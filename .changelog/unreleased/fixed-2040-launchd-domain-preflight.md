@@ -1,9 +1,6 @@
 - **Launchd handoffs check before stopping anything, report what they could not verify, and claim launchd only when proven (flair#2040).**
-  Over an ssh session the per-user GUI launchd domain can be unreachable
-  (`launchctl print gui/<uid>` → `125: Domain does not support specified
-  action`). `flair doctor --fix` used to clean-stop a healthy direct-spawned
-  instance and only then fail to load the job, leaving Flair down. `flair init`
-  printed "Launchd service registered ✓" for a plist it never loaded.
+  Launchd handoffs check GUI-domain availability before stopping an instance,
+  and init reports registration only after verifying the load.
 
   Before `doctor --fix` stops the instance or unloads a job, it checks:
   - that the GUI domain answers and the job is not disabled there (read-only
@@ -33,8 +30,9 @@
   started.
 
   `flair init` retires a legacy `ai.tpsdev.flair` job only behind the same
-  checks. It boots the job out only when it is proven not to serve the
-  instance, and removes the job's plist only once the job is shown gone. If it
+  checks. Init retires a non-serving legacy job directly and replaces a serving
+  legacy job through the guarded handoff; it removes the legacy plist only after
+  confirming the job is unloaded. If it
   cannot be shown gone, init keeps that plist, puts back the plist it had just
   written, reports the uncertainty and exits non-zero. When the job does serve
   the instance, init tries the guarded replacement and a restore. When that

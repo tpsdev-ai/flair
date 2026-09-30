@@ -104,6 +104,16 @@ async function sendAs(fromId: string, toId: string, seq: number, over: Partial<M
   return { status: res.status, text, id: sealed.id! };
 }
 
+/** Seal `base` with `signer`'s key and POST it to `path` as `poster` (TPS-Ed25519). */
+async function postSealedAs(poster: TestAgent, path: string, sealed: MessageEnvelope) {
+  const res = await fetch(`${harper.httpURL}${path}`, {
+    method: "POST",
+    headers: { Authorization: ed25519Header(poster, "POST", path), "Content-Type": "application/json" },
+    body: JSON.stringify(sealed),
+  });
+  return { status: res.status, text: await res.text(), contentType: res.headers.get("content-type") };
+}
+
 describe("Flair Relay S1 — de-elevated flair_agent can send/ack, and reads are party-scoped", () => {
   beforeAll(async () => {
     harper = await startHarper();
@@ -265,5 +275,45 @@ describe("Flair Relay S1 — de-elevated flair_agent can send/ack, and reads are
     expect(after.state, "foreign row state must not have been flipped to consumed").not.toBe("consumed");
     expect(after.from, "foreign row `from` must be unchanged").toBe(other.id);
     expect(after.to, "foreign row `to` must be unchanged").toBe(third.id);
+  }, 60_000);
+  // A send that reuses a stored message id is answered idempotently only for
+  // the message's own sender. Any other sender — here a verified, de-elevated
+  // agent that is not a party to the stored message, sending a validly signed
+  // envelope of its own — gets the owner-guard refusal: the same 403 the auth
+  // middleware gives a write to `/Message/<id>` it does not own, and no field
+  // of the stored message.
+  test("same-id retry: only the original sender gets the idempotent answer; another sender gets the owner refusal and no stored field", async () => {
+    // other → third, a message `agent` is not a party to.
+    const first = await sendAs(other.id, third.id, 7, { threadId: "other:third:retry", body: "the original" });
+    expect(first.status, `other→third send ${first.status}: ${first.text.slice(0, 300)}`).toBe(200);
+    const accepted = JSON.parse(first.text);
+    const before = await readRowAsAdmin(first.id);
+    expect(before?.from).toBe(other.id);
+
+    // The original sender's retry (same id) → the stored message's accepted view.
+    const retry = await sendAs(other.id, third.id, 8, { id: first.id, threadId: "other:third:retry", body: "the original" });
+    expect(retry.status, `retry ${retry.status}: ${retry.text.slice(0, 300)}`).toBe(200);
+    expect(JSON.parse(retry.text)).toEqual(accepted);
+
+    // `agent` reuses the id with its own validly signed envelope.
+    const reuse = sealMessage({
+      id: first.id, orgScope, from: agent.id, to: agent.id, threadId: "agent:own:reuse", seq: 0,
+      kind: "message", body: "mine", createdAt: new Date().toISOString(),
+    }, agent.secretKey);
+    const viaCollection = await postSealedAs(agent, "/Message", reuse);
+    expect(viaCollection.status, `reuse via /Message: ${viaCollection.text.slice(0, 300)}`).toBe(403);
+    for (const v of [other.id, third.id, "other:third:retry", accepted.contentHash, accepted.deliveredAt, accepted.createdAt, "the original"]) {
+      expect(viaCollection.text.includes(String(v)), `refusal leaked a stored value: ${v}`).toBe(false);
+    }
+
+    // Byte-identical to the refusal for a write to the stored message's own route.
+    const viaRecordRoute = await postSealedAs(agent, `/Message/${encodeURIComponent(first.id)}`, reuse);
+    expect(viaRecordRoute.status).toBe(403);
+    expect(viaCollection.text).toBe(viaRecordRoute.text);
+    expect(viaCollection.contentType).toBe(viaRecordRoute.contentType);
+
+    // Ground truth: the stored message is unchanged.
+    const after = await readRowAsAdmin(first.id);
+    expect(after).toEqual(before);
   }, 60_000);
 });

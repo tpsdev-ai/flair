@@ -1,4 +1,4 @@
-- **A non-admin Memory read ignores the caller's `select`/`property` and returns the authorized, gated pointer-projected row (slice 1 of #1940).**
+- **Breaking: non-admin Memory reads return full authorized rows and ignore `select`/`property`; clients must select fields from the returned object.**
   The auth middleware drops `select(...)` and `property` from a REST request URL before Harper
   parses it, and `Memory.get`/`Memory.search` drop them for a direct contextual read, keeping
   conditions, operator, sort, limit and offset exactly as sent. The read is answered on the same

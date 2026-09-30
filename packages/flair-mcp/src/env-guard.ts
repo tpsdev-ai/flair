@@ -80,7 +80,8 @@ export function stripInterpolationLiteralsFromEnv(
 
 /**
  * Hook probe mode (flair#1007) — shared by every hook binary this package
- * ships (session-start-hook.ts, continuity-capture-hook.ts). `flair doctor`
+ * ships (session-start-hook.ts, continuity-capture-hook.ts,
+ * prompt-recall-hook.ts). `flair doctor`
  * sets FLAIR_HOOK_PROBE to ask "does this command still resolve and execute?"
  * and a probed binary answers by exiting immediately, before stdin, clients,
  * network or any side effect — being reached at all IS the answer.

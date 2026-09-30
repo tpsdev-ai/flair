@@ -227,7 +227,7 @@ operator audit trail.
 
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
-| GET / POST | `/Message` | Ed25519 | POST sends (signed envelope). GET is party-scoped (`from` or `to`). Direct PUT is admin/internal. |
+| GET / POST | `/Message` | Ed25519 | POST sends (signed envelope). A POST that reuses a stored message id returns that message's accepted envelope only to its sender; any other sender gets **403** `forbidden: cannot modify Message owned by another principal`. GET is party-scoped (`from` or `to`). Direct PUT is admin/internal. |
 | GET | `/MessageInbox` | Ed25519 | Inbox for the caller. |
 | POST | `/MessageAck` | Ed25519 | Consume a delivered message. |
 | GET | `/MessageDeadLetter` | Ed25519 | Visible failures for the sender (`deadline`, `inbox_full`, …). |
