@@ -11,13 +11,13 @@
  * REPLACES `retrievalBoost` in `compositeScore` outright (see that
  * function's doc).
  *
- * flair#744 slice A: the actual ledger-write core below (formerly this
- * class's private `_recordOne()`) has moved to ./usage-recording.ts's
- * `recordUsageContribution()` — a shared, single-implementation extraction
- * also used by citation-on-write (resources/Memory.ts's post()/put()) so
- * there is exactly ONE place the (agentId, memoryId) ledger logic lives.
- * This endpoint's own request handling (auth, rate limit, batch validation,
- * the no-enumeration response) is unchanged.
+ * flair#744 slice A: the ledger-write core lives in ./usage-recording.ts's
+ * `recordUsageContribution()` — one implementation shared with
+ * citation-on-write (resources/Memory.ts's post()/put()) so there is exactly
+ * ONE place the (agentId, memoryId) ledger logic lives. This endpoint owns
+ * its request handling (auth, rate limit, batch validation, the
+ * no-enumeration response) and hands the validated batch to
+ * ./usage-recording.ts's `recordUsageBatch()`.
  *
  * WHY THIS IS ITS OWN ENDPOINT, NOT `Memory.put()` (Sherlock, K&S verdict —
  * FLAIR-USAGE-FEEDBACK-SIGNAL.md): usage feedback is fundamentally a
@@ -32,18 +32,22 @@
  * ./usage-recording.ts's recordUsageContribution()) against the RAW
  * `Memory` table object, entirely bypassing the `Memory` RESOURCE class
  * (and its ownership gate) — its own auth model is verified-agent +
- * within-org + explicitly NO ownership requirement.
+ * within-org + the caller's READ SCOPE + explicitly NO ownership requirement.
  *
- * NO READ-SCOPE GATE — INTENTIONAL ASYMMETRY with citation-on-write
- * (flair#775): this endpoint deliberately does NOT validate reported ids
- * against the caller's read scope. Usage feedback is the cross-agent
- * contract described above (agent B reports using agent A's memory
- * regardless of A's visibility setting), and the no-enumeration response
- * below already denies existence probing on this surface. Citation-on-write
- * (./usage-recording.ts's recordCitations()) DOES scope-gate each cited id —
- * it is a separate write surface with a narrower threat model; see that
- * module's doc. Do not "unify" the two: the difference is a K&S binding
- * condition on the flair#775 locked design, not drift.
+ * READ SCOPE: usage is recorded only for a memory in the caller's read scope
+ * — `resolveReadScope(caller).isAllowed(record)`: the caller's own memories
+ * at any visibility, and every other agent's non-private memories. That is
+ * the scope Memory.get() applies to a NON-ADMIN by-id read; here it applies
+ * to admin callers too, although an admin's Memory reads are unfiltered.
+ * Agent B can report using agent A's shared memory; a memory outside B's
+ * scope is treated like an id that does not exist: the same response, and
+ * no change to that memory's counters. The ledger core checks the scope on
+ * its first read of the memory, before it writes B's ledger row, so a memory
+ * outside the scope there gets no row; a memory that leaves the scope before
+ * the re-read that precedes the count bump keeps the row already written,
+ * and the count is not bumped. The scope is resolved once per call and fails
+ * CLOSED (nothing is recorded if it cannot be resolved). Citation-on-write
+ * applies the same rule (./usage-recording.ts's module doc).
  *
  * WHY THIS ISN'T A @table-BACKED RESOURCE: the actual dedup ledger (one row
  * per (agentId, memoryId) contribution) lives in the `MemoryUsage` table
@@ -82,7 +86,8 @@
  * NO ID ENUMERATION (Sherlock): the response is IDENTICAL — `{ recorded:
  * true }` — for every syntactically-valid input, regardless of whether a
  * given id was a fresh increment, an already-counted no-op (this agent
- * already contributed), or a not-found no-op (no such memory). A caller
+ * already contributed), or a not-found no-op (no such memory, or one outside
+ * the caller's read scope — see READ SCOPE above). A caller
  * cannot distinguish "that id doesn't exist" from "you already used it" by
  * inspecting the response; per-id/per-batch success is deliberately never
  * reported (see RECORDED_RESPONSE's doc below for why even partial-batch
@@ -96,7 +101,7 @@
 import { Resource } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
-import { recordUsageContribution, MAX_USAGE_IDS_PER_CALL } from "./usage-recording.js";
+import { recordUsageBatch, MAX_USAGE_IDS_PER_CALL } from "./usage-recording.js";
 import { resolveRecordUsageIds } from "./usage-ids.js";
 
 const UNAUTH = () =>
@@ -185,25 +190,11 @@ export class RecordUsage extends Resource {
     const attribution = sanitizeAttribution(data?.attribution);
     const now = new Date().toISOString();
 
-    for (const memoryId of memoryIds) {
-      try {
-        // flair#744 slice A: the ledger-write core now lives in
-        // ./usage-recording.ts's recordUsageContribution() — a shared,
-        // single-implementation extraction (also used by citation-on-write,
-        // resources/Memory.ts's post()/put()). Byte-identical behavior to
-        // the former private _recordOne() this replaced. Deliberately NO
-        // read-scope check on memoryId here (flair#775 asymmetry — see the
-        // module doc's NO READ-SCOPE GATE paragraph; citation-on-write's
-        // recordCitations() is the surface that scope-gates).
-        await recordUsageContribution(ctx, agentId, memoryId, attribution, now);
-      } catch (err) {
-        // Never let one bad id fail the whole batch, and never let an
-        // internal error leak existence information either — log
-        // server-side, collapse to the same no-op the response already
-        // returns for every other outcome.
-        console.error("RecordUsage.post: failed to record usage (treated as no-op)", { memoryId, err });
-      }
-    }
+    // Resolves the caller's read scope once, fails closed, and credits each id
+    // through the shared ledger core under that scope; per-id failures are
+    // logged server-side only (see the module doc's READ SCOPE paragraph and
+    // ./usage-recording.ts's recordUsageBatch()). Never throws.
+    await recordUsageBatch(ctx, agentId, memoryIds, attribution, now);
 
     // Deliberately does NOT report which ids succeeded / were already
     // counted / were not found — see RECORDED_RESPONSE's doc.
