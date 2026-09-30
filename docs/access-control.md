@@ -11,7 +11,7 @@ is off; clients registered while it was on keep using their stored client IDs
 until their records are removed. **What they can touch:** a connection acts as
 its principal. For a non-admin principal, that means writing its own memories
 and reading them plus other agents' non-private ones. `flair principal disable`
-marks a principal deactivated, which refuses its calls and keeps its data.
+marks a principal deactivated, which refuses its tool calls and keeps its data.
 
 This page covers `/mcp`, where apps such as Claude sign people in with OAuth.
 Agents that sign each request with their own Ed25519 key use a different path,
@@ -27,10 +27,12 @@ server, which has them sign in at the identity provider configured under
 configures GitHub. The access token the app receives carries the login as its
 subject; for GitHub, that is the account's username.
 
-`/mcp` answers `initialize`, `ping` and `tools/list` for any valid token. On
-every tool call (`tools/call`), Flair looks up the active `Credential` of kind
-`idp` whose `idpSubject` is that login, and acts as that credential's principal.
-There is no fallback to an anonymous or admin identity:
+`/mcp` answers `initialize`, `ping` and `tools/list` for any valid token, and
+refuses a `tools/call` for an unknown tool name, before it looks at the mapping.
+On a `tools/call` for a known tool, Flair looks for a `Credential` of kind `idp`
+whose `idpSubject` is that login, that names a principal, and whose status is
+not `revoked`, and acts as that principal. There is no fallback to an anonymous
+or admin identity:
 
 - **No mapping:** the call is refused. `/mcp` answers HTTP 200 with a JSON-RPC
   error:
@@ -83,40 +85,47 @@ person to an instance that is already enabled, also pass
 `--secrets-mechanism env-file`, so that the secrets it stages go to a local
 `0600` file and are not sent to the instance. Then answer `n` when it asks
 whether the staged secrets are applied. The `identity-mapping` step has run by
-then; a ✓ on it in the printed steps means the mapping was written and read
-back. The command stops before restarting the instance, reports the
+then; a ✓ on it in the printed steps means the write was accepted and the
+read-back described under [One mapping per login](#one-mapping-per-login)
+passed. The command stops before restarting the instance, reports the
 `secrets-provisioning` step as not applied, and exits non-zero.
 
-### One active mapping per login
+### One mapping per login
 
-`flair mcp enable` keeps one active mapping per login, whatever the provider
+`flair mcp enable` and the resolver both count a login's `idp` credential unless
+its status is `revoked` (the resolver also skips one that names no principal).
+`flair mcp enable` keeps one such credential per login, whatever the provider
 name:
 
 - Running it again with the same `--idp-subject` and `--idp-provider` and a
   different `--principal` re-points the existing credential, and the output
-  says `re-pointed`. Calls from that login then act as the new principal.
-  Memories are not moved or merged; each principal keeps its own.
-- If the login has an active credential under a different provider name, the
-  run revokes it (the row stays, with status `revoked`) and prints its id after
-  `SUPERSEDED:`.
-- After writing, it reads the mapping back and fails if the login does not have
-  exactly one active credential.
+  says `re-pointed`. Calls from that login then act as the principal the
+  credential names. Memories are not moved or merged; each principal keeps its
+  own.
+- If the login has a credential that is not `revoked` under a different
+  provider name, the run revokes it (the row stays, with status `revoked`) and
+  prints its id after `SUPERSEDED:`.
+- After writing, it reads the login's credentials back and fails unless exactly
+  one of them is not `revoked` and that one is the credential it wrote. It does
+  not compare the principal that credential names: `bootstrap`'s `agentId` (see
+  [Check who you are](#check-who-you-are)) shows which principal the login
+  resolves to.
 
 ### Just-in-time provisioning
 
 `FLAIR_MCP_JIT_PROVISION` is off by default; `1`, `true`, `yes` or `on` turns
 it on. It changes the "no mapping" case: instead of refusing, Flair creates a
-principal for the login on its first tool call and maps the login to it (if
-that write fails, the call is refused as in the "no mapping" case). The new
-principal is a non-admin agent with trust tier `unverified`, and its id has the
-form `agt_mcp_<login>_<8 hex digits>`, where characters other than letters and
-digits become `_` and the login part is cut to 24 characters. Its credential
-records the provider as `mcp-oauth`.
+principal for the login on its first call to a known tool and maps the login to
+it (if that write fails, the call is refused as in the "no mapping" case). The
+new principal is a non-admin agent with trust tier `unverified`, and its id has
+the form `agt_mcp_<login>_<8 hex digits>`, where characters other than letters
+and digits become `_` and the login part is cut to 24 characters. Its
+credential records the provider as `mcp-oauth`.
 
 Flair adds no check of its own in this mode: a login the authorization server
-issued a token for gets a principal on its first tool call. Flair's shipped
-configuration does not restrict which GitHub accounts can sign in. Turn it on
-only when that is what you want, and set it in the instance's process
+issued a token for gets a principal on its first call to a known tool. Flair's
+shipped configuration does not restrict which GitHub accounts can sign in. Turn
+it on only when that is what you want, and set it in the instance's process
 environment, like `FLAIR_MCP_OAUTH`.
 
 ## 2. Which apps
@@ -141,10 +150,12 @@ instead (see below).
 - **Listed hosts.** When `clientIdMetadataDocuments.allowedHosts` is non-empty,
   a `client_id` URL is accepted only if its host is on the list. For the
   document of an app that signs people in, an empty list (`[]`) or no
-  `allowedHosts` key places no restriction on the host. A headless
-  (`client_credentials`) document is refused unless the list is non-empty; with
-  the shipped `config.yaml`, Flair's authorization server does not take that
-  grant at all (see [example 5](#5-a-bot-reaches-another-oauth-protected-mcp-server-as-itself)).
+  `allowedHosts` key adds no allowlist restriction. The plugin still resolves
+  the host before fetching and refuses one that resolves to an address outside
+  the public ranges, such as a private, loopback or link-local address. A
+  headless (`client_credentials`) document is refused unless the list is
+  non-empty; with the shipped `config.yaml`, Flair's authorization server does
+  not take that grant at all (see [example 5](#5-a-bot-reaches-another-oauth-protected-mcp-server-as-itself)).
   The shipped list, `claude.ai` and `claude.com`, is there for Claude. With a
   non-empty list, a `client_id` on any other host gets HTTP 400 from the
   authorization endpoint, with error `invalid_client` and the description
@@ -187,10 +198,12 @@ setting: the command only shows the list in its output.
 ChatGPT's published metadata document, `https://chatgpt.com/oauth/client.json`,
 declares `token_endpoint_auth_method: private_key_jwt`. The `@harperfast/oauth`
 version Flair pins, 2.5.0, accepts only `none` in the metadata document of an
-app that signs people in, so adding `chatgpt.com` to the list does not let
-ChatGPT connect with that document. Its sign-in is refused with HTTP 400, error
-`invalid_client`, and the description
+app that signs people in, so ChatGPT's CIMD client is refused on 2.5.0 even with
+`chatgpt.com` on the list. A sign-in that presents that document gets HTTP 400,
+error `invalid_client`, and the description
 `token_endpoint_auth_method 'private_key_jwt' is not supported for interactive CIMD clients; use 'none'`.
+Stored registrations are a separate path (see [2. Which apps](#2-which-apps)),
+and registration of new clients is off.
 
 > **Upstream:** verification of `private_key_jwt` for interactive clients is in
 > progress upstream in
@@ -220,8 +233,10 @@ A connection acts as its principal:
   header.
 - The app also gets a refresh token, unless its metadata lists grant types
   without `refresh_token`. Refresh tokens are single-use: each refresh returns a
-  new one, and presenting one that was already used revokes that sign-in's
-  whole refresh-token family. The family expires 30 days after the sign-in, the
+  new one. A refresh token that was already used is refused (`invalid_grant`),
+  and the plugin attempts to revoke that sign-in's whole refresh-token family;
+  if that revocation write fails, the failure is logged and the token is still
+  refused. The family expires 30 days after the sign-in, the
   `@harperfast/oauth` default; the shipped `config.yaml` does not set
   `refreshTokenTtl`.
 
@@ -245,9 +260,9 @@ When the operations API accepts the update, it prints
   stay. The operations API of Harper 5.2.8, the version Flair pins, also accepts
   an update for an id that has no record, so the ✅ line does not show that the
   principal exists.
-- Flair reads the principal's status on every tool call, and refuses a
-  deactivated principal's calls, including calls that carry a token issued
-  before the change:
+- Flair reads the principal's status on every `tools/call` for a known tool, and
+  refuses those calls for a deactivated principal, including calls that carry a
+  token issued before the change:
 
   ```json
   {"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"forbidden: principal 'alice' is deactivated, so this token can no longer call tools. An operator must reactivate the principal (set its status to \"active\") to restore access."}}
@@ -316,10 +331,13 @@ act:
   present; in a terminal, the command prompts for them before the steps run.
 - `secrets-provisioning` always stages the secrets the instance needs in a local
   `0600` file. Without `--secrets-mechanism`, when the instance reports that it
-  supports Harper's env-secrets, the step also attempts to push each secret and
-  reads it back. If any push does not complete, the step names the variables
-  that failed and gives the staged-file instructions instead.
-- `identity-mapping` writes the mapping for `alice` and reads it back. The
+  supports Harper's env-secrets, the step also attempts to push each secret, then
+  reads back the stored row's `name` and `processEnv` flag (not the value). If
+  a push fails, or its row cannot be read back or does not show `processEnv` as
+  true, the step names the variables that failed and gives the staged-file
+  instructions instead.
+- `identity-mapping` writes the credential for `alice` and reads the login's
+  credentials back (see [One mapping per login](#one-mapping-per-login)). The
   command then asks you to confirm that the secrets are applied to the instance
   (or takes `--confirm-secrets-applied`).
 - `local-config-update` takes the first `config.yaml` it finds, in the current
@@ -382,13 +400,14 @@ shares her connector's memories.
   ```
 
   Answer `n` when asked whether the staged secrets are applied. When the
-  `identity-mapping` step shows ✓, its output says `re-pointed`, and the
-  connector acts as `alice-laptop` from then on. Memories
-  already written as `alice` stay with `alice`.
+  `identity-mapping` step shows ✓, its output says `re-pointed`. The
+  connector's `bootstrap` then shows which principal it resolves to; it should
+  be `"agentId": "alice-laptop"`. Memories already written as `alice` stay with
+  `alice`.
 
 **How to choose:** use one principal when both apps should see the same private
 memories. Keep two when you want to revoke or audit them separately.
-ChatGPT cannot be the second app yet; see [ChatGPT](#chatgpt).
+ChatGPT's CIMD client cannot be the second app yet; see [ChatGPT](#chatgpt).
 
 **Check:** `bootstrap` in each app returns the `agentId` you chose.
 **Revoke:** `flair principal disable` for the principal you want to stop.
@@ -419,7 +438,7 @@ non-private ones.
 
 **Revoke:** when dave leaves, run `flair principal disable dave` on the Flair
 host. His app may still hold an access token that passes the OAuth check until
-it expires, but his next tool call gets:
+it expires, but his next `tools/call` for a known tool gets:
 
 ```json
 {"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"forbidden: principal 'dave' is deactivated, so this token can no longer call tools. An operator must reactivate the principal (set its status to \"active\") to restore access."}}
