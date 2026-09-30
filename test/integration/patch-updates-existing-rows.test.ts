@@ -2,15 +2,17 @@
 // nor a trusted internal call it never creates one.
 //
 // For every table in the flair database, a PATCH whose target row does not
-// exist creates nothing unless the caller is an administrator or a trusted
-// internal call: a verified non-admin agent and an anonymous caller are refused
-// (404 from the table's guard, or an earlier refusal from Harper's permission
-// check or routing, or from the resource) and no row appears. A
+// exist does not create or modify its target row unless the caller is an
+// administrator or a trusted internal call: a verified non-admin agent and an
+// anonymous caller are refused (404 from the table's guard, or an earlier
+// refusal from Harper's permission check or routing, or from the resource) and
+// no row appears. A
 // PATCH to the caller's own existing row still updates it, and an
 // administrator's PATCH behaves as before.
 //
 // Every case runs on two Harpers, one per `authentication.authorizeLocal`
-// setting (on, the harness default; and off), and on each Harper twice: before
+// setting (on, the harness default; and off). Each (a)–(d) case runs in both
+// provisioning phases; calibration runs once per Harper. The phases are before
 // the least-privilege `flair-agent` Harper user is provisioned (verified agents
 // then resolve to the shared admin Harper user) and after.
 //   (a) ENUMERATION — every table in the flair database, read from the database
