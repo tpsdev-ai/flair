@@ -62,6 +62,15 @@ authorization check that refuses the request first answers with its own status
 resource permits creation, create the row with POST or PUT, under the
 resource's own create rules; PATCH then updates it.
 
+**Subscriptions.** An exported table can also be subscribed to on its route:
+SSE (`Accept: text/event-stream`) or WebSocket on `/<Table>/` or
+`/<Table>/<id>`. Table subscriptions are served to administrators (Admin Basic
+or an admin agent) and trusted internal callers only. A verified non-admin
+agent is refused with **403** (WebSocket close code 3003), and a caller without
+a valid credential with **401** (close code 3000). Verified agents receive
+changes to the memories they can read through `/FeedMemories`, and soul changes
+through `/FeedSouls`; neither is a table.
+
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.
 A nonce already recorded, or being recorded by a concurrent request, is refused
