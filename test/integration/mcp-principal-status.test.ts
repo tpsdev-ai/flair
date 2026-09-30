@@ -1,12 +1,14 @@
 // mcp-principal-status.test.ts — the native /mcp path checks the mapped
-// principal's status on every tool call, the same rule the Ed25519 path applies.
+// principal's status on every tool call dispatched through the credential
+// mapping, the same rule the Ed25519 path applies.
 //
 // A token's subject resolves to a principal through Credential(kind:"idp"). That
-// principal must exist and be active each time a tool is called — not only when
-// the token was minted. Deactivating a principal therefore refuses the tokens it
-// already holds, on every tool, with an error that names the principal and the
-// operator's remedy; reactivating it restores access; other principals are
-// unaffected.
+// principal must exist and be active each time a tool call is dispatched through
+// the mapping — not only when the token was minted. Deactivating a principal
+// therefore refuses the tokens it already holds, on every tool, with an error
+// that names the principal and the operator's remedy; reactivating it restores
+// access for a token that is still valid; other principals are unaffected. The
+// mapping credential's lastUsedAt moves only after a tool has run.
 //
 // Harness: an ephemeral Harper with MCP OAuth on and a pinned issuer. A signing
 // key we control is seeded into oauth.harper_oauth_mcp_keys (the table
@@ -17,11 +19,12 @@
 // `flair principal disable` sends.
 //
 // The case where the principal's status cannot be read is covered in
-// test/unit/mcp-handler.test.ts, where the read can be made to fail.
+// test/unit/mcp-handler.test.ts; this harness does not inject read failures.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { SignJWT, importPKCS8 } from "jose";
+import { tmpdir } from "node:os";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable";
 
@@ -142,7 +145,7 @@ let lToken: string;
 let cMemoryId: string;
 let toolNames: string[];
 
-describe("native MCP checks the principal's status on every tool call", () => {
+describe("native MCP checks the principal's status on every tool call dispatched through its credential mapping", () => {
   beforeAll(async () => {
     const { privateKey, publicKey } = generateKeyPairSync("rsa", {
       modulusLength: 2048,
@@ -160,6 +163,20 @@ describe("native MCP checks the principal's status on every tool call", () => {
     delete process.env.FLAIR_MCP_JIT_PROVISION;
     try {
       harper = await startHarper();
+      // Talk only to this test's own ephemeral instance: loopback, the
+      // OS-assigned ports it started on, never a production port, and a data
+      // directory under the temp dir — checked before the first call.
+      const http = new URL(harper.httpURL);
+      const ops = new URL(harper.opsURL);
+      for (const u of [http, ops]) {
+        const port = Number(u.port);
+        if (u.hostname !== "127.0.0.1" || !(port > 0) || port === 9925 || port === 9926) {
+          throw new Error(`refusing to run against ${u.href}: not this test's ephemeral instance`);
+        }
+      }
+      if (http.port === ops.port || !harper.process?.pid || !harper.installDir.startsWith(tmpdir())) {
+        throw new Error(`refusing to run: ${harper.httpURL} / ${harper.opsURL} is not an instance this test started`);
+      }
     } finally {
       for (const [k, v] of [["FLAIR_MCP_OAUTH", prior.oauth], ["FLAIR_MCP_ISSUER", prior.issuer], ["FLAIR_MCP_JIT_PROVISION", prior.jit]] as const) {
         if (v === undefined) delete process.env[k];
@@ -237,6 +254,30 @@ describe("native MCP checks the principal's status on every tool call", () => {
     const res = await callTool(lToken, "memory_search", { query: "anything" });
     expect(res.error, JSON.stringify(res.error)).toBeUndefined();
     expect(res.result.isError).toBe(false);
+  }, 30_000);
+
+  test("the mapping credential's lastUsedAt moves after a tool has run, not after rejected arguments", async () => {
+    const lastUsed = async (): Promise<string | undefined> => {
+      const res = await adminOp({
+        operation: "search_by_value", database: "flair", table: "Credential",
+        search_attribute: "idpSubject", search_value: D.sub, get_attributes: ["id", "lastUsedAt", "status"],
+      });
+      const rows = (await res.json()) as any[];
+      const active = rows.filter((r) => r.status !== "revoked");
+      expect(active.length, JSON.stringify(rows)).toBe(1);
+      return active[0].lastUsedAt;
+    };
+    const before = await lastUsed();
+    const rejected = await callTool(dToken, "memory_search", {});
+    expect(rejected.error?.code, JSON.stringify(rejected.error)).toBe(-32602);
+    expect(await lastUsed(), "rejected arguments leave lastUsedAt unchanged").toBe(before);
+
+    await new Promise((r) => setTimeout(r, 20));
+    const served = await callTool(dToken, "memory_search", { query: "anything" });
+    expect(served.error, JSON.stringify(served.error)).toBeUndefined();
+    const after = await lastUsed();
+    expect(typeof after).toBe("string");
+    expect(Date.parse(after as string)).toBeGreaterThan(Date.parse(before ?? "1970-01-01T00:00:00Z"));
   }, 30_000);
 
   test("after the principal is deactivated, its already-minted token is refused on every tool, with the principal named and the remedy stated", async () => {

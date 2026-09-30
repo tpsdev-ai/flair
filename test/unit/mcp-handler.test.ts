@@ -989,7 +989,7 @@ describe("body size cap", () => {
 });
 
 // ─── principal status on every call ─────────────────────────────────────────
-describe("tools/call — the mapped principal must exist and be active on every call", () => {
+describe("tools/call — the mapped principal must exist and be active on every call dispatched through a credential mapping", () => {
   beforeEach(() => {
     credentials = [{ id: "cred_carol", principalId: "agt_carol", kind: "idp", idpSubject: "sub-carol", status: "active" }];
     agents["agt_carol"] = { id: "agt_carol", status: "active" };
@@ -1012,7 +1012,7 @@ describe("tools/call — the mapped principal must exist and be active on every 
     expect(lastCall?.ctx.request.tpsAgent).toBe("agt_carol");
   });
 
-  it("a deactivated principal is refused on every tool, naming the principal and the remedy; nothing runs and the credential is not touched", async () => {
+  it("a deactivated principal is refused on every tool, naming the principal and the remedy; nothing runs and the credential is not updated", async () => {
     agents["agt_carol"] = { id: "agt_carol", status: "deactivated" };
     const { TOOLS } = await import("../../resources/mcp-tools.ts");
     for (const name of Object.keys(TOOLS)) {
@@ -1072,6 +1072,48 @@ describe("tools/call — the mapped principal must exist and be active on every 
     const body = await callAs("sub-carol", "memory_search", { query: "hi" });
     expect(body.error?.code).toBe(-32001);
     expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a call whose tool has run marks the credential used, after the tool ran", async () => {
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+    const touched = puts.filter((p) => p.table === "Credential");
+    expect(touched.length).toBe(1);
+    expect(touched[0].record.id).toBe("cred_carol");
+    expect(typeof touched[0].record.lastUsedAt).toBe("string");
+  });
+
+  it("a call whose arguments are rejected leaves the credential's lastUsedAt unchanged", async () => {
+    const body = await callAs("sub-carol", "memory_search", {});
+    expect(body.error?.code).toBe(-32602);
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a call whose tool throws leaves the credential's lastUsedAt unchanged", async () => {
+    const restore = __setHandlers({
+      SemanticSearch: class extends HarperShapedBase { async post() { throw new Error("search backend down"); } },
+    });
+    try {
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error?.code).toBe(-32000);
+      expect(body.error?.message).toContain("tool execution failed");
+      expect(puts).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("an unknown tool is refused before the subject is resolved, and nothing is written", async () => {
+    const body = await callAs("sub-carol", "no_such_tool", {});
+    expect(body.error?.code).toBe(-32602);
+    expect(puts).toEqual([]);
+  });
+
+  it("resolveAgentFromSub writes nothing", async () => {
+    expect(await resolveAgentFromSub("sub-carol")).toEqual({ agentId: "agt_carol", isAdmin: false });
     expect(puts).toEqual([]);
   });
 
