@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * Flair PreCompact hook for Claude Code (flair#2069): save one bounded
- * continuity record before context is lost, when the transcript tail holds
- * something to record and the write succeeds, so the next session start
- * shows it first. The record's content, bounds, redaction, storage and dedup are
- * defined in ./precompact.ts; this file is the binary around them.
+ * Flair PreCompact hook for Claude Code (flair#2069): when the transcript
+ * tail holds something to record, write one bounded continuity record before
+ * context is lost (a new row, or, within the dedup window, the same row
+ * updated), so the next session start can show it first. The record's
+ * content, bounds, redaction, storage and dedup are defined in
+ * ./precompact.ts; this file is the binary around them.
  *
  * PER RUN
  * -------
@@ -20,9 +21,10 @@
  *      record: standing instructions, open tasks, in-flight work and the last
  *      assistant message, redacted and cut to the record bound. Nothing to
  *      record: nothing written.
- *   4. Resolves the record id through the local marker (a rerun of the same
- *      compaction reuses it), writes the marker, then writes the row with a
- *      signed `PUT /Memory/<id>` as the agent's own Ed25519 identity.
+ *   4. Resolves the record id through the local marker (a later run for the
+ *      same harness session and trigger within the dedup window reuses it),
+ *      writes the marker, then writes the row with one signed
+ *      `PUT /Memory/<id>` as the agent's own Ed25519 identity.
  *
  * EXIT 0 ON EVERY PATH IT HANDLES
  * -------------------------------
@@ -35,10 +37,12 @@
  * `|| true` covers it. The time budget (FLAIR_PRECOMPACT_TIMEOUT_MS,
  * default 5 s) is a process-level deadline armed in main(), after the module
  * has loaded and the entry-point check (isDirectRun) has run, and before
- * stdin is read. When it passes, the timer starts
- * finishing whatever asynchronous work is still pending (stdin held open, a
- * slow read, a write in flight): the hook prints the one timeout note and exits
- * 0 once stdout drains, waiting at most a further STDOUT_DRAIN_GRACE_MS (1 s).
+ * stdin is read. When it passes, the timer starts finishing whatever
+ * asynchronous work is still pending (stdin held open, a slow read, a write
+ * in flight): the hook prints the one timeout note when FLAIR_AGENT_ID is
+ * set, and nothing when it is not (main() decides this when it arms the
+ * deadline), then exits 0 once stdout drains, waiting at most a further
+ * STDOUT_DRAIN_GRACE_MS (1 s).
  * Synchronous work can delay the timer itself; Claude Code's hook timeout is
  * the outer bound. stdin is read up
  * to STDIN_MAX_BYTES; a larger payload is ignored. The hook's own local files
@@ -64,12 +68,14 @@
  * continuity state for the session, a state file that could not be read (too
  * large, not a regular file, malformed) or updated, an unreadable transcript,
  * a marker that could not be read or written, and a write that was not
- * confirmed (named by its kind: auth, timeout, unreachable or http-<status>,
- * never by an error's message text or URL; worded as "may be missing", never
- * as "not saved", because the server may have applied it). A note that names
- * a state file or the marker shows its path through notePath: the home
- * directory as "~", control characters as "?", strings that match the
- * credential patterns redacted, at most NOTE_PATH_MAX_CHARS characters.
+ * confirmed (named by its kind, from classifyPreCompactFailure's three
+ * inputs: a numeric HTTP status, 401 or 403 as auth and any other as
+ * http-<status>; the hook's own timer or an error named exactly TimeoutError,
+ * as timeout; anything else as unreachable. Never by an error's message text
+ * or URL. Worded as "may be missing", never as "not saved", because the
+ * server may have applied it). A note that names a state file or the marker
+ * shows its path through notePath, which changes it only where each rule
+ * applies (see notePath).
  *
  * IDENTITY
  * --------
@@ -194,12 +200,16 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export const NOTE_PATH_MAX_CHARS = 200;
 
 /**
- * A local path as a note shows it, never as is: the home directory
- * (`env.HOME`, else the OS's) is shown as "~", every control or line-break
- * character as "?", strings that match the credential patterns are redacted
- * (redactSecrets), and the result is cut to NOTE_PATH_MAX_CHARS. The session
- * directory and the agent id in the path are configuration; a secret in them
- * that matches no pattern is shown as written.
+ * A local path as a note shows it. Each change applies only where it fits:
+ *   - a path inside the home directory (`env.HOME`, else the OS's) starts
+ *     with "~" instead; a home directory of "/" collapses nothing;
+ *   - each control or line-break character is shown as "?";
+ *   - strings that match the credential patterns are redacted
+ *     (redactSecrets);
+ *   - a result longer than NOTE_PATH_MAX_CHARS is cut to that, ending in "…".
+ * A path outside the home directory that none of these touch is shown as it
+ * is. The session directory and the agent id in the path are configuration;
+ * a secret in them that matches no pattern is shown as written.
  */
 export function notePath(path: string, env: Env = process.env): string {
   const home = (env.HOME || homedir()).replace(/\/+$/, "");
@@ -233,7 +243,7 @@ export interface PreCompactOutcome {
   reason: PreCompactReason;
   /** The record id, once one was resolved. */
   recordId?: string;
-  /** True when a rerun reused the marker's record id. */
+  /** True when this run reused the marker's record id. */
   reused?: boolean;
 }
 

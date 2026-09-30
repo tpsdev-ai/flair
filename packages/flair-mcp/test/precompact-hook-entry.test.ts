@@ -4,14 +4,20 @@
  * loopback HTTP stand-in for Flair; and `flair-session-start`, spawned the
  * same way, reading back what it wrote.
  *
- * What only a spawned process can show: the exit code (always 0, so a
- * PreCompact hook never blocks compaction), that the process ends within
- * its budget whatever asynchronous work is still pending (stdin held open, a
- * write never answered), what goes on the wire, and the full loop the issue asks for:
- * a compaction writes ONE record, a rerun keeps it one, and the next session
- * start shows it at the top, after a compaction and after a restart. And that
- * the hook's own local files cannot hold it past its budget: an oversize or
- * non-regular state file or marker is refused before any byte is read.
+ * What only a spawned process can show: the exit code (0 in every case
+ * here, so the hook does not block compaction), that the process ends soon
+ * after its budget whatever asynchronous work is still pending (stdin held
+ * open, a write never answered), what goes on the wire, and the full loop
+ * the issue asks for: a compaction writes ONE record, a rerun keeps it one,
+ * and the next session start shows it at the top, after a compaction and
+ * after a restart. And that the hook's own local files cannot hold it: an
+ * oversize or non-regular state file or marker is refused before any byte is
+ * read. Every timed case must end within ENDS_ON_DEADLINE_MS (2,500 ms) of
+ * spawn, a bound that also covers process start-up and the stdout drain.
+ * Most run with a SHORT_BUDGET_MS (500 ms) budget; the oversized-transcript
+ * case runs with 1,500 ms and the transcript-FIFO case with the default
+ * 5,000 ms, so those two must finish before their deadline fires. The
+ * held-stdin case must also take at least its budget less 50 ms.
  *
  * The stand-in authenticates the way Flair does: it parses the Authorization
  * header and verifies the Ed25519 signature over the canonical payload with
@@ -58,8 +64,10 @@ const HEADER_START = "Flair continuity record: the PreCompact hook's row (trigge
 const CHILD_DEADLINE_MS = 15_000;
 const CASE_BUDGET_MS = 30_000;
 const SHORT_BUDGET_MS = 500;
-/** A child that must end on its SHORT_BUDGET_MS deadline: the budget plus
- *  process start-up, generous for a loaded lane, well below the 5 s default. */
+/** The most a timed case may take from spawn to exit. With a SHORT_BUDGET_MS
+ *  budget that is the budget plus process start-up and the stdout drain,
+ *  generous for a loaded lane; with a longer budget it means the case must
+ *  finish before its deadline fires. */
 const ENDS_ON_DEADLINE_MS = 2_500;
 
 // Assembled at run time: not a real credential, and no literal token in the source.
@@ -343,7 +351,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
   );
 
   test(
-    "Flair slow: the process exits 0 on its budget with the write still open",
+    "Flair slow: with a 500 ms budget the process exits 0 within 2,500 ms of spawn, the write still open",
     async () => {
       seedSession(sessionDir, AGENT, HARNESS);
       mode = "hang";
@@ -382,7 +390,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
   );
 
   test(
-    "an oversized transcript: only its tail is read, the record stays bounded, and the hook ends within its budget",
+    "an oversized transcript: only its tail is read, the record stays bounded, and the process ends within 2,500 ms of spawn",
     async () => {
       seedSession(sessionDir, AGENT, HARNESS);
       const path = join(home, "big.jsonl");
@@ -435,7 +443,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
   }
 
   test(
-    "an oversize continuity state file: refused before any byte is read; one note, no request, no record, exit 0 within the budget",
+    "an oversize continuity state file: refused before any byte is read; one note, no request, no record, exit 0 within 2,500 ms of spawn",
     async () => {
       mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
       const path = statePath(sessionDir, AGENT, HARNESS);
@@ -459,7 +467,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
   );
 
   test(
-    "an oversize marker: refused before any byte is read; one note, no request, no record, exit 0 within the budget",
+    "an oversize marker: refused before any byte is read; one note, no request, no record, exit 0 within 2,500 ms of spawn",
     async () => {
       seedSession(sessionDir, AGENT, HARNESS);
       const markerPath = precompactMarkerPath(sessionDir, AGENT);

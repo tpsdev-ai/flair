@@ -6,14 +6,23 @@
  * its size bound, and a secret-shaped string in the transcript is redacted in
  * the stored record. Plus: Flair down (one note, never a block), a rerun of
  * the same compaction (still one record), a transcript with no instructions
- * (no instruction section, nothing invented), and every refusal path. Also:
- * an oversize state file or marker is refused unread (bounded local work),
- * the surfaced record is quoted data (fixed BEGIN/END lines, every line
+ * (no instruction section, nothing invented), and these refusal paths: no
+ * continuity state; a state file that is too large, malformed or cannot be
+ * updated; an unreadable transcript; a marker that is unreadable, too large
+ * or a directory. The marker-unwritable path is not exercised here: it needs
+ * a filesystem failure between two writes to the same directory. Also: the
+ * surfaced record is quoted data (fixed BEGIN/END lines, every line
  * prefixed), and Authorization-style values are redacted whole.
  *
- * LEAK-GUARD PROTOCOL (same as continuity-hook.test.ts): every "absent"
- * assertion has a positive control in the same record, so a hook that stored
- * nothing cannot pass a redaction or filter test.
+ * LEAK-GUARD PROTOCOL (as in continuity-hook.test.ts): a test that asserts a
+ * secret or a filtered text is absent from a record the hook stored, or from
+ * a block session start would show, also asserts text that must be present
+ * in that same record or block, so a hook that stored nothing cannot pass
+ * it. Tests on the extractor alone that expect nothing extracted (sidechain,
+ * meta and compact-summary entries; a turn with a harness marker) do not all
+ * carry such a control; the slash-command test checks its rule on a separate
+ * plain user turn. Tests of paths that store nothing assert that no request
+ * was made.
  *
  * Hermetic: an in-memory fake Flair (rows keyed by id, so a PUT to an existing
  * id updates it the way Memory.put upserts), a per-test temp dir for the
@@ -614,7 +623,7 @@ describe("PreCompact hook: failures print one note and never block compaction", 
     expect(readFileSync(markerPath, "utf-8")).toBe(big);
   });
 
-  test("a marker path that is not a regular file is refused before it is read (no block on a FIFO), no request", async () => {
+  test("a directory at the marker path is refused before it is read, no request (the FIFO case is spawned in precompact-hook-entry.test.ts)", async () => {
     const fake = new FakeFlair();
     seed();
     mkdirSync(precompactMarkerPath(sessionDir, AGENT));
@@ -873,7 +882,7 @@ describe("PreCompact pieces", () => {
 
   test("a slash command's <command-message> or <command-args> marks a harness turn: nothing in it is read as an instruction", () => {
     const rule = "Never disable review.";
-    // Positive control: the same text as the user's own turn is an instruction.
+    // Positive control: the same text in a plain user turn is an instruction.
     expect(extractFromTranscript([userTurn(rule)]).instructions).toEqual([rule]);
     for (const tag of ["command-message", "command-args"]) {
       expect(userTurnText(`<${tag}>${rule}</${tag}>`)).toBeNull();

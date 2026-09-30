@@ -23,8 +23,11 @@
  * section headings, a tool label on each in-flight line (planCapture's
  * "bash:", "write:", "edit:" or "notebook-edit:") and, when the record had to
  * be cut, RECORD_CUT_MARKER. The items:
- *   - Standing instructions: sentences from USER turns that the fixed
- *     heuristic below recognizes (INSTRUCTION_START_RE / _ANYWHERE_RE).
+ *   - Standing instructions: sentences from turns the transcript labels as
+ *     user turns, once the harness markup this file recognizes is removed,
+ *     that the fixed heuristic below recognizes (INSTRUCTION_START_RE /
+ *     _ANYWHERE_RE). The extractor cannot tell a user's words from harness
+ *     text that carries no recognized marker.
  *   - Open tasks: from the task tools' calls in the tail (TaskCreate /
  *     TaskUpdate, and TodoWrite when a session has it enabled), those not
  *     completed or deleted.
@@ -43,13 +46,13 @@
  * Of the user turns the harness writes, it skips those that carry a marker
  * it recognizes (HARNESS_TURN_RE: task notifications, slash-command echoes
  * and their output), meta entries and compaction summaries, and it drops
- * system-reminder blocks; a harness turn with no recognized marker is read
- * as the user's.
+ * system-reminder blocks; a harness turn with no recognized marker is
+ * treated as any other user turn.
  *
  * WHY REDACTION HERE WHEN THE JOURNAL HAS NONE: the journal's capture
  * discipline relies on its inputs being assistant-chosen, already-visible
  * prose plus a 400-character bound (see ./continuity.ts). This record also
- * quotes USER turns, where pasted credentials really do appear, so every free
+ * quotes user turns, where pasted credentials really do appear, so every free
  * text taken from the transcript (instruction sentences, task subjects, action
  * descriptions and file paths, the assistant message) passes redactSecrets()
  * BEFORE it is split, cut or stored (a user turn's harness markup is removed
@@ -60,18 +63,18 @@
  * every secret); the size bound and the ephemeral, private tier remain the
  * containment.
  *
- * STORAGE: one Memory row per compaction when the tail holds something to
- * record and the write succeeds (a later rerun updates it; two runs at the
- * same moment can each write one, since nothing locks the marker across
- * processes), through the same signed
- * `PUT /Memory/<id>` the journal uses, in the same shape as a journal row
- * (type "session", durability "ephemeral", whose TTL the server sets, 24 h by
- * default through FLAIR_EPHEMERAL_TTL_HOURS; visibility "private"; the
- * session's `adk:continuity:<sessionId>` tag) with meta.hook = "PreCompact".
- * The record id is kept in a local marker file so a rerun for the same
- * compaction (same harness session, same trigger, within
- * PRECOMPACT_DEDUP_WINDOW_MS of the first write) reuses it: the PUT then
- * updates the one row instead of creating a second.
+ * STORAGE: each run that has something to record makes ONE signed
+ * `PUT /Memory/<id>`, the verb the journal uses, in the same shape as a
+ * journal row (type "session", durability "ephemeral", whose TTL the server
+ * sets, 24 h by default through FLAIR_EPHEMERAL_TTL_HOURS; visibility
+ * "private"; the session's `adk:continuity:<sessionId>` tag) with
+ * meta.hook = "PreCompact". The id is fresh unless the local marker file
+ * names a record written for the same harness session and trigger less than
+ * PRECOMPACT_DEDUP_WINDOW_MS after that record's first write: then the id is
+ * reused and the PUT updates that row instead of adding one. That holds for a
+ * rerun of the same compaction and for a second compaction of the same kind
+ * alike; the hook cannot tell them apart. Two runs at the same moment can
+ * each add a row, since nothing locks the marker across processes.
  *
  * SURFACING: unlike journal rows (agent-pull: a count and a tag, never
  * content), this record's CONTENT is shown by flair-session-start, first,
@@ -139,10 +142,12 @@ export const MAX_INFLIGHT_ACTIONS = 5;
 export const ACTION_MAX_CHARS = 160;
 export const LAST_ASSISTANT_MAX_CHARS = 300;
 
-/** A rerun of the hook for the same harness session and trigger within this
- *  window of the record's FIRST write updates that record instead of creating
- *  a second one. Measured from the first write, so a series of reruns cannot
- *  stretch it. */
+/** A later run of the hook for the same harness session and trigger within
+ *  this window of the record's FIRST write updates that record instead of
+ *  creating a second one, whether it reruns the same compaction or handles a
+ *  second compaction of the same kind (the hook cannot tell them apart).
+ *  Measured from the first write, so a series of later runs cannot stretch
+ *  it. */
 export const PRECOMPACT_DEDUP_WINDOW_MS = 5 * 60_000;
 
 /** What a redacted secret is replaced with. */
@@ -375,14 +380,17 @@ export function extractInstructions(text: string): string[] {
   return out;
 }
 
-/** Markers of a user turn the HARNESS wrote, not the user: a task
- *  notification, a slash command's echo (<command-name>, <command-message>,
- *  <command-args>) and its local output (<local-command-…>). A harness turn
- *  that carries none of these is read as the user's. */
+/** Markers of a user turn the HARNESS wrote: a task notification, a slash
+ *  command's echo (<command-name>, <command-message>, <command-args>) and its
+ *  local output (<local-command-…>). A harness turn that carries none of
+ *  these is treated as any other user turn. */
 const HARNESS_TURN_RE = /<(?:task-notification|command-(?:name|message|args)|local-command-[a-z-]{1,20})>/i;
 
 /**
- * The user-authored text of a user turn, or null for a turn the harness wrote.
+ * The text of a user-labelled turn once the harness markup this filter
+ * recognizes is removed, or null when the turn carries a recognized harness
+ * marker (HARNESS_TURN_RE). It cannot tell a user's words from harness text
+ * that carries no recognized marker; such text is returned like any other.
  * System-reminder blocks are removed with their content; other markup tags
  * are removed and the text between them kept (a chat bridge wraps a real
  * message in a tag). Called on the RAW turn, before redactSecrets: the
@@ -706,7 +714,7 @@ export function buildPreCompactRow(
  * never record content (same rule as the pointer and state files).
  *
  * It is the DEDUP KEY: (harnessSessionId, trigger, firstWrittenAt) decides
- * whether a run is a rerun of the compaction that wrote recordId. It is also
+ * whether a run reuses recordId (see PRECOMPACT_DEDUP_WINDOW_MS). It is also
  * what session start follows to the record: by harness session id after a
  * compaction, by continuity session id after a restart.
  */
