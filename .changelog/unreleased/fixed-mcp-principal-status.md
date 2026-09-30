@@ -7,8 +7,10 @@
   operator has to do. A token minted while the principal was active stops
   working when `flair principal disable` deactivates it, and, while the token
   remains valid, works again once the principal's status is set back to
-  `active`. If the credential or the principal cannot be read, the call is
-  refused, and JIT provisioning runs only for a subject that the credential
-  lookup answered for. The credential's `lastUsedAt` is updated, best effort,
+  `active`. If the credential lookup or the principal read fails during
+  identity resolution, the call is refused, and JIT provisioning runs only for
+  a subject that the credential lookup answered for. A failed read of the
+  credential before the post-tool `lastUsedAt` update leaves the served answer
+  unchanged. The credential's `lastUsedAt` is updated, best effort,
   after a tool has run, not when a call is refused or its arguments are
   rejected; the update writes that field alone.

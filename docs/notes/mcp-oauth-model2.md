@@ -47,9 +47,11 @@ aud, scope }`. The handler maps `sub` → a flair `Agent` id:
    non-admin `Agent` + `Credential(kind:"idp")` from the sub.
 3. Otherwise **deny** — an unresolvable sub never runs as anonymous or admin.
 
-A failed read of the credential or of the principal refuses the call. It is
-never read as "allowed", and never as "no mapping", so step 2 runs only for a
-subject the credential lookup answered for.
+A failed credential lookup or principal read during identity resolution
+refuses the call. It is never read as "allowed", and never as "no mapping", so
+step 2 runs only for a subject the credential lookup answered for. A failed
+read of the credential before the post-tool `lastUsedAt` update leaves the
+served answer unchanged.
 
 The resolved agent is set as `request.tpsAgent` on a flair-shaped delegation
 context, so the wrapped handler scopes to the verified agent exactly as an
