@@ -392,7 +392,7 @@ describe("PreCompact record: acceptance (flair#2069)", () => {
       deps(fake, { now: () => new Date(t0.getTime() + 1000 + PRECOMPACT_DEDUP_WINDOW_MS) }),
     );
     expect(fake.rows.size).toBe(3);
-    // The window is measured from the FIRST write of a record, so reruns cannot stretch it.
+    // The window is measured from when the marker first named the record id, so later runs cannot stretch it.
     const marker = await readPreCompactMarker(sessionDir, AGENT);
     expect(marker.kind).toBe("present");
   });
@@ -942,9 +942,10 @@ describe("PreCompact pieces", () => {
     ]);
     expect(oneEntry.lastAssistant).toBe("First part. Second part.");
 
-    // Claude Code's own shape: one content block per entry, the entries of one
-    // API message sharing its message.id. A later message with no text is not
-    // the last message WITH text, so it does not replace it.
+    // The shape observed in Claude Code transcripts: one content block per
+    // entry, the entries of one API message sharing its message.id (the case
+    // above covers several blocks in one entry). A later message with no text
+    // is not the last message WITH text, so it does not replace it.
     const split = extractFromTranscript([
       blocks([{ type: "text", text: "An older message." }], "msg-1"),
       blocks([{ type: "thinking", thinking: "THINKING_MARKER" }], "msg-2"),

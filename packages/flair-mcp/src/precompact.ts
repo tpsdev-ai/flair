@@ -135,7 +135,9 @@ export const PRECOMPACT_HOOK = "PreCompact";
 
 /** How much of the transcript's END is read: at most this many bytes… */
 export const TRANSCRIPT_TAIL_MAX_BYTES = 1024 * 1024;
-/** …and, of the whole lines in them, at most this many (the newest). */
+/** …and, of the nonblank whole lines in them, at most this many (the newest):
+ *  blank lines are dropped before this cap, so the kept lines can reach back
+ *  past the last TRANSCRIPT_TAIL_MAX_LINES physical lines. */
 export const TRANSCRIPT_TAIL_MAX_LINES = 2000;
 
 /** Hard bound on the stored record's content, in characters. */
@@ -312,8 +314,9 @@ export type TranscriptTail =
   | { ok: false; reason: "no-path" | "not-a-file" | "unreadable" };
 
 /**
- * The newest whole lines of the transcript: at most `maxBytes` read from the
- * END of the file and, of the complete lines in them, at most `maxLines`.
+ * The newest nonblank whole lines of the transcript: at most `maxBytes` read
+ * from the END of the file and, of the complete lines in them that are not
+ * blank, at most `maxLines` (blank lines are dropped before that cap).
  *
  * A path that is empty (Claude Code has sent an empty `transcript_path` in
  * some versions) or not a regular file is refused BEFORE it is opened (opening
@@ -501,8 +504,10 @@ export function extractFromTranscript(lines: readonly string[]): PreCompactExtra
   let todos: unknown[] | null = null;
   const actions: string[] = [];
   // The newest assistant message that has text: its text blocks, in order.
-  // Claude Code writes one entry per content block, and the entries of one
-  // API message share `message.id`; an entry with no id is a message of its own.
+  // In the transcripts observed, Claude Code writes one entry per content
+  // block, the entries of one API message sharing `message.id`; an entry that
+  // holds several blocks is handled too, and an entry with no id is a message
+  // of its own.
   let lastAssistantParts: string[] = [];
   let lastAssistantId: string | null = null;
 

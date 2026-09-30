@@ -1,7 +1,8 @@
 /**
  * precompact-session-start.test.ts — flair#2069: `flair-session-start` shows
- * the newest pre-compaction record FIRST, after a compaction and after a
- * restart, then its normal content (bootstrap, then the resume hint).
+ * the pre-compaction record the local marker names FIRST, when the fetch
+ * returns an eligible live row, after a compaction and after a restart, then
+ * its normal content (bootstrap, then the resume hint).
  *
  * Lives in THIS package's lane because runHook's module statically imports
  * @tpsdev-ai/flair-client by its built dist (see continuity-resume.test.ts).
