@@ -362,15 +362,18 @@ export function cimdAllowedHostsFromFlag(raw: unknown, instanceUrl: string): { h
 }
 
 /**
- * The note a successful `enable` prints when the list this run wrote leaves
- * claude.ai out: dist/lib/mcp/cimd.js treats a client_id URL whose host is not
- * on a non-empty allowedHosts as an unknown client. Null when this run wrote no
- * list, or one with claude.ai.
+ * The note a successful `enable` prints when the list this run confirmed
+ * leaves claude.ai out. `enable` ensures the requested list in config.yaml
+ * (it writes the list only when the file does not already hold that exact
+ * list) and reads it back; the argument is that read-back list.
+ * dist/lib/mcp/cimd.js treats a client_id URL whose host is not on a non-empty
+ * allowedHosts as an unknown client. Null when this run confirmed no list, or
+ * one with claude.ai.
  */
 export function claudeAiExcludedNote(written: readonly string[] | undefined): string | null {
   if (!written || written.includes("claude.ai")) return null;
   return (
-    `claude.ai is not in the ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} list this run wrote (${JSON.stringify(written)}), ` +
+    `claude.ai is not in the ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} list this run ensured and read back (${JSON.stringify(written)}), ` +
     `so while the instance uses that list, a CIMD client_id URL on claude.ai is refused. ` +
     `Re-run with claude.ai in --cimd-allowed-hosts to allow it.`
   );

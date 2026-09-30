@@ -4,7 +4,10 @@
  * Runs the real registered command (`program.parseAsync`), not a helper, and
  * reads what it prints. The success lines claim only what the run checked: the
  * OAuth metadata check passed (the /mcp route is not probed), and, when this
- * run wrote --cimd-allowed-hosts, whether that list includes claude.ai. With no
+ * run confirmed a --cimd-allowed-hosts list (ensured it in config.yaml, writing
+ * the list only if the file did not already hold that exact list, and read it
+ * back), whether that list includes claude.ai. The case where the file
+ * already holds the list pins that the note does not claim a write. With no
  * flag the command does not inspect allowedHosts, so it must not say
  * "claude.ai can now connect" whatever list the instance has.
  *
@@ -170,8 +173,22 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.exit).toBeNull();
     expect(allowedHosts(r.configAfter)).toEqual(["flair.example.com"]);
     expect(r.out).toContain("The OAuth metadata check passed.");
-    expect(r.out).toContain("claude.ai is not in the mcp.clientIdMetadataDocuments.allowedHosts list this run wrote");
+    expect(r.out).toContain("claude.ai is not in the mcp.clientIdMetadataDocuments.allowedHosts list this run ensured and read back");
     expect(r.out).not.toContain("can now connect");
+  }, 20000);
+
+  test("the flag names the list the file already holds, without claude.ai: the file is not rewritten, and the note says this run ensured and read back that list, not that it wrote it", async () => {
+    expect(allowedHosts(WITHOUT_CLAUDE_AI)).toEqual(["flair.example.com"]);
+    const r = await runEnable(WITHOUT_CLAUDE_AI, ["--cimd-allowed-hosts", "flair.example.com"], true);
+    expect(r.foreign).toEqual([]);
+    expect(r.exit).toBeNull();
+    expect(r.configAfter).toBe(r.configBefore);
+    expect(r.out).toContain("it already carried this list; the file was not rewritten");
+    expect(r.out).toContain("The OAuth metadata check passed.");
+    expect(r.out).toContain(
+      'claude.ai is not in the mcp.clientIdMetadataDocuments.allowedHosts list this run ensured and read back (["flair.example.com"])',
+    );
+    expect(r.out).not.toContain("this run wrote");
   }, 20000);
 
   test("the flag writes a list with claude.ai: no claude.ai note", async () => {

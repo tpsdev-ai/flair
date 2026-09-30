@@ -464,9 +464,11 @@ async function promptText(question: string): Promise<string> {
 /**
  * flair#2113 review: the closing lines of a successful `flair mcp enable`.
  * They claim only what the run checked: the self-verify step's OAuth metadata
- * check (the /mcp route itself is not probed), and, when this run wrote
- * --cimd-allowed-hosts, whether that list includes claude.ai. With no flag the
- * command does not inspect allowedHosts, so it says nothing about claude.ai.
+ * check (the /mcp route itself is not probed), and, when this run confirmed a
+ * --cimd-allowed-hosts list (ensured it in config.yaml, writing the list only
+ * if the file did not already hold that exact list, and read it back), whether
+ * that list includes claude.ai. With no flag the command does not inspect
+ * allowedHosts, so it says nothing about claude.ai.
  */
 export function enableSuccessLines(result: EnableMcpResult): string[] {
   const lines = [
@@ -775,8 +777,9 @@ export function register(program: Command): void {
     .option("--secrets-path <path>", "Override the secrets staging file path")
     .option(
       "--cimd-allowed-hosts <hosts>",
-      "Comma-separated lowercase hostnames written as mcp.clientIdMetadataDocuments.allowedHosts into the config.yaml " +
-        "this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), then read back, before the restart. " +
+      "Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml " +
+        "this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds " +
+        "that exact list, then read back, before the restart. " +
         "Without --dry-run, refused unless the target's ops API shows it runs from that file on this machine; --dry-run " +
         "neither calls nor checks the target and writes nothing. Always refused for a *.harperfabric.com instance. " +
         "Without it the list is not changed (shipped: claude.ai,claude.com)",

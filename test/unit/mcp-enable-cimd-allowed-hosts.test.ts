@@ -1,8 +1,11 @@
 /**
- * flair#2113 — `flair mcp enable --cimd-allowed-hosts` writes the list the
- * @harperfast/oauth component reads, only when the target runs from the edited
- * config.yaml, and otherwise refuses (--dry-run checks no target and writes
- * nothing).
+ * flair#2113 — `flair mcp enable --cimd-allowed-hosts` ensures the list the
+ * @harperfast/oauth component reads in the edited config.yaml, and reads it
+ * back, only when the target runs from that file. Without --dry-run, a target
+ * not shown to run from that file is refused. --dry-run checks no target and
+ * writes nothing, so it does not refuse such a target; a Fabric origin and
+ * invalid local input (an invalid host list, or a missing or unusable
+ * config.yaml) are still refused under --dry-run.
  *
  * Before this fix the flag was parsed and echoed into a step line, and nothing
  * wrote it anywhere the @harperfast/oauth component reads.
@@ -16,7 +19,10 @@
  * over `mcp`, as its `updateConfiguration` does.
  *
  * Shapes: a non-Fabric target shown to run from the edited config.yaml gets
- * the list written before the restart, and read back here. A Fabric origin, or
+ * the list ensured in that file before the restart, and read back here. The
+ * writer skips the write when the file already holds that exact list; that
+ * case is covered in test/unit-isolated/mcp-enable-cli-output.test.ts, not
+ * here. A Fabric origin, or
  * (without --dry-run) a target not shown to run from that file, is refused
  * before any change. The
  * target check's process and hostname lookups are injected here, except in the
