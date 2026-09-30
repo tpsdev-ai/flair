@@ -1,4 +1,0 @@
-- **`FlairStore` structurally satisfies LangGraph's `BaseStore` type, and its documentation describes the implemented adapter.**
-  `FlairStore` exposes public `listNamespaces()`, `start()` and `stop()` methods. A contract test checks its assignability to `BaseStore` and exercises it as a compiled graph's `store`. `batch()` declares LangGraph's per-operation result type, `OperationResults<Op>`, instead of `any[]`; its checkpoint imports are type-only, so loading the adapter does not require that package at runtime. The unit lane type-checks the contract test and fails if the structural contract breaks. The README and source comments describe authentication, default visibility and federation eligibility, persistence conditions, retrieval, and namespace-enumeration limits. The package description states its authentication options, and the integrations catalog lists its methods and retrieval behavior.
-
-  (Refs #1943)
