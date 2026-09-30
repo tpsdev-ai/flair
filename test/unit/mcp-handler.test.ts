@@ -1005,7 +1005,7 @@ describe("tools/call — the mapped principal must exist and be active on every 
     expect(lastCall?.ctx.request.tpsAgent).toBe("agt_carol");
   });
 
-  it("a principal record with no status field runs (it predates the field)", async () => {
+  it("a principal record with no status field runs (a missing status counts as active)", async () => {
     agents["agt_carol"] = { id: "agt_carol" };
     const body = await callAs("sub-carol", "memory_search", { query: "hi" });
     expect(body.error).toBeUndefined();
@@ -1106,13 +1106,53 @@ describe("tools/call — the mapped principal must exist and be active on every 
     }
   });
 
+  it("with JIT on, a first call whose arguments are rejected creates the credential without lastUsedAt", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentials = []; // no credential maps the subject: JIT provisions one
+    const body = await callAs("sub-new", "memory_search", {});
+    expect(body.error?.code).toBe(-32602);
+    expect(lastCall).toBeNull();
+    const creds = puts.filter((p) => p.table === "Credential");
+    expect(creds.length).toBe(1);
+    expect(creds[0].record.idpSubject).toBe("sub-new");
+    expect("lastUsedAt" in creds[0].record).toBe(false);
+  });
+
+  it("with JIT on, a first call whose tool has run sets the new credential's lastUsedAt after the tool ran", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentials = []; // no credential maps the subject: JIT provisions one
+    const seen: { atToolRun: any[] | null } = { atToolRun: null };
+    const restore = __setHandlers({
+      SemanticSearch: class extends HarperShapedBase {
+        async post() {
+          seen.atToolRun = puts.filter((p) => p.table === "Credential").map((p) => ({ ...p.record }));
+          return { ok: true };
+        }
+      },
+    });
+    try {
+      const body = await callAs("sub-new", "memory_search", { query: "hi" });
+      expect(body.error).toBeUndefined();
+      const atToolRun = seen.atToolRun ?? [];
+      expect(atToolRun.length).toBe(1);
+      expect("lastUsedAt" in atToolRun[0]).toBe(false);
+      const creds = puts.filter((p) => p.table === "Credential");
+      expect(creds.length).toBe(2);
+      expect(creds[1].record.id).toBe(atToolRun[0].id);
+      expect(creds[1].record.idpSubject).toBe("sub-new");
+      expect(typeof creds[1].record.lastUsedAt).toBe("string");
+    } finally {
+      restore();
+    }
+  });
+
   it("an unknown tool is refused before the subject is resolved, and nothing is written", async () => {
     const body = await callAs("sub-carol", "no_such_tool", {});
     expect(body.error?.code).toBe(-32602);
     expect(puts).toEqual([]);
   });
 
-  it("resolveAgentFromSub writes nothing", async () => {
+  it("resolving an existing mapping writes nothing", async () => {
     expect(await resolveAgentFromSub("sub-carol")).toEqual({ agentId: "agt_carol", isAdmin: false });
     expect(puts).toEqual([]);
   });

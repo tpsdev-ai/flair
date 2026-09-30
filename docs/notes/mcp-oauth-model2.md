@@ -41,7 +41,7 @@ aud, scope }`. The handler maps `sub` → a flair `Agent` id:
    that names the principal and the operator's remedy, so a token minted while
    the principal was active stops working once it is deactivated and, while the
    token remains valid, works again once it is reactivated. The credential's
-   `lastUsedAt` is updated after a tool has run.
+   `lastUsedAt` is updated, best effort, after a tool has run.
 2. If no mapping and `FLAIR_MCP_JIT_PROVISION` is on, JIT-provision a
    non-admin `Agent` + `Credential(kind:"idp")` from the sub.
 3. Otherwise **deny** — an unresolvable sub never runs as anonymous or admin.

@@ -9,5 +9,6 @@
   remains valid, works again once the principal's status is set back to
   `active`. If the credential or the principal cannot be read, the call is
   refused, and JIT provisioning runs only for a subject that the credential
-  lookup answered for. The credential's `lastUsedAt` is updated after a tool has
-  run, not when a call is refused or its arguments are rejected.
+  lookup answered for. The credential's `lastUsedAt` is updated, best effort,
+  after a tool has run, not when a call is refused or its arguments are
+  rejected.

@@ -38,7 +38,7 @@ const sfx = Date.now().toString(36);
 const C = { id: `mcpstatus-c-${sfx}`, sub: `idp-sub-c-${sfx}` };
 // D: stays active throughout.
 const D = { id: `mcpstatus-d-${sfx}`, sub: `idp-sub-d-${sfx}` };
-// L: a principal record with no `status` field (it predates the field).
+// L: a principal record with no `status` field (a missing status counts as active).
 const L = { id: `mcpstatus-l-${sfx}`, sub: `idp-sub-l-${sfx}` };
 
 let harper: HarperInstance;

@@ -201,8 +201,8 @@ function jitProvisionEnabled(): boolean {
  * fails, resolution is refused. An unreadable answer is never taken as
  * "allowed", and never as "no mapping": JIT provisioning runs only for a
  * subject the credential lookup answered for. Resolution writes nothing to an
- * existing credential; the handler updates its `lastUsedAt` after a tool has
- * run (handleToolCall).
+ * existing credential; the handler updates its `lastUsedAt`, best effort, after
+ * a tool has run (handleToolCall).
  *
  * Returns:
  *   - `{ agentId, isAdmin, clientId? }` when a Credential maps the sub to an
@@ -220,8 +220,8 @@ export async function resolveAgentFromSub(sub: string, clientId?: string): Promi
 
 /**
  * resolveAgentFromSub's result together with the credential that mapped the
- * subject: null for a JIT-provisioned principal, whose new credential is
- * created with its `lastUsedAt` already set.
+ * subject: the existing credential, or the one JIT provisioning has just
+ * created without `lastUsedAt`.
  */
 interface SubMapping {
   agent: ResolvedAgent;
@@ -265,11 +265,11 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
   if (!jitProvisionEnabled()) return null;
 
   try {
-    const principalId = await jitProvisionPrincipal(sub);
+    const { principalId, credential } = await jitProvisionPrincipal(sub);
     // A JIT-provisioned principal is a fresh, non-admin agent by construction.
     const resolved: ResolvedAgent = { agentId: principalId, isAdmin: false };
     if (clientId) resolved.clientId = clientId;
-    return { agent: resolved, credential: null };
+    return { agent: resolved, credential };
   } catch {
     return null;
   }
@@ -280,8 +280,10 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
  * token subject. Mirrors XAA.resolveOrCreatePrincipal's provisioning shape (the
  * `Credential.kind:"idp"` + `idpSubject` surface) but keyed on the MCP token sub.
  * The created agent is non-admin, `kind:"agent"`, unverified trust tier.
+ * Returns the principal id and the new credential, which is created without
+ * `lastUsedAt`.
  */
-async function jitProvisionPrincipal(sub: string): Promise<string> {
+async function jitProvisionPrincipal(sub: string): Promise<{ principalId: string; credential: any }> {
   const now = new Date().toISOString();
   const principalId = `agt_mcp_${sub.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 24)}_${randomBytes(4).toString("hex")}`;
 
@@ -304,7 +306,7 @@ async function jitProvisionPrincipal(sub: string): Promise<string> {
   };
   await stampOriginatorOnCreate(principalRow);
   await (databases as any).flair.Agent.put(principalRow);
-  await (databases as any).flair.Credential.put({
+  const credential = {
     id: `cred_mcp_${randomBytes(8).toString("hex")}`,
     principalId,
     kind: "idp",
@@ -313,10 +315,10 @@ async function jitProvisionPrincipal(sub: string): Promise<string> {
     idpProvider: "mcp-oauth",
     idpSubject: sub,
     createdAt: now,
-    lastUsedAt: now,
-  });
+  };
+  await (databases as any).flair.Credential.put(credential);
 
-  return principalId;
+  return { principalId, credential };
 }
 
 /**
@@ -337,13 +339,13 @@ export class PrincipalRefusedError extends Error {
 /**
  * Read the mapped principal for this call and require it to exist and be
  * active (`isPrincipalDeactivated`, the predicate the Ed25519 path uses: a
- * record with no `status` field predates the field and counts as active).
+ * record with no `status` field counts as active).
  * Returns the principal record; throws `PrincipalRefusedError` otherwise,
  * including when the record cannot be read.
  *
  * Admin status is read from the same record, through the one shared predicate
  * (resources/agent-admin.ts, flair#941): a MCP-OAuth agent is NON-admin unless
- * an operator has explicitly marked its Agent record admin — the MCP surface
+ * an operator has set its Agent record's `role` to "admin" — the MCP surface
  * never elevates on its own. This surface is gated behind FLAIR_MCP_OAUTH and is
  * default-OFF.
  */
@@ -506,9 +508,10 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
     return rpcError(id, -32000, `tool execution failed: ${err?.message ?? String(err)}`);
   }
   // The tool has run and returned (a tool-level error result included): only
-  // now is the mapping credential marked used. A refused call, rejected
-  // arguments, or a tool that throws leave `lastUsedAt` as it was. Best-effort:
-  // a failure here does not change the answer.
+  // now is the mapping credential, a JIT-provisioned one included, marked used.
+  // A refused call, rejected arguments, or a tool that throws leave `lastUsedAt`
+  // as it was. Best effort: a failed write is ignored and does not change the
+  // answer.
   await touchLastUsed(mapping.credential);
 
   // MCP tools/call result: content blocks. Surface the handler's JSON payload
