@@ -54,6 +54,12 @@ the schema section so the catalog is complete.
 Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). A by-id miss and a
 by-id deny both return **404**, never 403, so ids are not an existence oracle.
 
+**PATCH updates existing rows.** On every table, a PATCH whose target row does
+not exist is refused with **404** unless the caller is an administrator or a
+trusted internal call, and nothing is written. Create a row with POST or PUT,
+which apply the resource's own create rules (owner and defaults); PATCH then
+updates it.
+
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.
 A nonce already recorded, or being recorded by a concurrent request, is refused
