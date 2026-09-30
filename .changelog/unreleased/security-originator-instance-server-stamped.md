@@ -39,6 +39,6 @@
   > These exceptions accept authenticated requests outside the application
   > resource stamping rule.
   >
-  > **Heads-up:** if a client or script relied on setting `originatorInstanceId`
-  > through `POST`/`PUT`/`PATCH`, that value is now ignored — the server stamps
-  > it. Nothing else about the field changed.
+  > **Heads-up:** application `POST`/`PUT`/`PATCH` bodies do not choose
+  > `originatorInstanceId`; creates derive local identity and updates retain
+  > stored attribution.

@@ -1,9 +1,6 @@
 - **Launchd handoffs check before stopping anything, report what they could not verify, and claim launchd only when proven (flair#2040).**
-  Over an ssh session the per-user GUI launchd domain can be unreachable
-  (`launchctl print gui/<uid>` → `125: Domain does not support specified
-  action`). `flair doctor --fix` used to clean-stop a healthy direct-spawned
-  instance and only then fail to load the job, leaving Flair down. `flair init`
-  printed "Launchd service registered ✓" for a plist it never loaded.
+  Launchd handoffs check GUI-domain availability before stopping an instance,
+  and init reports registration only after verifying the load.
 
   Before `doctor --fix` stops the instance or unloads a job, it checks:
   - that the GUI domain answers and the job is not disabled there (read-only
