@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import {
@@ -256,8 +256,11 @@ test("R2 control repairable partial still offers and applies repair", () => {
 }, 90_000);
 
 // Supplementary wording checks: the behavior is exercised above.
-test("R2 changelog scopes stale pins to a complete pair", () => {
-  const text = readFileSync(join(root, ".changelog/unreleased/fixed-doctor-continuity-pin-report.md"), "utf8");
+// The fragment is checked while it exists; a release promotes it into CHANGELOG.md
+// and deletes it, so the check skips once it is gone.
+const R2_FRAGMENT = ".changelog/unreleased/fixed-doctor-continuity-pin-report.md";
+test.skipIf(!existsSync(join(root, R2_FRAGMENT)))("R2 changelog scopes stale pins to a complete pair", () => {
+  const text = readFileSync(join(root, R2_FRAGMENT), "utf8");
   expect(text).toContain("When both hooks are present, range, tag, unsupported, and malformed specs make the pair stale and appear with their pin classification.");
 });
 

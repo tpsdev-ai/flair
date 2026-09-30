@@ -158,6 +158,7 @@ describe("the committed allowlist", () => {
     // Name the joi entries: a non-empty check alone could be satisfied by the
     // fastify entries while the joi entries had gone missing.
     expect(npmOnly.filter((e) => e.package === "joi").map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-6h2x-m376-mqjq",
       "GHSA-6w3j-5fw6-r9vr",
       "GHSA-gg4h-3hg2-grpc",
     ]);

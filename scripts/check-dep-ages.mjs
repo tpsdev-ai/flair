@@ -148,6 +148,8 @@ async function main() {
   function isRetryablePublishTimeError(err) {
     const msg = String(err?.message ?? err);
     if (msg.startsWith("no publish time")) return false;
+    // A malformed value is not transient; retrying fetches the same bad body.
+    if (msg.startsWith("unparseable publish time")) return false;
     if (/^HTTP 4\d\d/.test(msg) && !/^HTTP 408/.test(msg) && !/^HTTP 429/.test(msg)) {
       return false;
     }
@@ -168,7 +170,23 @@ async function main() {
     if (!time) {
       throw new Error(`no publish time for ${name}@${version}`);
     }
-    return Date.parse(time);
+    // Validate the SHAPE before parsing. The publish time must be a STRING.
+    // Date.parse coerces a number to a finite date (Date.parse(1) is not an
+    // error, so a non-string would be silently accepted) and THROWS on an
+    // object whose toString is not callable — and a thrown error here would be
+    // RETRIED. Both are registry failures, not age comparisons, so fail closed
+    // with the same non-retryable error.
+    if (typeof time !== "string") {
+      throw new Error(`unparseable publish time for ${name}@${version}: ${JSON.stringify(time)}`);
+    }
+    const publishedAt = Date.parse(time);
+    if (Number.isNaN(publishedAt)) {
+      // A present STRING that is not a valid date is equally untrustworthy:
+      // fail closed like a fetch failure — never compare it to the cutoff (NaN
+      // comparisons are always false and would slip through).
+      throw new Error(`unparseable publish time for ${name}@${version}: ${JSON.stringify(time)}`);
+    }
+    return publishedAt;
   }
 
   async function getPublishTime(name, version) {
