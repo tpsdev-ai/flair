@@ -2,8 +2,10 @@
  * A non-admin HTTP collection POST is served only by a resource's own `post()`,
  * which applies that resource's own write rules. On a table whose resource
  * defines no `post()` of its own, a collection POST is refused unless the
- * caller is an administrator or a trusted internal call: a verified agent gets
- * 403, a caller without a valid credential 401.
+ * caller is an administrator or a trusted internal call. Harper runs the
+ * resource's `allowCreate()` check before `post()`, and that check can refuse
+ * the POST first; a POST that reaches the guard is answered 403 for a verified
+ * agent and 401 for a caller without a valid credential.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
  * `guardInheritedPosts` gives every table class in the flair database's table
@@ -14,15 +16,19 @@
  *   - a resource class that defines `post()` keeps it: Harper calls the most
  *     derived `post()`, and when that override ends in `super.post()` the guard
  *     sees that the resource defines one and lets the call through;
- *   - a resource class without a `post()` of its own reaches the guard directly,
- *     and a non-admin caller is refused before Harper's `create()` runs;
+ *   - on a resource class without a `post()` of its own, a POST that passes the
+ *     resource's `allowCreate()` check reaches the guard, which refuses a
+ *     non-admin caller before Harper's `create()` runs;
  *   - resources/table-posts.ts logs an error at load when the registry is
  *     missing or empty, or an entry could not be guarded (`tablePostGuardGaps`).
  * test/integration/collection-post-attribution.test.ts reads every table in the
  * database at runtime, sends a collection POST built from the table's declared
  * attributes as a verified non-admin agent, and checks each row that POST wrote
- * (found under the table's primary key) for the caller as owner and for
- * `originatorInstanceId` and `provenance` that are not the body's.
+ * (found under the table's primary key): the table's registered owner field,
+ * if it has one, must be the caller. The body carries an `originatorInstanceId`
+ * and a `provenance` only where the table declares them, and only those
+ * declared fields are checked: `originatorInstanceId` must be the server's
+ * value, and `provenance` must not contain the body's sentinel timestamp.
  *
  * This module has no imports, so it is unit-tested directly
  * (test/unit/table-post-policy.test.ts); the dependencies it needs are passed in

@@ -10,16 +10,19 @@
 // the least-privilege `flair-agent` Harper user is provisioned and after.
 //   (a) ENUMERATION — every table, read from the database at runtime, with a
 //       body built from the table's declared attributes (plus the values in
-//       VALID_FIELDS that a table's own validation requires): owner fields
-//       naming another agent, then the caller; a body-supplied
-//       `originatorInstanceId` and `provenance` in both. The table is read under
-//       its primary key before and after each POST. Every row the POST wrote
-//       (new or changed, or under the body id or a key the response names) must
-//       have the caller as owner; this instance's `originatorInstanceId` on a
-//       new row and the previous value on an existing one; and not the body's
-//       `provenance`. A successful POST must
-//       have written a row that is found. A table whose own validation refuses
-//       the generated body is checked only for what that refusal wrote.
+//       VALID_FIELDS that a table's own validation requires). Each declared
+//       owner-shaped field names another agent, then the caller. Only where the
+//       table declares them does the body carry an `originatorInstanceId` and a
+//       `provenance` whose verified timestamp is a fixed sentinel. The table is
+//       read under its primary key before and after each POST. For every row
+//       the POST wrote (new or changed, or under the body id or a key the
+//       response names): the table's registered owner field (OWNER_FIELDS), if
+//       it has one, must be the caller; a declared `originatorInstanceId` must
+//       be this instance's id on a new row and the previous value on an
+//       existing one; and a declared `provenance` must not contain the sentinel
+//       timestamp. A successful POST must have written a row that is found. A
+//       table whose own validation refuses the generated body is checked only
+//       for what that refusal wrote.
 //   (b) Relationship: a verified non-admin agent's collection POST is created
 //       with the caller as owner and server-side `originatorInstanceId` and
 //       `provenance`; a body naming another agent is refused; an existing id is
@@ -197,7 +200,7 @@ for (const config of HARPERS) {
     function cases(phase: string) {
       const p = `tpost-${tag}-${phase}`;
 
-      test("(a) every table, with a body from its declared attributes: each row a non-admin collection POST writes has the caller as owner and none of the body's attribution", async () => {
+      test("(a) every table, with a body from its declared attributes: each row a non-admin collection POST writes has the caller in its owner field and none of the body's declared attribution values", async () => {
         const described = await adminOp({ operation: "describe_database", database: "flair" });
         const tables = Object.keys(described).sort();
         for (const t of ["Relationship", "Memory", "Soul", "Agent"]) expect(tables, `${t} is a table`).toContain(t);

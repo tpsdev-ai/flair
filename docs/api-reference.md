@@ -31,8 +31,10 @@ Flair is a Harper application. Two things become HTTP paths:
    PUT / PATCH / DELETE). Flair resource classes override those verbs to add
    identity gates, read-scope, and write policy. A collection `POST
    /<TypeName>/` from a non-admin HTTP caller is served only by a resource
-   class that defines `post()`; on a table without one it is refused (403 for a
-   verified agent, 401 without a valid credential).
+   class that defines `post()`; on a table without one it is refused. The
+   resource's `allowCreate()` check runs first and can refuse it; otherwise the
+   collection `POST` guard answers 403 for a verified agent and 401 without a
+   valid credential.
 2. **`export class Foo extends Resource`** in `resources/` — Harper mounts the
    class name as `/Foo`. Custom verbs are whatever the class implements
    (`post()` for actions, `get()` for reads).

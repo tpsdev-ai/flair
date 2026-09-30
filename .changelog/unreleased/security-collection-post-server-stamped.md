@@ -9,8 +9,10 @@
   answers 409, so a `POST` never updates a row.
 
   On a table whose resource defines no `post()` of its own, a collection `POST`
-  from a verified agent that is not an administrator answers 403, and one
-  without a valid credential answers 401; administrator and in-process `POST`s
-  to such a table are unchanged. Existing `post()` overrides are unchanged, and
-  each keeps its own write rules. The Flair client, the CLI and the MCP adapter
-  create relationships with `PUT /Relationship/<id>` and are unaffected.
+  from a non-admin HTTP caller is refused. The resource's `allowCreate()` check
+  runs first and can refuse it; otherwise the guard answers 403 for a verified
+  agent and 401 for a caller without a valid credential. Administrator and
+  in-process `POST`s to such a table are unchanged. Existing `post()` overrides
+  are unchanged, and each keeps its own write rules. The Flair client, the CLI
+  and the MCP adapter create relationships with `PUT /Relationship/<id>` and are
+  unaffected.
