@@ -29,7 +29,12 @@ Flair is a Harper application. Two things become HTTP paths:
 1. **`@table @export` in GraphQL** — Harper generates REST CRUD at
    `/<TypeName>` and `/<TypeName>/<id>` (GET collection / GET by id / POST /
    PUT / PATCH / DELETE). Flair resource classes override those verbs to add
-   identity gates, read-scope, and write policy.
+   identity gates, read-scope, and write policy. A collection `POST
+   /<TypeName>/` from a non-admin HTTP caller is served only by a resource
+   class that defines `post()`; on a table without one it is refused. The
+   resource's `allowCreate()` check runs first and can refuse it; otherwise the
+   collection `POST` guard answers 403 for a verified agent, 401 without a valid
+   credential, and refuses a caller it cannot resolve.
 2. **`export class Foo extends Resource`** in `resources/` — Harper mounts the
    class name as `/Foo`. Custom verbs are whatever the class implements
    (`post()` for actions, `get()` for reads).
@@ -207,7 +212,7 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 
 | Method | Path | Auth | Read / write |
 |--------|------|------|--------------|
-| GET / PUT | `/Relationship` | Ed25519 | Owner-only. Upsert via PUT; provenance stamped server-side. |
+| GET / POST / PUT | `/Relationship` | Ed25519 / Admin Basic | Owner-only for non-admin agents; administrators can read across owners. POST creates; a create that is otherwise admitted, valid and within the rate limit is 409 when its id already exists. PUT upserts. For a verified non-admin agent both stamp the owner from the caller (a body naming another agent is 403); an administrator keeps the owner it supplies. A write that passes validation gets provenance built server-side. |
 | GET / POST / PUT | `/WorkspaceState` | Ed25519 | Owner-only. POST stamps `agentId`; PUT rejects a mismatch. |
 | GET | `/WorkspaceLatest` | Ed25519 | Latest workspace row for the caller. |
 | GET / POST / PUT | `/OrgEvent` | Ed25519 | Any verified agent reads every event. Writes stamp `authorId`. |

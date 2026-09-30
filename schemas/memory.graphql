@@ -167,7 +167,7 @@ type Relationship @table(database: "flair") {
   updatedAt: String
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
                                     # for the full contract (write-time stamp, nullable, preserved across sync merges).
-                                    # Stamped server-side in resources/Relationship.ts's put() via resources/originator-instance.ts
+                                    # Stamped server-side in resources/Relationship.ts's post() and put() via resources/originator-instance.ts
                                     # (create stamps the local id; update keeps the stored value; never client-writable).
   provenance: String                # JSON blob (relationship-write-path, folded K&S refinement; re-stamped on
                                     # the semantic PATCH path by flair#1960 r2): SAME shape as
@@ -179,7 +179,7 @@ type Relationship @table(database: "flair") {
                                     # + one server clock read), never client-writable. Nullable by design — pre-existing rows read back
                                     # provenance = null, unchanged behavior (migration-equivalence gate, same
                                     # discipline as Memory.usageCount/flair#684). Stamped server-side in
-                                    # resources/Relationship.ts's put() (and re-stamped on a semantic patch());
+                                    # resources/Relationship.ts's post() and put() (and re-stamped on a semantic patch());
                                     # never client-writable.
 }
 
