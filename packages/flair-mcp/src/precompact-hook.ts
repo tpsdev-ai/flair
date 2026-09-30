@@ -2,9 +2,10 @@
 
 /**
  * Flair PreCompact hook for Claude Code (flair#2069): when the transcript
- * tail holds something to record, write one bounded continuity record before
- * context is lost (a new row, or, within the dedup window, the same row
- * updated), so the next session start can show it first. The record's
+ * tail holds something to record and the local checks pass, attempt one PUT
+ * of a bounded continuity record before context is lost (to a new row, or,
+ * within the dedup window, to the same row), so the next session start can
+ * show it first. The record's
  * content, bounds, redaction, storage and dedup are defined in
  * ./precompact.ts; this file is the binary around them.
  *

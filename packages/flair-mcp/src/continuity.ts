@@ -56,15 +56,17 @@
  *     sessionId).
  *
  * PRE-COMPACTION RECORD (flair#2069): just before a compaction, each run of
- * the `flair-precompact` hook that has something to record makes one PUT of a
- * row into the session's journal, in this row shape with meta.hook
- * "PreCompact"; a later run for the same harness session and trigger within
- * its dedup window reuses the row's id, so its PUT updates that row instead
- * of adding one (./precompact.ts PRECOMPACT_DEDUP_WINDOW_MS). It quotes user
- * turns, so unlike the journal lines it is redacted, and it is the one
- * continuity row whose CONTENT flair-session-start shows (first, after a
- * compaction or a restart, when the local marker names it). Its rules live
- * in ./precompact.ts; nothing above changes for journal rows. That
+ * the `flair-precompact` hook that has something to record attempts at most
+ * one PUT of a row into the session's journal, once its local checks pass, in
+ * this row shape with meta.hook "PreCompact" (a row is added or updated only
+ * when Flair applies that PUT); a later run for the same harness session and
+ * trigger within its dedup window reuses the row's id, so its PUT updates
+ * that row instead of adding one (./precompact.ts
+ * PRECOMPACT_DEDUP_WINDOW_MS). It quotes user turns, so unlike the journal
+ * lines it is redacted, and it is the one continuity row whose CONTENT
+ * flair-session-start shows (first, after a compaction or a restart, when the
+ * local marker names it). Its rules live in ./precompact.ts; nothing above
+ * changes for journal rows. That
  * hook arms a process-level deadline, which can fire only between
  * asynchronous steps, so it reads the state file through
  * bumpSeqBounded (asynchronous, size-capped with fstat before any byte is

@@ -379,7 +379,7 @@ describe("PreCompact record: acceptance (flair#2069)", () => {
     expect(fake.rows.size).toBe(1); // …one record
   });
 
-  test("a different trigger, or the same one after the dedup window, is a new compaction and a new record", async () => {
+  test("a different trigger, or the same one after the dedup window, gets a fresh record id and so a new record", async () => {
     seed();
     const fake = new FakeFlair();
     const path = writeTranscript(richTranscript());
@@ -829,6 +829,11 @@ describe("PreCompact pieces", () => {
       ["sk-" + a(16), REDACTED],
       ["sk-ant-" + a(16), REDACTED],
       ["sk-proj-" + a(16), REDACTED],
+      // The run of 16 is counted from right after "sk-", so a subtype counts toward it.
+      ["sk-ant-" + a(11), "sk-ant-" + a(11)],
+      ["sk-ant-" + a(12), REDACTED],
+      ["sk-proj-" + a(10), "sk-proj-" + a(10)],
+      ["sk-proj-" + a(11), REDACTED],
       ["xsk-" + a(20), "xsk-" + a(20)], // a prefix must start a word
       ["ghp_" + a(19), "ghp_" + a(19)],
       ...["ghp_", "gho_", "ghu_", "ghs_", "ghr_"].map((p) => [p + a(20), REDACTED] as const),
@@ -977,6 +982,18 @@ describe("PreCompact pieces", () => {
       "bash: Run the tests",
       "bash: Run the tests",
     ]);
+  });
+
+  test("tasks: a TodoWrite item marked deleted is not an open task; a pending one is", () => {
+    const extract = extractFromTranscript([
+      toolUse("td-1", "TodoWrite", {
+        todos: [
+          { content: "Remove old plan", status: "deleted", activeForm: "Removing" },
+          { content: "Write the new plan", status: "pending", activeForm: "Writing" },
+        ],
+      }),
+    ]);
+    expect(extract.openTasks).toEqual(["[pending] Write the new plan"]); // positive control: the pending item is kept
   });
 
   test("tasks: TodoWrite lists are read when present; a task deleted or created before the tail is not invented", () => {

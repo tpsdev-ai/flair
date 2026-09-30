@@ -63,18 +63,22 @@
  * every secret); the size bound and the ephemeral, private tier remain the
  * containment.
  *
- * STORAGE: each run that has something to record makes ONE signed
- * `PUT /Memory/<id>`, the verb the journal uses, in the same shape as a
- * journal row (type "session", durability "ephemeral", whose TTL the server
- * sets, 24 h by default through FLAIR_EPHEMERAL_TTL_HOURS; visibility
- * "private"; the session's `adk:continuity:<sessionId>` tag) with
- * meta.hook = "PreCompact". The id is fresh unless the local marker file
- * names a record written for the same harness session and trigger less than
- * PRECOMPACT_DEDUP_WINDOW_MS after that record's first write: then the id is
- * reused and the PUT updates that row instead of adding one. That holds for a
- * rerun of the same compaction and for a second compaction of the same kind
- * alike; the hook cannot tell them apart. Two runs at the same moment can
- * each add a row, since nothing locks the marker across processes.
+ * STORAGE: each run that has something to record attempts at most ONE signed
+ * `PUT /Memory/<id>`, once its local checks pass (./precompact-hook.ts
+ * runPreCompact: a marker that is absent or readable, a marker write that
+ * succeeds, time left in the budget, a client that could be built); a row is
+ * added or updated only when Flair applies that PUT. The PUT uses the verb
+ * the journal uses, in the same shape as a journal row (type "session",
+ * durability "ephemeral", whose TTL the server sets, 24 h by default through
+ * FLAIR_EPHEMERAL_TTL_HOURS; visibility "private"; the session's
+ * `adk:continuity:<sessionId>` tag) with meta.hook = "PreCompact". The id is
+ * fresh unless the local marker file names a record written for the same
+ * harness session and trigger less than PRECOMPACT_DEDUP_WINDOW_MS after that
+ * record's first write: then the id is reused and the PUT updates that row
+ * instead of adding one. That holds for a rerun of the same compaction and
+ * for a second compaction of the same kind alike; the hook cannot tell them
+ * apart. Two runs at the same moment can each add a row, since nothing locks
+ * the marker across processes.
  *
  * SURFACING: unlike journal rows (agent-pull: a count and a tag, never
  * content), this record's CONTENT is shown by flair-session-start, first,
@@ -605,7 +609,7 @@ export function extractFromTranscript(lines: readonly string[]): PreCompactExtra
       const t = asObj(item);
       const content = nonEmpty(t?.content);
       const status = nonEmpty(t?.status) ?? "pending";
-      if (content && status !== "completed") open.push({ subject: content, status });
+      if (content && status !== "completed" && status !== "deleted") open.push({ subject: content, status });
     }
   }
   open.sort((a, b) => Number(b.status === "in_progress") - Number(a.status === "in_progress"));
@@ -792,9 +796,10 @@ export async function writePreCompactMarker(sessionDir: string, agentId: string,
 }
 
 /**
- * The record id for this run: the marker's, when this run repeats the
- * compaction that wrote it (same harness session and trigger, within
- * PRECOMPACT_DEDUP_WINDOW_MS of its first write), else a fresh one.
+ * The record id for this run: the marker's, when the marker names the same
+ * harness session and trigger and this run comes less than
+ * PRECOMPACT_DEDUP_WINDOW_MS after that record's first write; else a fresh
+ * one. Only those three inputs decide it.
  */
 export function resolvePreCompactRecordId(
   marker: PreCompactMarker | null,
