@@ -17,5 +17,7 @@
   trusted internal ledger reads are unchanged.
 
   > **Heads-up:** a usage report counts only when the memory is in the reporting agent's read
-  > scope. A `standard` or `ephemeral` memory defaults to private, so only its owner's reports count
-  > unless it is written with `visibility: "shared"`.
+  > scope. Memories created through `Memory.post()` or `Memory.put()` default to private for
+  > `standard` and `ephemeral` durability. `POST /FeedMemories` defaults `ephemeral` records to
+  > private, while a new `standard` feed record with no `visibility` field is non-private; usage
+  > reports from other agents can count it.

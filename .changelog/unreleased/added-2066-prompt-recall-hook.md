@@ -17,7 +17,7 @@
   3000 ms) come from `FLAIR_PROMPT_RECALL_MIN_SCORE`, `FLAIR_PROMPT_RECALL_MAX_HITS` and
   `FLAIR_PROMPT_RECALL_TIMEOUT_MS`, or from the matching top-level keys in `~/.flair/config.yaml`.
   The hook never uses admin credentials. It is opt-in and wired by hand: `docs/claude-code.md` now
-  lists all three Claude Code hooks and gives the `settings.json` entry for this one, launched from
+  lists all four Claude Code hooks and gives the `settings.json` entry for this one, launched from
   a pinned local install so no package resolution runs ahead of every prompt.
 
   (Closes #2066)
