@@ -7,8 +7,8 @@
   carries the claim unchanged.
 
   This holds on every LOCAL write path that stamps provenance: Memory `post()`,
-  `put()` and a semantic `patch()`; Relationship `put()` and a semantic
-  `patch()`; feed ingest; and the Soul/AgentSeed operators. On such a newly
+  `put()` and a semantic `patch()`; Relationship `post()`, `put()` and a
+  semantic `patch()`; feed ingest; and the Soul/AgentSeed operators. On such a newly
   stamped write a request body can never set — or carry forward — any field
   under `verified`: the writers strip a body-supplied `provenance` and re-derive
   it from the resolved auth and one server clock read. A semantic update (one

@@ -151,10 +151,8 @@ test("every stamped raw create writer applies the shared rule; dynamic exception
   expect(missingDynamic).toEqual([]);
 });
 
-test("the four resource writers apply the shared create/update rule via the URL-bound resolver", () => {
-  for (const file of ["resources/Memory.ts", "resources/Soul.ts", "resources/Agent.ts", "resources/Relationship.ts"]) {
-    const src = readFileSync(file, "utf8");
-    expect(src).toContain("applyOriginatorInstanceId(");
-    expect(src).toContain("resolveStoredRow(");
-  }
-});
+// The four resource writers (Memory, Soul, Agent, Relationship) are checked on
+// their REST create routes, not by source text: see
+// test/integration/collection-post-attribution.test.ts, which sends each
+// collection POST and PUT with a body-supplied originatorInstanceId and reads
+// back the stored value.

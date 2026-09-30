@@ -183,88 +183,32 @@ export class Relationship extends (databases as any).flair.Relationship {
     return super.patch(content, query);
   }
 
+  /**
+   * POST (a collection create). Prepares the body with the same rules as put()
+   * before the row is created: the owner comes from the authenticated agent (a
+   * body that names another agent is refused), the fields are validated and
+   * normalized, provenance is built server-side, and `originatorInstanceId` is
+   * stamped as a create. An id that already exists is refused (409), so a POST
+   * never updates a row. Administrator and trusted internal callers are handled
+   * as in put().
+   */
+  async post(content: any, query?: any) {
+    const denial = await prepareRelationshipWrite(this, content, RECORD_TYPES.Relationship.attribution.post);
+    if (denial) return denial;
+    await applyOriginatorInstanceId(content, null);
+    return super.post(content, query);
+  }
+
   async put(content: any) {
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
-    const ctx = (this as any).getContext?.();
-    const auth = await resolveAgentAuth(ctx);
-
-    if (auth.kind === "anonymous") {
-      return UNAUTH();
-    }
-
-    // No-forge attribution — mode/field drawn from RECORD_TYPES.Relationship
-    // (record-types slice 2, flair#520) rather than a hand-typed literal.
-    // "stamp-strict" (see record-type-kit.ts's stampAttribution doc): reject
-    // a PRESENT, mismatched agentId, else unconditionally stamp with the
-    // verified identity. Admin/internal: content.agentId left as provided
-    // (unfiltered) — see doc above.
-    const attr = stampAttribution(auth, content, RECORD_TYPES.Relationship.ownerField, RECORD_TYPES.Relationship.attribution.put, "cannot write a relationship owned by another agent");
-    if (attr.denied) return attr.denied;
-
-    if (!content.agentId || typeof content.agentId !== "string") {
-      return new Response(JSON.stringify({ error: "agentId is required" }), {
-        status: 400, headers: { "content-type": "application/json" },
-      });
-    }
-
-    // Rate limit keyed on the RESOLVED agentId (never a client-supplied one)
-    // — matches Memory.post()'s intent, extended to cover every
-    // resolveAgentAuth path (credentialed super_user, verifyAgentRequest
-    // fallback), not just the gate's own `tpsAgent` annotation. Internal
-    // calls have no per-agent identity to key on and are trusted, so they're
-    // exempt — same as Memory.post()'s `if (authenticatedAgent)` guard.
-    if (auth.kind === "agent") {
-      const rl = checkRateLimit(auth.agentId);
-      if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "relationship");
-    }
-
-    // Validate required fields
-    if (!content.subject || typeof content.subject !== "string") {
-      return new Response(JSON.stringify({ error: "subject is required (string)" }), {
-        status: 400, headers: { "content-type": "application/json" },
-      });
-    }
-    if (!content.predicate || typeof content.predicate !== "string") {
-      return new Response(JSON.stringify({ error: "predicate is required (string)" }), {
-        status: 400, headers: { "content-type": "application/json" },
-      });
-    }
-    if (!content.object || typeof content.object !== "string") {
-      return new Response(JSON.stringify({ error: "object is required (string)" }), {
-        status: 400, headers: { "content-type": "application/json" },
-      });
-    }
-
-    // Normalize — lowercasing is load-bearing: MemoryBootstrap.ts's attention
-    // read matches lowercased predicted subjects against subject/object.
-    const now = new Date().toISOString();
-    content.subject = content.subject.toLowerCase();
-    content.predicate = content.predicate.toLowerCase();
-    content.object = content.object.toLowerCase();
-    content.createdAt = content.createdAt || now;
-    content.updatedAt = now;
-    content.validFrom = content.validFrom || now;
-    // validTo left as null/undefined for active relationships
-    content.confidence = content.confidence ?? 1.0;
-
-    // Write-time provenance stamp (relationship-write-path, folded K&S
-    // refinement) — reuses Memory's buildProvenance EXACTLY (./provenance.ts),
-    // same `{v, verified, claimed?}` shape, no Relationship-specific format.
-    // Additive/nullable on the schema side (schemas/memory.graphql) — a
-    // pre-existing row with no provenance field reads back `undefined`,
-    // unchanged behavior (migration-equivalence gate).
-    content.provenance = buildProvenance(auth, content.createdAt, content);
-    // flair#718 authorship-provenance — same contract as resources/Memory.ts's
-    // post()/put(): `claimedClient` is a write-body-only passthrough, already
-    // folded into `provenance.claimed.client` above. Strip it so it is NEVER
-    // persisted as a row field.
-    delete content.claimedClient;
+    const denial = await prepareRelationshipWrite(this, content, RECORD_TYPES.Relationship.attribution.put);
+    if (denial) return denial;
 
     // Write-time originatorInstanceId (federation-edge-hardening slice 1): a
     // CREATE (no stored row) stamps this instance's own id, ignoring any body
     // value; an UPDATE keeps the STORED value — a body value neither replaces
-    // nor clears it. Relationship has no post(), so put() carries both. See
+    // nor clears it. post() stamps its create itself; put() carries both. See
     // resources/originator-instance.ts for the full contract (the federation
     // merge is the raw table writer and never takes a request-body field).
     // The row is resolved by the URL-BOUND target id, never a body `id` (Harper
@@ -305,4 +249,95 @@ export class Relationship extends (databases as any).flair.Relationship {
 
     return super.delete(_);
   }
+}
+
+/**
+ * The write preparation Relationship's post() and put() share: resolve the
+ * caller (anonymous → 401), apply the owner attribution for `mode` (a verified
+ * non-admin agent's own id is stamped; a body naming another agent is refused),
+ * rate-limit, validate and normalize the triple, and build provenance
+ * server-side. Returns the refusal, or null when the body is ready to write.
+ * `originatorInstanceId` is the caller's to apply: a create stamp for post(),
+ * the stored-row rule for put().
+ */
+async function prepareRelationshipWrite(
+  resource: any,
+  content: any,
+  mode: Parameters<typeof stampAttribution>[3],
+): Promise<Response | null> {
+  const ctx = resource.getContext?.();
+  const auth = await resolveAgentAuth(ctx);
+
+  if (auth.kind === "anonymous") {
+    return UNAUTH();
+  }
+
+  // No-forge attribution — mode/field drawn from RECORD_TYPES.Relationship
+  // (record-types slice 2, flair#520) rather than a hand-typed literal.
+  // "stamp-strict" (see record-type-kit.ts's stampAttribution doc): reject
+  // a PRESENT, mismatched agentId, else unconditionally stamp with the
+  // verified identity. Admin/internal: content.agentId left as provided
+  // (unfiltered) — see the auth-reconcile doc on the Relationship class.
+  const attr = stampAttribution(auth, content, RECORD_TYPES.Relationship.ownerField, mode, "cannot write a relationship owned by another agent");
+  if (attr.denied) return attr.denied;
+
+  if (!content.agentId || typeof content.agentId !== "string") {
+    return new Response(JSON.stringify({ error: "agentId is required" }), {
+      status: 400, headers: { "content-type": "application/json" },
+    });
+  }
+
+  // Rate limit keyed on the RESOLVED agentId (never a client-supplied one)
+  // — matches Memory.post()'s intent, extended to cover every
+  // resolveAgentAuth path (credentialed super_user, verifyAgentRequest
+  // fallback), not just the gate's own `tpsAgent` annotation. Internal
+  // calls have no per-agent identity to key on and are trusted, so they're
+  // exempt — same as Memory.post()'s `if (authenticatedAgent)` guard.
+  if (auth.kind === "agent") {
+    const rl = checkRateLimit(auth.agentId);
+    if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "relationship");
+  }
+
+  // Validate required fields
+  if (!content.subject || typeof content.subject !== "string") {
+    return new Response(JSON.stringify({ error: "subject is required (string)" }), {
+      status: 400, headers: { "content-type": "application/json" },
+    });
+  }
+  if (!content.predicate || typeof content.predicate !== "string") {
+    return new Response(JSON.stringify({ error: "predicate is required (string)" }), {
+      status: 400, headers: { "content-type": "application/json" },
+    });
+  }
+  if (!content.object || typeof content.object !== "string") {
+    return new Response(JSON.stringify({ error: "object is required (string)" }), {
+      status: 400, headers: { "content-type": "application/json" },
+    });
+  }
+
+  // Normalize — lowercasing is load-bearing: MemoryBootstrap.ts's attention
+  // read matches lowercased predicted subjects against subject/object.
+  const now = new Date().toISOString();
+  content.subject = content.subject.toLowerCase();
+  content.predicate = content.predicate.toLowerCase();
+  content.object = content.object.toLowerCase();
+  content.createdAt = content.createdAt || now;
+  content.updatedAt = now;
+  content.validFrom = content.validFrom || now;
+  // validTo left as null/undefined for active relationships
+  content.confidence = content.confidence ?? 1.0;
+
+  // Write-time provenance stamp (relationship-write-path, folded K&S
+  // refinement) — reuses Memory's buildProvenance EXACTLY (./provenance.ts),
+  // same `{v, verified, claimed?}` shape, no Relationship-specific format.
+  // Additive/nullable on the schema side (schemas/memory.graphql) — a
+  // pre-existing row with no provenance field reads back `undefined`,
+  // unchanged behavior (migration-equivalence gate).
+  content.provenance = buildProvenance(auth, content.createdAt, content);
+  // flair#718 authorship-provenance — same contract as resources/Memory.ts's
+  // post()/put(): `claimedClient` is a write-body-only passthrough, already
+  // folded into `provenance.claimed.client` above. Strip it so it is NEVER
+  // persisted as a row field.
+  delete content.claimedClient;
+  return null;
 }

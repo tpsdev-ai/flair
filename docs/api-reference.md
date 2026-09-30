@@ -29,7 +29,10 @@ Flair is a Harper application. Two things become HTTP paths:
 1. **`@table @export` in GraphQL** — Harper generates REST CRUD at
    `/<TypeName>` and `/<TypeName>/<id>` (GET collection / GET by id / POST /
    PUT / PATCH / DELETE). Flair resource classes override those verbs to add
-   identity gates, read-scope, and write policy.
+   identity gates, read-scope, and write policy. A collection `POST
+   /<TypeName>/` from a caller who is not an administrator is served only by a
+   resource class that defines `post()`; on a table without one it is refused
+   (403 for a verified agent, 401 without a valid credential).
 2. **`export class Foo extends Resource`** in `resources/` — Harper mounts the
    class name as `/Foo`. Custom verbs are whatever the class implements
    (`post()` for actions, `get()` for reads).
@@ -190,7 +193,7 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 
 | Method | Path | Auth | Read / write |
 |--------|------|------|--------------|
-| GET / PUT | `/Relationship` | Ed25519 | Owner-only. Upsert via PUT; provenance stamped server-side. |
+| GET / POST / PUT | `/Relationship` | Ed25519 | Owner-only. POST creates (an existing id is 409); PUT upserts. Both stamp the owner from the caller and build provenance server-side. |
 | GET / POST / PUT | `/WorkspaceState` | Ed25519 | Owner-only. POST stamps `agentId`; PUT rejects a mismatch. |
 | GET | `/WorkspaceLatest` | Ed25519 | Latest workspace row for the caller. |
 | GET / POST / PUT | `/OrgEvent` | Ed25519 | Any verified agent reads every event. Writes stamp `authorId`. |
