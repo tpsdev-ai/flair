@@ -54,6 +54,14 @@ the schema section so the catalog is complete.
 Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). A by-id miss and a
 by-id deny both return **404**, never 403, so ids are not an existence oracle.
 
+**Subscriptions.** A table route can also be subscribed to: SSE
+(`Accept: text/event-stream`) or WebSocket on `/<Table>/` or `/<Table>/<id>`.
+Table subscriptions are served to administrators (Admin Basic or an admin
+agent) and trusted internal callers only, on every table. A verified non-admin
+agent is refused with **403** (WebSocket close code 3003), and a caller without
+a valid credential with **401** (close code 3000). Agents subscribe through the
+feed resources, `/FeedMemories` and `/FeedSouls`, which are not tables.
+
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.
 A nonce already recorded, or being recorded by a concurrent request, is refused
