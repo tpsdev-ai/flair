@@ -24,8 +24,8 @@
   `claimed`. Rows deliberately NOT
   re-stamped: a metadata-only PATCH (no content or creation-claim change), the `_reindex`
   maintenance re-PUT (which keeps the stored bytes so a corpus-wide reindex
-  stays byte-identical), federation-synced rows (which keep the ORIGINATOR's
-  stamped blob), and any row that is never written again. The server-stamped
+  stays byte-identical), federation-synced rows (which carry the provenance the
+  merge selected, when it is a string), and any row that is never written again. The server-stamped
   rule applies to newly stamped local provenance from this release on.
 
   (Closes #1960)
