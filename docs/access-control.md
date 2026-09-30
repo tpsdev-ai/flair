@@ -2,14 +2,16 @@
 
 Three separate checks decide who can use the native `/mcp` endpoint of a hosted
 Flair. **Which people:** a person signs in at your identity provider, and Flair
-acts only as the principal you mapped to that login. A login with no mapping is
-refused, unless you turn on just-in-time provisioning, which is off by default.
-**Which apps:** an app identifies itself with a Client ID Metadata Document
-served from a host on your allowlist (`claude.ai` and `claude.com` by default),
-and dynamic client registration is off. **What they can touch:** a connection
-acts as its principal. For a non-admin principal, that means writing its own
-memories and reading them plus other agents' non-private ones.
-`flair principal disable` cuts a principal off and keeps its data.
+acts as the principal that login is mapped to. A login with no mapping cannot
+call tools, unless you turn on just-in-time provisioning (off by default), which
+creates a principal for it. **Which apps:** an app identifies itself with a
+Client ID Metadata Document, and the shipped `allowedHosts` list (`claude.ai`
+and `claude.com`) limits which hosts may serve one. Registration of new clients
+is off; clients registered while it was on stay usable until their records are
+removed. **What they can touch:** a connection acts as its principal. For a
+non-admin principal, that means writing its own memories and reading them plus
+other agents' non-private ones. `flair principal disable` cuts a principal off
+and keeps its data.
 
 This page covers `/mcp`, where apps such as Claude sign people in with OAuth.
 Agents that sign each request with their own Ed25519 key use a different path,
@@ -22,13 +24,13 @@ is turned on is in [mcp-clients.md — Two MCP paths](mcp-clients.md#two-mcp-pat
 When someone connects an app, the app sends them to Flair's authorization
 server, which has them sign in at the identity provider configured under
 `'@harperfast/oauth'` → `providers` in Flair's `config.yaml`. The shipped file
-configures GitHub. The access token the app
-receives carries the login as its subject; for GitHub, that is the account's
-username.
+configures GitHub. The access token the app receives carries the login as its
+subject; for GitHub, that is the account's username.
 
-On every tool call, Flair looks up the active `Credential` of kind `idp` whose
-`idpSubject` is that login, and acts as that credential's principal. There is no
-fallback to an anonymous or admin identity:
+`/mcp` answers `initialize`, `ping` and `tools/list` for any valid token. On
+every tool call (`tools/call`), Flair looks up the active `Credential` of kind
+`idp` whose `idpSubject` is that login, and acts as that credential's principal.
+There is no fallback to an anonymous or admin identity:
 
 - **No mapping:** the call is refused. `/mcp` answers HTTP 200 with a JSON-RPC
   error:
@@ -41,6 +43,8 @@ fallback to an anonymous or admin identity:
   a message naming the principal.
 - **Mapped to a deactivated principal:** refused; see
   [Revoking access](#revoking-access).
+- **The credential or the principal could not be read:** refused with code
+  `-32000` and a message starting `unavailable:`.
 
 ### Map a person to a principal
 
@@ -101,7 +105,8 @@ name:
 
 `FLAIR_MCP_JIT_PROVISION` is off by default; `1`, `true`, `yes` or `on` turns
 it on. It changes the "no mapping" case: instead of refusing, Flair creates a
-principal for the login on its first tool call and maps the login to it. The new
+principal for the login on its first tool call and maps the login to it (if
+that write fails, the call is refused as in the "no mapping" case). The new
 principal is a non-admin agent with trust tier `unverified`, and its id has the
 form `agt_mcp_<login>_<8 hex digits>`, where characters other than letters and
 digits become `_` and the login part is cut to 24 characters. Its credential
@@ -115,29 +120,39 @@ environment, like `FLAIR_MCP_OAUTH`.
 
 ## 2. Which apps
 
-An app identifies itself with a Client ID Metadata Document (CIMD) instead of
-registering: its `client_id` is an HTTPS URL, and Flair's authorization server
-fetches the document from that URL when a person starts to sign in.
+An app identifies itself with a Client ID Metadata Document (CIMD): its
+`client_id` is an HTTPS URL, and Flair's authorization server fetches the
+document from that URL, and caches it, when a person starts to sign in.
 
-- **Dynamic client registration is off.** The shipped `config.yaml` sets
+- **Registration of new clients is off.** The shipped `config.yaml` sets
   `dynamicClientRegistration.enabled: false`, so `POST /oauth/mcp/register`
   answers `404 {"error":"Not found"}`, and the metadata at
   `/.well-known/oauth-authorization-server` lists no `registration_endpoint`.
-- **Only listed hosts.** `clientIdMetadataDocuments.allowedHosts` names the
-  hosts that may serve a `client_id`. The shipped list, `claude.ai` and
-  `claude.com`, is there for Claude. For a `client_id` on any other host, the
-  authorization endpoint answers HTTP 400 with error `invalid_client` and the
-  description `Unknown client_id`.
-- **The person sees the app's host.** Before sending the person to the
-  identity provider, the authorization server shows a page naming the host of
-  the app's `client_id`; the person continues from there.
+- **Clients registered earlier stay usable.** A `client_id` that is not shaped
+  like a metadata-document URL is looked up among stored registrations, in the
+  `harper_oauth_mcp_clients` table of Harper's `oauth` database. Turning
+  registration off does not remove those records: a client registered while
+  registration was on can still sign people in and refresh tokens, and the host
+  list below does not apply to it. Flair has no command that lists or removes
+  these records; such a client stays usable until its record is deleted.
+- **Listed hosts.** When `clientIdMetadataDocuments.allowedHosts` is non-empty,
+  a `client_id` URL is accepted only if its host is on the list. An empty list
+  (`[]`) or no `allowedHosts` key places no restriction on the host. The
+  shipped list, `claude.ai` and `claude.com`, is there for Claude. With a
+  non-empty list, a `client_id` on any other host gets HTTP 400 from the
+  authorization endpoint, with error `invalid_client` and the description
+  `Unknown client_id`.
+- **The person sees the app's host.** For an app that uses a metadata document,
+  the authorization server shows a page naming the host of the app's
+  `client_id` before it sends the person to the identity provider; the person
+  continues from there.
 - **Public clients with PKCE.** The document of an app that signs people in
   must declare `token_endpoint_auth_method: none`, or leave the field out. Any
   other value is refused with `invalid_client`. Every authorization request must
   carry a PKCE `code_challenge` with method `S256`. The server's metadata
   advertises `none`, `client_secret_basic` and `client_secret_post` as token
-  endpoint auth methods; the last two apply only to registered clients, and
-  registration is off. It does not advertise `private_key_jwt`.
+  endpoint auth methods; the last two apply only to registered clients. It does
+  not advertise `private_key_jwt`.
 
 ### Changing the list
 
@@ -154,22 +169,25 @@ The list lives in `config.yaml`:
 ```
 
 Edit the `config.yaml` your instance runs (on Fabric, the one you deploy) and
-restart Flair so the component loads the new list. The list is a literal, not an
-environment reference, so a new package version ships the default list again;
-re-apply your edit when you upgrade. `flair mcp enable --cimd-allowed-hosts`
-does not change this setting: the command only repeats the list in its output.
+restart Flair so the component loads the new list. The list is a literal in that
+file, not an environment reference. The package ships the file with the default
+list, and an upgrade installs the new version's file, so re-apply your edit
+after upgrading. `flair mcp enable --cimd-allowed-hosts` does not change this
+setting: the command only shows the list in its output.
 
 ### ChatGPT
 
 ChatGPT's published metadata document, `https://chatgpt.com/oauth/client.json`,
 declares `token_endpoint_auth_method: private_key_jwt`. The `@harperfast/oauth`
-version Flair pins, 2.5.0, accepts only `none` for an app that signs people in,
-so adding `chatgpt.com` to the list does not let ChatGPT connect. Its sign-in is
-refused with HTTP 400, error `invalid_client`, and the description
+version Flair pins, 2.5.0, accepts only `none` in the metadata document of an
+app that signs people in, so adding `chatgpt.com` to the list does not let
+ChatGPT connect with that document. Its sign-in is refused with HTTP 400, error
+`invalid_client`, and the description
 `token_endpoint_auth_method 'private_key_jwt' is not supported for interactive CIMD clients; use 'none'`.
 
-> **Upstream:** private_key_jwt verification for interactive clients is being
-> added upstream in @harperfast/oauth.
+> **Upstream:** verification of `private_key_jwt` for interactive clients is in
+> progress upstream in
+> [HarperFast/oauth#245](https://github.com/HarperFast/oauth/pull/245).
 
 ## 3. What they can touch
 
@@ -209,7 +227,8 @@ Deactivate the principal, on the Flair host, with `FLAIR_ADMIN_PASS` set or
 flair principal disable alice
 ```
 
-On success it prints `✅ Principal 'alice' deactivated`.
+When the operations API accepts the update, it prints
+`✅ Principal 'alice' deactivated`.
 
 - It sends the update to the operations API at `127.0.0.1` on the machine it
   runs on (port from `--ops-port`, `FLAIR_OPS_PORT` or the local Flair config).
@@ -232,8 +251,9 @@ On success it prints `✅ Principal 'alice' deactivated`.
   `flair principal enable` command.
 
 To close `/mcp` for everyone, unset `FLAIR_MCP_OAUTH` in the instance's
-environment and restart it; `flair mcp disable` asks you to confirm the variable
-is unset, then restarts the instance.
+environment (or set it to `0`) and restart the instance; `flair mcp disable`
+asks you to confirm the variable is unset, then sends the restart through the
+instance's operations API.
 
 ## Check who you are
 
@@ -277,10 +297,26 @@ flair mcp enable \
   --admin-pass "$TARGET_ADMIN_PASS"
 ```
 
-It prompts for the OAuth app's client id and secret, stages the secrets the
-instance needs (or pushes them, when the instance supports Harper's
-env-secrets), maps `alice`, asks you to confirm that the secrets are applied,
-restarts the instance and checks the result. On success it ends with:
+It prints each step as it runs. The steps that act:
+
+- `signing-key` creates `~/.flair/mcp-signing-key.pem` (or the
+  `--signing-key-file` path), or reuses the file if it exists.
+- `idp-credentials` takes the OAuth app's client id and secret (it prompts for
+  them).
+- `secrets-provisioning` always stages the secrets the instance needs in a local
+  `0600` file. Without `--secrets-mechanism`, it also pushes them to the
+  instance when the instance supports Harper's env-secrets.
+- `identity-mapping` maps `alice`. The command then asks you to confirm that the
+  secrets are applied to the instance.
+- `local-config-update` takes the first `config.yaml` it finds, in the current
+  directory and then in `~/.flair/`, on the machine you run it on. If that file
+  has the `'@harperfast/oauth'` → `mcp` block, it sets `mcp.enabled` to
+  `${FLAIR_MCP_OAUTH}`; otherwise the step is marked failed and the command
+  continues.
+- `restart`, `verify-restart` and `self-verify` restart the instance through its
+  operations API, wait for a new process, and check the published metadata.
+
+On success it ends with:
 
 ```
 ✓ claude.ai can now connect.
@@ -291,8 +327,10 @@ claude.ai → Settings → Connectors → Add custom connector
 ```
 
 On a `*.harperfabric.com` instance, the command ends at its
-`fabric-operator-deploy` step instead: it asks you to apply the staged secrets to
-the instance's environment and restart the instance yourself. Afterwards,
+`fabric-operator-deploy` step instead, after the confirmation, and prints
+instructions for finishing by hand. The step's own text says to apply the staged
+secrets, which include `FLAIR_MCP_OAUTH=true`, to the instance's environment and
+restart the instance. Afterwards,
 `flair mcp status --instance https://flair.example.com` reports whether the
 surface answers.
 
@@ -315,8 +353,9 @@ shares her connector's memories.
   say `alice-laptop`) and set `FLAIR_URL=https://flair.example.com` and
   `FLAIR_AGENT_ID=alice-laptop` in the adapter's config. `alice-laptop` and
   `alice` are then two principals: each writes its own memories and reads the
-  other's non-private ones, and neither reads the other's `private` memories.
-  To make them one, map the login to the laptop agent:
+  other's non-private ones, and, neither being an admin, neither reads the
+  other's `private` memories. To make them one, map the login to the laptop
+  agent:
 
   ```bash
   flair mcp enable \
@@ -368,8 +407,8 @@ it expires, but his next tool call gets:
 {"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"forbidden: principal 'dave' is deactivated, so this token can no longer call tools. An operator must reactivate the principal (set its status to \"active\") to restore access."}}
 ```
 
-His memories stay, and the ones he did not mark `private` stay readable by
-alice and carol.
+His memories stay, and those that are not `private` stay readable by alice and
+carol.
 
 ### Bots
 
@@ -388,16 +427,19 @@ flair agent add bob-the-bot \
 
 The password file must be mode `0600`. For an `https` target on port 443, the
 command writes the Agent record through the operations API on port 9925 of the <!-- docs-freshness-allow: hosted ops API port, not legacy data port -->
-same host; pass `--ops-target <url>` if yours is elsewhere. It writes the key to
-`~/.flair/keys/bob-the-bot.key` (mode `0600`) and prints:
+same host; pass `--ops-target <url>` if yours is elsewhere. It writes a new key
+to `~/.flair/keys/bob-the-bot.key` (mode `0600`), or reuses the key already
+there, and prints, among other lines:
 
 ```
 ✅ Agent 'bob-the-bot' (bob-the-bot) registered (ops: <operations API URL>)
 ```
 
 Configure the stdio adapter (`@tpsdev-ai/flair-mcp`) on the bot's host with
-`FLAIR_URL=https://flair.example.com` and `FLAIR_AGENT_ID=bob-the-bot`. It finds
-the key at `~/.flair/keys/bob-the-bot.key` and signs every request:
+`FLAIR_URL=https://flair.example.com` and `FLAIR_AGENT_ID=bob-the-bot`. With
+`FLAIR_KEY_PATH` and `FLAIR_KEY_DIR` unset, it looks for the key at
+`~/.flair/keys/bob-the-bot.key`, and signs each request it sends to Flair with
+it:
 
 ```
 Authorization: TPS-Ed25519 bob-the-bot:<unix-ms>:<nonce>:<base64 signature>
@@ -418,8 +460,19 @@ refused by these checks gets HTTP 401:
 **Check:** `flair bootstrap --agent bob-the-bot --url https://flair.example.com --json`
 and read `agentId` and `scope`.
 **Revoke:** `flair principal disable bob-the-bot` on the Flair host; its next
-request gets `{"error":"principal_deactivated"}`. `flair agent remove bob-the-bot`,
-also run on the Flair host, deletes the agent and all its data.
+request gets `{"error":"principal_deactivated"}`.
+
+`flair agent remove bob-the-bot`, also run on the Flair host, asks you to type
+`yes` (or takes `--force`), then:
+
+- searches the agent's `Memory` and `Soul` rows and sends a delete for each one
+  it finds, without checking whether each delete succeeded;
+- deletes the `Agent` record, and stops with an error if that delete fails;
+- deletes the agent's key files on the machine it runs on, unless you pass
+  `--keep-keys`.
+
+Rows the agent owns in other tables, such as its workspace state, are left in
+place.
 
 #### 5. A bot reaches another OAuth-protected MCP server as itself
 
@@ -429,8 +482,10 @@ without a person signing in, using its Flair key as its client credential
 
 When `FLAIR_MCP_ISSUER` or `FLAIR_PUBLIC_URL` is set, Flair publishes a Client
 ID Metadata Document at `/MCPClientMetadata/<agent-id>` for an agent whose record
-holds an Ed25519 public key. For `bob-the-bot`, the document is served at
-`https://flair.example.com/MCPClientMetadata/bob-the-bot`:
+holds an Ed25519 public key (64 hex characters, or base64 that decodes to 32
+bytes). With
+`FLAIR_MCP_ISSUER=https://flair.example.com`, the document for `bob-the-bot` is
+served at `https://flair.example.com/MCPClientMetadata/bob-the-bot`:
 
 ```json
 {
@@ -444,11 +499,12 @@ holds an Ed25519 public key. For `bob-the-bot`, the document is served at
 
 With neither variable set, the path answers HTTP 501 (`mcp_issuer_not_configured`).
 For an unknown agent, or one with no public key, it answers HTTP 404
-(`agent_not_found_or_no_key`).
+(`agent_not_found_or_no_key`). For a record whose public key does not decode to
+32 bytes, it answers HTTP 500 (`invalid_agent_key`).
 
 The other server's authorization server must allow this. If it runs
-`@harperfast/oauth` 2.5.0, that means `mcp.clientCredentials.enabled: true` and
-`flair.example.com` in its `clientIdMetadataDocuments.allowedHosts`.
+`@harperfast/oauth` 2.5.0, that includes `mcp.clientCredentials.enabled: true`
+and `flair.example.com` in its `clientIdMetadataDocuments.allowedHosts`.
 
 On the bot's host, mint a token:
 
@@ -475,11 +531,11 @@ Flair's own authorization server does not issue these tokens with the shipped
 **Check:** add `--dry-run` to sign the assertion and print its claims without
 sending it, and fetch the metadata URL to see the published key.
 **Revoke:** the other server's operator can remove `flair.example.com` from its
-list. On Flair, the document is served for any Agent record with a public key,
-deactivated or not, so `flair principal disable` does not withdraw it.
-`flair agent remove bob-the-bot` does: the path then answers 404. An
-authorization server that fetched the document earlier can keep using its cached
-copy until that copy expires.
+list. On Flair, the document remains served for a deactivated agent whose record
+holds a valid Ed25519 public key, so `flair principal disable` does not withdraw
+it. When `flair agent remove bob-the-bot` deletes the `Agent` record, the path
+answers 404. An authorization server that fetched the document earlier can keep
+using its cached copy until that copy expires.
 
 #### 6. A bot and a person using the same app
 
@@ -487,8 +543,9 @@ copy until that copy expires.
 build server. The job gets its own principal.
 
 Register the job's agent as in example 4 and set
-`FLAIR_AGENT_ID=bob-the-bot` in the build server's MCP config. Do not copy
-alice's key to the server or set `FLAIR_AGENT_ID=alice` there.
+`FLAIR_URL=https://flair.example.com` and `FLAIR_AGENT_ID=bob-the-bot` in the
+build server's MCP config. Do not copy alice's key to the server or set
+`FLAIR_AGENT_ID=alice` there.
 
 Why a separate principal:
 
