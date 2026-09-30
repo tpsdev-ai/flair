@@ -19,11 +19,10 @@
   place, because no new content was authored. A PATCH whose stored-row read
   fails is refused (500), never silently degraded to a metadata-only decision.
 
-  There is no bulk rewrite of stored provenance: an untouched row retains its
-  blob until a later semantic local write re-stamps it. Existing provenance is
-  retained until a local write re-stamps it; newly stamped provenance records
-  server write time under `verified` and sanitized creation claims under
-  `claimed`. Rows deliberately NOT
+  There is no bulk rewrite of stored provenance: an existing row keeps its blob
+  until a later write replaces it (a semantic local write re-stamps it; a newer
+  federated row carries its own). Newly stamped provenance records server write
+  time under `verified` and sanitized creation claims under `claimed`. Rows deliberately NOT
   re-stamped: a metadata-only PATCH (no content or creation-claim change), the `_reindex`
   maintenance re-PUT (which keeps the stored bytes so a corpus-wide reindex
   stays byte-identical), federation-synced rows (which keep the ORIGINATOR's
