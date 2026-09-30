@@ -59,8 +59,9 @@ SSE (`Accept: text/event-stream`) or WebSocket on `/<Table>/` or
 `/<Table>/<id>`. Table subscriptions are served to administrators (Admin Basic
 or an admin agent) and trusted internal callers only. A verified non-admin
 agent is refused with **403** (WebSocket close code 3003), and a caller without
-a valid credential with **401** (close code 3000). Verified agents receive soul
-changes through `/FeedSouls`, which is not a table.
+a valid credential with **401** (close code 3000). Verified agents receive
+changes to the memories they can read through `/FeedMemories`, and soul changes
+through `/FeedSouls`; neither is a table.
 
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.
@@ -85,7 +86,7 @@ own resource:
 | Scope | Meaning | Table | Enforced in |
 |-------|---------|-------|-------------|
 | **party** | Sender or recipient only | Message | `resources/Message.ts` |
-| **own-ledger** | Only the contributing agent's rows | MemoryUsage | `resources/MemoryUsage.ts` |
+| **own-ledger** | Non-admin reads: only the contributing agent's rows, about memories it can read. Admin / internal reads: unfiltered | MemoryUsage | `resources/MemoryUsage.ts` |
 | **owner-or-grantee** | Either party on the grant | MemoryGrant | `resources/MemoryGrant.ts` |
 
 Writes stamp `agentId` (or `authorId` / `from`) from the authenticated
@@ -142,8 +143,8 @@ the same identity plane.
 | DELETE | `/Memory/<id>` | Ed25519 | Owner or admin. `permanent` owner-delete is allowed. |
 | POST | `/SemanticSearch` | Ed25519 | Hybrid semantic + lexical. Same read-scope as Memory. Default scoring is `raw`. |
 | POST | `/BootstrapMemories` | Ed25519 | Cold-start context (soul + predicted memories + optional org events). |
-| POST | `/RecordUsage` | Ed25519 | Cross-agent usage signal (`Memory.usageCount`). No ownership requirement; no existence oracle in the response. Prefer this over writing `/MemoryUsage` directly. |
-| GET | `/MemoryUsage` | Ed25519 | Own ledger rows only. PUT/DELETE are admin/internal — agents must not delete their row to re-count. |
+| POST | `/RecordUsage` | Ed25519 | Cross-agent usage signal (`Memory.usageCount`). No ownership requirement; counts only memories in the caller's read scope (`resolveReadScope`: own at any visibility, others' non-private), admin callers included even though admin Memory reads are unfiltered; an out-of-scope id is handled like a missing one. No existence oracle in the response. Prefer this over writing `/MemoryUsage` directly. |
+| GET | `/MemoryUsage` | Ed25519 | Non-admin reads: own ledger rows only, about memories the caller can currently read; any other row reads as not found. Admin and internal reads are unchanged. PUT/DELETE are admin/internal — agents must not delete their row to re-count. |
 | GET / write | `/MemoryGrant` | Ed25519 | Read: owner or grantee. Write/delete: owner only (you share your own memories). |
 | GET / write | `/Asset` | Ed25519 | Owner-only blobs linked by `memoryId`. No MCP and no federation in this slice. |
 | GET / write | `/MemoryCandidate` | Ed25519 | Owner-only REM drafts. Never auto-promoted except the narrow ADK path. |

@@ -13,7 +13,7 @@
 // resolve to the shared admin Harper user) and after.
 //   (a) ENUMERATION — every table in the flair database, read from the database
 //       itself at runtime: on each table's collection route and by-id route
-//       (a stored row's id when an administrator can list one), a non-admin
+//       (a stored row's primary key when the table holds a row), a non-admin
 //       subscriber is refused (or finds no route) on both transports and
 //       receives nothing. A table added later is enumerated, and so checked,
 //       without anyone naming it.
@@ -21,8 +21,9 @@
 //       subscriber and deliver nothing, including rows written after the
 //       attempt; an anonymous subscriber gets 401.
 //   (c) Administrators (Basic and an admin agent) still subscribe and receive rows.
-//   (d) The feed resources are not table routes: FeedSouls serves a verified
-//       agent, and FeedMemories never answers with the table-route refusal.
+//   (d) The feed resources are not table routes: FeedMemories and FeedSouls
+//       serve a verified agent, and FeedMemories delivers none of A's private
+//       memories.
 //
 // Mutation check: make the table guard admit every caller — every table whose
 // own read gate admits the agent goes red in (a), and (b) goes red.
@@ -222,12 +223,12 @@ for (const config of HARPERS) {
     const sseAs = (agent: TestAgent, path: string) => openSse(`${harper.httpURL}${path}`, ed25519Header(agent, "GET", path));
     const wsUrl = (path: string) => `${harper.httpURL.replace(/^http/, "ws")}${path}`;
 
-    /** Tables in the flair database, read from the database itself. */
-    async function flairTables(): Promise<string[]> {
+    /** Tables in the flair database and each table's primary-key attribute, read from the database itself. */
+    async function flairTables(): Promise<Map<string, string | undefined>> {
       const res = await adminOp({ operation: "describe_database", database: "flair" });
       const body = await res.json();
       expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(200);
-      return Object.keys(body).sort();
+      return new Map(Object.keys(body).sort().map((t) => [t, typeof body[t]?.primary_key === "string" ? body[t].primary_key : undefined]));
     }
 
     /**
@@ -236,19 +237,36 @@ for (const config of HARPERS) {
      * something that is not the table (a resource that shares its name), "none"
      * when there is no route.
      */
-    async function routeKind(table: string): Promise<{ kind: "table" | "other" | "none"; sampleId?: string }> {
+    async function routeKind(table: string): Promise<"table" | "other" | "none"> {
       const res = await fetch(`${harper.httpURL}/${table}/`, { headers: { Authorization: basicAuth(harper), Accept: "application/json" } });
       const text = await res.text();
-      if (res.status === 404) return { kind: "none" };
-      if (res.status !== 200) return { kind: "other" };
+      if (res.status === 404) return "none";
+      if (res.status !== 200) return "other";
       try {
-        const rows = JSON.parse(text);
-        if (!Array.isArray(rows)) return { kind: "other" };
-        const id = rows.find((r: any) => typeof r?.id === "string" && r.id.length > 0)?.id;
-        return { kind: "table", sampleId: id };
+        return Array.isArray(JSON.parse(text)) ? "table" : "other";
       } catch {
-        return { kind: "other" };
+        return "other";
       }
+    }
+
+    /**
+     * A stored row's primary key, read from the table itself through the ops
+     * API: the value of the attribute `describe_database` names as the table's
+     * primary key. `key` is undefined when the table holds no row; a read that
+     * fails, or a stored row without that value, is reported as `error`, never
+     * as "no row".
+     */
+    async function storedKey(table: string, primaryKey: string | undefined): Promise<{ key?: string; error?: string }> {
+      if (primaryKey === undefined) return { error: "describe_database names no primary key" };
+      const res = await adminOp({ operation: "search_by_value", database: "flair", table, search_attribute: primaryKey, search_value: "*", get_attributes: [primaryKey], limit: 1 });
+      const text = await res.text();
+      let rows: unknown;
+      try { rows = JSON.parse(text); } catch { rows = undefined; }
+      if (res.status !== 200 || !Array.isArray(rows)) return { error: `reading a stored key returned ${res.status}: ${text.slice(0, 200)}` };
+      if (rows.length === 0) return {};
+      const value = (rows[0] as any)?.[primaryKey];
+      if ((typeof value === "string" && value.length > 0) || (typeof value === "number" && Number.isFinite(value))) return { key: String(value) };
+      return { error: `a stored row carries no value for the primary key ${primaryKey}` };
     }
 
     function cases(phase: string) {
@@ -268,26 +286,37 @@ for (const config of HARPERS) {
         await adminInsert("Message", { id: ids.message, from: A.id, to: C.id, threadId: `${p}-thread`, seq: 0, kind: "message", body: `${p} body for c only`, state: "delivered", createdAt: now() });
         await adminInsert("MemoryUsage", { id: ids.usage, agentId: A.id, memoryId: ids.memory, createdAt: now() });
         await adminInsert("Soul", { id: ids.soul, agentId: A.id, key: "role", value: `${p} role`, durability: "permanent", createdAt: now(), updatedAt: now() });
+        // Rows in the two exported tables whose primary key is not `id`, so (a)
+        // probes their by-id routes with a stored row's key.
+        await adminInsert("Presence", { agentId: A.id, lastHeartbeatAt: Date.now(), activity: "idle" });
+        await adminInsert("MemoryHostSource", { memoryId: ids.memory, hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: `${p}-run` }), authorId: A.id, receivedAt: now() });
       }, 60_000);
 
       test("(a) every table in the database refuses a non-admin subscriber on its collection and by-id routes, over SSE and WebSocket", async () => {
-        const tables = await flairTables();
+        const primaryKeys = await flairTables();
+        const tables = [...primaryKeys.keys()];
         const listable: string[] = []; // an administrator's collection read returns the table's rows
-        const sampleIds = new Map<string, string>(); // a stored row's id, when one was listed
+        const sampleKeys = new Map<string, string>(); // a stored row's primary key, when the table holds a row
         const found: string[] = [];
         for (const t of tables) {
-          const { kind, sampleId } = await routeKind(t);
+          const kind = await routeKind(t);
           if (kind === "table") listable.push(t);
-          if (sampleId) sampleIds.set(t, sampleId);
+          const stored = await storedKey(t, primaryKeys.get(t));
+          if (stored.key !== undefined) sampleKeys.set(t, stored.key);
+          if (stored.error) found.push(`${t}: ${stored.error}`);
           if (kind === "other" && !NOT_TABLE_ROUTES.has(t)) {
             found.push(`${t}: /${t}/ is served by something that does not list the table's rows; if that is a resource that is not the table, add it to NOT_TABLE_ROUTES`);
           }
         }
-        // Not vacuous: the enumeration reaches the routes this rule exists for.
+        // Not vacuous: the enumeration reaches the routes this rule exists for,
+        // and probes their by-id routes with a stored row's primary key.
         for (const t of ["Memory", "Message", "MemoryUsage"]) expect(listable, `${t} is listed by an administrator`).toContain(t);
+        for (const t of ["Memory", "Message", "MemoryUsage", "Presence", "MemoryHostSource"]) {
+          expect(sampleKeys.has(t), `${t}'s by-id route is probed with a stored row's primary key`).toBe(true);
+        }
 
         for (const t of tables) {
-          const byId = `/${t}/${encodeURIComponent(sampleIds.get(t) ?? `absent-${randomUUID()}`)}`;
+          const byId = `/${t}/${encodeURIComponent(sampleKeys.get(t) ?? `absent-${randomUUID()}`)}`;
           for (const path of [`/${t}/`, byId]) {
             const sub = sseAs(B, path);
             const status = await sub.statusWithin(3_000);
@@ -375,17 +404,18 @@ for (const config of HARPERS) {
         expect(ws.events.map((e) => e.id), "Basic admin over WebSocket").toContain(ids.memory);
       }, 60_000);
 
-      test("(d) the feed resources are not table routes: FeedSouls serves a verified agent, and FeedMemories never answers with the table-route refusal", async () => {
-        // FeedMemories admits whom its own gate admits. Whatever it answers, it
-        // is never the table-route refusal, and an admitted agent is served.
+      test("(d) the feed resources are not table routes: FeedMemories and FeedSouls serve a verified agent", async () => {
+        // FeedMemories admits a verified agent with either Harper user and
+        // delivers the memories it can read: its own, and none of A's private ones.
         const own = `${p}-b-own`;
         const feed = sseAs(B, "/FeedMemories");
         try {
           await writeMemory(B, { id: own, content: `${p} b own`, visibility: "private" });
           const status = await feed.statusWithin(5_000);
           expect(feed.text(), "FeedMemories never answers with the table-route refusal").not.toContain("table subscriptions");
-          if (phase === "shared-user") expect(status, "FeedMemories admits a verified agent that resolves to the shared Harper user").toBe(200);
-          if (status === 200) await feed.waitFor((e) => e.id === own, "B's own memory on FeedMemories");
+          expect(status, "FeedMemories admits a verified agent").toBe(200);
+          await feed.waitFor((e) => e.id === own, "B's own memory on FeedMemories");
+          expect(feed.events().filter((e) => foreignIds.has(e.id)), "FeedMemories delivers none of A's private memories").toEqual([]);
         } finally {
           await feed.stop();
         }
