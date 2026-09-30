@@ -137,10 +137,19 @@ class SoulMock extends HarperShapedBase {
 // Configurable per-test via these mutable fixtures.
 let credentials: any[] = [];
 let agents: Record<string, any> = {};
-const puts: { table: string; record: any }[] = [];
+const puts: { table: string; record: any; op?: "patch" }[] = [];
 // Set to make the resolver's credential lookup / principal read fail.
 let credentialSearchError: Error | null = null;
 let agentGetError: Error | null = null;
+// Set to make the credential's lastUsedAt patch fail.
+let credentialPatchError: Error | null = null;
+
+/** Store a credential row the way Harper does: a put replaces it, a patch merges into it (and creates it when missing). */
+function storeCredential(id: any, fields: any, merge: boolean): void {
+  const i = credentials.findIndex((c) => c?.id === id);
+  if (i < 0) credentials = [...credentials, { ...fields, id }];
+  else credentials = credentials.map((c, j) => (j === i ? (merge ? { ...c, ...fields, id } : { ...fields, id }) : c));
+}
 
 // Constructable no-op base classes so the REAL resource modules (which do
 // `class X extends databases.flair.X` or `extends Resource`) link + load — we
@@ -154,7 +163,13 @@ const databasesMock = {
         if (credentialSearchError) throw credentialSearchError;
         for (const c of credentials) yield c;
       },
-      put: async (r: any) => { puts.push({ table: "Credential", record: r }); return r; },
+      put: async (r: any) => { puts.push({ table: "Credential", record: r }); storeCredential(r.id, r, false); return r; },
+      get: async (id: any, _ctx?: any) => credentials.find((c) => c?.id === id) ?? null,
+      patch: async (id: any, update: any, _ctx?: any) => {
+        if (credentialPatchError) throw credentialPatchError;
+        puts.push({ table: "Credential", record: { id, ...update }, op: "patch" });
+        storeCredential(id, update, true);
+      },
     }),
     Agent: Object.assign(class extends NoopBase {}, {
       get: async (id: string) => {
@@ -211,6 +226,7 @@ beforeEach(() => {
   puts.length = 0;
   credentialSearchError = null;
   agentGetError = null;
+  credentialPatchError = null;
   delete process.env.FLAIR_MCP_JIT_PROVISION;
 });
 afterEach(() => {
@@ -1081,8 +1097,68 @@ describe("tools/call — the mapped principal must exist and be active on every 
     expect(lastCall?.resource).toBe("SemanticSearch.post");
     const touched = puts.filter((p) => p.table === "Credential");
     expect(touched.length).toBe(1);
+    expect(touched[0].op).toBe("patch");
+    expect(Object.keys(touched[0].record).sort()).toEqual(["id", "lastUsedAt"]);
     expect(touched[0].record.id).toBe("cred_carol");
     expect(typeof touched[0].record.lastUsedAt).toBe("string");
+  });
+
+  // A tool call that changes the credential while it runs.
+  function toolChangingCredential(change: () => void) {
+    return __setHandlers({
+      SemanticSearch: class extends HarperShapedBase {
+        async post() { change(); return { ok: true }; }
+      },
+    });
+  }
+
+  it("a credential revoked while its tool runs stays revoked, and its lastUsedAt is set", async () => {
+    const restore = toolChangingCredential(() => storeCredential("cred_carol", { status: "revoked" }, true));
+    try {
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error).toBeUndefined();
+      const stored = credentials.find((c) => c.id === "cred_carol");
+      expect(stored?.status).toBe("revoked");
+      expect(stored?.principalId).toBe("agt_carol");
+      expect(typeof stored?.lastUsedAt).toBe("string");
+    } finally {
+      restore();
+    }
+  });
+
+  it("a credential re-linked to another principal while its tool runs keeps the new principalId, and its lastUsedAt is set", async () => {
+    const restore = toolChangingCredential(() => storeCredential("cred_carol", { principalId: "agt_dave" }, true));
+    try {
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error).toBeUndefined();
+      const stored = credentials.find((c) => c.id === "cred_carol");
+      expect(stored?.principalId).toBe("agt_dave");
+      expect(stored?.status).toBe("active");
+      expect(typeof stored?.lastUsedAt).toBe("string");
+    } finally {
+      restore();
+    }
+  });
+
+  it("a credential deleted while its tool runs is not created again", async () => {
+    const restore = toolChangingCredential(() => { credentials = credentials.filter((c) => c.id !== "cred_carol"); });
+    try {
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error).toBeUndefined();
+      expect(credentials.find((c) => c.id === "cred_carol")).toBeUndefined();
+      expect(puts).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("a failed lastUsedAt update does not change the call's answer", async () => {
+    credentialPatchError = new Error("write failed");
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBe(false);
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+    expect(credentials.find((c) => c.id === "cred_carol")?.lastUsedAt).toBeUndefined();
   });
 
   it("a call whose arguments are rejected leaves the credential's lastUsedAt unchanged", async () => {
@@ -1138,8 +1214,9 @@ describe("tools/call — the mapped principal must exist and be active on every 
       expect("lastUsedAt" in atToolRun[0]).toBe(false);
       const creds = puts.filter((p) => p.table === "Credential");
       expect(creds.length).toBe(2);
+      expect(creds[1].op).toBe("patch");
       expect(creds[1].record.id).toBe(atToolRun[0].id);
-      expect(creds[1].record.idpSubject).toBe("sub-new");
+      expect(credentials.find((c) => c.id === atToolRun[0].id)?.idpSubject).toBe("sub-new");
       expect(typeof creds[1].record.lastUsedAt).toBe("string");
     } finally {
       restore();

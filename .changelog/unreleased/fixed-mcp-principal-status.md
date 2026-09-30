@@ -11,4 +11,4 @@
   refused, and JIT provisioning runs only for a subject that the credential
   lookup answered for. The credential's `lastUsedAt` is updated, best effort,
   after a tool has run, not when a call is refused or its arguments are
-  rejected.
+  rejected; the update writes that field alone.

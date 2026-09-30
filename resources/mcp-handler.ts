@@ -528,10 +528,18 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
   });
 }
 
-/** Mark the mapping credential used, once a tool has run (best-effort). */
+/**
+ * Mark the mapping credential used, once a tool has run (best-effort). The
+ * update writes `lastUsedAt` alone, as a field-level patch from an internal
+ * context (no request, no user), and is skipped when a read just before it
+ * finds no stored credential row.
+ */
 async function touchLastUsed(credential: any | null): Promise<void> {
-  if (!credential) return;
+  const credentialId = credential?.id;
+  if (credentialId == null) return;
   try {
-    await (databases as any).flair.Credential.put({ ...credential, lastUsedAt: new Date().toISOString() });
+    const Credential = (databases as any).flair.Credential;
+    if ((await Credential.get(credentialId, {})) == null) return;
+    await Credential.patch(credentialId, { lastUsedAt: new Date().toISOString() }, {});
   } catch { /* non-fatal: a failure here does not change the call's answer */ }
 }
