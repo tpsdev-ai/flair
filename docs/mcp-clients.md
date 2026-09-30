@@ -35,7 +35,7 @@ The snippets below are the **local** path. Flair also has a native `/mcp` endpoi
 
 Native `/mcp` is remote-only by design. The OAuth authorization server fetches client metadata over HTTPS and refuses private, loopback, and link-local hosts. `flair mcp enable` refuses localhost, loopback, RFC1918, IPv4 link-local, and `.local`. Set `FLAIR_MCP_OAUTH=true` — that is the one value that enables both Flair's `/mcp` route and the OAuth component. A loopback Flair cannot be the origin those clients dial. The stdio adapter is the local path because it speaks the instance's Ed25519 HTTP API and does not need that public origin.
 
-`flair init --agent <id>` attempts to wire detected local clients unless MCP wiring is disabled; bare `flair init` only initializes the instance. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools).
+`flair init --agent <id>` attempts to wire detected local clients unless MCP wiring is disabled; bare `flair init` only initializes the instance. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools). Who can connect through native `/mcp`, and how to revoke access, is in [access-control.md](access-control.md).
 
 ---
 
