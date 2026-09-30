@@ -55,10 +55,10 @@
  *     file untouched (scenario S7: compaction ≠ restart; no rotation, no new
  *     sessionId).
  *
- * PRE-COMPACTION RECORD (flair#2069): the `flair-precompact` hook writes at
- * most ONE more row into a session's journal per compaction, just before it
- * (none when there is nothing to record or the write fails), in this row
- * shape with meta.hook "PreCompact". It quotes user turns, so unlike the journal
+ * PRE-COMPACTION RECORD (flair#2069): the `flair-precompact` hook writes ONE
+ * more row into a session's journal per compaction, just before it, when
+ * there is something to record and the write succeeds (a later rerun updates
+ * that row), in this row shape with meta.hook "PreCompact". It quotes user turns, so unlike the journal
  * lines it is redacted, and it is the one continuity row whose CONTENT
  * flair-session-start shows (first, after a compaction or a restart). Its
  * rules live in ./precompact.ts; nothing above changes for journal rows. That

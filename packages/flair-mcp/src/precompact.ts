@@ -13,10 +13,13 @@
  * compaction starts.
  *
  * WHAT THE RECORD HOLDS (extractive, never generative: no model call, no
- * summary). Each item is text copied from the transcript tail, cut to a
- * bound, with secret-shaped strings replaced. The record's other text is its
- * own, fixed: a first line naming the trigger, the section headings, a status
- * label on each task, a tool label on each in-flight line ("bash:", "edit:")
+ * summary). Each item's free text is copied from the transcript tail, cut to
+ * a bound, with secret-shaped strings replaced. A task's status label is also
+ * taken from the transcript, but only when it is 1 to 20 of [a-z_] and
+ * redactSecrets would leave it unchanged; any other value is shown as "open"
+ * (statusLabel). The rest is fixed: a first
+ * line naming the trigger (normalized to manual / auto / unknown), the
+ * section headings, a tool label on each in-flight line ("bash:", "edit:")
  * and, when the record had to be cut, RECORD_CUT_MARKER. The items:
  *   - Standing instructions: sentences from USER turns that the fixed
  *     heuristic below recognizes (INSTRUCTION_START_RE / _ANYWHERE_RE).
@@ -41,14 +44,19 @@
  * WHY REDACTION HERE WHEN THE JOURNAL HAS NONE: the journal's capture
  * discipline relies on its inputs being assistant-chosen, already-visible
  * prose plus a 400-character bound (see ./continuity.ts). This record also
- * quotes USER turns, where pasted credentials really do appear, so every text
- * taken from the transcript passes redactSecrets() BEFORE it is split, cut or
- * stored. The redaction is pattern-based and best effort (it recognizes
- * common credential shapes, not every secret); the size bound and the
- * ephemeral, private tier remain the containment.
+ * quotes USER turns, where pasted credentials really do appear, so every free
+ * text taken from the transcript (instruction sentences, task subjects, action
+ * descriptions and file paths, the assistant message) passes redactSecrets()
+ * BEFORE it is split, cut or stored; a task's status label is kept only when
+ * it is status-shaped and redaction would not change it, else shown as "open"
+ * (statusLabel). The redaction is pattern-based and best effort (it
+ * recognizes common credential shapes, not every secret); the size bound and
+ * the ephemeral, private tier remain the containment.
  *
- * STORAGE: at most one Memory row per compaction (none when the tail holds
- * nothing to record or the write fails), through the same signed
+ * STORAGE: one Memory row per compaction when the tail holds something to
+ * record and the write succeeds (a later rerun updates it; two runs at the
+ * same moment can each write one, since nothing locks the marker across
+ * processes), through the same signed
  * `PUT /Memory/<id>` the journal uses, in the same shape as a journal row
  * (type "session", durability "ephemeral", whose TTL the server sets, 24 h by
  * default through FLAIR_EPHEMERAL_TTL_HOURS; visibility "private"; the
@@ -216,11 +224,17 @@ const AUTHORIZATION_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * Credential shapes replaced before anything is stored. A superset of the
- * auto-capture filter in packages/pi-flair (sk-, ghp_, pat_, Bearer, PEM
- * private keys). The token shapes use word boundaries and minimum lengths so
- * ordinary words are not caught. Every quantifier is bounded or runs over a
- * single character class, so no pattern backtracks badly on long input.
+ * Credential shapes replaced in the record's free text before it is stored.
+ * They cover the families the auto-capture filter in packages/pi-flair
+ * detects (sk-, ghp_, pat_, Bearer, PEM private keys) and more, but they are
+ * NOT a superset of that filter: pi-flair flags those prefixes followed by
+ * any number of characters, with no word boundary, while the token shapes
+ * here need a word boundary and a minimum length, so ordinary words are not
+ * caught: 16 characters after sk- or pat_, and 20 letters and digits (no dots)
+ * after ghp_ and the other gh?_ prefixes. A short or dotted token that
+ * pi-flair flags ("ghp_a.b", "pat_ab", "sk-abc123") is left as written here.
+ * Every quantifier is bounded or runs over a single character class, so no
+ * pattern backtracks badly on long input.
  *
  * Best effort by design: a secret with no recognizable shape (a bare
  * password in prose, a random string with no prefix) is NOT recognized.
@@ -391,8 +405,13 @@ function idString(value: unknown): string | null {
   return null;
 }
 
+/** A task's status as shown in the record: the transcript's value when it is
+ *  shaped like one (1 to 20 of [a-z_]) AND redactSecrets would leave it
+ *  unchanged, else "open". A credential-shaped value that fits the shape
+ *  (such as a 20-character pat_ token) is therefore shown as "open", never as
+ *  written. */
 function statusLabel(status: string): string {
-  return /^[a-z_]{1,20}$/.test(status) ? status : "open";
+  return /^[a-z_]{1,20}$/.test(status) && redactSecrets(status) === status ? status : "open";
 }
 
 /** The text of a message's content: the string itself, or its text blocks joined. */
@@ -906,7 +925,8 @@ export function quoteRecordLines(content: string): string[] {
  * 27 characters for an expanded year; the flagged note; BEGIN; END; the joins)
  * add under 700, so the block is under 6,700 characters, inside session
  * start's 10,000-character output. A record this hook writes has at most 24
- * lines (every text in it went through oneLine), so its block is under 2,750.
+ * lines (every copied free text in it went through oneLine, and a status
+ * label is [a-z_] only), so its block is under 2,750.
  */
 export function formatPreCompactContext(record: SurfacedPreCompact): string {
   const header =

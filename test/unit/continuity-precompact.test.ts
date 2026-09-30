@@ -328,6 +328,27 @@ describe("PreCompact record: acceptance (flair#2069)", () => {
     expect(content).toContain(`Last assistant message: Rotating the key ${REDACTED} next.`);
   });
 
+  test("a credential-shaped task status is stored as open; an ordinary status is kept as written", async () => {
+    seed();
+    // 20 characters of [a-z_]: it fits the status-label shape, and the redactor recognizes it.
+    const token = "pat_" + "abcdefghijklmnop";
+    expect(token).toMatch(/^[a-z_]{1,20}$/); // positive control: a shape check alone would keep it
+    expect(redactSecrets(token)).not.toBe(token); // positive control: it is credential-shaped
+    const lines = [
+      toolUse("s-1", "TaskCreate", { subject: "Ship the fix" }),
+      toolResult("s-1", "created", { toolUseResult: { task: { id: "71" } } }),
+      toolUse("s-2", "TaskUpdate", { taskId: "71", status: token }),
+      toolUse("s-3", "TaskCreate", { subject: "Write the notes" }),
+      toolResult("s-3", "created", { toolUseResult: { task: { id: "72" } } }),
+      toolUse("s-4", "TaskUpdate", { taskId: "72", status: "blocked_on_review" }),
+    ];
+    const fake = new FakeFlair();
+    const out = await runPreCompact(payload(writeTranscript(lines)), deps(fake));
+    expect(out.reason).toBe("written");
+    expect(JSON.stringify(onlyRow(fake))).not.toContain(token);
+    expect(String(onlyRow(fake).content)).toContain("Open tasks:\n- [open] Ship the fix\n- [blocked_on_review] Write the notes");
+  });
+
   test("a rerun for the same compaction (same session and trigger) updates the ONE record", async () => {
     seed();
     const fake = new FakeFlair();

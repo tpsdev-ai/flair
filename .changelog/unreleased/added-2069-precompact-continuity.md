@@ -3,24 +3,27 @@
   of the transcript (at most 1 MiB and 2,000 lines) and copies out, with no model call, the standing
   instructions found in your own turns by a fixed word heuristic, the open tasks, the last five file
   edits and shell-command descriptions (never the commands), and all the text of the last assistant
-  message. Credential-shaped strings are replaced with `[redacted]` before anything is stored,
-  including a whole Authorization-style value after `Authorization:`, `Bearer` or `Basic`, and the
-  record is at most 2,000 characters. When the transcript's end holds something to record, it is
-  written with the agent's own key as one private, ephemeral memory in the session's continuity
-  journal; a rerun for the same compaction within 5 minutes updates that record instead of adding a
-  second. `flair-session-start` now puts the record at the top of its context after a compaction, and
-  after a restart when the previous session saved one, ahead of the bootstrap context, as quoted data:
-  between fixed begin and end lines, with every line prefixed, so no line of transcript text can forge
-  the end line or start with a role marker such as `System:`. The text itself stays untrusted:
-  formatting cannot guarantee that a model disregards an instruction written inside the quote. The
-  hook always exits 0, so it never blocks compaction; when Flair is unreachable or slow, or one of its
-  own files is refused, it shows one short warning. Its time budget (`FLAIR_PRECOMPACT_TIMEOUT_MS`,
-  default 5000 ms) starts before it reads its input; when it passes, the hook stops waiting on
-  asynchronous work and exits once its output drains (at most one more second). It cannot interrupt
-  synchronous work such as the Flair client's read of the agent's key file (the hook entry's Claude
-  Code `timeout` is the outer bound). It checks the size of the transcript, its continuity state file
-  and its marker file before reading them; the key-file read is outside those caps. It is opt-in and
-  wired by hand: `flair hook install` does not write the entry, and `docs/claude-code.md` gives the
-  `settings.json` snippet and the heuristic's limits.
+  message. Credential-shaped strings in the record's free text, including a whole Authorization-style
+  value after `Authorization:`, `Bearer` or `Basic`, are replaced with `[redacted]` before the record
+  is stored (a credential-shaped task status is shown as `open` instead), and the record is at most
+  2,000 characters. When the transcript's end holds something to record and the write succeeds, it is
+  stored with the agent's own key as one private, ephemeral memory in the session's continuity
+  journal; a later rerun for the same compaction within 5 minutes updates that record instead of
+  adding a second (two runs at the same moment can each write one). `flair-session-start` now puts the
+  record at the top of its context after a compaction, and after a restart when the local marker file
+  still names the previous session's record, ahead of the bootstrap context, as quoted data: between
+  fixed begin and end lines, with every line prefixed, so no line of transcript text can forge the end
+  line or start with a role marker such as `System:`. The text itself stays untrusted: formatting
+  cannot guarantee that a model disregards an instruction written inside the quote. Once it has
+  started, every path the hook handles ends in exit 0, so it does not block compaction (the documented
+  command's `|| true` covers a launcher that fails first); when Flair is unreachable or slow, or one
+  of its own files is refused, it shows one short warning. Its time budget
+  (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default 5000 ms) starts before it reads its input; when it passes,
+  the hook stops waiting on asynchronous work and exits once its output drains (at most one more
+  second). It cannot interrupt synchronous work such as the Flair client's read of the agent's key
+  file (the hook entry's Claude Code `timeout` is the outer bound). It checks the size of the
+  transcript, its continuity state file and its marker file before reading them; the key-file read is
+  outside those caps. It is opt-in and wired by hand: `flair hook install` does not write the entry,
+  and `docs/claude-code.md` gives the `settings.json` snippet and the heuristic's limits.
 
   (Closes #2069)

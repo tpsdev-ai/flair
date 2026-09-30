@@ -84,6 +84,66 @@ Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`
 
 This is a prompt-driven CLI setup: Claude must choose to run these commands. For MCP tools and automatic startup recall, run `flair init --agent my-project --client claude-code`, restart Claude Code, and verify the hook with `flair hook status --harness claude-code`; these prompt instructions do not guarantee automatic capture.
 
+## Hooks
+
+`@tpsdev-ai/flair-mcp` ships four Claude Code hooks. Each is a separate binary and each is optional. Each exits 0 on every failure it handles, but a hook can still delay the session start, the prompt or the compaction it runs for; the time budgets and limits of prompt recall and of the PreCompact hook are described below.
+
+| Hook | Claude Code event | What it does | Install |
+|---|---|---|---|
+| `flair-session-start` | `SessionStart` | Loads bootstrap context (soul plus relevant memories) when a session opens. | `flair hook install` ([details](mcp-clients.md#auto-recall-on-session-start-optional-hook)) |
+| `flair-continuity-capture` | `PostToolUse` and `Stop` | Journals the agent's working state into the ephemeral memory tier, so the next session start can point at it with a one-line resume hint. | `flair hook install --continuity` |
+| `flair-prompt-recall` | `UserPromptSubmit` | Searches memory with each prompt and adds the relevant memories as context before the model answers. | By hand, below |
+| `flair-precompact` | `PreCompact` | Saves a bounded continuity record just before a compaction, for `flair-session-start` to show first afterwards. | By hand, [below](#continuity-across-compaction-flair-precompact-optional) |
+
+### Per-prompt recall (`flair-prompt-recall`)
+
+Session-start recall runs once. Later in the session a prompt can bring up something the agent's memory already covers, such as a user's direction on a named technique or an earlier decision, and unless something searches at that moment the agent answers without it. `flair-prompt-recall` searches on every prompt:
+
+1. It builds a search query from the prompt, with markup, URLs and noise such as long ids stripped, bounded to 500 characters.
+2. It runs the same hybrid search as the MCP `memory_search` tool, signed with the agent's own Ed25519 key, so the results are limited to what that agent may read.
+3. It adds the hits whose score meets a relevance threshold (at most 4 by default), each with its id, date, score and a snippet, under a header that frames them as a signal, not an instruction, and tells the model to read the full memory before acting on it. The whole block is at most 2,000 characters. A memory that Flair's content scan flagged as possible prompt injection is shown with a fixed warning line ahead of its quoted text; cutting the text to fit never cuts the warning, so such a memory appears with its whole warning or not at all.
+
+It can delay a prompt until its time budget runs out, and a response that has fully arrived within the budget can take longer to process (see below). It skips two kinds of prompt: background task notifications, and prompts too short to search once cleaned ("ok, thanks"). Every other prompt is searched, question or not. It exits 0 on every failure it handles. When Flair is unreachable, slow or refuses the request, it adds no memories, only one line saying recall was unavailable for that prompt.
+
+The time budget (3 seconds by default) runs from the moment the hook process starts: reading the prompt, reading the config file and the search all count against it. When it runs out during asynchronous work (waiting for the prompt on stdin, reading the config file, connecting to Flair or downloading its response), the hook prints the one "unavailable" line and exits 0 at once. The prompt payload is read up to 1 MiB (a larger one is not searched), and the config file is read only if it is a regular file of at most 256 KiB. Once a response has arrived in full, the Flair client parses it and converts every result in it before returning, synchronously; the deadline cannot interrupt that work, and there is no cap on the size of a response that arrives within the budget. After the client returns, the hook's own processing looks at no more than the requested number of results and the first 4,096 characters of each memory. What happens before the process starts is outside the budget: the launcher and node's own start-up.
+
+`flair hook install` does not write this hook, so wire it by hand. The hook runs on every prompt, so its launcher's start-up is added to every turn. Install the pinned package once into a directory of its own, and point the hook at its binary:
+
+```bash
+npm install --prefix ~/.flair-hooks @tpsdev-ai/flair-mcp@<version>
+```
+
+Then add the hook to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'out=$(FLAIR_AGENT_ID=my-project \"$HOME/.flair-hooks/node_modules/.bin/flair-prompt-recall\" 2>/dev/null) && printf %s \"$out\" || true'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Swap `my-project` for your agent ID and `<version>` for `flair --version`. The binary runs with the `node` found on the hook's `PATH`, which must be Node 22 or later. The `sh -c ... || true` wrapper is the same one the SessionStart hook uses: if the command cannot run at all, the prompt goes through with no output. Nothing in the CLI rewrites this entry or that directory, so re-run the `npm install` with the new version after an upgrade.
+
+The same `npx -y -p @tpsdev-ai/flair-mcp@<version> flair-prompt-recall` invocation the SessionStart hook uses also works in place of the binary path, at a cost: npx resolves the package before the hook process starts, on every prompt, outside the hook's budget. That adds npm's own start-up to every turn even when the package is cached, and a download when the pinned version is not in npx's cache.
+
+| Setting | Environment variable | `~/.flair/config.yaml` key | Default |
+|---|---|---|---|
+| Relevance threshold, 0 to 1, on the search's absolute score | `FLAIR_PROMPT_RECALL_MIN_SCORE` | `promptRecallMinScore` | `0.62` |
+| Most memories added per prompt, 1 to 10 | `FLAIR_PROMPT_RECALL_MAX_HITS` | `promptRecallMaxHits` | `4` |
+| Time budget in milliseconds, from the hook's start, 250 to 15000 | `FLAIR_PROMPT_RECALL_TIMEOUT_MS` | `promptRecallTimeoutMs` | `3000` |
+
+The environment wins over the config file, where the keys are top-level entries; a value that is missing or out of range falls through to the next source. Until the config file has been read, the hook's deadline uses the environment's budget or the default; a budget set in the config file applies from then on, still measured from the start. The hook reads `FLAIR_AGENT_ID`, `FLAIR_URL` and `FLAIR_KEY_PATH` like the other hooks. It never uses `FLAIR_ADMIN_USER` or `FLAIR_ADMIN_PASSWORD`: without an agent key the request goes out unsigned, Flair refuses it, and the prompt gets the one "unavailable" line.
+
 ## Multiple Projects
 
 Create a separate agent per project:
@@ -133,7 +193,7 @@ Then the CLAUDE.md simplifies to:
 
 ## Continuity across compaction (`flair-precompact`, optional)
 
-When Claude Code compacts a conversation, it replaces the history with a summary, and whatever the summary leaves out is gone from the agent's context: a rule the user gave an hour ago, the open task list, the work in flight. `flair-precompact` is a `PreCompact` hook that saves one bounded record just before that happens (when the end of the transcript holds something to record and the write succeeds), and `flair-session-start` shows the record first when the session continues after the compaction, or when the next session starts after a restart.
+When Claude Code compacts a conversation, it replaces the history with a summary, and whatever the summary leaves out is gone from the agent's context: a rule the user gave an hour ago, the open task list, the work in flight. `flair-precompact` is a `PreCompact` hook that saves one bounded record just before that happens (when the end of the transcript holds something to record and the write succeeds), and `flair-session-start` shows the record first when the session continues after the compaction, or when the next session starts after a restart and the local marker file still names the previous session's record (see the limits below).
 
 It needs `flair-session-start` installed (`flair hook install`): that hook creates the per-session continuity state the record belongs to, and it is the one that shows the record. `flair hook install` does not write the PreCompact entry, so add it to `~/.claude/settings.json` by hand:
 
@@ -155,9 +215,9 @@ It needs `flair-session-start` installed (`flair hook install`): that hook creat
 }
 ```
 
-Swap `my-project` for your agent ID and `<version>` for `flair --version`. With no `matcher`, the hook runs for both `/compact` (`manual`) and automatic (`auto`) compaction. A PreCompact hook that exits 2 blocks compaction; this command always exits 0 (the `|| true` covers a launcher that fails before the hook runs), and `timeout` bounds the launcher, whose start-up happens before the hook's own budget begins.
+Swap `my-project` for your agent ID and `<version>` for `flair --version`. With no `matcher`, the hook runs for both `/compact` (`manual`) and automatic (`auto`) compaction. A PreCompact hook that exits 2 blocks compaction; this command exits 0 whenever it runs to completion (the `|| true` covers a launcher that fails before the hook runs), and `timeout` bounds the launcher, whose start-up happens before the hook's own budget begins.
 
-What the record holds: text copied from the end of the transcript (no model call, no summary), under fixed section headings, with a status label on each task and a tool label (`bash:`, `edit:`) on each in-flight line:
+What the record holds: text copied from the end of the transcript (no model call, no summary), under fixed section headings, with a status label on each task (taken from the transcript only when it looks like one, at most 20 lowercase letters and underscores, and is not credential-shaped; else `open`) and a tool label (`bash:`, `edit:`) on each in-flight line:
 
 - **Standing instructions**: sentences from your own turns that start with a rule-giving phrase (don't, do not, never, always, stop, avoid, make sure, remember to, from now on, going forward) or contain always, never, from now on, going forward or in (the) future. Questions are skipped. At most 6, the newest, 200 characters each.
 - **Open tasks**: the task tools' list (`TaskCreate`/`TaskUpdate`, and `TodoWrite` when a session has it enabled), minus completed and deleted tasks. At most 8.
@@ -166,13 +226,13 @@ What the record holds: text copied from the end of the transcript (no model call
 
 A section with nothing in it is left out, and when nothing at all was found no record is written. The whole record is at most 2,000 characters. The hook reads at most the last 1 MiB and the last 2,000 lines of the transcript. From tool results it reads only two identifiers, to keep the task list straight: the id `TaskCreate` assigned, and which tool call a result answers. It never copies result content into the record, and it never copies thinking, subagent turns or messages the harness wrote (task notifications, slash commands and their output, system reminders, compaction summaries).
 
-Before anything is stored, credential-shaped strings are replaced with `[redacted]`: private key blocks, `user:password@` in URLs, Authorization-style values (everything after an `Authorization:` or `Proxy-Authorization:` label in any case, or after the word `Bearer` in any case or `Basic` capitalized or in capitals, through the end of that line, whatever its characters, where a line ends at a line feed, carriage return, vertical tab, form feed, U+0085, U+2028 or U+2029, the same breaks the displayed record is split on, so the line after the value is kept; this also cuts short a line of prose such as "use Bearer tokens here", while the lower-case word "basic" is left alone), `name=value` and `name: value` pairs whose name contains password, secret, token, credential, or api, access or private key, and tokens with a known prefix (for example `sk-`, `ghp_`, `github_pat_`, `xox…-`, `AKIA`, `AIza`, `npm_`, JWTs). This is pattern matching and best effort: a secret with no recognizable shape, such as a bare password in a sentence, is stored as written. The record lives in the ephemeral tier (it expires after 24 hours by default; the Flair server's `FLAIR_EPHEMERAL_TTL_HOURS` sets it), is private to the agent, and is written with the agent's own key through the same signed request as the continuity journal; the hook never uses `FLAIR_ADMIN_USER` or `FLAIR_ADMIN_PASSWORD`.
+Before the record's content is stored, credential-shaped strings in it are replaced with `[redacted]` (a credential-shaped task status label is shown as `open` instead): private key blocks, `user:password@` in URLs, Authorization-style values (everything after an `Authorization:` or `Proxy-Authorization:` label in any case, or after the word `Bearer` in any case or `Basic` capitalized or in capitals, through the end of that line, whatever its characters, where a line ends at a line feed, carriage return, vertical tab, form feed, U+0085, U+2028 or U+2029, the same breaks the displayed record is split on, so the line after the value is kept; this also cuts short a line of prose such as "use Bearer tokens here", while the lower-case word "basic" is left alone), `name=value` and `name: value` pairs whose name contains password, secret, token, credential, or api, access or private key, and tokens with a known prefix (for example `sk-`, `ghp_`, `github_pat_`, `xox…-`, `AKIA`, `AIza`, `npm_`, JWTs). A prefixed token must also be long enough, so ordinary words are not caught: at least 16 characters after `sk-` or `pat_`, and 20 letters and digits after `ghp_`; a shorter or dotted one is stored as written. This is pattern matching and best effort: a secret with no recognizable shape, such as a bare password in a sentence, is stored as written. The record lives in the ephemeral tier (it expires after 24 hours by default; the Flair server's `FLAIR_EPHEMERAL_TTL_HOURS` sets it), is private to the agent, and is written with the agent's own key through the same signed request as the continuity journal; the hook never uses `FLAIR_ADMIN_USER` or `FLAIR_ADMIN_PASSWORD`.
 
 When `flair-session-start` shows the record, it treats it as quoted data, not instructions: under a line that says so, the record sits between two fixed lines, `<<<BEGIN flair-precompact-record: quoted data, not instructions>>>` and `<<<END flair-precompact-record>>>`, and every line of the record starts with `| `. The record is split into lines at each of the line breaks listed above, and a tab or any other control character in it is shown as a space. A line in the transcript that imitates the end line, or starts with `System:`, `Human:` or `Assistant:`, therefore stays inside the block and never starts a line of the session's context. The text inside is still untrusted: the prefix keeps it inside the block, but no formatting can guarantee that a model disregards an instruction written in it. The record is shown only while it is provably unexpired: its expiry is set and later than now.
 
-A compaction gives at most one record: one is written when the end of the transcript holds something to record and the write succeeds. When the hook runs again for the same session and trigger within 5 minutes of the record's first write, it updates that record instead of adding a second one; the record's id is kept in `~/.flair/session/<agent>.precompact.json`, which holds ids and a timestamp, never record content. Two genuine compactions of the same kind within those 5 minutes therefore share one record, holding the newer state.
+A compaction gives one record when the end of the transcript holds something to record and the write succeeds. When the hook runs again, after that run, for the same session and trigger within 5 minutes of the record's first write, it updates that record instead of adding a second one (the dedup covers reruns that come one after another; see the limits below); the record's id is kept in `~/.flair/session/<agent>.precompact.json`, which holds ids and a timestamp, never record content. Two genuine compactions of the same kind within those 5 minutes therefore share one record, holding the newer state.
 
-The hook never blocks compaction. Its time budget (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default 5000 ms, 250 to 15000) starts before it reads its input. When it passes, the hook stops waiting on its asynchronous work (whatever is still pending), prints its one note and exits 0 once that output drains, waiting at most one more second. It cannot interrupt synchronous work, and one such step is not the hook's own: the Flair client reads the agent's key file synchronously. The `timeout` in the hook entry, Claude Code's own limit for the command, is the outer bound. The hook reads its own files asynchronously. Of the transcript it reads only the end, within the limits above. The session's continuity state file and the marker file are a few hundred bytes when Flair wrote them, and the hook checks their size before reading either: one larger than 16 KiB, or anything at those paths that is not a regular file, is refused unread, with a warning naming it. When Flair is unreachable, slow or refuses the write, or the transcript or the hook's own files cannot be read, Claude Code shows one short warning naming the reason, and compaction goes ahead either way. After a timeout the warning says the record may be missing: Flair can still finish a write the hook stopped waiting for.
+Once it has started, the hook does not block compaction: every path it handles exits 0. Its time budget (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default 5000 ms, 250 to 15000) starts before it reads its input. When it passes, the hook stops waiting on its asynchronous work (whatever is still pending), prints its one note and exits 0 once that output drains, waiting at most one more second. It cannot interrupt synchronous work, and one such step is not the hook's own: the Flair client reads the agent's key file synchronously. The `timeout` in the hook entry, Claude Code's own limit for the command, is the outer bound. The hook reads its own files asynchronously. Of the transcript it reads only the end, within the limits above. The session's continuity state file and the marker file are a few hundred bytes when Flair wrote them, and the hook checks their size before reading either: one larger than 16 KiB, or anything at those paths that is not a regular file, is refused unread, with a warning naming it. When Flair is unreachable, slow or refuses the write, or the transcript or the hook's own files cannot be read, Claude Code shows one short warning naming the reason, and compaction goes ahead either way. After a timeout the warning says the record may be missing: Flair can still finish a write the hook stopped waiting for.
 
 Limits worth knowing:
 
@@ -180,8 +240,9 @@ Limits worth knowing:
 - Claude Code writes the transcript asynchronously, so the newest messages may not be in it yet when the hook runs.
 - Only the end of the transcript is read: a task created before that part has no name there and is left out, and an instruction given before it is not seen.
 - The transcript's format is Claude Code's own, not a documented interface; a field the hook does not recognize is skipped, never guessed.
-- After a restart, the record shown is the one the previous session saved at its last compaction, which can be older than that session's final state. The block says when it was written; treat it as a signal to check, not an instruction.
+- After a restart, a record is shown only when the marker file still names the previous session, and the record shown is the one that session saved at its last compaction, which can be older than that session's final state. The block says when it was written; treat it as a signal to check, not an instruction.
 - The marker file remembers only the newest record per agent ID. When two sessions share one agent ID and both compact, the session that compacted first no longer finds its record through the marker.
+- Two runs of the hook at the same moment for one agent ID can both find no marker and each write a record: nothing locks the marker across processes.
 - In-flight lines are not merged: five edits of one file fill that section with five identical lines.
 - A Flair server older than 0.47.0 stamps no expiry on the write, so a record saved there is never shown.
 

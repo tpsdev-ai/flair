@@ -88,6 +88,7 @@
         "flair-precompact": "dist/precompact-hook.js",
         "flair-session-start": "dist/session-start-hook.js",
         "flair-continuity-capture": "dist/continuity-capture-hook.js",
+        "flair-prompt-recall": "dist/prompt-recall-hook.js",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.27.1",

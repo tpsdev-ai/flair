@@ -145,9 +145,10 @@ interface SessionStartInput {
 // Pre-compaction record (flair#2069): when the PreCompact hook
 // (./precompact-hook.ts) saved a record, this hook shows it FIRST: after a
 // compaction, the record this harness session saved; after a restart, the
-// one the previous session saved. Which record is decided from the local
-// marker file alone (./precompact.ts resolvePreCompactLookup: a bounded,
-// asynchronous read), then fetched with one `GET /Memory/<id>`; both run
+// one the previous session saved, when the marker still names that session.
+// Which record is decided from the local marker file alone
+// (./precompact.ts resolvePreCompactLookup: a bounded, asynchronous read),
+// then fetched with one `GET /Memory/<id>`; both run
 // concurrently with bootstrap under the same continuity timeout as the resume
 // hint. No marker ⇒ no request; any failure ⇒ nothing shown, boot proceeds.
 // The record is shown as quoted data between fixed BEGIN/END lines with every

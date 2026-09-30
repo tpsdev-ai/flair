@@ -24,12 +24,15 @@
  *      compaction reuses it), writes the marker, then writes the row with a
  *      signed `PUT /Memory/<id>` as the agent's own Ed25519 identity.
  *
- * NEVER BLOCKS COMPACTION
- * -----------------------
+ * EXIT 0 ON EVERY PATH IT HANDLES
+ * -------------------------------
  * Claude Code blocks compaction when a PreCompact hook exits 2 or prints a
- * `decision: "block"` object. This binary does neither on any path: it exits 0
- * and prints either nothing or ONE `{"systemMessage": …}` object (a warning
- * Claude Code shows the user). The time budget (FLAIR_PRECOMPACT_TIMEOUT_MS,
+ * `decision: "block"` object. Once this binary has started, it does neither
+ * on any path it handles: it exits 0 and prints either nothing or ONE
+ * `{"systemMessage": …}` object (a warning Claude Code shows the user). A
+ * failure before that (the launcher, the runtime's start-up, a static import
+ * that fails to load) is outside the binary; the documented command's
+ * `|| true` covers it. The time budget (FLAIR_PRECOMPACT_TIMEOUT_MS,
  * default 5 s) is a process-level deadline armed in main(), after the module
  * has loaded and the entry-point check (isDirectRun) has run, and before
  * stdin is read. When it passes, the timer starts
