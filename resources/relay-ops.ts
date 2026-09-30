@@ -11,6 +11,7 @@
  */
 
 import type { AgentAuthVerdict } from "./agent-auth.js";
+import { isForbiddenOwnerMutation, ownerMutationRefusal, OWNER_FIELDS } from "./record-owner-guard.js";
 import {
   capDecision,
   computeContentHash,
@@ -115,7 +116,11 @@ function acceptedView(row: MessageEnvelope): MessageEnvelope {
  * per-sender sub-cap, and delivers. Returns the accepted envelope — the SAME
  * shape regardless of whether `to` exists (no existence oracle): the only
  * principal ever looked up is the sender (needed for its public key), which is
- * the authenticated caller and therefore always present.
+ * the authenticated caller and therefore always present. A send that reuses a
+ * stored message id is answered with that message's accepted view only when
+ * it has the same sender; any other sender gets the owner-guard 403
+ * (record-owner-guard.ts's ownerMutationRefusal), which carries no field of
+ * the stored message.
  */
 export async function relaySend(
   deps: RelayDeps,
@@ -172,8 +177,28 @@ export async function relaySend(
   // Retry-dedup: an identical resend — same primary id, or the same content
   // hash from this sender to this recipient — returns the already-accepted
   // envelope. No second row, and (critically) no second charge against the cap.
-  const existingById = await Promise.resolve(deps.messages.get(String(content.id))).catch(() => null);
-  if (existingById) return acceptedView(existingById);
+  //
+  // The same-id answer is for the ORIGINAL SENDER only. A stored message is
+  // owned by its `from` (OWNER_FIELDS.Message), and this send's `from` is the
+  // verified signer. When the id is held by another sender, the send is
+  // refused with the owner-guard refusal — the same response the auth
+  // middleware gives a write to `/Message/<id>` for a message the caller does
+  // not own — and nothing from the stored row is returned. The rule is about
+  // the message, not the caller's role: an admin sending as X gets the same
+  // refusal for an id held by Y. The lookup fails CLOSED: if the stored row
+  // cannot be read, the send is refused the same way, never written over it.
+  let existingById: MessageEnvelope | null;
+  try {
+    existingById = (await Promise.resolve(deps.messages.get(String(content.id)))) ?? null;
+  } catch {
+    return ownerMutationRefusal("Message");
+  }
+  if (existingById) {
+    if (isForbiddenOwnerMutation(existingById as Record<string, unknown>, OWNER_FIELDS.Message, String(content.from))) {
+      return ownerMutationRefusal("Message");
+    }
+    return acceptedView(existingById);
+  }
 
   // The recipient's inbox — queried by the @indexed `to`, never the whole table
   // (Sherlock P0). Serves both dedup (same content from this sender) and the cap.
