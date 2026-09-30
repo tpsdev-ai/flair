@@ -94,7 +94,8 @@
     "lodash": "^4.18.0",
     "ip-address": "^10.5.1",
     "joi": "^17.13.7",
-    "moment": "^2.31.0"
+    "moment": "^2.31.0",
+    "@grpc/grpc-js": "^1.14.5"
   },
   "devDependencies": {
     "@playwright/test": "1.59.1",
