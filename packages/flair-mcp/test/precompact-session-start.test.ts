@@ -17,7 +17,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,12 +28,13 @@ import {
   PRECOMPACT_DATA_END,
   PRECOMPACT_DATA_PREFIX,
   PRECOMPACT_RECORD_MAX_CHARS,
+  precompactMarkerPath,
 } from "../src/precompact.ts";
 import { runPreCompact } from "../src/precompact-hook.ts";
 
 const AGENT = "agent-a";
 const HARNESS = "claude-sess-1";
-const HEADER_START = "Flair continuity record, saved by the PreCompact hook before a context compaction (trigger: auto";
+const HEADER_START = "Flair continuity record: the PreCompact hook's row (trigger: auto";
 const INSTRUCTION = "Never force-push a shared branch.";
 
 const ORIGINAL_ENV = {
@@ -225,6 +226,15 @@ describe("session start shows the pre-compaction record first (flair#2069)", () 
   test("nothing is shown for another session's record, a failed read, or no record at all; boot proceeds", async () => {
     seedSession(sessionDir, AGENT, HARNESS);
     const store = new Store();
+
+    // No record at all: no marker exists yet, so nothing is fetched and boot is normal.
+    expect(existsSync(precompactMarkerPath(sessionDir, AGENT))).toBe(false);
+    const none = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => store.client()));
+    expect(none).toBe("## Bootstrap context");
+    await runHook(JSON.stringify({ cwd: "/repo", source: "startup", session_id: "claude-restart" }), () => store.client());
+    expect(store.paths.filter((p) => p.startsWith("GET /Memory/"))).toEqual([]); // no by-id read, after a compaction or a restart
+
+    seedSession(sessionDir, AGENT, HARNESS);
     await compact(store);
 
     // A compaction of a DIFFERENT harness session.
@@ -235,6 +245,19 @@ describe("session start shows the pre-compaction record first (flair#2069)", () 
     store.failGet = true;
     const failed = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => store.client()));
     expect(failed).toBe("## Bootstrap context");
+  });
+
+  test("a row changed after the hook wrote it is shown only after redaction: a token in it never reaches the context", async () => {
+    seedSession(sessionDir, AGENT, HARNESS);
+    const store = new Store();
+    const recordId = await compact(store);
+    const token = "ghp_" + "Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb7cDe"; // assembled at run time; not a real credential
+    store.rows.set(recordId, { ...store.rows.get(recordId)!, content: `Always deploy with ${token} today.` });
+
+    const ctx = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => store.client()));
+    expect(ctx.startsWith(HEADER_START)).toBe(true); // positive control: the changed row is shown
+    expect(ctx).not.toContain(token);
+    expect(ctx.split("\n")).toContain(`${PRECOMPACT_DATA_PREFIX}Always deploy with [redacted] today.`);
   });
 
   test("a record whose expiry is missing or does not parse is not shown: only a provably live row is; boot proceeds", async () => {

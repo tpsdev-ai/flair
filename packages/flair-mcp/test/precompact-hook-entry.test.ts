@@ -52,7 +52,7 @@ const PRECOMPACT_ENTRY = join(import.meta.dir, "..", "src", "precompact-hook.ts"
 const SESSION_START_ENTRY = join(import.meta.dir, "..", "src", "session-start-hook.ts");
 const AGENT = "agent-a";
 const HARNESS = "claude-sess-1";
-const HEADER_START = "Flair continuity record, saved by the PreCompact hook before a context compaction (trigger: auto";
+const HEADER_START = "Flair continuity record: the PreCompact hook's row (trigger: auto";
 
 /** Far above any healthy run, so only a hung child hits it. */
 const CHILD_DEADLINE_MS = 15_000;

@@ -2,20 +2,22 @@
   The new `flair-precompact` binary in `@tpsdev-ai/flair-mcp` is a `PreCompact` hook. It reads the end
   of the transcript (at most 1 MiB and 2,000 lines) and copies out, with no model call, the standing
   instructions found in your own turns by a fixed word heuristic, the open tasks, the last five file
-  edits and shell-command descriptions (never the commands), and all the text of the last assistant
-  message. Credential-shaped strings in the record's free text, including a whole Authorization-style
-  value after `Authorization:`, `Bearer` or `Basic`, are replaced with `[redacted]` before the record
-  is stored (a credential-shaped task status is shown as `open` instead), and the record is at most
-  2,000 characters. When the transcript's end holds something to record and the write succeeds, it is
-  stored with the agent's own key as one private, ephemeral memory in the session's continuity
-  journal; a later rerun for the same compaction within 5 minutes updates that record instead of
-  adding a second (two runs at the same moment can each write one). `flair-session-start` now puts the
-  record at the top of its context after a compaction, and after a restart when the local marker file
-  still names the previous session's record, ahead of the bootstrap context, as quoted data: between
-  fixed begin and end lines, with every line prefixed, so no line of transcript text can forge the end
-  line or start with a role marker such as `System:`. The text itself stays untrusted: formatting
-  cannot guarantee that a model disregards an instruction written inside the quote. Once it has
-  started, every path the hook handles ends in exit 0, so it does not block compaction (the documented
+  edits and shell-command descriptions (never the commands), and the last assistant message's text
+  blocks, joined and cut to 300 characters. Strings in the record that match its credential patterns
+  (listed, with their limits, in `docs/claude-code.md`), including a whole Authorization-style value
+  after `Authorization:`, `Bearer` or `Basic`, are replaced with `[redacted]` before the record is
+  stored and again before it is shown (a task status that redaction would change is shown as `open`
+  instead); a secret that matches no pattern is kept as written, and the record is at most 2,000
+  characters. When the transcript's end holds something to record and the write succeeds, it is stored
+  with the agent's own key as one private, ephemeral memory in the session's continuity journal; a
+  later rerun for the same compaction within 5 minutes updates that record instead of adding a second
+  (two runs at the same moment can each write one). `flair-session-start` now puts the record at the
+  top of its context after a compaction, and after a restart when the local marker file still names
+  the previous session's record, ahead of the bootstrap context, as quoted data: between fixed begin
+  and end lines, with every line prefixed, so no line of the record's text can forge the end line or
+  start with a role marker such as `System:`. The text itself stays untrusted: formatting cannot
+  guarantee that a model disregards an instruction written inside the quote. Once it has started,
+  every path the hook handles ends in exit 0, so it does not block compaction (the documented
   command's `|| true` covers a launcher that fails first); when Flair is unreachable or slow, or one
   of its own files is refused, it shows one short warning. Its time budget
   (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default 5000 ms) starts before it reads its input; when it passes,
