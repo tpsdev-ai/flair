@@ -1,4 +1,4 @@
-- **`POST /RecordUsage` records usage only for memories the caller can read, and a `MemoryUsage` row is shown only while its memory is readable.**
+- **`POST /RecordUsage` records usage only for memories the caller can read, and a non-admin `MemoryUsage` read shows a row only while its memory is readable.**
   The rule is the one `Memory.get` applies to a by-id read (`resolveReadScope`): the caller's own
   memories at any visibility, and other agents' non-private memories. An id outside that scope is
   handled exactly like an id that does not exist: the response is the same `{ "recorded": true }`,

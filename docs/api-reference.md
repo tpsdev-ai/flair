@@ -135,7 +135,7 @@ the same identity plane.
 | POST | `/SemanticSearch` | Ed25519 | Hybrid semantic + lexical. Same read-scope as Memory. Default scoring is `raw`. |
 | POST | `/BootstrapMemories` | Ed25519 | Cold-start context (soul + predicted memories + optional org events). |
 | POST | `/RecordUsage` | Ed25519 | Cross-agent usage signal (`Memory.usageCount`). No ownership requirement; counts only memories the caller can read (same read-scope as Memory), and an unreadable id is handled like a missing one. No existence oracle in the response. Prefer this over writing `/MemoryUsage` directly. |
-| GET | `/MemoryUsage` | Ed25519 | Own ledger rows only, about memories the caller can currently read; any other row reads as not found. PUT/DELETE are admin/internal — agents must not delete their row to re-count. |
+| GET | `/MemoryUsage` | Ed25519 | Non-admin reads: own ledger rows only, about memories the caller can currently read; any other row reads as not found. Admin and internal reads are unchanged. PUT/DELETE are admin/internal — agents must not delete their row to re-count. |
 | GET / write | `/MemoryGrant` | Ed25519 | Read: owner or grantee. Write/delete: owner only (you share your own memories). |
 | GET / write | `/Asset` | Ed25519 | Owner-only blobs linked by `memoryId`. No MCP and no federation in this slice. |
 | GET / write | `/MemoryCandidate` | Ed25519 | Owner-only REM drafts. Never auto-promoted except the narrow ADK path. |
