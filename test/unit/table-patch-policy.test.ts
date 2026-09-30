@@ -1,6 +1,7 @@
 /**
  * table-patch-policy.test.ts — the guard that keeps PATCH from creating rows
- * for callers who are not administrators (resources/table-patch-policy.ts).
+ * for callers who are neither administrators nor trusted internal calls
+ * (resources/table-patch-policy.ts).
  *
  * The integration test (test/integration/patch-updates-existing-rows.test.ts)
  * checks the rule on every table of a real Harper. These cases pin what a real

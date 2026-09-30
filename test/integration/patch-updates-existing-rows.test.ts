@@ -1,10 +1,11 @@
-// PATCH updates existing rows; for a caller that is not an administrator it
-// never creates one.
+// PATCH updates existing rows; for a caller that is neither an administrator
+// nor a trusted internal call it never creates one.
 //
 // For every table in the flair database, a PATCH whose target row does not
-// exist creates nothing unless the caller is an administrator: a verified
-// non-admin agent and an anonymous caller are refused (404 from the table's
-// guard, or the resource's own refusal) and no row appears. A
+// exist creates nothing unless the caller is an administrator or a trusted
+// internal call: a verified non-admin agent and an anonymous caller are refused
+// (404 from the table's guard, or an earlier refusal from Harper's permission
+// check or routing, or from the resource) and no row appears. A
 // PATCH to the caller's own existing row still updates it, and an
 // administrator's PATCH behaves as before.
 //
