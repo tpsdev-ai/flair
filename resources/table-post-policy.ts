@@ -26,9 +26,10 @@
  * test/integration/collection-post-attribution.test.ts reads every table in the
  * database at runtime, sends a collection POST built from the table's declared
  * attributes (plus a value a table's own validation requires) as a verified
- * non-admin agent, and checks each row that POST wrote (found under the
- * table's primary key): the table's registered owner field, if it has one,
- * must be the caller. The body carries an `originatorInstanceId` and a
+ * non-admin agent, and checks each candidate stored row of that POST (a new or
+ * changed row, or a row under the body id or a key the response names, found
+ * under the table's primary key): the table's registered owner field, if it
+ * has one, must be the caller. The body carries an `originatorInstanceId` and a
  * `provenance` only where the table declares them, and only those declared
  * fields are checked: `originatorInstanceId` must be this instance's id on a
  * new row and the previous value on an existing one, and `provenance` must

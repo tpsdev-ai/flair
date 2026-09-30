@@ -16,15 +16,16 @@
 //       owner-shaped field names another agent, then the caller. Only where the
 //       table declares them does the body carry an `originatorInstanceId` and a
 //       `provenance` whose verified timestamp is a fixed sentinel. The table is
-//       read under its primary key before and after each POST. For every row
-//       the POST wrote (new or changed, or under the body id or a key the
-//       response names): the table's registered owner field (OWNER_FIELDS), if
-//       it has one, must be the caller; a declared `originatorInstanceId` must
-//       be this instance's id on a new row and the previous value on an
-//       existing one; and a declared `provenance` must not contain the sentinel
-//       timestamp. A successful POST must have written a row that is found. A
-//       table whose own validation refuses the generated body is checked only
-//       for what that refusal wrote.
+//       read under its primary key before and after each POST. For every
+//       candidate stored row (a new or changed row, or a row under the body id
+//       or a key the response names): the table's registered owner field
+//       (OWNER_FIELDS), if it has one, must be the caller; a declared
+//       `originatorInstanceId` must be this instance's id on a new row and the
+//       previous value on an existing one; and a declared `provenance` must not
+//       contain the sentinel timestamp. A successful POST must have at least
+//       one candidate stored row. A table whose own validation refuses the
+//       generated body is checked only on the candidate stored rows found after
+//       that refusal.
 //   (b) Relationship: a verified non-admin agent's valid collection POST is
 //       created with the caller as owner, this instance's
 //       `originatorInstanceId`, and `provenance` whose verified agent is the
@@ -92,7 +93,7 @@ const BODY_ORIGIN = "body-supplied-origin";
 const BODY_TS = "2001-01-01T00:00:00.000Z";
 const OWNER_SHAPED = ["agentId", "authorId", "principalId", "ownerId", "from"];
 // Field values a table's own validation requires, so that its POST succeeds and
-// the row it writes is inspected.
+// its associated stored row is inspected.
 const VALID_FIELDS: Record<string, Record<string, unknown>> = { Presence: { activity: "idle" } };
 
 const HARPERS = [
@@ -190,11 +191,11 @@ for (const config of HARPERS) {
     }
 
     /**
-     * What is wrong with a row a POST wrote (`prior` is the row before it, if
-     * any): a registered owner field (OWNER_FIELDS) that is not the caller; a
-     * declared `originatorInstanceId` that is not this instance's id on a new
-     * row or the previous value on an existing one; or a declared `provenance`
-     * that contains the sentinel timestamp.
+     * What is wrong with a candidate stored row of a POST (`prior` is the row
+     * before the POST, if any): a registered owner field (OWNER_FIELDS) that is
+     * not the caller; a declared `originatorInstanceId` that is not this
+     * instance's id on a new row or the previous value on an existing one; or a
+     * declared `provenance` that contains the sentinel timestamp.
      */
     function attributionProblems(table: string, row: any, prior: any, declared: Set<string>): string[] {
       const problems: string[] = [];
@@ -211,7 +212,7 @@ for (const config of HARPERS) {
     function cases(phase: string) {
       const p = `tpost-${tag}-${phase}`;
 
-      test("(a) every table, with a body from its declared attributes: each row a non-admin collection POST writes has the caller in its registered owner field, the server's originatorInstanceId where declared, and no sentinel provenance timestamp where declared", async () => {
+      test("(a) every table, with a body from its declared attributes: each candidate stored row of a non-admin collection POST has the caller in its registered owner field, the server's originatorInstanceId where declared, and no sentinel provenance timestamp where declared", async () => {
         const described = await adminOp({ operation: "describe_database", database: "flair" });
         const tables = Object.keys(described).sort();
         for (const t of ["Relationship", "Memory", "Soul", "Agent"]) expect(tables, `${t} is a table`).toContain(t);
@@ -226,16 +227,16 @@ for (const config of HARPERS) {
             const before = await snapshot(t, key);
             const r = await send("POST", `/${t}/`, bodyFor(t, attributes, id, owner), B);
             const after = await snapshot(t, key);
-            // The rows this POST wrote, under the table's own primary key: every
-            // new or changed row, and any row under the body id or a key the
-            // response names.
+            // The candidate stored rows of this POST, under the table's own
+            // primary key: every new or changed row, and any row under the body
+            // id or a key the response names, changed or not.
             const written = new Set<string>();
             for (const [k, row] of after) {
               if (!before.has(k) || JSON.stringify(before.get(k)) !== JSON.stringify(row)) written.add(k);
             }
             for (const k of [id, ...responseKeys(r.raw, key)]) if (after.has(k)) written.add(k);
             if (r.status >= 200 && r.status < 300) {
-              if (written.size === 0) found.push(`${t} (${label}): POST ${r.status} succeeded, but no row it wrote was found under ${key}`);
+              if (written.size === 0) found.push(`${t} (${label}): POST ${r.status} succeeded, but no candidate stored row was found under ${key}`);
               else inspected.add(t);
             }
             for (const k of written) {
@@ -245,8 +246,8 @@ for (const config of HARPERS) {
           }
         }
         expect(found, `tables: ${tables.join(", ")}`).toEqual([]);
-        // The check reads back successful writes: Presence writes under agentId,
-        // Relationship under the body id.
+        // The check finds a candidate stored row for these successful POSTs:
+        // Presence keys its row by agentId, Relationship by the body id.
         for (const t of ["Presence", "Relationship"]) expect([...inspected], `${t}'s successful POST was inspected`).toContain(t);
       }, 120_000);
 
