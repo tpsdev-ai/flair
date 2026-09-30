@@ -480,8 +480,8 @@ describe("updateLocalConfigCimdAllowedHosts — the read-back decides, never the
   });
 });
 
-describe("claudeAiExcludedNote — the note matches the list written", () => {
-  test("no list written, or one that includes claude.ai: no note", () => {
+describe("claudeAiExcludedNote — the note matches the list this run ensured and read back (written unless the file already held that exact list)", () => {
+  test("no list ensured and read back, or one that includes claude.ai: no note", () => {
     expect(claudeAiExcludedNote(undefined)).toBeNull();
     expect(claudeAiExcludedNote(["flair.example.com", "claude.ai"])).toBeNull();
   });

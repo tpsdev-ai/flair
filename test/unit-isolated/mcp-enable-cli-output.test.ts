@@ -183,7 +183,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.foreign).toEqual([]);
     expect(r.exit).toBeNull();
     expect(r.configAfter).toBe(r.configBefore);
-    expect(r.out).toContain("it already carried this list; the file was not rewritten");
+    expect(r.out).toContain("the file already held this list, so the allowed-hosts write was skipped");
     expect(r.out).toContain("The OAuth metadata check passed.");
     expect(r.out).toContain(
       'claude.ai is not in the mcp.clientIdMetadataDocuments.allowedHosts list this run ensured and read back (["flair.example.com"])',

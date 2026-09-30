@@ -268,11 +268,13 @@ export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMe
 // claude.ai + claude.com default stops applying; and an empty value becomes
 // `[]`, for which dist/lib/mcp/cimd.js skips its allowedHosts gate.
 //
-// So `enable` writes a literal list into a config.yaml on THIS machine (the
-// file it already edits for mcp.enabled), and only when the target instance is
-// shown to run from that file (`checkTargetRunsFromConfig`). It refuses the flag
-// everywhere else: a Fabric origin, whose config.yaml is deployed with the
-// component, and, outside --dry-run, any target it cannot match to that file.
+// So `enable` ensures a literal list in a config.yaml on THIS machine (the
+// file it already edits for mcp.enabled), writing the list unless that file
+// already holds that exact list and then reading it back, and only when the
+// target instance is shown to run from that file (`checkTargetRunsFromConfig`).
+// It refuses the flag everywhere else: a Fabric origin, whose config.yaml is
+// deployed with the component, and, outside --dry-run, any target it cannot
+// match to that file.
 // --dry-run neither calls nor checks the target and never writes the list.
 
 /** The config key the flag writes, as operator messages name it. */
@@ -895,7 +897,7 @@ export function updateLocalConfigCimdAllowedHosts(
   let how: string;
   let wrote = false;
   if (sameHostList(loaded.mcp.clientIdMetadataDocuments?.allowedHosts, list)) {
-    how = "it already carried this list; the file was not rewritten";
+    how = "the file already held this list, so the allowed-hosts write was skipped";
   } else {
     const intended = structuredClone(loaded.doc);
     const mcp = intended["@harperfast/oauth"].mcp;
@@ -1703,10 +1705,11 @@ export interface EnableMcpParams {
   signingKeyFilePath?: string;
   secretsMechanism?: SecretsMechanism;
   secretsStagingPath?: string;
-  /** flair#2113: lowercase bare hostnames written as
-   *  `mcp.clientIdMetadataDocuments.allowedHosts` into the local config.yaml
+  /** flair#2113: lowercase bare hostnames ensured as
+   *  `mcp.clientIdMetadataDocuments.allowedHosts` in the local config.yaml
    *  (`localConfigPath`, else `./config.yaml`, else `~/.flair/config.yaml`)
-   *  before the restart, and only when `checkTargetRunsFromConfig` shows the
+   *  before the restart (written unless that file already holds that exact
+   *  list, then read back), and only when `checkTargetRunsFromConfig` shows the
    *  target runs from that file. Refused, before anything changes, for a Fabric
    *  origin, for invalid entries, when that file is missing, cannot be parsed,
    *  or has no `@harperfast/oauth` → `mcp` block, and (without `dryRun`) when
