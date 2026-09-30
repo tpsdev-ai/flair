@@ -1,27 +1,34 @@
 /**
- * PATCH updates an existing row. Creating a row goes through POST or PUT,
- * where each resource attributes the owner from the authenticated caller and
- * applies its own defaults.
+ * PATCH updates an existing row. For a caller that is not an administrator or a
+ * trusted internal call, a PATCH never creates one; where a resource permits
+ * creation, rows are created with POST or PUT under the resource's own create
+ * rules.
  *
  * Harper's PATCH writes to the row its URL names and, when that row does not
- * exist, would create it from the request body alone. So for every table in the
- * flair database, a PATCH whose target row does not exist is refused unless the
- * caller is an administrator or a trusted internal call: the caller gets 404
- * with a message naming POST and PUT. A PATCH to an existing row is unchanged —
- * the resources' own rules (ownership, the immutable owner field, validation)
- * still decide it.
+ * exist, would create it from the request body alone. So each guarded table's
+ * own `patch()` refuses a PATCH whose target row does not exist unless the
+ * caller is an administrator or a trusted internal call: the caller gets 404.
+ * A resource or authorization check that refuses the request before the
+ * table's `patch()` runs answers with its own status instead. A PATCH to an
+ * existing row is unchanged — the resources' own rules (ownership, the
+ * immutable owner field, validation) still decide it.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
- * `guardTablePatches` gives every table class in the flair database its own
- * instance `patch()`, read from the database's own table registry at load
+ * `guardTablePatches` gives every table class in the flair database's table
+ * registry its own instance `patch()`, read from that registry at load
  * (resources/table-patches.ts), not from a list someone maintains:
- *   - a table added to the schema is in that registry, so it is guarded without
- *     anyone naming it;
+ *   - a table added to the schema is in that registry, so its class gets the
+ *     guard without anyone naming it;
  *   - Harper has already resolved the target id and loaded the row when the
  *     instance `patch()` runs, so the guard decides on the row Harper will
  *     write (`doesExist()`), never on a re-parse of the URL;
- *   - every flair resource's `patch()` override ends in `super.patch()`, which
- *     is this guarded method, and a resource without an override inherits it.
+ *   - a resource class without a `patch()` override inherits the guarded
+ *     method, and an override reaches it only through `super.patch()`. Every
+ *     flair override today either ends in `super.patch()` for the callers it
+ *     admits or refuses the request itself: MemoryHostSource refuses every REST
+ *     write, and MemoryUsage refuses a non-admin PATCH. A future override must
+ *     do one or the other; an override that writes the row another way would
+ *     not be covered by this guard.
  * test/integration/patch-updates-existing-rows.test.ts enumerates every table in
  * the database at runtime and fails if a non-admin PATCH creates a row in any.
  *
@@ -61,7 +68,7 @@ export function patchCreateRefusal(table: string, caller: PatchCaller): (Error &
   if (caller.kind === "internal") return null;
   if (caller.kind === "agent" && caller.isAdmin === true) return null;
   return Object.assign(
-    new Error(`not found: PATCH updates an existing ${table} row; create one with POST or PUT`),
+    new Error(`not found: PATCH updates an existing ${table} row and does not create one; where ${table} permits creation, use POST or PUT`),
     { statusCode: 404 },
   );
 }

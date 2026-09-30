@@ -3,7 +3,7 @@
  * for callers who are not administrators (resources/table-patch-policy.ts).
  *
  * The integration test (test/integration/patch-updates-existing-rows.test.ts)
- * proves the rule on every table of a real Harper. These cases pin what a real
+ * checks the rule on every table of a real Harper. These cases pin what a real
  * Harper does not exercise on demand: an instance that cannot say whether its
  * row exists, a caller that cannot be resolved, inheritance through a resource
  * override that ends in super.patch(), and idempotent installation.
@@ -47,7 +47,7 @@ describe("guardTablePatches", () => {
     guardTablePatches({ Memory: Table }, { resolveAuth: byContext });
     const err = await refusalOf(new Table(false, AGENT).patch({ content: "x" }, { id: "m1" }));
     expect(err?.statusCode).toBe(404);
-    expect(err?.message).toBe("not found: PATCH updates an existing Memory row; create one with POST or PUT");
+    expect(err?.message).toBe("not found: PATCH updates an existing Memory row and does not create one; where Memory permits creation, use POST or PUT");
     expect(calls).toEqual([]);
   });
 

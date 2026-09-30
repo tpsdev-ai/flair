@@ -191,9 +191,11 @@ export class Agent extends (databases as any).flair.Agent {
       delete content.publicKey;
       // flair#1965 r2: an EXISTING row keeps its stored originatorInstanceId
       // (a body value is dropped); a PATCH whose URL target has no stored row is
-      // a CREATE and must stamp the local id (Harper's patch path does not
-      // require an existing row). The row is resolved by the URL-BOUND target
-      // id, never a body `id`. See resources/originator-instance.ts.
+      // a CREATE when it reaches the table and must stamp the local id (Harper's
+      // patch path does not require an existing row; only an administrator's or
+      // a trusted internal PATCH gets that far — resources/table-patch-policy.ts
+      // refuses the rest). The row is resolved by the URL-BOUND target id, never
+      // a body `id`. See resources/originator-instance.ts.
       const resolvedOriginRow = await resolveStoredRow(this, "Agent", content, () => super.get());
       if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
       await applyOriginatorInstanceId(content, resolvedOriginRow.row);

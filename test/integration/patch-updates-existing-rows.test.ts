@@ -1,8 +1,10 @@
-// PATCH updates existing rows; creating a row goes through POST or PUT.
+// PATCH updates existing rows; for a caller that is not an administrator it
+// never creates one.
 //
 // For every table in the flair database, a PATCH whose target row does not
 // exist creates nothing unless the caller is an administrator: a verified
-// non-admin agent and an anonymous caller are refused and no row appears. A
+// non-admin agent and an anonymous caller are refused (404 from the table's
+// guard, or the resource's own refusal) and no row appears. A
 // PATCH to the caller's own existing row still updates it, and an
 // administrator's PATCH behaves as before.
 //
@@ -12,7 +14,8 @@
 // then resolve to the shared admin Harper user) and after.
 //   (a) ENUMERATION — every table in the flair database, read from the database
 //       itself at runtime: a non-admin PATCH to a missing id is refused and no
-//       row is created. A table added later is covered without being named.
+//       row is created. A table added later is enumerated, and so checked,
+//       without being named.
 //   (b) Memory: a PATCH to a missing id is refused whether the body names
 //       another agent, the caller itself, a null owner or no owner; anonymous
 //       too.
@@ -135,7 +138,7 @@ for (const config of HARPERS) {
     function cases(phase: string) {
       const p = `tpatch-${tag}-${phase}`;
 
-      test("(a) every table in the database: a non-admin PATCH to a missing id is refused and creates no row", async () => {
+      test("(a) every table in the database: a non-admin PATCH to a missing id is not reported as a success and creates no row", async () => {
         const described = await adminOp({ operation: "describe_database", database: "flair" });
         const tables = Object.keys(described).sort();
         // Not vacuous: the enumeration reaches the tables this rule exists for.
