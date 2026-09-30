@@ -4,7 +4,7 @@ import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
-import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
+import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
 import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
 
@@ -585,9 +585,7 @@ server.http(async (request: any, nextLayer: any) => {
       try {
         const record = await (databases as any).flair[guarded.table]?.get(guarded.id);
         if (isForbiddenOwnerMutation(record, guarded.ownerField, agentId)) {
-          return new Response(JSON.stringify({
-            error: `forbidden: cannot modify ${guarded.table} owned by another principal`,
-          }), { status: 403, headers: { "Content-Type": "application/json" } });
+          return ownerMutationRefusal(guarded.table);
         }
       } catch { /* unreadable row → fall through to the resource's own rules */ }
     }

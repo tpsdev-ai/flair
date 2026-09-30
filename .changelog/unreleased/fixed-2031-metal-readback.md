@@ -12,7 +12,5 @@
   including an explicit GPU request, and asks for a recheck after warmup;
   a finished explicit request without readback remains blocking.
 
-  > **Heads-up:** an Apple Silicon host that previously showed "Metal did not
-  > engage; running CPU" under launchd while ggml was on Metal now follows
-  > the engine. If the engine cannot be read, status says engagement is
-  > unconfirmed instead of claiming CPU.
+  > **Heads-up:** for GPU-offload requests, Apple Silicon status uses engine
+  > readback; absent readback is reported as unconfirmed.

@@ -1,11 +1,6 @@
 - **A leftover daemon identity sidecar no longer makes a stop or restart refuse.**
-  After `flair stop` ends a directly started (non-launchd) Harper,
-  `<dataDir>/flair-daemon.json` still named the stopped pid; a later instance
-  under a DIFFERENT supervisor (for example a systemd user unit whose Harper
-  writes its own pid to `hdb.pid`) then made the port-based stop/restart refuse
-  with "its identity could not be verified". A sidecar naming a pid that is
-  confirmed gone is now treated as stale rather than as a disagreement with
-  `hdb.pid`, so the live process is re-adopted from its own evidence: the
+  A sidecar whose pid is confirmed gone is treated as stale; stop and restart
+  can re-adopt the live process from current health and pid evidence: the
   missing-sidecar self-heal runs when `/Health` identifies flair and the
   pid-to-port and instance checks each match or are unavailable (a best-effort
   skip, never a proof). A pid whose liveness cannot be determined is never read
