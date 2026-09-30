@@ -12,5 +12,5 @@
   including an explicit GPU request, and asks for a recheck after warmup;
   a finished explicit request without readback remains blocking.
 
-  > **Heads-up:** Apple Silicon status uses engine readback; absent readback
-  > is reported as unconfirmed.
+  > **Heads-up:** for GPU-offload requests, Apple Silicon status uses engine
+  > readback; absent readback is reported as unconfirmed.
