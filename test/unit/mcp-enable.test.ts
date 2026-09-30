@@ -843,7 +843,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
 });
 
 describe("enableMcp — config-block step (flair#2116)", () => {
-  test("reports the shipped mcp.enabled env reference, not false, and matches the repo's config.yaml", async () => {
+  test("reports the shipped block: mcp.enabled env reference (not false), DCR off and the allowed hosts, as in the repo's config.yaml", async () => {
     const { fetchImpl } = fullMockFetch();
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), dryRun: true }, { fetchImpl });
     const step = result.steps.find((s) => s.step === "config-block");
@@ -851,11 +851,33 @@ describe("enableMcp — config-block step (flair#2116)", () => {
     expect(step!.detail).toContain("this step writes nothing");
     expect(step!.detail).toContain("mcp.enabled=${FLAIR_MCP_OAUTH}");
     expect(step!.detail).not.toContain("mcp.enabled=false");
-    // The value it reports is the one the shipped component config carries.
-    const shipped = yaml.load(readFileSync(join(import.meta.dir, "..", "..", "config.yaml"), "utf8")) as any;
-    expect(step!.detail).toContain(`mcp.enabled=${shipped["@harperfast/oauth"].mcp.enabled}`);
+    // Every field it reports as shipped is the one the shipped component config carries.
+    const mcp = shippedMcpBlock();
+    expect(step!.detail).toContain(`mcp.enabled=${mcp.enabled}`);
+    expect(step!.detail).toContain(`dynamicClientRegistration.enabled=${mcp.dynamicClientRegistration.enabled}`);
+    expect(step!.detail).toContain(`clientIdMetadataDocuments.allowedHosts=${JSON.stringify(mcp.clientIdMetadataDocuments.allowedHosts)})`);
+    expect(step!.detail).not.toContain("--cimd-allowed-hosts");
+  });
+
+  test("labels --cimd-allowed-hosts as requested and not applied, never as the shipped list (flair#2116)", async () => {
+    const { fetchImpl } = fullMockFetch();
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), dryRun: true, cimdAllowedHosts: ["example.com"] },
+      { fetchImpl },
+    );
+    const step = result.steps.find((s) => s.step === "config-block")!;
+    const shippedHosts = JSON.stringify(shippedMcpBlock().clientIdMetadataDocuments.allowedHosts);
+    expect(step.detail).toContain(`clientIdMetadataDocuments.allowedHosts=${shippedHosts})`);
+    expect(step.detail).not.toContain('allowedHosts=["example.com"]');
+    expect(step.detail).toContain('--cimd-allowed-hosts ["example.com"] was requested, and this command does not apply it');
   });
 });
+
+/** The `@harperfast/oauth` → `mcp` block of the repo's shipped config.yaml. */
+function shippedMcpBlock(): any {
+  const doc = yaml.load(readFileSync(join(import.meta.dir, "..", "..", "config.yaml"), "utf8")) as any;
+  return doc["@harperfast/oauth"].mcp;
+}
 
 describe("enableMcp — full happy path", () => {
   test("runs every step in order and returns a working paste block with no DCR call anywhere", async () => {

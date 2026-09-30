@@ -849,8 +849,9 @@ export function register(program: Command): void {
         if (result.failedStep === "fabric-operator-deploy") {
           // flair#1136/#1152: on Fabric, `enable` never restarts the instance and
           // needs no config edit (config.yaml ships mcp.enabled as an env
-          // reference). The operator applies the environment and restarts; a
-          // re-run then passes this step once self-verify does (flair#2116).
+          // reference). The operator addresses the cause the step reports (applying
+          // the environment and restarting when it says so); a re-run then passes
+          // this step once self-verify does (flair#2116).
           // The step's own detail above carries the specifics.
           console.error(
             `\n${render.icons.info} ${render.wrap(render.c.bold, "Fabric deployment detected.")}`,
@@ -859,9 +860,12 @@ export function register(program: Command): void {
             `   The /mcp OAuth surface did not pass self-verify on the public origin yet; the step above says why`,
           );
           console.error(
-            `   and what to do. After the restart, re-run \`flair mcp enable\` with the same options plus`,
+            `   and what to do. Address that cause (restart the instance if its environment changed), then re-run`,
           );
-          console.error(`   --confirm-secrets-applied: that step checks again and passes once self-verify does.\n`);
+          console.error(
+            `   \`flair mcp enable\` with the same options plus --confirm-secrets-applied: that step checks again`,
+          );
+          console.error(`   and passes once self-verify does.\n`);
         } else {
           console.error(`${render.icons.error} enable failed at step "${result.failedStep}" — see detail above for the exact fix, then re-run \`flair mcp enable\` (earlier steps are idempotent and will be reused).`);
         }

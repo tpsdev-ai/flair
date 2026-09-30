@@ -1,4 +1,5 @@
-// cli-message-flags.test.ts — flair#2116: every flag a message names exists.
+// cli-message-flags.test.ts — flair#2116: flags named in src/ string literals are
+// declared by the command they are checked against, within the limits below.
 //
 // `flair mcp enable` told operators to pass `--admin-pass-file` and `--ops-url`,
 // and the command has neither. Nothing failed: a flag named in an error message,
@@ -31,17 +32,24 @@
 //      commands that call it, and this test does not follow calls. They still
 //      catch a flag that no command in reach declares, which is what #2116's --ops-url was.
 //
-// Not scanned, by design: a flag's own declaration (`.option("--x <v>")`), and a
-// literal that is nothing but one flag (`"--user"`, `"--omit=dev"`). The second
-// is an argv element for another program or an argument to a hint builder, not
-// a sentence; the sentence it lands in is assembled elsewhere at runtime.
-//
-// References that are right but that the rules above cannot place go on
-// FOREIGN_TOOLS (another program's flags) or OTHER_COMMAND_REFERENCES (another
-// flair command's flag, checked against that command). Defects that were already on main
-// when this guard landed and are outside #2116 go on KNOWN_DEFECTS, which only
-// shrinks: an entry that no longer matches anything fails the test until it is
-// removed.
+// What this does NOT check:
+//   - a flag's own declaration (`.option("--x <v>")`);
+//   - a literal that is nothing but one flag (`"--user"`, `"--omit=dev"`): an
+//     argv element for another program or an argument to a hint builder, whose
+//     sentence is assembled elsewhere at runtime;
+//   - the flags after a FOREIGN_TOOLS name (another program's flags);
+//   - text outside string and template literals (comments), and a message built
+//     from several literals or from constants: each literal is read on its own,
+//     and `${…}` stands in for every substitution;
+//   - at tiers c–e, that the command showing the message declares the flag:
+//     only that some command in reach does;
+//   - the findings bound by OTHER_COMMAND_REFERENCES (another flair command's
+//     flag, checked against that command) and KNOWN_DEFECTS (defects already on
+//     main when this guard landed, outside #2116).
+// Each exemption binds to exactly one finding by file, flag, context and literal
+// text, and the one-to-one test fails when an entry matches no finding or more
+// than one, or a finding matches more than one entry. So a second message with an exempted flag is
+// not covered by the first one's entry, and a fixed defect's entry has to go.
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -69,17 +77,33 @@ const FOREIGN_TOOLS: Array<{ tool: string; why: string }> = [
 ];
 
 /**
+ * An exemption binds to ONE finding: the same file, flag, context (see
+ * `Finding.context`) and literal text. Line numbers are not part of it, so an
+ * unrelated edit above the message does not break it; a second message with the
+ * same flag in the same file is a new finding that no entry covers (or, if it is
+ * an exact copy, a second match for one entry), and both fail the one-to-one test.
+ */
+interface Exemption {
+  file: string;
+  flag: string;
+  context: string;
+  literal: string;
+}
+
+/**
  * Another flair command's flag, named where no mention in the same literal says
  * which command. Each entry names that command, and the test checks that the
  * command really declares the flag, so an entry cannot hide a bogus one.
  */
-const OTHER_COMMAND_REFERENCES: Array<{ file: string; flag: string; command: string; why: string }> = [
+const OTHER_COMMAND_REFERENCES: Array<Exemption & { command: string; why: string }> = [
   {
     // "Fix: flair init && flair restart (… — pass --ops-bind for deliberate
     // remote admin)": the parenthetical is about the `flair init` re-run, but it
     // follows the `flair restart` mention, whose span ends at the "(".
     file: "src/lib/ops-api-bind.ts",
     flag: "--ops-bind",
+    context: "*",
+    literal: "safe on a running install — pass --ops-bind for deliberate remote admin)",
     command: "init",
     why: "the remedy re-runs `flair init`, which declares --ops-bind",
   },
@@ -89,6 +113,8 @@ const OTHER_COMMAND_REFERENCES: Array<{ file: string; flag: string; command: str
     // identifiers into template literals.
     file: "src/lib/federation-pair-access.ts",
     flag: "--admin",
+    context: "*",
+    literal: "${…} ${…} --admin",
     command: "principal add",
     why: "the invocation is `flair principal add <id> --admin`, built from a constant",
   },
@@ -98,30 +124,85 @@ const OTHER_COMMAND_REFERENCES: Array<{ file: string; flag: string; command: str
  * Pre-existing on main when this guard landed (flair#2116), outside that
  * issue's scope. Each entry is a real defect: the flag is not declared by the
  * command the message sends the operator to. Fix the message, then delete the
- * entry — the ratchet test below fails while an entry matches nothing.
+ * entry — the one-to-one test fails while an entry matches nothing.
  */
-const KNOWN_DEFECTS: Array<{ file: string; flag: string; defect: string }> = [
+const KNOWN_DEFECTS: Array<Exemption & { defect: string }> = [
   {
     file: "src/commands/agent.ts",
     flag: "--admin-pass-from",
-    defect: "`agent list` / `agent rotate-key` inline-password warning suggests a flag no command declares",
+    context: "agent list",
+    literal: "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env ",
+    defect: "`agent list`'s inline-password warning suggests a flag no command declares",
+  },
+  {
+    file: "src/commands/agent.ts",
+    flag: "--admin-pass-from",
+    context: "agent rotate-key",
+    literal: "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env ",
+    defect: "`agent rotate-key`'s inline-password warning suggests a flag no command declares",
   },
   {
     file: "src/commands/deploy.ts",
     flag: "--remote",
-    defect: "`flair deploy` next-steps example runs `flair agent add --remote`; `agent add` declares --target",
+    context: "agent add",
+    literal: "     flair agent add --remote ${…} --name my-agent",
+    defect: "`flair deploy`'s next-steps example runs `flair agent add --remote`; `agent add` declares --target",
   },
   {
     file: "src/bridges/builtins/mem0.ts",
     flag: "--user",
-    defect: "mem0 import hint; `flair bridge import` declares no --user, and commander rejects it as an unknown option",
+    context: "*",
+    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
+    defect: "mem0 import hint (\"pass --user\"); `flair bridge import` declares no --user and commander rejects it as an unknown option",
+  },
+  {
+    file: "src/bridges/builtins/mem0.ts",
+    flag: "--user",
+    context: "bridge import",
+    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
+    defect: "mem0 import hint (the example); `flair bridge import` declares no --user",
   },
   {
     file: "src/bridges/builtins/mem0.ts",
     flag: "--api-key",
-    defect: "mem0 import hints; `flair bridge import` declares no --api-key",
+    context: "bridge import",
+    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
+    defect: "mem0 import hint (the example); `flair bridge import` declares no --api-key",
+  },
+  {
+    file: "src/bridges/builtins/mem0.ts",
+    flag: "--api-key",
+    context: "*",
+    literal: "pass --api-key <token> or set MEM0_API_KEY in the environment",
+    defect: "mem0 API-key hint; `flair bridge import` declares no --api-key",
   },
 ];
+
+const EXEMPTIONS: Exemption[] = [...OTHER_COMMAND_REFERENCES, ...KNOWN_DEFECTS];
+
+function exemptionMatches(e: Exemption, f: Finding): boolean {
+  return e.file === f.file && e.flag === f.flag && e.context === f.context && e.literal === f.literal;
+}
+
+/**
+ * Apply the exemptions one-to-one. `unexempted` is every finding no entry
+ * covers; `problems` names every entry that does not match exactly one finding
+ * and every finding that more than one entry matches.
+ */
+function applyExemptions(findings: Finding[], exemptions: Exemption[]): { unexempted: Finding[]; problems: string[] } {
+  const problems: string[] = [];
+  for (const e of exemptions) {
+    const n = findings.filter((f) => exemptionMatches(e, f)).length;
+    if (n !== 1) problems.push(`${e.file} ${e.flag} [${e.context}] «${e.literal}» matches ${n} findings, not exactly one`);
+  }
+  const unexempted: Finding[] = [];
+  for (const f of findings) {
+    const n = exemptions.filter((e) => exemptionMatches(e, f)).length;
+    if (n === 0) unexempted.push(f);
+    if (n > 1) problems.push(`${f.file}:${f.line} ${f.flag} is matched by ${n} exemptions`);
+  }
+  return { unexempted, problems };
+}
 
 // ─── The registry ──────────────────────────────────────────────────────────
 
@@ -161,6 +242,15 @@ interface Finding {
   file: string;
   line: number;
   flag: string;
+  /**
+   * The command the flag was checked against: its path when a mention or a
+   * `.command()` chain decided it (tiers a–b), "*" for the looser module tiers
+   * (c–e). With file, flag and literal, this is the finding's line-independent
+   * identity, which is what an exemption binds to.
+   */
+  context: string;
+  /** The whole literal, `${…}` for each substitution. */
+  literal: string;
   /** The command(s) the flag was checked against, for the failure message. */
   checkedAgainst: string;
   excerpt: string;
@@ -407,6 +497,8 @@ function scanSource(file: string, text: string, scope: ScanScope): { findings: F
         file,
         line: sf.getLineAndCharacterOfPosition(at).line + 1,
         flag,
+        context: mention ? mention.command! : chain ? chain.path! : "*",
+        literal: lit,
         checkedAgainst: against.length === 1 ? `flair ${against[0]}`.trim() : `${against.length} commands in reach`,
         excerpt: lit.slice(Math.max(0, i - 70), i + 50).replace(/\s+/g, " "),
       });
@@ -604,7 +696,7 @@ describe("flair#2116 — the rule, on a synthetic tree", () => {
 
 // ─── The tree ──────────────────────────────────────────────────────────────
 
-describe("flair#2116 — every flag a flair CLI message names exists", () => {
+describe("flair#2116 — flags named in src/ literals are declared by the command they are checked against", () => {
   const registry = buildRegistry(program);
   const tree = scanTree(registry);
 
@@ -624,32 +716,65 @@ describe("flair#2116 — every flag a flair CLI message names exists", () => {
     expect(missing).toEqual([]);
   });
 
-  test("every OTHER_COMMAND_REFERENCES entry names a command that declares the flag, and is still needed", () => {
+  test("every OTHER_COMMAND_REFERENCES entry names a command that declares the flag", () => {
     for (const r of OTHER_COMMAND_REFERENCES) {
       expect(`${r.command} ${r.flag}: ${registry.get(r.command)?.has(r.flag) ?? "no such command"}`).toBe(`${r.command} ${r.flag}: true`);
-      expect(tree.findings.some((f) => f.file === r.file && f.flag === r.flag)).toBe(true);
     }
   });
 
-  test("no message names a flag its command does not declare", () => {
-    const known = (f: Finding): boolean =>
-      KNOWN_DEFECTS.some((k) => k.file === f.file && k.flag === f.flag)
-      || OTHER_COMMAND_REFERENCES.some((r) => r.file === f.file && r.flag === f.flag && registry.get(r.command)?.has(f.flag) === true);
-    const unexpected = tree.findings.filter((f) => !known(f));
-    if (unexpected.length > 0) {
+  test("exemptions are one-to-one: each matches exactly one finding, and no finding matches more than one", () => {
+    expect(applyExemptions(tree.findings, EXEMPTIONS).problems).toEqual([]);
+  });
+
+  test("no scanned flag is undeclared by the command it is checked against, apart from the exempted findings", () => {
+    const { unexempted } = applyExemptions(tree.findings, EXEMPTIONS);
+    if (unexempted.length > 0) {
       throw new Error(
-        `${unexpected.length} flag(s) named in messages are not declared by the command they belong to:\n`
-          + `${describeFindings(unexpected)}\n`
+        `${unexempted.length} flag(s) named in messages are not declared by the command they are checked against:\n`
+          + `${describeFindings(unexempted)}\n`
           + "Name a flag the command has, or a mention (`flair <command> --flag`) if it is another command's. "
           + "Another program's flags go on FOREIGN_TOOLS with a reason.",
       );
     }
   });
 
-  test("KNOWN_DEFECTS only shrinks: every entry still matches a finding", () => {
-    const stale = KNOWN_DEFECTS.filter((k) => !tree.findings.some((f) => f.file === k.file && f.flag === k.flag));
-    expect(stale).toEqual([]);
-  });
+  // Exemptions bind to one finding each. A second message naming an exempted
+  // flag in the same file must fail, whether it copies the original literal
+  // exactly (the entry then matches two findings) or words it differently (a
+  // finding no entry covers). The unmutated file is the control.
+  const DEPLOY = "src/commands/deploy.ts";
+  const DEPLOY_ANCHOR = "      console.log(`     flair agent add --remote ${result.url} --name my-agent`);\n";
+  const duplicateRows: Array<{ name: string; extra: string; problems: RegExp[]; unexempted: string[] }> = [
+    {
+      name: "an exact copy of the exempted --remote example",
+      extra: DEPLOY_ANCHOR,
+      problems: [/^src\/commands\/deploy\.ts --remote \[agent add\] .* matches 2 findings, not exactly one$/],
+      unexempted: [],
+    },
+    {
+      name: "a differently worded second --remote example",
+      extra: "      console.log(`     flair agent add --remote ${result.url} --name other-agent`);\n",
+      problems: [],
+      unexempted: ["--remote → flair agent add"],
+    },
+  ];
+  for (const row of duplicateRows) {
+    test(`mutation: ${row.name} in ${DEPLOY} fails the exemption check`, () => {
+      const original = readFileSync(join(REPO, DEPLOY), "utf8");
+      expect(original.split(DEPLOY_ANCHOR)).toHaveLength(2); // the anchor exists, once
+      const scope = { registry, fallback: tree.fallbackFor(DEPLOY) };
+      // This file's findings against this file's exemptions only, so no other
+      // file's findings affect the rows.
+      const exemptions = EXEMPTIONS.filter((e) => e.file === DEPLOY);
+      const control = applyExemptions(scanSource(DEPLOY, original, scope).findings, exemptions);
+      expect(control).toEqual({ unexempted: [], problems: [] });
+      const mutated = original.replace(DEPLOY_ANCHOR, DEPLOY_ANCHOR + row.extra);
+      const result = applyExemptions(scanSource(DEPLOY, mutated, scope).findings, exemptions);
+      expect(result.problems).toHaveLength(row.problems.length);
+      row.problems.forEach((re, i) => expect(result.problems[i]).toMatch(re));
+      expect(result.unexempted.map((f) => `${f.flag} → ${f.checkedAgainst}`)).toEqual(row.unexempted);
+    });
+  }
 
   // A mutation run against the real sources: one bogus flag put back into one
   // message must be found, in the command it belongs to; the unmutated file is

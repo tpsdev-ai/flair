@@ -1342,14 +1342,16 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // ── @harperfast/oauth config (flair#1136: shipped in config.yaml) ──────
     // The block ships uncommented with mcp.enabled: ${FLAIR_MCP_OAUTH}
     // (flair#1152), so the environment turns it on. This step writes nothing;
-    // it reports the shipped block (flair#2116: it used to print false).
+    // it reports the block config.yaml ships (flair#2116: it used to print
+    // false), and a --cimd-allowed-hosts value only as requested, never as shipped.
     // set_configuration is removed — the block lives in the component's own
     // config.yaml, not in harperdb-config.yaml where Fabric would wipe it.
     const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
     currentStep = "config-block";
     push(true,
       `@harperfast/oauth config ships in config.yaml; this step writes nothing (mcp.enabled=${MCP_ENABLED_ENV_REFERENCE}, read from the instance environment; ` +
-        `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts=${JSON.stringify(cimdAllowedHosts)})`,
+        `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts=${JSON.stringify(DEFAULT_CIMD_ALLOWED_HOSTS)})` +
+        (params.cimdAllowedHosts ? `; --cimd-allowed-hosts ${JSON.stringify(cimdAllowedHosts)} was requested, and this command does not apply it` : ""),
     );
 
     // ── IdP OAuth-app credential intake ───────────────────────────────────────
