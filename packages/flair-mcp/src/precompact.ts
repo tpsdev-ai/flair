@@ -72,10 +72,13 @@
  * durability "ephemeral", whose TTL the server sets, 24 h by default through
  * FLAIR_EPHEMERAL_TTL_HOURS; visibility "private"; the session's
  * `adk:continuity:<sessionId>` tag) with meta.hook = "PreCompact". The id is
- * fresh unless the local marker file names a record written for the same
- * harness session and trigger less than PRECOMPACT_DEDUP_WINDOW_MS after that
- * record's first write: then the id is reused and the PUT updates that row
- * instead of adding one. That holds for a rerun of the same compaction and
+ * fresh unless the local marker file names a record id for the same harness
+ * session and trigger, and this run comes less than
+ * PRECOMPACT_DEDUP_WINDOW_MS after the marker first named that id (its
+ * firstWrittenAt): then the id is reused. The marker is written before the
+ * PUT is attempted, so the window starts even when that PUT fails; a later
+ * PUT that Flair applies with the reused id creates the row if it is absent
+ * and updates it if present. That holds for a rerun of the same compaction and
  * for a second compaction of the same kind alike; the hook cannot tell them
  * apart. Two runs at the same moment can each add a row, since nothing locks
  * the marker across processes.
@@ -147,11 +150,14 @@ export const ACTION_MAX_CHARS = 160;
 export const LAST_ASSISTANT_MAX_CHARS = 300;
 
 /** A later run of the hook for the same harness session and trigger within
- *  this window of the record's FIRST write updates that record instead of
- *  creating a second one, whether it reruns the same compaction or handles a
- *  second compaction of the same kind (the hook cannot tell them apart).
- *  Measured from the first write, so a series of later runs cannot stretch
- *  it. */
+ *  this window of the moment the marker FIRST named the record id (the
+ *  marker's firstWrittenAt, written before the first PUT is attempted, so a
+ *  failed PUT starts the window too) reuses that id instead of minting a
+ *  second one, whether it reruns the same compaction or handles a second
+ *  compaction of the same kind (the hook cannot tell them apart); its PUT,
+ *  if Flair applies it, creates the row if it is absent and updates it if
+ *  present. Measured from that first marker write, so a series of later runs
+ *  cannot stretch it. */
 export const PRECOMPACT_DEDUP_WINDOW_MS = 5 * 60_000;
 
 /** What a redacted secret is replaced with. */
@@ -713,8 +719,10 @@ export function buildPreCompactRow(
 // ── the marker: dedup key and surfacing pointer ─────────────────────────────
 
 /**
- * <sessionDir>/<agentId>.precompact.json (0600): the newest pre-compaction
- * record this agent identity wrote on this machine. IDs and a timestamp only,
+ * <sessionDir>/<agentId>.precompact.json (0600): the id of the newest
+ * pre-compaction record this agent identity tried to write on this machine.
+ * It is written before the PUT is attempted, so it can name a record whose
+ * PUT failed and that does not exist. IDs and a timestamp only,
  * never record content (same rule as the pointer and state files).
  *
  * It is the DEDUP KEY: (harnessSessionId, trigger, firstWrittenAt) decides
@@ -727,6 +735,10 @@ export interface PreCompactMarker {
   sessionId: string;
   trigger: PreCompactTrigger;
   recordId: string;
+  /** When the marker first named recordId: the time of the run that minted
+   *  the id, written before that run's PUT was attempted, and carried forward
+   *  unchanged by every run that reuses the id. Not the time of any write
+   *  Flair applied. */
   firstWrittenAt: string;
 }
 
@@ -798,8 +810,8 @@ export async function writePreCompactMarker(sessionDir: string, agentId: string,
 /**
  * The record id for this run: the marker's, when the marker names the same
  * harness session and trigger and this run comes less than
- * PRECOMPACT_DEDUP_WINDOW_MS after that record's first write; else a fresh
- * one. Only those three inputs decide it.
+ * PRECOMPACT_DEDUP_WINDOW_MS after the marker first named that id
+ * (firstWrittenAt); else a fresh one. Only those three inputs decide it.
  */
 export function resolvePreCompactRecordId(
   marker: PreCompactMarker | null,

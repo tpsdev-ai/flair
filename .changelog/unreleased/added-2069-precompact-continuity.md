@@ -11,15 +11,17 @@
   matches no pattern is kept as written, and the record is at most 2,000 characters. When the
   transcript's end holds something to record and the write succeeds, it is stored with the agent's own
   key as one private, ephemeral memory in the session's continuity journal; a later run for the same
-  session and trigger within 5 minutes of that record's first write, whether it repeats the compaction
-  or handles a second one of the same kind, updates that record instead of adding one (two runs at the
-  same moment can each add one). `flair-session-start` now puts the record at the top of its context
-  after a compaction, and after a restart when the local marker file still names the previous
-  session's record, ahead of the bootstrap context, as quoted data: between fixed begin and end lines,
-  with every line prefixed, so no line of the record's text can forge the end line or start with a
-  role marker such as `System:`. The text itself stays untrusted: formatting cannot guarantee that a
-  model disregards an instruction written inside the quote. Once it has started, every path the hook
-  handles ends in exit 0, so it does not block compaction (the documented command's `|| true` covers a
+  session and trigger within 5 minutes of the moment the hook's marker first named that record (the
+  marker is written before the write is attempted, so a failed write starts the window too), whether
+  it repeats the compaction or handles a second one of the same kind, writes to that record again: an
+  applied write creates the record if it is absent and updates it if present (two runs at the same
+  moment can each add one). `flair-session-start` now puts the record at the top of its context after
+  a compaction, and after a restart when the local marker file still names the previous session's
+  record, ahead of the bootstrap context, as quoted data: between fixed begin and end lines, with
+  every line prefixed, so no line of the record's text can forge the end line or start with a role
+  marker such as `System:`. The text itself stays untrusted: formatting cannot guarantee that a model
+  disregards an instruction written inside the quote. Once it has started, every path the hook handles
+  ends in exit 0, so it does not block compaction (the documented command's `|| true` covers a
   launcher that fails first); when Flair is unreachable or slow, or one of its own files is refused,
   it shows one short warning. Its time budget (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default 5000 ms) starts
   before it reads its input; when it passes, the hook stops waiting on asynchronous work and exits

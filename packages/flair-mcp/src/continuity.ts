@@ -60,9 +60,10 @@
  * one PUT of a row into the session's journal, once its local checks pass, in
  * this row shape with meta.hook "PreCompact" (a row is added or updated only
  * when Flair applies that PUT); a later run for the same harness session and
- * trigger within its dedup window reuses the row's id, so its PUT updates
- * that row instead of adding one (./precompact.ts
- * PRECOMPACT_DEDUP_WINDOW_MS). It quotes user turns, so unlike the journal
+ * trigger within its dedup window, which starts when the marker first names
+ * the id (before the first PUT is attempted), reuses the row's id, so its
+ * PUT, if applied, creates that row if it is absent and updates it if
+ * present (./precompact.ts PRECOMPACT_DEDUP_WINDOW_MS). It quotes user turns, so unlike the journal
  * lines it is redacted, and it is the one continuity row whose CONTENT
  * flair-session-start shows (first, after a compaction or a restart, when the
  * local marker names it). Its rules live in ./precompact.ts; nothing above
