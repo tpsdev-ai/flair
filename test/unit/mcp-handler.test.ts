@@ -138,6 +138,9 @@ class SoulMock extends HarperShapedBase {
 let credentials: any[] = [];
 let agents: Record<string, any> = {};
 const puts: { table: string; record: any }[] = [];
+// Set to make the resolver's credential lookup / principal read fail.
+let credentialSearchError: Error | null = null;
+let agentGetError: Error | null = null;
 
 // Constructable no-op base classes so the REAL resource modules (which do
 // `class X extends databases.flair.X` or `extends Resource`) link + load — we
@@ -147,11 +150,17 @@ class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const databasesMock = {
   flair: {
     Credential: Object.assign(class extends NoopBase {}, {
-      search: async function* (_q: any) { for (const c of credentials) yield c; },
+      search: async function* (_q: any) {
+        if (credentialSearchError) throw credentialSearchError;
+        for (const c of credentials) yield c;
+      },
       put: async (r: any) => { puts.push({ table: "Credential", record: r }); return r; },
     }),
     Agent: Object.assign(class extends NoopBase {}, {
-      get: async (id: string) => agents[id] ?? null,
+      get: async (id: string) => {
+        if (agentGetError) throw agentGetError;
+        return agents[id] ?? null;
+      },
       put: async (r: any) => { puts.push({ table: "Agent", record: r }); agents[r.id] = r; return r; },
     }),
     Memory: class extends NoopBase {},
@@ -166,7 +175,7 @@ const databasesMock = {
 // SemanticSearch/BootstrapMemories.
 mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {}, getUser: async () => null } }));
 
-const { mcpHandler, resolveAgentFromSub } = await import("../../resources/mcp-handler.ts");
+const { mcpHandler, resolveAgentFromSub, PrincipalRefusedError } = await import("../../resources/mcp-handler.ts");
 const { __setHandlers } = await import("../../resources/mcp-tools.ts");
 
 // Inject capture doubles for the delegated handlers via the tools registry —
@@ -200,6 +209,8 @@ beforeEach(() => {
   credentials = [];
   agents = {};
   puts.length = 0;
+  credentialSearchError = null;
+  agentGetError = null;
   delete process.env.FLAIR_MCP_JIT_PROVISION;
 });
 afterEach(() => {
@@ -272,6 +283,7 @@ describe("protocol handshake", () => {
 describe("resolveAgentFromSub", () => {
   it("existing idp Credential → its principalId", async () => {
     credentials = [{ principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" }];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
     const agent = await resolveAgentFromSub("sub-alice");
     expect(agent).toEqual({ agentId: "agt_alice", isAdmin: false });
   });
@@ -327,6 +339,7 @@ describe("resolveAgentFromSub", () => {
   // ─── flair#718 authorship-provenance: clientId threading ──────────────────
   it("no clientId passed → resolved agent has NO clientId property at all (not stamped as undefined)", async () => {
     credentials = [{ principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" }];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
     const agent = await resolveAgentFromSub("sub-alice");
     expect(agent).toEqual({ agentId: "agt_alice", isAdmin: false });
     expect("clientId" in (agent as any)).toBe(false);
@@ -334,6 +347,7 @@ describe("resolveAgentFromSub", () => {
 
   it("clientId passed → copied onto the resolved agent unchanged (existing-credential path)", async () => {
     credentials = [{ principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" }];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
     const agent = await resolveAgentFromSub("sub-alice", "flair_cl_abc123");
     expect(agent).toEqual({ agentId: "agt_alice", isAdmin: false, clientId: "flair_cl_abc123" });
   });
@@ -349,6 +363,7 @@ describe("resolveAgentFromSub", () => {
 describe("tools/call — scopes to the resolved agent (no forging)", () => {
   beforeEach(() => {
     credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
   });
 
   it("memory_search delegates with request.tpsAgent = resolved id", async () => {
@@ -973,6 +988,105 @@ describe("body size cap", () => {
   });
 });
 
+// ─── principal status on every call ─────────────────────────────────────────
+describe("tools/call — the mapped principal must exist and be active on every call", () => {
+  beforeEach(() => {
+    credentials = [{ id: "cred_carol", principalId: "agt_carol", kind: "idp", idpSubject: "sub-carol", status: "active" }];
+    agents["agt_carol"] = { id: "agt_carol", status: "active" };
+  });
+
+  function callAs(sub: string, name: string, args: any) {
+    return mcpHandler(post({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name, arguments: args } }, { sub })).then(parse);
+  }
+
+  it("an active principal's call runs", async () => {
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.ctx.request.tpsAgent).toBe("agt_carol");
+  });
+
+  it("a principal record with no status field runs (it predates the field)", async () => {
+    agents["agt_carol"] = { id: "agt_carol" };
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.ctx.request.tpsAgent).toBe("agt_carol");
+  });
+
+  it("a deactivated principal is refused on every tool, naming the principal and the remedy; nothing runs and the credential is not touched", async () => {
+    agents["agt_carol"] = { id: "agt_carol", status: "deactivated" };
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    for (const name of Object.keys(TOOLS)) {
+      lastCall = null;
+      const body = await callAs("sub-carol", name, {});
+      expect(body.result, name).toBeUndefined();
+      expect(body.error?.code, name).toBe(-32001);
+      expect(body.error?.message, name).toContain("principal 'agt_carol' is deactivated");
+      expect(body.error?.message, name).toContain('set its status to "active"');
+      expect(lastCall, name).toBeNull();
+    }
+    expect(puts).toEqual([]);
+  });
+
+  it("any status other than active is refused", async () => {
+    for (const status of ["suspended", "revoked", "", null]) {
+      agents["agt_carol"] = { id: "agt_carol", status };
+      lastCall = null;
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error?.code, String(status)).toBe(-32001);
+      expect(lastCall, String(status)).toBeNull();
+    }
+  });
+
+  it("a credential that maps to a principal that does not exist is refused", async () => {
+    delete agents["agt_carol"];
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error?.code).toBe(-32001);
+    expect(body.error?.message).toContain("principal 'agt_carol', which does not exist");
+    expect(lastCall).toBeNull();
+  });
+
+  it("a failed read of the principal's status refuses the call", async () => {
+    agentGetError = new Error("storage unavailable");
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.result).toBeUndefined();
+    expect(body.error?.code).toBe(-32000);
+    expect(body.error?.message).toContain("the status of principal 'agt_carol' could not be read");
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a failed credential lookup refuses the call and does not JIT-provision, even with JIT on", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentialSearchError = new Error("storage unavailable");
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.result).toBeUndefined();
+    expect(body.error?.code).toBe(-32000);
+    expect(body.error?.message).toContain("could not be read");
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a deactivated principal is refused, not replaced, when JIT is on", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    agents["agt_carol"] = { id: "agt_carol", status: "deactivated" };
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error?.code).toBe(-32001);
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("resolveAgentFromSub throws the refusal for a deactivated principal and resolves an active one", async () => {
+    agents["agt_carol"] = { id: "agt_carol", status: "deactivated" };
+    let thrown: unknown;
+    try { await resolveAgentFromSub("sub-carol"); } catch (err) { thrown = err; }
+    expect(thrown).toBeInstanceOf(PrincipalRefusedError);
+    expect((thrown as any).rpcCode).toBe(-32001);
+
+    agents["agt_carol"] = { id: "agt_carol", status: "active" };
+    expect(await resolveAgentFromSub("sub-carol")).toEqual({ agentId: "agt_carol", isAdmin: false });
+  });
+});
+
 // ─── tools/call argument types ───────────────────────────────────────────────
 describe("tools/call — arguments must match the tool's declared types", () => {
   // A helper, not an inline assignment: TypeScript would otherwise narrow
@@ -981,6 +1095,7 @@ describe("tools/call — arguments must match the tool's declared types", () => 
 
   beforeEach(() => {
     credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
   });
 
   async function call(name: string, args: any) {

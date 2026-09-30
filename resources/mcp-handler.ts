@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
 import { checkToolArguments, withoutNullArguments } from "./mcp-tool-arguments.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
+import { isPrincipalDeactivated } from "./agent-auth.js";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { resolveVersion } from "./version.js";
 
@@ -192,15 +193,29 @@ function jitProvisionEnabled(): boolean {
  * `undefined` — so existing callers/tests that don't pass one see the exact
  * same `{ agentId, isAdmin }` shape as before this field existed.
  *
+ * A mapped principal must exist and be active, checked on every call, the same
+ * rule the Ed25519 path applies (resources/agent-auth.ts, `isPrincipalDeactivated`).
+ * A token minted while the principal was active stops working as soon as the
+ * principal is deactivated. The principal record is read on every call; if that
+ * read fails, or the credential lookup itself fails, the call is refused. An
+ * unreadable answer is never taken as "allowed", and never as "no mapping":
+ * JIT provisioning runs only for a subject the credential lookup answered for.
+ *
  * Returns:
- *   - `{ agentId, isAdmin, clientId? }` when a Credential maps the sub to an Agent.
+ *   - `{ agentId, isAdmin, clientId? }` when a Credential maps the sub to an
+ *     existing, active Agent.
  *   - null when no Credential maps the sub AND JIT-provisioning is disabled or
  *     failed → the handler denies the tool call (sub is unresolvable).
+ *
+ * Throws `PrincipalRefusedError` (the handler returns its JSON-RPC error) when
+ * the mapped principal is deactivated or missing, or when the credential or
+ * principal could not be read.
  */
 export async function resolveAgentFromSub(sub: string, clientId?: string): Promise<ResolvedAgent | null> {
   if (!sub) return null;
 
   // 1. Existing IdP credential → its principalId is the Agent id.
+  let mapped: any = null;
   try {
     for await (const cred of (databases as any).flair.Credential.search({
       conditions: [
@@ -209,16 +224,29 @@ export async function resolveAgentFromSub(sub: string, clientId?: string): Promi
       ],
     })) {
       if (cred?.principalId && cred.status !== "revoked") {
-        // Touch lastUsedAt (best-effort; a failure here must not deny a valid call).
-        try {
-          await (databases as any).flair.Credential.put({ ...cred, lastUsedAt: new Date().toISOString() });
-        } catch { /* non-fatal */ }
-        const resolved: ResolvedAgent = { agentId: String(cred.principalId), isAdmin: await isAgentAdmin(cred.principalId) };
-        if (clientId) resolved.clientId = clientId;
-        return resolved;
+        mapped = cred;
+        break;
       }
     }
-  } catch { /* Credential table empty / search error → fall through to JIT/deny */ }
+  } catch {
+    throw new PrincipalRefusedError(
+      -32000,
+      "unavailable: the credential for this token's subject could not be read, so the call was refused. " +
+        "Retry; if this persists, an operator should check the flair server log.",
+    );
+  }
+
+  if (mapped) {
+    const principalId = String(mapped.principalId);
+    const principal = await requireActivePrincipal(principalId);
+    // Touch lastUsedAt (best-effort; a failure here must not deny a valid call).
+    try {
+      await (databases as any).flair.Credential.put({ ...mapped, lastUsedAt: new Date().toISOString() });
+    } catch { /* non-fatal */ }
+    const resolved: ResolvedAgent = { agentId: principalId, isAdmin: agentRecordIsAdmin(principal) };
+    if (clientId) resolved.clientId = clientId;
+    return resolved;
+  }
 
   // 2. No mapping. JIT-provision only behind the explicit trust anchor.
   if (!jitProvisionEnabled()) return null;
@@ -279,26 +307,59 @@ async function jitProvisionPrincipal(sub: string): Promise<string> {
 }
 
 /**
- * Is this Principal a flair admin? A MCP-OAuth agent is NON-admin unless an
- * operator has explicitly marked its Agent record admin — the MCP surface never
- * elevates on its own.
- *
- * flair#941: this used to OR the two admin fields together while the primary
- * HTTP gate (resources/agent-auth.ts's isAdmin) read only `role`, so the same
- * record could be an administrator here and an ordinary agent there. It now
- * resolves through the one shared predicate, so both surfaces answer
- * identically. A record carrying `admin: true` alone — which no flair write
- * path produces, and which was never an admin on the HTTP gate — is no longer
- * an admin here either; see resources/agent-admin.ts for the remedy. This
- * surface is gated behind FLAIR_MCP_OAUTH and is default-OFF.
+ * A token subject whose principal may not call tools. `rpcCode` and the message
+ * are the JSON-RPC error the handler returns; the message names the principal
+ * and what an operator has to do.
  */
-async function isAgentAdmin(principalId: string): Promise<boolean> {
-  try {
-    const agent = await (databases as any).flair.Agent.get(principalId);
-    return agentRecordIsAdmin(agent);
-  } catch {
-    return false;
+export class PrincipalRefusedError extends Error {
+  readonly rpcCode: number;
+  constructor(rpcCode: number, message: string) {
+    super(message);
+    this.name = "PrincipalRefusedError";
+    this.rpcCode = rpcCode;
   }
+}
+
+/**
+ * Read the mapped principal for this call and require it to exist and be
+ * active (`isPrincipalDeactivated`, the predicate the Ed25519 path uses: a
+ * record with no `status` field predates the field and counts as active).
+ * Returns the principal record; throws `PrincipalRefusedError` otherwise,
+ * including when the record cannot be read.
+ *
+ * Admin status is read from the same record, through the one shared predicate
+ * (resources/agent-admin.ts, flair#941): a MCP-OAuth agent is NON-admin unless
+ * an operator has explicitly marked its Agent record admin — the MCP surface
+ * never elevates on its own. This surface is gated behind FLAIR_MCP_OAUTH and is
+ * default-OFF.
+ */
+async function requireActivePrincipal(principalId: string): Promise<any> {
+  let principal: any;
+  try {
+    principal = await (databases as any).flair.Agent.get(principalId);
+  } catch {
+    throw new PrincipalRefusedError(
+      -32000,
+      `unavailable: the status of principal '${principalId}' could not be read, so the call was refused. ` +
+        "Retry; if this persists, an operator should check the flair server log.",
+    );
+  }
+  if (principal == null) {
+    throw new PrincipalRefusedError(
+      -32001,
+      `forbidden: this token's subject maps to principal '${principalId}', which does not exist. ` +
+        "An operator must link the subject to an existing principal " +
+        "(flair mcp enable --principal <agent-id> --idp-subject <subject>).",
+    );
+  }
+  if (isPrincipalDeactivated(principal)) {
+    throw new PrincipalRefusedError(
+      -32001,
+      `forbidden: principal '${principalId}' is deactivated, so this token can no longer call tools. ` +
+        "An operator must reactivate the principal (set its status to \"active\") to restore access.",
+    );
+  }
+  return principal;
 }
 
 // ─── MCP protocol dispatch ───────────────────────────────────────────────────
@@ -393,7 +454,21 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
   // stored provenance. Absent/non-string client_id → omitted, not invented.
   const clientId = typeof request?.mcp?.client_id === "string" ? request.mcp.client_id : undefined;
 
-  const agent = await resolveAgentFromSub(String(sub), clientId);
+  // The principal's status is checked on every call (resolveAgentFromSub): a
+  // deactivated or missing principal, or one whose status cannot be read, is
+  // refused here with the actionable error it carries.
+  let agent: ResolvedAgent | null;
+  try {
+    agent = await resolveAgentFromSub(String(sub), clientId);
+  } catch (err) {
+    if (err instanceof PrincipalRefusedError) return rpcError(id, err.rpcCode, err.message);
+    return rpcError(
+      id,
+      -32000,
+      "unavailable: the token subject could not be resolved to a principal, so the call was refused. " +
+        "Retry; if this persists, an operator should check the flair server log.",
+    );
+  }
   if (!agent) {
     // Sub verified by the AS but not mapped to a flair Agent (and JIT disabled /
     // failed). Deny — do NOT fall back to anonymous or admin.

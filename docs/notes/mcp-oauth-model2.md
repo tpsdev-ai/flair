@@ -34,10 +34,19 @@ aud, scope }`. The handler maps `sub` → a flair `Agent` id:
 
 1. Look up `Credential` where `kind === "idp"` AND `idpSubject === sub` → its
    `principalId` is the Agent id. (Same credential surface XAA's ID-JAG path
-   uses — one identity model.)
+   uses — one identity model.) That Agent must exist and be active on **every**
+   tool call — the rule the Ed25519 path applies (`isPrincipalDeactivated`; a
+   record with no `status` field counts as active). A deactivated or missing
+   principal is refused with a JSON-RPC error that names the principal and the
+   operator's remedy, so a token minted while the principal was active stops
+   working once it is deactivated, and works again once it is reactivated.
 2. If no mapping and `FLAIR_MCP_JIT_PROVISION` is on, JIT-provision a
    non-admin `Agent` + `Credential(kind:"idp")` from the sub.
 3. Otherwise **deny** — an unresolvable sub never runs as anonymous or admin.
+
+A failed read of the credential or of the principal refuses the call. It is
+never read as "allowed", and never as "no mapping", so step 2 runs only for a
+subject the credential lookup answered for.
 
 The resolved agent is set as `request.tpsAgent` on a flair-shaped delegation
 context, so the wrapped handler scopes to the verified agent exactly as an
