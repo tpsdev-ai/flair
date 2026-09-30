@@ -277,7 +277,7 @@ export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMe
 // match to that file.
 // --dry-run neither calls nor checks the target and never writes the list.
 
-/** The config key the flag writes, as operator messages name it. */
+/** The config key the flag sets, as operator messages name it. */
 export const CIMD_ALLOWED_HOSTS_CONFIG_KEY = "mcp.clientIdMetadataDocuments.allowedHosts";
 
 /** A `--cimd-allowed-hosts` value that is not a list of lowercase bare hostnames. */
@@ -1816,8 +1816,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // target is refused, the config.yaml to edit must exist with an
     // @harperfast/oauth mcp block, and (except under --dry-run, which makes no
     // remote call) the target must be shown to run from that file. Any of these
-    // failing refuses the flag with nothing changed. The write itself happens
-    // at local-config-update, before the restart.
+    // failing refuses the flag with nothing changed. The list itself is ensured
+    // at local-config-update, before the restart: written unless the file
+    // already holds that exact list, then read back.
     let cimdAllowedHosts: string[] | undefined;
     if (params.cimdAllowedHosts !== undefined) {
       currentStep = "cimd-allowed-hosts";
@@ -1862,7 +1863,10 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
               `target runs from, on its host, then restart it. Nothing was changed.`,
           );
         }
-        push(true, `${change} (to be written at the local-config-update step, before the restart); ${target.detail}`);
+        push(true,
+          `${change} (the local-config-update step, before the restart, writes it unless the file already holds that exact list, ` +
+            `then reads it back; a run that stops before that step does not write it); ${target.detail}`,
+        );
       }
     }
 
@@ -2092,8 +2096,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     const localConfigResult = updateLocalConfigMcpEnabled(true, params.localConfigPath);
     push(localConfigResult.ok, localConfigResult.detail);
 
-    // flair#2113: write --cimd-allowed-hosts and read it back. A failure here
-    // stops the flow before the restart.
+    // flair#2113: ensure --cimd-allowed-hosts (written unless the file already
+    // holds that exact list) and read it back. A failure here stops the flow
+    // before the restart.
     let writtenCimd: { hosts: string[]; path: string } | undefined;
     if (cimdAllowedHosts) {
       const written = updateLocalConfigCimdAllowedHosts(cimdAllowedHosts, params.localConfigPath);
