@@ -1,7 +1,7 @@
 - **PATCH updates existing rows; for a caller that is neither an administrator nor a trusted internal call it never creates one.**
   On every table in the flair database, a PATCH from a caller that is not an
-  administrator or a trusted internal call writes nothing when its target row
-  does not exist. The table's guard answers 404; a resource or authorization
+  administrator or a trusted internal call does not create or modify its target
+  row when that row does not exist. The table's guard answers 404; a resource or authorization
   check that refuses the request first answers with its own status (for
   example, MemoryHostSource and MemoryUsage refuse such a PATCH with 403).
   Where a resource permits creation, create the row with POST or PUT under the

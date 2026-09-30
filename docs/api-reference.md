@@ -55,8 +55,8 @@ Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, wh
 by-id deny both return **404**, never 403, so ids are not an existence oracle.
 
 **PATCH updates existing rows.** On every table, a PATCH from a caller that is
-not an administrator or a trusted internal call writes nothing when its target
-row does not exist. The table's guard answers **404**; a resource or
+not an administrator or a trusted internal call does not create or modify its
+target row when that row does not exist. The table's guard answers **404**; a resource or
 authorization check that refuses the request first answers with its own status
 (MemoryHostSource and MemoryUsage refuse such a PATCH with 403). Where a
 resource permits creation, create the row with POST or PUT, under the
