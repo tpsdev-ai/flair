@@ -1,27 +1,31 @@
 /**
- * flair#2113 — `flair mcp enable --cimd-allowed-hosts` sets the list the
- * authorization server serves, or refuses.
+ * flair#2113 — `flair mcp enable --cimd-allowed-hosts` writes the list the
+ * @harperfast/oauth component reads, only when the target runs from the edited
+ * config.yaml, and refuses otherwise.
  *
  * Before this fix the flag was parsed and echoed into a step line, and nothing
  * wrote it anywhere the @harperfast/oauth component reads.
  *
- * "The served list" is proven the way the component computes it, not by
- * trusting the function that wrote the file: `servedAllowedHosts()` parses the
+ * The list is read back the way the component computes it, not by trusting
+ * the function that wrote the file: `componentAllowedHosts()` parses the
  * config.yaml with the same `yaml` library Harper's OptionsWatcher parses a
  * component config.yaml with, takes the `@harperfast/oauth` block (what
  * `scope.options.getAll()` hands the plugin), and runs the installed
  * @harperfast/oauth's own `expandEnvVarsDeep` + `normalizeMcpSecurityConfig`
  * over `mcp`, as its `updateConfiguration` does.
  *
- * Shapes: the standalone shape (non-Fabric origin) writes the component
- * config.yaml before the restart, so its list is read back here. A Fabric
- * origin is refused before any change. House style follows
+ * Shapes: a non-Fabric target shown to run from the edited config.yaml gets
+ * the list written before the restart, and read back here. A Fabric origin, or
+ * a target not shown to run from that file, is refused before any change. The
+ * target check's process and hostname lookups are injected here, except in the
+ * one test that uses a real child process. House style follows
  * mcp-enable.test.ts: injected fetch, temp dirs, the repo's own config.yaml is
  * copied and never written.
  */
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import {
@@ -32,7 +36,9 @@ import {
   CimdAllowedHostsError,
   DEFAULT_CIMD_ALLOWED_HOSTS,
   cimdAllowedHostsFromFlag,
+  checkTargetRunsFromConfig,
   cimdAllowedHostsShapeRefusal,
+  harperAppDirFromCmdline,
   claudeAiExcludedNote,
   enableMcp,
   updateLocalConfigCimdAllowedHosts,
@@ -50,7 +56,7 @@ const ISSUER = "https://flair.example.com";
 const FABRIC_ISSUER = "https://my-flair.harperfabric.com";
 
 /** The allowedHosts the @harperfast/oauth component computes from `configPath`. */
-function servedAllowedHosts(configPath: string): unknown {
+function componentAllowedHosts(configPath: string): unknown {
   const root = harperYaml.parse(readFileSync(configPath, "utf-8"));
   const mcp = expandEnvVarsDeep(root["@harperfast/oauth"].mcp);
   normalizeMcpSecurityConfig(mcp, { warn() {} });
@@ -96,13 +102,37 @@ const CIMD_METADATA = {
   token_endpoint_auth_methods_supported: ["none"],
 };
 
+// What the fake target's ops API reports about itself (system_information with
+// the "system" attribute), and the seams that make this machine agree with it.
+const TEST_HOST = "flair-2113-test-host";
+const TARGET_PID = 4242;
+type TargetReport = { hostname?: string; pid?: number } | { status: number } | { throws: string };
+
+/**
+ * `checkTargetRunsFromConfig` seams: this machine is TEST_HOST, and TARGET_PID
+ * is a Harper process working in `cwd`, started as `harper run <appArg>`.
+ */
+function targetRunsFrom(cwd: string | null, cmdline: string | null = "node /pkg/node_modules/harper/dist/bin/harper.js run .") {
+  return {
+    readProcessCwd: (pid: number) => (pid === TARGET_PID ? cwd : null),
+    readProcessCmdline: (pid: number) => (pid === TARGET_PID ? cmdline : null),
+    localHostname: () => TEST_HOST,
+  };
+}
+
 /**
  * Injected fetch for the whole flow. Every request must target the fake
  * instance's host; anything else is recorded and fails the test. `onRestart`
  * runs when the ops-API restart arrives, so a test can read the config file
- * at the moment the instance would reload it.
+ * at the moment the instance would reload it. `target` is what the target
+ * check's system_information call gets back.
  */
-function mockFetch(host: string, onRestart?: () => void) {
+function mockFetch(
+  host: string,
+  opts: { onRestart?: () => void; target?: TargetReport } = {},
+) {
+  const onRestart = opts.onRestart;
+  const target: TargetReport = opts.target ?? { hostname: TEST_HOST, pid: TARGET_PID };
   const calls: string[] = [];
   const foreign: string[] = [];
   const creds = new Map<string, any>();
@@ -118,6 +148,15 @@ function mockFetch(host: string, onRestart?: () => void) {
       return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
     }
     const body = JSON.parse(String(init?.body ?? "{}"));
+    if (body.operation === "system_information" && (body.attributes ?? []).includes("system")) {
+      calls.push("target-check");
+      if ("throws" in target) throw new Error(target.throws);
+      if ("status" in target) return new Response("{}", { status: target.status });
+      return new Response(
+        JSON.stringify({ system: { hostname: target.hostname }, harperdb_processes: { core: [{ pid: target.pid }] } }),
+        { status: 200 },
+      );
+    }
     calls.push(`ops:${body.operation}`);
     if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
     if (body.operation === "search_by_conditions") {
@@ -201,11 +240,11 @@ describe("cimdAllowedHostsShapeRefusal — which targets can take the flag", () 
   });
 });
 
-// ─── standalone shape: the served list ──────────────────────────────────────
+// ─── target runs from the edited config.yaml: the list the component reads ──
 
-describe("enableMcp standalone shape — the served clientIdMetadataDocuments.allowedHosts", () => {
-  test("the shipped config.yaml serves the default claude.ai + claude.com", () => {
-    expect(servedAllowedHosts(REPO_CONFIG)).toEqual(DEFAULT_CIMD_ALLOWED_HOSTS);
+describe("enableMcp, non-Fabric target — the clientIdMetadataDocuments.allowedHosts the component reads", () => {
+  test("the component reads the default claude.ai + claude.com from the shipped config.yaml", () => {
+    expect(componentAllowedHosts(REPO_CONFIG)).toEqual(DEFAULT_CIMD_ALLOWED_HOSTS);
     expect(DEFAULT_CIMD_ALLOWED_HOSTS).toEqual(["claude.ai", "claude.com"]);
   });
 
@@ -218,28 +257,33 @@ describe("enableMcp standalone shape — the served clientIdMetadataDocuments.al
     expect(result.ok).toBe(true);
     expect(foreign).toEqual([]);
     expect(readFileSync(p.localConfigPath, "utf-8")).toBe(before);
-    expect(servedAllowedHosts(p.localConfigPath)).toEqual(["claude.ai", "claude.com"]);
+    expect(componentAllowedHosts(p.localConfigPath)).toEqual(["claude.ai", "claude.com"]);
     expect(result.cimdAllowedHosts).toBeUndefined();
     expect(result.steps.some((s) => s.step === "cimd-allowed-hosts")).toBe(false);
   });
 
-  test("with the flag: the component reads the new list, written before the restart", async () => {
+  test("with the flag and a target running from that file: the component reads the new list, written before the restart", async () => {
     const p = paths();
     let atRestart: unknown = "restart never called";
-    const { fetchImpl, calls, foreign } = mockFetch("flair.example.com", () => {
-      atRestart = servedAllowedHosts(p.localConfigPath);
+    const { fetchImpl, calls, foreign } = mockFetch("flair.example.com", {
+      onRestart: () => { atRestart = componentAllowedHosts(p.localConfigPath); },
     });
     const hosts = ["flair.example.com", "claude.ai"];
-    const result = await enableMcp({ ...BASE, ...p, cimdAllowedHosts: hosts, confirmSecretsApplied: true }, { fetchImpl });
+    const result = await enableMcp(
+      { ...BASE, ...p, cimdAllowedHosts: hosts, confirmSecretsApplied: true },
+      { fetchImpl, ...targetRunsFrom(dir) },
+    );
 
     expect(result.ok).toBe(true);
     expect(foreign).toEqual([]);
     expect(calls).toContain("ops:restart");
     expect(atRestart).toEqual(hosts);
-    expect(servedAllowedHosts(p.localConfigPath)).toEqual(hosts);
+    expect(componentAllowedHosts(p.localConfigPath)).toEqual(hosts);
     // The printed/returned list is the read-back, and names the file.
     expect(result.cimdAllowedHosts).toEqual(hosts);
     expect(result.cimdAllowedHostsConfigPath).toBe(p.localConfigPath);
+    // The target was checked first, before any other call.
+    expect(calls[0]).toBe("target-check");
     const written = result.steps.filter((s) => s.step === "local-config-update" && s.detail.includes("allowedHosts"));
     expect(written).toHaveLength(1);
     expect(written[0].ok).toBe(true);
@@ -253,7 +297,7 @@ describe("enableMcp standalone shape — the served clientIdMetadataDocuments.al
     const { fetchImpl } = mockFetch("flair.example.com");
     const result = await enableMcp(
       { ...BASE, ...p, cimdAllowedHosts: ["flair.example.com"], confirmSecretsApplied: true },
-      { fetchImpl },
+      { fetchImpl, ...targetRunsFrom(dir) },
     );
     expect(result.ok).toBe(true);
     expect(result.steps.some((s) => s.detail.includes("only the list's own lines were rewritten"))).toBe(true);
@@ -272,8 +316,8 @@ describe("enableMcp standalone shape — the served clientIdMetadataDocuments.al
     const res = updateLocalConfigCimdAllowedHosts(["flair.example.com"], configPath);
     expect(res.ok).toBe(true);
     expect(res.detail).toContain("re-emitted");
-    expect(res.served).toEqual(["flair.example.com"]);
-    expect(servedAllowedHosts(configPath)).toEqual(["flair.example.com"]);
+    expect(res.readBack).toEqual(["flair.example.com"]);
+    expect(componentAllowedHosts(configPath)).toEqual(["flair.example.com"]);
   });
 
   // Other shapes an operator's config.yaml may carry. Whichever path the writer
@@ -292,7 +336,7 @@ describe("enableMcp standalone shape — the served clientIdMetadataDocuments.al
       writeFileSync(configPath, text);
       const res = updateLocalConfigCimdAllowedHosts(["flair.example.com", "claude.ai"], configPath);
       expect(res.ok).toBe(true);
-      expect(servedAllowedHosts(configPath)).toEqual(["flair.example.com", "claude.ai"]);
+      expect(componentAllowedHosts(configPath)).toEqual(["flair.example.com", "claude.ai"]);
       const root = harperYaml.parse(readFileSync(configPath, "utf-8"));
       expect(root["@harperfast/oauth"].mcp.signingKeyPem).toBe("x");
     });
@@ -309,7 +353,7 @@ describe("enableMcp standalone shape — the served clientIdMetadataDocuments.al
     expect(readFileSync(p.localConfigPath, "utf-8")).toBe(before);
     const step = result.steps.find((s) => s.step === "cimd-allowed-hosts");
     expect(step?.ok).toBe(true);
-    expect(step?.detail).toContain("not written");
+    expect(step?.detail).toContain("the target was not checked, and nothing was written");
     expect(result.cimdAllowedHosts).toBeUndefined();
   });
 });
@@ -377,14 +421,17 @@ describe("enableMcp — the flag is refused, or fails loudly, where it cannot ta
     const p = paths();
     chmodSync(p.localConfigPath, 0o444);
     const { fetchImpl, calls } = mockFetch("flair.example.com");
-    const result = await enableMcp({ ...BASE, ...p, cimdAllowedHosts: ["flair.example.com"], confirmSecretsApplied: true }, { fetchImpl });
+    const result = await enableMcp(
+      { ...BASE, ...p, cimdAllowedHosts: ["flair.example.com"], confirmSecretsApplied: true },
+      { fetchImpl, ...targetRunsFrom(dir) },
+    );
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("local-config-update");
     expect(calls).not.toContain("ops:restart");
     expect(result.cimdAllowedHosts).toBeUndefined();
     const failed = result.steps.find((s) => s.step === "local-config-update" && !s.ok);
     expect(failed?.detail).toContain("not restarted");
-    expect(servedAllowedHosts(p.localConfigPath)).toEqual(["claude.ai", "claude.com"]);
+    expect(componentAllowedHosts(p.localConfigPath)).toEqual(["claude.ai", "claude.com"]);
   });
 });
 
@@ -394,7 +441,7 @@ describe("updateLocalConfigCimdAllowedHosts — the read-back decides, never the
     const res = updateLocalConfigCimdAllowedHosts(["flair.example.com"], configPath, { writeFile: () => {} });
     expect(res.ok).toBe(false);
     expect(res.detail).toContain("reads back");
-    expect(res.served).toBeUndefined();
+    expect(res.readBack).toBeUndefined();
   });
 
   test("a read-back that fails is reported as a failure", () => {
@@ -409,7 +456,7 @@ describe("updateLocalConfigCimdAllowedHosts — the read-back decides, never the
     });
     expect(res.ok).toBe(false);
     expect(res.detail).toContain("could not read it back");
-    expect(res.served).toBeUndefined();
+    expect(res.readBack).toBeUndefined();
   });
 
   test("the writer refuses an invalid list itself, and writes nothing", () => {
@@ -424,8 +471,8 @@ describe("updateLocalConfigCimdAllowedHosts — the read-back decides, never the
   });
 });
 
-describe("claudeAiExcludedNote — the closing line matches the list written", () => {
-  test("no list written, or one that includes claude.ai: the usual line holds", () => {
+describe("claudeAiExcludedNote — the note matches the list written", () => {
+  test("no list written, or one that includes claude.ai: no note", () => {
     expect(claudeAiExcludedNote(undefined)).toBeNull();
     expect(claudeAiExcludedNote(["flair.example.com", "claude.ai"])).toBeNull();
   });
@@ -436,5 +483,128 @@ describe("claudeAiExcludedNote — the closing line matches the list written", (
     expect(note).toContain("is refused");
     expect(note).toContain(JSON.stringify(["flair.example.com", "claude.com"]));
     expect(note).toContain("--cimd-allowed-hosts");
+  });
+});
+
+// ─── the target must be shown to run from the edited config.yaml ─────────────
+
+describe("enableMcp — the flag is refused unless the target runs from the edited config.yaml", () => {
+  let other: string;
+  beforeEach(() => {
+    other = mkdtempSync(join(tmpdir(), "flair-2113-target-"));
+    copyFileSync(REPO_CONFIG, join(other, "config.yaml"));
+  });
+  afterEach(() => {
+    rmSync(other, { recursive: true, force: true });
+  });
+
+  /** Run enable with the flag; assert it was refused at the target check with nothing changed. */
+  async function expectRefusedUnchanged(target: TargetReport, seams: ReturnType<typeof targetRunsFrom>, why: string) {
+    const p = paths();
+    const localBefore = readFileSync(p.localConfigPath, "utf-8");
+    const otherBefore = readFileSync(join(other, "config.yaml"), "utf-8");
+    const { fetchImpl, calls } = mockFetch("flair.example.com", { target });
+    const result = await enableMcp(
+      { ...BASE, ...p, cimdAllowedHosts: ["flair.example.com"], confirmSecretsApplied: true },
+      { fetchImpl, ...seams },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("cimd-allowed-hosts");
+    expect(result.refused?.message).toContain("mcp.clientIdMetadataDocuments.allowedHosts");
+    expect(result.refused?.message).toContain("Edit the key in the config.yaml the target runs from, on its host");
+    expect(result.refused?.message).toContain(why);
+    // The one call made is the read-only target check; nothing after it ran.
+    expect(calls).toEqual(["target-check"]);
+    expect(existsSync(p.signingKeyFilePath)).toBe(false);
+    expect(existsSync(p.secretsStagingPath)).toBe(false);
+    expect(readFileSync(p.localConfigPath, "utf-8")).toBe(localBefore);
+    expect(readFileSync(join(other, "config.yaml"), "utf-8")).toBe(otherBefore);
+    expect(result.cimdAllowedHosts).toBeUndefined();
+  }
+
+  test("distinct local and target configs: the target runs from another directory — refused, nothing written", async () => {
+    await expectRefusedUnchanged({ hostname: TEST_HOST, pid: TARGET_PID }, targetRunsFrom(other), `runs the application in ${other}`);
+  });
+
+  test("the target works in the edited file's directory but was started with another application directory — refused, nothing written", async () => {
+    await expectRefusedUnchanged(
+      { hostname: TEST_HOST, pid: TARGET_PID },
+      targetRunsFrom(dir, `node harper.js run ${other}`),
+      `runs the application in ${other}`,
+    );
+  });
+
+  test("the target's command line cannot be read, or names no run/dev application — refused, nothing written", async () => {
+    await expectRefusedUnchanged({ hostname: TEST_HOST, pid: TARGET_PID }, targetRunsFrom(dir, null), "could not be read from its command line");
+    await expectRefusedUnchanged({ hostname: TEST_HOST, pid: TARGET_PID }, targetRunsFrom(dir, "node harper.js start"), "could not be read from its command line");
+  });
+
+  test("the target reports another host — refused, nothing written", async () => {
+    await expectRefusedUnchanged({ hostname: "some-other-host", pid: TARGET_PID }, targetRunsFrom(dir), "this machine is");
+  });
+
+  test("the target's process cannot be found on this machine — refused, nothing written", async () => {
+    await expectRefusedUnchanged({ hostname: TEST_HOST, pid: TARGET_PID }, targetRunsFrom(null), "could not be read on this machine");
+  });
+
+  test("the target check gets HTTP 401 — refused, nothing written", async () => {
+    await expectRefusedUnchanged({ status: 401 }, targetRunsFrom(dir), "HTTP 401");
+  });
+
+  test("the target check cannot reach the ops API — refused, nothing written", async () => {
+    await expectRefusedUnchanged({ throws: "ECONNREFUSED" }, targetRunsFrom(dir), "ECONNREFUSED");
+  });
+
+  test("the target does not report its hostname or process id — refused, nothing written", async () => {
+    await expectRefusedUnchanged({ pid: TARGET_PID }, targetRunsFrom(dir), "did not report both its hostname and its Harper process id");
+    await expectRefusedUnchanged({ hostname: TEST_HOST }, targetRunsFrom(dir), "did not report both its hostname and its Harper process id");
+  });
+});
+
+describe("checkTargetRunsFromConfig — against a real process on this machine", () => {
+  test("matches a live process's working directory, and rejects another directory", async () => {
+    const other = mkdtempSync(join(tmpdir(), "flair-2113-other-"));
+    copyFileSync(REPO_CONFIG, join(other, "config.yaml"));
+    // Started like flair starts Harper: `... run .` in the application directory.
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", "run", "."], { cwd: dir, stdio: "ignore" });
+    try {
+      const pid = child.pid!;
+      expect(pid).toBeGreaterThan(0);
+      const report = { hostname: hostname(), pid };
+      const fetchImpl = (async (url: any) => {
+        expect(new URL(String(url)).hostname).toBe("flair.example.com");
+        return new Response(JSON.stringify({ system: { hostname: report.hostname }, harperdb_processes: { core: [{ pid }] } }), { status: 200 });
+      }) as typeof fetch;
+      // The default process cwd and command-line readers, and this machine's real hostname.
+      let result = { ok: false, detail: "not run" };
+      for (let i = 0; i < 40 && !result.ok; i++) {
+        result = await checkTargetRunsFromConfig(ISSUER, "admin", "pw", join(dir, "config.yaml"), { fetchImpl });
+        if (!result.ok) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(result.detail).toContain(`pid ${pid}`);
+      expect(result.ok).toBe(true);
+      const elsewhere = await checkTargetRunsFromConfig(ISSUER, "admin", "pw", join(other, "config.yaml"), { fetchImpl });
+      expect(elsewhere.ok).toBe(false);
+      expect(elsewhere.detail).toContain("not the directory of");
+    } finally {
+      child.kill("SIGKILL");
+      rmSync(other, { recursive: true, force: true });
+    }
+  }, 15000);
+});
+
+describe("harperAppDirFromCmdline — the application directory a Harper command line names", () => {
+  test("run/dev with ., a relative or an absolute directory, or none", () => {
+    expect(harperAppDirFromCmdline("node /x/harper.js run .", "/srv/flair")).toBe("/srv/flair");
+    expect(harperAppDirFromCmdline("node /x/harper.js run app", "/srv")).toBe("/srv/app");
+    expect(harperAppDirFromCmdline("node /x/harper.js run /opt/flair", "/srv")).toBe("/opt/flair");
+    expect(harperAppDirFromCmdline("node\0/x/harper.js\0dev\0.\0", "/srv/flair")).toBe("/srv/flair");
+    expect(harperAppDirFromCmdline("node /x/harper.js run", "/srv/flair")).toBe("/srv/flair");
+    expect(harperAppDirFromCmdline("node /x/harper.js run --foo", "/srv/flair")).toBe("/srv/flair");
+  });
+
+  test("no run/dev action: null, never a guess", () => {
+    expect(harperAppDirFromCmdline("node /x/harper.js start", "/srv/flair")).toBeNull();
+    expect(harperAppDirFromCmdline("", "/srv/flair")).toBeNull();
   });
 });

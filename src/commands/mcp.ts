@@ -461,6 +461,23 @@ async function promptText(question: string): Promise<string> {
   return answer.trim();
 }
 
+/**
+ * flair#2113 review: the closing lines of a successful `flair mcp enable`.
+ * They claim only what the run checked: the self-verify step's OAuth metadata
+ * check (the /mcp route itself is not probed), and, when this run wrote
+ * --cimd-allowed-hosts, whether that list includes claude.ai. With no flag the
+ * command does not read the list, so it says nothing about claude.ai.
+ */
+export function enableSuccessLines(result: EnableMcpResult): string[] {
+  const lines = [
+    `${render.icons.ok} ${render.wrap(render.c.bold, "The OAuth metadata check passed.")} The /mcp route itself was not probed.`,
+  ];
+  const claudeAiNote = claudeAiExcludedNote(result.cimdAllowedHosts);
+  if (claudeAiNote) lines.push(`${render.icons.info} ${claudeAiNote}`);
+  lines.push("", result.pasteBlock ?? "", "");
+  return lines;
+}
+
 function printEnableSteps(result: EnableMcpResult): void {
   console.log(`\n${render.wrap(render.c.bold, "flair mcp enable")}${result.dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
   for (const s of result.steps) {
@@ -758,9 +775,10 @@ export function register(program: Command): void {
     .option("--secrets-path <path>", "Override the secrets staging file path")
     .option(
       "--cimd-allowed-hosts <hosts>",
-      "Comma-separated lowercase hostnames. Replaces mcp.clientIdMetadataDocuments.allowedHosts in the component " +
-        "config.yaml this command edits (./config.yaml, else ~/.flair/config.yaml) and reads it back before the restart. " +
-        "Refused for a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)",
+      "Comma-separated lowercase hostnames written as mcp.clientIdMetadataDocuments.allowedHosts into the config.yaml " +
+        "this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), then read back, before the restart. " +
+        "Refused unless the target's ops API shows it runs from that file on this machine, and for a *.harperfabric.com " +
+        "instance. Without it the list is not changed (shipped: claude.ai,claude.com)",
     )
     .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
@@ -888,15 +906,7 @@ export function register(program: Command): void {
         return;
       }
 
-      const claudeAiNote = claudeAiExcludedNote(result.cimdAllowedHosts);
-      if (claudeAiNote) {
-        console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "The /mcp OAuth surface is enabled.")}`);
-        console.log(`${render.icons.info} ${claudeAiNote}\n`);
-      } else {
-        console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "claude.ai can now connect.")}\n`);
-      }
-      console.log(result.pasteBlock ?? "");
-      console.log("");
+      for (const line of enableSuccessLines(result)) console.log(line);
     });
 
   mcp

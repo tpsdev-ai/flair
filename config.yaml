@@ -59,7 +59,7 @@ authentication:
       # A LITERAL list, not a ${VAR} reference: @harperfast/oauth 2.5.0 does
       # not split a variable's value into hosts, and an unset one would replace
       # this default (flair#2113). `flair mcp enable --cimd-allowed-hosts`
-      # sets this list in the config.yaml it edits (refused for Fabric).
+      # writes this list only when the target instance runs from this file.
       allowedHosts:
         - claude.ai
         - claude.com
