@@ -170,6 +170,12 @@ afterEach(() => {
 });
 
 /** A minimal child environment: nothing inherited but PATH and the temp dir. */
+/** A path under `home` as a note shows it: the child's HOME is `home`, so the note collapses it to "~". */
+function shown(path: string): string {
+  expect(path.startsWith(`${home}/`)).toBe(true);
+  return `~${path.slice(home.length)}`;
+}
+
 function childEnv(extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = { HOME: home, USERPROFILE: home };
   if (process.env.PATH) env.PATH = process.env.PATH;
@@ -331,7 +337,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
       );
       expect(run.status).toBe(0);
       expect(run.stdout).toBe(writeFailedNote("unreachable"));
-      expect(noteOf(run.stdout)).toContain("was not saved (unreachable)");
+      expect(noteOf(run.stdout)).toContain("could not be confirmed (unreachable), so it may be missing");
     },
     CASE_BUDGET_MS,
   );
@@ -442,7 +448,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
       );
       expect(run.status).toBe(0);
       expect(noteOf(run.stdout)).toBe(
-        `Flair: the continuity state file ${path} could not be read (larger than ${SESSION_FILE_MAX_BYTES} bytes), so no pre-compaction record was saved. Remove that file to reset it; flair-session-start recreates it when a session starts.`,
+        `Flair: the continuity state file ${shown(path)} could not be read (larger than ${SESSION_FILE_MAX_BYTES} bytes), so no pre-compaction record was saved. Remove that file to reset it; flair-session-start recreates it when a session starts.`,
       );
       expect(seen).toHaveLength(0);
       expect(rows.size).toBe(0);
@@ -466,7 +472,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
       );
       expect(run.status).toBe(0);
       expect(noteOf(run.stdout)).toBe(
-        `Flair: the pre-compaction marker ${markerPath} could not be read (larger than ${SESSION_FILE_MAX_BYTES} bytes), so no record was saved. Remove that file to reset it.`,
+        `Flair: the pre-compaction marker ${shown(markerPath)} could not be read (larger than ${SESSION_FILE_MAX_BYTES} bytes), so no record was saved. Remove that file to reset it.`,
       );
       expect(seen).toHaveLength(0);
       expect(rows.size).toBe(0);
@@ -490,7 +496,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
         { deadlineMs: 8_000 },
       );
       expect(stateRun.status).toBe(0);
-      expect(noteOf(stateRun.stdout)).toContain(`the continuity state file ${statePipe} could not be read (not a regular file)`);
+      expect(noteOf(stateRun.stdout)).toContain(`the continuity state file ${shown(statePipe)} could not be read (not a regular file)`);
       expect(stateRun.elapsedMs).toBeLessThan(ENDS_ON_DEADLINE_MS);
 
       rmSync(statePipe);
@@ -505,7 +511,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
         { deadlineMs: 8_000 },
       );
       expect(markerRun.status).toBe(0);
-      expect(noteOf(markerRun.stdout)).toContain(`the pre-compaction marker ${markerPipe} could not be read (not a regular file)`);
+      expect(noteOf(markerRun.stdout)).toContain(`the pre-compaction marker ${shown(markerPipe)} could not be read (not a regular file)`);
       expect(markerRun.elapsedMs).toBeLessThan(ENDS_ON_DEADLINE_MS);
       expect(seen).toHaveLength(0);
       expect(rows.size).toBe(0);
@@ -526,7 +532,7 @@ describe("flair-precompact entry point (spawned, real client)", () => {
       expect(run.status).toBe(0);
       expect(seen).toHaveLength(1);
       expect(seen[0]!.authorization).toBeUndefined(); // never admin Basic
-      expect(noteOf(run.stdout)).toContain("was not saved (auth)");
+      expect(noteOf(run.stdout)).toContain("could not be confirmed (auth), so it may be missing");
       expect(run.stdout).not.toContain(ADMIN_PASSWORD_SENTINEL);
       expect(rows.size).toBe(0);
     },

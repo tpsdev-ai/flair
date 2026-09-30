@@ -52,11 +52,13 @@
  * quotes USER turns, where pasted credentials really do appear, so every free
  * text taken from the transcript (instruction sentences, task subjects, action
  * descriptions and file paths, the assistant message) passes redactSecrets()
- * BEFORE it is split, cut or stored; a task's status label is kept only when
- * it is status-shaped and redaction would not change it, else shown as "open"
- * (statusLabel). The redaction is pattern-based and best effort (it
- * recognizes common credential shapes, not every secret); the size bound and
- * the ephemeral, private tier remain the containment.
+ * BEFORE it is split, cut or stored (a user turn's harness markup is removed
+ * first, from the raw text, and only the text left is redacted); a task's
+ * status label is kept only when it is status-shaped and redaction would not
+ * change it, else shown as "open" (statusLabel). The redaction is
+ * pattern-based and best effort (it recognizes common credential shapes, not
+ * every secret); the size bound and the ephemeral, private tier remain the
+ * containment.
  *
  * STORAGE: one Memory row per compaction when the tail holds something to
  * record and the write succeeds (a later rerun updates it; two runs at the
@@ -383,7 +385,8 @@ const HARNESS_TURN_RE = /<(?:task-notification|command-(?:name|message|args)|loc
  * The user-authored text of a user turn, or null for a turn the harness wrote.
  * System-reminder blocks are removed with their content; other markup tags
  * are removed and the text between them kept (a chat bridge wraps a real
- * message in a tag).
+ * message in a tag). Called on the RAW turn, before redactSecrets: the
+ * extractor redacts only what this returns.
  */
 export function userTurnText(raw: string): string | null {
   if (HARNESS_TURN_RE.test(raw)) return null;
@@ -515,8 +518,11 @@ export function extractFromTranscript(lines: readonly string[]): PreCompactExtra
       if (entry.isMeta === true || entry.isCompactSummary === true) continue;
       const raw = textOf(message.content);
       if (raw === null) continue;
-      const text = userTurnText(redactSecrets(raw));
-      if (text !== null) instructions.push(...extractInstructions(text));
+      // Harness markup first, on the RAW text: the marker check, the
+      // system-reminder blocks and the tags. Redaction comes after, on the
+      // text that is left, so it never alters the markup those checks read.
+      const text = userTurnText(raw);
+      if (text !== null) instructions.push(...extractInstructions(redactSecrets(text)));
       continue;
     }
 

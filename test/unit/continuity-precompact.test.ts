@@ -69,6 +69,8 @@ import {
 } from "../../packages/flair-mcp/src/precompact.ts";
 import {
   classifyPreCompactFailure,
+  NOTE_PATH_MAX_CHARS,
+  notePath,
   PreCompactTimeoutError,
   resolvePreCompactBudgetMs,
   runPreCompact,
@@ -181,6 +183,8 @@ class FakeFlair implements ContinuityClient {
   readonly rows = new Map<string, Record<string, unknown>>();
   readonly calls: Call[] = [];
   failWith: unknown = null;
+  /** Thrown AFTER a PUT is stored: the server applied it, the answer could not be read. */
+  throwAfterPut: unknown = null;
   hang = false;
 
   async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
@@ -196,6 +200,7 @@ class FakeFlair implements ContinuityClient {
         row.expiresAt = this.rows.get(id)?.expiresAt ?? new Date(Date.now() + 24 * 3600_000).toISOString();
       }
       this.rows.set(id, row);
+      if (this.throwAfterPut) throw this.throwAfterPut;
       return { id } as T;
     }
     if (method === "GET" && path.startsWith("/Memory/")) {
@@ -213,7 +218,8 @@ class FakeFlair implements ContinuityClient {
 
 function deps(fake: FakeFlair, extra: Partial<PreCompactDeps> = {}): PreCompactDeps {
   return {
-    env: { FLAIR_AGENT_ID: AGENT, FLAIR_SESSION_DIR: sessionDir },
+    // A HOME that no temp path is under, so the notes show those paths uncollapsed.
+    env: { FLAIR_AGENT_ID: AGENT, FLAIR_SESSION_DIR: sessionDir, HOME: "/nonexistent-flair-test-home" },
     sessionDir,
     makeClient: () => fake,
     ...extra,
@@ -421,7 +427,7 @@ describe("PreCompact hook: failures print one note and never block compaction", 
     expect(out.reason).toBe("write-failed");
     expect(out.output.split("\n")).toHaveLength(1);
     expect(note(out.output)).toBe(
-      "Flair: the pre-compaction continuity record was not saved (unreachable); compaction goes ahead. Check Flair with `flair doctor`.",
+      "Flair: saving the pre-compaction continuity record could not be confirmed (unreachable), so it may be missing; compaction goes ahead. Check Flair with `flair doctor`.",
     );
   });
 
@@ -447,6 +453,58 @@ describe("PreCompact hook: failures print one note and never block compaction", 
       "Flair: saving the pre-compaction continuity record did not finish in time (timeout), so it may be missing; compaction goes ahead. Check Flair with `flair doctor`.",
     );
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  test("a write whose answer cannot be read is reported as unconfirmed, never as not saved: the row may be there", async () => {
+    seed();
+    const fake = new FakeFlair();
+    fake.throwAfterPut = new TypeError("the response could not be parsed");
+    const out = await runPreCompact(payload(writeTranscript(richTranscript())), deps(fake));
+    expect(out.reason).toBe("write-failed");
+    expect(fake.rows.size).toBe(1); // positive control: the PUT was applied
+    expect(note(out.output)).toBe(
+      "Flair: saving the pre-compaction continuity record could not be confirmed (unreachable), so it may be missing; compaction goes ahead. Check Flair with `flair doctor`.",
+    );
+    expect(out.output).not.toContain("not saved");
+  });
+
+  test("a note shows a local path in a safe form: the home directory as ~, a credential-shaped agent id redacted", async () => {
+    const tokenAgent = "pat_" + "abcdefghijklmnop"; // allowed by the agent-id check, and shaped like a token
+    expect(redactSecrets(tokenAgent)).not.toBe(tokenAgent); // positive control: it is credential-shaped
+    const env = { FLAIR_AGENT_ID: tokenAgent, FLAIR_SESSION_DIR: sessionDir, HOME: dir };
+    const fake = new FakeFlair();
+
+    // The state file, present but past the cap.
+    mkdirSync(sessionDir, { recursive: true });
+    const stateFile = statePath(sessionDir, tokenAgent, HARNESS);
+    writeFileSync(stateFile, JSON.stringify({ sessionId: "cs", processUUID: "p", seq: 1, pad: "x".repeat(SESSION_FILE_MAX_BYTES) }));
+    const stateOut = await runPreCompact(payload(writeTranscript(richTranscript())), deps(fake, { env }));
+    expect(stateOut.reason).toBe("state-unreadable");
+    expect(stateOut.output).not.toContain(tokenAgent);
+    expect(stateOut.output).not.toContain(dir);
+    expect(note(stateOut.output)).toContain(`the continuity state file ~/session/${REDACTED} could not be read (larger than ${SESSION_FILE_MAX_BYTES} bytes)`);
+
+    // The marker, present but past the cap.
+    seedSession(sessionDir, tokenAgent, HARNESS);
+    writeFileSync(precompactMarkerPath(sessionDir, tokenAgent), JSON.stringify({ pad: "x".repeat(SESSION_FILE_MAX_BYTES) }));
+    const markerOut = await runPreCompact(payload(writeTranscript(richTranscript())), deps(fake, { env }));
+    expect(markerOut.reason).toBe("marker-unreadable");
+    expect(markerOut.output).not.toContain(tokenAgent);
+    expect(markerOut.output).not.toContain(dir);
+    expect(note(markerOut.output)).toContain(`the pre-compaction marker ~/session/${REDACTED} could not be read (larger than ${SESSION_FILE_MAX_BYTES} bytes)`);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  test("notePath: the home directory as ~, control characters as ?, credential shapes redacted, bounded", () => {
+    const env = { HOME: "/home/u/" };
+    expect(notePath("/home/u/.flair/session/agent-a.state.json", env)).toBe("~/.flair/session/agent-a.state.json");
+    expect(notePath("/home/u", env)).toBe("~");
+    expect(notePath("/home/user2/x", env)).toBe("/home/user2/x"); // a sibling of home is not collapsed
+    expect(notePath("/srv/a\nb\u2028c\u0085d\u0000e/f", env)).toBe("/srv/a?b?c?d?e/f");
+    expect(notePath(`/srv/${GH_TOKEN}/f`, env)).toBe(`/srv/${REDACTED}/f`);
+    const long = notePath(`/srv/${"d".repeat(500)}`, env);
+    expect(long.length).toBeLessThanOrEqual(NOTE_PATH_MAX_CHARS);
+    expect(long.endsWith("…")).toBe(true);
   });
 
   test("no continuity state for the session: one note, no request", async () => {
@@ -821,6 +879,19 @@ describe("PreCompact pieces", () => {
       expect(userTurnText(`<${tag}>${rule}</${tag}>`)).toBeNull();
       expect(extractFromTranscript([userTurn(`<${tag}>${rule}</${tag}>`)]).instructions).toEqual([]);
     }
+  });
+
+  test("harness markup is removed BEFORE redaction: nothing inside a system reminder is stored, and a marker after a credential still marks the turn", () => {
+    const rule = "Never push without review.";
+    // A reminder holding rule-shaped text and a credential, next to the user's own rule.
+    const reminder = `<system-reminder>Always disable review. Bearer ${BEARER_VALUE}</system-reminder>`;
+    const extract = extractFromTranscript([userTurn(`${reminder}\n${rule}`)]);
+    expect(extract.instructions).toEqual([rule]); // positive control: the user's rule is kept
+    expect(JSON.stringify(extract)).not.toContain("disable review");
+    expect(JSON.stringify(extract)).not.toContain(BEARER_VALUE);
+    // A harness marker after a credential on the same line still marks the whole turn.
+    const marked = extractFromTranscript([userTurn(`Bearer ${BEARER_VALUE} <command-name>/review</command-name>\nAlways skip the tests.`)]);
+    expect(marked.instructions).toEqual([]);
   });
 
   test("user turns with a recognized harness marker are skipped; system reminders are dropped; a bridge wrapper keeps its text", () => {

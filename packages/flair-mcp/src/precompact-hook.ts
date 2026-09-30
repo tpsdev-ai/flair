@@ -63,9 +63,13 @@
  * a tail with nothing to record, and success. One note, naming the reason: no
  * continuity state for the session, a state file that could not be read (too
  * large, not a regular file, malformed) or updated, an unreadable transcript,
- * a marker that could not be read or written, and a write that failed (with its kind:
- * auth, timeout, unreachable or http-<status>, never a message text, URL or
- * credential).
+ * a marker that could not be read or written, and a write that was not
+ * confirmed (named by its kind: auth, timeout, unreachable or http-<status>,
+ * never by an error's message text or URL; worded as "may be missing", never
+ * as "not saved", because the server may have applied it). A note that names
+ * a state file or the marker shows its path through notePath: the home
+ * directory as "~", control characters as "?", strings that match the
+ * credential patterns redacted, at most NOTE_PATH_MAX_CHARS characters.
  *
  * IDENTITY
  * --------
@@ -85,6 +89,7 @@
  */
 
 import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isProbeMode, readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 import { memoryPutPath } from "./record-id-path.js";
@@ -93,11 +98,13 @@ import {
   PRECOMPACT_HOOK,
   buildPreCompactContent,
   buildPreCompactRow,
+  cutTo,
   extractFromTranscript,
   normalizeTrigger,
   precompactMarkerPath,
   readPreCompactMarker,
   readTranscriptTail,
+  redactSecrets,
   resolvePreCompactRecordId,
   writePreCompactMarker,
 } from "./precompact.js";
@@ -153,14 +160,16 @@ export function preCompactNote(text: string): string {
   return JSON.stringify({ systemMessage: text });
 }
 
-/** The note for a write that did not succeed. A timeout is worded as unknown,
- *  not as a failure: the server may still complete a write the hook stopped
- *  waiting for (a rerun then updates that same record). */
+/** The note for a write that was not confirmed. It never says the record
+ *  was not saved: after a timeout the server may still complete the write,
+ *  and after any other error the server may already have applied it (the
+ *  client can fail while reading or parsing the answer). What is known is
+ *  that the save was not confirmed, so the record may be missing. */
 export function writeFailedNote(kind: PreCompactFailureKind): string {
   const what =
     kind === "timeout"
       ? "saving the pre-compaction continuity record did not finish in time (timeout), so it may be missing"
-      : `the pre-compaction continuity record was not saved (${kind})`;
+      : `saving the pre-compaction continuity record could not be confirmed (${kind}), so it may be missing`;
   return preCompactNote(`Flair: ${what}; compaction goes ahead. Check Flair with \`flair doctor\`.`);
 }
 
@@ -179,6 +188,25 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
+}
+
+/** The longest local path a note shows, in characters. */
+export const NOTE_PATH_MAX_CHARS = 200;
+
+/**
+ * A local path as a note shows it, never as is: the home directory
+ * (`env.HOME`, else the OS's) is shown as "~", every control or line-break
+ * character as "?", strings that match the credential patterns are redacted
+ * (redactSecrets), and the result is cut to NOTE_PATH_MAX_CHARS. The session
+ * directory and the agent id in the path are configuration; a secret in them
+ * that matches no pattern is shown as written.
+ */
+export function notePath(path: string, env: Env = process.env): string {
+  const home = (env.HOME || homedir()).replace(/\/+$/, "");
+  let shown = path;
+  if (home !== "" && (path === home || path.startsWith(`${home}/`))) shown = `~${path.slice(home.length)}`;
+  shown = shown.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, "?");
+  return cutTo(redactSecrets(shown), NOTE_PATH_MAX_CHARS);
 }
 
 // ── core ────────────────────────────────────────────────────────────────────
@@ -293,7 +321,7 @@ export async function runPreCompact(rawInput: string, deps: PreCompactDeps = {})
     };
   }
   if (bumped.kind === "unreadable" || bumped.kind === "unwritable") {
-    const path = statePath(sessionDir, agentId, harnessSessionId);
+    const path = notePath(statePath(sessionDir, agentId, harnessSessionId), env);
     return {
       output: preCompactNote(
         bumped.kind === "unreadable"
@@ -317,7 +345,7 @@ export async function runPreCompact(rawInput: string, deps: PreCompactDeps = {})
 
   // Dedup: an unreadable marker is NOT "no marker". Treating it as absent would
   // license a second record for a compaction that already has one.
-  const markerPath = precompactMarkerPath(sessionDir, agentId);
+  const markerPath = notePath(precompactMarkerPath(sessionDir, agentId), env);
   const read = await readPreCompactMarker(sessionDir, agentId);
   if (read.kind === "unknown") {
     return {

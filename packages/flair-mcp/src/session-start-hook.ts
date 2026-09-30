@@ -146,11 +146,14 @@ interface SessionStartInput {
 // (./precompact-hook.ts) saved a record, this hook shows it FIRST: after a
 // compaction, the record this harness session saved; after a restart, the
 // one the previous session saved, when the marker still names that session.
-// Which record is decided from the local marker file alone
-// (./precompact.ts resolvePreCompactLookup: a bounded, asynchronous read),
-// then fetched with one `GET /Memory/<id>`; both run
-// concurrently with bootstrap under the same continuity timeout as the resume
-// hint. No marker ⇒ no request; any failure ⇒ nothing shown, boot proceeds.
+// Which record is decided locally, without a request: the marker file
+// (./precompact.ts resolvePreCompactLookup: a bounded, asynchronous read) is
+// matched against this harness session after a compaction, or against the
+// prior continuity pointer after a restart. The record is then fetched with
+// one `GET /Memory/<id>`; the lookup and that GET run concurrently with
+// bootstrap under the same continuity timeout as the resume hint. No marker,
+// or no match ⇒ no record GET (session start's other requests are
+// unchanged); any failure ⇒ nothing shown, boot proceeds.
 // The record is shown as quoted data between fixed BEGIN/END lines with every
 // line prefixed (./precompact.ts formatPreCompactContext).
 
