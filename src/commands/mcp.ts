@@ -38,6 +38,8 @@ import {
   mcpStatus,
   checkLocalOriginRefusal,
   selfVerifyMcpMetadata,
+  cimdAllowedHostsFromFlag,
+  claudeAiExcludedNote,
   type EnableMcpResult,
   type SecretsMechanism,
 } from "../lib/mcp-enable.js";
@@ -754,7 +756,12 @@ export function register(program: Command): void {
     .option("--principal-kind <human|agent>", "Kind for a newly-created principal", "human")
     .option("--secrets-mechanism <fabric-env-secrets|env-file>", "Override the shape-aware secrets mechanism (else auto-detected from --instance)")
     .option("--secrets-path <path>", "Override the secrets staging file path")
-    .option("--cimd-allowed-hosts <hosts>", "Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)")
+    .option(
+      "--cimd-allowed-hosts <hosts>",
+      "Comma-separated lowercase hostnames. Replaces mcp.clientIdMetadataDocuments.allowedHosts in the component " +
+        "config.yaml this command edits (./config.yaml, else ~/.flair/config.yaml) and reads it back before the restart. " +
+        "Refused for a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)",
+    )
     .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
@@ -774,6 +781,15 @@ export function register(program: Command): void {
       const localCheck = checkLocalOriginRefusal(instance);
       if (localCheck.refused) {
         console.error(`${render.icons.error} ${localCheck.message}`);
+        process.exit(1);
+      }
+
+      // flair#2113: an invalid --cimd-allowed-hosts, or one this target cannot
+      // take, is refused here, before anything is asked for. An explicit empty
+      // value is refused too: it used to be dropped as if the flag were absent.
+      const cimdFlag = cimdAllowedHostsFromFlag(opts.cimdAllowedHosts, instance);
+      if (cimdFlag.error) {
+        console.error(`${render.icons.error} ${cimdFlag.error}`);
         process.exit(1);
       }
 
@@ -809,10 +825,6 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      const cimdAllowedHosts: string[] | undefined = opts.cimdAllowedHosts
-        ? String(opts.cimdAllowedHosts).split(",").map((h: string) => h.trim()).filter(Boolean)
-        : undefined;
-
       const result = await enableMcp(
         {
           instance,
@@ -828,7 +840,7 @@ export function register(program: Command): void {
           signingKeyFilePath: opts.signingKeyFile,
           secretsMechanism,
           secretsStagingPath: opts.secretsPath,
-          cimdAllowedHosts,
+          cimdAllowedHosts: cimdFlag.hosts,
           dryRun,
           confirmSecretsApplied: Boolean(opts.confirmSecretsApplied),
         },
@@ -876,7 +888,13 @@ export function register(program: Command): void {
         return;
       }
 
-      console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "claude.ai can now connect.")}\n`);
+      const claudeAiNote = claudeAiExcludedNote(result.cimdAllowedHosts);
+      if (claudeAiNote) {
+        console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "The /mcp OAuth surface is enabled.")}`);
+        console.log(`${render.icons.info} ${claudeAiNote}\n`);
+      } else {
+        console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "claude.ai can now connect.")}\n`);
+      }
       console.log(result.pasteBlock ?? "");
       console.log("");
     });

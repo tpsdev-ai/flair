@@ -143,7 +143,7 @@
 import { probeSecretsCapability, pushSecrets, PROCESS_ENV_TIER } from "./secrets-push.js";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
@@ -252,6 +252,123 @@ export type SecretsMechanism = "fabric-env-secrets" | "env-file";
 export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMechanism): SecretsMechanism {
   if (override) return override;
   return isFabricOrigin(instanceUrl) ? "fabric-env-secrets" : "env-file";
+}
+
+// ─── --cimd-allowed-hosts (flair#2113) ───────────────────────────────────────
+//
+// The served list is the literal `mcp.clientIdMetadataDocuments.allowedHosts`
+// in the component config.yaml's `@harperfast/oauth` block. It cannot come from
+// a whole-token `${VAR}` the way `mcp.issuer` does. Measured on the installed
+// @harperfast/oauth 2.5.0 (dist/lib/config.js, `expandEnvVar` +
+// `normalizeMcpSecurityConfig`): a string there becomes a ONE-entry list and is
+// never split on commas; an unset variable leaves the literal placeholder as
+// the only entry, so the claude.ai + claude.com default would stop applying;
+// and an empty value becomes `[]`, for which dist/lib/mcp/cimd.js skips its
+// allowedHosts gate. So `enable` writes the list into the component
+// config.yaml it already edits for mcp.enabled (the standalone shape), reads it
+// back, and refuses the flag where it writes no config.yaml: a Fabric origin,
+// whose config.yaml is the one deployed with the component.
+
+/** The config key the flag sets, as operator messages name it. */
+export const CIMD_ALLOWED_HOSTS_CONFIG_KEY = "mcp.clientIdMetadataDocuments.allowedHosts";
+
+/** A `--cimd-allowed-hosts` value that is not a list of lowercase bare hostnames. */
+export class CimdAllowedHostsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CimdAllowedHostsError";
+  }
+}
+
+const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * Validate `--cimd-allowed-hosts` entries: lowercase bare hostnames only.
+ * Throws `CimdAllowedHostsError` for an empty list, or for the first bad entry
+ * (named, 1-based). Spaces around an entry are trimmed; nothing else is
+ * rewritten — an uppercase entry is refused, not lowercased — so the list
+ * written is the list typed, minus those spaces.
+ */
+export function validateCimdAllowedHosts(entries: readonly string[]): string[] {
+  const flag = "--cimd-allowed-hosts";
+  if (entries.length === 0 || (entries.length === 1 && String(entries[0]).trim() === "")) {
+    throw new CimdAllowedHostsError(
+      `${flag}: no hostnames given. Pass one or more lowercase hostnames, comma-separated (for example claude.ai,claude.com).`,
+    );
+  }
+  const hosts: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const host = String(entries[i]).trim();
+    const refuse = (why: string): never => {
+      throw new CimdAllowedHostsError(`${flag} entry ${i + 1} ${why}`);
+    };
+    if (host === "") refuse("is empty. Remove the extra comma, or pass a hostname.");
+    const shown = JSON.stringify(host);
+    if (host.includes("*")) refuse(`(${shown}) is a wildcard. List each hostname exactly.`);
+    if (host.includes("/")) refuse(`(${shown}) is a URL or path. Pass the bare hostname only.`);
+    if (host.startsWith("[") || host.split(":").length > 2) refuse(`(${shown}) looks like an IPv6 address. Pass a hostname.`);
+    if (host.includes(":")) refuse(`(${shown}) contains ":" (a port or scheme). Pass the bare hostname only.`);
+    if (host !== host.toLowerCase()) refuse(`(${shown}) has uppercase letters. Hostnames must be lowercase.`);
+    const labels = host.split(".");
+    if (host.length > 253 || !labels.every((label) => HOSTNAME_LABEL.test(label))) {
+      refuse(
+        `(${shown}) is not a valid hostname: dot-separated labels of a-z, 0-9 and inner hyphens, ` +
+          `each 1-63 characters, 253 in all at most.`,
+      );
+    }
+    if (/^[0-9]+$/.test(labels[labels.length - 1])) refuse(`(${shown}) ends in a numeric label, as an IP address does. Pass a hostname.`);
+    if (hosts.includes(host)) refuse(`(${shown}) repeats an earlier entry.`);
+    hosts.push(host);
+  }
+  return hosts;
+}
+
+/**
+ * The refusal for a target where `enable` cannot set the served list, else
+ * null. `enable` writes a config.yaml only on its non-Fabric branch, and this
+ * uses the same `isFabricOrigin` test that picks that branch.
+ */
+export function cimdAllowedHostsShapeRefusal(instanceUrl: string): string | null {
+  if (!isFabricOrigin(instanceUrl)) return null;
+  return (
+    `--cimd-allowed-hosts is refused for a Fabric instance (${new URL(instanceUrl).hostname}): ` +
+    `the served list is ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} in the @harperfast/oauth block of the config.yaml ` +
+    `deployed with the component, and this command does not write that file. ` +
+    `Set the key in the config.yaml you deploy, then redeploy. Nothing was changed.`
+  );
+}
+
+/**
+ * The CLI's reading of `--cimd-allowed-hosts`: `{}` when the flag is absent,
+ * `{ hosts }` when it is valid for this target, `{ error }` otherwise. An
+ * explicit empty value is an error, never "absent".
+ */
+export function cimdAllowedHostsFromFlag(raw: unknown, instanceUrl: string): { hosts?: string[]; error?: string } {
+  if (raw === undefined) return {};
+  let hosts: string[];
+  try {
+    hosts = validateCimdAllowedHosts(String(raw).split(","));
+  } catch (err: any) {
+    return { error: err?.message ?? String(err) };
+  }
+  const refusal = cimdAllowedHostsShapeRefusal(instanceUrl);
+  return refusal ? { error: refusal } : { hosts };
+}
+
+/**
+ * A successful `enable` closes with "claude.ai can now connect." That line is
+ * false when the list this run applied leaves claude.ai out:
+ * dist/lib/mcp/cimd.js treats a client_id URL whose host is not on a
+ * non-empty allowedHosts as an unknown client. Returns the note to print
+ * instead, or null when this run applied no list or one with claude.ai.
+ */
+export function claudeAiExcludedNote(written: readonly string[] | undefined): string | null {
+  if (!written || written.includes("claude.ai")) return null;
+  return (
+    `claude.ai is not in the ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} list this run applied (${JSON.stringify(written)}), ` +
+    `so while that list is served, a CIMD client_id URL on claude.ai is refused. ` +
+    `Re-run with claude.ai in --cimd-allowed-hosts to allow it.`
+  );
 }
 
 // ─── RS256 signing keypair ───────────────────────────────────────────────────
@@ -391,6 +508,19 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
 export const MCP_ENABLED_ENV_REFERENCE = "${FLAIR_MCP_OAUTH}";
 
 /**
+ * The local component config.yaml `enable` edits: `explicitPath` alone when
+ * given, otherwise `./config.yaml`, then `~/.flair/config.yaml` — the first
+ * that exists. Shared by `updateLocalConfigMcpEnabled` and the flair#2113
+ * allowedHosts writer so both edit the same file.
+ */
+function resolveLocalConfigPath(explicitPath?: string): { configPath: string | null; candidates: string[] } {
+  const candidates = explicitPath
+    ? [explicitPath]
+    : ["config.yaml", join(resolveHome(), ".flair", "config.yaml")];
+  return { configPath: candidates.find((p) => existsSync(p)) ?? null, candidates };
+}
+
+/**
  * Set mcp.enabled in a local component config.yaml to the flair#1152 shape.
  * Best-effort: returns `{ ok: false }` with a reason when the file can't be
  * found or parsed.
@@ -408,17 +538,7 @@ export function updateLocalConfigMcpEnabled(
   enabled: boolean,
   explicitPath?: string,
 ): { ok: boolean; detail: string } {
-  const candidates = explicitPath
-    ? [explicitPath]
-    : ["config.yaml", join(resolveHome(), ".flair", "config.yaml")];
-
-  let configPath: string | null = null;
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      configPath = p;
-      break;
-    }
-  }
+  const { configPath, candidates } = resolveLocalConfigPath(explicitPath);
 
   // The value the file should carry for this call (flair#1152): the env
   // reference when enabling, literal false when disabling.
@@ -488,6 +608,229 @@ export function updateLocalConfigMcpEnabled(
   }
 
   return { ok: true, detail: `mcp.enabled set to ${targetLabel} in ${configPath}` };
+}
+
+// ─── Local config.yaml: clientIdMetadataDocuments.allowedHosts (flair#2113) ──
+
+type ReadConfigFile = (path: string) => string;
+type WriteConfigFile = (path: string, data: string) => void;
+
+const readConfigFile: ReadConfigFile = (path) => readFileSync(path, "utf-8");
+const writeConfigFile: WriteConfigFile = (path, data) => writeFileSync(path, data, { encoding: "utf-8" });
+
+/** Flat rather than a discriminated union: tsconfig.cli.json (strict: false)
+ *  does not narrow on `ok`. `raw`/`doc`/`mcp` are meaningful only when `ok`. */
+interface LoadedOauthMcp {
+  ok: boolean;
+  detail: string;
+  raw?: string;
+  doc?: any;
+  mcp?: any;
+}
+
+/** Parse `path` and reach its `@harperfast/oauth` → `mcp` mapping. Every failure is a named `ok: false`. */
+function loadOauthMcpBlock(path: string, readFile: ReadConfigFile): LoadedOauthMcp {
+  let raw: string;
+  try {
+    raw = readFile(path);
+  } catch (err: any) {
+    return { ok: false, detail: `cannot read ${path}: ${err?.message ?? err}` };
+  }
+  let doc: any;
+  try {
+    doc = yaml.load(raw);
+  } catch (err: any) {
+    return { ok: false, detail: `cannot parse ${path} as YAML: ${err?.message ?? err}` };
+  }
+  const isMapping = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v);
+  const mcp = isMapping(doc) && isMapping(doc["@harperfast/oauth"]) ? doc["@harperfast/oauth"].mcp : undefined;
+  if (!isMapping(mcp)) return { ok: false, detail: `${path} has no @harperfast/oauth block with an mcp mapping` };
+  const cimd = mcp.clientIdMetadataDocuments;
+  if (cimd !== undefined && cimd !== null && !isMapping(cimd)) {
+    return { ok: false, detail: `${path}: mcp.clientIdMetadataDocuments is not a mapping` };
+  }
+  return { ok: true, detail: `${path} parsed`, raw, doc, mcp };
+}
+
+function sameHostList(value: unknown, hosts: readonly string[]): boolean {
+  return Array.isArray(value) && value.length === hosts.length && value.every((h, i) => h === hosts[i]);
+}
+
+export interface LocalCimdAllowedHostsRead {
+  ok: boolean;
+  detail: string;
+  path?: string;
+  /** The value the file carries now (`undefined` when the key is absent). */
+  current?: unknown;
+}
+
+/**
+ * Read-only: which config.yaml would `updateLocalConfigCimdAllowedHosts` write,
+ * and what list does it carry now? Same file resolution as
+ * `updateLocalConfigMcpEnabled`. `enable` runs this before any step with a
+ * side effect, so a missing or unusable file refuses the flag up front.
+ */
+export function readLocalConfigCimdAllowedHosts(
+  explicitPath?: string,
+  deps: { readFile?: ReadConfigFile } = {},
+): LocalCimdAllowedHostsRead {
+  const { configPath: found, candidates } = resolveLocalConfigPath(explicitPath);
+  if (!found) return { ok: false, detail: `no config.yaml found (tried: ${candidates.join(", ")})` };
+  const configPath = resolve(found);
+  const loaded = loadOauthMcpBlock(configPath, deps.readFile ?? readConfigFile);
+  if (!loaded.ok) return { ok: false, path: configPath, detail: loaded.detail };
+  return {
+    ok: true,
+    path: configPath,
+    current: loaded.mcp.clientIdMetadataDocuments?.allowedHosts,
+    detail: `${configPath} carries ${CIMD_ALLOWED_HOSTS_CONFIG_KEY}: ${JSON.stringify(loaded.mcp.clientIdMetadataDocuments?.allowedHosts ?? null)}`,
+  };
+}
+
+/**
+ * Replace the value of `@harperfast/oauth` → `mcp` → `clientIdMetadataDocuments`
+ * → `allowedHosts` in `raw` with a block sequence of `hosts`, touching no line
+ * outside the list's own lines (comments between its items go with it).
+ * Returns null when the key is absent, appears more than once, or has a value
+ * this line scan does not handle (for example a flow sequence spanning lines);
+ * the caller then re-emits the parsed document instead. The caller also
+ * re-parses the result and compares it with the intended document before
+ * using it.
+ */
+function replaceAllowedHostsLines(raw: string, hosts: readonly string[]): string | null {
+  const path = ["@harperfast/oauth", "mcp", "clientIdMetadataDocuments", "allowedHosts"];
+  const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+  const lines = raw.split(eol);
+  const skippable = (line: string) => /^\s*(#.*)?$/.test(line);
+  const indentOf = (line: string) => line.length - line.trimStart().length;
+  const keyLine = /^\s*(?:"([^"]*)"|'([^']*)'|([^\s#'"\-][^:#]*?))\s*:(?:\s+(.*))?$/;
+
+  const stack: { indent: number; key: string }[] = [];
+  let at = -1;
+  let atIndent = 0;
+  let atRest = "";
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (skippable(line)) continue;
+    const indent = indentOf(line);
+    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop();
+    const m = keyLine.exec(line);
+    if (!m) continue;
+    stack.push({ indent, key: m[1] ?? m[2] ?? m[3] });
+    if (stack.length === path.length && stack.every((s, k) => s.key === path[k])) {
+      if (at !== -1) return null;
+      at = i;
+      atIndent = indent;
+      atRest = (m[4] ?? "").replace(/(^|\s+)#.*$/, "").trim();
+    }
+  }
+  if (at === -1) return null;
+
+  let end = at;
+  if (atRest === "") {
+    for (let j = at + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (skippable(line)) continue;
+      const indent = indentOf(line);
+      if (indent > atIndent || (indent === atIndent && line.trimStart().startsWith("-"))) {
+        end = j;
+        continue;
+      }
+      break;
+    }
+  } else if (atRest.startsWith("[") && !atRest.endsWith("]")) {
+    return null;
+  }
+  const pad = " ".repeat(atIndent);
+  const block = [`${pad}allowedHosts:`, ...hosts.map((h) => `${pad}  - ${JSON.stringify(h)}`)];
+  return [...lines.slice(0, at), ...block, ...lines.slice(end + 1)].join(eol);
+}
+
+/**
+ * Set `mcp.clientIdMetadataDocuments.allowedHosts` in the local component
+ * config.yaml (same file resolution as `updateLocalConfigMcpEnabled`) to
+ * `hosts`, then read the file back. `ok: true` only when the read-back equals
+ * `hosts`; `served` is that read-back, never the intended value.
+ *
+ * The edit rewrites only the list's own lines when it can find them and the
+ * result parses to the intended document, so comments outside the list
+ * survive; otherwise it re-emits the parsed document, as
+ * `updateLocalConfigMcpEnabled` does, and says so in `detail`.
+ */
+export function updateLocalConfigCimdAllowedHosts(
+  hosts: readonly string[],
+  explicitPath?: string,
+  deps: { readFile?: ReadConfigFile; writeFile?: WriteConfigFile } = {},
+): { ok: boolean; detail: string; path?: string; served?: string[] } {
+  const readFile = deps.readFile ?? readConfigFile;
+  const writeFile = deps.writeFile ?? writeConfigFile;
+  let list: string[];
+  try {
+    list = validateCimdAllowedHosts(hosts);
+  } catch (err: any) {
+    return { ok: false, detail: err?.message ?? String(err) };
+  }
+  const { configPath: found, candidates } = resolveLocalConfigPath(explicitPath);
+  if (!found) return { ok: false, detail: `no config.yaml found (tried: ${candidates.join(", ")})` };
+  const configPath = resolve(found);
+  const loaded = loadOauthMcpBlock(configPath, readFile);
+  if (!loaded.ok) return { ok: false, path: configPath, detail: loaded.detail };
+
+  let how: string;
+  let wrote = false;
+  if (sameHostList(loaded.mcp.clientIdMetadataDocuments?.allowedHosts, list)) {
+    how = "it already carried this list; the file was not rewritten";
+  } else {
+    const intended = structuredClone(loaded.doc);
+    const mcp = intended["@harperfast/oauth"].mcp;
+    mcp.clientIdMetadataDocuments = { ...(mcp.clientIdMetadataDocuments ?? {}), allowedHosts: [...list] };
+    const edited = replaceAllowedHostsLines(loaded.raw ?? "", list);
+    let text: string;
+    if (edited !== null && JSON.stringify(safeYamlLoad(edited)) === JSON.stringify(intended)) {
+      text = edited;
+      how = "only the list's own lines were rewritten";
+    } else {
+      text = yaml.dump(intended, { lineWidth: -1, noCompatMode: true });
+      how = "the file was re-emitted from its parsed form, so its comments were not kept";
+    }
+    try {
+      writeFile(configPath, text);
+    } catch (err: any) {
+      return { ok: false, path: configPath, detail: `cannot write ${configPath}: ${err?.message ?? err}` };
+    }
+    wrote = true;
+  }
+
+  const back = loadOauthMcpBlock(configPath, readFile);
+  if (!back.ok) {
+    return {
+      ok: false,
+      path: configPath,
+      detail: `${wrote ? `wrote ${configPath} but ` : ""}could not read it back: ${back.detail}`,
+    };
+  }
+  const served = back.mcp.clientIdMetadataDocuments?.allowedHosts;
+  if (!sameHostList(served, list)) {
+    return {
+      ok: false,
+      path: configPath,
+      detail: `${configPath} reads back ${CIMD_ALLOWED_HOSTS_CONFIG_KEY}: ${JSON.stringify(served ?? null)}, not ${JSON.stringify(list)}`,
+    };
+  }
+  return {
+    ok: true,
+    path: configPath,
+    served: [...served],
+    detail: `${CIMD_ALLOWED_HOSTS_CONFIG_KEY} in ${configPath} reads back as ${JSON.stringify(served)} (${how})`,
+  };
+}
+
+function safeYamlLoad(text: string): unknown {
+  try {
+    return yaml.load(text);
+  } catch {
+    return undefined;
+  }
 }
 
 /** The exact callback URL to hand the operator when they create the IdP
@@ -1206,6 +1549,7 @@ export async function captureBootDiscriminator(
 
 export type EnableStepName =
   | "local-origin-check"
+  | "cimd-allowed-hosts"
   | "signing-key"
   | "config-block"
   | "idp-credentials"
@@ -1243,8 +1587,13 @@ export interface EnableMcpParams {
   signingKeyFilePath?: string;
   secretsMechanism?: SecretsMechanism;
   secretsStagingPath?: string;
-  /** `clientIdMetadataDocuments.allowedHosts` override — defaults to
-   *  `DEFAULT_CIMD_ALLOWED_HOSTS`. */
+  /** flair#2113: lowercase bare hostnames that replace
+   *  `mcp.clientIdMetadataDocuments.allowedHosts` in the local component
+   *  config.yaml (`localConfigPath`, else `./config.yaml`, else
+   *  `~/.flair/config.yaml`) before the restart. Refused, before anything
+   *  changes, for a Fabric origin, for invalid entries, and when that file is
+   *  missing, cannot be parsed, or has no `@harperfast/oauth` → `mcp` block.
+   *  Unset: the list is not touched. */
   cimdAllowedHosts?: string[];
   dryRun?: boolean;
   /** Operator confirms the staged secrets are live in the target's process
@@ -1285,6 +1634,11 @@ export interface EnableMcpResult {
   secretsPath?: string;
   signingKeyFilePath?: string;
   callbackUrl?: string;
+  /** flair#2113: set only when this run applied `--cimd-allowed-hosts`
+   *  (written, or already present) — the list read back from
+   *  `cimdAllowedHostsConfigPath`. */
+  cimdAllowedHosts?: string[];
+  cimdAllowedHostsConfigPath?: string;
 }
 
 /**
@@ -1332,6 +1686,41 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const principalKind = params.principalKind ?? "human";
 
   try {
+    // ── --cimd-allowed-hosts (flair#2113) ─────────────────────────────────────
+    // Validated, checked against the target's shape, and checked against the
+    // config.yaml it will be written to BEFORE any step with a side effect, so
+    // an invalid flag, a Fabric target, or a missing or unusable config.yaml is
+    // refused with nothing changed. The write itself happens at
+    // local-config-update, before the restart.
+    let cimdAllowedHosts: string[] | undefined;
+    if (params.cimdAllowedHosts !== undefined) {
+      currentStep = "cimd-allowed-hosts";
+      const refuse = (message: string): EnableMcpResult => {
+        push(false, message);
+        return { ok: false, dryRun, refused: { message }, steps, failedStep: "cimd-allowed-hosts" };
+      };
+      try {
+        cimdAllowedHosts = validateCimdAllowedHosts(params.cimdAllowedHosts);
+      } catch (err: any) {
+        return refuse(err?.message ?? String(err));
+      }
+      const shapeRefusal = cimdAllowedHostsShapeRefusal(params.instance);
+      if (shapeRefusal) return refuse(shapeRefusal);
+      const current = readLocalConfigCimdAllowedHosts(params.localConfigPath);
+      if (!current.ok) {
+        return refuse(
+          `--cimd-allowed-hosts cannot be applied: ${current.detail}. The served list is ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} ` +
+            `in the @harperfast/oauth block of the config.yaml the instance loads; run this command from the directory ` +
+            `that holds that file, or edit the key there by hand. Nothing was changed.`,
+        );
+      }
+      push(true,
+        `${CIMD_ALLOWED_HOSTS_CONFIG_KEY} in ${current.path}: ${JSON.stringify(current.current ?? null)} -> ` +
+          `${JSON.stringify(cimdAllowedHosts)}` +
+          (dryRun ? " (--dry-run: not written)" : " (to be written at the local-config-update step, before the restart)"),
+      );
+    }
+
     // ── RS256 signing keypair ─────────────────────────────────────────────────
     currentStep = "signing-key";
     const keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
@@ -1341,11 +1730,15 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // The block ships uncommented with mcp.enabled: false (inert default).
     // set_configuration is removed — the block lives in the component's own
     // config.yaml, not in harperdb-config.yaml where Fabric would wipe it.
-    const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
+    // flair#2113: this line used to print the flag's value as if it were the
+    // served list. The list is reported by the step that writes it.
     currentStep = "config-block";
     push(true,
-      `@harperfast/oauth config ships in config.yaml (mcp.enabled=false, ` +
-        `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts=${JSON.stringify(cimdAllowedHosts)})`,
+      `@harperfast/oauth config ships in config.yaml (mcp.enabled=${MCP_ENABLED_ENV_REFERENCE}, ` +
+        `dynamicClientRegistration.enabled=false); ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} ` +
+        (cimdAllowedHosts
+          ? "is handled by the cimd-allowed-hosts step"
+          : `is not changed by this run (shipped default: ${DEFAULT_CIMD_ALLOWED_HOSTS.join(", ")})`),
     );
 
     // ── IdP OAuth-app credential intake ───────────────────────────────────────
@@ -1542,6 +1935,33 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     const localConfigResult = updateLocalConfigMcpEnabled(true, params.localConfigPath);
     push(localConfigResult.ok, localConfigResult.detail);
 
+    // flair#2113: write --cimd-allowed-hosts and read it back. A failure here
+    // stops the flow: restarting would serve a list the operator did not ask for.
+    let servedCimd: { hosts: string[]; path: string } | undefined;
+    if (cimdAllowedHosts) {
+      const written = updateLocalConfigCimdAllowedHosts(cimdAllowedHosts, params.localConfigPath);
+      if (!written.ok || !written.served || !written.path) {
+        push(false,
+          `--cimd-allowed-hosts not applied: ${written.detail}. The instance was not restarted. ` +
+            `Fix that, or set ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} by hand, then re-run \`flair mcp enable\`.`,
+        );
+        return {
+          ok: false,
+          dryRun,
+          steps,
+          failedStep: "local-config-update",
+          issuer,
+          resource: `${issuer}/mcp`,
+          secretsMechanism: secretsResult.mechanism,
+          secretsPath: secretsResult.path,
+          signingKeyFilePath: keyResult.path,
+          callbackUrl,
+        };
+      }
+      servedCimd = { hosts: written.served, path: written.path };
+      push(true, `${written.detail}. The target serves this list after the restart below if it runs from ${written.path}.`);
+    }
+
     // ── Restart ───────────────────────────────────────────────────────────
     currentStep = "restart";
     const preDiscriminator = await captureBootDiscriminator(
@@ -1581,6 +2001,8 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         failedStep: "self-verify",
         issuer,
         resource: `${issuer}/mcp`,
+        cimdAllowedHosts: servedCimd?.hosts,
+        cimdAllowedHostsConfigPath: servedCimd?.path,
       };
     }
     push(true, verify.detail);
@@ -1597,6 +2019,8 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       secretsPath: secretsResult.path,
       signingKeyFilePath: keyResult.path,
       callbackUrl,
+      cimdAllowedHosts: servedCimd?.hosts,
+      cimdAllowedHostsConfigPath: servedCimd?.path,
     };
   } catch (err: any) {
     // flair#1087: blame the step that was RUNNING, never the last one that
