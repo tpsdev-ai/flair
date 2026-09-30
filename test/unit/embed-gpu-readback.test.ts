@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { EMBED_GPU_FALLBACK_MSG, EMBED_GPU_UNCONFIRMED_MSG } from "../../resources/embed-gpu.ts";
@@ -396,8 +396,11 @@ describe("documented contract: CPU request and layer count (flair#2031 docs)", (
     const docs = [
       readFileSync(join(root, "docs", "api-reference.md"), "utf8"),
       readFileSync(join(root, "docs", "deployment.md"), "utf8"),
-      readFileSync(join(root, ".changelog", "unreleased", "fixed-2031-metal-readback.md"), "utf8"),
     ];
+    // The changelog fragment is checked while it exists; a release promotes it into
+    // CHANGELOG.md and deletes it, so its absence is not a failure.
+    const fragment = join(root, ".changelog", "unreleased", "fixed-2031-metal-readback.md");
+    if (existsSync(fragment)) docs.push(readFileSync(fragment, "utf8"));
     for (const doc of docs) {
       expect(doc).not.toContain("offloaded `gpuLayers`");
       expect(doc).not.toContain("offloaded layer count");
