@@ -8,11 +8,17 @@
   events whose value is an object. It decides from the event's own `agentId`
   and `visibility` when both are present, and otherwise from the stored row
   re-read by id, withholding the event when it has no id or when that read
-  fails or returns no owner. Delete events are not delivered to a filtered
-  subscriber. Verified agents can subscribe to the memory feed, and anonymous
-  subscribers are refused. `FeedSouls` already follows the Soul read rule (any
-  verified agent reads every soul), and the same tests now cover it. Admin and
-  trusted internal subscribers are unchanged.
+  fails or returns no owner. A non-admin subscription keeps only the caller's
+  record-id, descendant and replay options (`id`, `isCollection`,
+  `onlyChildren`, `startTime`, `previousCount`, `omitCurrent`), so a
+  subscription to `/FeedMemories/<id>` follows that record only; no caller
+  filter or other option reaches it. In a replay that uses `startTime` or
+  `previousCount`, an earlier version of a record is delivered only while the
+  record's current stored row is readable. Delete events are not delivered to
+  a filtered subscriber. Verified agents can subscribe to the memory feed, and
+  anonymous subscribers are refused. `FeedSouls` already follows the Soul read
+  rule (any verified agent reads every soul), and the same tests now cover it.
+  Admin and trusted internal subscribers are unchanged.
 
   `POST /FeedMemories` writes do not take the durability-keyed visibility
   default that `Memory.post()` and `Memory.put()` apply. A new `ephemeral` feed

@@ -117,6 +117,42 @@ async function openFeed(url: string, authorization?: string): Promise<Feed> {
   };
 }
 
+/**
+ * Open an SSE subscription without waiting for its response headers. Harper
+ * sends an SSE response's headers with its first event, so a subscription
+ * that has nothing to deliver never resolves `fetch`. Frames are collected if
+ * and when they arrive; `stop()` aborts the request.
+ */
+function openFeedUnawaited(url: string, authorization: string): { events: () => FeedEvent[]; stop: () => Promise<void> } {
+  const ctrl = new AbortController();
+  const parsed: FeedEvent[] = [];
+  const pump = (async () => {
+    try {
+      const res = await fetch(url, { headers: { Accept: "text/event-stream", Authorization: authorization }, signal: ctrl.signal });
+      if (!res.body) return;
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let raw = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        raw += dec.decode(value, { stream: true });
+        let cut: number;
+        while ((cut = raw.indexOf("\n\n")) >= 0) {
+          const data = raw.slice(0, cut).split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n");
+          raw = raw.slice(cut + 2);
+          if (!data) continue;
+          try {
+            const obj = JSON.parse(data);
+            if (obj && typeof obj === "object" && "id" in obj) parsed.push({ id: String(obj.id), type: String(obj.type), value: obj.value });
+          } catch { /* non-JSON frame */ }
+        }
+      }
+    } catch { /* aborted by stop() */ }
+  })();
+  return { events: () => parsed.slice(), stop: async () => { ctrl.abort(); await pump; } };
+}
+
 let harper: HarperInstance;
 const A = mkAgent("feedscope-a");
 const B = mkAgent("feedscope-b");
@@ -246,6 +282,31 @@ function memoryFeedCases(phase: string) {
       }
     } finally {
       await feed.stop();
+    }
+  }, 30_000);
+
+  test("a by-id subscription receives only that record's events", async () => {
+    const sharedFeed = await openAs(B, `/FeedMemories/${ids.aShared}`);
+    const privatePath = `/FeedMemories/${ids.aPrivate}`;
+    // Nothing is deliverable on this subscription, so its headers never arrive.
+    const privateFeed = openFeedUnawaited(`${harper.httpURL}${privatePath}`, ed25519Header(B, "GET", privatePath));
+    try {
+      expect(sharedFeed.status).toBe(200);
+      // A readable record with another id changes first, then A's private
+      // record, then the subscribed record.
+      await feedWrite(B, { id: ids.bOwn, content: `${p} b own by-id`, visibility: "private" });
+      await feedWrite(A, { id: ids.aPrivate, content: `${p} a private by-id`, visibility: "private" });
+      await feedWrite(A, { id: ids.aShared, content: `${p} a shared by-id`, visibility: "shared" });
+      await sharedFeed.waitFor(
+        (e) => e.id === ids.aShared && e.value?.content === `${p} a shared by-id`,
+        "the subscribed record's update",
+      );
+      await new Promise((r) => setTimeout(r, 300));
+      expect(sharedFeed.events().filter((e) => e.id !== ids.aShared), "events for any other id").toEqual([]);
+      expect(privateFeed.events(), "a by-id subscription to A's private record").toEqual([]);
+    } finally {
+      await sharedFeed.stop();
+      await privateFeed.stop();
     }
   }, 30_000);
 
