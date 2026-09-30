@@ -123,7 +123,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -138,7 +138,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -153,7 +153,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -168,7 +168,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -183,7 +183,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -198,7 +198,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -213,7 +213,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -228,7 +228,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -243,7 +243,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=4.1.3"
@@ -258,10 +258,25 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Published 2026-09-28. Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4, raised for this advisory) keeps bun.lock on the fixed 4.1.4, but npm installs carry harper's pins. flair does not import fast-uri; it is reached only through harper's fastify stack (@fastify/ajv-compiler, fast-json-stringify). Same edge and same retirement path as the other fast-uri entries, so it shares their expiry.",
+      "reason": "Published 2026-09-28. Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.5; first raised to ^4.1.4 for this advisory) keeps bun.lock on a fixed 4.x (4.2.1), but npm installs carry harper's pins. flair does not import fast-uri; in an npm install of the flair package the only copies are harper's, reached through its fastify stack (@fastify/ajv-compiler, fast-json-stringify). Same edge and same retirement path as the other fast-uri entries, so it shares their expiry.",
       "added": "2026-09-28",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving every fast-uri copy out of the vulnerable ranges (>=3.1.7 on 3.x, >=4.1.4 on 4.x)"
+    },
+    {
+      "ghsa": "GHSA-hrr3-gc8f-f4qj",
+      "package": "fast-uri",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fast-uri",
+      "reason": "Published 2026-09-29. Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides: both copies it pins are in the affected ranges (3.1.0, and 4.1.2 nested under fastify's fast-json-stringify; fixed in 3.1.8 and 4.1.5). harper 5.2.8 (the version flair pins) through 5.2.14 pin both; harper 5.3.0, the latest, moves the nested copy to 4.2.1 but still pins 3.1.0. The bun override (fast-uri ^4.1.5, raised for this advisory) keeps bun.lock on a fixed 4.x (4.2.1), but npm installs carry harper's pins. flair does not import fast-uri; in an npm install of the flair package the only copies are harper's, reached through its fastify stack (@fastify/ajv-compiler, ajv, fast-json-stringify). Same edge and same retirement path as the other fast-uri entries, so it shares their expiry.",
+      "added": "2026-09-30",
+      "expires": "2026-11-02",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves every fast-uri copy out of the affected ranges (>=3.1.8 on 3.x, >=4.1.5 on 4.x); no release through harper 5.3.0 does"
     },
     {
       "ghsa": "GHSA-f886-m6hf-6m8v",
@@ -273,7 +288,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.12) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
       "added": "2026-09-03",
       "expires": "2027-03-02",
       "removeWhen": "harper ships a shrinkwrap resolving brace-expansion >=5.0.9"
@@ -288,7 +303,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.12) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
       "added": "2026-09-03",
       "expires": "2027-03-02",
       "removeWhen": "harper ships a shrinkwrap resolving brace-expansion >=5.0.9"
@@ -303,7 +318,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.12) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving brace-expansion >=5.0.9"
@@ -318,7 +333,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.12) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving brace-expansion >=5.0.9"
@@ -333,10 +348,55 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.12) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving brace-expansion >=5.0.9"
+    },
+    {
+      "ghsa": "GHSA-6j4f-fj2g-mc7p",
+      "package": "brace-expansion",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> brace-expansion",
+      "reason": "Published 2026-09-29. Resolved inside harper's pinned npm-shrinkwrap (brace-expansion 5.0.4; harper 5.2.8, the version flair pins, through 5.3.0, the latest, all pin 5.0.4), which npm honours over root overrides. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-qhr7-859c-m2p7 / GHSA-q2hr-2g5m-vwhr) keeps bun.lock on the fixed 5.0.12, but npm installs carry harper's pin. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the high ones.",
+      "added": "2026-09-30",
+      "expires": "2026-11-02",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves brace-expansion >=5.0.10; no release through harper 5.3.0 does"
+    },
+    {
+      "ghsa": "GHSA-qhr7-859c-m2p7",
+      "package": "brace-expansion",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> brace-expansion",
+      "reason": "Published 2026-09-29. Resolved inside harper's pinned npm-shrinkwrap (brace-expansion 5.0.4; harper 5.2.8, the version flair pins, through 5.3.0, the latest, all pin 5.0.4), which npm honours over root overrides. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-6j4f-fj2g-mc7p / GHSA-q2hr-2g5m-vwhr) keeps bun.lock on the fixed 5.0.12, but npm installs carry harper's pin. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the high ones.",
+      "added": "2026-09-30",
+      "expires": "2026-11-02",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves brace-expansion >=5.0.11; no release through harper 5.3.0 does"
+    },
+    {
+      "ghsa": "GHSA-q2hr-2g5m-vwhr",
+      "package": "brace-expansion",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> brace-expansion",
+      "reason": "Published 2026-09-29. Resolved inside harper's pinned npm-shrinkwrap (brace-expansion 5.0.4; harper 5.2.8, the version flair pins, through 5.3.0, the latest, all pin 5.0.4), which npm honours over root overrides. The bun override (brace-expansion ^5.0.12, raised for this advisory and GHSA-6j4f-fj2g-mc7p / GHSA-qhr7-859c-m2p7) keeps bun.lock on the fixed 5.0.12, but npm installs carry harper's pin. flair does not import brace-expansion; in an npm install of the flair package the only copy is harper's, reached through its @fastify/static -> glob -> minimatch. Same edge and same retirement path as the other brace-expansion entries, so it shares the expiry of the moderate ones.",
+      "added": "2026-09-30",
+      "expires": "2027-03-02",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves brace-expansion >=5.0.12; no release through harper 5.3.0 does"
     },
     {
       "ghsa": "GHSA-c96f-x56v-gq3h",
@@ -436,6 +496,21 @@
       "added": "2026-09-29",
       "expires": "2026-11-28",
       "removeWhen": "harper ships a shrinkwrap resolving joi >=17.13.7"
+    },
+    {
+      "ghsa": "GHSA-4p3w-j4w9-5jqw",
+      "package": "moment",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> moment",
+      "reason": "Published 2026-09-29. moment is an exact dependency of harper itself: harper 5.2.8 (the version flair pins) through 5.2.14 depend on moment 2.30.1 and pin it in their npm-shrinkwrap, which npm honours over root overrides. harper 5.3.0, the latest, depends on and pins 2.31.0, the fixed version. The bun override (moment ^2.31.0, added for this advisory) keeps bun.lock on 2.31.0, but npm installs carry harper 5.2.8's pin. flair does not import moment. The leash is 60 days rather than the 180-day moderate cap because a fixed harper release already exists, so retiring this entry is flair's own harper bump.",
+      "added": "2026-09-30",
+      "expires": "2026-11-29",
+      "removeWhen": "flair's harper dependency moves to 5.3.0 or later (harper 5.3.0's shrinkwrap resolves moment 2.31.0), or flair stops depending on harper"
     }
   ]
 }
