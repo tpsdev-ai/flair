@@ -452,20 +452,24 @@ jobs:
           retention-days: 7
 
   test-integration:
-    name: Integration Tests
+    name: Integration Tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
-    # 30, not 20 (#948). This is headroom, NOT the fix — the fix is dropping
-    # `--with-deps` from the Playwright step below, which removed this job's
-    # dependency on the Ubuntu apt mirror. Kept deliberately generous because
-    # the dominant cost here is `Run integration tests`: ~12 min when this
-    # comment was first written (2026-07-28), grown to 26m49s by 2026-08-21 —
-    # the whole job hit 29m58s and sibling runs were timeout-cancelled at
-    # 30m10s (#1320). The fix was the #1290/#1299/#1320 pattern: move the
-    # heaviest real-Harper-boot suites into test/integration-heavy/ (own job
-    # below), which put the projected job back at ~17m30s. If total job time
-    # starts creeping toward this number again, the integration suite is what
-    # to look at — raising this would just hide the trend.
-    timeout-minutes: 30
+    # Sharded (#2149, #2131). Before: ONE job ran the whole suite ~16-26 min
+    # against a 30-minute cap — measured on recent runs: main dfe01f0d 16m16s
+    # (`Run integration tests` alone 13m45s), and three other runs 23m2s,
+    # 24m38s, 26m1s; PR #2148 was cancelled at 30m17s with 0 failures. Each
+    # shard now runs the same steps on its share of test/integration/*.test.ts
+    # (scripts/ci/integration-shards.mjs), in parallel, and a final job named
+    # `Integration Tests` (below) requires every shard to succeed. timeout-minutes
+    # is ONE shard's cap, set from the measured per-shard time with a margin
+    # (durations recorded in the PR that sharded this job).
+    timeout-minutes: 15
+    strategy:
+      # fail-fast: false — every shard must run and report, and the aggregate
+      # job below fails unless each one succeeded.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -523,6 +527,10 @@ jobs:
         # hours with zero code at fault; a bare HF curl had already flaked
         # this job before that, #463/#465).
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      - name: Verify the shards cover every integration file
+        # Coverage gate (#2149): fails unless the shards partition the full
+        # list, so a new file can never run in no shard.
+        run: node scripts/ci/integration-shards.mjs --verify --of ${{ strategy.job-total }}
       - name: Run integration tests (native Harper spawn)
         # No HARPER_HTTP_URL — harper-lifecycle spawns Harper from node_modules
         # per the npm-installed harper. Avoids the Docker
@@ -536,13 +544,21 @@ jobs:
         # ${{ ... }} shell-injection.
         env:
           INTEGRATION_REPEATS: ${{ github.event.inputs.integration_repeats || '1' }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           repeats="${INTEGRATION_REPEATS}"
           case "$repeats" in ''|*[!0-9]*) repeats=1 ;; esac
+          files=$(node scripts/ci/integration-shards.mjs --shard "$SHARD" --of "$SHARDS")
+          if [ -z "$files" ]; then
+            echo "::error::shard ${SHARD}/${SHARDS} selected no files"
+            exit 1
+          fi
+          echo "Shard ${SHARD}/${SHARDS}: $(echo "$files" | wc -l) file(s)"
           echo "Running integration suite ${repeats}x"
           for i in $(seq 1 "${repeats}"); do
-            echo "::group::integration attempt ${i}/${repeats}"
-            bun test $(find test/integration -name '*.test.ts' | sort)
+            echo "::group::integration attempt ${i}/${repeats} (shard ${SHARD}/${SHARDS})"
+            bun test $files
             echo "::endgroup::"
           done
       # adk-flair-js integration tests exercise the Flair application through
@@ -693,6 +709,27 @@ jobs:
         env:
           FLAIR_URL: http://localhost:9926
           FLAIR_ADMIN_PASS: admin123
+
+  # flair#2149 / #2131: the required check. The shard matrix above runs the
+  # suite; this job keeps the check name EXACTLY `Integration Tests` so the
+  # ruleset is unchanged. It reads `needs.test-integration.result` explicitly,
+  # because a SKIPPED job reports success — a shard that was skipped or cancelled
+  # must fail this gate, not pass it. The matrix result is `success` only when
+  # every shard succeeded.
+  test-integration-gate:
+    name: Integration Tests
+    needs: [test-integration]
+    runs-on: ubuntu-latest
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Require every integration shard to succeed
+        run: |
+          echo "test-integration matrix result: ${{ needs.test-integration.result }}"
+          if [ "${{ needs.test-integration.result }}" != "success" ]; then
+            echo "::error::One or more Integration Tests shards did not succeed"
+            exit 1
+          fi
 
   test-integration-heavy:
     name: Integration Tests (heavy)
