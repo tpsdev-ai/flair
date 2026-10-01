@@ -7,12 +7,12 @@
  * count and proves the promises the slice makes:
  *
  *   - one worker serves unchanged (and /Health gains no field);
- *   - more than one worker refuses any non-/Health request with the one
- *     named 503, BEFORE the rate limiter, any credential read, or any table
- *     access, and AHEAD OF the method allowlist (a disallowed method gets the
- *     503, not a 405);
- *   - a worker count that is not a positive integer (1.5) or a throwing getter
- *     is UNKNOWN, refused, never read as one worker;
+ *   - more than one worker refuses any non-/Health request it is handed with
+ *     the one named 503, without reading a credential or touching a table, and
+ *     returns that 503 for a disallowed method too (this drives the captured
+ *     guard entry with a stub next layer — it proves the guard, not the chain);
+ *   - a worker count that no source supplies as a positive integer (1.5, or a
+ *     throw on both paths) is UNKNOWN, refused, never read as one worker;
  *   - the `FLAIR_MULTI_WORKER_UNSAFE=1` opt-in serves while /Health stays non-OK
  *     and names the opt-in.
  *
@@ -200,6 +200,16 @@ describe("multi-worker condition (pure)", () => {
     expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: null });
     setCondition(1, false, false);
     expect(guard.readWorkerCount()).toBe(1);
+  });
+
+  it("uses the configured fallback when the server.workerCount getter throws", () => {
+    // A throwing first getter is not by itself unknown: the other path decides.
+    setCondition(1, false, true, 2);
+    expect(guard.readWorkerCount()).toBe(2);
+    expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: 2 });
+    setCondition(1, false, true, 1);
+    expect(guard.readWorkerCount()).toBe(1);
+    expect(guard.multiWorkerCondition()).toEqual({ state: "single-worker", workerCount: 1 });
   });
 
   it("omits the /Health field on one worker and names the remedy when refusing", () => {

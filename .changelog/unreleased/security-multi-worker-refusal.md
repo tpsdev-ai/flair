@@ -9,12 +9,12 @@
   (`server.config.threads.count`) where that is not a positive integer — every
   worker now logs one named error, and the instance refuses before dispatch with
   one named 503: ahead of the method allowlist on the default chain, and ahead of
-  the handler on each `urlPath` mount. A count that is not a positive integer on
-  either path, including a getter that throws, is UNKNOWN and refused, never read
-  as one worker. `/Health` answers 503 and reports the refusal, and `flair
-  doctor` fails a `worker threads` check. Workers stay up in the refused state;
-  nothing throws during boot. One worker is unchanged: no new log line and
-  `/Health` is identical.
+  the handler on each `urlPath` mount. A getter that throws on one path falls
+  back to the other; a count that is not a positive integer on either path is
+  UNKNOWN and refused, never read as one worker. `/Health` answers 503 and
+  reports the refusal, and `flair doctor` fails a `worker threads` check.
+  Workers stay up in the refused state; nothing throws during boot. One worker
+  is unchanged: no new log line and `/Health` is identical.
 
   > **Heads-up:** if the instance logs the multi-worker refusal, set
   > `THREADS_COUNT=1` and restart Flair to serve again.

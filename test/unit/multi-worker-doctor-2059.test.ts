@@ -73,18 +73,18 @@ describe("readWorkerThreadsObservation", () => {
 });
 
 describe("interpretFlairHealth", () => {
-  it("reads a 2xx /Health as Flair, serving when the field is absent", () => {
+  it("reads a 2xx /Health as reaching, serving when the field is absent", () => {
     expect(interpretFlairHealth(200, { ok: true })).toEqual({ reaching: true, observation: { kind: "serving" } });
   });
 
-  it("reads a 503 with a refusal field as Flair, refused", () => {
+  it("reads a 503 with a refusal field as reaching, refused", () => {
     expect(interpretFlairHealth(503, { ok: false, multiWorker: { state: "refused", workerCount: 2 } })).toEqual({
       reaching: true,
       observation: { kind: "refused", state: "refused", workerCount: 2 },
     });
   });
 
-  it("does not treat a 503 without a refusal field as Flair", () => {
+  it("does not treat a 503 without a refusal field as reaching", () => {
     expect(interpretFlairHealth(503, { ok: false })).toEqual({ reaching: false, observation: null });
   });
 
@@ -146,7 +146,7 @@ describe("worker-threads doctor check", () => {
   });
 });
 
-describe("probeFlairHealth (the doctor discovery path) against a refused instance", () => {
+describe("probeFlairHealth (the doctor discovery path) against a local HTTP fixture", () => {
   const servers: Server[] = [];
   afterAll(async () => {
     await Promise.all(servers.map((s) => new Promise<void>((r) => s.close(() => r()))));
@@ -164,7 +164,7 @@ describe("probeFlairHealth (the doctor discovery path) against a refused instanc
     return `http://127.0.0.1:${addr.port}/Health`;
   }
 
-  it("recognises a refused instance (503 + refusal body) as reaching, and observes the refusal", async () => {
+  it("recognises a fixture's 503 + refusal body as reaching, and observes the refusal", async () => {
     const url = await serve(
       503,
       JSON.stringify({ ok: false, multiWorker: { state: "refused", workerCount: 2, remedy: "THREADS_COUNT=1" } }),

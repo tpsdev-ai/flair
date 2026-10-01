@@ -1,16 +1,16 @@
 /**
  * multi-worker-guard.ts — the S0 multi-worker refusal (flair#2059, slice S0 of #2052).
  *
- * Flair runs one Harper worker thread by default. More than one is not yet
- * supported: the multi-worker readiness audit (flair#2052) is not complete — a
- * per-worker embedding engine and per-worker BM25 index copies today, with the
- * in-process caches and rate limiters not yet enumerated — and the XAA token
- * path keeps its own `jti` single-use record (resources/XAA.ts), a get-then-put
- * that two workers can both pass, until flair#2073 routes it through the shared
- * atomic check-and-record. Until that work lands, an instance with more than one
- * worker REFUSES TO SERVE rather than run with those properties silently
- * removed. Linux can select several workers when nothing pins the count, so the
- * state is reachable by default, not only on purpose.
+ * Flair's shipped launch paths set one Harper worker thread. More than one is
+ * not yet supported: the multi-worker readiness audit (flair#2052) is not
+ * complete — a per-worker embedding engine and per-worker BM25 index copies
+ * today, with the in-process caches and rate limiters not yet enumerated — and
+ * the XAA token path keeps its own `jti` single-use record (resources/XAA.ts), a
+ * get-then-put that two workers can both pass, until flair#2073 routes it
+ * through the shared atomic check-and-record. Until that work lands, an instance
+ * with more than one worker REFUSES TO SERVE rather than run with those
+ * properties silently removed. Linux can select several workers when nothing
+ * pins the count, so the state is reachable by default, not only on purpose.
  *
  * This module is the single home for the condition and the state. It reads the
  * worker count ONCE per worker module instance (each worker loads its own copy,
@@ -20,9 +20,9 @@
  * `server.workerCount`, Harper's per-thread value; where that is not a positive
  * integer (on the main thread alongside worker threads it is `undefined`), the
  * count falls back to Harper's effective configured count,
- * `server.config.threads.count`. A count that is not a positive integer on
- * either path — including a getter that throws — is UNKNOWN, which is refused,
- * never read as one worker.
+ * `server.config.threads.count`. A getter that throws on one path falls back to
+ * the other; only when BOTH paths lack a positive integer is the count UNKNOWN,
+ * which is refused, never read as one worker.
  *
  * The refused state is enforced before dispatch. This module registers ONE
  * named http entry, runFirst and ordered ahead of the default REST middleware
@@ -199,9 +199,10 @@ function readPositiveInteger(read: () => unknown): number | null {
  * worker. On the main thread alongside worker threads it is `undefined`, so the
  * count falls back to Harper's effective configured count,
  * `server.config.threads.count`. Harper starts workers while `i < count`, so a
- * value that is not an integer (1.5) starts more workers than it names: a count
- * that is not a positive integer on either path — and a getter that throws — is
- * UNKNOWN, and the guard refuses it rather than read it as one worker.
+ * value that is not an integer (1.5) starts more workers than it names. A getter
+ * that throws on one path falls back to the other; only when BOTH paths lack a
+ * positive integer is the count UNKNOWN, and the guard refuses it rather than
+ * read it as one worker.
  */
 export function readWorkerCount(): number | null {
   const perThread = readPositiveInteger(

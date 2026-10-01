@@ -440,7 +440,7 @@ export type WorkerThreadsObservation =
 /**
  * Read the doctor observation from a /Health `multiWorker` value.
  *
- * An ABSENT field (undefined/null) is a serving instance: a one-worker /Health
+ * An ABSENT field (undefined/null) reads as serving: a one-worker /Health
  * omits `multiWorker`. A value that NAMES the refusal (`state` of "refused" or
  * "unsafe-opt-in") is the refusal, carrying its worker count when that is a
  * number. Anything else — a non-object, or an object with no recognized state —
@@ -459,9 +459,9 @@ export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObserva
   };
 }
 
-/** What a /Health probe found: whether the port is Flair, and what it observed. */
+/** What a /Health probe found: whether the port answered a recognized /Health, and what it observed. */
 export interface FlairHealthProbe {
-  /** The port answered with a recognized shape: a 2xx /Health, or a 503 carrying a recognized `multiWorker` refusal field. */
+  /** A 2xx, or a 503 whose body carries a recognized `multiWorker` refusal state field. */
   reaching: boolean;
   status: number;
   /** The parsed response body, or null when it was not JSON. */
@@ -471,15 +471,16 @@ export interface FlairHealthProbe {
 }
 
 /**
- * Interpret a /Health status and body: did this port answer with a recognized
- * shape, and what did it observe?
+ * Interpret a /Health status and body: did this port answer a recognized
+ * /Health, and what did it observe?
  *
- * A 2xx is reaching. A 503 is reaching ONLY when its `multiWorker` field names
- * the refusal — the state field a refused flair instance answers with, so
- * discovery recognises the refused instance instead of skipping it. Any other
- * non-2xx is not reaching. A 2xx with a malformed `multiWorker` is `unknown`,
- * never serving; a 503 with no recognized `multiWorker` field is not reaching,
- * so its worker check is skipped rather than blocking.
+ * A 2xx is reaching, whatever its body. A 503 is reaching ONLY when its
+ * `multiWorker` field names the refusal — the state field a refused flair
+ * instance answers with — so discovery recognises that instance instead of
+ * skipping it. Any other non-2xx is not reaching. A 2xx with a malformed
+ * `multiWorker` is `unknown`, never serving; a 503 with no recognized
+ * `multiWorker` field is not reaching, so its worker check is skipped rather
+ * than blocking.
  */
 export function interpretFlairHealth(status: number, body: unknown): { reaching: boolean; observation: WorkerThreadsObservation | null } {
   const observation = readWorkerThreadsObservation((body as { multiWorker?: unknown })?.multiWorker);

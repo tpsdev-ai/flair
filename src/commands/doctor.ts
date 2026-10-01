@@ -464,10 +464,11 @@ program
     }
 
     // Helper: try to reach Harper on a given port.
-    // Must return true ONLY for a recognized /Health: a 2xx, OR a 503 whose body
-    // carries the recognized `multiWorker` refusal field. A generic HTTP
+    // Must return true ONLY when /Health answers a 2xx (any body), OR a 503 whose
+    // body carries a recognized `multiWorker` refusal state field. It cannot
+    // identify the responder beyond that status/field pair — a generic HTTP
     // status > 0 (flair#862) would accept 404 from a Node inspector on 9229 or
-    // any other service — "present but wrong" beats "absent but correct".
+    // any other service: "present but wrong" beats "absent but correct".
     async function probePort(p: number): Promise<boolean> {
       const probe = await probeFlairHealth(`http://127.0.0.1:${p}/Health`);
       return probe.reaching; // 2xx /Health, or a 503 carrying the recognized multiWorker refusal field
@@ -603,11 +604,11 @@ program
       try {
         // flair#2059: the refused multi-worker state is reported by /Health as a
         // 503 WITH a body, so the probe reads the body whether or not the status
-        // is OK. A 2xx body's `multiWorker` field becomes the worker-threads
-        // observation (an absent one is a serving instance — a one-worker
-        // /Health omits it; a malformed one is unknown, never serving). A 503 is
-        // reached only when that field names the refusal; any other 503 is not
-        // reached, so its worker check is skipped.
+        // is OK. On a 2xx, the `multiWorker` field becomes the worker-threads
+        // observation (an absent one reads as serving — a one-worker /Health
+        // omits it; a malformed one is unknown, never serving). A 503 is reached
+        // only when that field names the refusal; any other 503 is not reached,
+        // so its worker check is skipped.
         const probe = await probeFlairHealth(`${baseUrl}/Health`);
         if (probe.reaching) {
           workerThreads = probe.observation ?? undefined;
