@@ -1,0 +1,1 @@
+- **Vendor-pinned audit exceptions now require every installed node to be under Harper and match its shrinkwrap pin.** Missing node or version evidence blocks the dependency audit gate.

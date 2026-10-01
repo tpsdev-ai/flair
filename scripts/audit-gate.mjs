@@ -257,13 +257,14 @@ export function runNpmAudit(prefix) {
 /**
  * Flatten npm's v2 audit report (`{ vulnerabilities: { <pkg>: { nodes, via, ... } } }`)
  * into the same flat advisory shape as `flattenAdvisories`, plus the dependency
- * `nodes` (paths relative to the install root) and `source: "npm-install"`.
+ * `nodes` (paths relative to the install root), optional per-node versions
+ * from the audit report, and `source: "npm-install"`.
  *
  * `via` carries the advisory metadata (one entry per advisory, with the GHSA in
  * its `url`); `nodes` is per-package, so every advisory for a package shares the
  * same paths. A package may appear both hoisted (`node_modules/<pkg>`) and under
- * harper (`node_modules/harper/node_modules/<pkg>`); the harper classification
- * keys off the substring `node_modules/harper/` in ANY node.
+ * harper (`node_modules/harper/node_modules/<pkg>`). The vendor-pinned check
+ * below examines every node; one harper node cannot cover a hoisted copy.
  */
 export function flattenNpmAdvisories(npmJson) {
   const out = [];
@@ -285,6 +286,11 @@ export function flattenNpmAdvisories(npmJson) {
         vulnerableVersions: item.range ?? "",
         url: item.url ?? "",
         nodes,
+        nodeVersions: Object.fromEntries(
+          nodes
+            .filter((node) => typeof node === "string" && Object.hasOwn(npmJson?.packages ?? {}, node))
+            .map((node) => [node, npmJson.packages[node]?.version ?? null]),
+        ),
         source: "npm-install",
       });
     }
@@ -398,6 +404,62 @@ export function validateAllowlist(allowlist, today) {
  */
 export function registryUrlFor(pkg) {
   return `https://registry.npmjs.org/${encodeURIComponent(pkg)}/latest`;
+}
+
+/** An npm audit node naming this package below harper's node_modules tree. */
+function harperNodeRoot(node, pkg) {
+  if (
+    typeof node !== "string" ||
+    !node.startsWith("node_modules/") ||
+    node.split("/").some((part) => !part || part === "." || part === "..") ||
+    node.includes("\\") ||
+    !node.endsWith(`/node_modules/${pkg}`)
+  ) return null;
+  const marker = "node_modules/harper/";
+  const index = node.indexOf(marker);
+  if (index < 0 || !node.slice(index + marker.length).startsWith("node_modules/")) return null;
+  return node.slice(0, index + "node_modules/harper".length);
+}
+
+/** Refuse a vendor exception unless each installed node matches harper's pin. */
+export function vendorPinnedNodeProblems(adv, npmPrefix) {
+  const nodes = adv.nodes;
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    return [`${adv.ghsa} (${adv.package}): npm audit reported no nodes. Inspect the npm-install audit report; the vendor-pinned entry cannot cover unknown nodes.`];
+  }
+  const isHarperNode = (node) => harperNodeRoot(node, adv.package) !== null;
+  if (!nodes.every(isHarperNode)) {
+    return nodes.filter((node) => !isHarperNode(node)).map((node) =>
+      `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside harper's dependency path. Fix the dependency, or extend the allowlist schema and add a separate, justified entry scoped to that node.`,
+    );
+  }
+
+  const problems = [];
+  for (const node of nodes.filter(isHarperNode)) {
+    const harperRoot = harperNodeRoot(node, adv.package);
+    const pinKey = node.slice(harperRoot.length + 1);
+    try {
+      const shrinkwrap = JSON.parse(readFileSync(join(npmPrefix, harperRoot, "npm-shrinkwrap.json"), "utf8"));
+      const pinned = shrinkwrap?.packages?.[pinKey]?.version;
+      const installed = JSON.parse(readFileSync(join(npmPrefix, node, "package.json"), "utf8"))?.version;
+      const reported = adv.nodeVersions?.[node];
+      if (typeof pinned !== "string" || !pinned || typeof installed !== "string" || !installed ||
+          (reported !== undefined && (typeof reported !== "string" || !reported))) {
+        throw new Error(`missing or invalid version for ${pinKey}`);
+      }
+      if (installed !== pinned || (reported !== undefined && reported !== pinned)) {
+        problems.push(
+          `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} has installed version ${installed}` +
+            `${reported === undefined ? "" : `, audit version ${reported}`}, but harper's shrinkwrap pins ${pinned}. Fix the dependency, or extend the allowlist schema and add a separate, justified entry scoped to that node.`,
+        );
+      }
+    } catch (e) {
+      problems.push(
+        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's shrinkwrap: ${e.message}. Restore readable package and shrinkwrap evidence, then rerun the gate.`,
+      );
+    }
+  }
+  return problems;
 }
 
 async function latestPublishedVersion(pkg) {
@@ -518,6 +580,15 @@ async function main() {
       continue;
     }
 
+    if (entry.class === "vendor-pinned" && adv.source === "npm-install") {
+      const nodeProblems = vendorPinnedNodeProblems(adv, npmPrefix);
+      if (nodeProblems.length) {
+        for (const problem of nodeProblems) fail(problem);
+        blocked.push(adv);
+        continue;
+      }
+    }
+
     // Classification — vendor-pinned (harper npm-shrinkwrap). An advisory the
     // npm observation reports under node_modules/harper/ is pinned by harper's
     // shrinkwrap, not by flair's own overrides. Such an entry must say so. The
@@ -604,7 +675,9 @@ async function main() {
       (a) =>
         a.source === "npm-install" &&
         a.ghsa?.toUpperCase() === g &&
-        (a.nodes ?? []).some((n) => n.includes("node_modules/harper/")),
+        allowed.some(({ adv }) => adv === a) &&
+        (a.nodes ?? []).length > 0 &&
+        a.nodes.every((n) => harperNodeRoot(n, a.package) !== null),
     );
     if (!npmAdv) continue;
     fixedForBunOnly.push({ entry, npmAdv });
