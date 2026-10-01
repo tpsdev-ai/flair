@@ -8,6 +8,9 @@
  *   - federation body signatures, key `f:<nonce>` — FederationPair and
  *     FederationSync (Federation.ts, via verifyFederationRequestBody).
  *
+ * The XAA ID-JAG `jti` record (flair#2073) uses the same `recordOnce` on its
+ * own table; see `claimIdJagJti` below.
+ *
  * The record of truth is the local `ReplayNonce` table (schemas/replay.graphql:
  * `replicate: false`, `expiration: 120`). Every Harper thread of this instance
  * reads and writes the same rows. Per-thread memory holds only keys this thread
@@ -75,10 +78,14 @@ export type RecordOutcome = "recorded" | "replay" | "contended";
 
 /** The store's dependencies, resolved on every claim (tests inject fakes). */
 export interface ReplayStoreDeps {
-  /** Harper table class for `flair.ReplayNonce`. */
+  /** Harper table class for `flair.ReplayNonce`, or for `name`. */
   table: any;
   /** Harper's `transaction(context, callback)`. */
   transaction: any;
+  /** The table's name in the `flair` database. Default: REPLAY_TABLE. */
+  name?: string;
+  /** First element of every lock key. Default: REPLAY_LOCK_NAMESPACE. */
+  lockNamespace?: string;
 }
 
 /** Named refusal state: the store cannot be used, so signed requests are refused. */
@@ -108,19 +115,20 @@ const STORE_METHODS = ["tryLock", "unlock", "getEntry"] as const;
  * outlive twice `windowMs`.
  */
 export function replayStoreContractGap(deps: ReplayStoreDeps, windowMs?: number): string | null {
+  const name = deps?.name ?? REPLAY_TABLE;
   const table = deps?.table;
-  if (!table) return `table flair.${REPLAY_TABLE} is not defined`;
+  if (!table) return `table flair.${name} is not defined`;
   const store = table.primaryStore;
-  if (!store) return `flair.${REPLAY_TABLE} has no primaryStore`;
+  if (!store) return `flair.${name} has no primaryStore`;
   for (const m of STORE_METHODS) {
-    if (typeof store[m] !== "function") return `flair.${REPLAY_TABLE}.primaryStore.${m} is not a function`;
+    if (typeof store[m] !== "function") return `flair.${name}.primaryStore.${m} is not a function`;
   }
-  if (typeof table.put !== "function") return `flair.${REPLAY_TABLE}.put is not a function`;
+  if (typeof table.put !== "function") return `flair.${name}.put is not a function`;
   if (typeof deps.transaction !== "function") return "Harper's transaction() is not available";
   if (windowMs !== undefined) {
     const expirationMs = table.expirationMS;
     if (typeof expirationMs === "number" && expirationMs > 0 && expirationMs <= 2 * windowMs) {
-      return `flair.${REPLAY_TABLE} keeps rows ${expirationMs} ms, not longer than twice the ${windowMs} ms window`;
+      return `flair.${name} keeps rows ${expirationMs} ms, not longer than twice the ${windowMs} ms window`;
     }
   }
   return null;
@@ -151,7 +159,7 @@ export async function recordOnce(key: string, seenAt: number, deps: ReplayStoreD
   if (gap) throw new ReplayStoreUnavailable(gap);
   const { table, transaction } = deps;
   const store = table.primaryStore;
-  const lockKey = [REPLAY_LOCK_NAMESPACE, key];
+  const lockKey = [deps.lockNamespace ?? REPLAY_LOCK_NAMESPACE, key];
   if (!store.tryLock(lockKey)) return "contended";
   try {
     store.resetReadTxn?.();
@@ -168,7 +176,13 @@ export async function recordOnce(key: string, seenAt: number, deps: ReplayStoreD
 const LOG_INTERVAL_MS = 10_000;
 const lastLogged = new Map<string, number>();
 
-function noteUnavailable(scope: ReplayScope, err: unknown): void {
+const REFUSED: Record<ReplayScope | "x", string> = {
+  a: "TPS-Ed25519 signed request",
+  f: "federation signed request",
+  x: "XAA jwt-bearer grant whose assertion carries a jti",
+};
+
+function noteUnavailable(scope: ReplayScope | "x", err: unknown, table: string = REPLAY_TABLE): void {
   const reason =
     err instanceof ReplayStoreUnavailable
       ? err.message
@@ -179,8 +193,8 @@ function noteUnavailable(scope: ReplayScope, err: unknown): void {
   if (lastLogged.size > 64) lastLogged.clear();
   lastLogged.set(tag, now);
   console.error(
-    `[flair-replay] ${reason}. Every ${scope === "a" ? "TPS-Ed25519" : "federation"} signed request is refused until the ` +
-      `flair.${REPLAY_TABLE} store is usable (see resources/replay-store.ts).`,
+    `[flair-replay] ${reason}. Every ${REFUSED[scope]} is refused until the ` +
+      `flair.${table} store is usable (see resources/replay-store.ts).`,
   );
 }
 
@@ -313,6 +327,49 @@ export function verifyFederationRequestBody(body: Record<string, any>, publicKey
     windowMs: FEDERATION_WINDOW_MS,
     replay: federationReplayGuard,
   });
+}
+
+// ─── XAA ID-JAG jti (flair#2073) ───────────────────────────────────────────
+
+/** Used ID-JAG `jti` values (schemas/oauth.graphql), one row per jti, keyed by the jti. */
+export const ID_JAG_REPLAY_TABLE = "IdJagReplay";
+
+/** First element of every jti lock key, so a jti never shares a lock key with a nonce. */
+export const ID_JAG_LOCK_NAMESPACE = "flair-replay-id-jag";
+
+function idJagReplayDeps(): ReplayStoreDeps {
+  return {
+    table: (databases as any)?.flair?.[ID_JAG_REPLAY_TABLE],
+    transaction: (globalThis as any).transaction,
+    name: ID_JAG_REPLAY_TABLE,
+    lockNamespace: ID_JAG_LOCK_NAMESPACE,
+  };
+}
+
+/**
+ * Claim an ID-JAG's `jti` once per instance, through `recordOnce`. Call it after
+ * the assertion has validated and before the grant has any effect; refuse on
+ * anything but "recorded". `minRetentionMs` is the longest an accepted
+ * assertion can stay acceptable after its jti is recorded: a table whose rows
+ * do not outlive it is unavailable.
+ */
+export async function claimIdJagJti(jti: string, minRetentionMs: number, now: number = Date.now()): Promise<ReplayClaim> {
+  try {
+    const deps = idJagReplayDeps();
+    const gap = replayStoreContractGap(deps);
+    if (gap) throw new ReplayStoreUnavailable(gap);
+    const expirationMs = deps.table.expirationMS;
+    if (typeof expirationMs === "number" && expirationMs > 0 && expirationMs <= minRetentionMs) {
+      throw new ReplayStoreUnavailable(
+        `flair.${ID_JAG_REPLAY_TABLE} keeps rows ${expirationMs} ms, not longer than the ${minRetentionMs} ms an assertion can stay acceptable`,
+      );
+    }
+    // A lock miss ("contended") is refused like a stored row.
+    return (await recordOnce(jti, now, deps)) === "recorded" ? "recorded" : "replay";
+  } catch (err) {
+    noteUnavailable("x", err, ID_JAG_REPLAY_TABLE);
+    return "unavailable";
+  }
 }
 
 // ─── Boot report ───────────────────────────────────────────────────────────

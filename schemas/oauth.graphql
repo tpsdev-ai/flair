@@ -48,11 +48,14 @@ type IdpConfig @table(database: "flair") @export {
   updatedAt: String
 }
 
-# ID-JAG replay prevention — tracks used `jti` claims.
-type IdJagReplay @table(database: "flair") {
+# ID-JAG replay prevention — one row per used `jti`, written once per instance
+# under a per-key lock by resources/replay-store.ts (claimIdJagJti).
+# expiration: 90000 — seconds a row is kept. It MUST equal
+#   ID_JAG_REPLAY_RETENTION_S in resources/XAA.ts, which says why it outlives
+#   every accepted assertion; test/unit-isolated/xaa-jti-replay.test.ts pins both.
+type IdJagReplay @table(database: "flair", expiration: 90000) {
   id: ID @primaryKey                # the jti value
-  expiresAt: String! @indexed       # TTL for cleanup
-  createdAt: String!
+  seenAt: Long!                     # ms-epoch when recorded
 }
 
 # Access + refresh tokens.

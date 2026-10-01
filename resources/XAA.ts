@@ -5,6 +5,7 @@ import { DEFAULT_HTTP_PORT } from "./a2a-url.js";
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
+import { claimIdJagJti, ReplayStoreUnavailable } from "./replay-store.js";
 
 /**
  * XAA (Enterprise-Managed Authorization) — ID-JAG validation for Flair.
@@ -26,7 +27,27 @@ import { stampOriginatorOnCreate } from "./originator-instance.js";
 
 const ACCESS_TOKEN_TTL_MS = 3600_000;        // 1 hour
 const REFRESH_TOKEN_TTL_MS = 7 * 86400_000;  // 7 days
-const CLOCK_SKEW_MS = 30_000;                // 30 seconds
+export const CLOCK_SKEW_MS = 30_000;         // 30 seconds
+
+/**
+ * An assertion that carries a `jti` is refused unless its `exp` is at most this
+ * far ahead of now, plus CLOCK_SKEW_MS (flair#2073).
+ */
+export const ID_JAG_MAX_VALIDITY_MS = 24 * 3600_000;
+
+/**
+ * The longest an accepted assertion stays acceptable after its jti is recorded:
+ * jose accepts it until just before exp + CLOCK_SKEW_MS, and exp is at most
+ * ID_JAG_MAX_VALIDITY_MS + CLOCK_SKEW_MS ahead when it is recorded.
+ */
+export const ID_JAG_LONGEST_ACCEPTANCE_MS = ID_JAG_MAX_VALIDITY_MS + 2 * CLOCK_SKEW_MS;
+
+/**
+ * Seconds a used jti is kept: 25 h, longer than ID_JAG_LONGEST_ACCEPTANCE_MS.
+ * MUST equal `expiration:` on `type IdJagReplay` in schemas/oauth.graphql
+ * (both pinned by test/unit-isolated/xaa-jti-replay.test.ts).
+ */
+export const ID_JAG_REPLAY_RETENTION_S = 90_000;
 
 // JWKS remote key set cache per issuer (jose handles caching internally)
 const jwksSetCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -120,17 +141,17 @@ export async function validateIdJag(
     }
   }
 
-  // Replay prevention (jti)
+  // Replay prevention (jti): recorded once per instance, under a per-key lock,
+  // before the grant has any effect. The record is kept
+  // ID_JAG_REPLAY_RETENTION_S, so the assertion's validity is bounded first.
   if (payload.jti) {
-    const existing = await (databases as any).flair.IdJagReplay.get(payload.jti);
-    if (existing) throw new Error("token replay detected");
-
-    const now = Date.now();
-    await (databases as any).flair.IdJagReplay.put({
-      id: payload.jti,
-      expiresAt: futureISO(Math.max((payload.exp ?? 0) * 1000 - now + CLOCK_SKEW_MS, 300_000)),
-      createdAt: nowISO(),
-    });
+    if (typeof payload.jti !== "string") throw new Error("jti claim must be a string");
+    if (typeof payload.exp !== "number" || payload.exp * 1000 > Date.now() + ID_JAG_MAX_VALIDITY_MS + CLOCK_SKEW_MS) {
+      throw new Error(`an assertion with a jti must carry an exp at most ${ID_JAG_MAX_VALIDITY_MS / 3600_000} hours ahead`);
+    }
+    const claim = await claimIdJagJti(payload.jti, ID_JAG_LONGEST_ACCEPTANCE_MS);
+    if (claim === "replay") throw new Error("token replay detected");
+    if (claim !== "recorded") throw new ReplayStoreUnavailable(`flair.IdJagReplay claim: ${claim}`);
   }
 
   return { payload: payload as JWTPayload & Record<string, any>, idpConfig };
@@ -294,6 +315,12 @@ export async function handleJwtBearerGrant(data: any): Promise<Response | object
       scope,
     };
   } catch (err: any) {
+    if (err instanceof ReplayStoreUnavailable) {
+      return new Response(JSON.stringify({
+        error: "temporarily_unavailable",
+        error_description: "replay_store_unavailable",
+      }), { status: 503, headers: { "content-type": "application/json" } });
+    }
     return new Response(JSON.stringify({
       error: "invalid_grant",
       error_description: err.message,

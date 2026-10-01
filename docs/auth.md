@@ -234,6 +234,8 @@ For organizations using an Identity Provider (IdP), XAA lets the IdP control who
 3. Client sends the ID token to Flair's token endpoint using the `jwt-bearer` grant type
 4. Flair validates the JWT signature, checks issuer/domain, maps to a Principal, and issues a scoped access token
 
+An assertion that carries a `jti` must also carry an `exp` no more than 24 hours (plus 30 seconds of clock skew) ahead. Flair records the `jti` before it issues tokens, and refuses the assertion if it is presented to this Harper instance again.
+
 ```
 POST /OAuthToken
 Content-Type: application/x-www-form-urlencoded

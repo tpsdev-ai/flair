@@ -22,6 +22,20 @@ export const PROBE_TARGET_REL = join("dist", "resources", "zz-replay-probe-2061.
 /** Where the probe writes, relative to the instance's ROOTPATH. */
 export const PROBE_OUT_REL = "replay-probe-2061";
 
+/** A probe resource: its source, where it is installed, and where it writes (relative to ROOTPATH). */
+export interface ProbeFiles {
+  source: string;
+  target: string;
+  out: string;
+}
+
+/** flair#2073's XAA jti probe (test/integration/xaa-jti-two-workers-2073.test.ts). */
+export const XAA_JTI_PROBE: ProbeFiles = {
+  source: join("test", "fixtures", "xaa-jti-probe-2073", "probe.js"),
+  target: join("dist", "resources", "zz-xaa-jti-probe-2073.js"),
+  out: "xaa-jti-probe-2073",
+};
+
 export interface ProbeComponent {
   /** Pass as `startHarper({ cwd })`. */
   dir: string;
@@ -34,7 +48,8 @@ function repoRoot(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
-export function componentWithReplayProbe(opts: { sourceRoot?: string } = {}): ProbeComponent {
+export function componentWithReplayProbe(opts: { sourceRoot?: string; probe?: ProbeFiles } = {}): ProbeComponent {
+  const probe = opts.probe ?? { source: PROBE_SOURCE_REL, target: PROBE_TARGET_REL, out: PROBE_OUT_REL };
   const sourceRoot = opts.sourceRoot ?? repoRoot();
   if (!existsSync(join(sourceRoot, "dist", "resources", "agent-auth.js"))) {
     throw new Error(
@@ -48,7 +63,7 @@ export function componentWithReplayProbe(opts: { sourceRoot?: string } = {}): Pr
   }
   const nm = join(sourceRoot, "node_modules");
   if (existsSync(nm)) symlinkSync(nm, join(dir, "node_modules"), "dir");
-  cpSync(join(repoRoot(), PROBE_SOURCE_REL), join(dir, PROBE_TARGET_REL));
+  cpSync(join(repoRoot(), probe.source), join(dir, probe.target));
   return {
     dir,
     sourceRoot,
