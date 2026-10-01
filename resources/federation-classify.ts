@@ -59,8 +59,8 @@ export type SkipReason =
   // ─── flair#2108 (an inbound Agent `status` that differs from the stored one) ──
   // Emitted by FederationSync.post before the raw put, for a record that passed
   // the earlier sync checks: an inbound Agent record
-  // whose data carries a `status` that differs from an existing local Agent's
-  // stored value, also when the record is older than the stored row and would
+  // whose effective status (a missing `status` counts as "active") differs from
+  // an existing local Agent's effective stored status, also when the record is older than the stored row and would
   // lose the last-write-wins merge. The federation path carries no verified
   // administrator authority for that principal, so the whole record is skipped
   // rather than merged without `status`.
@@ -261,8 +261,9 @@ export function classifyRecord(
 }
 
 /**
- * flair#2108: does this inbound Agent record carry a `status` that differs from
- * an existing local principal's stored value? True only when the record is for
+ * flair#2108: does this inbound Agent record's effective status differ from an
+ * existing local principal's effective stored status (a record with no `status`
+ * field counts as "active")? True only when the record is for
  * the Agent table, a local row exists, and the two differ under the feature's
  * lifecycle rule, which `effectiveAgentStatus` (resources/agent-status-guard.ts)
  * applies to both sides: a missing or undefined `status` is "active".
