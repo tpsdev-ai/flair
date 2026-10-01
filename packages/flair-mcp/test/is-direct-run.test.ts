@@ -1,4 +1,4 @@
-// Each flair-mcp script entry exports the shared isDirectRun. Where
+// Each ESM entry module tested here re-exports the shared `isDirectRun`. Where
 // import.meta.main is unavailable (Node 22 before 22.18), the fallback compares
 // filesystem paths resolved through symlinks, so a path with a space or an npm
 // bin symlink still matches, and a defined import.meta.main always decides.
