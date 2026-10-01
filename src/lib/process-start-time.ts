@@ -56,7 +56,7 @@ function readPsLstart(pid: number): string | null {
 
 let cachedClockTicksPerSecond: number | undefined;
 
-function clockTicksPerSecond(): number {
+function clockTicksPerSecond(): number | null {
   if (cachedClockTicksPerSecond !== undefined) return cachedClockTicksPerSecond;
   try {
     const raw = execFileSync("getconf", ["CLK_TCK"], {
@@ -69,18 +69,18 @@ function clockTicksPerSecond(): number {
       if (Number.isSafeInteger(ticks)) return (cachedClockTicksPerSecond = ticks);
     }
   } catch {
-    // getconf may be unavailable; use Linux's userspace USER_HZ fallback below.
+    // Unknown rate cannot establish a process's start time.
   }
-  // Linux's userspace USER_HZ is 100 on nearly every architecture. Use this
-  // fallback only when getconf fails or returns an invalid rate.
-  return (cachedClockTicksPerSecond = 100);
+  // Retry on a later read: getconf failure may be transient. Cache only a
+  // verified positive rate, never a guessed value.
+  return null;
 }
 
 /**
- * Linux's whole start second from the same boot epoch and start ticks that
- * `ps -o lstart=` uses. `/proc/uptime` plus `Date.now()` is sampled at two
- * different moments, so its reconstructed boot epoch can move across a
- * second boundary between reads of the same pid.
+ * Linux's whole start second from `/proc/stat` boot time and `/proc` start
+ * ticks when the host tick rate is known. `/proc/uptime` plus `Date.now()`
+ * is sampled at two different moments, so its reconstructed boot epoch can
+ * move across a second boundary between reads of the same pid.
  *
  * `/proc/<pid>/stat` reports starttime in USER_HZ ticks, and
  * `/proc/stat` reports btime in whole epoch seconds. Truncate the tick count
@@ -98,22 +98,25 @@ export function procStartSecondMsFromStat(processStat: string, systemStat: strin
 }
 
 /**
- * The pid's start time truncated to a whole second, in epoch ms (flair#2056).
+ * The pid's start time truncated to a whole second, in epoch ms when readable
+ * (flair#2056).
  *
  * macOS: the second `ps -o lstart=` reports. The zone correction is the
  * `applyLstartZoneOffset` offset rounded to a whole minute: that offset is the
  * parser's zone error (whole minutes) minus this process's sub-second start
  * fraction, and the rounding drops the fraction. Linux: btime plus the
- * `/proc` start ticks truncated to the second.
+ * `/proc` start ticks truncated to the second, only with a verified CLK_TCK.
  */
 export function readProcessStartSecondMs(pid: number): number | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (process.platform === "linux") {
     try {
+      const clkTck = clockTicksPerSecond();
+      if (clkTck === null) return null;
       return procStartSecondMsFromStat(
         readFileSync(`/proc/${pid}/stat`, "utf-8"),
         readFileSync("/proc/stat", "utf-8"),
-        clockTicksPerSecond(),
+        clkTck,
       );
     } catch {
       return null;
@@ -139,13 +142,15 @@ export function readProcessStartTimeMs(pid: number): number | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (process.platform === "linux") {
     try {
+      const clkTck = clockTicksPerSecond();
+      if (clkTck === null) return null;
       const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
       const starttime = parseProcStatStartTime(stat);
       if (starttime === null) return null;
       const uptimeRaw = readFileSync("/proc/uptime", "utf-8").trim().split(/\s+/)[0];
       const uptime = Number(uptimeRaw);
       if (!Number.isFinite(uptime)) return null;
-      return procStartTimeToEpochMs(starttime, uptime, Date.now());
+      return procStartTimeToEpochMs(starttime, uptime, Date.now(), clkTck);
     } catch {
       return null;
     }

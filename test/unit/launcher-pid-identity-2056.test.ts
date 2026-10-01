@@ -512,6 +512,30 @@ describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only whe
     expect(resolveInstanceServingPid(root, await freePort())).toBe(pid);
   }, 30_000);
 
+  test("unknown start second leaves a matching sidecar unconfirmed", () => {
+    const root = mkRoot();
+    // Inject a Harper-shaped command line so the time result is decisive.
+    writeSidecar(root, process.pid, Date.now());
+    writeFileSync(join(root, "hdb.pid"), `${process.pid}\n`);
+    let startReads = 0;
+    const deps = {
+      findListeningPids: () => [],
+      readCmdline: () => "node /opt/node_modules/harper/dist/bin/harper.js run .",
+    };
+    expect(resolveInstanceServingPid(root, 9926, {
+      ...deps,
+      readStartSecondMs: () => Math.floor(Date.now() / 1000) * 1000,
+    })).toBe(process.pid);
+    expect(resolveInstanceServingPid(root, 9926, {
+      ...deps,
+      readStartSecondMs: () => {
+        startReads++;
+        return null;
+      },
+    })).toBeNull();
+    expect(startReads).toBe(1);
+  }, 30_000);
+
   test("a Harper-shaped stub with NO sidecar is returned", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
