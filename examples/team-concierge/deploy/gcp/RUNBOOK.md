@@ -260,9 +260,7 @@ against a different hub than `FLAIR_URL`, or the secret holds a stale key
 works but recording fails; the instance's Cloud Logging shows adk-flair
 request errors. Fix: re-run step 3 against the right hub (`flair agent add` refuses an
 existing Agent row and leaves the old public key — delete the row first,
-as in teardown step 3, or register a different identity by setting both
-`FLAIR_AGENT_ID` and `FLAIR_KEY_SECRET`; `deploy.sh` still defaults those
-to `concierge-gcp` and `concierge-gcp-flair-key`), push
+as in teardown step 3), push
 the current keyfile as a **new secret version**
 (`gcloud secrets versions add concierge-gcp-flair-key --data-file=...`), and
 redeploy with `AGENT_ENGINE_ID=<id>` so the runtime picks it up.

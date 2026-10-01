@@ -488,8 +488,10 @@ writes a key file or an insert. It exits with an error that names the id and
 tells you to run `flair agent rotate-key <id>` on the Flair host (that command
 talks only to the local operations API and writes the replacement private key
 on that host). An adapter on another machine still loads the previous key
-until you copy the new key file there, or set `FLAIR_KEY_PATH` to it, and
-restart the adapter. The other remedy is `flair agent remove <id>` and then
+until the new private key file is on that signing host. `FLAIR_KEY_PATH`
+only names a path on the host where the adapter runs. Point it at that
+local file when the key is not in the default location, then restart the
+adapter. The other remedy is `flair agent remove <id>` and then
 `flair agent add` again. `flair agent remove` tries to delete that agent's
 Memory and Soul rows as well as the Agent row. A new id is inserted, then
 read back. The command prints the line above, and the public key on the
