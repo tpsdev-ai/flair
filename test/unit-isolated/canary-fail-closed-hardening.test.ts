@@ -657,6 +657,9 @@ const ctlNpmStub = [
   "  if [ -n \"${DISTTAG_LS_PRINTFAIL_PKG:-}\" ] && [ \"${3:-}\" = \"$DISTTAG_LS_PRINTFAIL_PKG\" ]; then echo \"latest: 1.2.2\"; exit 1; fi",
   "  if [ -n \"${DISTTAG_LS_CR:-}\" ]; then printf 'latest: 1.2.2\\r\\n'; exit 0; fi",
   "  if [ -n \"${DISTTAG_LS_GARBAGE:-}\" ]; then echo \"latest: garbage\"; exit 0; fi",
+  "  # flair#2140: DISTTAG_LS_CACHED is what npm's local cache would answer; only a",
+  "  # --prefer-online read gets the current value (1.2.2).",
+  "  if [ -n \"${DISTTAG_LS_CACHED:-}\" ]; then case \" $* \" in *\" --prefer-online \"*) ;; *) echo \"latest: $DISTTAG_LS_CACHED\"; exit 0 ;; esac; fi",
   "  echo \"latest: 1.2.2\"",
   "  exit 0",
   "fi",
@@ -874,6 +877,16 @@ describe("flair#2140: the promote block's final check waits instead of reporting
     expect(r.stderr).not.toContain("dist-tag rm");
   });
 
+  test("step 2 records the CURRENT latest, not npm's cached one: --previous and RESTORE lines carry 1.2.2, never the cached 1.2.1", () => {
+    const argvLog = join(mkdtempSync(join(SCRATCH, "skew-argv-")), "argv.log");
+    const r = runPromoteBlock({ DISTTAG_LS_CACHED: "1.2.1", SKEW_ARGV_LOG: argvLog, SKEW_FAIL: "3" });
+    expect(r.status, `stderr:\n${r.stderr}`).toBe(3);
+    const calls = readFileSync(argvLog, "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l) as string[]);
+    expect(calls[0]!.slice(4)).toEqual(PACKAGES.flatMap((p) => ["--previous", `${p}=1.2.2`]));
+    for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    expect(r.stderr).not.toContain("1.2.1");
+  });
+
   test("skew (exit 1) and DID NOT RUN (exit 2) still print the RESTORE lines at once, with no re-run instruction", () => {
     for (const code of ["1", "2"]) {
       const r = runPromoteBlock({ SKEW_FAIL: code });
@@ -971,9 +984,11 @@ describe("flair#2140 end to end: the real check, a registry that shows the last 
     // Every package moved, flair last.
     const adds = log.filter((l) => l.startsWith("dist-tag add "));
     expect(adds).toEqual(PACKAGES.map((p) => `dist-tag add ${p}@${VER} latest`));
-    // The check re-read the lagging package through the dist-tags endpoint until
-    // it showed the move (2 lagging reads + 1), and never read the CDN document.
-    expect(log.filter((l) => l === `dist-tag ls ${lagPkg} --prefer-online`).length).toBe(3);
+    // After the last move, the check re-read the lagging package through the
+    // dist-tags endpoint until it showed the move (2 lagging reads + 1), and never
+    // read the CDN document.
+    const afterMoves = log.slice(log.lastIndexOf(adds[adds.length - 1]!) + 1);
+    expect(afterMoves.filter((l) => l === `dist-tag ls ${lagPkg} --prefer-online`).length).toBe(3);
     expect(log.filter((l) => l.startsWith("view "))).toEqual([]);
   }, 120_000);
 });

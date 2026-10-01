@@ -177,7 +177,8 @@ describe("registry-latest-skew — the lockstep set must agree on `latest`", () 
 //     fixture's `view` value, which never changes during a test;
 //   - `dist-tag ls <pkg> [--prefer-online]` — the dist-tags endpoint: the
 //     fixture's `ls` list, one entry per read (the last entry repeats). `<fail>`
-//     exits 1 (an unreadable read).
+//     exits 1 (an unreadable read). An optional `delayMs` list (same indexing)
+//     makes that read answer late.
 // Every call is logged, one line per call, so a test can assert which surface
 // the script read and how many times.
 const WAIT_BIN = join(SCRATCH, "wait-bin");
@@ -207,9 +208,13 @@ writeFileSync(
     "  const n = fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0;",
     "  fs.writeFileSync(counter, String(n + 1));",
     "  const v = f.ls[Math.min(n, f.ls.length - 1)];",
-    "  if (v === '<fail>') process.exit(1);",
-    "  process.stdout.write('latest: ' + v + '\\nnext: 9.9.9-rc.1\\n');",
-    "  process.exit(0);",
+    "  const delay = Array.isArray(f.delayMs) ? f.delayMs[Math.min(n, f.delayMs.length - 1)] : 0;",
+    "  setTimeout(() => {",
+    "    if (v === '<fail>') process.exit(1);",
+    "    process.stdout.write('latest: ' + v + '\\nnext: 9.9.9-rc.1\\n');",
+    "    process.exit(0);",
+    "  }, delay);",
+    "  return;",
     "}",
     "process.stderr.write('unexpected npm call: ' + args.join(' ') + '\\n');",
     "process.exit(1);",
@@ -218,7 +223,7 @@ writeFileSync(
 );
 chmodSync(join(WAIT_BIN, "npm"), 0o755);
 
-type WaitFixture = { view?: string; ls?: string[] };
+type WaitFixture = { view?: string; ls?: string[]; delayMs?: number[] };
 
 /** Every lockstep package at `value` on both surfaces, then the overrides. */
 function waitFixtures(value: string, overrides: Record<string, WaitFixture> = {}): Record<string, WaitFixture> {
@@ -278,10 +283,10 @@ describe("registry-latest-skew --await — a promote the registry has not shown 
 
   test("a package that never leaves its previous latest => NOT YET VISIBLE (exit 3), re-run before restoring", async () => {
     const fx = waitFixtures("0.58.0", { [FLAIR]: { view: "0.57.0", ls: ["0.57.0"] } });
-    const r = await runWait(fx, ["0.58.0", "--await", "2", ...previousArgs("0.57.0")]);
+    const r = await runWait(fx, ["0.58.0", "--await", "4", ...previousArgs("0.57.0")]);
     expect(r.status, `stderr:\n${r.stderr}`).toBe(3);
     expect(r.stdout).toBe("");
-    expect(r.stderr).toContain("lockstep latest not yet visible after 2 s — expected 0.58.0");
+    expect(r.stderr).toContain("lockstep latest not yet visible after 4 s — expected 0.58.0");
     expect(r.stderr).toContain(`   ${FLAIR}: latest 0.57.0`);
     expect(r.stderr).toContain("Re-run this check with the same arguments before restoring anything.");
     expect(r.stderr).not.toContain("skew");
@@ -290,13 +295,13 @@ describe("registry-latest-skew --await — a promote the registry has not shown 
     for (const p of lockstepPackages().filter((q) => q !== FLAIR)) expect(r.stderr).not.toContain(`${p}: latest`);
     // It retried (more than one read of the lagging package) and the wait is bounded.
     expect(lsReadsOf(r.calls, FLAIR)).toBeGreaterThanOrEqual(2);
-    expect(r.elapsedMs).toBeGreaterThanOrEqual(2_000);
+    expect(r.elapsedMs).toBeGreaterThanOrEqual(4_000);
     expect(r.elapsedMs).toBeLessThan(15_000);
   }, 60_000);
 
   test("a third version (neither expected nor the previous latest) => skew (exit 1), after the wait", async () => {
     const fx = waitFixtures("0.58.0", { [FLAIR]: { ls: ["0.56.0"] } });
-    const r = await runWait(fx, ["0.58.0", "--await", "1", ...previousArgs("0.57.0")]);
+    const r = await runWait(fx, ["0.58.0", "--await", "4", ...previousArgs("0.57.0")]);
     expect(r.status, `stderr:\n${r.stderr}`).toBe(1);
     expect(r.stderr).toContain("✗ lockstep latest skew — expected 0.58.0:");
     expect(r.stderr).toContain(`   ${FLAIR}: latest 0.56.0`);
@@ -307,7 +312,7 @@ describe("registry-latest-skew --await — a promote the registry has not shown 
   test("one package on its previous latest and another on a third version => skew (exit 1), both named", async () => {
     const mcp = "@tpsdev-ai/flair-mcp";
     const fx = waitFixtures("0.58.0", { [FLAIR]: { ls: ["0.57.0"] }, [mcp]: { ls: ["0.55.0"] } });
-    const r = await runWait(fx, ["0.58.0", "--await", "1", ...previousArgs("0.57.0")]);
+    const r = await runWait(fx, ["0.58.0", "--await", "3", ...previousArgs("0.57.0")]);
     expect(r.status, `stderr:\n${r.stderr}`).toBe(1);
     expect(r.stderr).toContain(`   ${FLAIR}: latest 0.57.0`);
     expect(r.stderr).toContain(`   ${mcp}: latest 0.55.0`);
@@ -317,7 +322,7 @@ describe("registry-latest-skew --await — a promote the registry has not shown 
   test("a package on a version with no --previous for it is not explained by lag => skew (exit 1)", async () => {
     const fx = waitFixtures("0.58.0", { [FLAIR]: { ls: ["0.57.0"] } });
     const others = lockstepPackages().filter((p) => p !== FLAIR);
-    const r = await runWait(fx, ["0.58.0", "--await", "1", ...previousArgs("0.57.0", others)]);
+    const r = await runWait(fx, ["0.58.0", "--await", "3", ...previousArgs("0.57.0", others)]);
     expect(r.status, `stderr:\n${r.stderr}`).toBe(1);
     expect(r.stderr).toContain(`   ${FLAIR}: latest 0.57.0`);
     expect(r.stderr).not.toContain("not yet visible");
@@ -325,7 +330,7 @@ describe("registry-latest-skew --await — a promote the registry has not shown 
 
   test("a --previous in the promote block's step-2 shape (hyphen in the prerelease) is accepted", async () => {
     const fx = waitFixtures("0.58.0", { [FLAIR]: { ls: ["0.57.0-rc-1"] } });
-    const r = await runWait(fx, ["0.58.0", "--await", "1", ...previousArgs("0.57.0-rc-1")]);
+    const r = await runWait(fx, ["0.58.0", "--await", "3", ...previousArgs("0.57.0-rc-1")]);
     expect(r.status, `stderr:\n${r.stderr}`).toBe(3);
     expect(r.stderr).toContain(`   ${FLAIR}: latest 0.57.0-rc-1`);
   }, 60_000);
@@ -356,6 +361,29 @@ describe("registry-latest-skew --await — a promote the registry has not shown 
     expect(r.status, `stderr:\n${r.stderr}`).toBe(2);
     expect(r.stderr).toContain("DID NOT RUN");
     expect(r.stderr).toContain(FLAIR);
+  }, 60_000);
+
+  test("a first pass slower than the wait => DID NOT RUN (exit 2) at the end of the wait, naming the unread package", async () => {
+    // @tpsdev-ai/flair is read last; its read would take 8 s, the wait is 3 s.
+    const fx = waitFixtures("0.58.0", { [FLAIR]: { ls: ["0.58.0"], delayMs: [8_000] } });
+    const r = await runWait(fx, ["0.58.0", "--await", "3", ...previousArgs("0.57.0")]);
+    expect(r.status, `stderr:\n${r.stderr}`).toBe(2);
+    expect(r.stderr).toContain(`DID NOT RUN — the 3 s wait ended before dist-tags.latest was read for: ${FLAIR}\n`);
+    expect(r.stdout).toBe("");
+    expect(r.elapsedMs).toBeGreaterThanOrEqual(3_000);
+    expect(r.elapsedMs).toBeLessThan(6_000);
+  }, 60_000);
+
+  test("a re-read slower than the time left is cut at the end of the wait; the last read decides (exit 3)", async () => {
+    // First read of @tpsdev-ai/flair: its previous latest, at once. Its re-read
+    // would take 8 s; the wait is 4 s.
+    const fx = waitFixtures("0.58.0", { [FLAIR]: { ls: ["0.57.0"], delayMs: [0, 8_000] } });
+    const r = await runWait(fx, ["0.58.0", "--await", "4", ...previousArgs("0.57.0")]);
+    expect(r.status, `stderr:\n${r.stderr}`).toBe(3);
+    expect(r.stderr).toContain(`   ${FLAIR}: latest 0.57.0`);
+    expect(lsReadsOf(r.calls, FLAIR)).toBe(2);
+    expect(r.elapsedMs).toBeGreaterThanOrEqual(4_000);
+    expect(r.elapsedMs).toBeLessThan(7_000);
   }, 60_000);
 
   test("without --await the reads are unchanged: one `npm view` read per package, a lagging package is skew (exit 1)", async () => {

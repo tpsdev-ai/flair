@@ -251,13 +251,14 @@ EOF
   cat <<EOF
 
 # 2. Read each package's CURRENT latest BEFORE any move. If a read fails, NOTHING
-#    has moved — stop here and say so.
+#    has moved — stop here and say so. --prefer-online: without it npm can answer
+#    from its local cache (flair#2140), and step 4 compares against these values.
 for _p in ${PACKAGES[*]}; do
   # Capture npm's stdout and its exit status SEPARATELY. A (npm | sed) pipeline
   # reports sed's status (0 on a match), so an npm that FAILS while still printing
   # a "latest: 1.2.2" line would read as success. A failed read must stop here.
   set +e
-  _ls="\$(npm dist-tag ls "\$_p" 2>/dev/null)"
+  _ls="\$(npm dist-tag ls "\$_p" --prefer-online 2>/dev/null)"
   _ls_status=\$?
   set -e
   if [ "\$_ls_status" -ne 0 ]; then
@@ -315,8 +316,9 @@ done
 #    recorded. exit 3 = when the wait ended, every package not at ${VERSION} still
 #    read its previous latest: re-run the check before restoring anything. exit 1 =
 #    skew. exit 2 = the check DID NOT RUN (usage error, package-set derivation
-#    failure, empty set, or an unreadable latest); then the tag state is UNKNOWN
-#    and the block must not claim any package is or is not on its previous latest.
+#    failure, empty set, an unreadable latest, or a wait that ended before every
+#    latest was read); then the tag state is UNKNOWN and the block must not claim
+#    any package is or is not on its previous latest.
 _SKEW_PREV=()
 while IFS= read -r _line; do
   _SKEW_PREV[\${#_SKEW_PREV[@]}]="--previous"

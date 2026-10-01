@@ -40,7 +40,10 @@
  *     server.
  * Every package not yet at the expected version is re-read with backoff until it
  * is, or until the wait ends. The first read of each package is such a read too,
- * so in this mode a "converged" verdict rests only on these reads.
+ * so in this mode a "converged" verdict rests only on these reads. No read runs
+ * past the end of the wait: each gets at most the time left. A read the end of
+ * the wait cuts short leaves that package's last value in place; before every
+ * package has been read once, it is DID NOT RUN.
  *
  * Usage:
  *   node scripts/ci/registry-latest-skew.mjs [expected-version]
@@ -52,12 +55,13 @@
  *       wait ended, at least one package not at the expected version read a
  *       value other than its `--previous` (or has no `--previous`)
  *   2 — DID NOT RUN (a `latest` could not be read, a usage error, or no packages
- *       found) — an unmeasurable check is never green
+ *       found; in wait mode also when the wait ended before every package had
+ *       been read once) — an unmeasurable check is never green
  *   3 — wait mode only: NOT YET VISIBLE. When the wait ended, every package not at
  *       the expected version still read its `--previous` value. The message tells
  *       the operator to re-run the check before restoring anything.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { lockstepPackages } from "./lockstep-packages.mjs";
 
 /** The expected-version shape (unchanged from flair#1781). */
@@ -75,6 +79,8 @@ const AWAIT_FIRST_DELAY_MS = 1_000;
 const AWAIT_MAX_DELAY_MS = 16_000;
 /** A wait-mode read that has not returned after this long is unreadable. */
 const AWAIT_READ_TIMEOUT_MS = 30_000;
+/** A wait-mode read stopped at the end of the wait (its time limit was the time left). */
+const CUT = Symbol("cut");
 
 const argv = process.argv.slice(2);
 const hasPositional = argv.length > 0 && !argv[0].startsWith("--");
@@ -162,22 +168,21 @@ function readLatest(pkg) {
 
 /**
  * The wait mode's read: `latest` from the registry's dist-tags endpoint, through
- * `npm dist-tag ls <pkg> --prefer-online` (see the header for why). Returns null —
- * unreadable — when npm fails or times out, or when its output does not carry
- * exactly one `latest: <version>` line.
+ * `npm dist-tag ls <pkg> --prefer-online` (see the header for why), stopped after
+ * `timeoutMs`. Returns CUT when a limit below AWAIT_READ_TIMEOUT_MS (the time
+ * left in the wait) stopped it; null — unreadable — when npm fails or times out
+ * otherwise, or when its output does not carry exactly one `latest: <version>`
+ * line.
  */
-function readLatestUncached(pkg) {
-  let raw;
-  try {
-    raw = execFileSync("npm", ["dist-tag", "ls", pkg, "--prefer-online"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: AWAIT_READ_TIMEOUT_MS,
-    });
-  } catch {
-    return null;
-  }
-  const values = raw
+function readLatestUncached(pkg, timeoutMs) {
+  const r = spawnSync("npm", ["dist-tag", "ls", pkg, "--prefer-online"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: timeoutMs,
+  });
+  if (r.error?.code === "ETIMEDOUT" && timeoutMs < AWAIT_READ_TIMEOUT_MS) return CUT;
+  if (r.error || r.status !== 0) return null;
+  const values = r.stdout
     .split("\n")
     .map((line) => line.replace(/\r$/, ""))
     .filter((line) => line.startsWith("latest: "))
@@ -196,13 +201,26 @@ async function awaitConvergence() {
   let pending = [...packages];
   for (;;) {
     const unreadable = [];
+    let cut = false;
     for (const pkg of pending) {
-      const v = readLatestUncached(pkg);
+      const left = Math.ceil(deadline - performance.now());
+      const v = left > 0 ? readLatestUncached(pkg, Math.min(left, AWAIT_READ_TIMEOUT_MS)) : CUT;
+      if (v === CUT) {
+        cut = true;
+        break;
+      }
       if (v === null) unreadable.push(pkg);
       else current.set(pkg, v);
     }
     if (unreadable.length > 0) {
       console.error(`registry-latest-skew: DID NOT RUN — could not read dist-tags.latest for: ${unreadable.join(", ")}`);
+      return 2;
+    }
+    const unread = packages.filter((p) => !current.has(p));
+    if (unread.length > 0) {
+      console.error(
+        `registry-latest-skew: DID NOT RUN — the ${awaitSeconds} s wait ended before dist-tags.latest was read for: ${unread.join(", ")}`,
+      );
       return 2;
     }
     pending = pending.filter((p) => current.get(p) !== expected);
@@ -211,7 +229,7 @@ async function awaitConvergence() {
       return 0;
     }
     const remaining = deadline - performance.now();
-    if (remaining <= 0) break;
+    if (cut || remaining <= 0) break;
     await sleep(Math.min(delay, remaining));
     delay = Math.min(delay * 2, AWAIT_MAX_DELAY_MS);
   }
