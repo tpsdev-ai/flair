@@ -54,23 +54,46 @@ function readPsLstart(pid: number): string | null {
   }
 }
 
+let cachedClockTicksPerSecond: number | undefined;
+
+function clockTicksPerSecond(): number {
+  if (cachedClockTicksPerSecond !== undefined) return cachedClockTicksPerSecond;
+  try {
+    const raw = execFileSync("getconf", ["CLK_TCK"], {
+      encoding: "utf-8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (/^[1-9][0-9]*$/.test(raw)) {
+      const ticks = Number(raw);
+      if (Number.isSafeInteger(ticks)) return (cachedClockTicksPerSecond = ticks);
+    }
+  } catch {
+    // getconf may be unavailable; use Linux's userspace USER_HZ fallback below.
+  }
+  // Linux's userspace USER_HZ is 100 on nearly every architecture. Use this
+  // fallback only when getconf fails or returns an invalid rate.
+  return (cachedClockTicksPerSecond = 100);
+}
+
 /**
  * Linux's whole start second from the same boot epoch and start ticks that
  * `ps -o lstart=` uses. `/proc/uptime` plus `Date.now()` is sampled at two
  * different moments, so its reconstructed boot epoch can move across a
  * second boundary between reads of the same pid.
  *
- * `/proc/<pid>/stat` reports starttime in USER_HZ ticks (100 per second), and
+ * `/proc/<pid>/stat` reports starttime in USER_HZ ticks, and
  * `/proc/stat` reports btime in whole epoch seconds. Truncate the tick count
- * before adding btime so the answer is stable for a living process.
+ * before adding btime so the answer is stable across sampling and wall-clock
+ * second boundaries while btime is unchanged.
  */
-export function procStartSecondMsFromStat(processStat: string, systemStat: string): number | null {
+export function procStartSecondMsFromStat(processStat: string, systemStat: string, clkTck: number): number | null {
   const starttimeTicks = parseProcStatStartTime(processStat);
   const bootTimeMatch = /^btime[ \t]+([0-9]+)[ \t]*$/m.exec(systemStat);
-  if (starttimeTicks === null || !Number.isSafeInteger(starttimeTicks) || starttimeTicks < 0 || bootTimeMatch === null) return null;
+  if (starttimeTicks === null || !Number.isSafeInteger(starttimeTicks) || starttimeTicks < 0 || bootTimeMatch === null || !Number.isSafeInteger(clkTck) || clkTck <= 0) return null;
   const bootTimeSeconds = Number(bootTimeMatch[1]);
   if (!Number.isSafeInteger(bootTimeSeconds) || bootTimeSeconds <= 0) return null;
-  const startSecondMs = (bootTimeSeconds + Math.floor(starttimeTicks / 100)) * 1000;
+  const startSecondMs = (bootTimeSeconds + Math.floor(starttimeTicks / clkTck)) * 1000;
   return Number.isSafeInteger(startSecondMs) ? startSecondMs : null;
 }
 
@@ -90,6 +113,7 @@ export function readProcessStartSecondMs(pid: number): number | null {
       return procStartSecondMsFromStat(
         readFileSync(`/proc/${pid}/stat`, "utf-8"),
         readFileSync("/proc/stat", "utf-8"),
+        clockTicksPerSecond(),
       );
     } catch {
       return null;

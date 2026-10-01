@@ -57,20 +57,23 @@ describe("readProcessStartTimeMs — shared start-time reader (flair#1372)", () 
 });
 
 describe("readProcessStartSecondMs — Linux whole-second start time (flair#2056)", () => {
+  const clkTck = 250;
   const statAt = (starttimeTicks: number): string =>
     `4242 (harper) S 1 4242 4242 0 -1 4194560 100 0 0 0 10 5 0 0 20 0 1 0 ${starttimeTicks} 100000 2000`;
   const systemStat = "cpu 1 2 3 4\nbtime 1700000000\nprocesses 2\n";
 
   test("truncates ticks at a second boundary and gives the same answer on repeated reads", () => {
-    const justBefore = statAt(9_999); // 99.99 s after boot
-    expect(procStartSecondMsFromStat(justBefore, systemStat)).toBe(1_700_000_099_000);
-    expect(procStartSecondMsFromStat(justBefore, systemStat)).toBe(1_700_000_099_000);
-    expect(procStartSecondMsFromStat(statAt(10_000), systemStat)).toBe(1_700_000_100_000);
+    const justBefore = statAt(24_999); // 99.996 s after boot at 250 ticks/s
+    expect(procStartSecondMsFromStat(justBefore, systemStat, clkTck)).toBe(1_700_000_099_000);
+    expect(procStartSecondMsFromStat(justBefore, systemStat, clkTck)).toBe(1_700_000_099_000);
+    expect(procStartSecondMsFromStat(statAt(25_000), systemStat, clkTck)).toBe(1_700_000_100_000);
   });
 
   test("unreadable or malformed boot and process times fail closed", () => {
-    expect(procStartSecondMsFromStat(statAt(9_999), "cpu 1 2 3 4\n")).toBeNull();
-    expect(procStartSecondMsFromStat("4242 harper S 1 2 3", systemStat)).toBeNull();
+    expect(procStartSecondMsFromStat(statAt(24_999), "cpu 1 2 3 4\n", clkTck)).toBeNull();
+    expect(procStartSecondMsFromStat("4242 harper S 1 2 3", systemStat, clkTck)).toBeNull();
+    expect(procStartSecondMsFromStat(statAt(24_999), systemStat, 0)).toBeNull();
+    expect(procStartSecondMsFromStat(statAt(24_999), systemStat, 2.5)).toBeNull();
     expect(readProcessStartSecondMs(0)).toBeNull();
   });
 });
