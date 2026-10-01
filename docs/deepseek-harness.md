@@ -105,6 +105,6 @@ Field names verified against DSH `master` 2026-08-20; [their table](https://gith
 
 **Tools never appear.** DSH logs initial connection and discovery failures; by default a failed startup registers no tools rather than failing the plugin. Check `flair status` on the Flair side, and check the DSH logs for the `flair` server's connect errors. A duplicate `serverName: flair` across live instances fails the later instance at load.
 
-**`auth_error` on every call.** Identity/key mismatch — and remember that an exported `FLAIR_KEY_PATH` never reaches the server (caveat 1). If no Agent row exists, run `flair agent add <id>`. If the row exists, `agent add` refuses and leaves the stored key; run `flair agent rotate-key <id>` on the Flair host, or set `FLAIR_KEY_PATH` in `config.env` to the key that matches the stored one.
+**`auth_error` on every call.** Identity/key mismatch — and remember that an exported `FLAIR_KEY_PATH` never reaches the server (caveat 1). If no Agent row exists, run `flair agent add <id>`. If the row exists, `agent add` refuses and leaves the stored key. Run `flair agent rotate-key <id>` on the Flair host; that writes the new private key on the Flair host. Copy that file to the harness host and set `FLAIR_KEY_PATH` in `config.env` to it, then restart — the adapter otherwise keeps the old key. Setting `FLAIR_KEY_PATH` to a key that already matches the stored public key is the other fix.
 
 For everything else: [troubleshooting.md](troubleshooting.md).

@@ -486,12 +486,18 @@ there, sends an `insert` for the Agent record, and prints, among other lines:
 If an Agent record with that id already exists, the command stops before it
 writes a key file or an insert. It exits with an error that names the id and
 tells you to run `flair agent rotate-key <id>` on the Flair host (that command
-talks to the local operations API), or `flair agent remove <id>` and then
-`flair agent add` again. A new id is inserted, then read back. The command
-prints the line above, and the public key on the following line, only when
-the stored public key matches the key it wrote. A skipped insert or a
-different stored key is an error. Requests signed with a key that does not
-match the stored one still get `invalid_signature` (below).
+talks only to the local operations API and writes the replacement private key
+on that host). An adapter on another machine still loads the previous key
+until you copy the new key file there, or set `FLAIR_KEY_PATH` to it, and
+restart the adapter. The other remedy is `flair agent remove <id>` and then
+`flair agent add` again. `flair agent remove` tries to delete that agent's
+Memory and Soul rows as well as the Agent row. A new id is inserted, then
+read back. The command prints the line above, and the public key on the
+following line, only when the stored public key matches the key generated or
+reused by this command. A skipped insert, a different stored key, or a row
+with no usable public key is an error. A row that exists without a usable
+public key is not reported as a missing row. Requests signed with a key that
+does not match the stored one still get `invalid_signature` (below).
 
 Configure the stdio adapter (`@tpsdev-ai/flair-mcp`) on the bot's host with
 `FLAIR_URL=https://flair.example.com` and `FLAIR_AGENT_ID=bob-the-bot`. With
