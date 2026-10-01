@@ -300,9 +300,9 @@ describe("launcher script — non-interactive start", () => {
 
 // flair#2040 / flair#2056: when launchd starts the job (RunAtLoad at a console
 // login, or a KeepAlive retry) while a DIRECT process already serves the same
-// data directory, the launcher must not start a second Harper on it — but only
-// when that process is IDENTIFIED as the direct Flair process (the flair-daemon
-// sidecar plus a node/harper command line; see
+// data directory, the launcher must not start a second Harper on it. It refuses
+// only when hdb.pid names a live process whose command line is node or bun
+// running a Harper entry script; no flair-daemon sidecar is required (see
 // test/unit/launcher-pid-identity-2056.test.ts). Harper's own hdb.pid check
 // would refuse too, but only after loading its config and applying
 // HARPER_SET_CONFIG to the data directory. Platform-independent: plain sh.
@@ -329,12 +329,11 @@ describe("launcher script — never a second instance on a served data directory
     });
   }
 
-  test("hdb.pid names a LIVE process with NO identity (flair#2056) -> treated as stale; the launcher starts Harper", () => {
+  test("hdb.pid names a LIVE process that is not Harper (flair#2056) -> the launcher starts Harper", () => {
     const f = fixture();
-    // A live pid this test owns, but no flair-daemon.json identity: it cannot be
-    // shown to be the direct Flair process, so it is treated as stale (its pid
-    // may have been recycled) and Harper is exec'd. See
-    // test/unit/launcher-pid-identity-2056.test.ts for the identified-process refusal.
+    // A live pid this test owns: the test runner itself, whose command line is
+    // not node or bun running a Harper entry script, so Harper is exec'd. See
+    // test/unit/launcher-pid-identity-2056.test.ts for the refusal of a Harper process.
     writeFileSync(join(f.rootPath, "hdb.pid"), String(process.pid));
     const r = launch(f);
     expect(r.status).toBe(0);

@@ -232,7 +232,7 @@ import { classifyInstalledVersion, shouldPrintUpgradeLine, upgradeStatusSuffix, 
 import {
   classifyDaemonState,
   verifyIdentity,
-  isNodeHarperCommandLine,
+  isHarperProcessCommandLine,
   isStartTimeMatch,
   parseSidecarJson,
   classifyHealthProbe,
@@ -5641,14 +5641,13 @@ function resolveInstanceServingPid(dataDir: string, port: number): number | null
   try {
     listeningPids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
   } catch { /* lsof unavailable — the PID file may still answer */ }
-  // flair#2056: identify the PROCESS, not just the pid. A live `hdb.pid` is
-  // trusted when its command line is node running harper.js — a sidecar is NOT
-  // required, since an instance started by a pre-sidecar flair, or the instance
-  // launchd starts (whose launcher execs Harper), serves the data dir without
-  // one. A flair#1454 sidecar that names a DIFFERENT pid, or the same pid with a
-  // start time outside the ±2 s window, is a MISMATCH (the pid was recycled), so
-  // the pid is stale and the port listener answers instead. Reuses the existing
-  // sidecar reader (readSidecar).
+  // flair#2056: a live `hdb.pid` pid is used only when its command line passes
+  // isHarperProcessCommandLine and no flair#1454 sidecar disagrees. A sidecar
+  // is not required: an instance started by a pre-sidecar flair, or the one the
+  // launchd launcher execs, has none. A sidecar that names a different pid, or
+  // the same pid with a start time more than 2 s off, means the identity
+  // evidence disagrees: the pid is not used, and the port listener answers
+  // instead, if one is found.
   const sidecar = readSidecar(dataDir);
   const isIdentified = (pid: number): boolean => {
     if (sidecar.kind === "present") {
@@ -5657,7 +5656,7 @@ function resolveInstanceServingPid(dataDir: string, port: number): number | null
       if (actual === null || !isStartTimeMatch(actual, sidecar.startTimeMs)) return false;
     }
     const cmdline = defaultReadProcessCmdline(pid);
-    return cmdline !== null && isNodeHarperCommandLine(cmdline);
+    return cmdline !== null && isHarperProcessCommandLine(cmdline);
   };
   return pickInstancePid({
     pidFilePid: readHarperPid(dataDir),

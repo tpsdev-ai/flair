@@ -273,23 +273,34 @@ export function isStartTimeMatch(actualMs: number, recordedMs: number, tolerance
   return Math.abs(actualMs - recordedMs) <= toleranceMs;
 }
 
+/** Harper's entry script under an install tree: `…/node_modules/[@<scope>/]harper/dist/bin/harper.js`. */
+const HARPER_ENTRY_PATH = /(^|\/)node_modules\/(@[^/]+\/)?harper\/dist\/bin\/harper\.js$/;
+/** The relative entry Harper's own restart forks, from its package directory (LAUNCH_SERVICE_SCRIPTS.MAIN). */
+const HARPER_RESTART_ENTRY = "dist/bin/harper.js";
+
 /**
- * Does a process command line look like `node` running Harper (flair#2056)?
+ * Is this the command line of a Harper process (flair#2056)?
  *
- * The launcher and `resolveInstanceServingPid` trust a pidfile pid when the
- * command line is a node process running `harper.js`, unless a flair#1454
- * sidecar names a different pid or start time (the pid was recycled). A
- * recycled pid usually belongs to something else. The first token must be a
- * `node` executable and some token must end in `harper.js` (however flair's
- * launcher spells the absolute path). A command line that cannot be read is a
- * caller concern; an empty string is not this.
+ * argv[0]'s basename is `node` or `bun`, and argv[1], the script it runs, is a
+ * Harper entry: `…/node_modules/harper/dist/bin/harper.js` or
+ * `…/node_modules/@<scope>/harper/dist/bin/harper.js` (what `flair start`, the
+ * launchd launcher and a systemd unit pass), or `dist/bin/harper.js` (what
+ * Harper's own restart forks). flair passes no runtime options, so an option
+ * before the script does not match. A Harper path anywhere else in the
+ * arguments does not match.
+ *
+ * `cmdline` is `/proc/<pid>/cmdline` (NUL-separated argv) or `ps -o command=`
+ * (space-joined argv, split on whitespace: a path containing whitespace does
+ * not match).
  */
-export function isNodeHarperCommandLine(cmdline: string): boolean {
-  const tokens = cmdline.split(/\u0000|\s+/).filter((t) => t.length > 0);
-  if (tokens.length === 0) return false;
-  const exe = tokens[0].split("/").pop() ?? "";
-  if (exe !== "node" && exe !== "node.exe") return false;
-  return tokens.some((t) => /(^|\/)harper\.js$/.test(t));
+export function isHarperProcessCommandLine(cmdline: string): boolean {
+  const argv = cmdline.includes("\u0000") ? cmdline.split("\u0000") : cmdline.trim().split(/\s+/);
+  if (argv.length < 2) return false;
+  const exe = argv[0].split("/").pop();
+  if (exe !== "node" && exe !== "bun") return false;
+  const script = argv[1];
+  if (script.startsWith("-")) return false;
+  return script === HARPER_RESTART_ENTRY || HARPER_ENTRY_PATH.test(script);
 }
 
 /**
