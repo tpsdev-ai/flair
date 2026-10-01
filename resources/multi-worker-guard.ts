@@ -230,12 +230,15 @@ export function _resetMultiWorkerGuardForTests(): void {
 // Register the guard as its own http entry: runFirst, named, and ordered ahead
 // of the default REST middleware. A urlPath mount pulls it in by name (see
 // mcp-oauth.ts / oauth-wellknown.ts), so the refused state is enforced before
-// dispatch on every route Flair serves.
-server.http(multiWorkerRequestGuard, {
-  runFirst: true,
-  name: MULTI_WORKER_GUARD_HTTP_NAME,
-  before: FLAIR_AUTH_MIDDLEWARE_HTTP_NAME,
-});
+// dispatch on every route Flair serves. Skipped where `server.http` is absent
+// (a partial mock outside a running Harper, where there is no dispatch to guard).
+if (typeof (server as { http?: unknown } | undefined)?.http === "function") {
+  server.http(multiWorkerRequestGuard, {
+    runFirst: true,
+    name: MULTI_WORKER_GUARD_HTTP_NAME,
+    before: FLAIR_AUTH_MIDDLEWARE_HTTP_NAME,
+  });
+}
 
 // Every worker loads this module once, so the named boot line is emitted once
 // per worker module instance; every later read answers from the memoised
