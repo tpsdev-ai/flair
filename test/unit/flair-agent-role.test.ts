@@ -60,13 +60,13 @@ describe("ensureFlairAgentRole — idempotency", () => {
 
   it("calls alter_role when an existing role has different permissions", async () => {
     installFetch([
-      { ok: true, body: [{ role: ROLE_NAME, id: ROLE_NAME, permission: { super_user: true } }] },
+      { ok: true, body: [{ role: ROLE_NAME, id: "role-row-id-2154", permission: { super_user: true } }] },
       { ok: true, body: { ok: true } },
     ]);
     await ensureFlairAgentRole(OPS_URL, ADMIN, PASS);
     expect(capturedBodies[1].operation).toBe("alter_role");
     expect(capturedBodies[1].role).toBe(ROLE_NAME);
-    expect(capturedBodies[1].id).toBe(ROLE_NAME);
+    expect(capturedBodies[1].id).toBe("role-row-id-2154");
   });
 
   it("refuses to alter a role whose list_roles row carries no id", async () => {

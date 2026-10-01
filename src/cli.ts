@@ -3934,8 +3934,7 @@ const PAIR_INITIATOR_PERMISSION = {
 /**
  * The `id` that `alter_role` addresses a role by. `list_roles` answers with each
  * role's `id`, and Harper 5.2.8 rejects an `alter_role` that omits it ("Id can't
- * be blank"). A role row that carries no usable id is not updatable, and
- * guessing one would edit the wrong role, so this throws instead.
+ * be blank").
  */
 function alterRoleId(roleName: string, existing: any): string {
   const id = existing?.id;
