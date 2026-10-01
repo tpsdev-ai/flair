@@ -87,8 +87,9 @@ conclusion and tolerates only exact names in [the advisory allowlist](../.github
 All other release conditions must pass, and it targets the version still declared
 on `main`, so a newer version supersedes a missed release.
 
-If Release auto-tag did not create the tag, a repository admin tags by hand (a ruleset
-restricts creating `v*` tags). The first command must print nothing:
+If Release auto-tag refused, resolve what it reports; do not tag by hand. If it did not
+run, a repository admin tags by hand (a ruleset restricts creating `v*` tags) once the
+checks it applies pass. The first command must print nothing:
 
 ```bash
 git ls-remote --tags origin v0.11.0

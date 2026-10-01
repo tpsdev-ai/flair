@@ -1,1 +1,1 @@
-- **Release PR text names the bumped packages and explains automatic tagging and the admin fallback (Closes #2132)**
+- **Release PR text explains automatic tagging and the admin fallback for a missed run (Closes #2132)**
