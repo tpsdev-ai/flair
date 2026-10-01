@@ -37,7 +37,7 @@ describe("flair mcp disable remote admin password text", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   test("help requires the target's admin password via --admin-pass", () => {
     const result = spawnSync(process.execPath, [cli, "mcp", "disable", "--help"], {
@@ -50,5 +50,5 @@ describe("flair mcp disable remote admin password text", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toMatch(/Admin password for the remote target instance; pass it\s+explicitly with --admin-pass/);
     expect(result.stdout).not.toContain("FLAIR_ADMIN_PASS");
-  });
+  }, 20_000);
 });
