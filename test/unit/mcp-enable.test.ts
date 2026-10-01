@@ -704,9 +704,11 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   });
 
   test.each([
-    [{ opsPortOrUrl: "http://user:s3cret@127.0.0.1:19925" }, `"http://<credentials removed>@127.0.0.1:19925"`],
-    [{ hostedOrigin: "user:s3cret@flair.example.com" }, `"<credentials removed>@flair.example.com"`],
-  ])("refuses a target carrying credentials, and the message does not repeat them: %p", async (target, shown) => {
+    [{ opsPortOrUrl: "http://user:s3cret@127.0.0.1:19925" }, `"http://<credentials removed>@127.0.0.1:19925"`, ["user", "s3cret"]],
+    [{ hostedOrigin: "user:s3cret@flair.example.com" }, `"<credentials removed>@flair.example.com"`, ["user", "s3cret"]],
+    [{ opsPortOrUrl: "https://alice@private.invalid:pw123@ops.example.com" }, `"https://<credentials removed>@ops.example.com"`, ["alice", "private.invalid", "pw123"]],
+    [{ hostedOrigin: "https://alice@private.invalid:pw123@flair.example.com" }, `"https://<credentials removed>@flair.example.com"`, ["alice", "private.invalid", "pw123"]],
+  ])("refuses a target carrying credentials, and the message does not repeat them: %p", async (target, shown, hidden) => {
     const attempted: string[] = [];
     const fetchImpl = (async (url: any) => {
       attempted.push(String(url));
@@ -718,7 +720,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     );
     expect(err).toBeInstanceOf(Error);
     expect(err!.message).toContain(shown);
-    expect(err!.message).not.toContain("s3cret");
+    for (const part of hidden) expect(err!.message).not.toContain(part);
     expect(attempted).toEqual([]);
   });
 

@@ -1129,7 +1129,9 @@ const IDENTITY_MAPPING_TARGET_FORMS =
 function showOpsTarget(value: unknown): string {
   if (typeof value === "number") return String(value);
   if (typeof value !== "string") return `(${value === null ? "null" : typeof value})`;
-  return JSON.stringify(value.replace(/^([^@/?#]*:\/\/)?[^@/?#]*@/, "$1<credentials removed>@"));
+  // URL userinfo ends at the last @ in the authority; earlier @s may be part
+  // of the username or password, so redact through the last one.
+  return JSON.stringify(value.replace(/^([^@/?#]*:\/\/)?[^/?#]*@/, "$1<credentials removed>@"));
 }
 
 /** Resolve the ops target, or throw naming the value and the accepted forms. */
