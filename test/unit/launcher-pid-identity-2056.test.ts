@@ -526,7 +526,7 @@ describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only whe
     }, 30_000);
   }
 
-  test("LIMITATION: the `…/harper.js decoy` node is returned from the macOS ps line; from /proc on Linux it is not", async () => {
+  test("LIMITATION: the `…/harper.js decoy` node is returned from the macOS ps line; from a readable /proc on Linux it is not", async () => {
     const root = mkRoot();
     const pid = startSpaceDecoy(root);
     await waitStarted(pid);
