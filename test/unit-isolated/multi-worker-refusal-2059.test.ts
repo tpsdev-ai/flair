@@ -7,12 +7,12 @@
  * count and proves the promises the slice makes:
  *
  *   - one worker serves unchanged (and /Health gains no field);
- *   - more than one worker refuses any non-/Health request it is handed with
+ *   - more than one worker refuses requests except /Health and /health with
  *     the one named 503, without reading a credential or touching a table, and
  *     returns that 503 for a disallowed method too (this drives the captured
  *     guard entry with a stub next layer — it proves the guard, not the chain);
- *   - a worker count that no source supplies as a positive integer (1.5, or a
- *     throw on both paths) is UNKNOWN, refused, never read as one worker;
+ *   - a worker count that no source supplies as a positive integer is UNKNOWN,
+ *     refused, never read as one worker;
  *   - the `FLAIR_MULTI_WORKER_UNSAFE=1` opt-in serves while /Health stays non-OK
  *     and names the opt-in.
  *
@@ -324,10 +324,12 @@ describe("request guard (fake worker count)", () => {
     expect(allowed.status).toBe(200); // this entry steps aside; auth-middleware's 405 is a later entry
   });
 
-  it("steps aside for /Health so the resource renders the refusal", async () => {
+  it("steps aside for /Health and /health so the resource can render the refusal", async () => {
     setCondition(2, false);
-    const res = await middleware(makeRequest("/Health"), nextLayer);
-    expect(res.status).toBe(200);
+    for (const path of ["/Health", "/health"]) {
+      const res = await middleware(makeRequest(path), nextLayer);
+      expect(res.status).toBe(200);
+    }
   });
 
   it("serves under the opt-in", async () => {

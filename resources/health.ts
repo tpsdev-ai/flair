@@ -122,11 +122,8 @@ export class Health extends Resource {
       version: build?.version ?? resolveVersion(),
       buildCommit: build?.commit ?? null,
     }));
-    // flair#2059: on more than one Harper worker the instance refuses to serve.
-    // /Health stays reachable and reports the refusal (or the explicit opt-in)
-    // as the reason, with `ok` false and HTTP 503, so a traffic gate reads the
-    // refused state rather than a green light. On one worker the field is
-    // omitted and this endpoint is byte-identical to before the guard.
+    // Report refusal or explicit opt-in with HTTP 503. On one worker the field
+    // is omitted and this response is unchanged.
     const multiWorker = multiWorkerHealthField(multiWorkerCondition());
     let status = readiness.status;
     if (multiWorker) {

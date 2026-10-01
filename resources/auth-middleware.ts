@@ -188,12 +188,6 @@ server.http(async (request: any, nextLayer: any) => {
   // other method.
   // Exact match: HTTP methods are case-sensitive, and these are the spellings
   // Flair's clients send.
-  // The multi-worker refusal runs BEFORE this entry: multi-worker-guard.ts
-  // registers its own runFirst http entry, ordered ahead of this one. Flair's
-  // urlPath mounts name it via `after`, and oauth-wellknown.ts mounts the guard
-  // ahead of the OAuth plugin's well-known mounts. So a refused instance never
-  // reaches the method allowlist, the rate limiter, or any credential read below
-  // (flair#2059).
   const httpMethod = String(request.method ?? "");
   if (!ALLOWED_HTTP_METHODS.has(httpMethod)) {
     return new Response(JSON.stringify({

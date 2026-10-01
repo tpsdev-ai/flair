@@ -2,15 +2,8 @@
  * multi-worker-guard.ts — the S0 multi-worker refusal (flair#2059, slice S0 of #2052).
  *
  * Flair's shipped launch paths set one Harper worker thread. More than one is
- * not yet supported: the multi-worker readiness audit (flair#2052) is not
- * complete — a per-worker embedding engine and per-worker BM25 index copies
- * today, with the in-process caches and rate limiters not yet enumerated — and
- * the XAA token path keeps its own `jti` single-use record (resources/XAA.ts), a
- * get-then-put that two workers can both pass, until flair#2073 routes it
- * through the shared atomic check-and-record. Until that work lands, an instance
- * with more than one worker REFUSES TO SERVE rather than run with those
- * properties silently removed. Linux can select several workers when nothing
- * pins the count, so the state is reachable by default, not only on purpose.
+ * not yet supported while the readiness work (flair#2052) is incomplete.
+ * Linux can select several workers when nothing pins the count.
  *
  * This module is the single home for the condition and the state. It reads the
  * worker count ONCE per worker module instance (each worker loads its own copy,
@@ -35,11 +28,6 @@
  * at the @harperfast/oauth plugin's well-known paths, whose mounts carry no
  * ordering constraint of their own.
  *
- * The escape hatch is `FLAIR_MULTI_WORKER_UNSAFE=1`. No production Flair launch path sets
- * it; it exists for the readiness work's own two-worker tests and for an
- * operator who accepts the risk explicitly. Under it requests serve; the boot
- * line is still emitted and /Health stays non-OK, naming the opt-in.
- *
  * With one worker nothing changes: no boot line, and /Health is unchanged.
  */
 import { server } from "harper";
@@ -51,7 +39,7 @@ export const MULTI_WORKER_REFUSED_STATE = "multi-worker-unsupported";
 export const MULTI_WORKER_ERROR_NAME = "multi_worker_unsupported";
 /** The remedy named in the boot line, the 503 body and /Health. */
 export const MULTI_WORKER_REMEDY = "THREADS_COUNT=1";
-/** The only escape hatch. Exact value "1"; anything else leaves it off. */
+/** Environment key for the explicit unsafe state. */
 export const MULTI_WORKER_UNSAFE_ENV = "FLAIR_MULTI_WORKER_UNSAFE";
 /** This module's http-entry name, so flair's mounts order it ahead of themselves. */
 export const MULTI_WORKER_GUARD_HTTP_NAME = "flair-multi-worker-guard";
@@ -98,7 +86,7 @@ export function decideMultiWorkerState(workerCount: number | null, optIn: boolea
   return optIn ? "unsafe-opt-in" : "refused";
 }
 
-/** The escape hatch, read from an env map (defaults to `process.env`). */
+/** Read the explicit unsafe state from an env map (defaults to `process.env`). */
 export function multiWorkerUnsafeOptIn(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
@@ -199,10 +187,9 @@ function readPositiveInteger(read: () => unknown): number | null {
  * worker. On the main thread alongside worker threads it is `undefined`, so the
  * count falls back to Harper's effective configured count,
  * `server.config.threads.count`. Harper starts workers while `i < count`, so a
- * value that is not an integer (1.5) starts more workers than it names. A getter
- * that throws on one path falls back to the other; only when BOTH paths lack a
- * positive integer is the count UNKNOWN, and the guard refuses it rather than
- * read it as one worker.
+ * value that is not an integer (1.5) starts more workers than it names. Only
+ * when both reads lack a positive integer is the count UNKNOWN; the guard
+ * refuses it rather than reading it as one worker.
  */
 export function readWorkerCount(): number | null {
   const perThread = readPositiveInteger(

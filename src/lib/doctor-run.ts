@@ -425,12 +425,9 @@ function runKeysPrune(ctx: DoctorRunContext): DoctorCheckResult {
 }
 
 /**
- * What doctor observed about the instance's worker threads, derived from the
- * public /Health `multiWorker` field. `serving` covers a single worker (the
- * field is omitted) and any instance that is not in the refusal; `refused`
- * names the refusal or the explicit opt-in with the observed worker count (null
- * when the instance reported no usable count); `unknown` is a malformed field,
- * which is never read as serving and blocks doctor.
+ * Classification of the `multiWorker` field in the configured /Health response.
+ * An absent field maps to `serving`, a recognized state to `refused`, and a
+ * malformed field to `unknown`.
  */
 export type WorkerThreadsObservation =
   | { kind: "serving" }
@@ -459,7 +456,7 @@ export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObserva
   };
 }
 
-/** What a /Health probe found: whether the response counts as reaching (see `reaching`), and what it observed. */
+/** What the configured /Health URL returned. */
 export interface FlairHealthProbe {
   /** A 2xx, or a 503 whose body carries a recognized `multiWorker` refusal state field. */
   reaching: boolean;
@@ -474,8 +471,7 @@ export interface FlairHealthProbe {
  * Interpret a /Health status and body: does the response count as reaching
  * (a 2xx with any body, or a 503 carrying the multiWorker field), and what did it observe?
  *
- * A 2xx is reaching, whatever its body. Any other non-2xx is not reaching. A 2xx
- * with a malformed
+ * A 2xx is reaching, whatever its body. A 2xx with a malformed
  * `multiWorker` is `unknown`, never serving; a 503 with no recognized
  * `multiWorker` field is not reaching, so its worker check is skipped rather
  * than blocking.
@@ -487,7 +483,7 @@ export function interpretFlairHealth(status: number, body: unknown): { reaching:
   return { reaching: false, observation: null };
 }
 
-/** Probe a /Health URL. A failed fetch is not reaching; a refused instance is. */
+/** Probe a /Health URL. A failed fetch is not reaching. */
 export async function probeFlairHealth(
   url: string,
   fetchImpl: typeof fetch = fetch,
@@ -513,7 +509,7 @@ function runWorkerThreads(ctx: DoctorRunContext): DoctorCheckResult {
   const label = "worker threads";
   const observed = ctx.workerThreads;
   if (!observed) {
-    return result(id, label, "skip", { detail: "instance not observed" });
+    return result(id, label, "skip", { detail: "no /Health response observed at the configured URL" });
   }
   if (observed.kind === "unknown") {
     return result(id, label, "fail", {
@@ -522,14 +518,14 @@ function runWorkerThreads(ctx: DoctorRunContext): DoctorCheckResult {
     });
   }
   if (observed.kind === "serving") {
-    return result(id, label, "pass", { detail: "the instance reports no multi-worker refusal" });
+    return result(id, label, "pass", { detail: "the configured /Health response has no multi-worker refusal field" });
   }
   const count =
     observed.workerCount === null ? "an unreadable worker count" : `${observed.workerCount} Harper worker threads`;
   const detail =
     observed.state === "refused"
-      ? `the instance runs ${count} and refuses to serve; multi-worker is unsupported until the multi-worker readiness work lands`
-      : `the instance runs ${count} under the FLAIR_MULTI_WORKER_UNSAFE=1 opt-in, so the multi-worker readiness work is outstanding`;
+      ? `the configured /Health response reports refusal with ${count}; multi-worker is unsupported until the readiness work lands`
+      : `the configured /Health response reports ${count} and an explicit unsafe opt-in`;
   return result(id, label, "fail", {
     detail,
     remedy: "Set THREADS_COUNT=1 and restart flair",

@@ -476,8 +476,7 @@ program
 
     // Helper: discover what port a Harper PID is listening on.
     // Scans ALL listening ports for this PID and returns the first one that
-    // responds to /Health with 200 OK. This avoids picking a debug port (9229)
-    // or any non-Flair listener that happens to share the process (flair#862).
+    // returns a recognized /Health response. A 404 from a debug port is excluded.
     async function discoverPortFromPid(pid: string): Promise<number | null> {
       // Defense-in-depth: caller already validates, but re-check here
       if (!/^\d+$/.test(pid)) return null;
@@ -487,7 +486,7 @@ program
         // Extract all ports from lsof -Fn output (lines like "n127.0.0.1:PORT")
         const ports = [...out.matchAll(/n(?:\S+):(\d+)/g)].map(m => Number(m[1]));
         if (ports.length === 0) return null;
-        // Try each port until one responds to /Health with 200 OK
+        // Try each port until one returns a recognized /Health response
         for (const port of ports) {
           if (await probePort(port)) return port;
         }

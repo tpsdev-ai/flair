@@ -2,14 +2,8 @@
  * oauth-wellknown-guard-2059.test.ts — the guard is registered ahead of the
  * OAuth plugin's own well-known mounts (flair#2059).
  *
- * @harperfast/oauth registers its OWN mounts at
- * `/.well-known/oauth-protected-resource`, `.../oauth-authorization-server` and
- * `.../jwks.json` when its component loads, each in its own dispatch chain with
- * no ordering constraint. Harper resolves a chain's pulled-in guard entry AFTER
- * an unconstrained entry in the same group, so `after: MULTI_WORKER_GUARD_HTTP_NAME`
- * on flair's own handler does not put the guard ahead of the plugin's handler.
- * oauth-wellknown.ts therefore registers the guard itself as a runFirst mount at
- * each path. Without that, a refused instance would serve those mounts.
+ * @harperfast/oauth registers its mounts at component load and checks enabled
+ * state per request. oauth-wellknown.ts mounts the guard runFirst at those paths.
  *
  * This pins the registration itself; the real-Harper proof — the enabled plugin
  * route answers 503 on a refused instance and 200 on a one-worker control — is

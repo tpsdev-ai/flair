@@ -763,7 +763,8 @@ export interface StartHarperOptions {
    * Whether a `threads > 1` spawn sets `FLAIR_MULTI_WORKER_UNSAFE=1`, the
    * documented opt-in (flair#2059). Defaults to true so an existing two-worker
    * test keeps exercising its cross-worker path; pass false to boot a REFUSED
-   * instance (no opt-in) whose requests answer 503.
+   * local instance without the opt-in whose requests answer 503. External mode
+   * rejects an explicit false because it cannot configure the external service.
    */
   multiWorkerUnsafe?: boolean;
   /**
@@ -808,6 +809,17 @@ export interface StartHarperOptions {
   orphanExitPreload?: boolean;
 }
 
+export function applyMultiWorkerUnsafeSpawnOption(
+  env: Record<string, string>,
+  opts: Pick<StartHarperOptions, "threads" | "multiWorkerUnsafe">,
+): void {
+  if (opts.multiWorkerUnsafe === false) {
+    delete env.FLAIR_MULTI_WORKER_UNSAFE;
+  } else if ((opts.threads ?? 1) > 1) {
+    env.FLAIR_MULTI_WORKER_UNSAFE = "1";
+  }
+}
+
 export async function startHarper(opts: StartHarperOptions = {}): Promise<HarperInstance> {
   const cwd = opts.cwd ?? process.cwd();
   const harperBinDir = opts.harperBinDir ?? cwd;
@@ -815,6 +827,9 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
 
   // ── External mode: connect to Docker service ─────────────────────────────
   if (HARPER_HTTP_URL) {
+    if (opts.multiWorkerUnsafe === false) {
+      throw new Error("[harper-lifecycle] refused fixture requires local spawn; external HARPER_HTTP_URL cannot honor multiWorkerUnsafe: false");
+    }
     const httpURL = HARPER_HTTP_URL;
     const opsURL = HARPER_OPS_URL_ENV ?? httpURL.replace(/:(\d+)($|\/)/, (_, port, rest) => `:${Number(port) - 1}${rest}`);
     console.log(`[harper-lifecycle] external mode: httpURL=${httpURL} opsURL=${opsURL} user=${HARPER_ADMIN_USER}`);
@@ -873,14 +888,6 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     HDB_ADMIN_USERNAME: "admin",
     HDB_ADMIN_PASSWORD: "test123",
     THREADS_COUNT: String(opts.threads ?? 1),
-    // flair#2059: an instance with more than one worker refuses to serve until
-    // the multi-worker readiness work lands, so a test that deliberately runs
-    // >1 worker takes the documented opt-in unless it asks for the refused
-    // state (`multiWorkerUnsafe: false`). FLAIR_MULTI_WORKER_UNSAFE is the only
-    // escape hatch, and it is never set by a production launch path.
-    ...((opts.threads ?? 1) > 1 && opts.multiWorkerUnsafe !== false
-      ? { FLAIR_MULTI_WORKER_UNSAFE: "1" }
-      : {}),
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
     // Port audit (flair#1586): every listener a test-Harper can bind.
     //
@@ -905,6 +912,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     MQTT_WEBSOCKET: "false",
     THREADS_DEBUG: "false",
   };
+  applyMultiWorkerUnsafeSpawnOption(baseEnv, opts);
   // flair#1450: the child must exit when this process dies. The exit hook
   // above cannot cover SIGKILL of the harness (and we cannot install signal
   // handlers — federation-watch.test.ts SIGTERMs the runner as a fixture).

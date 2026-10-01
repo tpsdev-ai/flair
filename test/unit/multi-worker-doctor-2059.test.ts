@@ -3,12 +3,11 @@
  *
  * The `worker-threads` doctor check turns the public /Health `multiWorker` field
  * into a verdict: it fails on the refused state (naming `THREADS_COUNT=1` as the
- * remedy) and under the explicit opt-in, passes on a serving (one-worker)
- * instance, SKIPS for an unobserved instance, and FAILS — blocking the run —
+ * remedy) and under the explicit opt-in, passes on a serving
+ * observation, SKIPS when no response was observed, and FAILS — blocking the run —
  * for an unrecognized observation. The discovery probe (`probeFlairHealth`, the
  * path `flair doctor` uses) must recognise a `/Health` 503 carrying the
- * `multiWorker` refusal field so a refused instance is observed rather than
- * skipped.
+ * `multiWorker` refusal field so the response is observed.
  */
 import { afterAll, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -57,7 +56,7 @@ describe("readWorkerThreadsObservation", () => {
     });
   });
 
-  it("treats an ABSENT field as a serving instance", () => {
+  it("classifies an absent field as a serving observation", () => {
     expect(readWorkerThreadsObservation(undefined)).toEqual({ kind: "serving" });
     expect(readWorkerThreadsObservation(null)).toEqual({ kind: "serving" });
   });
@@ -118,15 +117,15 @@ describe("worker-threads doctor check", () => {
     const r = checkWorkerThreads({ kind: "refused", state: "unsafe-opt-in", workerCount: 4 });
     expect(r.status).toBe("fail");
     expect(r.remedy).toContain("THREADS_COUNT=1");
-    expect(r.detail).toContain("FLAIR_MULTI_WORKER_UNSAFE=1");
+    expect(r.detail).toContain("unsafe opt-in");
   });
 
-  it("passes on a serving (one-worker) observation", () => {
+  it("passes on a serving observation", () => {
     const r = checkWorkerThreads({ kind: "serving" });
     expect(r.status).toBe("pass");
   });
 
-  it("skips — never passes — when the instance was not observed", () => {
+  it("skips when no /Health response was observed", () => {
     expect(checkWorkerThreads(undefined).status).toBe("skip");
   });
 
@@ -174,7 +173,7 @@ describe("probeFlairHealth (the doctor discovery path) against a local HTTP fixt
     expect(probe.observation).toEqual({ kind: "refused", state: "refused", workerCount: 2 });
   });
 
-  it("does not treat an unrelated 503 as the instance", async () => {
+  it("does not treat an unrelated 503 as reaching", async () => {
     const url = await serve(503, JSON.stringify({ ok: false }), "text/plain");
     const probe = await probeFlairHealth(url);
     expect(probe.reaching).toBe(false);

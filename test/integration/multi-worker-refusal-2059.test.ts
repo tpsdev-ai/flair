@@ -13,22 +13,15 @@
 //   - a disallowed method answers 503, not the method allowlist's 405, so the
 //     guard runs ahead of the allowlist;
 //   - /Health stays reachable and reports the refusal;
-//   - the doctor discovery path (probeFlairHealth) observes the refused instance.
+//   - the doctor discovery path (probeFlairHealth) observes the /Health refusal response.
 //
-// This proof requires Linux: only there do the extra HTTP workers receive TCP
-// traffic. On macOS/Windows Harper does not share these ports across workers, so
-// the multi-worker dispatch this case exercises is not observable; the case is
-// gated to Linux below.
+// The multi-worker case is gated to Linux below.
 
 import { describe, test, beforeAll, afterAll, expect } from "bun:test";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { probeFlairHealth } from "../../src/lib/doctor-run.js";
 
-// Enable the MCP OAuth plugin for this file so its own /.well-known/jwks.json
-// mount is registered (the plugin route the refusal must precede). Both a
-// one-worker control and the two-worker refused instance boot with it on, so
-// the first proves the plugin route serves and the second proves the guard
-// covers the same route.
+// Enable MCP OAuth so the test exercises the plugin's jwks response.
 const priorOAuth = { flag: process.env.FLAIR_MCP_OAUTH, issuer: process.env.FLAIR_MCP_ISSUER };
 beforeAll(() => {
   process.env.FLAIR_MCP_OAUTH = "true";
@@ -144,8 +137,7 @@ describe("multi-worker refusal enforced before dispatch (real Harper, 2 workers)
       expect(healthBody.ok).toBe(false);
       expect(healthBody.multiWorker?.state).toBe("refused");
 
-      // The doctor discovery path sees the refused instance through a real
-      // Harper, instead of skipping it as unobserved.
+      // The doctor discovery path reads the /Health refusal response.
       const probe = await probeFlairHealth(`${base}/Health`);
       expect(probe.reaching).toBe(true);
       expect(probe.observation?.kind).toBe("refused");
