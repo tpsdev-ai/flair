@@ -1,0 +1,1 @@
+- **Corrected README federation and REM feature descriptions to match relay, replay and nightly promotion behavior (Closes #2093)**

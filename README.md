@@ -180,8 +180,8 @@ See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives �
 | **Auto entity detection** | Entities extracted from memory content on write. No tagging required. |
 | **Predictive bootstrap** | Cold-start context selected from active project, recent activity and agent role — not just recency. |
 | **Multi-agent** | One instance, any number of agents, each with its own keys, memories and soul. |
-| **Federation** | Hub-and-spoke sync between instances using signed requests and pairing tokens. Originator enforcement blocks cross-node replay. [docs/federation.md](docs/federation.md) |
-| **Memory hygiene (REM)** | On-demand (`flair rem rapid`) and scheduled nightly distillation. Candidates are staged and promoted one at a time with a required rationale — never auto-applied. [docs/rem.md](docs/rem.md) |
+| **Federation** | Hub-and-spoke sync between instances using signed requests and pairing tokens. Non-hub peers sync only rows treated as self-originated; hubs may relay; the nonce store rejects replayed signed requests. [docs/federation.md](docs/federation.md) |
+| **Memory hygiene (REM)** | On-demand (`flair rem rapid`) and scheduled nightly distillation. Candidates are staged and promoted with a required rationale; nightly REM also auto-promotes eligible ADK and continuity candidates. [docs/rem.md](docs/rem.md) |
 | **Memory bridges** | Import/export to foreign memory systems via a YAML descriptor or a code plugin. [docs/bridges.md](docs/bridges.md) |
 | **Real-time feeds** | Administrators subscribe to table changes over WebSocket/SSE; verified agents subscribe to changes to the memories they can read through `/FeedMemories`, and to soul changes through `/FeedSouls`. |
 | **OAuth 2.1 server** | PKCE, dynamic client registration, standards-compliant token endpoint. Delegate auth to Flair without a separate IdP. [docs/auth.md](docs/auth.md) |
