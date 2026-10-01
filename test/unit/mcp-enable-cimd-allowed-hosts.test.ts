@@ -4,9 +4,8 @@
  * back, only after a preflight match with the target. Without --dry-run, a
  * failed match is refused. --dry-run skips the match and writes nothing; a
  * Fabric origin, an invalid host list, and a config.yaml that is missing,
- * unreadable or not valid YAML, has no @harperfast/oauth mcp mapping, or has a
- * clientIdMetadataDocuments that is not a mapping, are still refused under
- * --dry-run.
+ * unreadable or not valid YAML, or has no @harperfast/oauth mcp mapping, are
+ * still refused under --dry-run.
  *
  * Before this fix the flag was parsed and echoed into a step line, and nothing
  * wrote it anywhere the @harperfast/oauth component reads.

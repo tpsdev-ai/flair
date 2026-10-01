@@ -673,9 +673,8 @@ export interface LocalCimdAllowedHostsRead {
  * Read-only: which config.yaml would `updateLocalConfigCimdAllowedHosts` write,
  * and what list does it carry now? Same file resolution as
  * `updateLocalConfigMcpEnabled`. `enable` runs this before any step with a
- * side effect, so a file that is missing, unreadable or not valid YAML, that
- * has no `@harperfast/oauth` → `mcp` mapping, or whose
- * `clientIdMetadataDocuments` is not a mapping refuses the flag up front. It
+ * side effect, so a file that is missing, unreadable or not valid YAML, or that
+ * has no `@harperfast/oauth` → `mcp` mapping, refuses the flag up front. It
  * does not check that the file can be written: a write failure fails the later
  * `local-config-update` step.
  */
