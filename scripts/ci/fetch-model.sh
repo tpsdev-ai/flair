@@ -61,7 +61,12 @@ HF_REPO="${FETCH_MODEL_HF_REPO:-nomic-ai/nomic-embed-text-v1.5-GGUF}"
 DEST_PATH="${DEST_DIR}/${MODEL_FILENAME}"
 
 sha256_of() {
-  sha256sum "$1" | awk '{ print $1 }'
+  # macOS lanes: `shasum -a 256` where no `sha256sum` is on PATH.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
 }
 
 verify() {

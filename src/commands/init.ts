@@ -221,7 +221,12 @@ function seedFederationInstanceViaOpsApi(...args: any[]): any {
  * after a seed it could not complete.
  */
 async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, adminPass: string): Promise<void> {
-  const outcome = await seedUsingFlairSkill({ baseUrl, user: adminUser, pass: adminPass });
+  const outcome = await seedUsingFlairSkill({
+    baseUrl,
+    user: adminUser,
+    pass: adminPass,
+    notify: (line) => console.log(line),
+  });
   if (outcome.kind === "refused") {
     console.error(`Error: the using-flair skill seed was refused — ${outcome.message}`);
     process.exit(1);

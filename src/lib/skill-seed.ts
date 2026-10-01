@@ -43,8 +43,26 @@ export const SEED_ASSIGNMENT_ID = "org-skill:using-flair";
 /** The org-scope assignment's priority. */
 export const SEED_ASSIGNMENT_PRIORITY = "standard";
 
-/** The bound on every seed request, so a stalled instance cannot hang init. */
+/**
+ * The bound on the seed's reads and on its assignment write, so a stalled
+ * instance cannot hang init.
+ */
 export const SEED_REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * The bound on the skill row's write. The instance embeds a skill row as it
+ * writes it (`Memory.put` awaits `getEmbedding`), and the first embed awaits
+ * the embedding model's readiness: a first start downloads the model (~80 MB)
+ * and loads it in the background, and Harper reports healthy before that ends.
+ * So this one write can outlast the 15 s bound on a healthy instance. 180 s
+ * covers a first-start download on an ordinary link, and stays under the 300 s
+ * default headers timeout of Node's fetch, so this bound and its message fire
+ * first.
+ */
+export const SEED_SKILL_WRITE_TIMEOUT_MS = 180_000;
+
+/** How long the skill row's write runs before init says what it is waiting on. */
+export const SEED_SKILL_WRITE_NOTICE_MS = 5_000;
 
 export type SeedAction = "create" | "unchanged" | "replace" | "keep";
 
@@ -231,10 +249,25 @@ export interface SkillSeedRestOptions {
   pass: string;
   /** Overridable for tests. */
   fetchImpl?: typeof fetch;
+  /** Told once, when the skill row's write is still waiting after the notice delay. */
+  notify?: (line: string) => void;
+  /** The bounds, in ms. Overridable for tests; the defaults are the constants above. */
+  requestTimeoutMs?: number;
+  skillWriteTimeoutMs?: number;
+  skillWriteNoticeMs?: number;
 }
 
 function detailOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** `AbortSignal.timeout` rejects a fetch with a DOMException named "TimeoutError". */
+function isTimeout(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "TimeoutError";
+}
+
+function seconds(ms: number): string {
+  return `${Math.round(ms / 100) / 10} s`;
 }
 
 function authHeader(user: string, pass: string): string {
@@ -261,13 +294,16 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = opts.baseUrl.replace(/\/$/, "");
   const auth = authHeader(opts.user, opts.pass);
+  const requestMs = opts.requestTimeoutMs ?? SEED_REQUEST_TIMEOUT_MS;
+  const skillWriteMs = opts.skillWriteTimeoutMs ?? SEED_SKILL_WRITE_TIMEOUT_MS;
+  const skillNoticeMs = opts.skillWriteNoticeMs ?? SEED_SKILL_WRITE_NOTICE_MS;
 
   const readById = async (table: string, id: string): Promise<SeedRead<SeedRowShape>> => {
     let res: Response;
     try {
       res = await fetchImpl(`${base}/${table}/${encodeURIComponent(id)}`, {
         headers: { Authorization: auth },
-        signal: AbortSignal.timeout(SEED_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(requestMs),
       });
     } catch (err) {
       return { ok: false, detail: `the request failed: ${detailOf(err)}` };
@@ -286,16 +322,23 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     }
   };
 
-  const putById = async (table: string, id: string, body: unknown): Promise<SeedWrite> => {
+  const putById = async (
+    table: string,
+    id: string,
+    body: unknown,
+    timeoutMs: number,
+    onTimeout: (ms: number) => string = (ms) => `no answer within ${seconds(ms)}`,
+  ): Promise<SeedWrite> => {
     let res: Response;
     try {
       res = await fetchImpl(`${base}/${table}/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: auth },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(SEED_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
+      if (isTimeout(err)) return { ok: false, detail: onTimeout(timeoutMs) };
       return { ok: false, detail: `the request failed: ${detailOf(err)}` };
     }
     if (!res.ok) {
@@ -305,16 +348,44 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     return { ok: true };
   };
 
+  // The skill row's write waits on the instance's embedding model (see
+  // SEED_SKILL_WRITE_TIMEOUT_MS), so it gets its own bound and says what it is
+  // waiting on. A client-side timeout does not cancel the write on the
+  // instance: a re-run reads the fixed id and writes nothing twice.
+  const putRow = async (): Promise<SeedWrite> => {
+    const notice = setTimeout(() => {
+      opts.notify?.(
+        `using-flair skill: still writing "${SEED_SKILL_ID}" — the instance embeds a skill row as it writes it, ` +
+          `and a first start downloads (~80 MB) and loads the embedding model first; waiting up to ${seconds(skillWriteMs)}`,
+      );
+    }, skillNoticeMs);
+    (notice as unknown as { unref?: () => void }).unref?.();
+    try {
+      return await putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current), skillWriteMs, (ms) =>
+        `no answer within ${seconds(ms)} — the instance embeds a skill row as it writes it, so this write also ` +
+        `waits for its embedding model to download and load; 'flair doctor' reports embeddings, ` +
+        `and a re-run writes nothing twice`,
+      );
+    } finally {
+      clearTimeout(notice);
+    }
+  };
+
   return {
     readRow: () => readById("Memory", SEED_SKILL_ID),
     readAssignment: () => readById("OrgSkillAssignment", SEED_ASSIGNMENT_ID),
-    putRow: () => putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current)),
+    putRow,
     putAssignment: () =>
-      putById("OrgSkillAssignment", SEED_ASSIGNMENT_ID, {
-        skillName: current.name,
-        skillRef: SEED_SKILL_ID,
-        priority: current.priority,
-      }),
+      putById(
+        "OrgSkillAssignment",
+        SEED_ASSIGNMENT_ID,
+        {
+          skillName: current.name,
+          skillRef: SEED_SKILL_ID,
+          priority: current.priority,
+        },
+        requestMs,
+      ),
   };
 }
 

@@ -250,7 +250,7 @@ jobs:
     # one level up from the case budgets):
     #   per-case budgets: 660 + 760 + 740 + 450 + 420 = 3030 s
     #   setup allowance (bun install + bun run build + build:cli +
-    #     check-darwin-gated-tests): ~240 s
+    #     check-darwin-gated-tests + the embedding-model fetch): ~240 s
     #   3030 + 240 = 3270 s; rounded up with margin to 60 min (3600 s)
     timeout-minutes: 60
     steps:
@@ -273,6 +273,16 @@ jobs:
         run: bun run build && bun run build:cli
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
+      # flair#2141 S2 — `flair init` seeds a skill row, and the instance embeds
+      # it as it writes it, so the init case below is this job's first embed.
+      # Every instance the test boots reads FLAIR_MODELS_DIR=<repo>/models (the
+      # test's doctorEnv); without a model there, each one starts the same
+      # HuggingFace download and is torn down mid-way, and the next waits out
+      # the dead download's lock. Same pinned fetch as every other lane that
+      # embeds (flair#715). After the unit step, so <cwd>/models is absent
+      # while the darwin-gated unit tests run.
+      - name: Pre-download embedding model
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
       - name: Real-launchd doctor --fix integration (flair#1581)
         run: bun test test/integration/doctor-fix-launchd-darwin.test.ts
 
