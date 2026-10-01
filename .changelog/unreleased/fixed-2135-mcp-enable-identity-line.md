@@ -1,0 +1,1 @@
+- **`flair mcp enable` now describes the connector identity mapping without claiming unconditional reads or writes.** See `docs/access-control.md` for the principal's access scope. (Closes #2135)

@@ -2029,8 +2029,8 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         `Exactly one active credential per (kind, idpSubject) is the invariant that keeps resolution deterministic.`
       : "";
     push(true,
-      `connector identity: sub '${params.idpSubject}' (provider '${idpProvider}') resolves to Agent '${principal}' — ` +
-        `every /mcp call reads and writes AS '${principal}'. ` +
+      `connector identity: mapped sub '${params.idpSubject}' (provider '${idpProvider}') to Agent '${principal}'; ` +
+        `see docs/access-control.md for how /mcp tool calls use it. ` +
         `principal ${mapping.principalCreated ? "created" : "already existed"}; ` +
         `Credential(kind:idp) ${mapping.credentialReused ? "re-pointed" : "created"} (${mapping.credentialId}).` +
         `${supersedeNote} ` +
@@ -2039,16 +2039,22 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         `Diagnostic: the bootstrap tool's agentId/scope fields always say who the server resolved you to.`,
     );
 
-    // ── Gate: confirm the staged secrets are actually live before restarting ─
+    // ── Gate: require confirmation that the secrets are live before continuing
     let confirmed = Boolean(params.confirmSecretsApplied);
     if (!confirmed && deps.confirmPrompt) {
       confirmed = await deps.confirmPrompt(
-        `Have you applied the ${secretsResult.varNames.length} vars staged at ${secretsResult.path} to ${params.instance}'s environment?`,
+        secretsPushed
+          ? isFabricOrigin(params.instance)
+            ? `The ${secretsResult.varNames.length} secrets were pushed to ${params.instance} and read back. Have you restarted the Fabric instance to load them?`
+            : `The ${secretsResult.varNames.length} secrets were pushed to ${params.instance} and read back. Have you loaded them into the instance's process environment?`
+          : `Have you applied the ${secretsResult.varNames.length} vars staged at ${secretsResult.path} to ${params.instance}'s environment?`,
       );
     }
     if (!confirmed) {
       push(false,
-        `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
+        secretsPushed
+          ? `not confirmed: the secrets were pushed to ${params.instance} and read back; ${isFabricOrigin(params.instance) ? "restart the Fabric instance" : "load them into the instance's process environment"}, then re-run \`flair mcp enable\` with --confirm-secrets-applied.`
+          : `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
       return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
     }

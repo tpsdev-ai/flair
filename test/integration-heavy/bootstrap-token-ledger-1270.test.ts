@@ -130,6 +130,8 @@ function reconstructScaffold(body: Record<string, any>): number {
     ...body,
     context: "",
     soul: {},
+    skills: [],
+    skillDiagnostics: [],
     memories: [],
     predicted: [],
     teammateFindings: [],

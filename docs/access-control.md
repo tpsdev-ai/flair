@@ -62,9 +62,9 @@ flair mcp enable \
 
 - `--idp-subject` is the login the identity provider reports: for GitHub, the
   username.
-- `--principal` is the principal that every `/mcp` call from that login reads
-  and writes as. It defaults to `self`. If no principal with that id exists, the
-  step creates a non-admin one, of kind `human` unless you pass
+- `--principal` is the principal the connector identity maps to. It defaults
+  to `self`. If no principal with that id
+  exists, the step creates a non-admin one, of kind `human` unless you pass
   `--principal-kind agent`.
 - `--admin-pass` is the target instance's admin password. Outside `--dry-run`,
   this command does not fall back to `FLAIR_ADMIN_PASS` or
@@ -77,7 +77,7 @@ flair mcp enable \
 The step's output states the mapping it wrote. The line starts:
 
 ```
-connector identity: sub 'alice' (provider 'github') resolves to Agent 'alice' — every /mcp call reads and writes AS 'alice'. principal created; Credential(kind:idp) created (cred_idp_github_<12 hex digits>).
+connector identity: mapped sub 'alice' (provider 'github') to Agent 'alice'; see docs/access-control.md for how /mcp tool calls use it. principal created; Credential(kind:idp) created (cred_idp_github_<12 hex digits>).
 ```
 
 `flair mcp enable` runs the whole enablement flow, not only this step. To add a
@@ -387,11 +387,17 @@ claude.ai → Settings → Connectors → Add custom connector
   (no client ID to enter — Claude presents its own Client ID Metadata Document URL automatically)
 ```
 
-On a `*.harperfabric.com` instance, the command ends at its
-`fabric-operator-deploy` step instead, after the confirmation, and prints
-instructions for finishing by hand. The step's own text says to apply the staged
-secrets, which include `FLAIR_MCP_OAUTH=true`, to the instance's environment and
-restart the instance. Afterwards,
+On a `*.harperfabric.com` instance, the command reaches its
+`fabric-operator-deploy` step after the confirmation and checks whether the
+public `/mcp` OAuth surface already passes self-verify. If it does, the command
+finishes there and prints the same connector details. If it does not, the run
+stops at that step with instructions: apply the staged secrets, which include
+`FLAIR_MCP_OAUTH=true`, to the instance's environment (when this run already
+pushed them to the instance, the step says so and only asks for the restart),
+restart the instance, then run `flair mcp enable` again with the same options
+plus `--confirm-secrets-applied`. That run checks again and finishes once
+self-verify passes. If the public origin cannot be reached, the step lists
+checks to run instead of the activation instructions. At any point,
 `flair mcp status --instance https://flair.example.com` reports whether the
 surface answers.
 

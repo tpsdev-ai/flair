@@ -1,0 +1,1 @@
+- **The README's federation and REM feature rows now match what the code does (Closes #2093).**

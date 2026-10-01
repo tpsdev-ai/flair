@@ -887,8 +887,9 @@ export interface ToolInvariants {
    *   result[total] ≈ Σ result[terms]
    *
    * (for bootstrap: tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens
-   * + trustTokens + eventsTokens — the identity documented at the counters'
-   * definition in resources/MemoryBootstrap.ts's response tail). Every term
+   * + trustTokens + eventsTokens + skillsTokens + skillDiagnosticsTokens — the
+   * identity documented at the counters' definition in
+   * resources/MemoryBootstrap.ts's response tail). Every term
    * must be a NUMBER (the counter convention reports 0, never omits), and the
    * gap `total - Σ terms` is bounded on BOTH sides:
    *
@@ -1328,11 +1329,15 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         "memoriesTruncated", "teammateFindingsIncluded", "teammateFindingsTruncated",
         "teammateFindingsMatched", "context", "flairVersion",
         "eventWatermark", "eventsHasMore", "eventsRemaining",
+        // flair#2141 S1b — the skills manifest, always present.
+        "skills", "skillDiagnostics", "skillsTruncated", "skillDiagnosticsTruncated",
         // flair#1270 — the payload token LEDGER: every token-charged content
         // class has a counter, so tokenEstimate ≈ scaffoldTokens + soulTokens +
-        // memoryTokens + trustTokens + eventsTokens decomposes from the payload
-        // alone (see the identity block in MemoryBootstrap's response tail).
+        // memoryTokens + trustTokens + eventsTokens + skillsTokens +
+        // skillDiagnosticsTokens decomposes from the payload alone (see the
+        // identity block in MemoryBootstrap's response tail).
         "soulTokens", "memoryTokens", "trustTokens", "eventsTokens", "scaffoldTokens",
+        "skillsTokens", "skillDiagnosticsTokens",
       ],
       fieldTypes: {
         agentId: "string", soul: "object", memories: "array", predicted: "array",
@@ -1344,6 +1349,8 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         soulTokens: "number", memoryTokens: "number", trustTokens: "number",
         eventsTokens: "number", scaffoldTokens: "number",
         eventWatermark: "string", eventsHasMore: "boolean", eventsRemaining: "number",
+        skills: "array", skillDiagnostics: "array", skillsTruncated: "number",
+        skillDiagnosticsTruncated: "number", skillsTokens: "number", skillDiagnosticsTokens: "number",
       },
       invariants: {
         // count == delivered — the historical count/charge/deliver drift.
@@ -1353,12 +1360,14 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
           { count: "teammateFindingsIncluded", containers: ["teammateFindings"] },  // #1199
           { count: "sections.events", containers: ["events"] },                     // #1206
           { count: "sections.soul", containers: ["soul"] },                         // #1371
+          { count: "sections.skills", containers: ["skills"] },                     // #2141
         ],
         // present + typed even when empty — never a bare {} / missing key (#1182).
         selfDescribingEmpty: [
           { path: "soul", type: "object" }, { path: "memories", type: "array" },
           { path: "predicted", type: "array" }, { path: "teammateFindings", type: "array" },
           { path: "events", type: "array" }, { path: "sections", type: "object" },
+          { path: "skills", type: "array" }, { path: "skillDiagnostics", type: "array" }, // #2141
         ],
         // #1200 — dedup by the SEMANTIC content key (excludes id/createdAt, which
         // vary across physical duplicate rows). See ToolInvariants.dedupSignature.
@@ -1372,14 +1381,18 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         // structured charge gap; uncounted content does not fit under it.
         budgetCap: { estimate: "tokenEstimate", budget: "maxTokens", tolerance: 0.25 },
         // flair#1290 step 4 — the #1270 token-ledger identity, enforced:
-        // tokenEstimate ≈ scaffold + soul + memory + trust + events, two-sided
+        // tokenEstimate ≈ scaffold + soul + memory + trust + events + skills
+        // + skillDiagnostics, two-sided
         // (constants sized in bootstrap-token-ledger-1270.test.ts, which reads
         // them from HERE — one identity, one tolerance definition). The upper
         // bound is waived when the request opted into the prose mirror
         // (includeContext), which legitimately widens the gap by design.
         tokenDecomposition: {
           total: "tokenEstimate",
-          terms: ["scaffoldTokens", "soulTokens", "memoryTokens", "trustTokens", "eventsTokens"],
+          terms: [
+            "scaffoldTokens", "soulTokens", "memoryTokens", "trustTokens", "eventsTokens",
+            "skillsTokens", "skillDiagnosticsTokens", // #2141
+          ],
           perItemContainers: ["memories", "predicted", "teammateFindings"],
           perItemGap: 60,
           fixedSlack: 150,
@@ -1426,6 +1439,12 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         containerRules: [
           { container: "events", requiredFields: ["id", "kind", "summary", "createdAt"] },
           { container: "memories", requiredFields: ["id", "content"], forbiddenFields: INTERNAL_MEMORY_FIELDS },
+          // #2141 — a manifest entry names a skill; the procedure is fetched with skill_get.
+          {
+            container: "skills",
+            requiredFields: ["name", "skillId", "scope", "priority", "source"],
+            forbiddenFields: ["content", "trigger", "metadata"],
+          },
         ],
         fullyResolved: true, // #1182 — never a spread pending Promise collapsing to {flairVersion}.
       },
