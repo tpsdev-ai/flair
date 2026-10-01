@@ -10,8 +10,8 @@
  *
  * The XAA ID-JAG `jti` record (flair#2073) uses the same `recordOnce` on its
  * own table; see `claimIdJagJti` below. The OAuth single-use record (flair#2145)
- * uses it on one more, for a redeemed authorization code (`c:<sha256>`) and a
- * rotated refresh token (`r:<sha256>`); see `claimOAuthSingleUse` below.
+ * uses it on one more, for claims to redeem an authorization code (`c:<sha256>`)
+ * or rotate a refresh token (`r:<sha256>`); see `claimOAuthSingleUse` below.
  *
  * The record of truth is the local `ReplayNonce` table (schemas/replay.graphql:
  * `replicate: false`, `expiration: 120`). Every Harper thread of this instance
@@ -385,7 +385,7 @@ export async function claimIdJagJti(jti: string, minRetentionMs: number, now: nu
 
 // ─── OAuth single-use records (flair#2145) ─────────────────────────────────
 
-/** One row per redeemed authorization code or rotated refresh token (schemas/oauth.graphql). */
+/** One row per claim to redeem a code or rotate a refresh token (schemas/oauth.graphql). */
 export const OAUTH_SINGLE_USE_TABLE = "OAuthSingleUse";
 
 /** First element of every single-use lock key, so it never collides with a nonce or a jti lock. */
@@ -404,9 +404,10 @@ export function oauthSingleUseDeps(): ReplayStoreDeps {
 }
 
 /**
- * Claim a redeemed authorization code (`c:<sha256>`) or a rotated refresh token
- * (`r:<sha256>`) once per instance, through `recordOnce`. Call it after the
- * request has been validated and before it has any effect; refuse on anything
+ * Claim an authorization code presented for redemption (`c:<sha256>`) or a
+ * refresh token presented for rotation (`r:<sha256>`) once per instance,
+ * through `recordOnce`. Call it after the request has been validated and before
+ * the handler attempts its later write or token issuance; refuse on anything
  * but "recorded". `sha256Hex` is the SHA-256 of the code or token, so the
  * record holds no redeemable secret. `minRetentionMs` is the longest the code
  * or token can be presented after its row is recorded: a table whose rows do

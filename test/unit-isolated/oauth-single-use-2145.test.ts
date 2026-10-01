@@ -2,11 +2,14 @@
  * oauth-single-use-2145.test.ts — the single-use record behind the
  * authorization-code and refresh-token grants (flair#2145).
  *
- * OAuthToken (resources/OAuth.ts) claims a redeemed authorization code
- * (`c:<sha256(code)>`) and a rotated refresh token (`r:<sha256(token)>`)
+ * OAuthToken (resources/OAuth.ts) records claims to redeem an authorization
+ * code (`c:<sha256(code)>`) and rotate a refresh token (`r:<sha256(token)>`)
  * through claimOAuthSingleUse (resources/replay-store.ts) — the same
  * lock-then-insert as the agent-auth, federation and XAA jti records
- * (recordOnce) — in flair.OAuthSingleUse. These tests drive the token endpoint's
+ * (recordOnce) — in flair.OAuthSingleUse. The later `used` or revocation write
+ * is attempted after the claim; if it fails, no token pair is issued and the
+ * claim remains, so the code or token cannot be redeemed again.
+ * These tests drive the token endpoint's
  * two grants against in-memory OAuth tables and an OAuthSingleUse with the
  * store's contract (test/helpers/fake-replay-store.ts), and pin:
  *   - a code, and a refresh token, is redeemed once: the first request is
@@ -15,9 +18,9 @@
  *   - a store error or a missing store primitive refuses with 503 and issues
  *     nothing;
  *   - the row is written only after the request has validated;
- *   - the key is a SHA-256 in its own lock namespace, the code's row is still
- *     flagged used, and the schema's expiration is the retention the store
- *     needs, which outlives both token lifetimes.
+ *   - the key is a SHA-256 in its own lock namespace, a successful grant flags
+ *     the code's own row used, and the schema's expiration setting outlives
+ *     both token lifetimes.
  *
  * Isolated lane: this file stubs `harper` for `databases`, so it must run
  * one-process-per-file (flair#1817). The two-worker proof on a real Harper is

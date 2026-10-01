@@ -1,7 +1,7 @@
 // oauth-single-use-two-workers-2145.test.ts — REAL Harper with TWO worker
 // threads (flair#2145).
 //
-// A redeemed authorization code, and a rotated refresh token, are recorded once
+// A claim to redeem a code or rotate a refresh token is recorded once
 // per Harper instance (resources/OAuth.ts → claimOAuthSingleUse in
 // resources/replay-store.ts), so a code or refresh token accepted on one worker
 // is refused on the other, and simultaneous presentations of one yield exactly

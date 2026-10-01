@@ -41,8 +41,8 @@ const REFRESH_TOKEN_TTL_MS = 7 * 86400_000;  // 7 days
 const AUTH_CODE_TTL_MS = 600_000;            // 10 minutes
 
 /**
- * Seconds a redeemed authorization code, or a rotated refresh token, is
- * remembered (schemas/oauth.graphql: `expiration:` on `OAuthSingleUse`). MUST
+ * Seconds before a claim to redeem a code or rotate a refresh token may be
+ * removed (schemas/oauth.graphql: `expiration:` on `OAuthSingleUse`). MUST
  * equal that value — both pinned by
  * test/unit-isolated/oauth-single-use-2145.test.ts. It must outlive the longest
  * either can be presented after its row is recorded: AUTH_CODE_TTL_MS, and
@@ -535,8 +535,8 @@ export class OAuthToken extends Resource {
       }
     }
 
-    // Redeemed once per instance: the code's use is recorded under a per-key
-    // lock before any token is issued (resources/replay-store.ts).
+    // Claim to redeem once per instance under a per-key lock before any token
+    // is issued (resources/replay-store.ts).
     const claim = await claimOAuthSingleUse("code", sha256(code), AUTH_CODE_TTL_MS);
     if (claim === "unavailable") return storeUnavailable();
     if (claim === "replay") {
@@ -600,8 +600,8 @@ export class OAuthToken extends Resource {
       });
     }
 
-    // Rotated once per instance: the refresh token's use is recorded under a
-    // per-key lock before the new pair is issued (resources/replay-store.ts).
+    // Claim to rotate once per instance under a per-key lock before the new
+    // pair is issued (resources/replay-store.ts).
     const claim = await claimOAuthSingleUse("refresh", tokenHash, REFRESH_TOKEN_TTL_MS);
     if (claim === "unavailable") return storeUnavailable();
     if (claim === "replay") {

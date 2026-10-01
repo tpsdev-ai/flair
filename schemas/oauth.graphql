@@ -59,12 +59,15 @@ type IdJagReplay @table(database: "flair", expiration: 90000) {
   seenAt: Long!                     # ms-epoch when recorded
 }
 
-# One row per redeemed OAuth authorization code or rotated refresh token,
+# One row per claim to redeem an OAuth authorization code or rotate a refresh token,
 # written once per instance under a per-key lock by resources/replay-store.ts
 # (claimOAuthSingleUse).
-#   c:<sha256(code)>      a redeemed authorization code
-#   r:<sha256(token)>     a rotated refresh token
-# expiration: 691200 — seconds a row is kept. It MUST equal
+#   c:<sha256(code)>      a code presented for redemption
+#   r:<sha256(token)>     a refresh token presented for rotation
+# A single-use row records that a redemption was claimed. If the later `used`
+# or revocation write fails, no token pair is issued; the claim remains, so
+# the code or token cannot be redeemed again.
+# expiration: 691200 — seconds before Harper's scan may remove a row. It MUST equal
 #   OAUTH_SINGLE_USE_RETENTION_S in resources/OAuth.ts, which says why it
 #   outlives the longest a code or refresh token can be presented;
 #   test/unit-isolated/oauth-single-use-2145.test.ts pins both.

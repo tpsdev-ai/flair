@@ -266,7 +266,11 @@ operator audit trail.
 
 `OAuthAuthCode`, `OAuthToken`, `IdJagReplay`, and `OAuthSingleUse` are internal
 tables (no `@export`). They hold codes, hashed tokens, used `jti` values, and
-the hashed keys of redeemed codes and rotated refresh tokens.
+the hashed keys of codes presented for redemption and refresh tokens presented
+for rotation. A single-use row records that a redemption was claimed. The
+handler attempts the later `used` or revocation write before issuing tokens.
+If that write fails, no token pair is issued; the claim remains, so the code
+or token cannot be redeemed again.
 
 OAuth rate limits and env vars: [docs/auth.md](auth.md#rate-limiting).
 
@@ -490,7 +494,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **OAuthToken** | oauth.graphql | no | Hashed access/refresh tokens |
 | **IdpConfig** | oauth.graphql | yes | XAA IdP (`issuer`, `jwksUri`, `requiredDomain`) |
 | **IdJagReplay** | oauth.graphql | no | Used ID-JAG `jti` values |
-| **OAuthSingleUse** | oauth.graphql | no | A redeemed authorization code or rotated refresh token, keyed by its SHA-256 |
+| **OAuthSingleUse** | oauth.graphql | no | A claim to redeem an authorization code or rotate a refresh token, keyed by its SHA-256 |
 
 ---
 
