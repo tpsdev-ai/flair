@@ -107,10 +107,12 @@ type ParsedAgentRows =
 
 /**
  * Parse an operations `search_by_value` body for one id.
- * `[]` is the only absence. One well-formed row with that id is the agent,
- * even when `publicKey` is missing or empty. A non-array, a malformed
- * element, more than one row, or a row whose id is not the one searched is
- * unreadable — never "no such agent".
+ * `[]` is the only absence. One row with this id and a string `name` is that
+ * agent even when `publicKey` is missing or empty: a missing public key is
+ * still an existing row and fails the later success check. It is not a
+ * missing row. Unreadable, and never treated as absence: a non-array, more
+ * than one row, a non-object element, a missing or empty id, a different id,
+ * a non-string `publicKey`, or a missing or non-string `name`.
  */
 function parseAgentRows(body: unknown, id: string): ParsedAgentRows {
   if (!Array.isArray(body)) {
@@ -137,12 +139,15 @@ function parseAgentRows(body: unknown, id: string): ParsedAgentRows {
   if (rec.publicKey !== undefined && typeof rec.publicKey !== "string") {
     return { ok: false, reason: "operations API returned a malformed Agent row." };
   }
+  if (typeof rec.name !== "string") {
+    return { ok: false, reason: "operations API returned an Agent row whose name is missing or not a string." };
+  }
   const publicKey = typeof rec.publicKey === "string" && rec.publicKey.length > 0 ? rec.publicKey : undefined;
   return {
     ok: true,
     row: {
       id: rec.id,
-      ...(typeof rec.name === "string" ? { name: rec.name } : {}),
+      name: rec.name,
       ...(publicKey !== undefined ? { publicKey } : {}),
     },
   };
@@ -176,9 +181,13 @@ function agentKeyNotStoredMessage(id: string, stored: StoredAgent | null): strin
 
 /**
  * Read one Agent row by id through the operations API.
- * A failed body read, an empty body, non-JSON, a malformed row, or a row
- * whose id is not the one searched exits the process. Those results are not
- * "no such agent". Returns null only when the body is a JSON `[]`.
+ * Exits on a failed body read, an empty body, non-JSON, a row whose id is
+ * not the one searched, or a row that is unreadable: non-object, missing or
+ * empty id, non-string `publicKey`, or missing or non-string `name`.
+ * Those results are not "no such agent". A row with this id and a string
+ * `name` is returned even when `publicKey` is missing or empty; that is an
+ * existing row, and the add success check refuses it. Returns null only
+ * when the body is a JSON `[]`.
  */
 async function readStoredAgent(
   opsPortOrUrl: number | string,

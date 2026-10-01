@@ -42,7 +42,15 @@ let skipInsert: boolean;
  * How each Agent search answers. `table` is the real row or `[]`.
  * The other modes are unreadable or not the searched id — none of them is absence.
  */
-let searchMode: "table" | "empty-body" | "unreadable" | "malformed" | "unexpected-id" | "row-without-key";
+let searchMode:
+  | "table"
+  | "empty-body"
+  | "unreadable"
+  | "malformed"
+  | "unexpected-id"
+  | "row-without-key"
+  | "row-missing-name"
+  | "row-non-string-name";
 
 function json(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -92,6 +100,16 @@ beforeEach(async () => {
           const priorSearches = ops.filter((op) => op === "search_by_value").length;
           if (priorSearches === 1) return json(res, 200, []);
           return json(res, 200, [{ id: searched, name: searched }]);
+        }
+        if (searchMode === "row-missing-name" || searchMode === "row-non-string-name") {
+          const priorSearches = ops.filter((op) => op === "search_by_value").length;
+          if (priorSearches === 1) return json(res, 200, []);
+          const publicKey = table.get(searched)?.publicKey;
+          const row =
+            searchMode === "row-missing-name"
+              ? { id: searched, publicKey }
+              : { id: searched, publicKey, name: 12 };
+          return json(res, 200, [row]);
         }
         const row = table.get(searched);
         return json(res, 200, row ? [row] : []);
@@ -246,6 +264,31 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     expect(result.stderr).toContain(`Agent '${id}'`);
     expect(result.stderr).not.toContain(`no Agent row for '${id}'`);
     expect(result.stderr).toContain("usable public key");
+    expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
+  });
+
+  test("a read-back row with a matching public key and no name cannot print registered", async () => {
+    const id = "noname-2126";
+    searchMode = "row-missing-name";
+
+    const result = await agentAdd(id);
+
+    expect(result.code).toBe(1);
+    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(result.stderr).toContain("name");
+    expect(result.stderr).not.toContain("no Agent row");
+    expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
+  });
+
+  test("a read-back row with a matching public key and a non-string name cannot print registered", async () => {
+    const id = "badname-2126";
+    searchMode = "row-non-string-name";
+
+    const result = await agentAdd(id);
+
+    expect(result.code).toBe(1);
+    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(result.stderr).toContain("name");
     expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
   });
 });
