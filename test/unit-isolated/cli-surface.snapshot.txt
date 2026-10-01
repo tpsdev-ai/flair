@@ -480,7 +480,7 @@ flair mcp disable
       description: Remote flair instance to disable against (else FLAIR_URL)
       attr: instance
     --admin-pass <pass>
-      description: Admin password for the target instance (or FLAIR_ADMIN_PASS)
+      description: Admin password for the remote target instance; pass it explicitly with --admin-pass
       attr: adminPass
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -3096,8 +3096,8 @@ OAuth surface.
 
 Options:
   --instance <url>     Remote flair instance to disable against (else FLAIR_URL)
-  --admin-pass <pass>  Admin password for the target instance (or
-                       FLAIR_ADMIN_PASS)
+  --admin-pass <pass>  Admin password for the remote target instance; pass it
+                       explicitly with --admin-pass
   --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
                        default: admin)
   --confirm-flag-off   Confirm FLAIR_MCP_OAUTH is already unset on the target

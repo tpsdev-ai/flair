@@ -918,7 +918,7 @@ export function register(program: Command): void {
     .command("disable")
     .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
     .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)")
-    .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
+    .option("--admin-pass <pass>", "Admin password for the remote target instance; pass it explicitly with --admin-pass")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-flag-off", "Confirm FLAIR_MCP_OAUTH is already unset on the target instance's environment (skips the interactive confirm)")
     .option("--json", "Print machine-readable JSON instead of a human summary")
@@ -932,7 +932,7 @@ export function register(program: Command): void {
       // comment in `mcp enable` above.
       const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!adminPass) {
-        console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required.");
+        console.error("Error: --admin-pass <pass> is required for a REMOTE target. Pass the target instance's admin password explicitly.");
         process.exit(1);
       }
 
