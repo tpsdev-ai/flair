@@ -205,9 +205,13 @@ process ID the instance reports, a readable process on this machine, and that
 file (compared by `realpath`). At its `local-config-update` step, before it
 restarts the instance, it writes the list unless the file already holds that
 exact list, then reads the file back. It also refuses the flag for a Fabric
-instance, an invalid host list, or a missing or unusable `config.yaml`. A
-refusal changes nothing. With `--dry-run`, it skips the match and writes
-nothing. A run that stops before `local-config-update` does not write the list.
+instance, an invalid host list, or a `config.yaml` that is missing, unreadable
+or not valid YAML, has no `@harperfast/oauth` `mcp` mapping, or has a
+`clientIdMetadataDocuments` that is not a mapping; it does not check early that
+the file can be written, and a write failure fails the later
+`local-config-update` step. A refusal changes nothing. With `--dry-run`, it
+skips the match and writes nothing. A run that stops before
+`local-config-update` does not write the list.
 On Fabric, and whenever the command refuses, edit the file by hand as above. If
 an upgrade replaces that file, run the command again or edit the file.
 

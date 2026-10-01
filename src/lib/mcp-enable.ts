@@ -673,7 +673,11 @@ export interface LocalCimdAllowedHostsRead {
  * Read-only: which config.yaml would `updateLocalConfigCimdAllowedHosts` write,
  * and what list does it carry now? Same file resolution as
  * `updateLocalConfigMcpEnabled`. `enable` runs this before any step with a
- * side effect, so a missing or unusable file refuses the flag up front.
+ * side effect, so a file that is missing, unreadable or not valid YAML, that
+ * has no `@harperfast/oauth` → `mcp` mapping, or whose
+ * `clientIdMetadataDocuments` is not a mapping refuses the flag up front. It
+ * does not check that the file can be written: a write failure fails the later
+ * `local-config-update` step.
  */
 export function readLocalConfigCimdAllowedHosts(
   explicitPath?: string,
@@ -2140,7 +2144,8 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       const written = updateLocalConfigCimdAllowedHosts(cimdAllowedHosts, params.localConfigPath);
       if (!written.ok || !written.readBack || !written.path) {
         push(false,
-          `--cimd-allowed-hosts not applied: ${written.detail}. The instance was not restarted. ` +
+          `--cimd-allowed-hosts change could not be confirmed: ${written.detail}. The config.yaml may have changed, ` +
+            `and this command did not restart the instance. ` +
             `Fix that, or set ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} by hand, then re-run \`flair mcp enable\`.`,
         );
         return {
