@@ -69,9 +69,9 @@ const VALID_MCP_WRITE_VERBS = ["store", "delete", "update"];
 describe("RECORD_TYPES — shape and exhaustiveness", () => {
   const entries = Object.entries(RECORD_TYPES) as Array<[string, RecordTypePolicy]>;
 
-  it("registers exactly the five core tables plus MemoryCandidate and Asset (no more, no fewer)", () => {
+  it("registers exactly the five core tables plus MemoryCandidate, Asset and OrgSkillAssignment (no more, no fewer)", () => {
     expect(Object.keys(RECORD_TYPES).sort()).toEqual(
-      ["Asset", "Memory", "MemoryCandidate", "OrgEvent", "Relationship", "Soul", "WorkspaceState"].sort(),
+      ["Asset", "Memory", "MemoryCandidate", "OrgEvent", "OrgSkillAssignment", "Relationship", "Soul", "WorkspaceState"].sort(),
     );
   });
 
@@ -242,6 +242,19 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
       identity: "gated",
       readScope: "owner-only",
       attribution: { post: "validate-truthy", put: "validate-truthy" },
+      provenance: false,
+      remEligible: false,
+      federation: "excluded",
+    });
+  });
+
+  it("OrgSkillAssignment (flair#2141 S1): unscoped verified reads, no attribution idiom, no provenance/embedding/mcp, not federated", () => {
+    expect(RECORD_TYPES.OrgSkillAssignment).toEqual({
+      table: "OrgSkillAssignment",
+      ownerField: "writer",
+      identity: "gated",
+      readScope: "none",
+      attribution: {},
       provenance: false,
       remEligible: false,
       federation: "excluded",

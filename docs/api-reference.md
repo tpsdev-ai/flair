@@ -52,7 +52,7 @@ the schema section so the catalog is complete.
 | **Public** | none | Discovery, health, OAuth well-known. `GET /Presence` is public only when the instance opts in to a public roster (`PRESENCE_PUBLIC_ROSTER=true`) — by default it needs a verified reader. See [Presence for API consumers](#presence-for-api-consumers). |
 | **Ed25519 agent** | `TPS-Ed25519` header | Default agent path. Writes as self only. Reads follow the resource's read-scope (below). |
 | **Admin Basic** | Harper `HDB_ADMIN_PASSWORD` / `FLAIR_ADMIN_PASSWORD` | Whole-instance operator. Bypasses agent scoping, including `private` memory. Used by the web admin and `n8n-nodes-flair`. |
-| **Operator / internal** | Admin Basic, or a deliberate `internalContext()` call inside the process | Soul mutations and `AgentSeed`. Agent Ed25519 keys — including admin-agent keys — cannot author Soul. |
+| **Operator / internal** | Admin Basic, or a deliberate `internalContext()` call inside the process | Soul mutations, `OrgSkillAssignment` writes and `AgentSeed`. Agent Ed25519 keys — including admin-agent keys — cannot author Soul. |
 | **Federation body-sig** | Ed25519 over the request body + timestamp/nonce; pairing uses a one-time token | `/FederationPair`, `/FederationSync`. Harper role gate is open; the handler is the auth boundary. |
 | **OAuth bearer** | Access token from Flair's AS or `@harperfast/oauth` | `/mcp` only, and only when `FLAIR_MCP_OAUTH=true` plus a public issuer. Off by default (path 404s). |
 
@@ -91,7 +91,7 @@ From `RECORD_TYPES` in `resources/record-types.ts`:
 |-------|---------|--------|
 | **open-within-org** | Own rows (any visibility) plus every other agent's non-private rows | Memory |
 | **owner-only** | Only the owning agent (plus admin / internal) | Relationship, WorkspaceState, Asset, MemoryCandidate |
-| **none** | Any verified agent reads every row; no visibility field | Soul, OrgEvent |
+| **none** | Any verified agent reads every row; no visibility field | Soul, OrgEvent, OrgSkillAssignment |
 
 These three scopes are **not** in `RECORD_TYPES`. Each is hand-implemented on its
 own resource:
@@ -171,6 +171,8 @@ the same identity plane.
 | POST | `/MemoryReflect` | Ed25519 | REM distill → MemoryCandidate. |
 | POST | `/MemoryDedupStats` | Admin Basic | Dedup diagnostics. Fleet-wide sweep; `allowCreate` is `allowAdmin`. |
 | POST | `/SkillScan` | Ed25519 | Skill-tag scan on Memory writes. |
+| GET | `/OrgSkillAssignment`, `/OrgSkillAssignment/<id>` | Ed25519 | Any verified agent. Org-scope skill assignments; see the `skills` paragraph in [docs/mcp-clients.md](mcp-clients.md). Not federated. |
+| POST / PUT / PATCH / DELETE | `/OrgSkillAssignment` | **Operator / internal** | Not Ed25519, admin-agent keys included. Each accepted write appends an `OrgSkillAssignmentHistory` row. |
 
 Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 `content`. MCP tools: `skill_store`, `skill_search`, `skill_get`.
@@ -476,6 +478,8 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **MemoryHitStat** | memory.graphql | no | Search-hit ledger (`retrievalCount`, `lastRetrieved`); overlaid onto Memory reads |
 | **MemoryCandidate** | memory.graphql | yes | REM draft (`claim`, `status`, `scopeTag`, visibility ruling) |
 | **Asset** | memory.graphql | yes | Blob (`contentType`, `data`) owned by `agentId`, linked by `memoryId` |
+| **OrgSkillAssignment** | memory.graphql | yes | Org-scope skill assignment (`skillName`, `skillRef`, `priority`, server-stamped `writer` / `sourceClass`) |
+| **OrgSkillAssignmentHistory** | memory.graphql | no | One row per OrgSkillAssignment write (`assignmentId`, `op`, `actor`, `sourceClass`, `previousHash`) |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |

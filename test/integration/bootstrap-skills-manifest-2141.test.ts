@@ -14,6 +14,7 @@
 //     `skillId` (Sherlock R4(b) on #2141).
 //   - An unresolved name and an equal-priority tie appear only in
 //     `skillDiagnostics`.
+//   - An org assignment (flair#2141 S1) ships as a scope "org" entry.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -36,6 +37,7 @@ const OWN_NAME = `s1b-own-skill-${sfx}`;
 const TEAMMATE_NAME = `s1b-teammate-skill-${sfx}`;
 const PROCEDURE = `s1b procedure body ${sfx}: step one, step two`;
 let ownId = "";
+let teammateId = "";
 
 async function fleet(op: string, body: Record<string, unknown> = {}): Promise<any> {
   const res = await fetch(`${harper.httpURL}/AgentFleet/`, {
@@ -111,6 +113,7 @@ beforeAll(async () => {
     name: TEAMMATE_NAME,
   }, TEAMMATE);
   expect(teammate?.id).toBeTruthy();
+  teammateId = teammate.id;
   const upd = await ops({
     operation: "update", database: "flair", table: "Memory",
     records: [{ id: teammate.id, createdAt: "2020-01-01T00:00:00.000Z" }],
@@ -156,5 +159,19 @@ describe("flair#2141 S1b — bootstrap skills manifest over /mcp", () => {
     const got = await tool("skill_get", { id: skillId }, READER);
     expect(got.agentId, "the row belongs to the assignee, not the reader").toBe(ASSIGNEE);
     expect(got.content).toBe(PROCEDURE);
+  }, 120_000);
+
+  // flair#2141 S1 — runs last: the org row it inserts applies to every agent.
+  test("an org assignment reaches the /mcp bootstrap as a scope org entry naming its skillRef", async () => {
+    const orgName = `s1-org-skill-${sfx}`;
+    const res = await ops({
+      operation: "insert", database: "flair", table: "OrgSkillAssignment",
+      records: [{ id: `s1-org-${sfx}`, skillName: orgName, skillRef: teammateId, priority: "standard", createdAt: new Date().toISOString(), sourceClass: "operator" }],
+    });
+    expect(res.status, `seed OrgSkillAssignment: ${res.text.slice(0, 300)}`).toBe(200);
+    const args = {};
+    const boot = await tool("bootstrap", args, ASSIGNEE);
+    conform("bootstrap", boot, TOOLS.bootstrap.contract, { args });
+    expect(boot.skills).toContainEqual({ name: orgName, skillId: teammateId, scope: "org", priority: "standard", source: null });
   }, 120_000);
 });

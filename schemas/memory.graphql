@@ -383,3 +383,34 @@ type Asset @table(database: "flair") @export {
   createdAt: String! @indexed
   updatedAt: String                # stamped on write; later sweep key (nullable/additive)
 }
+
+# OrgSkillAssignment — an org-scope skill assignment (flair#2141 S1): the
+# skill row `skillRef`, under `skillName` and `priority`, for the agents on this
+# instance that receive org skills (resources/skill-manifest.ts). No @export:
+# the REST surface is resources/OrgSkillAssignment.ts, whose writes need the
+# operator or internal source and server-stamp `writer`, `sourceClass`,
+# `createdAt` and `updatedAt`. Instance-local: absent from the federation table
+# policy.
+type OrgSkillAssignment @table(database: "flair") {
+  id: ID @primaryKey
+  skillName: String! @indexed
+  skillRef: String!                # the skill-tagged Memory row id
+  priority: String!                # critical | high | standard | low
+  createdAt: String!
+  updatedAt: String
+  writer: String                   # the operator's principal id; null for an internal write
+  sourceClass: String!             # operator | internal
+}
+
+# OrgSkillAssignmentHistory — one row per accepted write through
+# resources/OrgSkillAssignment.ts, appended in the write's transaction.
+# No @export and no resource class: no REST verb reaches it.
+type OrgSkillAssignmentHistory @table(database: "flair") {
+  id: ID @primaryKey
+  assignmentId: String! @indexed
+  op: String!                      # create | update | delete
+  actor: String                    # the writer; null for an internal write
+  sourceClass: String!             # operator | internal
+  previousHash: String             # sha256 of the stored row before the write; null on create
+  at: String!
+}

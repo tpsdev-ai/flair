@@ -477,6 +477,23 @@ export const RECORD_TYPES = {
     // same reasoning, not by omission.
     federation: "excluded",
   },
+
+  // OrgSkillAssignment — flair#2141 S1. Org-scope skill assignments, readable
+  // by any verified agent. resources/OrgSkillAssignment.ts gates each write
+  // verb itself on the operator or internal source (no record-type-kit
+  // attribution idiom). No principal owns a row: `ownerField` names the
+  // server-stamped `writer`, which no read scope or attribution mode uses.
+  // Instance-local.
+  OrgSkillAssignment: {
+    table: "OrgSkillAssignment",
+    ownerField: "writer",
+    identity: "gated",
+    readScope: "none",
+    attribution: {},
+    provenance: false,
+    remEligible: false,
+    federation: "excluded",
+  },
 } as const satisfies Record<string, RecordTypePolicy>;
 
 export type RecordTypeName = keyof typeof RECORD_TYPES;

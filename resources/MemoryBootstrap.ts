@@ -5,7 +5,7 @@ import { wrapUntrusted } from "./content-safety.js";
 import { isTeammate, formatTeamLine, isZeroRowNoOpEvent } from "./memory-bootstrap-lib.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { isValidEntity } from "./entity-vocab.js";
-import { withDetachedTxn } from "./table-helpers.js";
+import { withDetachedTxn, withDetachedTxnAsync } from "./table-helpers.js";
 import { getPresenceRoster } from "./presence-internal.js";
 import {
   buildCollisionEntries,
@@ -32,12 +32,15 @@ import { SKILL_ASSIGNMENT_KEY } from "./skill-provenance.js";
 import { SKILL_TAG } from "./skill-write.js";
 import {
   SKILL_ROW_SELECT,
+  receivesOrgSkills,
   resolvableSkillRows,
   resolveSkillManifest,
   skillLine,
+  type OrgSkillInput,
   type SkillDiagnostic,
   type SkillManifestEntry,
 } from "./skill-manifest.js";
+import { localInstanceId } from "./instance-identity.js";
 
 /**
  * POST /MemoryBootstrap
@@ -627,10 +630,11 @@ export class BootstrapMemories extends Resource {
     // the skills manifest (1b) re-checks its skill rows against it.
     const scope = await resolveReadScope(agentId);
 
-    // --- 1b. Skills manifest (flair#2141 S1b; conflict rules flair#1433) ---
+    // --- 1b. Skills manifest (flair#2141 S1b and S1; conflict rules flair#1433) ---
     // Present whatever includeSoul and includeContext say. resolveSkillManifest
-    // (resources/skill-manifest.ts) splits the assignments into winners, each
-    // with the own skill row `skill_get` reads, and diagnostics. Entries are
+    // (resources/skill-manifest.ts) splits the agent's own and org-scope
+    // assignments into winners, each with the skill row `skill_get` reads,
+    // and diagnostics. Entries are
     // admitted while they fit the shared budget, right after the soul, at
     // their serialized size; an entry that does not fit is counted in
     // skillsTruncated / skillDiagnosticsTruncated instead.
@@ -638,21 +642,44 @@ export class BootstrapMemories extends Resource {
     const includedSkillDiagnostics: SkillDiagnostic[] = [];
     let skillsTruncated = 0;
     let skillDiagnosticsTruncated = 0;
-    if (skillAssignments.length > 0) {
+    // flair#2141 S1 — org-scope assignments apply only when the target's Agent
+    // record, read on every call, says it receives org skills.
+    const orgRows: any[] = [];
+    const orgQuery = withDetachedTxn(ctx, () => (databases as any).flair.OrgSkillAssignment.search());
+    for await (const row of orgQuery as AsyncIterable<any>) orgRows.push(row);
+    const org: OrgSkillInput = { assignments: [], rows: [], instanceId: null };
+    if (orgRows.length > 0
+      && receivesOrgSkills(await withDetachedTxnAsync(ctx, () => (databases as any).flair.Agent.get(agentId)))) {
+      const refRows: any[] = [];
+      for (const ref of new Set(orgRows.map((row) => row.skillRef).filter((ref) => typeof ref === "string"))) {
+        const refQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
+          conditions: [{ attribute: "id", comparator: "equals", value: ref }],
+          select: SKILL_ROW_SELECT,
+        }));
+        for await (const record of refQuery as AsyncIterable<any>) refRows.push(record);
+      }
+      org.assignments = orgRows;
+      org.rows = resolvableSkillRows(refRows, scope.isAllowed);
+      org.instanceId = await localInstanceId();
+    }
+    if (skillAssignments.length > 0 || org.assignments.length > 0) {
       const skillRows: any[] = [];
-      const skillQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
-        conditions: [
-          { attribute: "agentId", comparator: "equals", value: agentId },
-          { attribute: "tags", comparator: "equals", value: SKILL_TAG },
-          { attribute: "archived", comparator: "not_equal", value: true },
-        ],
-        select: SKILL_ROW_SELECT,
-      }));
-      for await (const record of skillQuery as AsyncIterable<any>) skillRows.push(record);
+      if (skillAssignments.length > 0) {
+        const skillQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
+          conditions: [
+            { attribute: "agentId", comparator: "equals", value: agentId },
+            { attribute: "tags", comparator: "equals", value: SKILL_TAG },
+            { attribute: "archived", comparator: "not_equal", value: true },
+          ],
+          select: SKILL_ROW_SELECT,
+        }));
+        for await (const record of skillQuery as AsyncIterable<any>) skillRows.push(record);
+      }
       const manifest = resolveSkillManifest(
         skillAssignments,
         resolvableSkillRows(skillRows, scope.isAllowed),
         agentId,
+        org,
       );
       for (const entry of manifest.skills) {
         const cost = estimateTokens(JSON.stringify(entry));

@@ -1,35 +1,39 @@
 /**
  * skill-manifest.ts — the structured skills manifest in every successful
- * bootstrap response (flair#2141 S1b). No Harper imports.
+ * bootstrap response (flair#2141 S1b, S1). No Harper imports.
  *
- * `resolveSkillManifest` turns an agent's `skill-assignment` Soul rows into two
- * lists:
+ * `resolveSkillManifest` turns an agent's `skill-assignment` Soul rows and the
+ * instance's org-scope assignments (OrgSkillAssignment) into two lists:
  *   - `skills`: the winners only — `{ name, skillId, scope, priority, source }`,
  *     where `skillId` is the skill-tagged Memory row to fetch with `skill_get`.
- *   - `diagnostics`: assignments refused (a non-durable source or an
- *     equal-priority tie) or superseded, and winners whose name does not
- *     resolve to exactly one own skill row (unresolved or ambiguous).
- * The priority/tie rules are `resolveActiveSkills` (skill-provenance.ts), run
- * first; name resolution runs on its winners. Every candidate has scope "own"
- * (the target agent's own assignments); flair#2141 S1 adds org assignments and
- * opt-outs ahead of the priority rules.
+ *   - `diagnostics`: assignments refused (a non-durable source, an
+ *     equal-priority tie or a non-boolean `optOut`) or superseded, and winners
+ *     whose skill row does not resolve (unresolved or ambiguous).
+ * Candidates are the agent's own assignments (scope "own") plus the org
+ * assignments (scope "org") whose names the agent is not opted out of. The
+ * priority/tie rules (`resolveActiveSkills`, skill-provenance.ts) run on the
+ * candidates; then each winner's skill row is resolved: an own name to the
+ * agent's own skill row, an org assignment to its `skillRef`.
  *
  * The manifest strings (`name`, `source`) come from Soul `skill-assignment`
- * rows and reach the agent's context without SkillScan. That is safe only
- * because no agent key can write those rows; only operator credentials and
- * Flair's own internal paths can (resources/soul-write-policy.ts). Widening who
- * may write them changes this render path.
+ * rows, and an org entry's `name` from its OrgSkillAssignment row; they reach
+ * the agent's context without SkillScan. That is safe only because no agent
+ * key can write those rows; only operator credentials and Flair's own internal
+ * paths can (resources/soul-write-policy.ts, resources/OrgSkillAssignment.ts).
+ * Widening who may write them changes this render path.
  */
 
 import {
   formatBase,
+  normalizePriority,
   parseSkillMetadata,
   resolveActiveSkills,
+  skillSourceOf,
   type SkillAssignmentInput,
 } from "./skill-provenance.js";
 import { isSkillWrite } from "./skill-write.js";
 
-export type SkillScope = "own";
+export type SkillScope = "own" | "org";
 
 export interface SkillManifestEntry {
   name: string;
@@ -72,6 +76,39 @@ export type SkillRefResolution =
   | { kind: "resolved"; skillId: string }
   | { kind: "unresolved"; reason: string }
   | { kind: "ambiguous"; reason: string; candidates: string[] };
+
+/** A `skill-assignment` Soul row, as far as the manifest reads it. */
+export type OwnSkillAssignment = SkillAssignmentInput & { originatorInstanceId?: unknown };
+
+/** An OrgSkillAssignment row, as far as the manifest reads it. */
+export interface OrgSkillAssignmentRow {
+  skillName?: unknown;
+  skillRef?: unknown;
+  priority?: unknown;
+}
+
+export interface OrgSkillInput {
+  /** The OrgSkillAssignment rows; empty when the target does not receive org skills. */
+  assignments: OrgSkillAssignmentRow[];
+  /** The rows the `skillRef`s name, already passed through resolvableSkillRows. */
+  rows: SkillRow[];
+  /** This instance's id, or null when it has none. An opt-out applies only
+   *  when its Soul row's `originatorInstanceId` equals it. */
+  instanceId: string | null;
+}
+
+const NO_ORG: OrgSkillInput = { assignments: [], rows: [], instanceId: null };
+
+/**
+ * Whether a target receives org skills, from its Agent record: the record
+ * exists, `kind` is "agent" (absent counts as "agent") and `status` is
+ * "active" (absent counts as "active").
+ */
+export function receivesOrgSkills(agent: unknown): boolean {
+  if (!agent || typeof agent !== "object") return false;
+  const { kind, status } = agent as { kind?: unknown; status?: unknown };
+  return (kind ?? "agent") === "agent" && (status ?? "active") === "active";
+}
 
 /** A skill row's name: `metadata.name` (skill_store folds it there). */
 export function skillNameOf(row: SkillRow): string | undefined {
@@ -132,6 +169,14 @@ export function resolveSkillRef(name: string, rows: SkillRow[], agentId: string)
     ?? { kind: "unresolved", reason: "the agent has no live skill row with this name" };
 }
 
+/** An org assignment's `skillRef`, resolved against the rows it may name. */
+function resolveOrgRef(skillRef: unknown, rows: SkillRow[]): SkillRefResolution {
+  if (typeof skillRef === "string" && rows.some((row) => row.id === skillRef)) {
+    return { kind: "resolved", skillId: skillRef };
+  }
+  return { kind: "unresolved", reason: "the skillRef is not a live skill row this agent can read" };
+}
+
 /** The "## Active Skills" prose line for a manifest entry. */
 export function skillLine(entry: SkillManifestEntry): string {
   return formatBase(entry.name, entry.priority, entry.source ?? undefined);
@@ -142,24 +187,59 @@ function compareDiagnostics(a: SkillDiagnostic, b: SkillDiagnostic): number {
     || a.decision.localeCompare(b.decision)
     || (a.source ?? "").localeCompare(b.source ?? "")
     || a.priority.localeCompare(b.priority)
-    || a.reason.localeCompare(b.reason);
+    || a.reason.localeCompare(b.reason)
+    || a.scope.localeCompare(b.scope);
 }
+
+type Candidate = { input: SkillAssignmentInput; scope: SkillScope; skillRef?: unknown };
 
 /**
  * The manifest for one agent: `assignments` are its `skill-assignment` Soul
- * rows, `rows` the skill rows it may resolve to (see resolvableSkillRows).
- * `skills` is sorted by name; `diagnostics` by name, decision, source,
- * priority and reason.
+ * rows, `rows` the skill rows its own names may resolve to (see
+ * resolvableSkillRows), `org` the org assignments it receives. A Soul row with
+ * `metadata.optOut: true` is an opt-out, never a candidate: it removes the org
+ * assignments with that name before the priority rules, when its
+ * `originatorInstanceId` is `org.instanceId`. `skills` is sorted by name;
+ * `diagnostics` by name, decision, source, priority, reason and scope.
  */
 export function resolveSkillManifest(
-  assignments: SkillAssignmentInput[],
+  assignments: OwnSkillAssignment[],
   rows: SkillRow[],
   agentId: string,
+  org: OrgSkillInput = NO_ORG,
 ): { skills: SkillManifestEntry[]; diagnostics: SkillDiagnostic[] } {
   const skills: SkillManifestEntry[] = [];
   const diagnostics: SkillDiagnostic[] = [];
-  for (const outcome of resolveActiveSkills(assignments).outcomes) {
-    const scope: SkillScope = "own";
+  const candidates: Candidate[] = [];
+  const optedOut = new Set<string>();
+
+  for (const assignment of assignments) {
+    const optOut = parseSkillMetadata(assignment.metadata).optOut;
+    if (optOut === undefined || optOut === false) {
+      candidates.push({ input: assignment, scope: "own" });
+      continue;
+    }
+    if (typeof assignment.value !== "string" || assignment.value.length === 0) continue;
+    if (optOut !== true) {
+      diagnostics.push({
+        name: assignment.value, scope: "own",
+        priority: normalizePriority(assignment.priority),
+        source: skillSourceOf(assignment) ?? null,
+        decision: "refused", reason: "metadata.optOut is not a boolean",
+      });
+      continue;
+    }
+    if ((assignment.originatorInstanceId ?? null) === org.instanceId) optedOut.add(assignment.value);
+  }
+  for (const row of org.assignments) {
+    if (typeof row.skillName !== "string" || optedOut.has(row.skillName)) continue;
+    candidates.push({ input: { value: row.skillName, priority: row.priority }, scope: "org", skillRef: row.skillRef });
+  }
+
+  const byInput = new Map(candidates.map((candidate) => [candidate.input, candidate]));
+  for (const outcome of resolveActiveSkills(candidates.map((candidate) => candidate.input)).outcomes) {
+    const candidate = byInput.get(outcome.input) as Candidate;
+    const scope = candidate.scope;
     const source = outcome.source ?? null;
     if (!outcome.loaded) {
       diagnostics.push({
@@ -168,7 +248,9 @@ export function resolveSkillManifest(
       });
       continue;
     }
-    const ref = resolveSkillRef(outcome.name, rows, agentId);
+    const ref = scope === "org"
+      ? resolveOrgRef(candidate.skillRef, org.rows)
+      : resolveSkillRef(outcome.name, rows, agentId);
     if (ref.kind === "resolved") {
       skills.push({ name: outcome.name, skillId: ref.skillId, scope, priority: outcome.priority, source });
       continue;

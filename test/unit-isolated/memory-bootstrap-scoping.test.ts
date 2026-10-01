@@ -78,6 +78,11 @@ let failSkillRowRead: false | "call" | "iterate" = false;
 let memoryGrants: any[];
 let soulStore: Map<string, any> = new Map();
 let orgEventStore: any[] = [];
+// flair#2141 S1 — Agent records by id (the org-skill eligibility read) and the
+// OrgSkillAssignment rows; `failOrgRead` makes the org-assignment read throw.
+let agentStore: Map<string, any> = new Map();
+let orgSkillStore: any[] = [];
+let failOrgRead = false;
 const readPositionStore = new Map<string, any>();
 
 function memorySearchGen(query: any) {
@@ -132,7 +137,16 @@ const databasesMock = {
         return gen();
       },
     },
-    Agent: { search: () => emptyGen(), get: async () => null },
+    Agent: { search: () => emptyGen(), get: async (id: any) => agentStore.get(id) ?? null },
+    OrgSkillAssignment: {
+      search: () => {
+        if (failOrgRead) throw new Error("org assignment read failed");
+        async function* gen() {
+          for (const r of orgSkillStore) yield r;
+        }
+        return gen();
+      },
+    },
     Relationship: { search: () => emptyGen() },
     OrgEvent: {
       search: (query?: any) => {
@@ -176,6 +190,9 @@ function reset() {
   memoryGrants = [];
   soulStore = new Map();
   orgEventStore = [];
+  agentStore = new Map();
+  orgSkillStore = [];
+  failOrgRead = false;
   readPositionStore.clear();
   embedInputTypeCalls = [];
   taskEmbedding = undefined;
@@ -1286,5 +1303,63 @@ describe("MemoryBootstrap.post() — skills manifest (flair#2141 S1b)", () => {
       expect.arrayContaining(["skillsTokens", "skillDiagnosticsTokens"]),
     );
     conform("bootstrap", { ...res, flairVersion: "0.0.0-test" }, TOOLS.bootstrap.contract, { args });
+  });
+});
+
+// flair#2141 S1 — org-scope assignments through MemoryBootstrap.post(). The
+// pure rules are in test/unit/skill-manifest.test.ts.
+describe("MemoryBootstrap.post() — org-scope skills (flair#2141 S1)", () => {
+  function seedOrg() {
+    seedSkillRow({ id: "org-skill", agentId: "agent-ops", name: "using-flair" });
+    seedSkillRow({ id: "org-tied", agentId: "agent-ops", name: "tied" });
+    orgSkillStore.push(
+      { id: "o1", skillName: "using-flair", skillRef: "org-skill", priority: "standard" },
+      { id: "o2", skillName: "tied", skillRef: "org-tied", priority: "high" },
+      { id: "o3", skillName: "tied", skillRef: "org-tied", priority: "high" },
+      { id: "o4", skillName: "dangling", skillRef: "no-such-row", priority: "standard" },
+      { id: "o5", skillName: "opted", skillRef: "org-skill", priority: "standard" },
+    );
+    soulStore.set("opt", {
+      id: "opt", agentId: "agent-a", key: "skill-assignment", value: "opted",
+      metadata: JSON.stringify({ optOut: true }),
+    });
+  }
+
+  it("includeSoul:false returns the org winner with scope org; tied and unresolved org skills appear only in diagnostics, and an opted-out one in neither", async () => {
+    reset();
+    seedOrg();
+    agentStore.set("agent-a", { id: "agent-a" });
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeSoul: false });
+    expect(res.skills).toEqual([
+      { name: "using-flair", skillId: "org-skill", scope: "org", priority: "standard", source: null },
+    ]);
+    expect(res.skillDiagnostics.map((d: any) => `${d.name}:${d.scope}:${d.decision}`)).toEqual([
+      "dangling:org:unresolved",
+      "tied:org:refused",
+      "tied:org:refused",
+    ]);
+  });
+
+  it("a human, a deactivated agent and a target with no Agent record get no org skills, read from the record on every call", async () => {
+    reset();
+    seedOrg();
+    agentStore.set("agent-a", { id: "agent-a", kind: "agent", status: "active" });
+    agentStore.set("human-h", { id: "human-h", kind: "human", status: "active" });
+    const admin = makeBootstrap(agentCtx("admin-x", true));
+    expect((await admin.post({ agentId: "agent-a", includeSoul: false })).skills.map((s: any) => s.name)).toEqual(["using-flair"]);
+    agentStore.set("agent-a", { id: "agent-a", kind: "agent", status: "deactivated" });
+    for (const target of ["agent-a", "human-h", "no-record"]) {
+      const res: any = await admin.post({ agentId: target, includeSoul: false });
+      expect(res.skills, target).toEqual([]);
+      expect(res.skillDiagnostics, target).toEqual([]);
+    }
+  });
+
+  it("a failed org-assignment read fails the bootstrap rather than reporting no org skills", async () => {
+    reset();
+    seedOrg();
+    agentStore.set("agent-a", { id: "agent-a" });
+    failOrgRead = true;
+    await expect(makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a" })).rejects.toThrow("org assignment read failed");
   });
 });

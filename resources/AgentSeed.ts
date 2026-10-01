@@ -28,6 +28,7 @@ import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { rejectSkillWritePath } from "./skill-write.js";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
+import { SKILL_ASSIGNMENT_KEY } from "./skill-provenance.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -74,6 +75,14 @@ export class AgentSeed extends Resource {
     // Validate the entire caller-controlled template before creating any rows.
     const defaults = DEFAULT_SOUL_KEYS(agentId, name, role, now);
     const merged = { ...defaults, ...(soulTemplate || {}) };
+    // flair#2141 S1: a seeded Soul entry carries a value only, so a
+    // skill-assignment (and its optOut metadata) is written through Soul.
+    if (Object.hasOwn(merged, SKILL_ASSIGNMENT_KEY)) {
+      return new Response(JSON.stringify({
+        error: "skill_assignment_not_seedable",
+        message: "soulTemplate cannot carry a skill-assignment; write it through Soul",
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
     for (const value of Object.values(merged)) {
       const refusal = await refuseSoulWriteContent({ agentId, value: String(value) });
       if (refusal) return refusal;
