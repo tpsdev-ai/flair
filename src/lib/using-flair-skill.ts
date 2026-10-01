@@ -1,19 +1,22 @@
 /**
  * using-flair-skill.ts — the shipped `using-flair` skill text (flair#2141 S2).
  *
+ * `flair init` is the install path: it writes this text as ONE skill-tagged
+ * Memory row, and an org-scope assignment that points at it, so a new agent's
+ * bootstrap lists `using-flair` with no per-agent setup.
+ *
  * ONE reviewed text, reconciled from the flair best-practices guidance and the
- * cursor-flair skills (remember, bootstrap, coordinate, soul). It covers when
- * to write and at what durability, provenance, recall habits, what not to
- * store, identity, and how to find teammates. Since item 3 (a directory tool)
- * has not landed, the teammates part points at the Agent/Presence records.
+ * cursor-flair skills (remember, bootstrap, coordinate, soul). It covers when to
+ * write and at what durability, provenance, recall habits, what not to store,
+ * identity, and where the Agent and Presence records describe the office.
  *
  * The text is code: it is reviewed like any other file, it carries a content
  * hash, and the shipped-hash list below is the record of every version this
- * repo has ever shipped. `resources/SkillSeed.ts` (the installer) and
- * `resources/skill-seed.ts` (the decision) read them.
+ * repo has ever shipped. `src/lib/skill-seed.ts` (the decision and the write)
+ * reads them.
  *
- * Pure constants + one hash function, no Harper import, so the seed decision is
- * unit-testable without the runtime.
+ * Pure constants + one hash function, no runtime import, so the seed decision is
+ * unit-testable without a server.
  */
 import { createHash } from "node:crypto";
 
@@ -23,7 +26,7 @@ export const USING_FLAIR_SKILL_NAME = "using-flair";
 /** The recall trigger — the "when to use" text a skill row embeds from. */
 export const USING_FLAIR_SKILL_TRIGGER =
   "Use when you are about to store a durable decision, lesson, preference or fact, " +
-  "recall prior context at session start or after a gap, or find a teammate.";
+  "recall prior context at session start or after a gap, or look up who is in the office.";
 
 /** The procedure. Each line states current Flair behaviour. */
 export const USING_FLAIR_SKILL_CONTENT = [
@@ -31,15 +34,15 @@ export const USING_FLAIR_SKILL_CONTENT = [
   "",
   "## When to write, and at what durability",
   "- Store a decision, lesson, preference, or fact that should outlive this session: one concise `content` string.",
-  "- `permanent` for identity and never-forget facts; `persistent` for decisions and lessons; `standard` (the default) for ordinary working memory; `ephemeral` for this-session scratch.",
+  "- `permanent` for identity and never-forget facts; `persistent` for decisions and lessons; `standard` (the default) for ordinary working memory; `ephemeral` for private scratch that expires on a timer (24 hours by default), not at the end of a session.",
   "- `permanent` and `persistent` default to `shared`; `standard` and `ephemeral` default to `private`. Set `visibility: \"shared\"` explicitly to share an ordinary working fact with teammates.",
   "",
   "## Provenance",
-  "- Write as yourself: the server stamps the author from your signed key, never from the request body. Do not claim another agent's id.",
+  "- Write as yourself: Flair records the provenance of the credential the request authenticated with, and refuses a non-operator write whose `agentId` is not the writer's own, so a request body cannot claim another agent's id. Basic-auth operator credentials are recorded the same way.",
   "- Confirm a write with the returned id and a short preview.",
   "",
   "## Recall habits",
-  "- At session start, on resume, or after a long gap, load your bootstrap (soul plus memories) before answering from memory.",
+  "- At session start, on resume, or after a long gap, load your bootstrap before answering from memory.",
   "- On a task switch, search memory from two or three angles before acting.",
   "- When a search surfaces a row you just wrote or a near-duplicate, update that row instead of adding another.",
   "",
@@ -48,12 +51,11 @@ export const USING_FLAIR_SKILL_CONTENT = [
   "- Never store another person's private data.",
   "",
   "## Identity",
-  "- Your identity and standing instructions live in Soul, and ride in every bootstrap. Set them deliberately rather than leaving them to memory.",
+  "- Your identity and standing instructions live in Soul. A bootstrap carries them when it is asked for soul (`includeSoul`) and when they fit its token budget; set them deliberately rather than leaving them to memory.",
   "",
   "## Finding teammates",
-  "- Read the `Agent` table for who is in this office: one row per principal, with `kind`, `role`, and `status`.",
-  "- Read `Presence` for who is live: `lastHeartbeatAt` and `activity` for each agent.",
-  "- A directory tool that answers \"who is here and how do I reach them\" in one call is planned; until then those two records are the answer.",
+  "- Read the `Agent` table for who is in this office: one row per principal, with `kind`, `role`, and `status` fields. A record identifies a principal; it is not a promise that the principal is reachable.",
+  "- Read `Presence` for who is live: `lastHeartbeatAt` and `activity` for each agent. Presence reports liveness, not a guaranteed address.",
 ].join("\n");
 
 /** sha256 of a skill row's `content` — the value the shipped-hash list holds. */
@@ -63,9 +65,10 @@ export function usingFlairSkillHash(content: string): string {
 
 /**
  * The hashes of every `using-flair` text this repository has shipped. A stored
- * row whose content hash is in this list is an UNEDITED shipped version, so an
- * installer may replace it; a hash that is not in the list is an operator edit,
- * which is left alone. Append a new hash here whenever the text above changes.
+ * row whose content hash is in this list is an UNEDITED shipped version, so the
+ * installer may replace it; a hash that is not in the list is a locally modified
+ * or unrecognized version, which is left alone. (A hash does not identify its
+ * editor.) Append a new hash here whenever the text above changes.
  */
 export const USING_FLAIR_SHIPPED_HASHES: readonly string[] = Object.freeze([
   usingFlairSkillHash(USING_FLAIR_SKILL_CONTENT),

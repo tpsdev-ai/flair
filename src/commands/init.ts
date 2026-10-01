@@ -19,6 +19,7 @@ import {
   resolveInitAdminPasswordSource,
 } from "../lib/init-admin-pass.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
 import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
@@ -214,42 +215,18 @@ function seedFederationInstanceViaOpsApi(...args: any[]): any {
 }
 
 /**
- * flair#2141 S2 — seed the org-wide `using-flair` skill on an instance over the
- * operator REST surface. Idempotent; the endpoint refuses (naming the table and
- * a remedy) when an existing row or assignment cannot be read, and never writes
- * a duplicate. A refusal is reported, not swallowed.
+ * flair#2141 S2 — seed the org-wide `using-flair` skill on an instance, as the
+ * operator. Idempotent (fixed row ids, read by primary key). A refusal names
+ * what failed and how to fix it, and FAILS this run: init never reports success
+ * after a seed it could not complete.
  */
 async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, adminPass: string): Promise<void> {
-  const url = `${baseUrl.replace(/\/$/, "")}/SkillSeed`;
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`,
-      },
-      body: "{}",
-    });
-  } catch (err) {
-    console.error(
-      `Warning: the using-flair skill seed request to ${url} failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return;
+  const outcome = await seedUsingFlairSkill({ baseUrl, user: adminUser, pass: adminPass });
+  if (outcome.kind === "refused") {
+    console.error(`Error: the using-flair skill seed was refused — ${outcome.message}`);
+    process.exit(1);
   }
-  const text = await res.text().catch(() => "");
-  if (res.ok) {
-    let message = "seeded";
-    try {
-      message = (JSON.parse(text) as { message?: string }).message ?? message;
-    } catch {
-      /* keep the default */
-    }
-    console.log(`using-flair skill: ${message}`);
-    return;
-  }
-  console.error(`Warning: the using-flair skill seed was refused (${res.status}): ${text.slice(0, 300)}`);
-  console.error("  Resolve that and re-run 'flair init'.");
+  console.log(`using-flair skill: ${outcome.message}`);
 }
 
 function readOccupiedListener(port: number): OccupiedHarperListener {
@@ -469,7 +446,7 @@ program
       }
 
       // flair#2141 S2 — seed the org-wide using-flair skill on the remote
-      // instance (operator-attributed). Idempotent; a refusal is reported.
+      // instance, as the operator. Idempotent; a refusal fails this run.
       await seedUsingFlairSkillViaRest(baseUrl, adminUser, flairAdminPass);
 
       // Reconcile the federation Instance identity row if --remote (hub role).
@@ -1134,10 +1111,20 @@ program
     // means an explicit loopback also persists, so a widening can be reversed.
     persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost, httpBind.host);
 
-    // flair#2141 S2 — seed the org-wide using-flair skill (operator-attributed,
-    // idempotent). Runs whether or not an agent is registered here. A refusal is
-    // reported with the remedy, never swallowed.
-    await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);
+    // flair#2141 S2 — seed the org-wide using-flair skill on this instance, as
+    // the operator. It runs on the install path, where init has verified a
+    // serving instance (it started Harper or waited on its health check);
+    // --skip-start neither starts nor verifies one, so it does not seed and
+    // says so rather than reporting an install it did not confirm. A refusal
+    // fails this run rather than reporting a successful init without the skill,
+    // so both install paths call it before they print their success summary.
+    const seedUsingFlairSkillOnInstall = async (): Promise<void> => {
+      if (opts.skipStart) {
+        console.log("using-flair skill: not seeded (--skip-start does not verify an instance)");
+        return;
+      }
+      await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);
+    };
 
     if (agentId) {
       // Generate or reuse keypair
@@ -1235,6 +1222,9 @@ program
         // An unrun check must not look like a pass.
         console.log(`${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditCheck.detail})`);
       }
+
+      // flair#2141 S2 — seed the using-flair skill before init reports success.
+      await seedUsingFlairSkillOnInstall();
 
       // Output — admin password printed once, never written to disk
       console.log("\n✅ Flair initialized successfully");
@@ -1582,6 +1572,8 @@ program
       }
     } else {
       const httpUrl = `http://127.0.0.1:${httpPort}`;
+      // flair#2141 S2 — seed the using-flair skill before init reports success.
+      await seedUsingFlairSkillOnInstall();
       console.log("\n✅ Flair initialized (no agent registered)");
       console.log(`   Flair URL:   ${httpUrl}`);
       
