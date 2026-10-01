@@ -62,9 +62,9 @@ flair mcp enable \
 
 - `--idp-subject` is the login the identity provider reports: for GitHub, the
   username.
-- `--principal` is the principal that every `/mcp` call from that login reads
-  and writes as. It defaults to `self`. If no principal with that id exists, the
-  step creates a non-admin one, of kind `human` unless you pass
+- `--principal` is the principal used by tool calls authenticated as that
+  connector identity. It defaults to `self`. If no principal with that id
+  exists, the step creates a non-admin one, of kind `human` unless you pass
   `--principal-kind agent`.
 - `--admin-pass` is the target instance's admin password. Outside `--dry-run`,
   this command does not fall back to `FLAIR_ADMIN_PASS` or
@@ -77,7 +77,7 @@ flair mcp enable \
 The step's output states the mapping it wrote. The line starts:
 
 ```
-connector identity: sub 'alice' (provider 'github') resolves to Agent 'alice' — every /mcp call reads and writes AS 'alice'. principal created; Credential(kind:idp) created (cred_idp_github_<12 hex digits>).
+connector identity: calls authenticated as sub 'alice' (provider 'github') act as Agent 'alice'; see docs/access-control.md for what that principal can read and write. principal created; Credential(kind:idp) created (cred_idp_github_<12 hex digits>).
 ```
 
 `flair mcp enable` runs the whole enablement flow, not only this step. To add a
