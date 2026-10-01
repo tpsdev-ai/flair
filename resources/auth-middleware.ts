@@ -6,7 +6,7 @@ import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } 
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
-import { multiWorkerCondition, multiWorkerRefusalResponse } from "./multi-worker-guard.js";
+import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
 import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
@@ -188,6 +188,10 @@ server.http(async (request: any, nextLayer: any) => {
   // other method.
   // Exact match: HTTP methods are case-sensitive, and these are the spellings
   // Flair's clients send.
+  // The multi-worker refusal runs BEFORE this entry: multi-worker-guard.ts
+  // registers its own runFirst http entry, ordered ahead of this one, and any
+  // urlPath mount pulls it in. So a refused instance never reaches the method
+  // allowlist, the rate limiter, or any credential read below (flair#2059).
   const httpMethod = String(request.method ?? "");
   if (!ALLOWED_HTTP_METHODS.has(httpMethod)) {
     return new Response(JSON.stringify({
@@ -200,15 +204,6 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
-
-  // ── Multi-worker refusal, before the rate limiter and before any auth ──────
-  // flair#2059: with more than one Harper worker the per-worker replay guards
-  // no longer bound replay, so the instance does not serve. Every requested
-  // path except /Health gets one named 503 here — before the rate limiter,
-  // before any credential is read, and before any table is touched. /Health
-  // steps through and renders the same refusal itself (resources/health.ts).
-  const multiWorkerRefusal = multiWorkerRefusalResponse(multiWorkerCondition(), url.pathname);
-  if (multiWorkerRefusal) return multiWorkerRefusal;
 
   // ── Rate limiting, right after the method check ────────────────────────────
   // Before the public-path passthrough below (the OAuth endpoints all sit on it,
@@ -800,4 +795,4 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   return response;
-}, { runFirst: true });
+}, { runFirst: true, name: FLAIR_AUTH_MIDDLEWARE_HTTP_NAME });

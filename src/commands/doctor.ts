@@ -17,7 +17,7 @@ import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUse
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
-import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, readWorkerThreadsObservation, renderCatalogDoctorLines, runDoctorChecks, type WorkerThreadsObservation } from "../lib/doctor-run.js";
+import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, probeFlairHealth, renderCatalogDoctorLines, runDoctorChecks, type WorkerThreadsObservation } from "../lib/doctor-run.js";
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
@@ -464,15 +464,14 @@ program
     }
 
     // Helper: try to reach Harper on a given port.
-    // Must return true ONLY when Harper's /Health endpoint returns 200 OK.
-    // A generic HTTP status > 0 (flair#862) would accept 404 from a Node
+    // Must return true ONLY for a Flair /Health: a 200 OK, OR the validated
+    // refusal a refused instance answers with (503 + a `multiWorker` refusal
+    // field). A generic HTTP status > 0 (flair#862) would accept 404 from a Node
     // inspector on 9229 or any other service — "present but wrong" beats
     // "absent but correct".
     async function probePort(p: number): Promise<boolean> {
-      try {
-        const res = await fetch(`http://127.0.0.1:${p}/Health`, { signal: AbortSignal.timeout(3000) });
-        return res.ok; // 200-299 only — /Health returns { ok: true } on 200
-      } catch { return false; }
+      const probe = await probeFlairHealth(`http://127.0.0.1:${p}/Health`);
+      return probe.reaching; // 2xx /Health, or the validated multi-worker refusal
     }
 
     // Helper: discover what port a Harper PID is listening on.
@@ -603,24 +602,19 @@ program
     let workerThreads: WorkerThreadsObservation | undefined;
     if (harperResponding) {
       try {
-        const healthRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
         // flair#2059: the refused multi-worker state is reported by /Health as a
-        // 503 WITH a body, so the body is read whether or not the status is OK.
-        // A body that NAMES the refusal becomes the worker-threads observation;
-        // an absent field is a serving instance (a one-worker /Health omits it).
-        let healthBody: { version?: unknown; embedding?: unknown; multiWorker?: unknown } | null = null;
-        try {
-          healthBody = (await healthRes.json()) as { version?: unknown; embedding?: unknown; multiWorker?: unknown };
-        } catch {
-          // A non-JSON /Health body is not an observation: the worker-threads
-          // check stays unobserved and reports skip, never a pass.
-        }
-        if (healthBody) {
-          if (healthRes.ok) {
+        // 503 WITH a body, so the probe reads the body whether or not the status
+        // is OK. A body that NAMES the refusal becomes the worker-threads
+        // observation; an absent field is a serving instance (a one-worker
+        // /Health omits it); a malformed field is unknown, never serving.
+        const probe = await probeFlairHealth(`${baseUrl}/Health`);
+        if (probe.reaching) {
+          workerThreads = probe.observation ?? undefined;
+          if (probe.status >= 200 && probe.status < 300 && probe.body && typeof probe.body === "object") {
+            const healthBody = probe.body as { version?: unknown; embedding?: unknown };
             runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
             embedGpuFromHealth = healthBody.embedding;
           }
-          workerThreads = readWorkerThreadsObservation(healthBody.multiWorker);
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
 

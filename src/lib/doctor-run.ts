@@ -428,32 +428,84 @@ function runKeysPrune(ctx: DoctorRunContext): DoctorCheckResult {
  * What doctor observed about the instance's worker threads, derived from the
  * public /Health `multiWorker` field. `serving` covers a single worker (the
  * field is omitted) and any instance that is not in the refusal; `refused`
- * names the refusal or the explicit opt-in with the observed worker count.
+ * names the refusal or the explicit opt-in with the observed worker count (null
+ * when the instance reported no usable count); `unknown` is a malformed field,
+ * which is never read as serving.
  */
 export type WorkerThreadsObservation =
   | { kind: "serving" }
-  | { kind: "refused"; state: "refused" | "unsafe-opt-in"; workerCount: number };
+  | { kind: "refused"; state: "refused" | "unsafe-opt-in"; workerCount: number | null }
+  | { kind: "unknown" };
 
 /**
- * Read the doctor observation from a /Health `multiWorker` value. The field is
- * present exactly when the instance is refusing (or serving under the opt-in);
- * an absent or unrecognized value is therefore a serving instance, which is what
- * a one-worker instance reports. Only a value that NAMES the refusal is treated
- * as one — an unknown shape is never promoted to "refused".
+ * Read the doctor observation from a /Health `multiWorker` value.
+ *
+ * An ABSENT field (undefined/null) is a serving instance: a one-worker /Health
+ * omits `multiWorker`. A value that NAMES the refusal (`state` of "refused" or
+ * "unsafe-opt-in") is the refusal, carrying its worker count when that is a
+ * number. Anything else — a non-object, or an object with no recognized state —
+ * is UNKNOWN, never promoted to serving.
  */
 export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObservation {
-  if (raw && typeof raw === "object") {
-    const rec = raw as { state?: unknown; workerCount?: unknown };
-    const state = rec.state;
-    const workerCount = rec.workerCount;
-    if (
-      (state === "refused" || state === "unsafe-opt-in") &&
-      typeof workerCount === "number" && Number.isFinite(workerCount)
-    ) {
-      return { kind: "refused", state, workerCount };
+  if (raw === undefined || raw === null) return { kind: "serving" };
+  if (typeof raw !== "object") return { kind: "unknown" };
+  const rec = raw as { state?: unknown; workerCount?: unknown };
+  if (rec.state !== "refused" && rec.state !== "unsafe-opt-in") return { kind: "unknown" };
+  const workerCount = rec.workerCount;
+  return {
+    kind: "refused",
+    state: rec.state,
+    workerCount: typeof workerCount === "number" && Number.isFinite(workerCount) ? workerCount : null,
+  };
+}
+
+/** What a /Health probe found: whether the port is Flair, and what it observed. */
+export interface FlairHealthProbe {
+  /** The port answered as Flair: a 2xx /Health, or a validated Flair refusal. */
+  reaching: boolean;
+  status: number;
+  /** The parsed response body, or null when it was not JSON. */
+  body: unknown;
+  /** The worker-thread observation, or null when none was observed. */
+  observation: WorkerThreadsObservation | null;
+}
+
+/**
+ * Interpret a /Health status and body: is this port Flair, and what did it
+ * observe?
+ *
+ * A 2xx is Flair. A 503 is Flair ONLY when its `multiWorker` field names the
+ * refusal — that is the validated refusal a refused instance answers with, so
+ * discovery recognises the refused instance instead of skipping it. Any other
+ * non-2xx is not an observation. A malformed `multiWorker` is `unknown`, never
+ * serving.
+ */
+export function interpretFlairHealth(status: number, body: unknown): { reaching: boolean; observation: WorkerThreadsObservation | null } {
+  const observation = readWorkerThreadsObservation((body as { multiWorker?: unknown })?.multiWorker);
+  if (status >= 200 && status < 300) return { reaching: true, observation };
+  if (status === 503 && observation.kind === "refused") return { reaching: true, observation };
+  return { reaching: false, observation: null };
+}
+
+/** Probe a /Health URL. A failed fetch is not reaching; a refused instance is. */
+export async function probeFlairHealth(
+  url: string,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 3000,
+): Promise<FlairHealthProbe> {
+  try {
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
     }
+    const verdict = interpretFlairHealth(res.status, body);
+    return { ...verdict, status: res.status, body };
+  } catch {
+    return { reaching: false, status: 0, body: null, observation: null };
   }
-  return { kind: "serving" };
 }
 
 function runWorkerThreads(ctx: DoctorRunContext): DoctorCheckResult {
@@ -463,13 +515,18 @@ function runWorkerThreads(ctx: DoctorRunContext): DoctorCheckResult {
   if (!observed) {
     return result(id, label, "skip", { detail: "instance not observed" });
   }
+  if (observed.kind === "unknown") {
+    return result(id, label, "skip", { detail: "the instance's worker-thread state was not recognized" });
+  }
   if (observed.kind === "serving") {
     return result(id, label, "pass", { detail: "the instance reports no multi-worker refusal" });
   }
+  const count =
+    observed.workerCount === null ? "an unreadable worker count" : `${observed.workerCount} Harper worker threads`;
   const detail =
     observed.state === "refused"
-      ? `the instance runs ${observed.workerCount} Harper worker threads and refuses to serve; multi-worker is unsupported until the multi-worker readiness work lands`
-      : `the instance runs ${observed.workerCount} Harper worker threads under the FLAIR_MULTI_WORKER_UNSAFE=1 opt-in, so its replay guards are per worker`;
+      ? `the instance runs ${count} and refuses to serve; multi-worker is unsupported until the multi-worker readiness work lands`
+      : `the instance runs ${count} under the FLAIR_MULTI_WORKER_UNSAFE=1 opt-in, so the multi-worker readiness work is outstanding`;
   return result(id, label, "fail", {
     detail,
     remedy: "Set THREADS_COUNT=1 and restart flair",

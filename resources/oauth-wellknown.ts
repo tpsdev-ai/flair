@@ -99,6 +99,7 @@ import {
   prmPathMatches,
 } from "./oauth-discovery.js";
 import { mcpOAuthEnabled } from "./mcp-oauth-flag.js";
+import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
 
 export interface WellKnownDeps {
   /** Injectable for tests; defaults to the real Harper server. */
@@ -116,8 +117,8 @@ export function registerOAuthWellKnownRoutes(deps: WellKnownDeps = {}): string[]
   if (typeof srv?.http !== "function") return [];
   const enabled = deps.isMcpOAuthEnabled ?? mcpOAuthEnabled;
 
-  srv.http(makeWellKnownHandler(prmPathMatches, buildProtectedResourceMetadata, enabled), { urlPath: PRM_PATH });
-  srv.http(makeWellKnownHandler(asMetadataPathMatches, buildAuthorizationServerMetadata, enabled), { urlPath: AS_METADATA_PATH });
+  srv.http(makeWellKnownHandler(prmPathMatches, buildProtectedResourceMetadata, enabled), { urlPath: PRM_PATH, after: MULTI_WORKER_GUARD_HTTP_NAME });
+  srv.http(makeWellKnownHandler(asMetadataPathMatches, buildAuthorizationServerMetadata, enabled), { urlPath: AS_METADATA_PATH, after: MULTI_WORKER_GUARD_HTTP_NAME });
 
   return [PRM_PATH, AS_METADATA_PATH];
 }
