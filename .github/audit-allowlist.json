@@ -93,10 +93,10 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fastify",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3), which npm honours over root overrides. The bun override (fastify ^5.12.1) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving fastify >=5.12.1.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3), which npm honours over root overrides. The bun override (fastify ^5.12.5) fixes it in bun.lock, but npm installs carry harper's pin. Retired when flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.1; harper 5.3.0's resolves 5.12.5.",
       "added": "2026-09-03",
       "expires": "2027-03-02",
-      "removeWhen": "harper ships a shrinkwrap resolving fastify >=5.12.1"
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.1; harper 5.3.0 does (5.12.5)"
     },
     {
       "ghsa": "GHSA-3m5p-2c4r-xxw2",
@@ -108,10 +108,85 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fastify",
-      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3), which npm honours over root overrides. The bun override (fastify ^5.12.1) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving fastify >=5.12.1.",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3), which npm honours over root overrides. The bun override (fastify ^5.12.5) fixes it in bun.lock, but npm installs carry harper's pin. Retired when flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.1; harper 5.3.0's resolves 5.12.5.",
       "added": "2026-09-03",
       "expires": "2027-03-02",
-      "removeWhen": "harper ships a shrinkwrap resolving fastify >=5.12.1"
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.1; harper 5.3.0 does (5.12.5)"
+    },
+    {
+      "ghsa": "GHSA-hwr6-493r-vm6h",
+      "package": "fastify",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fastify",
+      "reason": "Published 2026-09-30. Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3; harper 5.2.8 is the version flair pins), which npm honours over root overrides. The bun override (fastify ^5.12.5) fixes it in bun.lock, but npm installs carry harper's pin. Retired when flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.2; harper 5.3.0's resolves 5.12.5.",
+      "added": "2026-10-01",
+      "expires": "2026-10-31",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.2; harper 5.3.0 does (5.12.5)"
+    },
+    {
+      "ghsa": "GHSA-9q9j-q6p8-xq58",
+      "package": "fastify",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fastify",
+      "reason": "Published 2026-09-30. Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3; harper 5.2.8 is the version flair pins), which npm honours over root overrides. The bun override (fastify ^5.12.5) fixes it in bun.lock, but npm installs carry harper's pin. Retired when flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.2; harper 5.3.0's resolves 5.12.5.",
+      "added": "2026-10-01",
+      "expires": "2026-10-31",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.2; harper 5.3.0 does (5.12.5)"
+    },
+    {
+      "ghsa": "GHSA-p68q-wchp-6fh7",
+      "package": "fastify",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fastify",
+      "reason": "Published 2026-09-30. Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3; harper 5.2.8 is the version flair pins), which npm honours over root overrides. The bun override (fastify ^5.12.5) fixes it in bun.lock, but npm installs carry harper's pin. Retired when flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.2; harper 5.3.0's resolves 5.12.5.",
+      "added": "2026-10-01",
+      "expires": "2026-10-31",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.2; harper 5.3.0 does (5.12.5)"
+    },
+    {
+      "ghsa": "GHSA-667r-xxjv-c9mm",
+      "package": "fastify",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fastify",
+      "reason": "Published 2026-09-30. Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3; harper 5.2.8 is the version flair pins), which npm honours over root overrides. The bun override (fastify ^5.12.5) fixes it in bun.lock, but npm installs carry harper's pin. Retired when flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.2; harper 5.3.0's resolves 5.12.5.",
+      "added": "2026-10-01",
+      "expires": "2026-10-31",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.2; harper 5.3.0 does (5.12.5)"
+    },
+    {
+      "ghsa": "GHSA-4mh8-r7rc-xpvc",
+      "package": "fastify",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fastify",
+      "reason": "Published 2026-09-30. Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3; harper 5.2.8 is the version flair pins), which npm honours over root overrides. The bun override (fastify ^5.12.5) fixes it in bun.lock, but npm installs carry harper's pin. Retired when flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.5; harper 5.3.0's resolves 5.12.5.",
+      "added": "2026-10-01",
+      "expires": "2026-10-31",
+      "removeWhen": "flair moves to a harper release whose shrinkwrap resolves fastify >=5.12.5; harper 5.3.0 does (5.12.5)"
     },
     {
       "ghsa": "GHSA-v2hh-gcrm-f6hx",
