@@ -5,10 +5,10 @@
  * that Harper's /health returns 200. A half-booted instance (server up, app
  * absent) must fail loudly rather than handing tests a 404-serving URL.
  */
-import { test, expect, afterEach } from "bun:test";
+import { test, expect } from "bun:test";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { writeFileSync, unlinkSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdtempSync, unlinkSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -191,7 +191,7 @@ test("bootEphemeralHarper rejects within budget when helper never emits config",
   } finally {
     cleanup();
   }
-});
+}, 15_000);
 
 // ─── Recovery contract (flair#1121) ─────────────────────────────────────────
 // The JSON line must include rootPath and harperPid so callers can recover
@@ -215,6 +215,7 @@ async function spawnMockBootHelper(jsonFields: Record<string, unknown>): Promise
   return new Promise((resolve, reject) => {
     const proc = spawn(process.execPath, [scriptPath], {
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: 10_000,
     });
     let stdout = "";
     const timeout = setTimeout(() => {
@@ -272,7 +273,7 @@ test("JSON line includes rootPath and harperPid", async () => {
     proc.stdin?.end();
     try { proc.kill("SIGKILL"); } catch {}
   }
-});
+}, 15_000);
 
 test("JSON line with null harperPid (external mode) still includes the field", async () => {
   const { config, proc } = await spawnMockBootHelper({
@@ -293,7 +294,7 @@ test("JSON line with null harperPid (external mode) still includes the field", a
     proc.stdin?.end();
     try { proc.kill("SIGKILL"); } catch {}
   }
-});
+}, 15_000);
 
 // ─── Source-level assertion (mutation-checkable) ───────────────────────────
 // Directly verifies the boot-harper.mjs source emits rootPath + harperPid in
@@ -315,8 +316,8 @@ test("boot-harper.mjs source emits rootPath and harperPid in config object", () 
 });
 
 // ─── Recovery-path test (flair#1121) ───────────────────────────────────────
-// Simulates the recovery contract: a wrapper that emits rootPath + harperPid,
-// then blocks until stdin closes. We SIGKILL it mid-teardown and exercise the
+// Simulates the recovery contract: a wrapper that emits rootPath + harperPid.
+// We SIGKILL it mid-teardown and exercise the
 // documented recovery path using the emitted fields.
 //
 // This is a mock test — it does NOT boot a real Harper. The real-Harper
@@ -324,32 +325,23 @@ test("boot-harper.mjs source emits rootPath and harperPid in config object", () 
 // The contract under test is the JSON line format + the recovery procedure,
 // both of which are exercised here.
 
-test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", async () => {
-  const rootPath = join(tmpdir(), `flair-test-recovery-${process.pid}`);
-  const { mkdir, writeFile } = await import("node:fs/promises");
-
-  // Create a mock install tree with a fake hdb.pid (simulating an orphaned Harper)
-  await mkdir(rootPath, { recursive: true });
-  await writeFile(join(rootPath, "hdb.pid"), String(process.pid), "utf-8");
-
-  // Spawn a mock wrapper that:
-  // 1. Prints the JSON line with rootPath + harperPid
-  // 2. Spawns a child process (simulating Harper)
-  // 3. Blocks until stdin closes, then "tears down" (kills child, removes tree)
-  const mockScript = join(tmpdir(), `adk-flair-test-recovery-mock-${process.pid}.mjs`);
+function writeRecoveryMock(rootPath: string): string {
+  const mockScript = join(rootPath, "recovery-mock.mjs");
   writeFileSync(mockScript, [
     "import { spawn } from 'node:child_process';",
-    "import { rm } from 'node:fs/promises';",
+    "import { writeFileSync, rmSync } from 'node:fs';",
+    "import { join } from 'node:path';",
     "",
     `const ROOT = ${JSON.stringify(rootPath)};`,
+    "const parentPid = process.ppid;",
     "",
-    "// Spawn a mock Harper child (just sleeps)",
     "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300_000)'], {",
     "  stdio: 'ignore',",
     "  detached: true,",
+    "  timeout: 120_000,",
     "});",
+    "writeFileSync(join(ROOT, 'mock-child.pid'), String(child.pid));",
     "",
-    "// Emit the JSON config line",
     "const config = {",
     "  httpURL: 'http://127.0.0.1:19926',",
     "  opsURL: 'http://127.0.0.1:19925',",
@@ -362,26 +354,68 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
     "};",
     "process.stdout.write(JSON.stringify(config) + '\\n');",
     "",
-    "// Block until stdin closes (teardown signal)",
-    "await new Promise(r => process.stdin.on('end', r));",
-    "",
-    "// Teardown: kill child, then remove tree",
-    "try { child.kill('SIGTERM'); }",
-    "catch {}",
-    "// Simulate slow teardown — this is where SIGKILL catches us",
-    "await new Promise(r => setTimeout(r, 5000));",
+    "const reason = await new Promise(resolve => {",
+    "  let settled = false;",
+    "  const finish = value => {",
+    "    if (settled) return;",
+    "    settled = true;",
+    "    clearInterval(parentCheck);",
+    "    clearTimeout(deadline);",
+    "    resolve(value);",
+    "  };",
+    "  const parentCheck = setInterval(() => {",
+    "    if (process.ppid !== parentPid) finish('parent');",
+    "  }, 250);",
+    "  const deadline = setTimeout(() => finish('deadline'), 90_000);",
+    "  if (process.env.RECOVERY_MOCK_IGNORE_STDIN !== '1') {",
+    "    process.stdin.once('end', () => finish('stdin'));",
+    "    process.stdin.resume();",
+    "  }",
+    "});",
+    "if (reason === 'stdin') await new Promise(r => setTimeout(r, 5000));",
     "try { child.kill('SIGKILL'); } catch {}",
-    "await rm(ROOT, { recursive: true, force: true });",
+    "rmSync(ROOT, { recursive: true, force: true });",
+    "if (process.env.RECOVERY_MOCK_EXIT_FILE) {",
+    "  writeFileSync(process.env.RECOVERY_MOCK_EXIT_FILE, reason);",
+    "}",
+    "process.exit(0);",
   ].join("\n"), "utf-8");
+  return mockScript;
+}
 
-  const cleanupMockScript = () => {
-    try { unlinkSync(mockScript); } catch {}
-  };
+function killPid(pid: number | undefined): void {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) return;
+  try { process.kill(pid, "SIGKILL"); } catch {}
+}
+
+function processRunning(pid: number): boolean {
+  try { process.kill(pid, 0); } catch { return false; }
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+      return stat[stat.lastIndexOf(")") + 2] !== "Z";
+    } catch { /* /proc may be unavailable */ }
+  }
+  return true;
+}
+
+function recordedMockPid(rootPath: string, name: string): number | undefined {
+  try { return Number(readFileSync(join(rootPath, name), "utf-8")); }
+  catch { return undefined; }
+}
+
+test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", async () => {
+  const rootPath = mkdtempSync(join(tmpdir(), "flair-test-recovery-"));
+  writeFileSync(join(rootPath, "hdb.pid"), String(process.pid), "utf-8");
+  const mockScript = writeRecoveryMock(rootPath);
+  let wrapper: ChildProcess | undefined;
+  let harperPid: number | undefined;
 
   try {
     // ── Spawn the mock wrapper ──────────────────────────────────────────
-    const wrapper = spawn(process.execPath, [mockScript], {
+    wrapper = spawn("node", [mockScript], {
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: 50_000,
     });
 
     // Read the JSON line
@@ -415,7 +449,7 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
       });
     });
 
-    const harperPid = config.harperPid as number;
+    harperPid = config.harperPid as number;
     expect(config.rootPath).toBe(rootPath);
     expect(typeof harperPid).toBe("number");
     expect(harperPid).toBeGreaterThan(0);
@@ -441,10 +475,8 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
     });
 
     // ── The mock Harper child should still be alive (orphaned) ──────────
-    // (The wrapper's teardown has a 5s sleep before killing the child,
-    // so our SIGKILL catches it before the child is killed.)
     try { process.kill(harperPid, 0); childAlive = true; } catch { childAlive = false; }
-    // The child may or may not survive depending on timing — either is valid
+    expect(childAlive).toBe(true);
 
     // ── Exercise the documented recovery path ───────────────────────────
     // 1. Kill by explicit harperPid
@@ -464,8 +496,84 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
     expect(stillAlive).toBe(false);
     expect(existsSync(rootPath)).toBe(false);
   } finally {
-    cleanupMockScript();
-    // Best-effort cleanup in case the test failed mid-way
+    killPid(wrapper?.pid);
+    killPid(harperPid ?? recordedMockPid(rootPath, "mock-child.pid"));
     try { rmSync(rootPath, { recursive: true, force: true, maxRetries: 2 }); } catch {}
   }
 }, 60_000);
+
+test("recovery mock exits when its parent disappears", async () => {
+  const rootPath = mkdtempSync(join(tmpdir(), "flair-test-parent-exit-"));
+  const exitFile = `${rootPath}.exit`;
+  const mockScript = writeRecoveryMock(rootPath);
+  const launcherCode = [
+    "const { spawn } = require('node:child_process');",
+    "const { writeFileSync } = require('node:fs');",
+    "const wrapper = spawn(process.execPath, [process.argv[1]], {",
+    "  stdio: ['pipe', 'pipe', 'pipe'],",
+    "  detached: true,",
+    "  timeout: 8_000,",
+    "  env: { ...process.env, RECOVERY_MOCK_IGNORE_STDIN: '1', RECOVERY_MOCK_EXIT_FILE: process.argv[2] },",
+    "});",
+    "writeFileSync(process.argv[3], String(wrapper.pid));",
+    "let stdout = '';",
+    "wrapper.stdout.on('data', chunk => {",
+    "  stdout += chunk.toString();",
+    "  const end = stdout.indexOf('\\n');",
+    "  if (end < 0) return;",
+    "  const config = JSON.parse(stdout.slice(0, end));",
+    "  process.stdout.write(JSON.stringify({ wrapperPid: wrapper.pid, harperPid: config.harperPid }) + '\\n', () => process.exit(0));",
+    "});",
+    "wrapper.on('error', error => { console.error(error); process.exit(1); });",
+  ].join("\n");
+  let launcher: ChildProcess | undefined;
+  let wrapperPid: number | undefined;
+  let harperPid: number | undefined;
+  let launcherStderr = "";
+
+  try {
+    launcher = spawn("node", ["-e", launcherCode, mockScript, exitFile, join(rootPath, "mock-wrapper.pid")], {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 8_000,
+    });
+    launcher.stderr?.on("data", (chunk: Buffer) => { launcherStderr += chunk.toString(); });
+    const pids = await new Promise<{ wrapperPid: number; harperPid: number }>((resolve, reject) => {
+      let stdout = "";
+      const deadline = setTimeout(() => reject(new Error("launcher did not report mock PIDs")), 3_000);
+      launcher!.stdout?.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        const end = stdout.indexOf("\n");
+        if (end < 0) return;
+        clearTimeout(deadline);
+        resolve(JSON.parse(stdout.slice(0, end)));
+      });
+      launcher!.on("error", error => { clearTimeout(deadline); reject(error); });
+      launcher!.on("exit", code => {
+        if (code !== 0) { clearTimeout(deadline); reject(new Error(`launcher exited ${code}`)); }
+      });
+    });
+    wrapperPid = pids.wrapperPid;
+    harperPid = pids.harperPid;
+    expect(wrapperPid).toBeGreaterThan(0);
+    expect(harperPid).toBeGreaterThan(0);
+
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(exitFile) && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    expect(existsSync(exitFile), `mock exit marker missing; launcher stderr: ${launcherStderr}`).toBe(true);
+    expect(readFileSync(exitFile, "utf-8")).toBe("parent");
+    expect(existsSync(rootPath)).toBe(false);
+    const exitDeadline = Date.now() + 3_000;
+    while (processRunning(wrapperPid) && Date.now() < exitDeadline) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    expect(processRunning(wrapperPid)).toBe(false);
+  } finally {
+    killPid(launcher?.pid);
+    killPid(wrapperPid ?? recordedMockPid(rootPath, "mock-wrapper.pid"));
+    killPid(harperPid ?? recordedMockPid(rootPath, "mock-child.pid"));
+    try { rmSync(rootPath, { recursive: true, force: true }); } catch {}
+    try { unlinkSync(exitFile); } catch {}
+  }
+}, 12_000);
