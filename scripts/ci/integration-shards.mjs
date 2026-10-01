@@ -71,9 +71,8 @@ export function weightOf(file) {
 
 /**
  * Assign `files` to `shards` shards, deterministically. Files are placed by
- * descending weight into the currently-lightest shard (ties by shard index), so
- * the heaviest files land in different shards; the rest fill in. Returns an
- * array of `shards` arrays, each sorted, all disjoint, the union `files`.
+ * descending weight into the currently-lightest shard (ties by shard index).
+ * Returns an array of `shards` arrays, each sorted.
  */
 export function assignShards(files, shards) {
   if (!Number.isInteger(shards) || shards < 1) {

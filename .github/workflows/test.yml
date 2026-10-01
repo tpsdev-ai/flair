@@ -462,15 +462,14 @@ jobs:
     # 11m44s — every shard under half the old 30-minute cap. A first run at cap
     # 15 cut shard 2 during its Docker step (its `Run integration tests` step
     # alone 10m17s) and the gate failed, as designed, because a cancelled shard
-    # is not a success; the cap below is 25, ~1.7x the heaviest shard's
-    # integration step, with room for the E2E tail. Each shard runs the same
+    # is not a success; the cap below is 25. Each shard runs the same
     # steps on its share of test/integration/*.test.ts
     # (scripts/ci/integration-shards.mjs), and the final job named
     # `Integration Tests` (below) requires every shard to succeed.
     timeout-minutes: 25
     strategy:
-      # fail-fast: false — every shard must run and report, and the aggregate
-      # job below fails unless each one succeeded.
+      # fail-fast: false — one failed shard does not cancel the others; the
+      # aggregate job below fails unless each one succeeded.
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
