@@ -231,7 +231,9 @@ async function readStoredAgent(
     process.exit(1);
   }
   const parsed = parseAgentRows(body, id);
-  if (!parsed.ok) {
+  // `=== false`, not `!parsed.ok`: tsconfig.cli.json is not strict, and `!`
+  // does not narrow this union there.
+  if (parsed.ok === false) {
     console.error(`Error: could not read Agent '${id}': ${parsed.reason}`);
     process.exit(1);
   }
