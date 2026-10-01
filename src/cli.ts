@@ -5641,17 +5641,21 @@ function resolveInstanceServingPid(dataDir: string, port: number): number | null
   try {
     listeningPids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
   } catch { /* lsof unavailable — the PID file may still answer */ }
-  // flair#2056: identify the process, not just the pid. A live `hdb.pid` is
-  // trusted only when the flair#1454 sidecar matches (same pid, start time
-  // within ±2s) AND the command line is node running harper.js; otherwise the
-  // pid may have been recycled and is treated as stale, so the port listener
-  // answers instead. Reuses the existing sidecar reader (readSidecar).
+  // flair#2056: identify the PROCESS, not just the pid. A live `hdb.pid` is
+  // trusted when its command line is node running harper.js — a sidecar is NOT
+  // required, since an instance started by a pre-sidecar flair, or the instance
+  // launchd starts (whose launcher execs Harper), serves the data dir without
+  // one. A flair#1454 sidecar that names a DIFFERENT pid, or the same pid with a
+  // start time outside the ±2 s window, is a MISMATCH (the pid was recycled), so
+  // the pid is stale and the port listener answers instead. Reuses the existing
+  // sidecar reader (readSidecar).
   const sidecar = readSidecar(dataDir);
   const isIdentified = (pid: number): boolean => {
-    if (sidecar.kind !== "present") return false;
-    if (sidecar.pid !== pid) return false;
-    const actual = readProcessStartTimeMs(pid);
-    if (actual === null || !isStartTimeMatch(actual, sidecar.startTimeMs)) return false;
+    if (sidecar.kind === "present") {
+      if (sidecar.pid !== pid) return false;
+      const actual = readProcessStartTimeMs(pid);
+      if (actual === null || !isStartTimeMatch(actual, sidecar.startTimeMs)) return false;
+    }
     const cmdline = defaultReadProcessCmdline(pid);
     return cmdline !== null && isNodeHarperCommandLine(cmdline);
   };

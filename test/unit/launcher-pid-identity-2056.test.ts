@@ -1,9 +1,11 @@
 // launcher-pid-identity-2056.test.ts — flair#2056.
 //
 // The launcher and resolveInstanceServingPid must identify the PROCESS behind
-// hdb.pid, not just the pid: a sidecar (flair-daemon.json: same pid, start time
-// within ±2 s) AND a node/harper command line. Otherwise the pid may have been
-// recycled, and a stale hdb.pid must not block a launchd takeover.
+// hdb.pid, not just the pid: a node/harper command line. A flair#1454 sidecar
+// (flair-daemon.json: same pid, start time within ±2 s) is not required — a
+// pre-sidecar instance, or the instance launchd starts, has none — but a
+// sidecar that MISMATCHES the pid marks it recycled (stale), so a second start
+// is allowed. Otherwise a stale hdb.pid must not block a launchd takeover.
 //
 // Hermetic: a stub node/harper that only prints a marker, and background
 // processes this file starts and then kills by the pid it recorded. Every spawn
@@ -167,6 +169,29 @@ describe("flair#2056 — the launchd launcher identifies the process behind hdb.
     expect(r.stdout).toContain(MARKER);
   }, 30_000);
 
+  test("a live node/harper process with NO sidecar is still refused (a pre-sidecar or launchd-started instance)", async () => {
+    const root = mkRoot();
+    const pid = startNodeHarper(root);
+    await waitStarted(pid);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    // No flair-daemon.json: the command line alone identifies the serving process.
+    const r = runLauncher(root, "node", stubHarper(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain(MARKER);
+    expect(r.stderr).toContain(`already served by pid ${pid}`);
+  }, 30_000);
+
+  test("a sidecar naming a DIFFERENT pid is a mismatch -> the launcher execs Harper", async () => {
+    const root = mkRoot();
+    const pid = startNodeHarper(root);
+    await waitStarted(pid);
+    writeSidecar(root, pid + 1, Date.now()); // another pid's sidecar: this pid was recycled
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarper(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(MARKER);
+  }, 30_000);
+
   test("a start-time mismatch does not refuse (identity is the pair, not the pid)", async () => {
     const root = mkRoot();
     const pid = startNodeHarper(root);
@@ -195,6 +220,15 @@ describe("flair#2056 — resolveInstanceServingPid applies the same identity rul
     const pid = startNodeHarper(root);
     const start = await waitStarted(pid);
     writeSidecar(root, pid, start);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const serving = resolveInstanceServingPid(root, await freePort());
+    expect(serving).toBe(pid);
+  }, 30_000);
+
+  test("a node/harper pid with NO sidecar is the serving process", async () => {
+    const root = mkRoot();
+    const pid = startNodeHarper(root);
+    await waitStarted(pid);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     const serving = resolveInstanceServingPid(root, await freePort());
     expect(serving).toBe(pid);

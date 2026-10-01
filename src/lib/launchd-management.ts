@@ -445,11 +445,12 @@ export function pickInstancePid(input: {
   isAlive: (pid: number) => boolean;
   listeningPids: number[];
   /**
-   * flair#2056: is `pid` IDENTIFIED as the direct Flair process (matching
-   * sidecar + a node/harper command line)? When given, a live pidfile pid is
-   * used only if it answers true; an unidentifiable pid is treated as stale
-   * (the pid may have been recycled) and the port listener answers instead.
-   * Omitted by callers that have not gathered identity evidence.
+   * flair#2056: is `pid` IDENTIFIED as the Flair process (a node/harper
+   * command line, and not a flair#1454 sidecar mismatch)? When given, a live
+   * pidfile pid is used only if it answers true; an unidentifiable pid is
+   * treated as stale (the pid may have been recycled) and the port listener
+   * answers instead. Omitted by callers that have not gathered identity
+   * evidence.
    */
   isIdentified?: (pid: number) => boolean;
 }): number | null {

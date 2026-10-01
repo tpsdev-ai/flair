@@ -26,49 +26,58 @@ NODE="$2"
 HARPER_BIN="$3"
 
 # flair#2040 / flair#2056: never start a SECOND instance on a data directory
-# that a live process already serves — but only when that process is IDENTIFIED
-# as the direct Flair process. `kill -0` alone proves only that SOME process has
+# that a live process already serves — but only when that process is identified
+# as a Flair/Harper process. `kill -0` alone proves only that SOME process has
 # the pid; a crashed direct process that left hdb.pid behind can have its pid
 # reused by anything, and then every KeepAlive retry would exit 0 forever and
-# launchd would never start Flair. Identity is the flair#1454 sidecar
-# (`flair-daemon.json`: the same pid and a start time within ±2 s of
-# `ps -o lstart=`) AND a node/harper command line. Anything less is
-# unidentifiable, and unidentifiable is treated as STALE: fall through and exec
-# Harper, whose own hdb.pid check still applies. Refuse only on a positive
-# identification. Exit 0 on the refusal — a deliberate no-op, not a crash;
-# KeepAlive retries after its throttle interval, and the next attempt starts
-# Harper once the direct process has exited.
+# launchd would never start Flair.
+#
+# Identity is the PROCESS, not the pid: the live pid is refused when its command
+# line is a node process running harper.js. A flair#1454 sidecar
+# (`flair-daemon.json`) is NOT required — an instance started by a pre-sidecar
+# flair, or the instance launchd starts (this launcher execs Harper, which
+# writes no sidecar), serves the data dir with no sidecar. A sidecar that names
+# a DIFFERENT pid, or the same pid with a start time outside the ±2 s window of
+# `ps -o lstart=`, is a MISMATCH: the pid was recycled, so it is STALE and
+# Harper is exec'd (its own hdb.pid check still applies).
+#
+# Refuse only on a positive identification. Exit 0 on the refusal — a
+# deliberate no-op, not a crash; KeepAlive retries after its throttle interval,
+# and the next attempt starts Harper once the direct process has exited.
 if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
   LIVE_PID="$(tr -cd '0-9' < "$ROOTPATH/hdb.pid" 2>/dev/null || true)"
   if [ -n "$LIVE_PID" ] && [ "$LIVE_PID" != "$$" ] && [ "$LIVE_PID" -gt 1 ] 2>/dev/null && kill -0 "$LIVE_PID" 2>/dev/null; then
-    IDENTIFIED=0
+    STALE=0
     SIDE="$ROOTPATH/flair-daemon.json"
     if [ -f "$SIDE" ]; then
       SIDE_PID="$(grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$SIDE" 2>/dev/null | grep -o '[0-9][0-9]*$' || true)"
       SIDE_START="$(grep -o '"startTimeMs"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$SIDE" 2>/dev/null | grep -o '[0-9][0-9]*$' || true)"
-      if [ -n "$SIDE_PID" ] && [ "$SIDE_PID" = "$LIVE_PID" ] && [ -n "$SIDE_START" ]; then
-        LSTART="$(ps -o lstart= -p "$LIVE_PID" 2>/dev/null || true)"
-        ACT_S=""
-        case "$(uname -s)" in
-          Darwin) if [ -n "$LSTART" ]; then ACT_S="$(date -j -f "%a %b %e %T %Y" "$LSTART" +%s 2>/dev/null || true)"; fi ;;
-          *)      if [ -n "$LSTART" ]; then ACT_S="$(date -d "$LSTART" +%s 2>/dev/null || true)"; fi ;;
-        esac
-        if [ -n "$ACT_S" ]; then
-          START_S=$((SIDE_START / 1000))
-          DIFF=$((ACT_S - START_S))
-          if [ "$DIFF" -lt 0 ]; then DIFF=$((0 - DIFF)); fi
-          if [ "$DIFF" -le 2 ]; then
-            CMD="$(ps -o command= -p "$LIVE_PID" 2>/dev/null || true)"
-            case "$CMD" in
-              *node*harper*) IDENTIFIED=1 ;;
-            esac
+      if [ -n "$SIDE_PID" ] && [ -n "$SIDE_START" ]; then
+        if [ "$SIDE_PID" != "$LIVE_PID" ]; then
+          STALE=1
+        else
+          LSTART="$(ps -o lstart= -p "$LIVE_PID" 2>/dev/null || true)"
+          ACT_S=""
+          case "$(uname -s)" in
+            Darwin) if [ -n "$LSTART" ]; then ACT_S="$(date -j -f "%a %b %e %T %Y" "$LSTART" +%s 2>/dev/null || true)"; fi ;;
+            *)      if [ -n "$LSTART" ]; then ACT_S="$(date -d "$LSTART" +%s 2>/dev/null || true)"; fi ;;
+          esac
+          if [ -n "$ACT_S" ]; then
+            START_S=$((SIDE_START / 1000))
+            DIFF=$((ACT_S - START_S))
+            if [ "$DIFF" -lt 0 ]; then DIFF=$((0 - DIFF)); fi
+            if [ "$DIFF" -gt 2 ]; then STALE=1; fi
           fi
         fi
       fi
     fi
-    if [ "$IDENTIFIED" = "1" ]; then
-      echo "start-flair-with-admin-pass: $ROOTPATH is already served by pid $LIVE_PID (not started by this launchd job); not starting a second instance. launchd retries after its throttle interval and starts Flair once that process has exited." >&2
-      exit 0
+    if [ "$STALE" = "0" ]; then
+      CMD="$(ps -o command= -p "$LIVE_PID" 2>/dev/null || true)"
+      case "$CMD" in
+        *node*harper*)
+          echo "start-flair-with-admin-pass: $ROOTPATH is already served by pid $LIVE_PID (not started by this launchd job); not starting a second instance. launchd retries after its throttle interval and starts Flair once that process has exited." >&2
+          exit 0 ;;
+      esac
     fi
   fi
 fi
