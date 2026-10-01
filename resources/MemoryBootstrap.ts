@@ -30,6 +30,7 @@ import { defaultReadPositionTable, ensureReadPosition } from "./agent-read-posit
 import { catchupSeekTimestamp, isCatchupEligible } from "./org-event-catchup-lib.js";
 import { SKILL_ASSIGNMENT_KEY } from "./skill-provenance.js";
 import { SKILL_TAG } from "./skill-write.js";
+import { SEED_SKILL_AGENT_ID } from "./skill-seed.js";
 import {
   SKILL_ROW_SELECT,
   receivesOrgSkills,
@@ -675,6 +676,18 @@ export class BootstrapMemories extends Resource {
           select: SKILL_ROW_SELECT,
         }));
         for await (const record of skillQuery as AsyncIterable<any>) skillRows.push(record);
+        // flair#2141 S2: also read the installer-seeded skill rows, so a
+        // name-only assignment resolves to the seed when the agent has no row
+        // of its own with the name (resources/skill-manifest.ts seedSkillRows).
+        const seedQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
+          conditions: [
+            { attribute: "agentId", comparator: "equals", value: SEED_SKILL_AGENT_ID },
+            { attribute: "tags", comparator: "equals", value: SKILL_TAG },
+            { attribute: "archived", comparator: "not_equal", value: true },
+          ],
+          select: SKILL_ROW_SELECT,
+        }));
+        for await (const record of seedQuery as AsyncIterable<any>) skillRows.push(record);
       }
       const manifest = resolveSkillManifest(
         skillAssignments,

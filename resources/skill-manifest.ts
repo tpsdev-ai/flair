@@ -32,6 +32,7 @@ import {
   type SkillAssignmentInput,
 } from "./skill-provenance.js";
 import { isSkillWrite } from "./skill-write.js";
+import { seedSkillRows as seedRowsOf } from "./skill-seed.js";
 
 export type SkillScope = "own" | "org";
 
@@ -141,12 +142,13 @@ export function resolvableSkillRows(
 }
 
 /**
- * flair#2141 S2 hook: the skill rows written by the reserved system writer
- * (the operator seed), the only candidates besides the agent's own rows. None
- * exist before S2, so this returns no rows.
+ * flair#2141 S2: the skill rows written by the reserved system writer (the
+ * installer seed), the only candidates besides the agent's own rows. A
+ * name-only assignment resolves to one of these when the agent has no row of
+ * its own with the name.
  */
-export function seedSkillRows(_rows: SkillRow[]): SkillRow[] {
-  return [];
+export function seedSkillRows(rows: SkillRow[]): SkillRow[] {
+  return seedRowsOf(rows);
 }
 
 /**

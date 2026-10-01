@@ -213,6 +213,45 @@ function seedFederationInstanceViaOpsApi(...args: any[]): any {
   return cli.seedFederationInstanceViaOpsApi(...args);
 }
 
+/**
+ * flair#2141 S2 — seed the org-wide `using-flair` skill on an instance over the
+ * operator REST surface. Idempotent; the endpoint refuses (naming the table and
+ * a remedy) when an existing row or assignment cannot be read, and never writes
+ * a duplicate. A refusal is reported, not swallowed.
+ */
+async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, adminPass: string): Promise<void> {
+  const url = `${baseUrl.replace(/\/$/, "")}/SkillSeed`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`,
+      },
+      body: "{}",
+    });
+  } catch (err) {
+    console.error(
+      `Warning: the using-flair skill seed request to ${url} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+  const text = await res.text().catch(() => "");
+  if (res.ok) {
+    let message = "seeded";
+    try {
+      message = (JSON.parse(text) as { message?: string }).message ?? message;
+    } catch {
+      /* keep the default */
+    }
+    console.log(`using-flair skill: ${message}`);
+    return;
+  }
+  console.error(`Warning: the using-flair skill seed was refused (${res.status}): ${text.slice(0, 300)}`);
+  console.error("  Resolve that and re-run 'flair init'.");
+}
+
 function readOccupiedListener(port: number): OccupiedHarperListener {
   return cli.readOccupiedListener(port);
 }
@@ -428,6 +467,10 @@ program
       } else {
         console.log("No --agent-id provided -- skipping agent registration");
       }
+
+      // flair#2141 S2 — seed the org-wide using-flair skill on the remote
+      // instance (operator-attributed). Idempotent; a refusal is reported.
+      await seedUsingFlairSkillViaRest(baseUrl, adminUser, flairAdminPass);
 
       // Reconcile the federation Instance identity row if --remote (hub role).
       // flair#1883: this used to INSERT a row with a fresh random id on every
@@ -1090,6 +1133,11 @@ program
     // from the still-persisted wildcard. Writing the resolved host on every init
     // means an explicit loopback also persists, so a widening can be reversed.
     persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost, httpBind.host);
+
+    // flair#2141 S2 — seed the org-wide using-flair skill (operator-attributed,
+    // idempotent). Runs whether or not an agent is registered here. A refusal is
+    // reported with the remedy, never swallowed.
+    await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);
 
     if (agentId) {
       // Generate or reuse keypair
