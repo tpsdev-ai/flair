@@ -53,6 +53,34 @@ function readPsLstart(pid: number): string | null {
   }
 }
 
+/**
+ * The pid's start time truncated to a whole second, in epoch ms (flair#2056).
+ *
+ * macOS: the second `ps -o lstart=` reports. The zone correction is the
+ * `applyLstartZoneOffset` offset rounded to a whole minute: that offset is the
+ * parser's zone error (whole minutes) minus this process's sub-second start
+ * fraction, and the rounding drops the fraction. Linux: the `/proc` start time
+ * truncated to the second.
+ */
+export function readProcessStartSecondMs(pid: number): number | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "darwin") {
+    const targetRaw = readPsLstart(pid);
+    if (targetRaw === null) return null;
+    const targetParsed = parsePsLstart(targetRaw);
+    if (targetParsed === null) return null;
+    const ownRaw = pid === process.pid ? targetRaw : readPsLstart(process.pid);
+    if (ownRaw === null) return null;
+    const ownParsed = parsePsLstart(ownRaw);
+    if (ownParsed === null) return null;
+    const ownTrueStartMs = Date.now() - process.uptime() * 1000;
+    const zoneErrorMs = Math.round((ownParsed - ownTrueStartMs) / 60_000) * 60_000;
+    return targetParsed - zoneErrorMs;
+  }
+  const ms = readProcessStartTimeMs(pid);
+  return ms === null ? null : Math.floor(ms / 1000) * 1000;
+}
+
 export function readProcessStartTimeMs(pid: number): number | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (process.platform === "linux") {

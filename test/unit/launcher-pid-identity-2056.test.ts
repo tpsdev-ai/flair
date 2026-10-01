@@ -1,15 +1,20 @@
 // launcher-pid-identity-2056.test.ts — flair#2056.
 //
-// The launcher and resolveInstanceServingPid must identify the PROCESS behind
-// hdb.pid, not just the pid. A live hdb.pid pid counts as the serving instance
-// only when its command line is a Harper process: argv[0]'s basename is `node`
-// or `bun`, and argv[1], the script it runs, is a Harper entry
+// The launcher and resolveInstanceServingPid check the command line of the
+// process hdb.pid names, not only that the pid is alive. The launcher refuses,
+// and resolveInstanceServingPid uses the hdb.pid pid as PID-file evidence, only
+// when that live process is Harper-shaped: argv[0]'s basename is `node` or
+// `bun`, and argv[1], the script it runs, is a Harper entry
 // (`…/node_modules/[@<scope>/]harper/dist/bin/harper.js`, or Harper's own
 // restart entry `dist/bin/harper.js`). A Harper path in any other position does
 // not count. A flair#1454 sidecar (flair-daemon.json) is not required — a
-// pre-sidecar instance, or the instance launchd starts, has none — but when one
-// names a different pid, or the same pid with a start time more than 2 s off,
-// the identity evidence disagrees and the pid is not treated as the instance.
+// pre-sidecar instance, or the instance launchd starts, has none — but it
+// disagrees when it names a different pid, or a startTimeMs more than 2000 ms
+// from the process's start second (ps reports whole seconds), and then the
+// launcher does not refuse and the pid is not used as PID-file evidence. When
+// the pid is not used, resolveInstanceServingPid returns the first process
+// listening on the port, if any. The Harper-shaped processes here are timer
+// stubs: they serve nothing.
 //
 // Hermetic: the stub Harper the launcher execs only prints a marker. Each
 // launcher run is a spawnSync with a timeout, and each case has its own
@@ -21,9 +26,9 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { createServer } from "node:net";
-import { readProcessStartTimeMs } from "../../src/lib/process-start-time.js";
-import { isHarperProcessCommandLine } from "../../src/lib/daemon-liveness.js";
+import { connect, createServer } from "node:net";
+import { readProcessStartSecondMs, readProcessStartTimeMs } from "../../src/lib/process-start-time.js";
+import { isHarperProcessCommandLine, sidecarStartAgrees } from "../../src/lib/daemon-liveness.js";
 import { resolveInstanceServingPid } from "../../src/cli.ts";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
@@ -70,9 +75,9 @@ function startSleep(): number {
 }
 
 /**
- * A live process launched the way flair launches Harper:
- * `<runtime> <root>/node_modules/harper/dist/bin/harper.js run .` (`runtime`
- * is `node` unless given, e.g. this test's own bun).
+ * A Harper-shaped stub: a timer script at `<root>/node_modules/harper/dist/bin/harper.js`,
+ * launched with the argv flair uses for Harper (`<runtime> <script> run .`;
+ * `runtime` is `node` unless given, e.g. this test's own bun). It serves nothing.
  */
 function startHarperEntry(root: string, runtime = "node"): number {
   const dir = join(root, "node_modules", "harper", "dist", "bin");
@@ -97,6 +102,47 @@ function startNodeEvalWithHarperArg(): number {
   return startBackground(["node", "-e", "setTimeout(() => {}, 120_000)", "/tmp/harper.js"]);
 }
 
+/**
+ * A live `node -e` listening on 127.0.0.1:`port`, with a harper.js path as an
+ * argument it does not run: not Harper-shaped, but the port's listener.
+ */
+async function startNodeEvalListening(port: number): Promise<number> {
+  const code = `require("node:net").createServer().listen(${port}, "127.0.0.1"); setTimeout(() => process.exit(0), 120_000);`;
+  const pid = startBackground(["node", "-e", code, "/tmp/harper.js"]);
+  for (let i = 0; i < 100; i++) {
+    const up = await new Promise<boolean>((resolve) => {
+      const sock = connect(port, "127.0.0.1");
+      sock.once("connect", () => { sock.destroy(); resolve(true); });
+      sock.once("error", () => resolve(false));
+    });
+    if (up) return pid;
+    await Bun.sleep(20);
+  }
+  throw new Error(`pid ${pid} did not listen on ${port}`);
+}
+
+/**
+ * The start second `ps -o lstart=` reports for `pid`, in epoch seconds,
+ * converted the way the launcher converts it (`date -j -f` on macOS,
+ * `date -d` elsewhere).
+ */
+function psLstartSecond(pid: number): number {
+  const conv = process.platform === "darwin"
+    ? 'date -j -f "%a %b %e %T %Y" "$(ps -o lstart= -p "$1")" +%s'
+    : 'date -d "$(ps -o lstart= -p "$1")" +%s';
+  const r = spawnSync("sh", ["-c", conv, "sh", String(pid)], { encoding: "utf-8", timeout: 5_000 });
+  const sec = Number((r.stdout ?? "").trim());
+  if (!Number.isInteger(sec) || sec <= 0) throw new Error(`could not read the start second of pid ${pid}: ${r.stderr}`);
+  return sec;
+}
+
+/** The pid's start second as the TS check reads it (readProcessStartSecondMs). */
+function tsStartSecondMs(pid: number): number {
+  const ms = readProcessStartSecondMs(pid);
+  if (ms === null) throw new Error(`could not read the start second of pid ${pid}`);
+  return ms;
+}
+
 /** The pid's command line as `ps -o command=` prints it (what the launcher reads). */
 function psCommand(pid: number): string {
   return spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf-8", timeout: 5_000 }).stdout.trim();
@@ -119,6 +165,11 @@ async function waitStarted(pid: number): Promise<number> {
     await Bun.sleep(20);
   }
   throw new Error(`pid ${pid} did not start with a readable start time`);
+}
+
+/** The refusal line the launcher prints for `pid`. */
+function refusal(pid: number): string {
+  return `hdb.pid names pid ${pid}, a live node/bun process running a Harper entry script; not starting a second instance`;
 }
 
 function writeSidecar(root: string, pid: number, startTimeMs: number): void {
@@ -198,7 +249,27 @@ describe("isHarperProcessCommandLine", () => {
   });
 });
 
-describe("flair#2056 — the launchd launcher identifies the process behind hdb.pid", () => {
+describe("sidecarStartAgrees — within 2000 ms of the start second, in milliseconds", () => {
+  test("a start second of 12 s: a sidecar at 14.5 s disagrees, at 13.9 s agrees", () => {
+    expect(sidecarStartAgrees(12_000, 14_500)).toBe(false);
+    expect(sidecarStartAgrees(12_000, 13_900)).toBe(true);
+  });
+
+  test("the 2000 ms bound on both sides", () => {
+    expect(sidecarStartAgrees(12_000, 14_000)).toBe(true);
+    expect(sidecarStartAgrees(12_000, 14_001)).toBe(false);
+    expect(sidecarStartAgrees(12_000, 10_000)).toBe(true);
+    expect(sidecarStartAgrees(12_000, 9_999)).toBe(false);
+  });
+
+  test.skipIf(process.platform !== "darwin")("macOS: readProcessStartSecondMs is the second `ps -o lstart=` reports", async () => {
+    const pid = startSleep();
+    await waitStarted(pid);
+    expect(tsStartSecondMs(pid)).toBe(psLstartSecond(pid) * 1000);
+  }, 30_000);
+});
+
+describe("flair#2056 — the launchd launcher refuses only when hdb.pid names a live Harper-shaped process", () => {
   test("hdb.pid names a live UNRELATED process -> the launcher execs Harper", async () => {
     const root = mkRoot();
     const pid = startSleep();
@@ -207,10 +278,10 @@ describe("flair#2056 — the launchd launcher identifies the process behind hdb.
     const r = runLauncher(root, "node", stubHarper(root));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain(MARKER);
-    expect(r.stderr).not.toContain("already served");
+    expect(r.stderr).not.toContain("not starting a second instance");
   }, 30_000);
 
-  test("hdb.pid names a live `sh` with a node_modules/harper.js ARGUMENT -> not Harper; the launcher execs Harper", async () => {
+  test("hdb.pid names a live `sh` with a node_modules/harper.js ARGUMENT -> not Harper-shaped; the launcher execs Harper", async () => {
     const root = mkRoot();
     const pid = startShellWithHarperArg();
     await waitStarted(pid);
@@ -219,10 +290,10 @@ describe("flair#2056 — the launchd launcher identifies the process behind hdb.
     const r = runLauncher(root, "node", stubHarper(root));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain(MARKER);
-    expect(r.stderr).not.toContain("already served");
+    expect(r.stderr).not.toContain("not starting a second instance");
   }, 30_000);
 
-  test("hdb.pid names a live `node -e` with a harper.js ARGUMENT -> not Harper; the launcher execs Harper", async () => {
+  test("hdb.pid names a live `node -e` with a harper.js ARGUMENT -> not Harper-shaped; the launcher execs Harper", async () => {
     const root = mkRoot();
     const pid = startNodeEvalWithHarperArg();
     await waitStarted(pid);
@@ -231,45 +302,45 @@ describe("flair#2056 — the launchd launcher identifies the process behind hdb.
     const r = runLauncher(root, "node", stubHarper(root));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain(MARKER);
-    expect(r.stderr).not.toContain("already served");
+    expect(r.stderr).not.toContain("not starting a second instance");
   }, 30_000);
 
-  test("CONTROL: node running a Harper entry, with a matching sidecar, is refused", async () => {
+  test("CONTROL: a Harper-shaped stub (node running a Harper entry script) with a matching sidecar is refused", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
-    const start = await waitStarted(pid);
-    writeSidecar(root, pid, start);
+    await waitStarted(pid);
+    writeSidecar(root, pid, psLstartSecond(pid) * 1000);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     const r = runLauncher(root, "node", stubHarper(root));
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain(MARKER);
-    expect(r.stderr).toContain(`already served by pid ${pid}`);
+    expect(r.stderr).toContain(refusal(pid));
   }, 30_000);
 
-  test("a matching sidecar with a non-Harper command line (`sleep`) -> the launcher execs Harper", async () => {
+  test("a matching sidecar with a command line that is not Harper-shaped (`sleep`) -> the launcher execs Harper", async () => {
     const root = mkRoot();
     const pid = startSleep();
-    const start = await waitStarted(pid);
-    writeSidecar(root, pid, start); // matches pid + start time, but it is `sleep`
+    await waitStarted(pid);
+    writeSidecar(root, pid, psLstartSecond(pid) * 1000); // matches pid + start second, but it is `sleep`
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     const r = runLauncher(root, "node", stubHarper(root));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain(MARKER);
   }, 30_000);
 
-  test("node running a Harper entry with NO sidecar is refused (a pre-sidecar or launchd-started instance)", async () => {
+  test("a Harper-shaped stub with NO sidecar is refused (as for a pre-sidecar or launchd-started instance)", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
     await waitStarted(pid);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
-    // No flair-daemon.json: the command line alone identifies the serving process.
+    // No flair-daemon.json: the command line alone decides.
     const r = runLauncher(root, "node", stubHarper(root));
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain(MARKER);
-    expect(r.stderr).toContain(`already served by pid ${pid}`);
+    expect(r.stderr).toContain(refusal(pid));
   }, 30_000);
 
-  test("bun running a Harper entry with NO sidecar is refused (the flair CLI under bun spawns Harper with bun)", async () => {
+  test("a Harper-shaped stub run by bun, with NO sidecar, is refused (the flair CLI under bun spawns Harper with bun)", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root, process.execPath);
     await waitStarted(pid);
@@ -277,7 +348,7 @@ describe("flair#2056 — the launchd launcher identifies the process behind hdb.
     const r = runLauncher(root, "node", stubHarper(root));
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain(MARKER);
-    expect(r.stderr).toContain(`already served by pid ${pid}`);
+    expect(r.stderr).toContain(refusal(pid));
   }, 30_000);
 
   test("a sidecar naming a DIFFERENT pid: the identity evidence disagrees -> the launcher execs Harper", async () => {
@@ -294,28 +365,65 @@ describe("flair#2056 — the launchd launcher identifies the process behind hdb.
   test("a sidecar with the same pid but a start time 60 s off: the identity evidence disagrees -> the launcher execs Harper", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
-    const start = await waitStarted(pid);
-    writeSidecar(root, pid, start + 60_000);
+    await waitStarted(pid);
+    writeSidecar(root, pid, psLstartSecond(pid) * 1000 + 60_000);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     const r = runLauncher(root, "node", stubHarper(root));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain(MARKER);
   }, 30_000);
+
+  test("start second 12.000 s vs sidecar 14.500 s (2500 ms): the identity evidence disagrees -> the launcher execs Harper", async () => {
+    const root = mkRoot();
+    const pid = startHarperEntry(root);
+    await waitStarted(pid);
+    writeSidecar(root, pid, psLstartSecond(pid) * 1000 + 2_500);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarper(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(MARKER);
+    expect(r.stderr).not.toContain("not starting a second instance");
+  }, 30_000);
+
+  test("start second 12.000 s vs sidecar 13.900 s (1900 ms): within 2000 ms -> refused", async () => {
+    const root = mkRoot();
+    const pid = startHarperEntry(root);
+    await waitStarted(pid);
+    writeSidecar(root, pid, psLstartSecond(pid) * 1000 + 1_900);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarper(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain(MARKER);
+    expect(r.stderr).toContain(refusal(pid));
+  }, 30_000);
+
+  test("a sidecar startTimeMs written with leading zeros is read as decimal, not octal", async () => {
+    const root = mkRoot();
+    const pid = startHarperEntry(root);
+    await waitStarted(pid);
+    const startTimeMs = psLstartSecond(pid) * 1000 + 500;
+    writeFileSync(join(root, "flair-daemon.json"), `{"pid": ${pid}, "startTimeMs": 00${startTimeMs}, "port": 9926}\n`);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarper(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain(MARKER);
+    expect(r.stderr).toContain(refusal(pid));
+  }, 30_000);
 });
 
-describe("flair#2056 — resolveInstanceServingPid identifies the process behind hdb.pid", () => {
+describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only when it is Harper-shaped", () => {
   // freePort(): nothing listens there, so a pid that is not used yields null.
-  test("a live unrelated pid in hdb.pid is not the serving process", async () => {
+  test("a live unrelated pid in hdb.pid is not returned", async () => {
     const root = mkRoot();
     const pid = startSleep();
     await waitStarted(pid);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
-    const serving = resolveInstanceServingPid(root, await freePort());
-    expect(serving).not.toBe(pid);
-    expect(serving).toBeNull();
+    const picked = resolveInstanceServingPid(root, await freePort());
+    expect(picked).not.toBe(pid);
+    expect(picked).toBeNull();
   }, 30_000);
 
-  test("a live `sh` or `node -e` with a Harper path ARGUMENT in hdb.pid is not the serving process", async () => {
+  test("a live `sh` or `node -e` with a Harper path ARGUMENT in hdb.pid is not returned", async () => {
     for (const start of [startShellWithHarperArg, startNodeEvalWithHarperArg]) {
       const root = mkRoot();
       const pid = start();
@@ -325,26 +433,24 @@ describe("flair#2056 — resolveInstanceServingPid identifies the process behind
     }
   }, 30_000);
 
-  test("CONTROL: node running a Harper entry, with a matching sidecar, is returned", async () => {
+  test("CONTROL: a Harper-shaped stub with a matching sidecar is returned", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
-    const start = await waitStarted(pid);
-    writeSidecar(root, pid, start);
+    await waitStarted(pid);
+    writeSidecar(root, pid, tsStartSecondMs(pid));
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
-    const serving = resolveInstanceServingPid(root, await freePort());
-    expect(serving).toBe(pid);
+    expect(resolveInstanceServingPid(root, await freePort())).toBe(pid);
   }, 30_000);
 
-  test("node running a Harper entry with NO sidecar is the serving process", async () => {
+  test("a Harper-shaped stub with NO sidecar is returned", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
     await waitStarted(pid);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
-    const serving = resolveInstanceServingPid(root, await freePort());
-    expect(serving).toBe(pid);
+    expect(resolveInstanceServingPid(root, await freePort())).toBe(pid);
   }, 30_000);
 
-  test("a sidecar naming a DIFFERENT pid: the identity evidence disagrees -> not the serving process", async () => {
+  test("a sidecar naming a DIFFERENT pid: the identity evidence disagrees -> not returned", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
     await waitStarted(pid);
@@ -353,12 +459,39 @@ describe("flair#2056 — resolveInstanceServingPid identifies the process behind
     expect(resolveInstanceServingPid(root, await freePort())).toBeNull();
   }, 30_000);
 
-  test("a sidecar with the same pid but a start time 60 s off: the identity evidence disagrees -> not the serving process", async () => {
+  test("a sidecar with the same pid but a start time 60 s off: the identity evidence disagrees -> not returned", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
-    const start = await waitStarted(pid);
-    writeSidecar(root, pid, start + 60_000);
+    await waitStarted(pid);
+    writeSidecar(root, pid, tsStartSecondMs(pid) + 60_000);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     expect(resolveInstanceServingPid(root, await freePort())).toBeNull();
+  }, 30_000);
+
+  test("start second 12.000 s vs sidecar 14.500 s (2500 ms): the identity evidence disagrees -> not returned", async () => {
+    const root = mkRoot();
+    const pid = startHarperEntry(root);
+    await waitStarted(pid);
+    writeSidecar(root, pid, tsStartSecondMs(pid) + 2_500);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    expect(resolveInstanceServingPid(root, await freePort())).toBeNull();
+  }, 30_000);
+
+  test("start second 12.000 s vs sidecar 13.900 s (1900 ms): within 2000 ms -> returned", async () => {
+    const root = mkRoot();
+    const pid = startHarperEntry(root);
+    await waitStarted(pid);
+    writeSidecar(root, pid, tsStartSecondMs(pid) + 1_900);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    expect(resolveInstanceServingPid(root, await freePort())).toBe(pid);
+  }, 30_000);
+
+  test("a pid that is not Harper-shaped is still returned when it is the port's listener (the port fallback)", async () => {
+    const root = mkRoot();
+    const port = await freePort();
+    const pid = await startNodeEvalListening(port);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    expect(isHarperProcessCommandLine(psCommand(pid))).toBe(false);
+    expect(resolveInstanceServingPid(root, port)).toBe(pid);
   }, 30_000);
 });

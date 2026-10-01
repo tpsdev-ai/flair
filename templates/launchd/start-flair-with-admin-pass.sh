@@ -25,9 +25,10 @@ ADMIN_PASS_FILE="$1"
 NODE="$2"
 HARPER_BIN="$3"
 
-# flair#2056: is "$1", a `ps -o command=` line (argv joined by spaces), a Harper
-# process? argv[0]'s basename is `node` or `bun`, and argv[1], the script it
-# runs, is `…/node_modules/harper/dist/bin/harper.js`,
+# flair#2056: is "$1", a `ps -o command=` line (argv joined by spaces),
+# Harper-shaped? It shows what the process was started to run, not that it
+# serves anything. argv[0]'s basename is `node` or `bun`, and argv[1], the
+# script it runs, is `…/node_modules/harper/dist/bin/harper.js`,
 # `…/node_modules/@<scope>/harper/dist/bin/harper.js` or `dist/bin/harper.js`
 # (what Harper's own restart forks). An option before the script, or a Harper
 # path in any other position, does not match; nor does a path containing a
@@ -57,19 +58,21 @@ is_harper_command() {
   return 1
 }
 
-# flair#2040 / flair#2056: never start a SECOND instance on a data directory
-# that a live Harper process already serves. `kill -0` alone proves only that
-# SOME process has the pid: if a direct process dies and leaves hdb.pid behind,
-# another process can later get that pid, and a refusal on `kill -0` alone
-# would make every KeepAlive retry exit 0 without ever starting Flair.
+# flair#2040 / flair#2056: do not start a second Harper on a data directory
+# whose hdb.pid names a live Harper-shaped process. `kill -0` alone proves only
+# that SOME process has the pid: if a direct process dies and leaves hdb.pid
+# behind, another process can later get that pid, and a refusal on `kill -0`
+# alone would make every KeepAlive retry exit 0 without ever starting Flair.
 #
-# So the live pid is refused only when `ps -o command=` shows a Harper process
-# (is_harper_command above). A flair#1454 sidecar (`flair-daemon.json`) is not
-# required: an instance started by a pre-sidecar flair, or the instance this
-# launcher execs (Harper writes no sidecar), has none. A sidecar that names a
-# different pid, or the same pid with a start time more than 2 s from
-# `ps -o lstart=`, means the identity evidence disagrees: the pid is not
-# refused, and Harper is exec'd (its own hdb.pid check still applies).
+# So the launcher refuses only when `ps -o command=` for the live pid is
+# Harper-shaped (is_harper_command above). A flair#1454 sidecar
+# (`flair-daemon.json`) is not required: an instance started by a pre-sidecar
+# flair, or the instance this launcher execs (Harper writes no sidecar), has
+# none. A sidecar disagrees when it names a different pid, or a startTimeMs more
+# than 2000 ms from the start second `ps -o lstart=` reports (ps reports whole
+# seconds, so a process started at 12.9 s is compared as 12 s). Then the
+# launcher does not refuse, and Harper is exec'd (its own hdb.pid check still
+# applies).
 #
 # Exit 0 on the refusal: a deliberate no-op, not a crash. KeepAlive retries
 # after its throttle interval, and the next attempt starts Harper once the
@@ -82,6 +85,10 @@ if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
     if [ -f "$SIDE" ]; then
       SIDE_PID="$(grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$SIDE" 2>/dev/null | grep -o '[0-9][0-9]*$' || true)"
       SIDE_START="$(grep -o '"startTimeMs"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$SIDE" 2>/dev/null | grep -o '[0-9][0-9]*$' || true)"
+      # Shell arithmetic reads a leading 0 as octal: drop leading zeros, and
+      # leave the sidecar unused when nothing is left or more than 15 digits are.
+      SIDE_START="${SIDE_START#"${SIDE_START%%[!0]*}"}"
+      case "$SIDE_START" in ????????????????*) SIDE_START="" ;; esac
       if [ -n "$SIDE_PID" ] && [ -n "$SIDE_START" ]; then
         if [ "$SIDE_PID" != "$LIVE_PID" ]; then
           DISAGREE=1
@@ -93,16 +100,17 @@ if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
             *)      if [ -n "$LSTART" ]; then ACT_S="$(date -d "$LSTART" +%s 2>/dev/null || true)"; fi ;;
           esac
           if [ -n "$ACT_S" ]; then
-            START_S=$((SIDE_START / 1000))
-            DIFF=$((ACT_S - START_S))
-            if [ "$DIFF" -lt 0 ]; then DIFF=$((0 - DIFF)); fi
-            if [ "$DIFF" -gt 2 ]; then DISAGREE=1; fi
+            # Milliseconds against the start second in milliseconds: a start
+            # second of 12 s against a sidecar of 14.5 s is 2500 ms.
+            DIFF_MS=$((SIDE_START - ACT_S * 1000))
+            if [ "$DIFF_MS" -lt 0 ]; then DIFF_MS=$((0 - DIFF_MS)); fi
+            if [ "$DIFF_MS" -gt 2000 ]; then DISAGREE=1; fi
           fi
         fi
       fi
     fi
     if [ "$DISAGREE" = "0" ] && is_harper_command "$(ps -o command= -p "$LIVE_PID" 2>/dev/null || true)"; then
-      echo "start-flair-with-admin-pass: $ROOTPATH is already served by pid $LIVE_PID (not started by this launchd job); not starting a second instance. launchd retries after its throttle interval and starts Flair once that process has exited." >&2
+      echo "start-flair-with-admin-pass: $ROOTPATH/hdb.pid names pid $LIVE_PID, a live node/bun process running a Harper entry script; not starting a second instance. launchd retries after its throttle interval and starts Flair once that process has exited." >&2
       exit 0
     fi
   fi

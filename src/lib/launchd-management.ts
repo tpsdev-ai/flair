@@ -445,16 +445,17 @@ export function pickInstancePid(input: {
   isAlive: (pid: number) => boolean;
   listeningPids: number[];
   /**
-   * flair#2056: the caller's identity check for the pidfile pid
-   * (resolveInstanceServingPid: a Harper command line and no disagreeing
-   * flair#1454 sidecar). When given, a live pidfile pid is used only if it
-   * answers true; otherwise the first port listener answers, if there is one.
-   * Omitted by callers that have not gathered identity evidence.
+   * flair#2056: the caller's check on the pidfile pid
+   * (resolveInstanceServingPid: a Harper-shaped command line and no
+   * disagreeing flair#1454 sidecar). When given, a live pidfile pid is
+   * returned only if it answers true; otherwise the first port listener is
+   * returned, if there is one, and that can be the same pid. Omitted by
+   * callers that have not gathered this evidence.
    */
-  isIdentified?: (pid: number) => boolean;
+  isPidFileEvidence?: (pid: number) => boolean;
 }): number | null {
-  const { pidFilePid, isAlive, listeningPids, isIdentified } = input;
-  if (pidFilePid !== null && isAlive(pidFilePid) && (isIdentified === undefined || isIdentified(pidFilePid))) {
+  const { pidFilePid, isAlive, listeningPids, isPidFileEvidence } = input;
+  if (pidFilePid !== null && isAlive(pidFilePid) && (isPidFileEvidence === undefined || isPidFileEvidence(pidFilePid))) {
     return pidFilePid;
   }
   return listeningPids.length > 0 ? listeningPids[0] : null;

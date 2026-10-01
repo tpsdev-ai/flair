@@ -273,13 +273,25 @@ export function isStartTimeMatch(actualMs: number, recordedMs: number, tolerance
   return Math.abs(actualMs - recordedMs) <= toleranceMs;
 }
 
+/**
+ * Does a flair#1454 sidecar's `startTimeMs` agree with a process's start
+ * second (flair#2056)? `startSecondMs` is the start time truncated to a whole
+ * second, in epoch ms (the second `ps -o lstart=` reports). They agree when
+ * they are within 2000 ms of each other, compared in milliseconds: a start
+ * second of 12 s against a sidecar of 14.5 s is 2500 ms and does not agree.
+ */
+export function sidecarStartAgrees(startSecondMs: number, sidecarStartMs: number): boolean {
+  return Math.abs(sidecarStartMs - startSecondMs) <= 2000;
+}
+
 /** Harper's entry script under an install tree: `…/node_modules/[@<scope>/]harper/dist/bin/harper.js`. */
 const HARPER_ENTRY_PATH = /(^|\/)node_modules\/(@[^/]+\/)?harper\/dist\/bin\/harper\.js$/;
 /** The relative entry Harper's own restart forks, from its package directory (LAUNCH_SERVICE_SCRIPTS.MAIN). */
 const HARPER_RESTART_ENTRY = "dist/bin/harper.js";
 
 /**
- * Is this the command line of a Harper process (flair#2056)?
+ * Is this a Harper-shaped command line (flair#2056)? It shows what the process
+ * was started to run, not that it serves anything.
  *
  * argv[0]'s basename is `node` or `bun`, and argv[1], the script it runs, is a
  * Harper entry: `…/node_modules/harper/dist/bin/harper.js` or

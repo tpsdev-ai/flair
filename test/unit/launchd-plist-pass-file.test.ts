@@ -333,7 +333,7 @@ describe("launcher script — never a second instance on a served data directory
     const f = fixture();
     // A live pid this test owns: the test runner itself, whose command line is
     // not node or bun running a Harper entry script, so Harper is exec'd. See
-    // test/unit/launcher-pid-identity-2056.test.ts for the refusal of a Harper process.
+    // test/unit/launcher-pid-identity-2056.test.ts for the refusal of a Harper-shaped process.
     writeFileSync(join(f.rootPath, "hdb.pid"), String(process.pid));
     const r = launch(f);
     expect(r.status).toBe(0);
