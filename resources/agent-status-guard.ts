@@ -25,6 +25,17 @@
 /** The lifecycle field this module guards. */
 export const AGENT_STATUS_FIELD = "status";
 
+/**
+ * The feature's lifecycle rule applied to a value: a principal's effective
+ * `status` is its stored value, or "active" when it is missing or undefined
+ * (resources/agent-auth.ts's isPrincipalDeactivated applies the same rule to a
+ * principal). Federation's status comparison uses it on both sides
+ * (resources/federation-classify.ts).
+ */
+export function effectiveAgentStatus(status: unknown): unknown {
+  return status === undefined ? "active" : status;
+}
+
 /** The refusal text: names the field, the internal exception, and Presence. */
 export const AGENT_STATUS_ADMIN_ONLY_ERROR =
   "forbidden: status is administrator-only (a trusted internal call is excepted); report liveness through Presence";

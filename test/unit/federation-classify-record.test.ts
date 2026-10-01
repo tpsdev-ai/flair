@@ -157,10 +157,22 @@ describe("inboundChangesExistingPrincipalStatus (flair#2108)", () => {
     expect(inboundChangesExistingPrincipalStatus(older, { id: "a1", status: "active", updatedAt: "2100-01-01T00:00:00.000Z" })).toBe(true);
   });
 
-  test("is false when the status is unchanged, absent, or there is no local row", () => {
+  test("is false when the status is unchanged or there is no local row", () => {
     expect(inboundChangesExistingPrincipalStatus(agentRecord("active"), { id: "a1", status: "active" })).toBe(false);
-    expect(inboundChangesExistingPrincipalStatus({ table: "Agent", id: "a1", data: { id: "a1" }, updatedAt: "x", originatorInstanceId: "p" }, { id: "a1", status: "active" })).toBe(false);
     expect(inboundChangesExistingPrincipalStatus(agentRecord("deactivated"), null)).toBe(false);
+  });
+
+  test("is false when an absent status meets `active`, on either side", () => {
+    // A missing or undefined `status` is active (resources/agent-status-guard.ts).
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("active"), { id: "a1" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus(agentRecord(undefined), { id: "a1" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus(agentRecord(undefined), { id: "a1", status: "active" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus({ table: "Agent", id: "a1", data: { id: "a1" }, updatedAt: "x", originatorInstanceId: "p" }, { id: "a1", status: "active" })).toBe(false);
+  });
+
+  test("is true when an absent status meets a value other than `active`", () => {
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("inactive"), { id: "a1" })).toBe(true);
+    expect(inboundChangesExistingPrincipalStatus(agentRecord(undefined), { id: "a1", status: "inactive" })).toBe(true);
   });
 
   test("is false for any non-Agent table", () => {

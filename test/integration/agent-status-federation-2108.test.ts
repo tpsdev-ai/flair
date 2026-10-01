@@ -15,6 +15,8 @@ import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifec
 const sfx = Date.now().toString(36);
 const HUB = `afs-hub-${sfx}`;
 const TARGET = `afs-target-${sfx}`;
+// A principal whose local row has no `status` — the feature reads that as active.
+const NO_STATUS = `afs-nostatus-${sfx}`;
 const now = () => new Date().toISOString();
 
 let harper: HarperInstance;
@@ -94,5 +96,17 @@ describe("flair#2108 — an inbound federated record cannot change an existing l
     const rec = await rawAgent(TARGET);
     expect(rec?.runtime, "an ordinary field did not sync").toBe("remote2");
     expect(rec?.status).toBe("active");
+  }, 30_000);
+
+  test("a peer record restating `active` against a local row with no status is not a change", async () => {
+    const t = new Date(Date.now() - 60_000).toISOString();
+    await ops({
+      operation: "insert", database: "flair", table: "Agent",
+      records: [{ id: NO_STATUS, name: NO_STATUS, role: "agent", admin: false, runtime: "local", publicKey: "pending", createdAt: t, updatedAt: t }],
+    });
+    const out = await sync({ id: NO_STATUS, data: { id: NO_STATUS, status: "active", runtime: "remote" } });
+    expect(out.merged, JSON.stringify(out)).toBe(1);
+    const rec = await rawAgent(NO_STATUS);
+    expect(rec?.runtime, "a record restating the local row's effective status did not sync").toBe("remote");
   }, 30_000);
 });

@@ -5,6 +5,7 @@
  * spinning up Harper's database module. The same SkipReason names are used
  * in SyncLog.skippedReasons so operators can grep for them.
  */
+import { effectiveAgentStatus } from "./agent-status-guard.js";
 
 export interface SyncRecord {
   table: string;
@@ -262,13 +263,14 @@ export function classifyRecord(
 /**
  * flair#2108: does this inbound Agent record carry a `status` that differs from
  * an existing local principal's stored value? True only when the record is for
- * the Agent table, a local row exists, and the record's data carries `status`
- * with a value different from the row's. `updatedAt` is not compared, so a
- * record older than the stored row, which would lose the last-write-wins merge,
- * is also true. The federation path carries no verified administrator authority
- * for the principal (the batch is signed, and a record signature may also be
- * present; neither is an admin claim), so a true answer skips the whole record
- * before the raw put.
+ * the Agent table, a local row exists, and the two differ under the feature's
+ * lifecycle rule, which `effectiveAgentStatus` (resources/agent-status-guard.ts)
+ * applies to both sides: a missing or undefined `status` is "active".
+ * `updatedAt` is not compared, so a record older than the stored row, which
+ * would lose the last-write-wins merge, is also true. The federation path
+ * carries no verified administrator authority for the principal (the batch is
+ * signed, and a record signature may also be present; neither is an admin
+ * claim), so a true answer skips the whole record before the raw put.
  */
 export function inboundChangesExistingPrincipalStatus(
   record: SyncRecord,
@@ -277,6 +279,5 @@ export function inboundChangesExistingPrincipalStatus(
   if (record.table !== "Agent" || local == null) return false;
   const data = record.data;
   if (!data || typeof data !== "object") return false;
-  if (!Object.hasOwn(data, "status")) return false;
-  return data.status !== local.status;
+  return effectiveAgentStatus(data.status) !== effectiveAgentStatus(local.status);
 }
