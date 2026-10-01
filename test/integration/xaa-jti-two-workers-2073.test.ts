@@ -1,10 +1,11 @@
 // xaa-jti-two-workers-2073.test.ts — REAL Harper with TWO worker threads
 // (flair#2073, part of flair#2052's S1b).
 //
-// An ID-JAG's `jti` is recorded once per Harper instance (resources/XAA.ts →
-// claimIdJagJti in resources/replay-store.ts), so an assertion accepted on one
-// worker is refused on every other, and simultaneous presentations of one
-// assertion yield exactly one acceptance, on one worker or across both.
+// The probe's assertions carry UUID `jti` values. Each is recorded once per
+// Harper instance (resources/XAA.ts → claimIdJagJti in
+// resources/replay-store.ts), so an assertion accepted on one worker is refused
+// on the other, and simultaneous presentations of one assertion yield exactly
+// one acceptance, on one worker or across both.
 //
 // HTTP cannot aim a request at a chosen worker (see
 // replay-store-two-workers-2061.test.ts), so a private composed copy of the
@@ -134,9 +135,10 @@ describe(`XAA ID-JAG jti records are instance-shared across ${WORKERS} Harper wo
     expect(r.controlBefore.present).toBe(true);
     expect(r.controlAfterScans.present).toBe(false); // assertion: the scan ran and evicted an expired row
     expect(r.entryAfterScans.present).toBe(true); // assertion: the record was kept
-    // jose accepts the assertion until just before exp + CLOCK_SKEW_MS; Harper
-    // removes the row no earlier than its expiresAt.
-    expect(r.entryAfterScans.expiresAt).toBeGreaterThan(r.exp * 1000 + CLOCK_SKEW_MS); // assertion: the record outlives the validity
+    // jose accepts the assertion only before exp + CLOCK_SKEW_MS + 1 s (it
+    // compares exp with the current whole second); Harper removes the row no
+    // earlier than its expiresAt.
+    expect(r.entryAfterScans.expiresAt).toBeGreaterThan(r.exp * 1000 + CLOCK_SKEW_MS + 1000); // assertion: the record outlives the validity
     expect(r.replayOnLastWorker).toEqual(REPLAY);
   });
 });

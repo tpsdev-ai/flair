@@ -8,12 +8,14 @@
  * assertions, a real JWKS served on an ephemeral loopback port, and an
  * in-memory table with the store's contract (test/helpers/fake-replay-store.ts),
  * and pin:
- *   - an assertion is accepted once, and N simultaneous presentations give one
- *     acceptance and one token pair;
+ *   - an assertion with a UUID `jti` is accepted once, and N simultaneous
+ *     presentations of one give one acceptance and one token pair;
+ *   - a `jti` claim that is present but not a nonempty string is refused with
+ *     400 before the store is touched;
  *   - the lock key is in its own namespace and always released, and a lock miss
  *     refuses without recording;
- *   - a store error, or a missing store primitive, refuses with 503 and issues
- *     nothing;
+ *   - with a UUID `jti`, a store error or a missing store primitive refuses
+ *     with 503 and issues nothing;
  *   - the jti is recorded only after the assertion validates;
  *   - the row's retention outlives the longest an accepted assertion stays
  *     valid, and an assertion with a jti must carry an `exp` inside that bound.
@@ -177,7 +179,7 @@ const UNAVAILABLE = { status: 503, body: { error: "temporarily_unavailable", err
 
 // ─── one acceptance per jti ────────────────────────────────────────────────
 
-describe("an ID-JAG jti is accepted once", () => {
+describe("a UUID jti is accepted once", () => {
   it("the first presentation is accepted and records the jti; the next is refused", async () => {
     const jti = randomUUID();
     const token = await assertion({ jti });
@@ -237,7 +239,7 @@ describe("an ID-JAG jti is accepted once", () => {
 
 // ─── fail closed ───────────────────────────────────────────────────────────
 
-describe("a store error refuses the grant with 503 and issues nothing", () => {
+describe("with a UUID jti, a store error refuses the grant with 503 and issues nothing", () => {
   for (const which of ["put", "getEntry", "tryLock"] as const) {
     it(`a ${which} failure refuses; nothing is recorded or issued; the assertion is accepted once the store recovers`, async () => {
       const token = await assertion({ jti: randomUUID() });
@@ -308,9 +310,10 @@ describe("the record outlives the assertion's validity", () => {
   });
 
   it("the retention is longer than the longest an accepted assertion stays acceptable after its jti is recorded", () => {
-    // jose accepts until just before exp + CLOCK_SKEW_MS; an assertion with a jti
-    // is accepted only while exp ≤ now + ID_JAG_MAX_VALIDITY_MS + CLOCK_SKEW_MS.
-    expect(xaa.ID_JAG_LONGEST_ACCEPTANCE_MS).toBe(xaa.ID_JAG_MAX_VALIDITY_MS + 2 * xaa.CLOCK_SKEW_MS);
+    // jose compares exp with the current whole second, so it accepts only before
+    // exp + CLOCK_SKEW_MS + 1 s; an assertion with a jti is accepted only while
+    // exp ≤ now + ID_JAG_MAX_VALIDITY_MS + CLOCK_SKEW_MS.
+    expect(xaa.ID_JAG_LONGEST_ACCEPTANCE_MS).toBe(xaa.ID_JAG_MAX_VALIDITY_MS + 2 * xaa.CLOCK_SKEW_MS + 1000);
     expect(xaa.ID_JAG_REPLAY_RETENTION_S * 1000).toBeGreaterThan(xaa.ID_JAG_LONGEST_ACCEPTANCE_MS);
   });
 
@@ -344,4 +347,48 @@ describe("the record outlives the assertion's validity", () => {
     expect(await grant(await assertion({ jti: randomUUID() }))).toEqual(UNAVAILABLE);
     expect(table.calls.tryLock).toBe(0);
   });
+
+  it("a fractional exp: a live table that keeps rows longer than 24 h + 60 s but not 24 h + 61 s refuses with 503", async () => {
+    table.expirationMS = xaa.ID_JAG_MAX_VALIDITY_MS + 2 * xaa.CLOCK_SKEW_MS + 500;
+    expect(await grant(await assertion({ jti: randomUUID(), expInSec: 300.5 }))).toEqual(UNAVAILABLE);
+    expect(table.calls.tryLock).toBe(0);
+    expect(tokenRows.size).toBe(0);
+  });
+});
+
+// ─── a jti claim, when present, must be a nonempty string ──────────────────
+
+describe("a jti claim, when present, must be a nonempty string", () => {
+  const values: Array<[string, unknown]> = [
+    ['""', ""],
+    ["null", null],
+    ["0", 0],
+    ["false", false],
+  ];
+  const variants: Array<[string, AssertionOpts, () => void]> = [
+    ["", {}, () => {}],
+    [" and no exp", { expInSec: null }, () => {}],
+    [
+      " while the store is unavailable",
+      {},
+      () => {
+        table.fail.tryLock = true;
+        table.fail.getEntry = true;
+        table.fail.put = true;
+      },
+    ],
+  ];
+  for (const [label, jti] of values) {
+    for (const [variant, opts, setup] of variants) {
+      it(`jti ${label}${variant}: refused with 400, nothing issued, and the store is not touched`, async () => {
+        setup();
+        const r = await grant(await assertion({ ...opts, jti }));
+        expect(r.status).toBe(400); // assertion: refused
+        expect(r.body.error).toBe("invalid_grant");
+        expect(tokenRows.size).toBe(0); // assertion: no token issued
+        expect(agentRows.size).toBe(0);
+        expect(table.calls.tryLock).toBe(0);
+      });
+    }
+  }
 });

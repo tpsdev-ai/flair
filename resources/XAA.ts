@@ -36,11 +36,12 @@ export const CLOCK_SKEW_MS = 30_000;         // 30 seconds
 export const ID_JAG_MAX_VALIDITY_MS = 24 * 3600_000;
 
 /**
- * The longest an accepted assertion stays acceptable after its jti is recorded:
- * jose accepts it until just before exp + CLOCK_SKEW_MS, and exp is at most
+ * The longest an accepted assertion stays acceptable after its jti is recorded.
+ * jose compares exp with the current whole second, so it accepts an assertion
+ * only before exp + CLOCK_SKEW_MS + 1 s, and exp is at most
  * ID_JAG_MAX_VALIDITY_MS + CLOCK_SKEW_MS ahead when it is recorded.
  */
-export const ID_JAG_LONGEST_ACCEPTANCE_MS = ID_JAG_MAX_VALIDITY_MS + 2 * CLOCK_SKEW_MS;
+export const ID_JAG_LONGEST_ACCEPTANCE_MS = ID_JAG_MAX_VALIDITY_MS + 2 * CLOCK_SKEW_MS + 1000;
 
 /**
  * Seconds a used jti is kept: 25 h, longer than ID_JAG_LONGEST_ACCEPTANCE_MS.
@@ -141,11 +142,12 @@ export async function validateIdJag(
     }
   }
 
-  // Replay prevention (jti): recorded once per instance, under a per-key lock,
+  // Replay prevention (jti): a jti claim, when present, must be a nonempty
+  // string, and is then recorded once per instance, under a per-key lock,
   // before the grant has any effect. The record is kept
   // ID_JAG_REPLAY_RETENTION_S, so the assertion's validity is bounded first.
-  if (payload.jti) {
-    if (typeof payload.jti !== "string") throw new Error("jti claim must be a string");
+  if (payload.jti !== undefined) {
+    if (typeof payload.jti !== "string" || payload.jti === "") throw new Error("jti claim must be a nonempty string");
     if (typeof payload.exp !== "number" || payload.exp * 1000 > Date.now() + ID_JAG_MAX_VALIDITY_MS + CLOCK_SKEW_MS) {
       throw new Error(`an assertion with a jti must carry an exp at most ${ID_JAG_MAX_VALIDITY_MS / 3600_000} hours ahead`);
     }
