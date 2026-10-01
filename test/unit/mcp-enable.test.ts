@@ -1089,11 +1089,13 @@ describe("disableMcp", () => {
     expect(calls.filter((c) => c.body.operation === "restart")).toHaveLength(0);
   });
 
-  test("confirmFlagOff:true triggers exactly one restart call", async () => {
+  test("confirmFlagOff:true requests one restart without claiming the route is unmounted", async () => {
     const { fetchImpl, calls } = mockOpsFetch();
     const result = await disableMcp({ instance: ISSUER, adminUser: "admin", adminPass: "pw", confirmFlagOff: true }, { fetchImpl });
     expect(result.ok).toBe(true);
     expect(calls.map((c) => c.body.operation)).toEqual(["restart"]);
+    expect(result.detail).toBe(`restart requested for ${ISSUER}`);
+    expect(result.detail).not.toMatch(/\/mcp.*(?:mount|route)/i);
   });
 
   test("an interactive confirmPrompt gates the same way", async () => {

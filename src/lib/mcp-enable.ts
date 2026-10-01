@@ -2302,7 +2302,7 @@ export async function disableMcp(params: DisableMcpParams, deps: DisableMcpDeps 
   } catch (err: any) {
     return { ok: false, detail: `restart failed: ${err?.message ?? err}` };
   }
-  return { ok: true, detail: `restarted ${params.instance} — /mcp route no longer mounts (byte-identical boot)` };
+  return { ok: true, detail: `restart requested for ${params.instance}` };
 }
 
 // ─── flair mcp status ─────────────────────────────────────────────────────────
