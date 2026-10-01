@@ -1,11 +1,10 @@
 /**
  * flair#2113 — `flair mcp enable --cimd-allowed-hosts` ensures the list the
  * @harperfast/oauth component reads in the edited config.yaml, and reads it
- * back, only when the target runs from that file. Without --dry-run, a target
- * not shown to run from that file is refused. --dry-run checks no target and
- * writes nothing, so it does not refuse such a target; a Fabric origin and
- * invalid local input (an invalid host list, or a missing or unusable
- * config.yaml) are still refused under --dry-run.
+ * back, only after a preflight match with the target. Without --dry-run, a
+ * failed match is refused. --dry-run skips the match and writes nothing; a
+ * Fabric origin, an invalid host list and a missing or unusable config.yaml
+ * are still refused under --dry-run.
  *
  * Before this fix the flag was parsed and echoed into a step line, and nothing
  * wrote it anywhere the @harperfast/oauth component reads.
@@ -18,14 +17,13 @@
  * @harperfast/oauth's own `expandEnvVarsDeep` + `normalizeMcpSecurityConfig`
  * over `mcp`, as its `updateConfiguration` does.
  *
- * Shapes: a non-Fabric target shown to run from the edited config.yaml gets
- * the list ensured in that file before the restart, and read back here. The
+ * Shapes: a non-Fabric target that passes the match gets the list ensured in
+ * the edited config.yaml before the restart, and read back here. The
  * writer skips the write when the file already holds that exact list; that
  * case is covered in test/unit-isolated/mcp-enable-cli-output.test.ts, not
- * here. A Fabric origin, or
- * (without --dry-run) a target not shown to run from that file, is refused
- * before any change. The
- * target check's process and hostname lookups are injected here, except in the
+ * here. A Fabric origin, or (without --dry-run) a failed match, is refused
+ * before any change. The target check's process and hostname lookups are
+ * injected here, except in the
  * one test that uses a real child process. House style follows
  * mcp-enable.test.ts: injected fetch, temp dirs, the repo's own config.yaml is
  * copied and never written.
@@ -495,9 +493,9 @@ describe("claudeAiExcludedNote — the note matches the list this run ensured an
   });
 });
 
-// ─── the target must be shown to run from the edited config.yaml ─────────────
+// ─── the preflight match ──────────────────────────────────────────────────────
 
-describe("enableMcp — the flag is refused unless the target runs from the edited config.yaml", () => {
+describe("enableMcp — without --dry-run, the flag is refused unless the preflight match passes", () => {
   let other: string;
   beforeEach(() => {
     other = mkdtempSync(join(tmpdir(), "flair-2113-target-"));
@@ -520,7 +518,7 @@ describe("enableMcp — the flag is refused unless the target runs from the edit
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("cimd-allowed-hosts");
     expect(result.refused?.message).toContain("mcp.clientIdMetadataDocuments.allowedHosts");
-    expect(result.refused?.message).toContain("Edit the key in the config.yaml the target runs from, on its host");
+    expect(result.refused?.message).toContain("by hand in the config.yaml the target runs from, on its host");
     expect(result.refused?.message).toContain(why);
     // The one call made is the read-only target check; nothing after it ran.
     expect(calls).toEqual(["target-check"]);
@@ -532,14 +530,14 @@ describe("enableMcp — the flag is refused unless the target runs from the edit
   }
 
   test("distinct local and target configs: the target runs from another directory — refused, nothing written", async () => {
-    await expectRefusedUnchanged({ hostname: TEST_HOST, pid: TARGET_PID }, targetRunsFrom(other), `runs the application in ${other}`);
+    await expectRefusedUnchanged({ hostname: TEST_HOST, pid: TARGET_PID }, targetRunsFrom(other), `application directory ${other}`);
   });
 
   test("the target works in the edited file's directory but was started with another application directory — refused, nothing written", async () => {
     await expectRefusedUnchanged(
       { hostname: TEST_HOST, pid: TARGET_PID },
       targetRunsFrom(dir, `node harper.js run ${other}`),
-      `runs the application in ${other}`,
+      `application directory ${other}`,
     );
   });
 
@@ -594,7 +592,7 @@ describe("checkTargetRunsFromConfig — against a real process on this machine",
       expect(result.ok).toBe(true);
       const elsewhere = await checkTargetRunsFromConfig(ISSUER, "admin", "pw", join(other, "config.yaml"), { fetchImpl });
       expect(elsewhere.ok).toBe(false);
-      expect(elsewhere.detail).toContain("not the directory of");
+      expect(elsewhere.detail).toContain("config.yaml is not");
     } finally {
       child.kill("SIGKILL");
       rmSync(other, { recursive: true, force: true });

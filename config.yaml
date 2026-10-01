@@ -58,8 +58,7 @@ authentication:
     clientIdMetadataDocuments:
       # A LITERAL list, not a ${VAR} reference: @harperfast/oauth 2.5.0 does
       # not split a variable's value into hosts, and an unset one would replace
-      # this default (flair#2113). `flair mcp enable --cimd-allowed-hosts`
-      # writes this list only when the target instance runs from this file.
+      # this default (flair#2113).
       allowedHosts:
         - claude.ai
         - claude.com

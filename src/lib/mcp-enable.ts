@@ -269,13 +269,9 @@ export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMe
 // `[]`, for which dist/lib/mcp/cimd.js skips its allowedHosts gate.
 //
 // So `enable` ensures a literal list in a config.yaml on THIS machine (the
-// file it already edits for mcp.enabled), writing the list unless that file
-// already holds that exact list and then reading it back, and only when the
-// target instance is shown to run from that file (`checkTargetRunsFromConfig`).
-// It refuses the flag everywhere else: a Fabric origin, whose config.yaml is
-// deployed with the component, and, outside --dry-run, any target it cannot
-// match to that file.
-// --dry-run neither calls nor checks the target and never writes the list.
+// file it already edits for mcp.enabled), after the preflight match in
+// `checkTargetRunsFromConfig`. It refuses a Fabric origin and, outside
+// --dry-run, a failed match. --dry-run skips the match and never writes the list.
 
 /** The config key the flag sets, as operator messages name it. */
 export const CIMD_ALLOWED_HOSTS_CONFIG_KEY = "mcp.clientIdMetadataDocuments.allowedHosts";
@@ -294,8 +290,7 @@ const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
  * Validate `--cimd-allowed-hosts` entries: lowercase bare hostnames only.
  * Throws `CimdAllowedHostsError` for an empty list, or for the first bad entry
  * (named, 1-based). Spaces around an entry are trimmed; nothing else is
- * rewritten — an uppercase entry is refused, not lowercased — so the list
- * written is the list typed, minus those spaces.
+ * rewritten: an uppercase entry is refused, not lowercased.
  */
 export function validateCimdAllowedHosts(entries: readonly string[]): string[] {
   const flag = "--cimd-allowed-hosts";
@@ -723,23 +718,17 @@ export interface TargetConfigCheckDeps {
 }
 
 /**
- * flair#2113 review: does the target instance run from `configPath`?
- *
- * `--cimd-allowed-hosts` edits a config.yaml on the machine this command runs
- * on, so it may only be written when the target is shown to load that file.
- * Three checks, all required:
+ * flair#2113 review: the preflight match between the target and `configPath`.
+ * All required:
  *   1. the target's ops API `system_information` reports this machine's
- *      hostname;
- *   2. it reports the pid of its Harper core process, and that pid's working
- *      directory and command line can be read on this machine, the command
- *      line naming a `run`/`dev` application directory
- *      (`harperAppDirFromCmdline`);
- *   3. `config.yaml` in that application directory is the same file as
- *      `configPath` (both paths resolved with `realpath`).
- * Harper loads the component config.yaml from that application directory
- * (flair starts it as `harper run .` with the package directory as its cwd).
- * Any check that fails, or that cannot be completed, gives `ok: false` with
- * the reason; nothing here is ever read as a pass by default.
+ *      hostname and a Harper core process id;
+ *   2. that pid's working directory and command line can be read on this
+ *      machine, and the command line names a `run`/`dev` application
+ *      directory (`harperAppDirFromCmdline`);
+ *   3. `config.yaml` in that application directory and `configPath` resolve
+ *      to the same file (`realpath`).
+ * A check that fails, or cannot be completed, gives `ok: false` with the
+ * reason.
  */
 export async function checkTargetRunsFromConfig(
   instance: string,
@@ -778,14 +767,14 @@ export async function checkTargetRunsFromConfig(
   }
   const cwd = readCwd(pid);
   if (!cwd) {
-    return { ok: false, detail: `the target's Harper process is pid ${pid}, and its working directory could not be read on this machine` };
+    return { ok: false, detail: `the target reports pid ${pid}, and that pid's working directory could not be read on this machine` };
   }
   const cmdline = readCmdline(pid);
   const appDir = cmdline ? harperAppDirFromCmdline(cmdline, cwd) : null;
   if (!appDir) {
     return {
       ok: false,
-      detail: `the target's Harper process (pid ${pid}) runs in ${cwd}, and the application directory it was started with could not be read from its command line`,
+      detail: `the target reports pid ${pid}, which runs in ${cwd} on this machine, and its application directory could not be read from its command line`,
     };
   }
   let targetConfig: string;
@@ -794,14 +783,14 @@ export async function checkTargetRunsFromConfig(
     targetConfig = realpathSync(join(appDir, "config.yaml"));
     editedConfig = realpathSync(configPath);
   } catch (err: any) {
-    return { ok: false, detail: `the target's Harper process (pid ${pid}) runs the application in ${appDir}, and its config.yaml could not be resolved: ${err?.message ?? err}` };
+    return { ok: false, detail: `the target reports pid ${pid}, whose command line on this machine names application directory ${appDir}, and a config.yaml could not be resolved: ${err?.message ?? err}` };
   }
   if (targetConfig !== editedConfig) {
-    return { ok: false, detail: `the target's Harper process (pid ${pid}) runs the application in ${appDir}, not the directory of ${editedConfig}` };
+    return { ok: false, detail: `the target reports pid ${pid}, whose command line on this machine names application directory ${appDir}; its config.yaml is not ${editedConfig} by realpath` };
   }
   return {
     ok: true,
-    detail: `the target reports this host (${targetHost}), and its Harper process (pid ${pid}) runs the application in ${appDir}, which holds ${editedConfig}`,
+    detail: `preflight match: the target reports host ${targetHost} and pid ${pid}; that pid's command line on this machine names application directory ${appDir}, whose config.yaml is ${editedConfig} by realpath`,
   };
 }
 
@@ -1715,12 +1704,12 @@ export interface EnableMcpParams {
    *  `mcp.clientIdMetadataDocuments.allowedHosts` in the local config.yaml
    *  (`localConfigPath`, else `./config.yaml`, else `~/.flair/config.yaml`)
    *  before the restart (written unless that file already holds that exact
-   *  list, then read back), and only when `checkTargetRunsFromConfig` shows the
-   *  target runs from that file. Refused, before anything changes, for a Fabric
+   *  list, then read back), and only after the preflight match in
+   *  `checkTargetRunsFromConfig`. Refused, before anything changes, for a Fabric
    *  origin, for invalid entries, when that file is missing, cannot be parsed,
    *  or has no `@harperfast/oauth` → `mcp` block, and (without `dryRun`) when
-   *  the target is not shown to run from it. `dryRun` neither calls nor checks
-   *  the target and writes nothing. Unset: the list is not touched. */
+   *  the match fails. `dryRun` skips the match and writes nothing. Unset: the
+   *  list is not touched. */
   cimdAllowedHosts?: string[];
   dryRun?: boolean;
   /** Operator confirms the staged secrets are live in the target's process
@@ -1820,9 +1809,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // ── --cimd-allowed-hosts (flair#2113) ─────────────────────────────────────
     // Before any step with a side effect: the hosts are validated, a Fabric
     // target is refused, the config.yaml to edit must exist with an
-    // @harperfast/oauth mcp block, and (except under --dry-run, which makes no
-    // remote call) the target must be shown to run from that file. Any of these
-    // failing refuses the flag with nothing changed. The list itself is ensured
+    // @harperfast/oauth mcp block, and (except under --dry-run, which skips it)
+    // the preflight match must pass. Any of these failing refuses the flag with
+    // nothing changed. The list itself is ensured
     // at local-config-update, before the restart: written unless the file
     // already holds that exact list, then read back.
     let cimdAllowedHosts: string[] | undefined;
@@ -1842,9 +1831,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       const current = readLocalConfigCimdAllowedHosts(params.localConfigPath);
       if (!current.ok) {
         return refuse(
-          `--cimd-allowed-hosts cannot be applied: ${current.detail}. The instance reads ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} ` +
-            `from the @harperfast/oauth block of the config.yaml it runs from; run this command on the instance's host, ` +
-            `from the directory that holds that file, or edit the key there by hand. Nothing was changed.`,
+          `--cimd-allowed-hosts cannot be applied: ${current.detail}. Run this command on the instance's host, from the ` +
+            `directory that holds the config.yaml it runs from, or edit ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} there by hand. ` +
+            `Nothing was changed.`,
         );
       }
       const change =
@@ -1864,9 +1853,8 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         );
         if (!target.ok) {
           return refuse(
-            `--cimd-allowed-hosts refused: ${target.detail}. This command writes ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} only into ` +
-              `a config.yaml on this machine that the target is shown to run from. Edit the key in the config.yaml the ` +
-              `target runs from, on its host, then restart it. Nothing was changed.`,
+            `--cimd-allowed-hosts refused: ${target.detail}. Edit ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} by hand in the ` +
+              `config.yaml the target runs from, on its host, then restart it. Nothing was changed.`,
           );
         }
         push(true,
@@ -2169,9 +2157,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         };
       }
       writtenCimd = { hosts: written.readBack, path: written.path };
-      push(true,
-        `${written.detail}. Before any change, the target's Harper process was running the application in ${dirname(written.path)}.`,
-      );
+      push(true, written.detail);
     }
 
     // ── Restart ───────────────────────────────────────────────────────────

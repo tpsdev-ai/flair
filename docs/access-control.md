@@ -197,20 +197,19 @@ file, not an environment reference. The package ships the file with the default
 list, and a completed upgrade installs the new version's file, so re-apply your
 edit after upgrading.
 
-`flair mcp enable --cimd-allowed-hosts <hosts>` can make this edit for an
-instance that runs on the machine where you run the command. It uses
-`config.yaml` in the current directory, else `~/.flair/config.yaml`. Before any
-step that changes anything, it checks through the instance's operations API that
-the instance runs from that file, and refuses the flag if it cannot show that.
-At its `local-config-update` step, before it restarts the instance, it writes the
-list unless the file already holds that exact list, then reads the file back. It
-also refuses the flag for a Fabric instance, for an invalid host list, and for a
-missing or unusable `config.yaml`. A refusal changes nothing. With `--dry-run`,
-the command does not check the instance, so it does not refuse one that runs
-from another file, and it writes nothing. A run that stops before
-`local-config-update` does not write the list. On Fabric, and whenever the
-command refuses, edit the file by hand as above. If an upgrade replaces that
-file, run the command again or edit the file.
+`flair mcp enable --cimd-allowed-hosts <hosts>` can make this edit to
+`config.yaml` in the current directory, else `~/.flair/config.yaml`, on the
+machine where you run it. Without `--dry-run`, before any step that changes
+anything, it refuses the flag unless a preflight match links the host and
+process ID the instance reports, a readable process on this machine, and that
+file (compared by `realpath`). At its `local-config-update` step, before it
+restarts the instance, it writes the list unless the file already holds that
+exact list, then reads the file back. It also refuses the flag for a Fabric
+instance, an invalid host list, or a missing or unusable `config.yaml`. A
+refusal changes nothing. With `--dry-run`, it skips the match and writes
+nothing. A run that stops before `local-config-update` does not write the list.
+On Fabric, and whenever the command refuses, edit the file by hand as above. If
+an upgrade replaces that file, run the command again or edit the file.
 
 ### ChatGPT
 

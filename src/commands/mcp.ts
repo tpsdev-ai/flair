@@ -780,8 +780,9 @@ export function register(program: Command): void {
       "Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml " +
         "this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds " +
         "that exact list, then read back, before the restart. " +
-        "Without --dry-run, refused unless the target's ops API shows it runs from that file on this machine; --dry-run " +
-        "neither calls nor checks the target and writes nothing. Always refused for a *.harperfabric.com instance. " +
+        "Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable " +
+        "process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. " +
+        "Always refused for a *.harperfabric.com instance. " +
         "Without it the list is not changed (shipped: claude.ai,claude.com)",
     )
     .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
@@ -806,8 +807,8 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      // flair#2113: an invalid --cimd-allowed-hosts, or one this target cannot
-      // take, is refused here, before anything is asked for. An explicit empty
+      // flair#2113: an invalid --cimd-allowed-hosts, or one for a Fabric
+      // instance, is refused here, before anything is asked for. An explicit empty
       // value is refused too: it used to be dropped as if the flag were absent.
       const cimdFlag = cimdAllowedHostsFromFlag(opts.cimdAllowedHosts, instance);
       if (cimdFlag.error) {
