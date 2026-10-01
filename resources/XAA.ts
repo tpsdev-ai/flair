@@ -44,7 +44,7 @@ export const ID_JAG_MAX_VALIDITY_MS = 24 * 3600_000;
 export const ID_JAG_LONGEST_ACCEPTANCE_MS = ID_JAG_MAX_VALIDITY_MS + 2 * CLOCK_SKEW_MS + 1000;
 
 /**
- * Seconds a used jti is kept: 25 h, longer than ID_JAG_LONGEST_ACCEPTANCE_MS.
+ * Seconds a newly recorded jti row is kept: 25 h, longer than ID_JAG_LONGEST_ACCEPTANCE_MS.
  * MUST equal `expiration:` on `type IdJagReplay` in schemas/oauth.graphql
  * (both pinned by test/unit-isolated/xaa-jti-replay.test.ts).
  */
