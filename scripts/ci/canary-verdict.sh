@@ -137,6 +137,12 @@ is_release() {
     [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
+# flair#2140: how long the promote block's convergence check waits for the
+# registry to show the new `latest` (registry-latest-skew.mjs --await). The
+# v0.57.0 false skew had cleared when the check was re-run a minute later; 120 s
+# is twice that.
+SKEW_AWAIT_S=120
+
 # The ONE source for the lockstep set (never a second list here).
 PACKAGES=()
 while IFS= read -r _line; do
@@ -245,13 +251,14 @@ EOF
   cat <<EOF
 
 # 2. Read each package's CURRENT latest BEFORE any move. If a read fails, NOTHING
-#    has moved — stop here and say so.
+#    has moved — stop here and say so. --prefer-online: without it npm can answer
+#    from its local cache (flair#2140), and step 4 compares against these values.
 for _p in ${PACKAGES[*]}; do
   # Capture npm's stdout and its exit status SEPARATELY. A (npm | sed) pipeline
   # reports sed's status (0 on a match), so an npm that FAILS while still printing
   # a "latest: 1.2.2" line would read as success. A failed read must stop here.
   set +e
-  _ls="\$(npm dist-tag ls "\$_p" 2>/dev/null)"
+  _ls="\$(npm dist-tag ls "\$_p" --prefer-online 2>/dev/null)"
   _ls_status=\$?
   set -e
   if [ "\$_ls_status" -ne 0 ]; then
@@ -301,16 +308,32 @@ for _p in \$_LPKGS; do
   printf '%s=%s\n' "\$_p" "\$_pv" >> "\$MOVED"
 done
 
-# 4. Confirm the set converged — ONLY when every move succeeded. exit 2 = the check
-#    DID NOT RUN (usage error, package-set derivation failure, empty set, or an
-#    unreadable latest); then the tag state is UNKNOWN and the block must not claim
+# 4. Confirm the set converged — ONLY when every move succeeded. The check runs in
+#    wait mode (flair#2140): the registry can serve a package's previous latest for
+#    a while after its move, so the check reads every latest from the registry's
+#    dist-tags endpoint and re-reads a package that is not yet at ${VERSION}, with
+#    backoff, for up to ${SKEW_AWAIT_S} s; each --previous is a latest step 2
+#    recorded. exit 3 = when the wait ended, every package not at ${VERSION} still
+#    read its previous latest: re-run the check before restoring anything. exit 1 =
+#    skew. exit 2 = the check DID NOT RUN (usage error, package-set derivation
+#    failure, empty set, an unreadable latest, or a wait that ended before every
+#    latest was read); then the tag state is UNKNOWN and the block must not claim
 #    any package is or is not on its previous latest.
+_SKEW_PREV=()
+while IFS= read -r _line; do
+  _SKEW_PREV[\${#_SKEW_PREV[@]}]="--previous"
+  _SKEW_PREV[\${#_SKEW_PREV[@]}]="\$_line"
+done < "\$PREV_LATEST"
 set +e
-node scripts/ci/registry-latest-skew.mjs ${VERSION}
+node scripts/ci/registry-latest-skew.mjs ${VERSION} --await ${SKEW_AWAIT_S} "\${_SKEW_PREV[@]}"
 _skew=\$?
 set -e
 if [ "\$_skew" -ne 0 ]; then
-  if [ "\$_skew" -eq 2 ]; then
+  if [ "\$_skew" -eq 3 ]; then
+    echo "canary promote: the convergence check did not see ${VERSION} on every package before its ${SKEW_AWAIT_S} s wait ended; its output above names the packages whose reads still returned their PREVIOUS latest. The registry can keep serving the previous latest for a while after a move, so this is not a skew verdict. RE-RUN the check before restoring anything:" >&2
+    echo "  node scripts/ci/registry-latest-skew.mjs ${VERSION} --await ${SKEW_AWAIT_S} \${_SKEW_PREV[*]}" >&2
+    echo "Restore only if the re-run exits 1 (skew) or 2 (DID NOT RUN), or if you decide to roll back rather than wait. Then RESTORE every attempted package to its PREVIOUS latest (this does not delete a tag):" >&2
+  elif [ "\$_skew" -eq 2 ]; then
     echo "canary promote: the convergence check DID NOT RUN — it could not establish the current tag state (its message above says why); every package's state is UNKNOWN. RESTORE every attempted package to its PREVIOUS latest (this does not delete a tag):" >&2
   else
     echo "canary promote: the convergence check found skew — the set did not reach the expected version; the offenders and their current latest are above in the check's output. RESTORE every attempted package to its PREVIOUS latest (this does not delete a tag):" >&2
@@ -319,6 +342,7 @@ if [ "\$_skew" -ne 0 ]; then
     _mp="\${_line%%=*}"; _mv="\${_line#*=}"
     echo "  npm dist-tag add \${_mp}@\${_mv} latest" >&2
   done < "\$MOVED"
+  if [ "\$_skew" -eq 3 ]; then exit 3; fi
   exit 1
 fi
 EOF
@@ -376,8 +400,12 @@ RESTORE lines print.
 On the move-failure path it prints one RESTORE line per already-moved package
 (\`npm dist-tag add <pkg>@<previous> latest\`, never \`npm dist-tag rm\`) and then the
 packages it did NOT move; on the final-check path (every add call succeeded)
-the block runs the convergence check and, IF THAT CHECK FAILS, prints its result
-and the same RESTORE lines; on success the convergence check prints its own success line and the block
+the block runs the convergence check, which re-reads a package that is not yet at
+\`${VERSION}\` for up to ${SKEW_AWAIT_S} s. If that check finds skew or DID NOT RUN, the block
+prints its result and the same RESTORE lines. If, when the wait ends, every package not
+at \`${VERSION}\` still reads its PREVIOUS \`latest\`, the block tells you to re-run the
+check before restoring anything, and prints the same RESTORE lines after that as a
+fallback. On success the convergence check prints its own success line and the block
 prints no RESTORE lines. The block never asserts a tag's current value — the convergence
 check's output is the only state evidence. The preflight is bound to the release run's **package-set digest** — a single
 sha256 over the canonical sorted list of \`<name>@${VERSION} <sha256>\` lines, one per

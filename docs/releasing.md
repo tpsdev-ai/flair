@@ -313,6 +313,15 @@ and 0.55.1's promote had to be assembled by hand, line by line, for this reason.
   It reads `dist-tags.latest` for every lockstep package and exits non-zero
   naming any that disagree (or that differ from `<ver>`). The canary runs the same
   check BEFORE the verdict, so a pre-existing skew is visible there too.
+
+  The promote block runs this check itself, in its wait mode (`--await 120`, with
+  each package's previous `latest`): it reads every `latest` from the registry's
+  dist-tags endpoint, re-reads a package that is not yet at `<ver>` until it is or
+  the wait ends, and exits 3 if every such package still reads its previous
+  `latest` at the end. On exit 3, re-run the command the block prints before
+  restoring anything. A run without `--await` reads the package document, which
+  the public registry serves from its CDN and which can still show the previous
+  `latest` for a short time after a move.
 - **On FAIL**, the version stays public but unpromoted. The canary emits one
   `npm deprecate` line per package; run them, then re-cut the next patch. A
   version is never refreshed in place.

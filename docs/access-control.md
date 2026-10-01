@@ -195,8 +195,24 @@ Edit the `config.yaml` your instance runs (on Fabric, the one you deploy) and
 restart Flair so the component loads the new list. The list is a literal in that
 file, not an environment reference. The package ships the file with the default
 list, and a completed upgrade installs the new version's file, so re-apply your
-edit after upgrading. `flair mcp enable --cimd-allowed-hosts` does not change this
-setting: the command only shows the list in its output.
+edit after upgrading.
+
+`flair mcp enable --cimd-allowed-hosts <hosts>` can make this edit to
+`config.yaml` in the current directory, else `~/.flair/config.yaml`, on the
+machine where you run it. Without `--dry-run`, before any step that changes
+anything, it refuses the flag unless a preflight match links the host and
+process ID the instance reports, a readable process on this machine, and that
+file (compared by `realpath`). At its `local-config-update` step, before it
+restarts the instance, it writes the list unless the file already holds that
+exact list, then reads the file back. It also refuses the flag for a Fabric
+instance, an invalid host list, or a `config.yaml` that is missing, unreadable
+or not valid YAML, or has no `@harperfast/oauth` `mcp` mapping; it does not
+check early that the file can be written, and a write failure fails the later
+`local-config-update` step. A refusal changes nothing. With `--dry-run`, it
+skips the match and writes nothing. A run that stops before
+`local-config-update` does not write the list.
+On Fabric, and whenever the command refuses, edit the file by hand as above. If
+an upgrade replaces that file, run the command again or edit the file.
 
 ### ChatGPT
 
@@ -364,7 +380,7 @@ act:
 On success it ends with:
 
 ```
-✓ claude.ai can now connect.
+✓ The OAuth metadata check passed. The /mcp route itself was not probed.
 
 claude.ai → Settings → Connectors → Add custom connector
   URL: https://flair.example.com/mcp

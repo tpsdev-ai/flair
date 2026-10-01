@@ -116,6 +116,7 @@ const nodeStub = [
    "import { createHash } from 'node:crypto';",
    "import { spawnSync } from 'node:child_process';",
    "import { join as require_join } from 'node:path';",
+   "import { appendFileSync } from 'node:fs';",
    "const args = process.argv.slice(2);",
    "const joined = args.join(' ');",
    "if (joined.includes('lockstep-packages.mjs')) {",
@@ -142,8 +143,20 @@ const nodeStub = [
    "  process.stdout.write(createHash('sha256').update(seed + pk).digest('hex') + '\\n');",
    "  process.exit(0);",
    "}",
+   "// flair#2140: SKEW_ARGV_LOG records the convergence check's argv; SKEW_REAL=1 runs the",
+   "// REAL registry-latest-skew.mjs (against whatever npm is on the PATH); SKEW_FAIL=3 is",
+   "// its 'not yet visible' exit.",
+   "if (joined.includes('registry-latest-skew.mjs') && process.env.SKEW_ARGV_LOG) appendFileSync(process.env.SKEW_ARGV_LOG, JSON.stringify(args) + '\\n');",
+   "if (joined.includes('registry-latest-skew.mjs') && process.env.SKEW_REAL === '1') {",
+   "  const abs = args.map((a, i) => (i === 0 ? require_join(process.env.REPO_ROOT, a) : a));",
+   "  const r = spawnSync(process.env.REAL_NODE, abs, { cwd: process.env.REPO_ROOT, encoding: 'utf8', stdio: ['inherit', 'pipe', 'pipe'] });",
+   "  if (r.stdout) process.stdout.write(r.stdout);",
+   "  if (r.stderr) process.stderr.write(r.stderr);",
+   "  process.exit(r.status ?? 1);",
+   "}",
    "if (joined.includes('registry-latest-skew.mjs') && process.env.SKEW_FAIL === '1') process.exit(1);",
    "if (joined.includes('registry-latest-skew.mjs') && process.env.SKEW_FAIL === '2') process.exit(2);",
+   "if (joined.includes('registry-latest-skew.mjs') && process.env.SKEW_FAIL === '3') process.exit(3);",
    "// Any other node script the gate runs (registry-latest-skew) is a no-op here.",
    "process.exit(0);",
 ].join("\n");
@@ -644,6 +657,9 @@ const ctlNpmStub = [
   "  if [ -n \"${DISTTAG_LS_PRINTFAIL_PKG:-}\" ] && [ \"${3:-}\" = \"$DISTTAG_LS_PRINTFAIL_PKG\" ]; then echo \"latest: 1.2.2\"; exit 1; fi",
   "  if [ -n \"${DISTTAG_LS_CR:-}\" ]; then printf 'latest: 1.2.2\\r\\n'; exit 0; fi",
   "  if [ -n \"${DISTTAG_LS_GARBAGE:-}\" ]; then echo \"latest: garbage\"; exit 0; fi",
+  "  # flair#2140: DISTTAG_LS_CACHED is what npm's local cache would answer; only a",
+  "  # --prefer-online read gets the current value (1.2.2).",
+  "  if [ -n \"${DISTTAG_LS_CACHED:-}\" ]; then case \" $* \" in *\" --prefer-online \"*) ;; *) echo \"latest: $DISTTAG_LS_CACHED\"; exit 0 ;; esac; fi",
   "  echo \"latest: 1.2.2\"",
   "  exit 0",
   "fi",
@@ -814,4 +830,165 @@ describe("round 8: the emitted block promises an EQUALITY check, not freshness",
     expect(out).toContain("not a freshness check");
     expect(out).toContain("a different package set is refused");
   });
+});
+
+// ── flair#2140: the final convergence check waits for the registry ─────────────
+// After the v0.57.0 and v0.58.0 promotes, the check read a stale `latest` for the
+// package moved last, reported skew and printed RESTORE lines for a promote that
+// had succeeded. The block now runs the check in wait mode with every previous
+// latest it recorded, prints RESTORE lines at once for skew, DID NOT RUN or any
+// other failing exit, and on "not yet visible" (exit 3) tells the operator to
+// re-run the check BEFORE the RESTORE lines, which follow only as a fallback.
+describe("flair#2140: the promote block's final check waits instead of reporting lag as skew", () => {
+  test("the block runs the check in wait mode with every recorded previous latest; success prints no RESTORE line", () => {
+    const argvLog = join(mkdtempSync(join(SCRATCH, "skew-argv-")), "argv.log");
+    const r = runPromoteBlock({ SKEW_ARGV_LOG: argvLog });
+    expect(r.status, `stderr:\n${r.stderr}`).toBe(0);
+    const calls = readFileSync(argvLog, "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l) as string[]);
+    expect(calls.length).toBe(1);
+    expect(calls[0]).toEqual([
+      "scripts/ci/registry-latest-skew.mjs",
+      VER,
+      "--await",
+      "120",
+      ...PACKAGES.flatMap((p) => ["--previous", `${p}=1.2.2`]),
+    ]);
+    expect(r.stderr).not.toContain("RESTORE");
+    expect(r.stderr).not.toContain("npm dist-tag add");
+  });
+
+  test("not yet visible (exit 3): the re-run instruction comes FIRST, the RESTORE lines only after it, the block exits 3", () => {
+    const r = runPromoteBlock({ SKEW_FAIL: "3" });
+    expect(r.status, `stderr:\n${r.stderr}`).toBe(3);
+    expect(r.dt.split("\n").filter((l) => l.startsWith("dist-tag add ")).length).toBe(PACKAGES.length);
+    expect(r.stderr).toContain("this is not a skew verdict");
+    const rerunAt = r.stderr.indexOf("RE-RUN the check before restoring anything:");
+    expect(rerunAt).toBeGreaterThanOrEqual(0);
+    const rerun = `  node scripts/ci/registry-latest-skew.mjs ${VER} --await 120 ${PACKAGES.map((p) => `--previous ${p}=1.2.2`).join(" ")}`;
+    expect(r.stderr).toContain(rerun + "\n");
+    const fallbackAt = r.stderr.indexOf("Restore only if the re-run exits 1 (skew) or 2 (DID NOT RUN)");
+    expect(fallbackAt).toBeGreaterThan(rerunAt);
+    for (const p of PACKAGES) {
+      const at = r.stderr.indexOf(`npm dist-tag add ${p}@1.2.2 latest`);
+      expect(at, `RESTORE line for ${p}`).toBeGreaterThan(fallbackAt);
+    }
+    expect(r.stderr).not.toContain("found skew");
+    expect(r.stderr).not.toContain("DID NOT RUN —");
+    expect(r.stderr).not.toContain("dist-tag rm");
+  });
+
+  test("step 2 records the CURRENT latest, not npm's cached one: --previous and RESTORE lines carry 1.2.2, never the cached 1.2.1", () => {
+    const argvLog = join(mkdtempSync(join(SCRATCH, "skew-argv-")), "argv.log");
+    const r = runPromoteBlock({ DISTTAG_LS_CACHED: "1.2.1", SKEW_ARGV_LOG: argvLog, SKEW_FAIL: "3" });
+    expect(r.status, `stderr:\n${r.stderr}`).toBe(3);
+    const calls = readFileSync(argvLog, "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l) as string[]);
+    expect(calls[0]!.slice(4)).toEqual(PACKAGES.flatMap((p) => ["--previous", `${p}=1.2.2`]));
+    for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    expect(r.stderr).not.toContain("1.2.1");
+  });
+
+  test("skew (exit 1) and DID NOT RUN (exit 2) still print the RESTORE lines at once, with no re-run instruction", () => {
+    for (const code of ["1", "2"]) {
+      const r = runPromoteBlock({ SKEW_FAIL: code });
+      expect(r.status, `SKEW_FAIL=${code} stderr:\n${r.stderr}`).toBe(1);
+      expect(r.stderr).not.toContain("not a skew verdict");
+      expect(r.stderr).not.toContain("RE-RUN the check");
+      for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    }
+  });
+});
+
+// End to end, with the REAL convergence check: a registry whose CDN-served package
+// document keeps the previous latest for the package moved last, and whose
+// dist-tags endpoint shows the move after two more reads. On the block before
+// flair#2140 this printed "found skew" and nine RESTORE lines.
+const E2E_SHIM = join(SCRATCH, "e2e-npm-shim");
+const E2E_NPM_JS = join(SCRATCH, "e2e-npm.cjs");
+mkdirSync(E2E_SHIM, { recursive: true });
+writeFileSync(
+  E2E_NPM_JS,
+  [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const args = process.argv.slice(2);",
+    "const st = process.env.E2E_STATE;",
+    "fs.appendFileSync(path.join(st, 'npm.log'), args.join(' ') + '\\n');",
+    "const PREV = '1.2.2';",
+    "const movedFile = (pkg) => path.join(st, 'moved-' + encodeURIComponent(pkg));",
+    "const movedTo = (pkg) => (fs.existsSync(movedFile(pkg)) ? fs.readFileSync(movedFile(pkg), 'utf8') : null);",
+    "if (args[0] === 'dist-tag' && args[1] === 'add') {",
+    "  const at = args[2].lastIndexOf('@');",
+    "  fs.writeFileSync(movedFile(args[2].slice(0, at)), args[2].slice(at + 1));",
+    "  process.exit(0);",
+    "}",
+    "if (args[0] === 'dist-tag' && args[1] === 'ls') {",
+    "  const pkg = args[2];",
+    "  let v = movedTo(pkg) ?? PREV;",
+    "  if (movedTo(pkg) !== null && pkg === process.env.E2E_LAG_PKG) {",
+    "    const cf = path.join(st, 'post-move-reads-' + encodeURIComponent(pkg));",
+    "    const n = fs.existsSync(cf) ? Number(fs.readFileSync(cf, 'utf8')) : 0;",
+    "    fs.writeFileSync(cf, String(n + 1));",
+    "    if (n < Number(process.env.E2E_LAG_READS)) v = PREV;",
+    "  }",
+    "  process.stdout.write('latest: ' + v + '\\n');",
+    "  process.exit(0);",
+    "}",
+    "if (args[0] === 'view' && args[2] === 'dist-tags.latest') {",
+    "  const pkg = args[1];",
+    "  process.stdout.write((pkg === process.env.E2E_LAG_PKG ? PREV : movedTo(pkg) ?? PREV) + '\\n');",
+    "  process.exit(0);",
+    "}",
+    "process.exit(1);",
+    "",
+  ].join("\n"),
+);
+writeFileSync(join(E2E_SHIM, "npm"), ["#!/usr/bin/env bash", 'exec "$REAL_NODE" "$E2E_NPM_JS" "$@"', ""].join("\n"));
+chmodSync(join(E2E_SHIM, "npm"), 0o755);
+
+describe("flair#2140 end to end: the real check, a registry that shows the last move late", () => {
+  test("the package moved last reads its previous latest for 2 reads after its move => the block converges, no RESTORE line", () => {
+    const cert = rederivedDigest("sha:");
+    const emitted = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+    expect(emitted.status).toBe(0);
+    const m = emitted.stdout.match(/```\n([\s\S]*?)\n```/);
+    if (!m?.[1]) throw new Error("flair#2140 e2e: no fenced promote block in the PASS output");
+    const cwd = mkdtempSync(join(SCRATCH, "e2e-2140-"));
+    const f = join(cwd, "block.sh");
+    const state = join(cwd, "state");
+    mkdirSync(state);
+    writeFileSync(f, m[1]!);
+    const lagPkg = PACKAGES[PACKAGES.length - 1]!; // @tpsdev-ai/flair, moved LAST
+    const r = spawnSync("bash", [f], {
+      cwd: REPO,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${SHIM}:${E2E_SHIM}:${process.env.PATH}`,
+        REAL_NODE,
+        NODE_STUB: join(SCRATCH, "node-stub.mjs"),
+        REPO_ROOT: REPO,
+        STUB_SHA_MODE: "bindings",
+        SKEW_REAL: "1",
+        E2E_NPM_JS,
+        E2E_STATE: state,
+        E2E_LAG_PKG: lagPkg,
+        E2E_LAG_READS: "2",
+      },
+      timeout: 120_000,
+    });
+    expect(r.status, `stderr:\n${r.stderr}\nstdout:\n${r.stdout}`).toBe(0);
+    expect(r.stdout).toContain(`all ${PACKAGES.length} lockstep packages are at latest ${VER}`);
+    expect(r.stderr).not.toContain("RESTORE");
+    expect(r.stderr).not.toContain("skew");
+    const log = readFileSync(join(state, "npm.log"), "utf8").split("\n").filter((l) => l.length > 0);
+    // Every package moved, flair last.
+    const adds = log.filter((l) => l.startsWith("dist-tag add "));
+    expect(adds).toEqual(PACKAGES.map((p) => `dist-tag add ${p}@${VER} latest`));
+    // After the last move, the check re-read the lagging package through the
+    // dist-tags endpoint until it showed the move (2 lagging reads + 1), and never
+    // read the CDN document.
+    const afterMoves = log.slice(log.lastIndexOf(adds[adds.length - 1]!) + 1);
+    expect(afterMoves.filter((l) => l === `dist-tag ls ${lagPkg} --prefer-online`).length).toBe(3);
+    expect(log.filter((l) => l.startsWith("view "))).toEqual([]);
+  }, 120_000);
 });

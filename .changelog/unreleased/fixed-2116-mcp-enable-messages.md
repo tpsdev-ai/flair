@@ -7,7 +7,8 @@
   and listed a `--cimd-allowed-hosts` value as the shipped `allowedHosts`. It now
   reports the `${FLAIR_MCP_OAUTH}` reference and the allowed hosts that
   `config.yaml` ships, says the step writes nothing, and shows a
-  `--cimd-allowed-hosts` value as requested and not applied.
+  `--cimd-allowed-hosts` value as requested, pointing to the
+  `cimd-allowed-hosts` step for whether and when the run writes it.
 
   On a Fabric instance the `fabric-operator-deploy` step failed on every run, so a
   re-run after the operator's restart stopped there again. The step now runs
