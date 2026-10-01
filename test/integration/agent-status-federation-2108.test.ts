@@ -1,12 +1,12 @@
 // agent-status-federation-2108.test.ts — flair#2108, the federation half.
 //
-// A signed paired peer pushes a batch to POST /FederationSync. The merge writes
-// the Agent table through the RAW table (resources/Federation.ts), bypassing the
-// Agent resource's status guard. flair#2108 closes that: an inbound Agent record
-// that would CHANGE an existing local principal's `status` is refused — the
-// federation path carries no verified administrator authority for that principal
-// — and the WHOLE record is skipped, so a second field in the same record does
-// not land either. Any other field still syncs.
+// A known peer with a pinned key pushes a signed batch to POST /FederationSync.
+// The merge writes the Agent table through the RAW table
+// (resources/Federation.ts), not through the Agent resource's status guard.
+// flair#2108: an inbound Agent record whose `status` differs from an existing
+// local principal's stored value is skipped WHOLE — the federation path carries
+// no verified administrator authority for that principal — so a second field in
+// the same record does not land either. A separate runtime-only record syncs.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
@@ -63,7 +63,7 @@ async function sync(data: Record<string, unknown>): Promise<any> {
   return JSON.parse(text);
 }
 
-describe("flair#2108 — an inbound federated record cannot change an existing principal's status", () => {
+describe("flair#2108 — an inbound federated record cannot change an existing local principal's status", () => {
   beforeAll(async () => {
     harper = await startHarper();
     assertOwnInstance(harper);
@@ -80,7 +80,7 @@ describe("flair#2108 — an inbound federated record cannot change an existing p
 
   afterAll(async () => { if (harper) await stopHarper(harper); });
 
-  test("a peer record that changes `status` is refused whole: status and a second field are unchanged", async () => {
+  test("a peer record whose `status` differs from the stored value is skipped whole: status and a second field are unchanged", async () => {
     const out = await sync({ data: { id: TARGET, status: "deactivated", runtime: "remote" } });
     expect(out.skippedReasons?.agent_status_not_federated, JSON.stringify(out)).toBe(1);
     const rec = await rawAgent(TARGET);
@@ -88,7 +88,7 @@ describe("flair#2108 — an inbound federated record cannot change an existing p
     expect(rec?.runtime, "a second field in the refused record landed (partial merge)").toBe("local");
   }, 30_000);
 
-  test("CONTROL: a peer record changing only another field still syncs", async () => {
+  test("CONTROL: a separate runtime-only peer record syncs", async () => {
     const out = await sync({ data: { id: TARGET, runtime: "remote2" } });
     expect(out.merged, JSON.stringify(out)).toBe(1);
     const rec = await rawAgent(TARGET);

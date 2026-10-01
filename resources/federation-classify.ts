@@ -55,11 +55,13 @@ export type SkipReason =
   // in the sync's table set either (an inbound "MemoryHostSource" row skips as
   // "unknown_table").
   | "pointer_not_federated"
-  // ─── flair#2108 (an inbound record may not change an existing principal) ──
+  // ─── flair#2108 (an inbound Agent `status` that differs from the stored one) ──
   // Emitted by FederationSync.post before the raw put: an inbound Agent record
-  // whose data would CHANGE an existing local Agent's `status`. The federation
-  // path carries no verified administrator authority for that principal, so the
-  // whole record is skipped rather than merged without `status`.
+  // whose data carries a `status` that differs from an existing local Agent's
+  // stored value, also when the record is older than the stored row and would
+  // lose the last-write-wins merge. The federation path carries no verified
+  // administrator authority for that principal, so the whole record is skipped
+  // rather than merged without `status`.
   | "agent_status_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.
@@ -257,12 +259,15 @@ export function classifyRecord(
 }
 
 /**
- * flair#2108: would this inbound record CHANGE an existing local principal's
- * `status`? True only for an Agent record whose data carries `status` and that
- * value differs from the stored row's. The federation path carries no verified
- * administrator authority for the principal it changes (the wire carries an
- * originator signature and an optional principalId, not an admin claim), so a
- * true answer skips the whole record before the raw put.
+ * flair#2108: does this inbound Agent record carry a `status` that differs from
+ * an existing local principal's stored value? True only when the record is for
+ * the Agent table, a local row exists, and the record's data carries `status`
+ * with a value different from the row's. `updatedAt` is not compared, so a
+ * record older than the stored row, which would lose the last-write-wins merge,
+ * is also true. The federation path carries no verified administrator authority
+ * for the principal (the batch is signed, and a record signature may also be
+ * present; neither is an admin claim), so a true answer skips the whole record
+ * before the raw put.
  */
 export function inboundChangesExistingPrincipalStatus(
   record: SyncRecord,

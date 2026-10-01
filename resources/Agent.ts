@@ -93,12 +93,10 @@ export class Agent extends (databases as any).flair.Agent {
    */
   private async authorizePrincipalWrite(content: any): Promise<Response | null> {
     const auth = await resolveAgentAuth((this as any).getContext?.());
-    // Admit ONLY a trusted internal call and an administrator. Every other
-    // verdict — anonymous, a non-admin agent, or a verdict kind the auth
-    // resolver does not define — is refused before any mutation. (The old
-    // `auth.kind !== "agent"` form admitted any unknown kind; the check that
-    // read tpsAgent treated a missing agent as trusted, so anonymous slipped
-    // through.)
+    // A trusted internal call and an administrator are admitted here. Anonymous
+    // and any verdict kind the auth resolver does not define are refused before
+    // any mutation. A non-admin agent goes on to the rules below: a body with
+    // `status` is refused (rule 3); without it, rules 1 and 2 decide.
     const admission = admitPrincipalWrite(auth);
     if (admission === "internal" || admission === "admin") return null;
     if (admission === "deny") {

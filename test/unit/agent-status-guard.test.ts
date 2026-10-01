@@ -1,10 +1,12 @@
 // agent-status-guard.test.ts — flair#2108. `Agent.status` is the principal's
-// lifecycle state (anything other than "active" deactivates it). Through the
-// Agent resource, a write that carries `status` is admitted only from a trusted
-// internal call or an administrator; an authenticated non-admin agent's write
-// that includes it is refused whole. (A federation peer's record merges through
-// the raw table and refuses an inbound status change on an existing principal
-// separately — resources/Federation.ts.)
+// lifecycle state (any present value other than "active" deactivates it; a
+// missing or undefined `status` is treated as active). The Agent resource's PUT
+// and PATCH admit a trusted internal call and an administrator; a non-admin
+// agent's PUT or PATCH that includes `status` is refused whole, and one without
+// it goes on to the other per-record rules. (A federation peer's record merges
+// through the raw table; resources/Federation.ts separately skips an inbound
+// Agent record whose `status` differs from an existing local principal's stored
+// value.)
 //
 // These pin the pure decisions the Agent resource applies: which bodies count as
 // a status write, the admission of caller verdicts (an unexpected verdict is
@@ -66,7 +68,7 @@ describe("statusWriteRefusal — the decision the resource applies", () => {
   });
 });
 
-describe("admitPrincipalWrite — only internal and an admin agent", () => {
+describe("admitPrincipalWrite — admits internal and an admin agent, routes a non-admin agent on, denies the rest", () => {
   it("admits a trusted internal call and an administrator", () => {
     expect(admitPrincipalWrite({ kind: "internal" })).toBe("internal");
     expect(admitPrincipalWrite({ kind: "agent", isAdmin: true })).toBe("admin");

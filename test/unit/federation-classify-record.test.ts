@@ -150,8 +150,11 @@ describe("classifyRecord — skip categorization", () => {
 describe("inboundChangesExistingPrincipalStatus (flair#2108)", () => {
   const agentRecord = (status: unknown) => ({ table: "Agent", id: "a1", data: { id: "a1", status }, updatedAt: "x", originatorInstanceId: "p" });
 
-  test("is true when an Agent merge would change an existing row's status", () => {
+  test("is true when an Agent record's status differs from an existing row's", () => {
     expect(inboundChangesExistingPrincipalStatus(agentRecord("deactivated"), { id: "a1", status: "active" })).toBe(true);
+    // updatedAt is not compared: a record older than the stored row is also true.
+    const older = { ...agentRecord("deactivated"), updatedAt: "2000-01-01T00:00:00.000Z" };
+    expect(inboundChangesExistingPrincipalStatus(older, { id: "a1", status: "active", updatedAt: "2100-01-01T00:00:00.000Z" })).toBe(true);
   });
 
   test("is false when the status is unchanged, absent, or there is no local row", () => {
