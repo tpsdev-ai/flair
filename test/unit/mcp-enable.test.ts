@@ -661,8 +661,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
 
   test.each([
     ["https://flair.example.com", `https://flair.example.com:${HOSTED_OPS_PORT}/`],
-    ["https://flair.example.com:443/some/path?x=1", `https://flair.example.com:${HOSTED_OPS_PORT}/`],
-    ["flair.example.com", `https://flair.example.com:${HOSTED_OPS_PORT}/`],
+    ["https://flair.example.com/", `https://flair.example.com:${HOSTED_OPS_PORT}/`],
     ["http://10.0.0.5:8443", `http://10.0.0.5:${HOSTED_OPS_PORT}/`],
   ])("hostedOrigin %p resolves to its host at the hosted ops port", async (hostedOrigin, expected) => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
@@ -672,20 +671,23 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   });
 
   test.each([
-    ["a bare host name", { opsPortOrUrl: "flair.example.com" }, `opsPortOrUrl "flair.example.com" names`],
-    ["host:port with no scheme", { opsPortOrUrl: "127.0.0.1:19925" }, `opsPortOrUrl "127.0.0.1:19925" names`],
-    ["a non-http scheme", { opsPortOrUrl: "ftp://ops.example.com:21" }, `opsPortOrUrl "ftp://ops.example.com:21" names`],
-    ["a URL with a path", { opsPortOrUrl: "http://127.0.0.1:19925/ops" }, `opsPortOrUrl "http://127.0.0.1:19925/ops" names`],
-    ["a URL with a query", { opsPortOrUrl: "http://127.0.0.1:19925/?a=1" }, `opsPortOrUrl "http://127.0.0.1:19925/?a=1" names`],
-    ["port 0", { opsPortOrUrl: 0 }, "opsPortOrUrl 0 names"],
-    ["port 65536", { opsPortOrUrl: 65536 }, "opsPortOrUrl 65536 names"],
-    ["a fractional port", { opsPortOrUrl: 19925.5 }, "opsPortOrUrl 19925.5 names"],
-    ["a non-string, non-number", { opsPortOrUrl: null }, "opsPortOrUrl (null) names"],
-    ["both forms", { opsPortOrUrl: 19925, hostedOrigin: "https://flair.example.com" }, `got both opsPortOrUrl 19925 and hostedOrigin "https://flair.example.com"`],
+    ["a bare host name", { opsPortOrUrl: "flair.example.com" }, "opsPortOrUrl <unparseable value> names"],
+    ["host:port with no scheme", { opsPortOrUrl: "127.0.0.1:19925" }, "opsPortOrUrl <unparseable value> names"],
+    ["a non-http scheme", { opsPortOrUrl: "ftp://ops.example.com:21" }, "opsPortOrUrl ftp://ops.example.com names"],
+    ["a URL with a path", { opsPortOrUrl: "http://127.0.0.1:19925/ops" }, "opsPortOrUrl http://127.0.0.1:19925 names"],
+    ["a URL with a query", { opsPortOrUrl: "http://127.0.0.1:19925/?a=1" }, "opsPortOrUrl http://127.0.0.1:19925 names"],
+    ["port 0", { opsPortOrUrl: 0 }, "opsPortOrUrl <unparseable value> names"],
+    ["port 65536", { opsPortOrUrl: 65536 }, "opsPortOrUrl <unparseable value> names"],
+    ["a fractional port", { opsPortOrUrl: 19925.5 }, "opsPortOrUrl <unparseable value> names"],
+    ["a non-string, non-number", { opsPortOrUrl: null }, "opsPortOrUrl <unparseable value> names"],
+    ["both forms", { opsPortOrUrl: 19925, hostedOrigin: "https://flair.example.com" }, "got both opsPortOrUrl <unparseable value> and hostedOrigin https://flair.example.com"],
     ["neither form", {}, "got neither opsPortOrUrl nor hostedOrigin"],
-    ["an unparseable hostedOrigin", { hostedOrigin: "::::not a url::::" }, `hostedOrigin "::::not a url::::" as a served origin`],
-    ["a non-http hostedOrigin", { hostedOrigin: "ftp://flair.example.com" }, `hostedOrigin "ftp://flair.example.com" as a served origin`],
-  ])("refuses %s before any request, naming the value and the accepted forms", async (_label, target, named) => {
+    ["an unparseable hostedOrigin", { hostedOrigin: "::::not a url::::" }, "hostedOrigin <unparseable value> as a served origin"],
+    ["a non-http hostedOrigin", { hostedOrigin: "ftp://flair.example.com" }, "hostedOrigin ftp://flair.example.com as a served origin"],
+    ["a bare hostedOrigin", { hostedOrigin: "flair.example.com" }, "hostedOrigin <unparseable value> as a served origin"],
+    ["a hostedOrigin with a path", { hostedOrigin: "https://flair.example.com/path" }, "hostedOrigin https://flair.example.com as a served origin"],
+    ["a hostedOrigin with a query", { hostedOrigin: "https://flair.example.com/?x=1" }, "hostedOrigin https://flair.example.com as a served origin"],
+  ])("refuses %s before any request, showing only parsed URL components and the accepted forms", async (_label, target, named) => {
     const attempted: string[] = [];
     const fetchImpl = (async (url: any) => {
       attempted.push(String(url));
@@ -698,16 +700,17 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err!.message).toContain(named);
     expect(err!.message).toContain("Accepted, exactly one of: opsPortOrUrl as a port number (1-65535) on 127.0.0.1");
-    expect(err!.message).toContain(`hostedOrigin as an http:// or https:// URL or a bare host name`);
+    expect(err!.message).toContain(`hostedOrigin as the same canonical http:// or https:// origin form`);
+    expect(err!.message).toContain("exactly equal its parsed URL origin or that origin followed by /");
     expect(err!.message).toContain("No request was sent.");
     expect(attempted).toEqual([]);
   });
 
   test.each([
-    [{ opsPortOrUrl: "http://user:s3cret@127.0.0.1:19925" }, `"http://<credentials removed>@127.0.0.1:19925"`, ["user", "s3cret"]],
-    [{ hostedOrigin: "user:s3cret@flair.example.com" }, `"<credentials removed>@flair.example.com"`, ["user", "s3cret"]],
-    [{ opsPortOrUrl: "https://alice@private.invalid:pw123@ops.example.com" }, `"https://<credentials removed>@ops.example.com"`, ["alice", "private.invalid", "pw123"]],
-    [{ hostedOrigin: "https://alice@private.invalid:pw123@flair.example.com" }, `"https://<credentials removed>@flair.example.com"`, ["alice", "private.invalid", "pw123"]],
+    [{ opsPortOrUrl: "http://user:s3cret@127.0.0.1:19925" }, "http://127.0.0.1:19925", ["user", "s3cret"]],
+    [{ hostedOrigin: "user:s3cret@flair.example.com" }, "<unparseable value>", ["user", "s3cret"]],
+    [{ opsPortOrUrl: "https://alice@private.invalid:pw123@ops.example.com" }, "https://ops.example.com", ["alice", "private.invalid", "pw123"]],
+    [{ hostedOrigin: "https://alice@private.invalid:pw123@flair.example.com" }, "https://flair.example.com", ["alice", "private.invalid", "pw123"]],
   ])("refuses a target carrying credentials, and the message does not repeat them: %p", async (target, shown, hidden) => {
     const attempted: string[] = [];
     const fetchImpl = (async (url: any) => {
@@ -719,10 +722,36 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
       (e: Error) => e,
     );
     expect(err).toBeInstanceOf(Error);
-    expect(err!.message).toContain(shown);
     for (const part of hidden) expect(err!.message).not.toContain(part);
+    expect(err!.message).toContain(shown);
     expect(attempted).toEqual([]);
   });
+
+  test.each(([
+    "https:/flair.example.com",
+    "https:\n//alice:pw123@ops.example.com",
+    "https://ops.example.com/?",
+    "https://ops.example.com/#",
+  ] as const).flatMap((value) => (["opsPortOrUrl", "hostedOrigin"] as const).map((field) => [value, field] as const)))(
+    "rejects noncanonical URL %p as %s without echoing caller text",
+    async (value, field) => {
+      const attempted: string[] = [];
+      const fetchImpl = (async (url: any) => {
+        attempted.push(String(url));
+        throw new Error("no request expected");
+      }) as typeof fetch;
+      const err = await provisionIdpIdentityMapping({ ...MAPPING, [field]: value } as any, { fetchImpl }).then(
+        () => null,
+        (e: Error) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).toContain("Accepted, exactly one of:");
+      expect(err!.message).not.toContain(value);
+      expect(err!.message).not.toContain("alice");
+      expect(err!.message).not.toContain("pw123");
+      expect(attempted).toEqual([]);
+    },
+  );
 
   test("a 404 from an address the caller named does not say `flair mcp enable` derived it", async () => {
     const { fetchImpl } = mockOpsFetch({ failFind: true, failFindStatus: 404 });

@@ -1095,15 +1095,17 @@ export type IdentityMappingOpsTarget =
   | {
       /**
        * The ops API itself. A number is a port on 127.0.0.1. A string is the ops
-       * API's own http(s) URL, used with its own host and port.
+       * API's own canonical http(s) origin, optionally followed by `/`, used
+       * with its own host and port.
        */
       opsPortOrUrl: number | string;
       hostedOrigin?: never;
     }
   | {
       /**
-       * A served origin (the instance URL). The ops calls go to its host at
-       * HOSTED_OPS_PORT, the address `resolveOpsUrl` gives for the same string.
+       * A canonical http(s) served origin, optionally followed by `/`. The ops
+       * calls go to its host at HOSTED_OPS_PORT, the address `resolveOpsUrl`
+       * gives for the same string.
        */
       hostedOrigin: string;
       opsPortOrUrl?: never;
@@ -1121,17 +1123,39 @@ export type IdentityMappingParams = IdentityMappingOpsTarget & {
 
 const IDENTITY_MAPPING_TARGET_FORMS =
   `Accepted, exactly one of: opsPortOrUrl as a port number (1-65535) on 127.0.0.1, or as the ops API's own ` +
-  `http:// or https:// URL with no path, query, fragment or credentials, used with its own host and port; or ` +
-  `hostedOrigin as an http:// or https:// URL or a bare host name (read as https), without credentials, ` +
-  `whose host is used at port ${HOSTED_OPS_PORT}. No request was sent.`;
+  `canonical http:// or https:// origin, optionally followed by /, with no credentials, non-root path, query or fragment, used with its own host and port; or ` +
+  `hostedOrigin as the same canonical http:// or https:// origin form, whose host is used at port ${HOSTED_OPS_PORT}. ` +
+  `The string must exactly equal its parsed URL origin or that origin followed by /. No request was sent.`;
 
-/** A refused target as the error shows it: strings quoted, credentials cut. */
+/** Build a refused target's display only from parsed URL components. Never
+ *  include caller text: userinfo, paths and even malformed text are untrusted.
+ *  A URL without a hostname gets the same placeholder as an unparseable one. */
 function showOpsTarget(value: unknown): string {
-  if (typeof value === "number") return String(value);
-  if (typeof value !== "string") return `(${value === null ? "null" : typeof value})`;
-  // URL userinfo ends at the last @ in the authority; earlier @s may be part
-  // of the username or password, so redact through the last one.
-  return JSON.stringify(value.replace(/^([^@/?#]*:\/\/)?[^/?#]*@/, "$1<credentials removed>@"));
+  if (typeof value !== "string") return "<unparseable value>";
+  try {
+    const u = new URL(value);
+    if (!u.hostname) return "<unparseable value>";
+    return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+  } catch {
+    return "<unparseable value>";
+  }
+}
+
+/** A URL string is accepted only when parsing leaves its origin spelling
+ *  unchanged (apart from an optional `/`). This also rejects empty ? and #. */
+function canonicalHttpOrigin(value: unknown): URL | null {
+  if (typeof value !== "string") return null;
+  try {
+    const u = new URL(value);
+    if (
+      (u.protocol === "http:" || u.protocol === "https:") &&
+      !u.username && !u.password &&
+      (value === u.origin || value === `${u.origin}/`)
+    ) return u;
+  } catch {
+    // A malformed URL is not an ops target.
+  }
+  return null;
 }
 
 /** Resolve the ops target, or throw naming the value and the accepted forms. */
@@ -1140,30 +1164,24 @@ function identityMappingOpsUrl(target: IdentityMappingOpsTarget): { url: string;
   const refuse = (what: string): never => {
     throw new Error(`Identity mapping: ${what}. ${IDENTITY_MAPPING_TARGET_FORMS}`);
   };
-  const isHttp = (u: URL) => u.protocol === "http:" || u.protocol === "https:";
-
   if (opsPortOrUrl !== undefined && hostedOrigin !== undefined) {
     return refuse(`got both opsPortOrUrl ${showOpsTarget(opsPortOrUrl)} and hostedOrigin ${showOpsTarget(hostedOrigin)}`);
   }
   if (hostedOrigin !== undefined) {
-    const u = typeof hostedOrigin === "string" ? hostedOpsUrl(hostedOrigin) : null;
-    if (!u || !isHttp(u) || u.username || u.password) {
+    const u = canonicalHttpOrigin(hostedOrigin);
+    if (!u) {
       return refuse(`cannot read hostedOrigin ${showOpsTarget(hostedOrigin)} as a served origin`);
     }
-    return { url: u.toString(), hosted: true };
+    u.port = String(HOSTED_OPS_PORT);
+    return { url: `${u.origin}/`, hosted: true };
   }
   if (opsPortOrUrl === undefined) return refuse("got neither opsPortOrUrl nor hostedOrigin");
   if (typeof opsPortOrUrl === "number" && Number.isInteger(opsPortOrUrl) && opsPortOrUrl >= 1 && opsPortOrUrl <= 65535) {
     return { url: `http://127.0.0.1:${opsPortOrUrl}/`, hosted: false };
   }
   if (typeof opsPortOrUrl === "string") {
-    let u: URL | null = null;
-    try {
-      u = new URL(opsPortOrUrl);
-    } catch {
-      u = null;
-    }
-    if (u && isHttp(u) && !u.username && !u.password && u.pathname === "/" && !u.search && !u.hash) {
+    const u = canonicalHttpOrigin(opsPortOrUrl);
+    if (u) {
       return { url: `${u.origin}/`, hosted: false };
     }
   }
