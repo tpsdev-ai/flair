@@ -38,6 +38,8 @@ import {
   mcpStatus,
   checkLocalOriginRefusal,
   selfVerifyMcpMetadata,
+  cimdAllowedHostsFromFlag,
+  claudeAiExcludedNote,
   type EnableMcpResult,
   type SecretsMechanism,
 } from "../lib/mcp-enable.js";
@@ -459,6 +461,25 @@ async function promptText(question: string): Promise<string> {
   return answer.trim();
 }
 
+/**
+ * flair#2113 review: the closing lines of a successful `flair mcp enable`.
+ * They claim only what the run checked: the self-verify step's OAuth metadata
+ * check (the /mcp route itself is not probed), and, when this run confirmed a
+ * --cimd-allowed-hosts list (ensured it in config.yaml, writing the list only
+ * if the file did not already hold that exact list, and read it back), whether
+ * that list includes claude.ai. With no flag the command does not inspect
+ * allowedHosts, so it says nothing about claude.ai.
+ */
+export function enableSuccessLines(result: EnableMcpResult): string[] {
+  const lines = [
+    `${render.icons.ok} ${render.wrap(render.c.bold, "The OAuth metadata check passed.")} The /mcp route itself was not probed.`,
+  ];
+  const claudeAiNote = claudeAiExcludedNote(result.cimdAllowedHosts);
+  if (claudeAiNote) lines.push(`${render.icons.info} ${claudeAiNote}`);
+  lines.push("", result.pasteBlock ?? "", "");
+  return lines;
+}
+
 function printEnableSteps(result: EnableMcpResult): void {
   console.log(`\n${render.wrap(render.c.bold, "flair mcp enable")}${result.dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
   for (const s of result.steps) {
@@ -754,12 +775,21 @@ export function register(program: Command): void {
     .option("--principal-kind <human|agent>", "Kind for a newly-created principal", "human")
     .option("--secrets-mechanism <fabric-env-secrets|env-file>", "Override the shape-aware secrets mechanism (else auto-detected from --instance)")
     .option("--secrets-path <path>", "Override the secrets staging file path")
-    .option("--cimd-allowed-hosts <hosts>", "Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)")
+    .option(
+      "--cimd-allowed-hosts <hosts>",
+      "Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml " +
+        "this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds " +
+        "that exact list, then read back, before the restart. " +
+        "Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable " +
+        "process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. " +
+        "Always refused for a *.harperfabric.com instance. " +
+        "Without it the list is not changed (shipped: claude.ai,claude.com)",
+    )
     .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
-    .option("--dry-run", "Generate keys/tokens/config and validate inputs; skip every remote call")
+    .option("--dry-run", "Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
@@ -774,6 +804,15 @@ export function register(program: Command): void {
       const localCheck = checkLocalOriginRefusal(instance);
       if (localCheck.refused) {
         console.error(`${render.icons.error} ${localCheck.message}`);
+        process.exit(1);
+      }
+
+      // flair#2113: an invalid --cimd-allowed-hosts, or one for a Fabric
+      // instance, is refused here, before anything is asked for. An explicit empty
+      // value is refused too: it used to be dropped as if the flag were absent.
+      const cimdFlag = cimdAllowedHostsFromFlag(opts.cimdAllowedHosts, instance);
+      if (cimdFlag.error) {
+        console.error(`${render.icons.error} ${cimdFlag.error}`);
         process.exit(1);
       }
 
@@ -809,10 +848,6 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      const cimdAllowedHosts: string[] | undefined = opts.cimdAllowedHosts
-        ? String(opts.cimdAllowedHosts).split(",").map((h: string) => h.trim()).filter(Boolean)
-        : undefined;
-
       const result = await enableMcp(
         {
           instance,
@@ -828,7 +863,7 @@ export function register(program: Command): void {
           signingKeyFilePath: opts.signingKeyFile,
           secretsMechanism,
           secretsStagingPath: opts.secretsPath,
-          cimdAllowedHosts,
+          cimdAllowedHosts: cimdFlag.hosts,
           dryRun,
           confirmSecretsApplied: Boolean(opts.confirmSecretsApplied),
         },
@@ -876,9 +911,7 @@ export function register(program: Command): void {
         return;
       }
 
-      console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "claude.ai can now connect.")}\n`);
-      console.log(result.pasteBlock ?? "");
-      console.log("");
+      for (const line of enableSuccessLines(result)) console.log(line);
     });
 
   mcp

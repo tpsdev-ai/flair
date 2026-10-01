@@ -451,7 +451,7 @@ flair mcp enable
       description: Override the secrets staging file path
       attr: secretsPath
     --cimd-allowed-hosts <hosts>
-      description: Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)
+      description: Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused for a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
       attr: cimdAllowedHosts
     --signing-key-file <path>
       description: RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)
@@ -466,7 +466,7 @@ flair mcp enable
       description: Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
       attr: confirmSecretsApplied
     --dry-run
-      description: Generate keys/tokens/config and validate inputs; skip every remote call
+      description: Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
       attr: dryRun
     --json
       description: Print machine-readable JSON instead of a human summary
@@ -3076,12 +3076,12 @@ Options:
   --principal-kind <human|agent>                     Kind for a newly-created principal (default: "human")
   --secrets-mechanism <fabric-env-secrets|env-file>  Override the shape-aware secrets mechanism (else auto-detected from --instance)
   --secrets-path <path>                              Override the secrets staging file path
-  --cimd-allowed-hosts <hosts>                       Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)
+  --cimd-allowed-hosts <hosts>                       Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused for a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
   --signing-key-file <path>                          RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)
   --admin-pass <pass>                                Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
   --admin-user <name>                                Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
-  --dry-run                                          Generate keys/tokens/config and validate inputs; skip every remote call
+  --dry-run                                          Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
   --json                                             Print machine-readable JSON instead of a human summary
   -h, --help                                         display help for command
 

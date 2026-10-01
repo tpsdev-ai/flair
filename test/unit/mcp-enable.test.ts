@@ -18,7 +18,8 @@
  *   - the orchestration order (dry-run stops after the local/pure steps;
  *     the live path ends at self-verify — no DCR call after restart)
  *   - local-origin refusal (the exact addendum message, zero fetch calls)
- *   - dry-run (no remote calls, signing key still materializes on disk)
+ *   - dry-run (no remote calls and no file written: the signing-key step
+ *     reports the key a real run would reuse or generate — flair#2113)
  *   - self-verify failure names the step to re-run, never reports success
  *     on hope — including the new CIMD-not-advertised failure mode
  *   - disable symmetry (flag-off confirmation gate, then restart only)
@@ -28,7 +29,7 @@
  *     and never writes initialAccessToken/allowedRedirectUriHosts
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import yaml from "js-yaml";
@@ -798,18 +799,40 @@ describe("enableMcp — local-origin refusal", () => {
 });
 
 describe("enableMcp — dry-run", () => {
-  test("generates the signing key on disk and stops before any remote call", async () => {
+  test("writes no file: reports where a signing key would be generated, and stops before any remote call", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const paths = tempPaths();
+    const listingBefore = readdirSync(dir).sort();
+    const configBefore = readFileSync(paths.localConfigPath, "utf-8");
     const result = await enableMcp({ ...BASE_PARAMS, ...paths, dryRun: true }, { fetchImpl });
 
     expect(result.ok).toBe(true);
     expect(result.dryRun).toBe(true);
     expect(calls).toHaveLength(0);
-    expect(existsSync(paths.signingKeyFilePath)).toBe(true);
+    // flair#2113 review: --dry-run no longer creates the key.
+    expect(existsSync(paths.signingKeyFilePath)).toBe(false);
+    expect(readdirSync(dir).sort()).toEqual(listingBefore);
+    expect(readFileSync(paths.localConfigPath, "utf-8")).toBe(configBefore);
+    const keyStep = result.steps.find((s) => s.step === "signing-key");
+    expect(keyStep?.ok).toBe(true);
+    expect(keyStep?.detail).toContain(`no signing key at ${paths.signingKeyFilePath}; a run without --dry-run generates one there`);
+    expect(result.signingKeyFilePath).toBe(paths.signingKeyFilePath);
     expect(result.issuer).toBe(ISSUER);
     expect(result.resource).toBe(`${ISSUER}/mcp`);
     expect(result.callbackUrl).toBe(`${ISSUER}/oauth/github/callback`);
+  });
+
+  test("an existing signing key is reported as reused and left byte-identical", async () => {
+    const { fetchImpl, calls } = fullMockFetch();
+    const paths = tempPaths();
+    writeFileSync(paths.signingKeyFilePath, "EXISTING-KEY-BYTES", { mode: 0o600 });
+    const result = await enableMcp({ ...BASE_PARAMS, ...paths, dryRun: true }, { fetchImpl });
+
+    expect(result.ok).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(readFileSync(paths.signingKeyFilePath, "utf-8")).toBe("EXISTING-KEY-BYTES");
+    const keyStep = result.steps.find((s) => s.step === "signing-key");
+    expect(keyStep?.detail).toContain(`signing key found at ${paths.signingKeyFilePath}; a run without --dry-run reuses it`);
   });
 
   test("still fails at idp-credentials when required values are missing, even in dry-run", async () => {
@@ -863,7 +886,7 @@ describe("enableMcp — config-block step (flair#2116)", () => {
     expect(step!.detail).not.toContain("--cimd-allowed-hosts");
   });
 
-  test("labels --cimd-allowed-hosts as requested and not applied, never as the shipped list (flair#2116)", async () => {
+  test("labels --cimd-allowed-hosts as requested and points to the cimd-allowed-hosts step above, never as the shipped list (flair#2116)", async () => {
     const { fetchImpl } = fullMockFetch();
     const result = await enableMcp(
       { ...BASE_PARAMS, ...tempPaths(), dryRun: true, cimdAllowedHosts: ["example.com"] },
@@ -873,7 +896,13 @@ describe("enableMcp — config-block step (flair#2116)", () => {
     const shippedHosts = JSON.stringify(shippedMcpBlock().clientIdMetadataDocuments.allowedHosts);
     expect(step.detail).toContain(`clientIdMetadataDocuments.allowedHosts=${shippedHosts})`);
     expect(step.detail).not.toContain('allowedHosts=["example.com"]');
-    expect(step.detail).toContain('--cimd-allowed-hosts ["example.com"] was requested, and this command does not apply it');
+    expect(step.detail).toContain(
+      '--cimd-allowed-hosts ["example.com"] was requested; the cimd-allowed-hosts step above says whether and when this run writes it',
+    );
+    // "above": the step the pointer names ran, and was reported, before this one.
+    const cimdStep = result.steps.findIndex((s) => s.step === "cimd-allowed-hosts");
+    expect(cimdStep).toBeGreaterThanOrEqual(0);
+    expect(cimdStep).toBeLessThan(result.steps.indexOf(step));
   });
 });
 
