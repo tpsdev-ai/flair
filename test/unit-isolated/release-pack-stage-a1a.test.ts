@@ -40,6 +40,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -55,9 +56,27 @@ const WORKFLOW = join(REPO, ".github", "workflows", "release-publish.yml");
 const PACK_SCRIPT = join(REPO, "scripts", "ci", "release-pack.mjs");
 const PACKAGES: string[] = lockstepPackages();
 
-const SCRATCH = mkdtempSync(join(tmpdir(), "flair-a1a-"));
+// Resolved: the fake npm records process.cwd(), which is the real path (on
+// macOS, os.tmpdir() sits under the /var -> /private/var symlink).
+const SCRATCH = mkdtempSync(join(realpathSync(tmpdir()), "flair-a1a-"));
 const BIN = join(SCRATCH, "bin");
 mkdirSync(BIN, { recursive: true });
+
+// The stage shell runs on ubuntu-latest and its `find -printf` needs GNU find.
+// On darwin, link GNU find (`gfind`) into BIN, first on the stage shell's PATH,
+// as `find`; without `gfind`, the runtime cases fail with this message. Linux:
+// no change.
+const GNU_FIND_MISSING = linkGnuFindOnDarwin();
+
+function linkGnuFindOnDarwin(): string | null {
+  if (process.platform !== "darwin") return null;
+  const gfind = Bun.which("gfind");
+  if (!gfind) {
+    return "the stage-shell cases need GNU find, and no `gfind` is on PATH: install GNU findutils (`brew install findutils`)";
+  }
+  symlinkSync(gfind, join(BIN, "find"));
+  return null;
+}
 
 afterAll(() => {
   rmSync(SCRATCH, { recursive: true, force: true });
@@ -731,6 +750,7 @@ function runStageShell(
   envExtra: Record<string, string> = {},
   scratchFiles: Record<string, string> = {},
 ): RunResult {
+  if (GNU_FIND_MISSING) throw new Error(GNU_FIND_MISSING);
   installFakeNpm();
   installFakeGh();
   const scratch = mkdtempSync(join(SCRATCH, "run-"));
