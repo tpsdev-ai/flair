@@ -59,6 +59,8 @@ let baseUrl: string;
 let registeredPubKey: Buffer | null;
 let readAuthHeader: string | null;
 let readPath: string | null;
+/** Rows `agent add` has inserted. Lookups and the post-insert read-back read this. */
+let agents: Map<string, { id: string; name?: string; publicKey?: string }>;
 
 function json(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -71,20 +73,37 @@ beforeEach(async () => {
   registeredPubKey = null;
   readAuthHeader = null;
   readPath = null;
+  agents = new Map();
 
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       if (req.method === "POST") {
-        // `flair agent add` seeds the Agent via the ops API — capture the public
-        // key it registered so we can verify the client's signature later.
+        // `flair agent add` looks the id up, inserts, then reads the row back.
+        // Answer those the way Harper's operations API does: an array of rows,
+        // and an insert that is visible to the following search.
+        let payload: { operation?: string; table?: string; search_value?: string; records?: Array<{ id?: string; name?: string; publicKey?: string }> } = {};
         try {
-          const payload = JSON.parse(body || "{}");
-          const pub = payload?.records?.[0]?.publicKey;
-          if (typeof pub === "string") registeredPubKey = Buffer.from(pub, "base64url");
+          payload = JSON.parse(body || "{}");
         } catch {
-          /* not the insert we care about */
+          /* not the ops body we care about */
+        }
+        if (payload.operation === "search_by_value" && payload.table === "Agent") {
+          const row = agents.get(String(payload.search_value ?? ""));
+          return json(res, 200, row ? [row] : []);
+        }
+        const rec = payload.records?.[0];
+        const pub = rec?.publicKey;
+        if (typeof pub === "string") registeredPubKey = Buffer.from(pub, "base64url");
+        if (
+          payload.operation === "insert" &&
+          payload.table === "Agent" &&
+          rec &&
+          typeof rec.id === "string" &&
+          !agents.has(rec.id)
+        ) {
+          agents.set(rec.id, { id: rec.id, name: rec.name, publicKey: pub });
         }
         return json(res, 200, { ok: true });
       }

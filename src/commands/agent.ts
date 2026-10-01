@@ -1,14 +1,15 @@
 /**
  * agent.ts — `flair agent` command group (flair#1630 / epic #1618).
  *
- * Extracted from src/cli.ts with ZERO behavior change. Owns the `agent`
- * commander registration (`add`, `list`/`show`, `remove`, ...) and its action
- * handlers — including the Ed25519 keypair generation in `agent add` and the
- * interactive-removal flow in `agent remove`, both moved verbatim.
+ * Extracted from src/cli.ts. Owns the `agent` commander registration
+ * (`add`, `list`/`show`, `remove`, ...) and its action handlers, including
+ * Ed25519 keypair generation in `agent add` and the interactive removal flow.
  *
- * SECURITY: this module only relocates existing identity/auth logic. It does not
- * add or alter any registration, signing, key-generation, or key-permission
- * behavior.
+ * `agent add` (flair#2126) looks up the id before it writes. An existing Agent
+ * row is refused — the stored public key is left unchanged — and the message
+ * names `flair agent rotate-key` or `flair agent remove` first. A new id is
+ * inserted, then read back; `registered` is printed only when the stored
+ * public key matches the key this command wrote.
  *
  * Shared cli.ts-local helpers are injected via bindCli() so this module never
  * imports src/cli.ts (avoids the import cycle and keeps it inside the strict
@@ -87,6 +88,111 @@ const seedAgentViaOpsApi = (
 ): Promise<void> => cli.seedAgentViaOpsApi(opsPortOrUrl, agentId, pubKeyB64url, adminUser, adminPass);
 const agentRecordIsAdmin = (record: any): boolean => cli.agentRecordIsAdmin(record);
 
+interface StoredAgent {
+  id: string;
+  name?: string;
+  publicKey?: string;
+}
+
+/** Operations API URL, same shape as `seedAgentViaOpsApi` (trailing slash). */
+function opsApiUrl(opsPortOrUrl: number | string): string {
+  return typeof opsPortOrUrl === "number"
+    ? `http://127.0.0.1:${opsPortOrUrl}/`
+    : `${opsPortOrUrl.replace(/\/$/, "")}/`;
+}
+
+/**
+ * Parse an operations `search_by_value` body. An array (including empty) is a
+ * real answer. Anything else is unreadable — the caller must not treat it as
+ * "no such agent" and must not claim a registration succeeded.
+ */
+function parseAgentRows(body: unknown): StoredAgent[] | null {
+  if (!Array.isArray(body)) return null;
+  const rows: StoredAgent[] = [];
+  for (const row of body) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as { id?: unknown; name?: unknown; publicKey?: unknown };
+    if (typeof rec.id !== "string" || rec.id.length === 0) continue;
+    rows.push({
+      id: rec.id,
+      ...(typeof rec.name === "string" ? { name: rec.name } : {}),
+      ...(typeof rec.publicKey === "string" ? { publicKey: rec.publicKey } : {}),
+    });
+  }
+  return rows;
+}
+
+function agentAlreadyExistsMessage(id: string): string {
+  return (
+    `Error: Agent '${id}' already exists; its stored public key was left unchanged. ` +
+    `Run \`flair agent rotate-key ${id}\` on the Flair host to replace the key, ` +
+    `or \`flair agent remove ${id}\` first and then \`flair agent add ${id}\`.`
+  );
+}
+
+function agentKeyNotStoredMessage(id: string, storedPublicKey: string | undefined): string {
+  const found = storedPublicKey
+    ? `The stored public key is '${storedPublicKey}', which is not the key this command wrote.`
+    : `Reading the record back found no Agent row for '${id}'.`;
+  return (
+    `Error: Agent '${id}' was not stored with the public key this command wrote. ${found} ` +
+    `Run \`flair agent rotate-key ${id}\` on the Flair host to replace the key, ` +
+    `or \`flair agent remove ${id}\` first and then \`flair agent add ${id}\`.`
+  );
+}
+
+/**
+ * Read one Agent row by id through the operations API. Exits the process when
+ * the lookup itself fails — an unread table is not "no such agent".
+ * Returns null only when the search succeeded and no row has this id.
+ */
+async function readStoredAgent(
+  opsPortOrUrl: number | string,
+  id: string,
+  adminUser: string,
+  adminPass: string,
+): Promise<StoredAgent | null> {
+  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  let res: Response;
+  try {
+    res = await fetch(opsApiUrl(opsPortOrUrl), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+      body: JSON.stringify({
+        operation: "search_by_value",
+        database: "flair",
+        table: "Agent",
+        search_attribute: "id",
+        search_value: id,
+        get_attributes: ["id", "name", "publicKey"],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error: could not read Agent '${id}': ${message}`);
+    process.exit(1);
+  }
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    console.error(`Error: could not read Agent '${id}' (${res.status}): ${text}`);
+    process.exit(1);
+  }
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : [];
+  } catch {
+    console.error(`Error: could not read Agent '${id}': operations API returned a body that is not JSON.`);
+    process.exit(1);
+  }
+  const rows = parseAgentRows(body);
+  if (rows === null) {
+    console.error(`Error: could not read Agent '${id}': operations API returned an unexpected body.`);
+    process.exit(1);
+  }
+  return rows.find((row) => row.id === id) ?? null;
+}
+
 /** Register the `flair agent` command group (flair#1630). */
 export function register(program: Command): void {
   // ─── flair agent ─────────────────────────────────────────────────────────────
@@ -95,7 +201,7 @@ export function register(program: Command): void {
 
   agent
     .command("add <id>")
-    .description("Register a new agent in a running Flair instance")
+    .description("Register a new agent. Refuses an id whose Agent record already exists")
     .option("--name <name>", "Display name (defaults to id)")
     .option("--port <port>", "Harper HTTP port")
     .option("--admin-pass <pass>", "Admin password for registration")
@@ -169,6 +275,17 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
+      // flair#2126 — Harper 5.2.8 skips an insert whose id already exists and
+      // still returns OK, so the seed helper's 409/"already exists" path never
+      // fires and the old public key stays. Look the id up first and refuse
+      // before any key file or insert. A later read-back covers a row that
+      // appears in the gap, or an insert that does not store this key.
+      const existing = await readStoredAgent(seedOpsTarget, id, adminUser, adminPass);
+      if (existing) {
+        console.error(agentAlreadyExistsMessage(id));
+        process.exit(1);
+      }
+
       mkdirSync(keysDir, { recursive: true });
       const privPath = privKeyPath(id, keysDir);
       const pubPath = pubKeyPath(id, keysDir);
@@ -190,13 +307,18 @@ export function register(program: Command): void {
       }
 
       await seedAgentViaOpsApi(seedOpsTarget, id, pubKeyB64url, adminUser, adminPass);
+      const stored = await readStoredAgent(seedOpsTarget, id, adminUser, adminPass);
+      if (!stored || stored.publicKey !== pubKeyB64url) {
+        console.error(agentKeyNotStoredMessage(id, stored?.publicKey));
+        process.exit(1);
+      }
       console.log(
         typeof seedOpsTarget === "string"
           ? `✅ Agent '${id}' (${name}) registered (ops: ${seedOpsTarget})`
           : `✅ Agent '${id}' (${name}) registered`,
       );
       console.log(`   Private key: ${privPath}`);
-      console.log(`   Public key:  ${pubKeyB64url}`);
+      console.log(`   Public key:  ${stored.publicKey}`);
       // flair#1280 — connector legibility at provisioning time: an OAuth /mcp
       // connector resolves its own token subject to an Agent via
       // Credential(kind:idp), NOT via this key, and the two identities are

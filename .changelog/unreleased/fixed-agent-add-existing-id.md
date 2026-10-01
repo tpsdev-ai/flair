@@ -1,0 +1,4 @@
+- **`flair agent add` refuses an id that already has an Agent record, and reports success only after the stored public key matches.**
+  Re-running add for an existing id used to print `registered` while Harper 5.2.8 left the old public key in place, so a newly generated key then failed with `invalid_signature`. The command looks the id up first. When a record is already there, it exits with an error that names the id and tells you to run `flair agent rotate-key` on the Flair host, or `flair agent remove` first. A new id is inserted as before; the command reads the row back and prints the stored public key only when it matches the key it just wrote.
+
+  > **Heads-up:** `flair agent add <id>` no longer finishes silently when that id already exists. Run `flair agent rotate-key <id>` on the Flair host to replace the key, or `flair agent remove <id>` before adding it again.

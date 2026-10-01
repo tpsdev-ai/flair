@@ -483,11 +483,15 @@ there, sends an `insert` for the Agent record, and prints, among other lines:
 ✅ Agent 'bob-the-bot' (bob-the-bot) registered (ops: <operations API URL>)
 ```
 
-If an Agent record with that id already exists, the insert leaves it unchanged,
-including its public key (Harper 5.2.8, the version Flair pins, skips an insert
-for an existing id), and the command still prints that line. Requests signed
-with a key that does not match the stored one then get `invalid_signature`
-(below).
+If an Agent record with that id already exists, the command stops before it
+writes a key file or an insert. It exits with an error that names the id and
+tells you to run `flair agent rotate-key <id>` on the Flair host (that command
+talks to the local operations API), or `flair agent remove <id>` and then
+`flair agent add` again. A new id is inserted, then read back. The command
+prints the line above, and the public key on the following line, only when
+the stored public key matches the key it wrote. A skipped insert or a
+different stored key is an error. Requests signed with a key that does not
+match the stored one still get `invalid_signature` (below).
 
 Configure the stdio adapter (`@tpsdev-ai/flair-mcp`) on the bot's host with
 `FLAIR_URL=https://flair.example.com` and `FLAIR_AGENT_ID=bob-the-bot`. With

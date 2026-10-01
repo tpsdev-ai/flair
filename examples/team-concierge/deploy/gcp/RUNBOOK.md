@@ -229,8 +229,8 @@ curl -u admin "$FLAIR_URL:9925/" \
 #    Expect `Keypair written:` — `Reusing existing key` means a stale keyfile
 #    survived step 6's cleanup and you have NOT rotated; delete
 #    ~/.flair/keys/concierge-gcp.key and re-run. Deleting the row first is
-#    load-bearing: against an existing row the hub keeps the OLD public key
-#    and the re-mint reports success anyway. Then re-run the 3b check.
+#    load-bearing: `flair agent add` refuses an existing id and leaves the
+#    old public key in place. Then re-run the 3b check.
 
 # 3. New key -> new secret version (note the version number it prints):
 gcloud secrets versions add concierge-gcp-flair-key \
@@ -258,10 +258,9 @@ above, not as the rotation itself.
 against a different hub than `FLAIR_URL`, or the secret holds a stale key
 (e.g. re-minted after upload), every memory op gets 401. Symptoms: chat
 works but recording fails; the instance's Cloud Logging shows adk-flair
-request errors. Fix: re-run step 3 against the right hub (against an
-existing Agent row the hub keeps the OLD public key while the command
-reports success — delete the row first, as in teardown step 3, or pick a
-new id + secret), push
+request errors. Fix: re-run step 3 against the right hub (`flair agent add` refuses an
+existing Agent row and leaves the old public key — delete the row first,
+as in teardown step 3, or pick a new id + secret), push
 the current keyfile as a **new secret version**
 (`gcloud secrets versions add concierge-gcp-flair-key --data-file=...`), and
 redeploy with `AGENT_ENGINE_ID=<id>` so the runtime picks it up.
