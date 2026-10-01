@@ -177,7 +177,11 @@ describe("resolveSkillManifest — org assignments and opt-outs (flair#2141 S1)"
   test("an opt-out applies only when its originatorInstanceId is this instance's id", () => {
     expect(resolveSkillManifest([optOut("instance-peer")], [], AGENT, org([usingFlair])).skills).toEqual([orgEntry]);
     expect(resolveSkillManifest([optOut(null)], [], AGENT, org([usingFlair])).skills).toEqual([orgEntry]);
-    expect(resolveSkillManifest([optOut(null)], [], AGENT, org([usingFlair], null)).skills).toEqual([]);
+  });
+
+  test("with this instance's id unknown (a failed identity read), no opt-out applies: unstamped or stamped, the org skill stays", () => {
+    expect(resolveSkillManifest([optOut(null)], [], AGENT, org([usingFlair], null)).skills).toEqual([orgEntry]);
+    expect(resolveSkillManifest([optOut(LOCAL)], [], AGENT, org([usingFlair], null)).skills).toEqual([orgEntry]);
   });
 
   test("a non-boolean optOut is refused in diagnostics and neither removes the org skill nor loads", () => {

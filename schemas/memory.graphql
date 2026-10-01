@@ -404,7 +404,7 @@ type OrgSkillAssignment @table(database: "flair") {
 
 # OrgSkillAssignmentHistory — one row per accepted write through
 # resources/OrgSkillAssignment.ts, appended in the write's transaction.
-# No @export and no resource class: no REST verb reaches it.
+# No @export and no resource class: there is no direct /OrgSkillAssignmentHistory route.
 type OrgSkillAssignmentHistory @table(database: "flair") {
   id: ID @primaryKey
   assignmentId: String! @indexed

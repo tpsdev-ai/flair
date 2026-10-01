@@ -3,7 +3,8 @@ import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { resolveStoredRow } from "./originator-instance.js";
 import { FORBIDDEN, NOT_FOUND, UNAUTH, makeAuthGate } from "./record-type-kit.js";
-import { withSharedWriteTransaction } from "./request-transaction.js";
+import { withKeyLock } from "./key-lock.js";
+import { withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { PRIORITY_RANK } from "./skill-provenance.js";
 import { soulWriteSource, type SoulWriteSource } from "./soul-write-policy.js";
 
@@ -22,7 +23,11 @@ import { soulWriteSource, type SoulWriteSource } from "./soul-write-policy.js";
  *
  * History: each accepted write appends an OrgSkillAssignmentHistory row
  * (actor, source class, a hash of the stored row before the write) in the
- * write's transaction.
+ * write's transaction. put, patch and delete hold a per-assignment lock shared
+ * by the threads of this Harper process (`withAssignmentLock`) while they read
+ * the stored row and commit, so two writes to one assignment through this
+ * process record distinct predecessors. Writes on other replicated nodes are
+ * not covered by that lock.
  */
 
 const TABLE = "OrgSkillAssignment";
@@ -103,6 +108,33 @@ async function appendHistory(
   }, context);
 }
 
+const LOCK_NAMESPACE = "flair-org-skill-assignment";
+/** The wait for another write to the same assignment: at most LOCK_ATTEMPTS × LOCK_WAIT_MS. */
+const LOCK_ATTEMPTS = 200;
+const LOCK_WAIT_MS = 10;
+
+/**
+ * Run `fn` holding this process's lock on assignment `id` (resources/key-lock.ts),
+ * so no other write to that assignment through this process reads or commits
+ * in between. `fn` must commit before it returns. 409 when the lock stays held
+ * past the wait; 503 when the store has no lock.
+ */
+async function withAssignmentLock(id: string, fn: () => Promise<unknown>): Promise<unknown> {
+  const store = (databases as any).flair.OrgSkillAssignment?.primaryStore;
+  const outcome = await withKeyLock(store, [LOCK_NAMESPACE, id], fn, LOCK_ATTEMPTS, LOCK_WAIT_MS);
+  if (outcome.kind === "done") return outcome.value;
+  if (outcome.kind === "busy") {
+    return new Response(JSON.stringify({
+      error: "org_skill_assignment_busy",
+      message: "another write to this assignment is still in progress; retry",
+    }), { status: 409, headers: { "Content-Type": "application/json" } });
+  }
+  return new Response(JSON.stringify({
+    error: "org_skill_assignment_lock_unavailable",
+    message: "the OrgSkillAssignment store has no per-key lock, so the write was refused",
+  }), { status: 503, headers: { "Content-Type": "application/json" } });
+}
+
 const authGate = makeAuthGate();
 
 export class OrgSkillAssignment extends (databases as any).flair.OrgSkillAssignment {
@@ -131,15 +163,15 @@ export class OrgSkillAssignment extends (databases as any).flair.OrgSkillAssignm
     if (!isRecord(content)) return badRequest("org_skill_assignment_requires_one_record", "send one assignment object");
     const fields = validFields(content);
     if (fields instanceof Response) return fields;
-    const stored = await resolveStoredRow(this, TABLE, content, () => super.get());
-    if (stored.denial) return stored.denial;
-    const at = new Date().toISOString();
-    const createdAt = typeof stored.row?.createdAt === "string" ? stored.row.createdAt : at;
-    const record = { id, ...fields, createdAt, updatedAt: at, writer: who.writer, sourceClass: who.sourceClass };
-    return withSharedWriteTransaction((this as any).getContext?.(), async (shared) => {
+    return withAssignmentLock(id, () => withOwnedTransaction((this as any).getContext?.(), async (shared) => {
+      const stored = await resolveStoredRow(this, TABLE, content, () => super.get());
+      if (stored.denial) return stored.denial;
+      const at = new Date().toISOString();
+      const createdAt = typeof stored.row?.createdAt === "string" ? stored.row.createdAt : at;
+      const record = { id, ...fields, createdAt, updatedAt: at, writer: who.writer, sourceClass: who.sourceClass };
       await appendHistory(shared, id, stored.row ? "update" : "create", stored.row, who, at);
       return super.put(record, context);
-    });
+    }));
   }
 
   async patch(content: any, query?: any) {
@@ -148,21 +180,21 @@ export class OrgSkillAssignment extends (databases as any).flair.OrgSkillAssignm
     const id = boundId(this);
     if (!id) return badRequest("org_skill_assignment_id_required", "address one assignment: PATCH /OrgSkillAssignment/<id>");
     if (!isRecord(content)) return badRequest("org_skill_assignment_requires_one_record", "send one assignment object");
-    const stored = await resolveStoredRow(this, TABLE, content, () => super.get());
-    if (stored.denial) return stored.denial;
-    if (!stored.row) return NOT_FOUND();
-    const merged: Record<string, unknown> = {};
-    for (const field of ["skillName", "skillRef", "priority"] as const) {
-      merged[field] = Object.hasOwn(content, field) ? content[field] : stored.row[field];
-    }
-    const fields = validFields(merged);
-    if (fields instanceof Response) return fields;
-    const at = new Date().toISOString();
-    const changes = { ...fields, updatedAt: at, writer: who.writer, sourceClass: who.sourceClass };
-    return withSharedWriteTransaction((this as any).getContext?.(), async (shared) => {
+    return withAssignmentLock(id, () => withOwnedTransaction((this as any).getContext?.(), async (shared) => {
+      const stored = await resolveStoredRow(this, TABLE, content, () => super.get());
+      if (stored.denial) return stored.denial;
+      if (!stored.row) return NOT_FOUND();
+      const merged: Record<string, unknown> = {};
+      for (const field of ["skillName", "skillRef", "priority"] as const) {
+        merged[field] = Object.hasOwn(content, field) ? content[field] : stored.row[field];
+      }
+      const fields = validFields(merged);
+      if (fields instanceof Response) return fields;
+      const at = new Date().toISOString();
+      const changes = { ...fields, updatedAt: at, writer: who.writer, sourceClass: who.sourceClass };
       await appendHistory(shared, id, "update", stored.row, who, at);
       return super.patch(changes, query);
-    });
+    }));
   }
 
   async delete(target?: any) {
@@ -170,13 +202,13 @@ export class OrgSkillAssignment extends (databases as any).flair.OrgSkillAssignm
     if (who instanceof Response) return who;
     const id = boundId(this);
     if (!id) return badRequest("org_skill_assignment_id_required", "address one assignment: DELETE /OrgSkillAssignment/<id>");
-    const stored = await resolveStoredRow(this, TABLE, undefined, () => super.get());
-    if (stored.denial) return stored.denial;
-    if (!stored.row) return NOT_FOUND();
-    const at = new Date().toISOString();
-    return withSharedWriteTransaction((this as any).getContext?.(), async (shared) => {
+    return withAssignmentLock(id, () => withOwnedTransaction((this as any).getContext?.(), async (shared) => {
+      const stored = await resolveStoredRow(this, TABLE, undefined, () => super.get());
+      if (stored.denial) return stored.denial;
+      if (!stored.row) return NOT_FOUND();
+      const at = new Date().toISOString();
       await appendHistory(shared, id, "delete", stored.row, who, at);
       return super.delete(target);
-    });
+    }));
   }
 }

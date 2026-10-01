@@ -479,7 +479,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **MemoryCandidate** | memory.graphql | yes | REM draft (`claim`, `status`, `scopeTag`, visibility ruling) |
 | **Asset** | memory.graphql | yes | Blob (`contentType`, `data`) owned by `agentId`, linked by `memoryId` |
 | **OrgSkillAssignment** | memory.graphql | yes | Org-scope skill assignment (`skillName`, `skillRef`, `priority`, server-stamped `writer` / `sourceClass`) |
-| **OrgSkillAssignmentHistory** | memory.graphql | no | One row per OrgSkillAssignment write (`assignmentId`, `op`, `actor`, `sourceClass`, `previousHash`) |
+| **OrgSkillAssignmentHistory** | memory.graphql | no | One row per accepted OrgSkillAssignment resource write (`assignmentId`, `op`, `actor`, `sourceClass`, `previousHash`) |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |

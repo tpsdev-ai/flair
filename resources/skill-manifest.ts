@@ -92,8 +92,9 @@ export interface OrgSkillInput {
   assignments: OrgSkillAssignmentRow[];
   /** The rows the `skillRef`s name, already passed through resolvableSkillRows. */
   rows: SkillRow[];
-  /** This instance's id, or null when it has none. An opt-out applies only
-   *  when its Soul row's `originatorInstanceId` equals it. */
+  /** This instance's id, or null when it is unknown (no identity row, or a
+   *  failed read). An opt-out applies only when this is a non-empty string
+   *  and its Soul row's `originatorInstanceId` equals it. */
   instanceId: string | null;
 }
 
@@ -198,9 +199,10 @@ type Candidate = { input: SkillAssignmentInput; scope: SkillScope; skillRef?: un
  * rows, `rows` the skill rows its own names may resolve to (see
  * resolvableSkillRows), `org` the org assignments it receives. A Soul row with
  * `metadata.optOut: true` is an opt-out, never a candidate: it removes the org
- * assignments with that name before the priority rules, when its
- * `originatorInstanceId` is `org.instanceId`. `skills` is sorted by name;
- * `diagnostics` by name, decision, source, priority, reason and scope.
+ * assignments with that name before the priority rules, when `org.instanceId`
+ * is a non-empty string and the row's `originatorInstanceId` equals it.
+ * `skills` is sorted by name; `diagnostics` by name, decision, source,
+ * priority, reason and scope.
  */
 export function resolveSkillManifest(
   assignments: OwnSkillAssignment[],
@@ -229,7 +231,9 @@ export function resolveSkillManifest(
       });
       continue;
     }
-    if ((assignment.originatorInstanceId ?? null) === org.instanceId) optedOut.add(assignment.value);
+    if (typeof org.instanceId === "string" && org.instanceId !== "" && assignment.originatorInstanceId === org.instanceId) {
+      optedOut.add(assignment.value);
+    }
   }
   for (const row of org.assignments) {
     if (typeof row.skillName !== "string" || optedOut.has(row.skillName)) continue;

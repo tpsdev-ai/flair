@@ -1,6 +1,6 @@
 /**
- * flair-agent-role-boot.ts — at server start, brings an existing `flair_agent`
- * role to this release's grants (flair#2141 S1).
+ * flair-agent-role-boot.ts — at server start, attempts to bring an existing
+ * `flair_agent` role to this release's grants (flair#2141 S1).
  *
  * `flair init` writes the role. An instance set up by an earlier release keeps
  * that release's grants, so the role lacks the grants for a table added since.

@@ -642,8 +642,9 @@ export class BootstrapMemories extends Resource {
     const includedSkillDiagnostics: SkillDiagnostic[] = [];
     let skillsTruncated = 0;
     let skillDiagnosticsTruncated = 0;
-    // flair#2141 S1 — org-scope assignments apply only when the target's Agent
-    // record, read on every call, says it receives org skills.
+    // flair#2141 S1 — when org rows exist, the target's Agent record is read on
+    // this call, and org assignments apply only when it says the target
+    // receives org skills.
     const orgRows: any[] = [];
     const orgQuery = withDetachedTxn(ctx, () => (databases as any).flair.OrgSkillAssignment.search());
     for await (const row of orgQuery as AsyncIterable<any>) orgRows.push(row);

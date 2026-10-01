@@ -4,11 +4,13 @@
 // through put()), so the authority checks run over HTTP against a spawned,
 // HOME-isolated Harper:
 //   - Basic admin creates, replaces, patches and deletes; each write appends a
-//     history row whose previousHash is the hash of the row before it.
+//     history row whose previousHash is the hash of the row before it, also
+//     when several writes to one assignment arrive at once.
 //   - An admin-agent key and a plain agent key are refused on every write verb
 //     (PATCH by id included); anonymous callers reach no verb.
 //   - Bootstrap over REST resolves the org assignment for an agent, lets a
-//     higher-priority own assignment win, honours an operator opt-out, and
+//     higher-priority own assignment win, honours an operator opt-out stamped
+//     with this instance's id (and not an unstamped one), and
 //     gives a human, a deactivated agent and a missing target none.
 //   - With the flair_agent role provisioned, a de-elevated agent reads the
 //     table and cannot write it; a role set without the table's grant is
@@ -33,6 +35,7 @@ const ADMIN_AGENT = mkAgent(`osa-admin-${sfx}`);
 const OWNER = `osa-owner-${sfx}`;   // owns the org skill row
 const PRI = mkAgent(`osa-pri-${sfx}`); // has its own higher-priority assignment
 const OPTED = mkAgent(`osa-opted-${sfx}`);
+const UNSTAMPED = mkAgent(`osa-unstamped-${sfx}`); // has an opt-out row with no instance stamp
 const HUMAN = `osa-human-${sfx}`;
 const DEACT = `osa-deact-${sfx}`;
 const ORG_NAME = `osa-using-flair-${sfx}`;
@@ -122,7 +125,7 @@ beforeAll(async () => {
   installDir = harper.installDir;
   assertOwnInstance(harper);
   await upsert("Agent", [
-    ...[AGENT, PRI, OPTED].map((a) => ({ id: a.id, name: a.id, role: "agent", publicKey: a.publicKey, createdAt: now() })),
+    ...[AGENT, PRI, OPTED, UNSTAMPED].map((a) => ({ id: a.id, name: a.id, role: "agent", publicKey: a.publicKey, createdAt: now() })),
     { id: ADMIN_AGENT.id, name: ADMIN_AGENT.id, role: "admin", admin: true, publicKey: ADMIN_AGENT.publicKey, createdAt: now() },
     { id: OWNER, name: OWNER, role: "agent", publicKey: "pending", createdAt: now() },
     { id: HUMAN, name: HUMAN, kind: "human", publicKey: "pending", createdAt: now() },
@@ -186,6 +189,37 @@ describe("flair#2141 S1 — OrgSkillAssignment authority over HTTP", () => {
       expect((await call("basic", method, path, body)).status, `${method} ${path}`).toBe(404);
     }
     expect(await history(row.id)).toHaveLength(4);
+  }, 120_000);
+
+  test("concurrent writes to one assignment record distinct predecessors that chain from the created row to the stored row", async () => {
+    const name = `osa-concurrent-${sfx}`;
+    const id = await createViaOperator(name);
+    const created = (await assignmentsNamed(name))[0];
+    const refs = Array.from({ length: 8 }, (_, i) => `osa-ref-${i}-${sfx}`);
+    const results = await Promise.all(refs.map((skillRef) => call("basic", "PATCH", `/OrgSkillAssignment/${id}`, { skillRef })));
+    expect(results.map((r) => r.status).filter((s) => s >= 300)).toEqual([]);
+    const updates = (await history(id)).filter((h) => h.op === "update");
+    expect(updates).toHaveLength(refs.length);
+    expect(new Set(updates.map((h) => h.previousHash)).size).toBe(refs.length);
+    // Walk the chain: the update whose predecessor is the current row, then the
+    // row it left (one of the remaining refs, its updatedAt the update's `at`).
+    const final = (await assignmentsNamed(name))[0];
+    let state: Record<string, unknown> = created;
+    const refsLeft = new Set(refs);
+    const updatesLeft = new Set(updates);
+    for (let step = 0; step < refs.length; step++) {
+      const update = [...updatesLeft].find((u) => u.previousHash === rowHash(state));
+      expect(update, `no update records the row at step ${step} as its predecessor`).toBeDefined();
+      updatesLeft.delete(update);
+      const last = updatesLeft.size === 0;
+      const next = [...refsLeft]
+        .map((skillRef) => ({ ...state, skillRef, updatedAt: update.at }))
+        .find((row) => last ? rowHash(row) === rowHash(final) : [...updatesLeft].some((u) => u.previousHash === rowHash(row)));
+      expect(next, `no ref continues the chain after step ${step}`).toBeDefined();
+      refsLeft.delete(next!.skillRef as string);
+      state = next!;
+    }
+    expect(refsLeft.size).toBe(0);
   }, 120_000);
 
   test("an admin-agent key and an agent key cannot create, replace, patch or delete; the row and its history are unchanged", async () => {
@@ -260,13 +294,28 @@ describe("flair#2141 S1 — OrgSkillAssignment authority over HTTP", () => {
 
 describe("flair#2141 S1 — bootstrap over REST resolves org assignments", () => {
   const DANGLING = `osa-dangling-${sfx}`;
+  let unstampedBeforeIdentity: any;
   beforeAll(async () => {
     await createViaOperator(ORG_NAME);
     await createViaOperator(DANGLING, `osa-no-such-row-${sfx}`);
     const assignment = (id: string, agentId: string, extra: Record<string, unknown>) =>
       call("basic", "PUT", `/Soul/${id}`, { id, agentId, key: "skill-assignment", value: ORG_NAME, createdAt: now(), ...extra });
     expect((await assignment(`osa-pri-a-${sfx}`, PRI.id, { priority: "high" })).status).toBeLessThan(300);
+    // An opt-out with no stamp, written straight to the table, bootstrapped
+    // while this instance has no identity row (its id reads as null).
+    const instances = await ops({ operation: "search_by_value", database: "flair", table: "Instance", search_attribute: "id", search_value: "*", get_attributes: ["id"] });
+    expect(instances, "a fresh test instance has no identity row yet").toEqual([]);
+    await upsert("Soul", [{
+      id: `osa-unstamped-a-${sfx}`, agentId: UNSTAMPED.id, key: "skill-assignment", value: ORG_NAME,
+      metadata: JSON.stringify({ optOut: true }), createdAt: now(),
+    }]);
+    unstampedBeforeIdentity = await bootstrap(UNSTAMPED, {});
+    // Then the instance gets its one identity row, and the operator writes an
+    // opt-out, which the Soul resource stamps with that id.
+    await upsert("Instance", [{ id: `osa-instance-${sfx}`, publicKey: "test-instance-key", role: "hub", status: "active", createdAt: now() }]);
     expect((await assignment(`osa-opt-a-${sfx}`, OPTED.id, { metadata: JSON.stringify({ optOut: true }) })).status).toBeLessThan(300);
+    const opt = await ops({ operation: "search_by_id", database: "flair", table: "Soul", ids: [`osa-opt-a-${sfx}`], get_attributes: ["originatorInstanceId"] });
+    expect(opt[0]?.originatorInstanceId).toBe(`osa-instance-${sfx}`);
   }, 120_000);
 
   test("an agent with no own assignment gets the org skill (scope org); an unresolved org skillRef is only in diagnostics", async () => {
@@ -290,6 +339,11 @@ describe("flair#2141 S1 — bootstrap over REST resolves org assignments", () =>
     expect(res.skills.map((s: any) => s.name)).not.toContain(ORG_NAME);
     expect(res.skillDiagnostics.map((d: any) => d.name)).not.toContain(ORG_NAME);
     expect((await bootstrap(AGENT, {})).skills.map((s: any) => s.name)).toContain(ORG_NAME);
+  }, 60_000);
+
+  test("an opt-out row with no instance stamp does not apply, with or without a readable instance id: the org skill stays", async () => {
+    expect(unstampedBeforeIdentity.skills.map((s: any) => s.name)).toContain(ORG_NAME);
+    expect((await bootstrap(UNSTAMPED, {})).skills.map((s: any) => s.name)).toContain(ORG_NAME);
   }, 60_000);
 
   test("a human, a deactivated agent and a missing target get no org skills", async () => {

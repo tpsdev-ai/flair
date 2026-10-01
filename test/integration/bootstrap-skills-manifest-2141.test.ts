@@ -161,7 +161,7 @@ describe("flair#2141 S1b — bootstrap skills manifest over /mcp", () => {
     expect(got.content).toBe(PROCEDURE);
   }, 120_000);
 
-  // flair#2141 S1 — runs last: the org row it inserts applies to every agent.
+  // flair#2141 S1 — runs last, so the org row it inserts cannot change the cases above.
   test("an org assignment reaches the /mcp bootstrap as a scope org entry naming its skillRef", async () => {
     const orgName = `s1-org-skill-${sfx}`;
     const res = await ops({

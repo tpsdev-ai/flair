@@ -83,6 +83,9 @@ let orgEventStore: any[] = [];
 let agentStore: Map<string, any> = new Map();
 let orgSkillStore: any[] = [];
 let failOrgRead = false;
+// The Instance rows localInstanceId() reads; `failInstanceRead` makes that read throw.
+let instanceRows: any[] = [];
+let failInstanceRead = false;
 const readPositionStore = new Map<string, any>();
 
 function memorySearchGen(query: any) {
@@ -147,6 +150,15 @@ const databasesMock = {
         return gen();
       },
     },
+    Instance: {
+      search: () => {
+        if (failInstanceRead) throw new Error("instance read failed");
+        async function* gen() {
+          for (const r of instanceRows) yield r;
+        }
+        return gen();
+      },
+    },
     Relationship: { search: () => emptyGen() },
     OrgEvent: {
       search: (query?: any) => {
@@ -175,6 +187,7 @@ class ResourceBase {}
 mock.module("harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
 
 const { BootstrapMemories } = await import("../../resources/MemoryBootstrap.ts");
+const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 const { estimateTokens } = await import("../../resources/token-estimate.ts");
 
 function makeBootstrap(ctxRequest: any) {
@@ -193,6 +206,9 @@ function reset() {
   agentStore = new Map();
   orgSkillStore = [];
   failOrgRead = false;
+  instanceRows = [];
+  failInstanceRead = false;
+  _resetLocalInstanceIdCacheForTests();
   readPositionStore.clear();
   embedInputTypeCalls = [];
   taskEmbedding = undefined;
@@ -1321,8 +1337,9 @@ describe("MemoryBootstrap.post() — org-scope skills (flair#2141 S1)", () => {
     );
     soulStore.set("opt", {
       id: "opt", agentId: "agent-a", key: "skill-assignment", value: "opted",
-      metadata: JSON.stringify({ optOut: true }),
+      metadata: JSON.stringify({ optOut: true }), originatorInstanceId: "inst-local",
     });
+    instanceRows.push({ id: "inst-local", publicKey: "k", role: "hub", status: "active", createdAt: "2026-01-01T00:00:00.000Z" });
   }
 
   it("includeSoul:false returns the org winner with scope org; tied and unresolved org skills appear only in diagnostics, and an opted-out one in neither", async () => {
@@ -1340,7 +1357,7 @@ describe("MemoryBootstrap.post() — org-scope skills (flair#2141 S1)", () => {
     ]);
   });
 
-  it("a human, a deactivated agent and a target with no Agent record get no org skills, read from the record on every call", async () => {
+  it("a human, a deactivated agent and a target with no Agent record get no org skills; the record is read again on the next call", async () => {
     reset();
     seedOrg();
     agentStore.set("agent-a", { id: "agent-a", kind: "agent", status: "active" });
@@ -1353,6 +1370,16 @@ describe("MemoryBootstrap.post() — org-scope skills (flair#2141 S1)", () => {
       expect(res.skills, target).toEqual([]);
       expect(res.skillDiagnostics, target).toEqual([]);
     }
+  });
+
+  it("when this instance's id cannot be read, an unstamped opt-out does not apply and the org skill stays", async () => {
+    reset();
+    seedOrg();
+    delete soulStore.get("opt").originatorInstanceId;
+    agentStore.set("agent-a", { id: "agent-a" });
+    failInstanceRead = true;
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeSoul: false });
+    expect(res.skills.map((s: any) => s.name)).toEqual(["opted", "using-flair"]);
   });
 
   it("a failed org-assignment read fails the bootstrap rather than reporting no org skills", async () => {

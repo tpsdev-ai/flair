@@ -9,15 +9,10 @@
 // The auth reshape replaces the global gate's "verified agent borrows admin
 // super_user" elevation with a real, least-privilege Harper role. After an
 // agent's Ed25519 signature verifies, resources resolve the request to the
-// shared `flair_agent`-roled user instead of admin — so agents get exactly the
-// table CRUD below and nothing more. Critically: with no `super_user` and no
-// operations grants, /sql and /graphql become NATIVELY 403 for agents (the
-// raw-query block the gate hand-rolled is now enforced by Harper itself).
-//
-// Row-level ownership (an agent touches only its OWN memories/soul/events) is
-// NOT expressible in Harper's role model — it stays in each resource's allow*,
-// keyed on the Ed25519-verified agentId. So these per-table grants are the
-// coarse CRUD envelope; allow* is the ownership boundary inside it.
+// shared `flair_agent`-roled user instead of admin. Critically: with no
+// `super_user` and no operations grants, /sql and /graphql become NATIVELY 403
+// for agents (the raw-query block the gate hand-rolled is now enforced by
+// Harper itself).
 //
 // VALIDATION GATES (must confirm against a live Harper before this role goes
 // live — flagged for Sherlock + the PR, not assumed):
@@ -45,7 +40,7 @@ export const FLAIR_AGENT_PERMISSION = {
   structure_user: false,
   flair: {
     tables: {
-      // Core agent-owned data — CRUD envelope; ownership enforced in allow*.
+      // Core agent-owned data — CRUD envelope.
       Memory:          grant(true,  true,  true,  true),
       MemoryCandidate: grant(true,  true,  true,  true),
       MemoryGrant:     grant(true,  true,  true,  true),
@@ -95,7 +90,7 @@ export const FLAIR_AGENT_PERMISSION = {
       Instance:        grant(true,  false, false, false),
       // flair#2141 S1: org-scope skill assignments. Agents read them; every
       // write is operator/internal only (resources/OrgSkillAssignment.ts), so
-      // no write grant. The history table has no REST surface.
+      // no write grant. The history table has no direct REST route.
       OrgSkillAssignment:        grant(true,  false, false, false),
       OrgSkillAssignmentHistory: grant(false, false, false, false),
       // Federation / OAuth / IdP / internal — system + admin only; agents get none.
