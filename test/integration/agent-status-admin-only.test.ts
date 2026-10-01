@@ -2,20 +2,26 @@
 //
 // `Agent.status` is the principal's LIFECYCLE state: anything other than
 // "active" means deactivated (resources/agent-auth.ts's isPrincipalDeactivated),
-// so a principal that may write its own `status` can deactivate itself. A body
-// that includes `status` is therefore administrator-only — accepted from an
-// administrator or a trusted internal call, refused for a non-admin caller on
-// any row, including its own.
+// so a principal that may write its own `status` can deactivate itself. Through
+// the Agent resource a body that includes `status` is admitted only from a
+// trusted internal call or an administrator; an authenticated non-admin agent's
+// write is refused with 403 on any row, including its own. (A federation peer's
+// record merges through the raw table and refuses an inbound status change
+// separately — test/integration/agent-status-federation-2108.test.ts.)
 //
-// These boot a real Harper instance and exercise the actual resource path
-// (PATCH /Agent/<id> with an Ed25519 agent credential), asserting:
+// These exercise real Harper through the actual resource path (Ed25519 agent
+// credentials against PATCH and PUT /Agent/<id>), asserting:
 //   1. an administrator can set `status`;
-//   2. a non-admin write that includes `status` is refused as a clean error and
-//      writes NOTHING — neither the status nor the other fields in that request;
+//   2. an authenticated non-admin write that includes `status` is refused with a
+//      clean 403 and writes NOTHING — neither the status nor the other fields in
+//      that request;
 //   3. a non-admin write of another self-editable field still works.
 //
 // The refusal case is deliberately sent with a second field so "nothing was
 // written" covers the whole request, not just the field named in the error.
+// A trusted internal call has no over-the-wire form (the internal verdict comes
+// from the ABSENCE of a request), so its admission is pinned here against the
+// pure decision the resource applies.
 //
 // MODEL: test/integration/admin-field-truth.test.ts (admin-vs-non-admin agent
 // seeding + Ed25519 signing against a real instance).
@@ -23,6 +29,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { admitPrincipalWrite } from "../../resources/agent-status-guard.js";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -141,6 +148,28 @@ describe("flair#2108 — Agent.status is administrator-only", () => {
     const rec = await rawAgent(harper, plainRefuse.id);
     expect(rec?.status).toBe("active");
   }, 30_000);
+
+  test("a non-admin PUT that includes `status` is refused and writes nothing", async () => {
+    const path = `/Agent/${plainRefuse.id}`;
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: ed25519Header(plainRefuse, "PUT", path),
+      },
+      body: JSON.stringify({ id: plainRefuse.id, name: plainRefuse.id, status: "deactivated", runtime: "tampered-put" }),
+    });
+    expect(res.status, `non-admin PUT status write returned ${res.status}, expected 403`).toBe(403);
+    const rec = await rawAgent(harper, plainRefuse.id);
+    expect(rec?.status, "status was persisted by a refused PUT").toBe("active");
+    expect(rec?.runtime, "the other field in the refused PUT was persisted").toBe("orig");
+  }, 30_000);
+
+  test("a trusted internal call is admitted (no over-the-wire form)", () => {
+    // The internal verdict is the ABSENCE of a request, so it is not reachable
+    // over HTTP; this pins the admission the resource applies to it.
+    expect(admitPrincipalWrite({ kind: "internal" })).toBe("internal");
+  });
 
   test("a non-admin may still write its own ordinary self-editable fields", async () => {
     const path = `/Agent/${plainBenign.id}`;

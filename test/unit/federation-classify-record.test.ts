@@ -3,6 +3,7 @@ import {
   classifyRecord,
   FEDERATION_SYNC_TABLES,
   PRINCIPAL_OWNING_TABLES,
+  inboundChangesExistingPrincipalStatus,
 } from "../../resources/federation-classify.js";
 
 // classifyRecord is the pure decision function extracted from FederationSync.post.
@@ -143,5 +144,23 @@ describe("classifyRecord — skip categorization", () => {
     expect([...knownTables].sort()).toEqual([...FEDERATION_SYNC_TABLES].sort());
     expect(PRINCIPAL_OWNING_TABLES.has("Memory")).toBe(true);
     expect(PRINCIPAL_OWNING_TABLES.has("Soul")).toBe(false);
+  });
+});
+
+describe("inboundChangesExistingPrincipalStatus (flair#2108)", () => {
+  const agentRecord = (status: unknown) => ({ table: "Agent", id: "a1", data: { id: "a1", status }, updatedAt: "x", originatorInstanceId: "p" });
+
+  test("is true when an Agent merge would change an existing row's status", () => {
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("deactivated"), { id: "a1", status: "active" })).toBe(true);
+  });
+
+  test("is false when the status is unchanged, absent, or there is no local row", () => {
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("active"), { id: "a1", status: "active" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus({ table: "Agent", id: "a1", data: { id: "a1" }, updatedAt: "x", originatorInstanceId: "p" }, { id: "a1", status: "active" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("deactivated"), null)).toBe(false);
+  });
+
+  test("is false for any non-Agent table", () => {
+    expect(inboundChangesExistingPrincipalStatus({ table: "Memory", id: "m1", data: { status: "x" }, updatedAt: "x", originatorInstanceId: "p" }, { id: "m1", status: "y" })).toBe(false);
   });
 });

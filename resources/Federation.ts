@@ -29,12 +29,14 @@ import {
   classifyRecord,
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
+  inboundChangesExistingPrincipalStatus,
   type FederationSyncTable,
 } from "./federation-classify.js";
 export {
   classifyRecord,
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
+  inboundChangesExistingPrincipalStatus,
   recordSignatureVersion,
   PRINCIPAL_OWNING_TABLES,
   FEDERATION_TABLE_POLICY,
@@ -825,6 +827,18 @@ export class FederationSync extends Resource {
         });
         if (principalSkip) {
           recordSkip(principalSkip);
+          continue;
+        }
+
+        // ── flair#2108: an inbound record may not change an existing
+        // principal's `status`. The federation path carries no verified
+        // administrator authority for the principal it changes (the wire
+        // carries an originator signature and an optional principalId, not an
+        // admin claim), so the whole record is skipped rather than merged with
+        // a pinned status — the merge stays atomic and the other fields in the
+        // record do not land either.
+        if (inboundChangesExistingPrincipalStatus(record, local)) {
+          recordSkip("agent_status_not_federated");
           continue;
         }
 

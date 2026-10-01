@@ -55,6 +55,12 @@ export type SkipReason =
   // in the sync's table set either (an inbound "MemoryHostSource" row skips as
   // "unknown_table").
   | "pointer_not_federated"
+  // ─── flair#2108 (an inbound record may not change an existing principal) ──
+  // Emitted by FederationSync.post before the raw put: an inbound Agent record
+  // whose data would CHANGE an existing local Agent's `status`. The federation
+  // path carries no verified administrator authority for that principal, so the
+  // whole record is skipped rather than merged without `status`.
+  | "agent_status_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.
   | "id_mismatch";
@@ -248,4 +254,23 @@ export function classifyRecord(
   }
 
   return { action: "merge", originator };
+}
+
+/**
+ * flair#2108: would this inbound record CHANGE an existing local principal's
+ * `status`? True only for an Agent record whose data carries `status` and that
+ * value differs from the stored row's. The federation path carries no verified
+ * administrator authority for the principal it changes (the wire carries an
+ * originator signature and an optional principalId, not an admin claim), so a
+ * true answer skips the whole record before the raw put.
+ */
+export function inboundChangesExistingPrincipalStatus(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+): boolean {
+  if (record.table !== "Agent" || local == null) return false;
+  const data = record.data;
+  if (!data || typeof data !== "object") return false;
+  if (!Object.hasOwn(data, "status")) return false;
+  return data.status !== local.status;
 }

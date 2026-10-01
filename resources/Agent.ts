@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
-import { statusWriteRefusal } from "./agent-status-guard.js";
+import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js";
 import { applyOriginatorInstanceId, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 
 /**
@@ -93,18 +93,33 @@ export class Agent extends (databases as any).flair.Agent {
    */
   private async authorizePrincipalWrite(content: any): Promise<Response | null> {
     const auth = await resolveAgentAuth((this as any).getContext?.());
-    // Anonymous denied (defense-in-depth alongside allowUpdate; the old check read
-    // tpsAgent and treated a missing agent as trusted, so anonymous slipped through).
-    if (auth.kind === "anonymous") {
-      return new Response(JSON.stringify({ error: "authentication required" }), {
+    // Admit ONLY a trusted internal call and an administrator. Every other
+    // verdict — anonymous, a non-admin agent, or a verdict kind the auth
+    // resolver does not define — is refused before any mutation. (The old
+    // `auth.kind !== "agent"` form admitted any unknown kind; the check that
+    // read tpsAgent treated a missing agent as trusted, so anonymous slipped
+    // through.)
+    const admission = admitPrincipalWrite(auth);
+    if (admission === "internal" || admission === "admin") return null;
+    if (admission === "deny") {
+      const anonymous = (auth as { kind?: unknown }).kind === "anonymous";
+      return new Response(
+        JSON.stringify({ error: anonymous ? "authentication required" : "unrecognized caller verdict; refused" }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      );
+    }
+    // admission === "non-admin" here. Narrow the type (and stay fail-closed if a
+    // future verdict shape ever slipped past admitPrincipalWrite).
+    if (auth.kind !== "agent") {
+      return new Response(JSON.stringify({ error: "unrecognized caller verdict; refused" }), {
         status: 401, headers: { "content-type": "application/json" },
       });
     }
-    if (auth.kind !== "agent" || auth.isAdmin) return null;
 
     // 3. A non-admin caller may not write `status`, on ANY row, including its
-    // own. Refused before any read or write, so nothing in the request is applied.
-    const statusDenial = statusWriteRefusal(content, auth.isAdmin);
+    // own. Refused before the target-row update, so nothing in the request is
+    // applied.
+    const statusDenial = statusWriteRefusal(content, false);
     if (statusDenial) return statusDenial;
 
     const existing = await Promise.resolve(super.get()).catch(() => null);
