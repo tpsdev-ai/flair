@@ -3932,6 +3932,20 @@ const PAIR_INITIATOR_PERMISSION = {
 } as const;
 
 /**
+ * The `id` that `alter_role` addresses a role by. `list_roles` answers with each
+ * role's `id`, and Harper 5.2.8 rejects an `alter_role` that omits it ("Id can't
+ * be blank"). A role row that carries no usable id is not updatable, and
+ * guessing one would edit the wrong role, so this throws instead.
+ */
+function alterRoleId(roleName: string, existing: any): string {
+  const id = existing?.id;
+  if (typeof id !== "string" || id.length === 0) {
+    throw new Error(`alter_role for '${roleName}': list_roles returned no id for the role`);
+  }
+  return id;
+}
+
+/**
  * Idempotently ensures the `flair_pair_initiator` role exists on the Harper
  * instance at `opsUrl` with the canonical permission spec.
  *
@@ -3986,6 +4000,7 @@ export async function ensureFlairPairInitiatorRole(
   console.log(`Role '${ROLE_NAME}' exists but permissions differ — updating...`);
   await callOpsApi(opsUrl, {
     operation: "alter_role",
+    id: alterRoleId(ROLE_NAME, existing),
     role: ROLE_NAME,
     permission: PAIR_INITIATOR_PERMISSION,
   }, adminUser, adminPass);
@@ -4146,6 +4161,7 @@ export async function ensureFlairAgentRole(
   console.log(`Role '${ROLE_NAME}' exists but permissions differ — updating...`);
   await callOpsApi(opsUrl, {
     operation: "alter_role",
+    id: alterRoleId(ROLE_NAME, existing),
     role: ROLE_NAME,
     permission: FLAIR_AGENT_PERMISSION,
   }, adminUser, adminPass);

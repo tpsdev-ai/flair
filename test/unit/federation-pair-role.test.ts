@@ -116,10 +116,10 @@ describe("ensureFlairPairInitiatorRole", () => {
     };
 
     installFetch([
-      // list_roles → role present but with wrong perms
+      // list_roles → role present but with wrong perms (real rows carry the id)
       {
         ok: true,
-        body: [{ role: ROLE_NAME, permission: differentPerm }],
+        body: [{ role: ROLE_NAME, id: ROLE_NAME, permission: differentPerm }],
       },
       // alter_role → success
       { ok: true, body: { ok: true } },
@@ -131,6 +131,7 @@ describe("ensureFlairPairInitiatorRole", () => {
     expect(capturedBodies[0].operation).toBe("list_roles");
     expect(capturedBodies[1].operation).toBe("alter_role");
     expect(capturedBodies[1].role).toBe(ROLE_NAME);
+    expect(capturedBodies[1].id).toBe(ROLE_NAME);
     expect(capturedBodies[1].permission).toEqual(CANONICAL_PERM);
   });
 
