@@ -3,9 +3,9 @@
 // so `ensureFlairAgentRole` and `ensureFlairPairInitiatorRole` could not bring an
 // existing role's permissions into spec.
 //
-// The unit lane mocks `fetch`, so it can only see the body the code builds, not
-// Harper's verdict on it. This drives the REAL functions against a spawned Harper
-// and down each one's existing-role (alter) path.
+// The role unit tests mock `fetch`, so they can see only the body the code
+// builds, not Harper's verdict on it. This drives the REAL functions against a
+// spawned Harper and down each one's existing-role (alter) path.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { ensureFlairAgentRole, ensureFlairPairInitiatorRole } from "../../src/cli";
 import { type HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
@@ -33,8 +33,8 @@ async function permissionOf(name: string): Promise<Record<string, unknown>> {
   );
   if (!row) throw new Error(`role '${name}' is not on the instance`);
   const permission = row.permission;
-  // A read that returned no permission established nothing; only the empty
-  // object `{}` (the sentinel below) is a legitimate value here.
+  // The empty object `{}` (the sentinel below) is a legitimate value here, so
+  // only a missing or non-object permission is refused.
   if (!permission || typeof permission !== "object") {
     throw new Error(`list_roles returned no permission for '${name}' (${JSON.stringify(permission)})`);
   }
