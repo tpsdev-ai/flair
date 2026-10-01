@@ -572,7 +572,7 @@ PR_TITLE="release: v${VERSION}" PR_HEAD="$RELEASE_BRANCH" PR_VERSION="$VERSION" 
 
 See CHANGELOG.md for what'"'"'s in this release.
 
-After this merges, Release auto-tag normally creates the tag once main'"'"'s CI passes. If it did not, a repository admin tags by hand (a ruleset restricts creating v* tags); the first command must print nothing:
+After this merges, Release auto-tag normally creates the tag once main'"'"'s CI passes. If it did not, a repository admin (a ruleset restricts creating v* tags) must tag the release (OIDC staging — no npm login); the first command must print nothing:
 \`\`\`
 git ls-remote --tags origin v${process.env.PR_VERSION}
 git checkout main && git pull
