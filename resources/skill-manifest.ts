@@ -8,7 +8,7 @@
  *     where `skillId` is the skill-tagged Memory row to fetch with `skill_get`.
  *   - `diagnostics`: assignments refused (a non-durable source or an
  *     equal-priority tie) or superseded, and winners whose name does not
- *     resolve to exactly one skill row (unresolved or ambiguous).
+ *     resolve to exactly one own skill row (unresolved or ambiguous).
  * The priority/tie rules are `resolveActiveSkills` (skill-provenance.ts), run
  * first; name resolution runs on its winners. Every candidate has scope "own"
  * (the target agent's own assignments); flair#2141 S1 adds org assignments and
@@ -48,7 +48,7 @@ export interface SkillDiagnostic {
   source: string | null;
   decision: SkillDiagnosticDecision;
   reason: string;
-  /** Ambiguous only: the ids of the skill rows that have the name. */
+  /** Ambiguous only: the ids of the agent's own skill rows with the name. */
   candidates?: string[];
 }
 

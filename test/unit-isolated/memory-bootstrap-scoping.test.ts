@@ -907,10 +907,7 @@ describe("MemoryBootstrap.post() — verbatim soul duplicates collapse (flair#14
 
 // flair#1433 — Active Skills through the real bootstrap payload. Pure-module
 // cases live in test/unit/skill-provenance.test.ts; these pin that
-// MemoryBootstrap.post() actually ships the stated outcome. Since flair#2141
-// S1b the outcome ships in the `skills` manifest (winners) and
-// `skillDiagnostics` (refusals, supersessions, unresolved and ambiguous
-// names); the prose renders winners only.
+// MemoryBootstrap.post() actually ships the stated outcome.
 function seedAssignment(row: {
   id: string;
   agentId: string;

@@ -628,14 +628,12 @@ export class BootstrapMemories extends Resource {
     const scope = await resolveReadScope(agentId);
 
     // --- 1b. Skills manifest (flair#2141 S1b; conflict rules flair#1433) ---
-    // Present whatever includeSoul and includeContext say. `skills` lists the
-    // winners, each with the skill row `skill_get` reads; a name resolves to
-    // the agent's own skill row only. Refusals, ties, supersessions and names
-    // that do not resolve to exactly one own row go to `skillDiagnostics`
-    // (resources/skill-manifest.ts). Both are charged against the shared
-    // budget right after the soul, at the serialized size of each entry that
-    // ships; an entry that does not fit is counted in skillsTruncated /
-    // skillDiagnosticsTruncated instead.
+    // Present whatever includeSoul and includeContext say. resolveSkillManifest
+    // (resources/skill-manifest.ts) splits the assignments into winners, each
+    // with the own skill row `skill_get` reads, and diagnostics. Entries are
+    // admitted while they fit the shared budget, right after the soul, at
+    // their serialized size; an entry that does not fit is counted in
+    // skillsTruncated / skillDiagnosticsTruncated instead.
     const includedSkills: SkillManifestEntry[] = [];
     const includedSkillDiagnostics: SkillDiagnostic[] = [];
     let skillsTruncated = 0;
@@ -1542,8 +1540,8 @@ export class BootstrapMemories extends Resource {
     if (sections.soul.length > 0) {
       parts.push("## Identity\n" + sections.soul.join("\n"));
     }
-    // flair#2141 — rendered from the `skills` manifest (winners only), and only
-    // with includeSoul; conflict outcomes are in `skillDiagnostics`.
+    // flair#2141 — rendered from the admitted `skills` entries, and only with
+    // includeSoul.
     if (includeSoul && sections.skills.length > 0) {
       parts.push("## Active Skills\n" + sections.skills.join("\n"));
     }
