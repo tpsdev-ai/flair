@@ -5,11 +5,12 @@
  * (`add`, `list`/`show`, `remove`, ...) and its action handlers, including
  * Ed25519 keypair generation in `agent add` and the interactive removal flow.
  *
- * `agent add` (flair#2126) looks up the id before it writes. An existing Agent
- * row is refused — the stored public key is left unchanged — and the message
- * names `flair agent rotate-key` or `flair agent remove` first. A new id is
- * inserted, then read back; `registered` is printed only when the stored
- * public key matches the key this command generated or reused.
+ * `agent add` (flair#2126) looks up the id before it writes. A well-formed
+ * existing row is refused — the stored public key is left unchanged — and
+ * that message names `flair agent rotate-key` or `flair agent remove` first.
+ * An unreadable row exits without that remedy. A new id is inserted, then
+ * read back; `registered` is printed only when the stored public key matches
+ * the key this command generated or reused and `name` is a string.
  *
  * Shared cli.ts-local helpers are injected via bindCli() so this module never
  * imports src/cli.ts (avoids the import cycle and keeps it inside the strict

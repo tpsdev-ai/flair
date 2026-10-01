@@ -39,8 +39,10 @@ let storePublicKey: string | null;
 /** When set, an insert returns OK and stores nothing. */
 let skipInsert: boolean;
 /**
- * How each Agent search answers. `table` is the real row or `[]`.
- * The other modes are unreadable or not the searched id — none of them is absence.
+ * How Agent searches answer.
+ * `table`: the stored row, or `[]` when that id is absent.
+ * `empty-body`, `unreadable`, `malformed`, and `unexpected-id`: that response on every search.
+ * `row-without-key`, `row-missing-name`, and `row-non-string-name`: `[]` on the first search, then the named row on the second.
  */
 let searchMode:
   | "table"

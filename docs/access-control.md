@@ -483,17 +483,20 @@ there, sends an `insert` for the Agent record, and prints, among other lines:
 ✅ Agent 'bob-the-bot' (bob-the-bot) registered (ops: <operations API URL>)
 ```
 
-If an Agent record with that id already exists, the command stops before it
-writes a key file or an insert. It exits with an error that names the id and
-tells you to run `flair agent rotate-key <id>` on the Flair host (that command
-talks only to the local operations API and writes the replacement private key
-on that host). An adapter on another machine still loads the previous key
-until the new private key file is on that signing host. `FLAIR_KEY_PATH`
+If a well-formed Agent record with that id already exists, the command stops
+before it writes a key file or an insert. It exits with an error that names
+the id and tells you to run `flair agent rotate-key <id>` on the Flair host
+(that command talks only to the local operations API and writes the
+replacement private key on that host). An unreadable row, including one whose
+`name` is missing or not a string, exits with "could not read" and does not
+name that remedy. For a well-formed row the other remedy is
+`flair agent remove <id>` and then `flair agent add` again.
+`flair agent remove` tries to delete that agent's Memory and Soul rows as
+well as the Agent row. An adapter on another machine still loads the previous
+key until the new private key file is on that signing host. `FLAIR_KEY_PATH`
 only names a path on the host where the adapter runs. Point it at that
 local file when the key is not in the default location, then restart the
-adapter. The other remedy is `flair agent remove <id>` and then
-`flair agent add` again. `flair agent remove` tries to delete that agent's
-Memory and Soul rows as well as the Agent row. A new id is inserted, then
+adapter. A new id is inserted, then
 read back. The command prints the line above, and the public key on the
 following line, only when the stored public key matches the key generated or
 reused by this command. A skipped insert, a different stored key, or a row
