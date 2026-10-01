@@ -18,6 +18,17 @@
  * See test/unit/mcp-client-assertion.test.ts for a mirror of that
  * verification, run against assertions this module produces.
  *
+ * ── The audience form (RFC 7523bis transition switch) ───────────────────────
+ * RFC 7523bis makes the authorization server's issuer the sole `aud` and
+ * defines `typ: client-authentication+jwt`. The verifier's side of that
+ * (HarperFast/oauth #245) is merged upstream but NOT RELEASED, so the DEFAULT
+ * here stays the shape above and the issuer form is opt-in, via
+ * `FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE` or `flair mcp token
+ * --assertion-audience`. The issuer form signs `aud` = the issuer read from
+ * the authorization server's metadata document — never derived from the
+ * token-endpoint URL — with `typ: "client-authentication+jwt"`. The default
+ * flips once the verifier release that accepts the issuer audience ships.
+ *
  * ── oauth#161/#162/#163, shipped in @harperfast/oauth@2.2.0 ─────────────────
  * The token-endpoint grant that CONSUMES this assertion
  * (`grant_type=client_credentials`) shipped as HarperFast/oauth PR #170
@@ -71,6 +82,135 @@ export const CLIENT_ASSERTION_TYPE_JWT_BEARER =
  * assertion signed with a longer window would be rejected server-side.
  */
 export const MAX_ASSERTION_LIFETIME_SECONDS = 60;
+
+// ─── The audience form (the RFC 7523bis transition switch) ──────────────────
+
+/**
+ * Which audience an assertion is signed for:
+ *   - `"token-endpoint"` (default): `aud` = the token-endpoint URL, `typ:
+ *     "JWT"` — today's shape, and the one the released verifier accepts.
+ *   - `"issuer"`: `aud` = the authorization server metadata document's
+ *     `issuer` as the sole value, `typ: "client-authentication+jwt"`.
+ */
+export type ClientAssertionAudienceForm = "token-endpoint" | "issuer";
+
+/** The switch's accepted values, in the order the refusal message lists them. */
+export const CLIENT_ASSERTION_AUDIENCE_FORMS: readonly ClientAssertionAudienceForm[] = [
+  "token-endpoint",
+  "issuer",
+];
+
+/**
+ * The switch's environment variable (`flair mcp token --assertion-audience`
+ * overrides it). Default `"token-endpoint"`; an unrecognised value is refused,
+ * never treated as the default.
+ */
+export const CLIENT_ASSERTION_AUDIENCE_ENV = "FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE";
+
+/**
+ * The configured audience form, from an explicit flag value (else from
+ * CLIENT_ASSERTION_AUDIENCE_ENV). Unset or empty: `"token-endpoint"`.
+ */
+export function clientAssertionAudienceForm(
+  raw: string | undefined = process.env[CLIENT_ASSERTION_AUDIENCE_ENV],
+): ClientAssertionAudienceForm {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (!value) return "token-endpoint";
+  if (value === "token-endpoint" || value === "issuer") return value;
+  throw new Error(
+    `Unknown client-assertion audience form ${JSON.stringify(raw)}: ${CLIENT_ASSERTION_AUDIENCE_ENV} ` +
+      `(or --assertion-audience) must be ${CLIENT_ASSERTION_AUDIENCE_FORMS.map((f) => `"${f}"`).join(" or ")}.`,
+  );
+}
+
+/** The `aud` claim and header `typ` a signed assertion carries. */
+export interface ClientAssertionAudience {
+  aud: string;
+  typ: string;
+}
+
+/** The header `typ` of the token-endpoint audience form. */
+export const CLIENT_ASSERTION_TYP_JWT = "JWT";
+
+/** RFC 7523bis §4 explicit `typ`: the header of the issuer audience form. */
+export const CLIENT_ASSERTION_TYP_CLIENT_AUTHENTICATION = "client-authentication+jwt";
+
+/**
+ * The metadata document URL for an authorization server origin — the discovery
+ * convention src/lib/mcp-enable.ts already uses.
+ */
+export function oauthMetadataUrl(origin: string): string {
+  return `${origin.replace(/\/+$/, "")}/.well-known/oauth-authorization-server`;
+}
+
+function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the `issuer` from the authorization server metadata document at
+ * `metadataUrl`. Refuses — naming the switch and the URL — when the document
+ * cannot be read, or carries no usable issuer.
+ */
+export async function fetchAuthorizationServerIssuer(
+  metadataUrl: string,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<string> {
+  const setting = `${CLIENT_ASSERTION_AUDIENCE_ENV}=issuer (--assertion-audience issuer)`;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  let res: Response;
+  try {
+    res = await fetchImpl(metadataUrl, { signal: AbortSignal.timeout(15_000) });
+  } catch (err: any) {
+    throw new Error(`${setting}, but the metadata document at ${metadataUrl} could not be read: ${err?.message ?? err}`);
+  }
+  if (!res.ok) throw new Error(`${setting}, but the metadata document at ${metadataUrl} returned HTTP ${res.status}`);
+  let body: any;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error(`${setting}, but the metadata document at ${metadataUrl} did not return JSON`);
+  }
+  const issuer = body?.issuer;
+  if (typeof issuer !== "string" || !isAbsoluteHttpUrl(issuer)) {
+    throw new Error(
+      `${setting}, but the metadata document at ${metadataUrl} has no usable issuer (got ${JSON.stringify(issuer)}).`,
+    );
+  }
+  return issuer;
+}
+
+/**
+ * Build the audience for a form. The token-endpoint form is today's shape. The
+ * issuer form reads the metadata document at `metadataUrl` and uses its
+ * `issuer` as the SOLE `aud` — never the token-endpoint URL, and never a value
+ * derived from it.
+ */
+export async function resolveClientAssertionAudience(params: {
+  form: ClientAssertionAudienceForm;
+  tokenEndpoint: string;
+  /** Required for the issuer form: the authorization server's metadata document URL. */
+  metadataUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<ClientAssertionAudience> {
+  if (params.form === "token-endpoint") return { aud: params.tokenEndpoint, typ: CLIENT_ASSERTION_TYP_JWT };
+  if (!params.metadataUrl) {
+    throw new Error(
+      `${CLIENT_ASSERTION_AUDIENCE_ENV}=issuer (--assertion-audience issuer) needs the authorization server's ` +
+        `metadata document: pass --issuer (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL).`,
+    );
+  }
+  const issuer = await fetchAuthorizationServerIssuer(
+    params.metadataUrl,
+    params.fetchImpl ? { fetchImpl: params.fetchImpl } : {},
+  );
+  return { aud: issuer, typ: CLIENT_ASSERTION_TYP_CLIENT_AUTHENTICATION };
+}
 
 // ─── JWK types ──────────────────────────────────────────────────────────────
 
@@ -150,10 +290,17 @@ export function publicJwkFromPrivateKey(privateKey: KeyObject): Ed25519Jwk {
 export interface SignClientAssertionParams {
   /** The client_id being authenticated; becomes both `iss` and `sub`. */
   clientId: string;
-  /** The token-endpoint URL; becomes `aud` (exact match required). */
+  /** The token-endpoint URL; becomes `aud` unless `audience` says otherwise. */
   tokenEndpoint: string;
   /** The agent's Ed25519 private key. */
   privateKey: KeyObject;
+  /**
+   * The `aud` claim and header `typ`. Default: the token-endpoint form, `{ aud:
+   * tokenEndpoint, typ: "JWT" }`. Build it with
+   * `resolveClientAssertionAudience`, which reads the issuer from the
+   * authorization server's metadata document for the issuer form.
+   */
+  audience?: ClientAssertionAudience;
   /** `exp - iat` window, seconds. Default + hard cap: MAX_ASSERTION_LIFETIME_SECONDS. */
   expiresInSeconds?: number;
   /** Override `jti` (defaults to a random UUID). Exposed for deterministic tests. */
@@ -203,10 +350,14 @@ export function signClientAssertion(params: SignClientAssertionParams): SignedCl
   const exp = iat + expiresIn;
   const jti = params.jti ?? randomUUID();
 
-  // header.typ is optional per RFC 7515 §4.1.9, but #165 accepts it when
-  // present (case-insensitively) — include it for maximum interop.
-  const header = { alg: "EdDSA", typ: "JWT" };
-  const claims: ClientAssertionClaims = { iss: clientId, sub: clientId, aud: tokenEndpoint, exp, iat, jti };
+  // header.typ is optional per RFC 7515 §4.1.9, but the verifier checks it
+  // when present — include it: "JWT" for the token-endpoint form (what the
+  // released verifier requires), and "client-authentication+jwt" (RFC
+  // 7523bis) for the issuer form.
+  const audience: ClientAssertionAudience =
+    params.audience ?? { aud: tokenEndpoint, typ: CLIENT_ASSERTION_TYP_JWT };
+  const header = { alg: "EdDSA", typ: audience.typ };
+  const claims: ClientAssertionClaims = { iss: clientId, sub: clientId, aud: audience.aud, exp, iat, jti };
 
   const headerB64 = base64urlJson(header);
   const payloadB64 = base64urlJson(claims);
@@ -436,6 +587,13 @@ export interface GetMcpAccessTokenParams {
   resource?: string;
   /** Assertion `exp - iat` window, seconds. Default + hard cap: MAX_ASSERTION_LIFETIME_SECONDS. */
   expiresInSeconds?: number;
+  /**
+   * The `aud`/`typ` to sign with. Default: the token-endpoint form (see
+   * `signClientAssertion`); `resolveClientAssertionAudience` builds either
+   * form. The audience form does not change the minted token, so it is not
+   * part of the cache key.
+   */
+  audience?: ClientAssertionAudience;
   /** Re-mint once fewer than this many ms remain before the cached token's expiry. Default 30s — comfortably inside the client_credentials grant's short (default 300s) TTL. */
   refreshMarginMs?: number;
   /** Skip the cache and mint a fresh token unconditionally (e.g. after a 401 the caller suspects means the cached token was revoked). */
@@ -472,6 +630,7 @@ export async function getMcpAccessToken(params: GetMcpAccessTokenParams): Promis
     tokenEndpoint: params.tokenEndpoint,
     privateKey: params.privateKey,
     expiresInSeconds: params.expiresInSeconds,
+    audience: params.audience,
   });
   const form = buildTokenRequestForm({ clientId: params.clientId, assertion, resource: params.resource });
   const token = await requestMcpAccessToken(form, params.tokenEndpoint, {
