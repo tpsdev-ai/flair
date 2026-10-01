@@ -56,7 +56,8 @@ export type SkipReason =
   // "unknown_table").
   | "pointer_not_federated"
   // ─── flair#2108 (an inbound Agent `status` that differs from the stored one) ──
-  // Emitted by FederationSync.post before the raw put: an inbound Agent record
+  // Emitted by FederationSync.post before the raw put, for a record that passed
+  // the earlier sync checks: an inbound Agent record
   // whose data carries a `status` that differs from an existing local Agent's
   // stored value, also when the record is older than the stored row and would
   // lose the last-write-wins merge. The federation path carries no verified
