@@ -9,7 +9,7 @@
  * row is refused — the stored public key is left unchanged — and the message
  * names `flair agent rotate-key` or `flair agent remove` first. A new id is
  * inserted, then read back; `registered` is printed only when the stored
- * public key matches the key this command wrote.
+ * public key matches the key this command generated or reused.
  *
  * Shared cli.ts-local helpers are injected via bindCli() so this module never
  * imports src/cli.ts (avoids the import cycle and keeps it inside the strict
@@ -101,50 +101,84 @@ function opsApiUrl(opsPortOrUrl: number | string): string {
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
 }
 
+type ParsedAgentRows =
+  | { ok: true; row: StoredAgent | null }
+  | { ok: false; reason: string };
+
 /**
- * Parse an operations `search_by_value` body. An array (including empty) is a
- * real answer. Anything else is unreadable — the caller must not treat it as
- * "no such agent" and must not claim a registration succeeded.
+ * Parse an operations `search_by_value` body for one id.
+ * `[]` is the only absence. One well-formed row with that id is the agent,
+ * even when `publicKey` is missing or empty. A non-array, a malformed
+ * element, more than one row, or a row whose id is not the one searched is
+ * unreadable — never "no such agent".
  */
-function parseAgentRows(body: unknown): StoredAgent[] | null {
-  if (!Array.isArray(body)) return null;
-  const rows: StoredAgent[] = [];
-  for (const row of body) {
-    if (!row || typeof row !== "object") continue;
-    const rec = row as { id?: unknown; name?: unknown; publicKey?: unknown };
-    if (typeof rec.id !== "string" || rec.id.length === 0) continue;
-    rows.push({
+function parseAgentRows(body: unknown, id: string): ParsedAgentRows {
+  if (!Array.isArray(body)) {
+    return { ok: false, reason: "operations API returned an unexpected body." };
+  }
+  if (body.length === 0) return { ok: true, row: null };
+  if (body.length !== 1) {
+    return { ok: false, reason: `operations API returned ${body.length} rows for Agent '${id}'.` };
+  }
+  const row = body[0];
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return { ok: false, reason: "operations API returned a malformed Agent row." };
+  }
+  const rec = row as { id?: unknown; name?: unknown; publicKey?: unknown };
+  if (typeof rec.id !== "string" || rec.id.length === 0) {
+    return { ok: false, reason: "operations API returned a malformed Agent row." };
+  }
+  if (rec.id !== id) {
+    return {
+      ok: false,
+      reason: `operations API returned Agent '${rec.id}' while looking up '${id}'.`,
+    };
+  }
+  if (rec.publicKey !== undefined && typeof rec.publicKey !== "string") {
+    return { ok: false, reason: "operations API returned a malformed Agent row." };
+  }
+  const publicKey = typeof rec.publicKey === "string" && rec.publicKey.length > 0 ? rec.publicKey : undefined;
+  return {
+    ok: true,
+    row: {
       id: rec.id,
       ...(typeof rec.name === "string" ? { name: rec.name } : {}),
-      ...(typeof rec.publicKey === "string" ? { publicKey: rec.publicKey } : {}),
-    });
-  }
-  return rows;
+      ...(publicKey !== undefined ? { publicKey } : {}),
+    },
+  };
 }
 
 function agentAlreadyExistsMessage(id: string): string {
   return (
     `Error: Agent '${id}' already exists; its stored public key was left unchanged. ` +
     `Run \`flair agent rotate-key ${id}\` on the Flair host to replace the key, ` +
-    `or \`flair agent remove ${id}\` first and then \`flair agent add ${id}\`.`
+    `or \`flair agent remove ${id}\` first and then \`flair agent add ${id}\`. ` +
+    `\`flair agent remove\` tries to delete that agent's Memory and Soul rows.`
   );
 }
 
-function agentKeyNotStoredMessage(id: string, storedPublicKey: string | undefined): string {
-  const found = storedPublicKey
-    ? `The stored public key is '${storedPublicKey}', which is not the key this command wrote.`
-    : `Reading the record back found no Agent row for '${id}'.`;
+function agentKeyNotStoredMessage(id: string, stored: StoredAgent | null): string {
+  let found: string;
+  if (!stored) {
+    found = `Reading the record back found no Agent row for '${id}'.`;
+  } else if (typeof stored.publicKey !== "string" || stored.publicKey.length === 0) {
+    found = `An Agent row for '${id}' was found, but it has no usable public key.`;
+  } else {
+    found = `The stored public key is '${stored.publicKey}', which is not the key generated or reused by this command.`;
+  }
   return (
-    `Error: Agent '${id}' was not stored with the public key this command wrote. ${found} ` +
+    `Error: Agent '${id}' was not stored with the public key generated or reused by this command. ${found} ` +
     `Run \`flair agent rotate-key ${id}\` on the Flair host to replace the key, ` +
-    `or \`flair agent remove ${id}\` first and then \`flair agent add ${id}\`.`
+    `or \`flair agent remove ${id}\` first and then \`flair agent add ${id}\`. ` +
+    `\`flair agent remove\` tries to delete that agent's Memory and Soul rows.`
   );
 }
 
 /**
- * Read one Agent row by id through the operations API. Exits the process when
- * the lookup itself fails — an unread table is not "no such agent".
- * Returns null only when the search succeeded and no row has this id.
+ * Read one Agent row by id through the operations API.
+ * A failed body read, an empty body, non-JSON, a malformed row, or a row
+ * whose id is not the one searched exits the process. Those results are not
+ * "no such agent". Returns null only when the body is a JSON `[]`.
  */
 async function readStoredAgent(
   opsPortOrUrl: number | string,
@@ -173,24 +207,35 @@ async function readStoredAgent(
     console.error(`Error: could not read Agent '${id}': ${message}`);
     process.exit(1);
   }
-  const text = await res.text().catch(() => "");
+  let text: string;
+  try {
+    text = await res.text();
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error: could not read Agent '${id}': ${message}`);
+    process.exit(1);
+  }
   if (!res.ok) {
     console.error(`Error: could not read Agent '${id}' (${res.status}): ${text}`);
     process.exit(1);
   }
+  if (text.trim().length === 0) {
+    console.error(`Error: could not read Agent '${id}': operations API returned an empty body.`);
+    process.exit(1);
+  }
   let body: unknown;
   try {
-    body = text ? JSON.parse(text) : [];
+    body = JSON.parse(text);
   } catch {
     console.error(`Error: could not read Agent '${id}': operations API returned a body that is not JSON.`);
     process.exit(1);
   }
-  const rows = parseAgentRows(body);
-  if (rows === null) {
-    console.error(`Error: could not read Agent '${id}': operations API returned an unexpected body.`);
+  const parsed = parseAgentRows(body, id);
+  if (!parsed.ok) {
+    console.error(`Error: could not read Agent '${id}': ${parsed.reason}`);
     process.exit(1);
   }
-  return rows.find((row) => row.id === id) ?? null;
+  return parsed.row;
 }
 
 /** Register the `flair agent` command group (flair#1630). */
@@ -309,7 +354,7 @@ export function register(program: Command): void {
       await seedAgentViaOpsApi(seedOpsTarget, id, pubKeyB64url, adminUser, adminPass);
       const stored = await readStoredAgent(seedOpsTarget, id, adminUser, adminPass);
       if (!stored || stored.publicKey !== pubKeyB64url) {
-        console.error(agentKeyNotStoredMessage(id, stored?.publicKey));
+        console.error(agentKeyNotStoredMessage(id, stored));
         process.exit(1);
       }
       console.log(

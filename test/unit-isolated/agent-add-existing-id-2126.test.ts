@@ -38,6 +38,11 @@ let ops: string[];
 let storePublicKey: string | null;
 /** When set, an insert returns OK and stores nothing. */
 let skipInsert: boolean;
+/**
+ * How each Agent search answers. `table` is the real row or `[]`.
+ * The other modes are unreadable or not the searched id — none of them is absence.
+ */
+let searchMode: "table" | "empty-body" | "unreadable" | "malformed" | "unexpected-id" | "row-without-key";
 
 function json(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -51,6 +56,7 @@ beforeEach(async () => {
   ops = [];
   storePublicKey = null;
   skipInsert = false;
+  searchMode = "table";
 
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
     let raw = "";
@@ -64,7 +70,30 @@ beforeEach(async () => {
       }
       if (body.operation === "search_by_value" && body.table === "Agent") {
         ops.push("search_by_value");
-        const row = table.get(String(body.search_value ?? ""));
+        const searched = String(body.search_value ?? "");
+        if (searchMode === "empty-body") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("");
+          return;
+        }
+        if (searchMode === "unreadable") {
+          res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+          res.write("[");
+          res.destroy();
+          return;
+        }
+        if (searchMode === "malformed") {
+          return json(res, 200, [{ name: "no-id" }]);
+        }
+        if (searchMode === "unexpected-id") {
+          return json(res, 200, [{ id: "someone-else", name: "someone-else", publicKey: "other-key" }]);
+        }
+        if (searchMode === "row-without-key") {
+          const priorSearches = ops.filter((op) => op === "search_by_value").length;
+          if (priorSearches === 1) return json(res, 200, []);
+          return json(res, 200, [{ id: searched, name: searched }]);
+        }
+        const row = table.get(searched);
         return json(res, 200, row ? [row] : []);
       }
       if (body.operation === "insert" && body.table === "Agent") {
@@ -203,5 +232,60 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     expect(result.stderr).toContain(`flair agent remove ${id}`);
     expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
     expect(result.stdout).not.toContain("stored-public-key-not-the-one-written");
+    expect(result.stderr).toContain("generated or reused by this command");
+  });
+
+  test("a read-back row without a usable public key is not reported as a missing row", async () => {
+    const id = "nokey-2126";
+    searchMode = "row-without-key";
+
+    const result = await agentAdd(id);
+
+    expect(result.code).toBe(1);
+    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(result.stderr).toContain(`Agent '${id}'`);
+    expect(result.stderr).not.toContain(`no Agent row for '${id}'`);
+    expect(result.stderr).toContain("usable public key");
+    expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
+  });
+});
+
+describe("flair#2126 — a failed lookup is not absence", () => {
+  async function refusedBeforeWrite(id: string) {
+    const result = await agentAdd(id);
+    expect(result.code).toBe(1);
+    expect(ops).toEqual(["search_by_value"]);
+    expect(ops).not.toContain("insert");
+    expect(existsSync(join(keysDir, `${id}.key`))).toBe(false);
+    expect(existsSync(join(keysDir, `${id}.pub`))).toBe(false);
+    expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
+    expect(result.stdout).not.toContain("Keypair written");
+    expect(result.stdout).not.toContain("Reusing existing key");
+    return result;
+  }
+
+  test("an empty search body is not absence", async () => {
+    searchMode = "empty-body";
+    const result = await refusedBeforeWrite("empty-body-2126");
+    expect(result.stderr).toContain("empty body");
+  });
+
+  test("an unreadable search body is not absence", async () => {
+    searchMode = "unreadable";
+    const result = await refusedBeforeWrite("unreadable-2126");
+    expect(result.stderr).toContain("could not read Agent 'unreadable-2126'");
+  });
+
+  test("malformed search rows are not absence", async () => {
+    searchMode = "malformed";
+    const result = await refusedBeforeWrite("malformed-2126");
+    expect(result.stderr).toContain("malformed");
+  });
+
+  test("a search that returns a different id is not absence", async () => {
+    searchMode = "unexpected-id";
+    const result = await refusedBeforeWrite("unexpected-2126");
+    expect(result.stderr).toContain("someone-else");
+    expect(result.stderr).not.toContain("no Agent row");
   });
 });
