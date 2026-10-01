@@ -2039,7 +2039,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         `Diagnostic: the bootstrap tool's agentId/scope fields always say who the server resolved you to.`,
     );
 
-    // ── Gate: confirm the secrets are live before restarting ───────────────
+    // ── Gate: require confirmation that the secrets are live before continuing
     let confirmed = Boolean(params.confirmSecretsApplied);
     if (!confirmed && deps.confirmPrompt) {
       confirmed = await deps.confirmPrompt(
@@ -2053,7 +2053,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     if (!confirmed) {
       push(false,
         secretsPushed
-          ? `not confirmed: the secrets were pushed to ${params.instance} and read back; ${isFabricOrigin(params.instance) ? "restart the Fabric instance" : "load them into the instance's process environment"}, then re-run \`flair mcp enable\` with --confirm-secrets-applied (earlier steps are idempotent and will reuse what's already provisioned).`
+          ? `not confirmed: the secrets were pushed to ${params.instance} and read back; ${isFabricOrigin(params.instance) ? "restart the Fabric instance" : "load them into the instance's process environment"}, then re-run \`flair mcp enable\` with --confirm-secrets-applied.`
           : `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
       return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
