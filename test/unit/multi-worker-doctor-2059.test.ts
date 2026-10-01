@@ -4,10 +4,11 @@
  * The `worker-threads` doctor check turns the public /Health `multiWorker` field
  * into a verdict: it fails on the refused state (naming `THREADS_COUNT=1` as the
  * remedy) and under the explicit opt-in, passes on a serving (one-worker)
- * instance, and SKIPS — never passes — for an unobserved or unrecognized
- * observation. The discovery probe (`probeFlairHealth`, the path `flair doctor`
- * uses) must recognise a validated Flair refusal so a refused instance is
- * observed rather than skipped.
+ * instance, SKIPS for an unobserved instance, and FAILS — blocking the run —
+ * for an unrecognized observation. The discovery probe (`probeFlairHealth`, the
+ * path `flair doctor` uses) must recognise a `/Health` 503 carrying the
+ * `multiWorker` refusal field so a refused instance is observed rather than
+ * skipped.
  */
 import { afterAll, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -16,6 +17,7 @@ import {
   interpretFlairHealth,
   probeFlairHealth,
   readWorkerThreadsObservation,
+  renderCatalogDoctorLines,
   runDoctorChecks,
   type DoctorRunContext,
   type WorkerThreadsObservation,
@@ -128,8 +130,19 @@ describe("worker-threads doctor check", () => {
     expect(checkWorkerThreads(undefined).status).toBe("skip");
   });
 
-  it("skips — never passes — on an unrecognized observation", () => {
-    expect(checkWorkerThreads({ kind: "unknown" }).status).toBe("skip");
+  it("fails — blocking — on an unrecognized observation, and renders an error line", () => {
+    const run = runDoctorChecks(
+      { ...baseCtx, workerThreads: { kind: "unknown" } },
+      { catalogIds: ["worker-threads"] as const },
+    );
+    // The whole verdict: a reachable but unrecognized observation is not healthy.
+    expect(run.healthy).toBe(false);
+    expect(run.results[0].status).toBe("fail");
+    // The rendered line: the OK icon must not appear for an unrecognized state.
+    const [line] = renderCatalogDoctorLines(run);
+    expect(line.icon).toBe("error");
+    expect(line.line).toContain("worker threads: fail");
+    expect(line.line).toContain("worker-thread state this doctor does not recognize");
   });
 });
 

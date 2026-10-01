@@ -12,6 +12,13 @@
  * The documents themselves, and every path-screening decision, live in
  * resources/oauth-discovery.ts — this file is only the Harper wiring.
  *
+ * flair's document mounts here are ordered `after` the multi-worker guard
+ * (resources/multi-worker-guard.ts). The @harperfast/oauth plugin registers its
+ * own mounts at these paths when MCP OAuth is enabled, with no such ordering,
+ * and Harper resolves a chain's pulled-in guard entry after an unconstrained
+ * one — so the guard is also registered as a runFirst mount at each path, ahead
+ * of the plugin's handler.
+ *
  * ── Why `server.http({ urlPath })` and not a Resource ───────────────────────
  * Harper's REST layer maps a Resource CLASS NAME to a path segment; no class
  * name produces `/.well-known/oauth-protected-resource`. A urlPath mount is the
@@ -91,6 +98,7 @@
 import { server } from "harper";
 import {
   AS_METADATA_PATH,
+  JWKS_PATH,
   PRM_PATH,
   asMetadataPathMatches,
   buildAuthorizationServerMetadata,
@@ -99,7 +107,7 @@ import {
   prmPathMatches,
 } from "./oauth-discovery.js";
 import { mcpOAuthEnabled } from "./mcp-oauth-flag.js";
-import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
+import { MULTI_WORKER_GUARD_HTTP_NAME, multiWorkerRequestGuard } from "./multi-worker-guard.js";
 
 export interface WellKnownDeps {
   /** Injectable for tests; defaults to the real Harper server. */
@@ -120,7 +128,19 @@ export function registerOAuthWellKnownRoutes(deps: WellKnownDeps = {}): string[]
   srv.http(makeWellKnownHandler(prmPathMatches, buildProtectedResourceMetadata, enabled), { urlPath: PRM_PATH, after: MULTI_WORKER_GUARD_HTTP_NAME });
   srv.http(makeWellKnownHandler(asMetadataPathMatches, buildAuthorizationServerMetadata, enabled), { urlPath: AS_METADATA_PATH, after: MULTI_WORKER_GUARD_HTTP_NAME });
 
-  return [PRM_PATH, AS_METADATA_PATH];
+  // @harperfast/oauth registers its own mounts at all three well-known paths when
+  // MCP OAuth is enabled, each in its own dispatch chain, with no ordering
+  // constraint. Harper resolves a chain's pulled-in guard entry AFTER an
+  // unconstrained entry in the same group (resolveDeps appends it, and topoSort's
+  // tiebreak is that array's order), so a bare `after` on flair's handler leaves
+  // the plugin's handler ahead of the guard. Registering the guard itself as a
+  // runFirst mount at each path makes it the group's first entry, ahead of the
+  // plugin's handler.
+  for (const path of [PRM_PATH, AS_METADATA_PATH, JWKS_PATH]) {
+    srv.http(multiWorkerRequestGuard, { urlPath: path, runFirst: true, name: MULTI_WORKER_GUARD_HTTP_NAME });
+  }
+
+  return [PRM_PATH, AS_METADATA_PATH, JWKS_PATH];
 }
 
 // Registered at module load, like resources/auth-middleware.ts. The opt-out

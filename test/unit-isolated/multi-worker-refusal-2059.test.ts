@@ -7,11 +7,12 @@
  * count and proves the promises the slice makes:
  *
  *   - one worker serves unchanged (and /Health gains no field);
- *   - more than one worker refuses every route that is not /Health with the one
+ *   - more than one worker refuses any non-/Health request with the one
  *     named 503, BEFORE the rate limiter, any credential read, or any table
  *     access, and AHEAD OF the method allowlist (a disallowed method gets the
  *     503, not a 405);
- *   - an UNREADABLE worker count is refused, never read as one worker;
+ *   - a worker count that is not a positive integer (1.5) or a throwing getter
+ *     is UNKNOWN, refused, never read as one worker;
  *   - the `FLAIR_MULTI_WORKER_UNSAFE=1` opt-in serves while /Health stays non-OK
  *     and names the opt-in.
  *
@@ -27,6 +28,7 @@ import { beforeEach, describe, expect, it, mock } from "bun:test";
 let credentialReads = 0;
 let tableReads = 0;
 let workerCountValue: number | undefined = 1;
+let workerCountThrows = false;
 let loggerErrors: string[] = [];
 const httpEntries: Array<{ handler: unknown; options: unknown }> = [];
 
@@ -50,6 +52,7 @@ mock.module("harper", () => {
         return null;
       },
       get workerCount() {
+        if (workerCountThrows) throw new Error("workerCount getter failed");
         return workerCountValue;
       },
       resources: {
@@ -104,8 +107,9 @@ function makeRequest(path: string, method = "GET", authorization?: string): any 
 }
 
 /** Force the condition the guard resolves next: a fake count and the opt-in. */
-function setCondition(workerCount: number | undefined, optIn: boolean): void {
+function setCondition(workerCount: number | undefined, optIn: boolean, throws = false): void {
   workerCountValue = workerCount;
+  workerCountThrows = throws;
   if (optIn) process.env.FLAIR_MULTI_WORKER_UNSAFE = "1";
   else delete process.env.FLAIR_MULTI_WORKER_UNSAFE;
   guard._resetMultiWorkerGuardForTests();
@@ -146,6 +150,22 @@ describe("multi-worker condition (pure)", () => {
     expect(guard.readWorkerCount()).toBeNull();
     expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: null });
     setCondition(1, false);
+    expect(guard.readWorkerCount()).toBe(1);
+  });
+
+  it("reads a non-integer server.workerCount as unknown, never flooring it", () => {
+    // Harper starts workers while i < count, so 1.5 starts two; flooring it to
+    // 1 would report a serving state for a two-worker instance.
+    setCondition(1.5, false);
+    expect(guard.readWorkerCount()).toBeNull();
+    expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: null });
+  });
+
+  it("reads a throwing server.workerCount getter as unknown, not as a throw", () => {
+    setCondition(1, false, true);
+    expect(guard.readWorkerCount()).toBeNull();
+    expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: null });
+    setCondition(1, false, false);
     expect(guard.readWorkerCount()).toBe(1);
   });
 
@@ -196,7 +216,7 @@ describe("request guard (fake worker count)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("refuses every non-/Health route with the named 503 before any auth or table access", async () => {
+  it("refuses each non-/Health route with the named 503 before any auth or table access", async () => {
     setCondition(2, false);
     const routes: Array<[string, string]> = [
       ["/Presence", "GET"],
@@ -224,6 +244,24 @@ describe("request guard (fake worker count)", () => {
 
   it("refuses an unknown worker count too", async () => {
     setCondition(undefined, false);
+    const res = await middleware(makeRequest("/Memory", "GET"), nextLayer);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error?: string; workerCount?: number | null };
+    expect(body.error).toBe("multi_worker_unsupported");
+    expect(body.workerCount).toBeNull();
+  });
+
+  it("refuses a non-integer worker count (1.5) rather than flooring it", async () => {
+    setCondition(1.5, false);
+    const res = await middleware(makeRequest("/Memory", "GET"), nextLayer);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error?: string; workerCount?: number | null };
+    expect(body.error).toBe("multi_worker_unsupported");
+    expect(body.workerCount).toBeNull();
+  });
+
+  it("refuses when the worker-count getter throws", async () => {
+    setCondition(1, false, true);
     const res = await middleware(makeRequest("/Memory", "GET"), nextLayer);
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error?: string; workerCount?: number | null };

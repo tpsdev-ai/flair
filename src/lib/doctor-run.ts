@@ -430,7 +430,7 @@ function runKeysPrune(ctx: DoctorRunContext): DoctorCheckResult {
  * field is omitted) and any instance that is not in the refusal; `refused`
  * names the refusal or the explicit opt-in with the observed worker count (null
  * when the instance reported no usable count); `unknown` is a malformed field,
- * which is never read as serving.
+ * which is never read as serving and blocks doctor.
  */
 export type WorkerThreadsObservation =
   | { kind: "serving" }
@@ -461,7 +461,7 @@ export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObserva
 
 /** What a /Health probe found: whether the port is Flair, and what it observed. */
 export interface FlairHealthProbe {
-  /** The port answered as Flair: a 2xx /Health, or a validated Flair refusal. */
+  /** The port answered as Flair: a 2xx /Health, or a /Health 503 carrying a recognized `multiWorker` refusal. */
   reaching: boolean;
   status: number;
   /** The parsed response body, or null when it was not JSON. */
@@ -475,10 +475,9 @@ export interface FlairHealthProbe {
  * observe?
  *
  * A 2xx is Flair. A 503 is Flair ONLY when its `multiWorker` field names the
- * refusal — that is the validated refusal a refused instance answers with, so
- * discovery recognises the refused instance instead of skipping it. Any other
- * non-2xx is not an observation. A malformed `multiWorker` is `unknown`, never
- * serving.
+ * refusal — the state field a refused flair instance answers with, so discovery
+ * recognises the refused instance instead of skipping it. Any other non-2xx is
+ * not an observation. A malformed `multiWorker` is `unknown`, never serving.
  */
 export function interpretFlairHealth(status: number, body: unknown): { reaching: boolean; observation: WorkerThreadsObservation | null } {
   const observation = readWorkerThreadsObservation((body as { multiWorker?: unknown })?.multiWorker);
@@ -516,7 +515,10 @@ function runWorkerThreads(ctx: DoctorRunContext): DoctorCheckResult {
     return result(id, label, "skip", { detail: "instance not observed" });
   }
   if (observed.kind === "unknown") {
-    return result(id, label, "skip", { detail: "the instance's worker-thread state was not recognized" });
+    return result(id, label, "fail", {
+      detail: "the instance answered /Health with a worker-thread state this doctor does not recognize",
+      remedy: "Inspect /Health and re-run doctor",
+    });
   }
   if (observed.kind === "serving") {
     return result(id, label, "pass", { detail: "the instance reports no multi-worker refusal" });

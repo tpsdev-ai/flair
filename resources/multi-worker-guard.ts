@@ -16,17 +16,20 @@
  * `server.workerCount` ONCE per worker module instance (each worker loads its
  * own copy, so the named boot line is emitted once per worker instance), decides
  * the state, and answers the questions the rest of the server asks: what does
- * /Health report, and does this request serve or get the named 503. An
- * unreadable `server.workerCount` is UNKNOWN, which is refused, never read as
- * one worker.
+ * /Health report, and does this request serve or get the named 503. A
+ * `server.workerCount` that is not a positive integer — including a getter that
+ * throws — is UNKNOWN, which is refused, never read as one worker.
  *
- * The refused state is enforced before dispatch on every route Flair serves.
- * This module registers ONE named http entry, runFirst and ordered ahead of the
- * default REST middleware (auth-middleware.ts, which orders itself after this
- * entry): so the refusal lands before the method allowlist, before Harper's
- * `authentication` and before any flair handler. A urlPath mount (for example
+ * The refused state is enforced before dispatch. This module registers ONE
+ * named http entry, runFirst and ordered ahead of the default REST middleware
+ * (auth-middleware.ts, which orders itself after this entry): so the refusal
+ * lands before the method allowlist, before Harper's `authentication` and
+ * before any flair handler on the default chain. A urlPath mount (for example
  * `/mcp`) gets its OWN dispatch chain, so flair's mounts declare
- * `after: MULTI_WORKER_GUARD_HTTP_NAME` to pull this entry into their chains.
+ * `after: MULTI_WORKER_GUARD_HTTP_NAME` to pull this entry into their chains,
+ * and oauth-wellknown.ts registers this same guard function as a runFirst mount
+ * at the @harperfast/oauth plugin's well-known paths, whose mounts carry no
+ * ordering constraint of their own.
  *
  * The escape hatch is `FLAIR_MULTI_WORKER_UNSAFE=1`. No flair launch path sets
  * it; it exists for the readiness work's own two-worker tests and for an
@@ -56,7 +59,7 @@ export type MultiWorkerState = "single-worker" | "refused" | "unsafe-opt-in";
 
 export interface MultiWorkerCondition {
   state: MultiWorkerState;
-  /** `server.workerCount` as read once, or null when it is not a number. */
+  /** `server.workerCount` as read once, or null when it is not a positive integer. */
   workerCount: number | null;
 }
 
@@ -173,17 +176,24 @@ export function multiWorkerRefusalResponse(
 let cached: MultiWorkerCondition | null = null;
 
 /**
- * `server.workerCount` as read once, or null when it is not a number.
+ * `server.workerCount` as read once, or null when it is not a positive integer.
  *
  * Harper defines `workerCount` on the server object on every worker thread (its
- * getter returns the configured thread count there, and 1 on the main worker).
- * A value that is not a finite number at least 1 is not a serving worker's
- * count: it is UNKNOWN, and the guard refuses it rather than read it as one.
+ * getter returns the configured thread count there, and 1 on the main worker),
+ * and starts workers while `i < count`: a count that is not an integer (1.5)
+ * starts more workers than it names. So a value that is not a positive integer
+ * — and a getter that throws — is UNKNOWN, and the guard refuses it rather than
+ * read it as one worker.
  */
 export function readWorkerCount(): number | null {
-  const raw = (server as { workerCount?: unknown } | undefined)?.workerCount;
-  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 1) return null;
-  return Math.floor(raw);
+  let raw: unknown;
+  try {
+    raw = (server as { workerCount?: unknown } | undefined)?.workerCount;
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) return null;
+  return raw;
 }
 
 /** The condition, resolved once per worker module instance. */
@@ -229,9 +239,10 @@ export function _resetMultiWorkerGuardForTests(): void {
 
 // Register the guard as its own http entry: runFirst, named, and ordered ahead
 // of the default REST middleware. A urlPath mount pulls it in by name (see
-// mcp-oauth.ts / oauth-wellknown.ts), so the refused state is enforced before
-// dispatch on every route Flair serves. Skipped where `server.http` is absent
-// (a partial mock outside a running Harper, where there is no dispatch to guard).
+// mcp-oauth.ts / oauth-wellknown.ts), so the refusal precedes the handlers on
+// the default chain and on each mount that declares `after`. Skipped where
+// `server.http` is absent (a partial mock outside a running Harper, where there
+// is no dispatch to guard).
 if (typeof (server as { http?: unknown } | undefined)?.http === "function") {
   server.http(multiWorkerRequestGuard, {
     runFirst: true,

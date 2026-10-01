@@ -464,14 +464,13 @@ program
     }
 
     // Helper: try to reach Harper on a given port.
-    // Must return true ONLY for a Flair /Health: a 200 OK, OR the validated
-    // refusal a refused instance answers with (503 + a `multiWorker` refusal
-    // field). A generic HTTP status > 0 (flair#862) would accept 404 from a Node
-    // inspector on 9229 or any other service — "present but wrong" beats
-    // "absent but correct".
+    // Must return true ONLY for a Flair /Health: a 200 OK, OR a 503 whose body
+    // carries the recognized `multiWorker` refusal field. A generic HTTP
+    // status > 0 (flair#862) would accept 404 from a Node inspector on 9229 or
+    // any other service — "present but wrong" beats "absent but correct".
     async function probePort(p: number): Promise<boolean> {
       const probe = await probeFlairHealth(`http://127.0.0.1:${p}/Health`);
-      return probe.reaching; // 2xx /Health, or the validated multi-worker refusal
+      return probe.reaching; // 2xx /Health, or a 503 carrying the recognized multiWorker refusal field
     }
 
     // Helper: discover what port a Harper PID is listening on.

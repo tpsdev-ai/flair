@@ -1,26 +1,51 @@
 // multi-worker-refusal-2059.test.ts — REAL Harper, two workers, refusal active.
 //
 // flair#2059 (S0 of #2052): with more than one Harper worker the instance refuses
-// to serve until the multi-worker readiness work lands. The refused state is
-// enforced before dispatch on every route Flair serves — this proves it through a
+// to serve until the multi-worker readiness work lands. The refusal runs ahead of
+// the handlers on the default chain and on each urlPath mount — proved through a
 // real Harper, not by invoking a captured middleware callback:
 //
 //   - a default REST route answers the one named 503;
-//   - a MOUNTED route (the /.well-known discovery mount, its own dispatch chain)
-//     answers the same 503, so the guard is pulled into a mounted chain;
+//   - a MOUNTED route flair registers (a /.well-known discovery mount, its own
+//     dispatch chain) answers the same 503;
+//   - the OAuth plugin's own /.well-known/jwks.json mount answers the same 503,
+//     so the guard is pulled into that chain too;
 //   - a disallowed method answers 503, not the method allowlist's 405, so the
 //     guard runs ahead of the allowlist;
 //   - /Health stays reachable and reports the refusal;
 //   - the doctor discovery path (probeFlairHealth) observes the refused instance.
 //
-// Darwin forces one worker (Harper configValidator), so the refused two-worker
-// instance cannot exist there and the case skips.
+// This proof requires Linux: only there do the extra HTTP workers receive TCP
+// traffic. On macOS/Windows the workers cannot share the server ports, so the
+// main thread (whose `server.workerCount` reads 1) serves alone and the refusal
+// is not observable. The case is gated to Linux below.
 
 import { describe, test, beforeAll, afterAll, expect } from "bun:test";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { probeFlairHealth } from "../../src/lib/doctor-run.js";
 
-describe("one worker serves the same routes (control)", () => {
+// Enable the MCP OAuth plugin for this file so its own /.well-known/jwks.json
+// mount is registered (the plugin route the refusal must precede). Both a
+// one-worker control and the two-worker refused instance boot with it on, so
+// the first proves the plugin route serves and the second proves the guard
+// covers the same route.
+const priorOAuth = { flag: process.env.FLAIR_MCP_OAUTH, issuer: process.env.FLAIR_MCP_ISSUER };
+beforeAll(() => {
+  process.env.FLAIR_MCP_OAUTH = "true";
+  process.env.FLAIR_MCP_ISSUER = "https://multi-worker-2059.flair.test";
+});
+afterAll(() => {
+  if (priorOAuth.flag === undefined) delete process.env.FLAIR_MCP_OAUTH;
+  else process.env.FLAIR_MCP_OAUTH = priorOAuth.flag;
+  if (priorOAuth.issuer === undefined) delete process.env.FLAIR_MCP_ISSUER;
+  else process.env.FLAIR_MCP_ISSUER = priorOAuth.issuer;
+});
+
+function basicHeader(harper: HarperInstance): string {
+  return "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
+}
+
+describe("one worker serves (control)", () => {
   let harper: HarperInstance;
   beforeAll(async () => {
     harper = await startHarper();
@@ -30,15 +55,22 @@ describe("one worker serves the same routes (control)", () => {
   });
 
   test(
-    "a default route and the mounted route serve on one worker",
+    "a default route, the mounted discovery route and the plugin's jwks route serve on one worker",
     async () => {
       const base = harper.httpURL.replace(/\/$/, "");
       // The mounted discovery route is reachable and answers its document.
       const wellKnown = await fetch(`${base}/.well-known/oauth-protected-resource`);
       expect(wellKnown.status).toBe(200);
-      // The default chain serves too (no multi-worker refusal).
-      const presence = await fetch(`${base}/Presence`);
-      expect(presence.status).not.toBe(503);
+      // The OAuth plugin's own mount is enabled and serves here, so the
+      // two-worker case below proves the guard covers this same route.
+      const jwks = await fetch(`${base}/.well-known/jwks.json`);
+      expect(jwks.status).toBe(200);
+      // A default-chain route serves too: the admin credential reaches
+      // /Presence (200), so the guard stepped aside rather than refusing.
+      const presence = await fetch(`${base}/Presence`, {
+        headers: { Authorization: basicHeader(harper) },
+      });
+      expect(presence.status).toBe(200);
     },
     240_000,
   );
@@ -54,8 +86,8 @@ describe("multi-worker refusal enforced before dispatch (real Harper, 2 workers)
     if (harper) await stopHarper(harper);
   });
 
-  test.skipIf(process.platform === "darwin")(
-    "refuses a default route, a mounted route, a disallowed method and /Health, and the doctor probe observes it",
+  test.skipIf(process.platform !== "linux")(
+    "refuses a default route, a mounted route, the plugin's jwks route, a disallowed method and /Health, and the doctor probe observes it",
     async () => {
       const base = harper.httpURL.replace(/\/$/, "");
       // Right after boot a worker can still be settling; retry a request that
@@ -78,10 +110,20 @@ describe("multi-worker refusal enforced before dispatch (real Harper, 2 workers)
       expect(presence.status).toBe(503);
       expect(((await presence.json()) as { error?: string }).error).toBe("multi_worker_unsupported");
 
-      // A MOUNTED route: its own urlPath dispatch chain must pull the guard in.
+      // A MOUNTED route flair registers: its own urlPath dispatch chain must
+      // pull the guard in via the `after` its mount declares.
       const wellKnown = await get("/.well-known/oauth-protected-resource");
       expect(wellKnown.status).toBe(503);
       expect(((await wellKnown.json()) as { error?: string }).error).toBe("multi_worker_unsupported");
+
+      // The OAuth plugin's OWN mount: it registers /.well-known/jwks.json
+      // without declaring the guard, so the pass-through entry oauth-wellknown.ts
+      // registers at the same path pulls the guard into that chain. This route
+      // answers 200 on the one-worker control above, so this 503 is the guard
+      // refusing the same enabled plugin route.
+      const jwks = await get("/.well-known/jwks.json");
+      expect(jwks.status).toBe(503);
+      expect(((await jwks.json()) as { error?: string }).error).toBe("multi_worker_unsupported");
 
       // A disallowed method: the guard runs ahead of the method allowlist, so
       // this is 503, never the allowlist's 405. (A TRACE response carries no
@@ -90,7 +132,8 @@ describe("multi-worker refusal enforced before dispatch (real Harper, 2 workers)
       expect(trace.status).toBe(503);
 
       // A protected route with NO credential is 503, not a 401/403: the guard
-      // runs before Harper's `authentication` and before any credential read.
+      // runs before Harper's `authentication` and before auth-middleware's
+      // credential read on this default-chain route.
       const memory = await get("/Memory");
       expect(memory.status).toBe(503);
 
