@@ -568,12 +568,13 @@ echo "🔖 Opening release PR..."
 PR_PAYLOAD="$(mktemp)"
 trap 'rm -f "$PR_PAYLOAD"' EXIT
 PR_TITLE="release: v${VERSION}" PR_HEAD="$RELEASE_BRANCH" PR_VERSION="$VERSION" node -e '
-  const body = `Version bump across workspace packages to v${process.env.PR_VERSION}.
+  const body = `Version bump of the lockstep release packages to v${process.env.PR_VERSION}.
 
 See CHANGELOG.md for what'"'"'s in this release.
 
-After CI is green and this is merged, tag the release (OIDC staging — no npm login):
+After this merges, Release auto-tag normally creates the tag once main'"'"'s CI passes. If it did not, a repository admin tags by hand (a ruleset restricts creating v* tags); the first command must print nothing:
 \`\`\`
+git ls-remote --tags origin v${process.env.PR_VERSION}
 git checkout main && git pull
 git tag -a v${process.env.PR_VERSION} -m "v${process.env.PR_VERSION}" && git push origin v${process.env.PR_VERSION}
 \`\`\`
