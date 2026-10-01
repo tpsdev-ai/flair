@@ -40,7 +40,7 @@ export const AS_METADATA_PATH = "/.well-known/oauth-authorization-server";
 
 /**
  * The JWKS well-known path. flair registers no document at this path:
- * @harperfast/oauth registers its own mount here when MCP OAuth is enabled, and
+ * @harperfast/oauth registers its own mount here when its component loads (it checks whether MCP OAuth is enabled per request), and
  * oauth-wellknown.ts registers the multi-worker guard as a runFirst mount at
  * this path so it precedes the plugin's handler.
  */

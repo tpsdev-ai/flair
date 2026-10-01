@@ -459,7 +459,7 @@ export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObserva
   };
 }
 
-/** What a /Health probe found: whether the port answered a recognized /Health, and what it observed. */
+/** What a /Health probe found: whether the response counts as reaching (see `reaching`), and what it observed. */
 export interface FlairHealthProbe {
   /** A 2xx, or a 503 whose body carries a recognized `multiWorker` refusal state field. */
   reaching: boolean;
@@ -471,13 +471,11 @@ export interface FlairHealthProbe {
 }
 
 /**
- * Interpret a /Health status and body: did this port answer a recognized
- * /Health, and what did it observe?
+ * Interpret a /Health status and body: does the response count as reaching
+ * (a 2xx with any body, or a 503 carrying the multiWorker field), and what did it observe?
  *
- * A 2xx is reaching, whatever its body. A 503 is reaching ONLY when its
- * `multiWorker` field names the refusal — the state field a refused flair
- * instance answers with — so discovery recognises that instance instead of
- * skipping it. Any other non-2xx is not reaching. A 2xx with a malformed
+ * A 2xx is reaching, whatever its body. Any other non-2xx is not reaching. A 2xx
+ * with a malformed
  * `multiWorker` is `unknown`, never serving; a 503 with no recognized
  * `multiWorker` field is not reaching, so its worker check is skipped rather
  * than blocking.
@@ -519,7 +517,7 @@ function runWorkerThreads(ctx: DoctorRunContext): DoctorCheckResult {
   }
   if (observed.kind === "unknown") {
     return result(id, label, "fail", {
-      detail: "the instance answered /Health with a worker-thread state this doctor does not recognize",
+      detail: "the /Health response carried a worker-thread state this doctor does not recognize",
       remedy: "Inspect /Health and re-run doctor",
     });
   }

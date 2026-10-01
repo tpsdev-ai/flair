@@ -6,11 +6,10 @@
   enumerated, and the XAA token path's `jti` single-use record until #2073 routes
   it through the shared atomic check-and-record. With more than one worker — the
   count read from `server.workerCount`, or Harper's effective configured count
-  (`server.config.threads.count`) where that is not a positive integer — every
-  worker now logs one named error, and the instance refuses before dispatch with
+  (`server.config.threads.count`) where reading the first fails or it is not a positive integer — every
+  worker now logs one named error, and every request except `/Health` is refused before dispatch with
   one named 503: ahead of the method allowlist on the default chain, and ahead of
-  the handler on each `urlPath` mount. A getter that throws on one path falls
-  back to the other; a count that is not a positive integer on either path is
+  the handler on each `urlPath` mount. a count with no positive integer from either read is
   UNKNOWN and refused, never read as one worker. `/Health` answers 503 and
   reports the refusal, and `flair doctor` fails a `worker threads` check.
   Workers stay up in the refused state; nothing throws during boot. One worker
@@ -20,4 +19,4 @@
   > `THREADS_COUNT=1` and restart Flair to serve again.
   > `FLAIR_MULTI_WORKER_UNSAFE=1` is the only escape hatch — the instance
   > serves, the opt-in is still logged and `/Health` stays non-OK — and it is
-  > never set by any flair launch path.
+  > never set by a production Flair launch path.

@@ -17,14 +17,14 @@
  * so the named boot line is emitted once per worker instance), decides the
  * state, and answers the questions the rest of the server asks: what does
  * /Health report, and does this request serve or get the named 503. The count is
- * `server.workerCount`, Harper's per-thread value; where that is not a positive
- * integer (on the main thread alongside worker threads it is `undefined`), the
- * count falls back to Harper's effective configured count,
- * `server.config.threads.count`. A getter that throws on one path falls back to
- * the other; only when BOTH paths lack a positive integer is the count UNKNOWN,
- * which is refused, never read as one worker.
+ * `server.workerCount`, Harper's per-thread value. Where reading it fails or it
+ * is not a positive integer (on the main thread alongside worker threads it is
+ * `undefined`), the count is read from Harper's effective configured count,
+ * `server.config.threads.count`. Only when that read also fails or is not a
+ * positive integer is the count UNKNOWN, which is refused, never read as one
+ * worker.
  *
- * The refused state is enforced before dispatch. This module registers ONE
+ * The refused state is enforced before dispatch for every request except `/Health` and `/health`, which the guard passes to the Health resource to answer with its own 503. This module registers ONE
  * named http entry, runFirst and ordered ahead of the default REST middleware
  * (auth-middleware.ts, which orders itself after this entry): so the refusal
  * lands before the method allowlist, before Harper's `authentication` and
@@ -35,7 +35,7 @@
  * at the @harperfast/oauth plugin's well-known paths, whose mounts carry no
  * ordering constraint of their own.
  *
- * The escape hatch is `FLAIR_MULTI_WORKER_UNSAFE=1`. No flair launch path sets
+ * The escape hatch is `FLAIR_MULTI_WORKER_UNSAFE=1`. No production Flair launch path sets
  * it; it exists for the readiness work's own two-worker tests and for an
  * operator who accepts the risk explicitly. Under it requests serve; the boot
  * line is still emitted and /Health stays non-OK, naming the opt-in.

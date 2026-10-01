@@ -4,7 +4,7 @@
  *
  * @harperfast/oauth registers its OWN mounts at
  * `/.well-known/oauth-protected-resource`, `.../oauth-authorization-server` and
- * `.../jwks.json` when MCP OAuth is enabled, each in its own dispatch chain with
+ * `.../jwks.json` when its component loads, each in its own dispatch chain with
  * no ordering constraint. Harper resolves a chain's pulled-in guard entry AFTER
  * an unconstrained entry in the same group, so `after: MULTI_WORKER_GUARD_HTTP_NAME`
  * on flair's own handler does not put the guard ahead of the plugin's handler.

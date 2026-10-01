@@ -14,7 +14,7 @@
  *
  * flair's document mounts here are ordered `after` the multi-worker guard
  * (resources/multi-worker-guard.ts). The @harperfast/oauth plugin registers its
- * own mounts at these paths when MCP OAuth is enabled, with no such ordering,
+ * own mounts at these paths when its component loads (it checks whether MCP OAuth is enabled per request), with no such ordering,
  * and Harper resolves a chain's pulled-in guard entry after an unconstrained
  * one — so the guard is also registered as a runFirst mount at each path, ahead
  * of the plugin's handler.

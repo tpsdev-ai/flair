@@ -121,7 +121,7 @@ describe("worker-threads doctor check", () => {
     expect(r.detail).toContain("FLAIR_MULTI_WORKER_UNSAFE=1");
   });
 
-  it("passes on a serving (one-worker) instance", () => {
+  it("passes on a serving (one-worker) observation", () => {
     const r = checkWorkerThreads({ kind: "serving" });
     expect(r.status).toBe("pass");
   });
