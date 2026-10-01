@@ -372,7 +372,10 @@ function writeRecoveryMock(rootPath: string): string {
     "    process.stdin.resume();",
     "  }",
     "});",
-    "if (reason === 'stdin') await new Promise(r => setTimeout(r, 5000));",
+    "if (reason === 'stdin') {",
+    "  process.stdout.write(JSON.stringify({ teardown: 'started' }) + '\\n');",
+    "  await new Promise(r => setTimeout(r, 5000));",
+    "}",
     "try { child.kill('SIGKILL'); } catch {}",
     "rmSync(ROOT, { recursive: true, force: true });",
     "if (process.env.RECOVERY_MOCK_EXIT_FILE) {",
@@ -464,8 +467,40 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
     expect(existsSync(join(rootPath, "hdb.pid"))).toBe(true);
 
     // ── SIGKILL the wrapper mid-teardown ────────────────────────────────
-    wrapper.stdin?.end(); // trigger teardown
-    await new Promise(r => setTimeout(r, 100)); // tiny window for teardown to start
+    await new Promise<void>((resolve, reject) => {
+      let stdout = "";
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("mock wrapper did not report teardown start within 5 s"));
+      }, 5_000);
+      const onData = (chunk: Buffer) => {
+        stdout += chunk.toString();
+        let end: number;
+        while ((end = stdout.indexOf("\n")) !== -1) {
+          const line = stdout.slice(0, end);
+          stdout = stdout.slice(end + 1);
+          try {
+            if (JSON.parse(line).teardown === "started") {
+              cleanup();
+              resolve();
+              return;
+            }
+          } catch {}
+        }
+      };
+      const onExit = () => {
+        cleanup();
+        reject(new Error("mock wrapper exited before teardown start marker"));
+      };
+      const cleanup = () => {
+        clearTimeout(timeout);
+        wrapper!.stdout?.off("data", onData);
+        wrapper!.off("exit", onExit);
+      };
+      wrapper!.stdout?.on("data", onData);
+      wrapper!.once("exit", onExit);
+      wrapper!.stdin?.end();
+    });
     try { wrapper.kill("SIGKILL"); } catch {}
 
     // Wait for wrapper to exit
