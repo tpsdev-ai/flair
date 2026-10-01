@@ -301,11 +301,12 @@ describe("launcher script — non-interactive start", () => {
 // flair#2040 / flair#2056: when launchd starts the job (RunAtLoad at a console
 // login, or a KeepAlive retry) while a DIRECT process already serves the same
 // data directory, the launcher must not start a second Harper on it. It refuses
-// only when hdb.pid names a live process whose command line is node or bun
-// running a Harper entry script; no flair-daemon sidecar is required (see
-// test/unit/launcher-pid-identity-2056.test.ts). Harper's own hdb.pid check
-// would refuse too, but only after loading its config and applying
-// HARPER_SET_CONFIG to the data directory. Platform-independent: plain sh.
+// only when hdb.pid names a live process whose command line, as ps reports
+// it, is node or bun followed by a Harper entry path; no flair-daemon sidecar
+// is required (see test/unit/launcher-pid-identity-2056.test.ts). Harper's own
+// hdb.pid check would refuse too, but only after loading its config and
+// applying HARPER_SET_CONFIG to the data directory. Platform-independent: plain
+// sh.
 describe("launcher script — never a second instance on a served data directory (flair#2040)", () => {
   const LAUNCHER = join(import.meta.dir, "../../templates/launchd/start-flair-with-admin-pass.sh");
 
@@ -329,10 +330,11 @@ describe("launcher script — never a second instance on a served data directory
     });
   }
 
-  test("hdb.pid names a LIVE process that is not Harper (flair#2056) -> the launcher starts Harper", () => {
+  test("hdb.pid names a LIVE process whose command line is not Harper-shaped (flair#2056) -> the launcher execs the fake node", () => {
     const f = fixture();
     // A live pid this test owns: the test runner itself, whose command line is
-    // not node or bun running a Harper entry script, so Harper is exec'd. See
+    // not node or bun followed by a Harper entry path, so the launcher does not
+    // refuse and execs the fake node. See
     // test/unit/launcher-pid-identity-2056.test.ts for the refusal of a Harper-shaped process.
     writeFileSync(join(f.rootPath, "hdb.pid"), String(process.pid));
     const r = launch(f);

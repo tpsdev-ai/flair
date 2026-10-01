@@ -284,35 +284,35 @@ export function sidecarStartAgrees(startSecondMs: number, sidecarStartMs: number
   return Math.abs(sidecarStartMs - startSecondMs) <= 2000;
 }
 
-/** Harper's entry script under an install tree: `…/node_modules/[@<scope>/]harper/dist/bin/harper.js`. */
+/** A Harper entry path under an install tree: `…/node_modules/[@<scope>/]harper/dist/bin/harper.js`. */
 const HARPER_ENTRY_PATH = /(^|\/)node_modules\/(@[^/]+\/)?harper\/dist\/bin\/harper\.js$/;
 /** The relative entry Harper's own restart forks, from its package directory (LAUNCH_SERVICE_SCRIPTS.MAIN). */
 const HARPER_RESTART_ENTRY = "dist/bin/harper.js";
 
 /**
  * Is this a Harper-shaped command line (flair#2056)? It shows what the process
- * was started to run, not that it serves anything.
+ * was started with, not that it serves anything.
  *
- * argv[0]'s basename is `node` or `bun`, and argv[1], the script it runs, is a
- * Harper entry: `…/node_modules/harper/dist/bin/harper.js` or
+ * The first argument's basename is `node` or `bun`, and the second is a Harper
+ * entry path: `…/node_modules/harper/dist/bin/harper.js` or
  * `…/node_modules/@<scope>/harper/dist/bin/harper.js` (what `flair start`, the
  * launchd launcher and a systemd unit pass), or `dist/bin/harper.js` (what
- * Harper's own restart forks). flair passes no runtime options, so an option
- * before the script does not match. A Harper path anywhere else in the
- * arguments does not match.
+ * Harper's own restart forks). A second argument starting with `-`, or a Harper
+ * path in a later argument, does not match.
  *
- * `cmdline` is `/proc/<pid>/cmdline` (NUL-separated argv) or `ps -o command=`
- * (space-joined argv, split on whitespace: a path containing whitespace does
- * not match).
+ * `cmdline` is `/proc/<pid>/cmdline` (NUL-separated: the arguments exactly) or
+ * the line `ps -o command=` reports (arguments joined by spaces; split here on
+ * whitespace). From the `ps` line this does not establish which argument is the
+ * script: an argument containing a space can produce a matching line.
  */
 export function isHarperProcessCommandLine(cmdline: string): boolean {
-  const argv = cmdline.includes("\u0000") ? cmdline.split("\u0000") : cmdline.trim().split(/\s+/);
-  if (argv.length < 2) return false;
-  const exe = argv[0].split("/").pop();
+  const args = cmdline.includes("\u0000") ? cmdline.split("\u0000") : cmdline.trim().split(/\s+/);
+  if (args.length < 2) return false;
+  const exe = args[0].split("/").pop();
   if (exe !== "node" && exe !== "bun") return false;
-  const script = argv[1];
-  if (script.startsWith("-")) return false;
-  return script === HARPER_RESTART_ENTRY || HARPER_ENTRY_PATH.test(script);
+  const second = args[1];
+  if (second.startsWith("-")) return false;
+  return second === HARPER_RESTART_ENTRY || HARPER_ENTRY_PATH.test(second);
 }
 
 /**

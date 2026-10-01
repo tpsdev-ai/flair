@@ -25,8 +25,8 @@
 //     the stub, never a database. The stub answers Flair's /Health on 127.0.0.1,
 //     writes hdb.pid, opens `<dataDir>/operations-server`, and logs SIGTERM.
 //     Every path runs it as `<this test's runtime (bun)> <stub> run .`, the argv
-//     `flair start` spawns under bun, so the launcher's flair#2056 check finds a
-//     live stub Harper-shaped by its executable and entry script.
+//     `flair start` spawns under bun, so the command line `ps` reports for a
+//     live stub is Harper-shaped for the launcher's flair#2056 check.
 //   - HOME is a throwaway directory for every CLI subprocess; every plist, data
 //     dir, admin-pass file and label resolves inside it. Ports are ephemeral,
 //     never 9926.
@@ -845,7 +845,7 @@ describe("flair#2040 — a launchd start of the job while a DIRECT process serve
       const startsBefore = stubStarts().length;
       const refused = runAsLaunchd(fx.plistPath);
       expect(refused.status).toBe(0);
-      expect(refused.stderr).toContain(`hdb.pid names pid ${pid}, a live node/bun process running a Harper entry script`);
+      expect(refused.stderr).toContain(`hdb.pid names pid ${pid}, whose command line as ps reports it is node or bun followed by a Harper entry path`);
       expect(refused.stderr).toContain("not starting a second instance");
       // No second Harper ran: no new stub start, hdb.pid and the server unchanged.
       expect(stubStarts().length).toBe(startsBefore);
