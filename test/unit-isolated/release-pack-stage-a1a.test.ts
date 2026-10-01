@@ -57,7 +57,8 @@ const PACK_SCRIPT = join(REPO, "scripts", "ci", "release-pack.mjs");
 const PACKAGES: string[] = lockstepPackages();
 
 // Resolved: the fake npm records process.cwd(), which is the real path (on
-// macOS, os.tmpdir() sits under the /var -> /private/var symlink).
+// the tested macOS host, the default TMPDIR is under the /var -> /private/var
+// symlink).
 const SCRATCH = mkdtempSync(join(realpathSync(tmpdir()), "flair-a1a-"));
 const BIN = join(SCRATCH, "bin");
 mkdirSync(BIN, { recursive: true });
