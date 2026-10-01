@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import yaml from "js-yaml";
 import { program } from "../../src/cli.ts";
+import { generateRsaSigningKeyPair } from "../../src/lib/mcp-enable.ts";
 
 const REPO_CONFIG = join(import.meta.dir, "..", "..", "config.yaml");
 const HOST = "flair.example.com";
@@ -39,10 +40,17 @@ interface RunResult {
   /** Did the run leave a signing key or a secrets staging file in the temp dir? */
   keyWritten: boolean;
   secretsWritten: boolean;
+  secretSets: string[];
+  secretReads: string[];
 }
 
 /** Run `flair mcp enable` in a temp dir holding `config` as ./config.yaml. */
-async function runEnable(config: string, extraArgs: string[], targetRunsFromTempDir: boolean): Promise<RunResult> {
+async function runEnable(
+  config: string,
+  extraArgs: string[],
+  targetRunsFromTempDir: boolean,
+  options: { confirmed?: boolean; pushSecrets?: boolean } = {},
+): Promise<RunResult> {
   const tmp = mkdtempSync(join(tmpdir(), "flair-2113-cli-"));
   const configPath = join(tmp, "config.yaml");
   writeFileSync(configPath, config);
@@ -61,6 +69,9 @@ async function runEnable(config: string, extraArgs: string[], targetRunsFromTemp
   let exit: string | null = null;
   let bootPid = 1000;
   const credentials: any[] = [];
+  const secretSets: string[] = [];
+  const secretReads: string[] = [];
+  const pushPublicKey = options.pushSecrets ? generateRsaSigningKeyPair().publicKey : undefined;
   try {
     // Give the child a moment to exist before the target check reads its cwd.
     await new Promise((r) => setTimeout(r, 150));
@@ -81,6 +92,17 @@ async function runEnable(config: string, extraArgs: string[], targetRunsFromTemp
         }), { status: 200 });
       }
       const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.operation === "get_secrets_public_key" && pushPublicKey) {
+        return new Response(JSON.stringify({ public_key: pushPublicKey }), { status: 200 });
+      }
+      if (body.operation === "set_secret") {
+        secretSets.push(body.name);
+        return new Response("{}", { status: 200 });
+      }
+      if (body.operation === "search_by_value" && body.table === "hdb_secret") {
+        secretReads.push(body.search_value);
+        return new Response(JSON.stringify([{ name: body.search_value, processEnv: true }]), { status: 200 });
+      }
       if (body.operation === "system_information" && (body.attributes ?? []).includes("system")) {
         return new Response(JSON.stringify({
           system: { hostname: targetRunsFromTempDir ? hostname() : "another-host" },
@@ -117,8 +139,8 @@ async function runEnable(config: string, extraArgs: string[], targetRunsFromTemp
         "--admin-pass", "pw",
         "--signing-key-file", join(tmp, "signing-key.pem"),
         "--secrets-path", join(tmp, "secrets.env"),
-        "--secrets-mechanism", "env-file",
-        "--confirm-secrets-applied",
+        ...(options.pushSecrets ? [] : ["--secrets-mechanism", "env-file"]),
+        ...(options.confirmed === false ? [] : ["--confirm-secrets-applied"]),
         ...extraArgs,
       ]);
     } catch (e: any) {
@@ -133,6 +155,8 @@ async function runEnable(config: string, extraArgs: string[], targetRunsFromTemp
       configBefore: config,
       keyWritten: existsSync(join(tmp, "signing-key.pem")),
       secretsWritten: existsSync(join(tmp, "secrets.env")),
+      secretSets,
+      secretReads,
     };
   } finally {
     console.log = origLog;
@@ -224,5 +248,22 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.configAfter).toBe(r.configBefore);
     expect(r.keyWritten).toBe(false);
     expect(r.secretsWritten).toBe(false);
+  }, 20000);
+
+  test("a verified push without confirmation prints the load instruction, not the staged-file remedy", async () => {
+    const r = await runEnable(SHIPPED, [], true, { confirmed: false, pushSecrets: true });
+    expect(r.exit).toBe("process.exit(1)");
+    expect(r.secretSets.length).toBeGreaterThan(0);
+    expect(r.secretReads).toEqual(r.secretSets);
+    expect(r.out).toContain(`the secrets were pushed to ${ISSUER} and read back; load them into the instance's process environment`);
+    expect(r.out).not.toContain("apply the staged secrets");
+    expect(r.out).not.toContain("once the staged secrets are live");
+  }, 20000);
+
+  test("without a push, the unconfirmed CLI still prints the staged-file remedy", async () => {
+    const r = await runEnable(SHIPPED, [], true, { confirmed: false });
+    expect(r.exit).toBe("process.exit(1)");
+    expect(r.secretSets).toEqual([]);
+    expect(r.out).toContain(`not applied: pass --confirm-secrets-applied once the staged secrets are live on ${ISSUER}`);
   }, 20000);
 });

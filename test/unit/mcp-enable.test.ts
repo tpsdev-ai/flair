@@ -849,6 +849,29 @@ describe("enableMcp — dry-run", () => {
 });
 
 describe("enableMcp — the confirm-secrets-applied gate", () => {
+  function pushedSecretsFetch() {
+    const { fetchImpl: baseFetch, calls } = fullMockFetch();
+    const { publicKey } = generateRsaSigningKeyPair();
+    const setNames: string[] = [];
+    const readBackNames: string[] = [];
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.operation === "get_secrets_public_key") {
+        return new Response(JSON.stringify({ public_key: publicKey }), { status: 200 });
+      }
+      if (body.operation === "set_secret") {
+        setNames.push(body.name);
+        return new Response("{}", { status: 200 });
+      }
+      if (body.operation === "search_by_value" && body.table === "hdb_secret") {
+        readBackNames.push(body.search_value);
+        return new Response(JSON.stringify([{ name: body.search_value, processEnv: true }]), { status: 200 });
+      }
+      return baseFetch(url, init);
+    }) as typeof fetch;
+    return { fetchImpl, calls, setNames, readBackNames };
+  }
+
   test("refuses to restart without confirmation, and never calls restart", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths() }, { fetchImpl });
@@ -857,15 +880,57 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     expect(calls.filter((c) => c === "ops:restart")).toHaveLength(0);
     // Identity mapping DOES run before the gate.
     expect(calls).toContain("ops:search_by_value");
+    expect(result.steps.at(-1)?.detail).toBe(
+      `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${ISSUER}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
+    );
   });
 
   test("an interactive confirmPrompt returning false also refuses", async () => {
     const { fetchImpl } = fullMockFetch();
+    let prompt = "";
     const result = await enableMcp(
       { ...BASE_PARAMS, ...tempPaths() },
-      { fetchImpl, confirmPrompt: async () => false },
+      { fetchImpl, confirmPrompt: async (message) => { prompt = message; return false; } },
     );
     expect(result.ok).toBe(false);
+    expect(prompt).toBe(`Have you applied the 5 vars staged at ${join(dir, "secrets.env")} to ${ISSUER}'s environment?`);
+  });
+
+  test("pushed and read-back Fabric secrets, without confirmation: asks for a restart and never calls restart", async () => {
+    const { fetchImpl, calls, setNames, readBackNames } = pushedSecretsFetch();
+    const instance = "https://my-flair.harperfabric.com";
+    const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), instance }, { fetchImpl });
+
+    expect(result.failedStep).toBe("secrets-provisioning");
+    expect(setNames.length).toBeGreaterThan(0);
+    expect(readBackNames).toEqual(setNames);
+    expect(result.steps.find((s) => s.step === "secrets-provisioning" && s.ok)?.detail).toContain("pushed to the target");
+    const detail = result.steps.at(-1)!.detail;
+    expect(detail).toContain(`the secrets were pushed to ${instance} and read back; restart the Fabric instance`);
+    expect(detail).toContain("--confirm-secrets-applied");
+    expect(detail).not.toContain("staged secrets");
+    expect(detail).not.toContain("not applied");
+    expect(calls).not.toContain("ops:restart");
+  });
+
+  test("pushed and read-back standalone secrets, declined prompt: asks to load them", async () => {
+    const { fetchImpl, calls, setNames, readBackNames } = pushedSecretsFetch();
+    let prompt = "";
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths() },
+      { fetchImpl, confirmPrompt: async (message) => { prompt = message; return false; } },
+    );
+
+    expect(result.failedStep).toBe("secrets-provisioning");
+    expect(setNames.length).toBeGreaterThan(0);
+    expect(readBackNames).toEqual(setNames);
+    expect(prompt).toContain(`secrets were pushed to ${ISSUER} and read back`);
+    expect(prompt).toContain("loaded them into the instance's process environment");
+    expect(prompt).not.toContain("staged");
+    const detail = result.steps.at(-1)!.detail;
+    expect(detail).toContain(`the secrets were pushed to ${ISSUER} and read back; load them into the instance's process environment`);
+    expect(detail).not.toContain("staged secrets");
+    expect(calls).not.toContain("ops:restart");
   });
 });
 

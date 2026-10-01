@@ -2039,16 +2039,22 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         `Diagnostic: the bootstrap tool's agentId/scope fields always say who the server resolved you to.`,
     );
 
-    // ── Gate: confirm the staged secrets are actually live before restarting ─
+    // ── Gate: confirm the secrets are live before restarting ───────────────
     let confirmed = Boolean(params.confirmSecretsApplied);
     if (!confirmed && deps.confirmPrompt) {
       confirmed = await deps.confirmPrompt(
-        `Have you applied the ${secretsResult.varNames.length} vars staged at ${secretsResult.path} to ${params.instance}'s environment?`,
+        secretsPushed
+          ? isFabricOrigin(params.instance)
+            ? `The ${secretsResult.varNames.length} secrets were pushed to ${params.instance} and read back. Have you restarted the Fabric instance to load them?`
+            : `The ${secretsResult.varNames.length} secrets were pushed to ${params.instance} and read back. Have you loaded them into the instance's process environment?`
+          : `Have you applied the ${secretsResult.varNames.length} vars staged at ${secretsResult.path} to ${params.instance}'s environment?`,
       );
     }
     if (!confirmed) {
       push(false,
-        `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
+        secretsPushed
+          ? `not confirmed: the secrets were pushed to ${params.instance} and read back; ${isFabricOrigin(params.instance) ? "restart the Fabric instance" : "load them into the instance's process environment"}, then re-run \`flair mcp enable\` with --confirm-secrets-applied (earlier steps are idempotent and will reuse what's already provisioned).`
+          : `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
       return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
     }
