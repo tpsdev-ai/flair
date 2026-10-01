@@ -1176,23 +1176,23 @@ describe("MemoryBootstrap.post() — skills manifest (flair#2141 S1b)", () => {
     }
   });
 
-  it("legacy name resolution: the agent's own row first; a teammate's private row never resolves; two own rows are ambiguous", async () => {
+  it("a name resolves to the agent's own skill row only: a teammate's shared or private row with the name leaves it unresolved; two own rows are ambiguous", async () => {
     reset();
-    seedAssignment({ id: "a1", agentId: "agent-a", value: "own-first" });
-    seedAssignment({ id: "a2", agentId: "agent-a", value: "private-only" });
-    seedAssignment({ id: "a3", agentId: "agent-a", value: "two-own" });
-    seedAssignment({ id: "a4", agentId: "agent-a", value: "oldest-wins" });
-    seedSkillRow({ id: "teammate-old", agentId: "agent-b", name: "own-first", createdAt: "2020-01-01T00:00:00.000Z" });
-    seedSkillRow({ id: "own-new", agentId: "agent-a", name: "own-first", visibility: "private", createdAt: "2026-06-01T00:00:00.000Z" });
-    seedSkillRow({ id: "teammate-private", agentId: "agent-b", name: "private-only", visibility: "private" });
+    seedAssignment({ id: "a1", agentId: "agent-a", value: "own-row" });
+    seedAssignment({ id: "a2", agentId: "agent-a", value: "teammate-shared" });
+    seedAssignment({ id: "a3", agentId: "agent-a", value: "teammate-private" });
+    seedAssignment({ id: "a4", agentId: "agent-a", value: "two-own" });
+    seedSkillRow({ id: "teammate-old", agentId: "agent-b", name: "own-row", createdAt: "2020-01-01T00:00:00.000Z" });
+    seedSkillRow({ id: "own-new", agentId: "agent-a", name: "own-row", visibility: "private", createdAt: "2026-06-01T00:00:00.000Z" });
+    seedSkillRow({ id: "shared-old", agentId: "agent-b", name: "teammate-shared", createdAt: "2020-01-01T00:00:00.000Z" });
+    seedSkillRow({ id: "private-old", agentId: "agent-b", name: "teammate-private", visibility: "private", createdAt: "2020-01-01T00:00:00.000Z" });
     seedSkillRow({ id: "two-own-1", agentId: "agent-a", name: "two-own" });
     seedSkillRow({ id: "two-own-2", agentId: "agent-a", name: "two-own" });
-    seedSkillRow({ id: "newer", agentId: "agent-b", name: "oldest-wins", createdAt: "2026-03-01T00:00:00.000Z" });
-    seedSkillRow({ id: "older", agentId: "agent-c", name: "oldest-wins", createdAt: "2026-02-01T00:00:00.000Z" });
     const res: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeSoul: false });
-    expect(res.skills.map((s: any) => `${s.name}=${s.skillId}`)).toEqual(["oldest-wins=older", "own-first=own-new"]);
+    expect(res.skills.map((s: any) => `${s.name}=${s.skillId}`)).toEqual(["own-row=own-new"]);
     const byName = Object.fromEntries(res.skillDiagnostics.map((d: any) => [d.name, d]));
-    expect(byName["private-only"].decision).toBe("unresolved");
+    expect(byName["teammate-shared"].decision).toBe("unresolved");
+    expect(byName["teammate-private"].decision).toBe("unresolved");
     expect(byName["two-own"].decision).toBe("ambiguous");
     expect(byName["two-own"].candidates).toEqual(["two-own-1", "two-own-2"]);
   });
@@ -1208,8 +1208,8 @@ describe("MemoryBootstrap.post() — skills manifest (flair#2141 S1b)", () => {
   });
 
   it("the manifest and diagnostics are charged to the shared budget and reported in skillsTokens / skillDiagnosticsTokens", async () => {
-    // A long source makes the one manifest entry cost more than the one short
-    // own memory, so the budget decides which of the two ships.
+    // A long source makes the one manifest entry cost more than the short
+    // permanent memory, so the budget decides which of the two ships.
     const LONG_SOURCE = `npm:@example/${"x".repeat(400)}@1.0.0`;
     const entry = { name: "alpha", skillId: "skill-alpha", scope: "own", priority: "standard", source: LONG_SOURCE };
     const entryCost = estimateTokens(JSON.stringify(entry));
@@ -1217,8 +1217,7 @@ describe("MemoryBootstrap.post() — skills manifest (flair#2141 S1b)", () => {
       reset();
       seedAssignment({ id: "a", agentId: "agent-a", value: "alpha", source: LONG_SOURCE });
       seedAssignment({ id: "m", agentId: "agent-a", value: "missing" });
-      // A teammate's shared row, so it is not one of agent-a's own memories.
-      seedSkillRow({ id: "skill-alpha", agentId: "agent-b", name: "alpha" });
+      seedSkillRow({ id: "skill-alpha", agentId: "agent-a", name: "alpha" });
       memoryStore.set("mem-1", {
         id: "mem-1", agentId: "agent-a", content: "short", durability: "permanent",
         createdAt: "2026-01-01T00:00:00.000Z", archived: false,
@@ -1235,7 +1234,7 @@ describe("MemoryBootstrap.post() — skills manifest (flair#2141 S1b)", () => {
       full.skillDiagnostics.reduce((n: number, d: any) => n + estimateTokens(JSON.stringify(d)), 0),
     );
     expect(full.skillDiagnosticsTokens).toBeGreaterThan(0);
-    expect(full.memoriesIncluded).toBe(1);
+    expect(full.memories.map((m: any) => m.id)).toContain("mem-1");
 
     // Budget = exactly the manifest entry: it ships and leaves nothing for the
     // diagnostic or the memory.
@@ -1245,7 +1244,7 @@ describe("MemoryBootstrap.post() — skills manifest (flair#2141 S1b)", () => {
     expect(exact.skillDiagnostics).toEqual([]);
     expect(exact.skillDiagnosticsTruncated).toBe(1);
     expect(exact.memoriesIncluded).toBe(0);
-    expect(exact.memoriesTruncated).toBe(1);
+    expect(exact.memories.map((m: any) => m.id)).not.toContain("mem-1");
 
     // One token short: the entry does not ship and is counted.
     seed();

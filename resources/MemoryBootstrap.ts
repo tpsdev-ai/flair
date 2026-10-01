@@ -624,17 +624,18 @@ export class BootstrapMemories extends Resource {
     }
 
     // The read scope (see the "Read-scope" block below), resolved here because
-    // the skills manifest (1b) reads skill rows under it.
+    // the skills manifest (1b) re-checks its skill rows against it.
     const scope = await resolveReadScope(agentId);
 
     // --- 1b. Skills manifest (flair#2141 S1b; conflict rules flair#1433) ---
-    // Present whatever includeSoul and includeContext say.
-    // `skills` lists the winners, each with the skill row `skill_get` reads;
-    // refusals, ties, supersessions and names that do not resolve to exactly
-    // one row go to `skillDiagnostics` (resources/skill-manifest.ts). Both
-    // are charged against the shared budget right after the soul, at the
-    // serialized size of each entry that ships; an entry that does not fit is
-    // counted in skillsTruncated / skillDiagnosticsTruncated instead.
+    // Present whatever includeSoul and includeContext say. `skills` lists the
+    // winners, each with the skill row `skill_get` reads; a name resolves to
+    // the agent's own skill row only. Refusals, ties, supersessions and names
+    // that do not resolve to exactly one own row go to `skillDiagnostics`
+    // (resources/skill-manifest.ts). Both are charged against the shared
+    // budget right after the soul, at the serialized size of each entry that
+    // ships; an entry that does not fit is counted in skillsTruncated /
+    // skillDiagnosticsTruncated instead.
     const includedSkills: SkillManifestEntry[] = [];
     const includedSkillDiagnostics: SkillDiagnostic[] = [];
     let skillsTruncated = 0;
@@ -643,7 +644,7 @@ export class BootstrapMemories extends Resource {
       const skillRows: any[] = [];
       const skillQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
         conditions: [
-          scope.condition,
+          { attribute: "agentId", comparator: "equals", value: agentId },
           { attribute: "tags", comparator: "equals", value: SKILL_TAG },
           { attribute: "archived", comparator: "not_equal", value: true },
         ],

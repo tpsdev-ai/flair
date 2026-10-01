@@ -17,7 +17,6 @@ function skillRow(id: string, agentId: string, name: string, extra: Record<strin
     agentId,
     tags: ["skill"],
     metadata: JSON.stringify({ name }),
-    createdAt: "2026-01-01T00:00:00.000Z",
     ...extra,
   };
 }
@@ -31,8 +30,8 @@ function assignment(value: string, priority = "standard", source?: string) {
   };
 }
 
-describe("resolveSkillRef — legacy name-only resolution order", () => {
-  test("the agent's own row wins over an older teammate row", () => {
+describe("resolveSkillRef — a name resolves to the agent's own skill row only", () => {
+  test("the agent's own row resolves, even beside a teammate row with an older createdAt", () => {
     const rows = [
       skillRow("teammate-old", "agent-b", "deploy", { createdAt: "2020-01-01T00:00:00.000Z" }),
       skillRow("own", AGENT, "deploy", { createdAt: "2026-06-01T00:00:00.000Z" }),
@@ -40,15 +39,15 @@ describe("resolveSkillRef — legacy name-only resolution order", () => {
     expect(resolveSkillRef("deploy", rows, AGENT)).toEqual({ kind: "resolved", skillId: "own" });
   });
 
-  test("with no own row, the oldest createdAt wins", () => {
+  test("a teammate's shared row with the name and an older createdAt does not resolve: the name is unresolved", () => {
     const rows = [
-      skillRow("newer", "agent-b", "deploy", { createdAt: "2026-02-01T00:00:00.000Z" }),
-      skillRow("older", "agent-c", "deploy", { createdAt: "2026-01-01T00:00:00.000Z" }),
+      skillRow("teammate-old", "agent-b", "deploy", { createdAt: "2020-01-01T00:00:00.000Z", visibility: "shared" }),
+      skillRow("teammate-new", "agent-c", "deploy", { createdAt: "2026-02-01T00:00:00.000Z", visibility: "shared" }),
     ];
-    expect(resolveSkillRef("deploy", rows, AGENT)).toEqual({ kind: "resolved", skillId: "older" });
+    expect(resolveSkillRef("deploy", rows, AGENT).kind).toBe("unresolved");
   });
 
-  test("two own rows with the name are ambiguous, even when one is older", () => {
+  test("two own rows with the name are ambiguous, whatever their createdAt", () => {
     const rows = [
       skillRow("own-2", AGENT, "deploy", { createdAt: "2026-02-01T00:00:00.000Z" }),
       skillRow("own-1", AGENT, "deploy", { createdAt: "2026-01-01T00:00:00.000Z" }),
@@ -58,32 +57,13 @@ describe("resolveSkillRef — legacy name-only resolution order", () => {
     expect((ref as any).candidates).toEqual(["own-1", "own-2"]);
   });
 
-  test("two non-own rows tied at the oldest createdAt are ambiguous", () => {
-    const rows = [
-      skillRow("b", "agent-b", "deploy"),
-      skillRow("c", "agent-c", "deploy"),
-      skillRow("d", "agent-d", "deploy", { createdAt: "2026-03-01T00:00:00.000Z" }),
-    ];
-    const ref = resolveSkillRef("deploy", rows, AGENT);
-    expect(ref.kind).toBe("ambiguous");
-    expect((ref as any).candidates).toEqual(["b", "c"]);
-  });
-
-  test("a candidate whose createdAt does not parse makes the oldest step ambiguous", () => {
-    const rows = [
-      skillRow("b", "agent-b", "deploy"),
-      skillRow("c", "agent-c", "deploy", { createdAt: "not-a-date" }),
-    ];
-    expect(resolveSkillRef("deploy", rows, AGENT).kind).toBe("ambiguous");
-  });
-
   test("no row with the name is unresolved", () => {
     const rows = [skillRow("x", AGENT, "other")];
     expect(resolveSkillRef("deploy", rows, AGENT).kind).toBe("unresolved");
   });
 });
 
-describe("resolvableSkillRows — what a name may resolve to", () => {
+describe("resolvableSkillRows — the rows passed to resolveSkillRef", () => {
   const readable = (row: any) => row.agentId === AGENT || row.visibility !== "private";
   const NOW = Date.parse("2026-06-01T00:00:00.000Z");
 

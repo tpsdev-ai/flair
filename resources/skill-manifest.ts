@@ -48,7 +48,7 @@ export interface SkillDiagnostic {
   source: string | null;
   decision: SkillDiagnosticDecision;
   reason: string;
-  /** Ambiguous only: the skill row ids that tied at the deciding step. */
+  /** Ambiguous only: the ids of the skill rows that have the name. */
   candidates?: string[];
 }
 
@@ -58,7 +58,6 @@ export interface SkillRow {
   agentId?: unknown;
   tags?: unknown;
   metadata?: unknown;
-  createdAt?: unknown;
   archived?: unknown;
   validTo?: unknown;
   expiresAt?: unknown;
@@ -66,7 +65,7 @@ export interface SkillRow {
 
 /** The Memory fields the bootstrap skill-row query selects. */
 export const SKILL_ROW_SELECT = [
-  "id", "agentId", "visibility", "tags", "metadata", "createdAt", "archived", "validTo", "expiresAt",
+  "id", "agentId", "visibility", "tags", "metadata", "archived", "validTo", "expiresAt",
 ];
 
 export type SkillRefResolution =
@@ -85,7 +84,7 @@ function isPast(value: unknown, now: number): boolean {
 }
 
 /**
- * The rows a name may resolve to: skill-tagged, readable by the target agent
+ * The rows passed to resolveSkillRef: skill-tagged, readable by the target agent
  * (`isReadable`, the read-scope predicate `skill_get` applies), not archived,
  * and not closed (`validTo`) or expired (`expiresAt`).
  */
@@ -104,34 +103,33 @@ export function resolvableSkillRows(
 }
 
 /**
- * Resolve a name-only assignment to one skill row. Order: the target agent's
- * own row with that name, then the oldest `createdAt` (flair#2141 S2 adds the
- * org seed row between the two). More than one row at the deciding step is
- * ambiguous, as is an oldest step over two or more rows where a `createdAt`
- * does not parse.
+ * flair#2141 S2 hook: the skill rows written by the reserved system writer
+ * (the operator seed), the only candidates besides the agent's own rows. None
+ * exist before S2, so this returns no rows.
+ */
+export function seedSkillRows(_rows: SkillRow[]): SkillRow[] {
+  return [];
+}
+
+/**
+ * Resolve a name-only assignment to one skill row: the target agent's own row
+ * with that name (then, from flair#2141 S2, a seed row; see seedSkillRows).
+ * More than one row at a step is ambiguous; no row is unresolved.
  */
 export function resolveSkillRef(name: string, rows: SkillRow[], agentId: string): SkillRefResolution {
   const named = rows.filter((row) => skillNameOf(row) === name);
-  const ids = (list: SkillRow[]) => list.map((row) => row.id as string).sort();
-
-  const own = named.filter((row) => row.agentId === agentId);
-  if (own.length === 1) return { kind: "resolved", skillId: own[0].id as string };
-  if (own.length > 1) {
-    return { kind: "ambiguous", reason: `${own.length} of the agent's own skill rows have this name`, candidates: ids(own) };
-  }
-
-  if (named.length === 0) return { kind: "unresolved", reason: "no readable, live skill row has this name" };
-  if (named.length === 1) return { kind: "resolved", skillId: named[0].id as string };
-
-  const times = named.map((row) => (typeof row.createdAt === "string" ? Date.parse(row.createdAt) : NaN));
-  const oldest = Math.min(...times);
-  const atOldest = Number.isNaN(oldest) ? named : named.filter((_, i) => times[i] === oldest);
-  if (atOldest.length === 1) return { kind: "resolved", skillId: atOldest[0].id as string };
-  return {
-    kind: "ambiguous",
-    reason: `${named.length} readable skill rows have this name and none is uniquely the oldest`,
-    candidates: ids(atOldest),
+  const decide = (list: SkillRow[], whose: string): SkillRefResolution | null => {
+    if (list.length === 1) return { kind: "resolved", skillId: list[0].id as string };
+    if (list.length === 0) return null;
+    return {
+      kind: "ambiguous",
+      reason: `${list.length} ${whose} skill rows have this name`,
+      candidates: list.map((row) => row.id as string).sort(),
+    };
   };
+  return decide(named.filter((row) => row.agentId === agentId), "of the agent's own")
+    ?? decide(seedSkillRows(named), "seed")
+    ?? { kind: "unresolved", reason: "the agent has no live skill row with this name" };
 }
 
 /** The "## Active Skills" prose line for a manifest entry. */
