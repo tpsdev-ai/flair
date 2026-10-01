@@ -16,9 +16,9 @@
 //   - the doctor discovery path (probeFlairHealth) observes the refused instance.
 //
 // This proof requires Linux: only there do the extra HTTP workers receive TCP
-// traffic. On macOS/Windows the workers cannot share the server ports, so the
-// main thread (whose `server.workerCount` reads 1) serves alone and the refusal
-// is not observable. The case is gated to Linux below.
+// traffic. On macOS/Windows Harper does not share these ports across workers, so
+// the multi-worker dispatch this case exercises is not observable; the case is
+// gated to Linux below.
 
 import { describe, test, beforeAll, afterAll, expect } from "bun:test";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";

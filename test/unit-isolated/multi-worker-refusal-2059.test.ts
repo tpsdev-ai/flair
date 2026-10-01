@@ -29,6 +29,7 @@ let credentialReads = 0;
 let tableReads = 0;
 let workerCountValue: number | undefined = 1;
 let workerCountThrows = false;
+let configThreadsCount: number | undefined = undefined;
 let loggerErrors: string[] = [];
 const httpEntries: Array<{ handler: unknown; options: unknown }> = [];
 
@@ -54,6 +55,15 @@ mock.module("harper", () => {
       get workerCount() {
         if (workerCountThrows) throw new Error("workerCount getter failed");
         return workerCountValue;
+      },
+      // Harper's effective configured count, the fallback the guard reads when
+      // `server.workerCount` is not a positive integer (the main thread's value).
+      config: {
+        threads: {
+          get count() {
+            return configThreadsCount;
+          },
+        },
       },
       resources: {
         get: (name: string) =>
@@ -107,9 +117,15 @@ function makeRequest(path: string, method = "GET", authorization?: string): any 
 }
 
 /** Force the condition the guard resolves next: a fake count and the opt-in. */
-function setCondition(workerCount: number | undefined, optIn: boolean, throws = false): void {
+function setCondition(
+  workerCount: number | undefined,
+  optIn: boolean,
+  throws = false,
+  configCount: number | undefined = undefined,
+): void {
   workerCountValue = workerCount;
   workerCountThrows = throws;
+  configThreadsCount = configCount;
   if (optIn) process.env.FLAIR_MULTI_WORKER_UNSAFE = "1";
   else delete process.env.FLAIR_MULTI_WORKER_UNSAFE;
   guard._resetMultiWorkerGuardForTests();
@@ -145,7 +161,7 @@ describe("multi-worker condition (pure)", () => {
     expect(guard.multiWorkerUnsafeOptIn({ FLAIR_MULTI_WORKER_UNSAFE: "0" })).toBe(false);
   });
 
-  it("reads an unreadable server.workerCount as unknown, never as one", () => {
+  it("reads an unreadable count on both paths as unknown, never as one", () => {
     setCondition(undefined, false);
     expect(guard.readWorkerCount()).toBeNull();
     expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: null });
@@ -153,10 +169,27 @@ describe("multi-worker condition (pure)", () => {
     expect(guard.readWorkerCount()).toBe(1);
   });
 
+  it("falls back to Harper's configured count when server.workerCount is absent", () => {
+    // The main thread has no `server.workerCount`; the effective configured
+    // count (server.config.threads.count) is what decides there.
+    setCondition(undefined, false, false, 2);
+    expect(guard.readWorkerCount()).toBe(2);
+    expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: 2 });
+    setCondition(undefined, false, false, 1);
+    expect(guard.readWorkerCount()).toBe(1);
+    expect(guard.multiWorkerCondition()).toEqual({ state: "single-worker", workerCount: 1 });
+  });
+
   it("reads a non-integer server.workerCount as unknown, never flooring it", () => {
     // Harper starts workers while i < count, so 1.5 starts two; flooring it to
     // 1 would report a serving state for a two-worker instance.
     setCondition(1.5, false);
+    expect(guard.readWorkerCount()).toBeNull();
+    expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: null });
+  });
+
+  it("reads a non-integer configured count as unknown when server.workerCount is absent", () => {
+    setCondition(undefined, false, false, 1.5);
     expect(guard.readWorkerCount()).toBeNull();
     expect(guard.multiWorkerCondition()).toEqual({ state: "refused", workerCount: null });
   });
@@ -191,7 +224,7 @@ describe("multi-worker condition (pure)", () => {
   it("emits one named boot line naming the condition and the remedy, and none on one worker", () => {
     expect(guard.multiWorkerBootLine({ state: "single-worker", workerCount: 1 })).toBeNull();
     const line = guard.multiWorkerBootLine({ state: "refused", workerCount: 2 }) ?? "";
-    expect(line).toContain("server.workerCount=2");
+    expect(line).toContain("worker count=2");
     expect(line).toContain("THREADS_COUNT=1");
 
     loggerErrors = [];
@@ -201,7 +234,7 @@ describe("multi-worker condition (pure)", () => {
 
   it("names an unreadable count as unreadable, and logs the opt-in as an opt-in", () => {
     const refused = guard.multiWorkerBootLine({ state: "refused", workerCount: null }) ?? "";
-    expect(refused).toContain("server.workerCount is unreadable");
+    expect(refused).toContain("the worker count is unreadable");
     // The opt-in line is an opt-in, not a continuing refusal.
     const optIn = guard.multiWorkerBootLine({ state: "unsafe-opt-in", workerCount: 2 }) ?? "";
     expect(optIn).toContain("FLAIR_MULTI_WORKER_UNSAFE=1");
@@ -229,8 +262,10 @@ describe("request guard (fake worker count)", () => {
     for (const [path, method] of routes) {
       tableReads = 0;
       credentialReads = 0;
-      // A Basic credential is attached so "before any auth" is a real
-      // assertion: the refusal must land without getUser ever being consulted.
+      // A Basic credential is attached so the guard's own credential read is a
+      // real assertion: the guard entry returns the 503 without consulting
+      // getUser. (This invokes the captured guard entry with a stub next layer,
+      // so it proves the guard itself, not the full chain.)
       const res = await middleware(makeRequest(path, method, "Basic Zm9vOmJhcg=="), nextLayer);
       expect(res.status).toBe(503);
       const body = (await res.json()) as { error?: string; remedy?: string; workerCount?: number };

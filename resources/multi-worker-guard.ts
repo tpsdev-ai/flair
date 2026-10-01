@@ -12,13 +12,17 @@
  * removed. Linux can select several workers when nothing pins the count, so the
  * state is reachable by default, not only on purpose.
  *
- * This module is the single home for the condition and the state. It reads
- * `server.workerCount` ONCE per worker module instance (each worker loads its
- * own copy, so the named boot line is emitted once per worker instance), decides
- * the state, and answers the questions the rest of the server asks: what does
- * /Health report, and does this request serve or get the named 503. A
- * `server.workerCount` that is not a positive integer — including a getter that
- * throws — is UNKNOWN, which is refused, never read as one worker.
+ * This module is the single home for the condition and the state. It reads the
+ * worker count ONCE per worker module instance (each worker loads its own copy,
+ * so the named boot line is emitted once per worker instance), decides the
+ * state, and answers the questions the rest of the server asks: what does
+ * /Health report, and does this request serve or get the named 503. The count is
+ * `server.workerCount`, Harper's per-thread value; where that is not a positive
+ * integer (on the main thread alongside worker threads it is `undefined`), the
+ * count falls back to Harper's effective configured count,
+ * `server.config.threads.count`. A count that is not a positive integer on
+ * either path — including a getter that throws — is UNKNOWN, which is refused,
+ * never read as one worker.
  *
  * The refused state is enforced before dispatch. This module registers ONE
  * named http entry, runFirst and ordered ahead of the default REST middleware
@@ -59,7 +63,7 @@ export type MultiWorkerState = "single-worker" | "refused" | "unsafe-opt-in";
 
 export interface MultiWorkerCondition {
   state: MultiWorkerState;
-  /** `server.workerCount` as read once, or null when it is not a positive integer. */
+  /** Harper's effective worker count as read once, or null when it is not a positive integer. */
   workerCount: number | null;
 }
 
@@ -104,8 +108,8 @@ export function multiWorkerUnsafeOptIn(
 /** The condition's worker count as a label, naming an unreadable count as such. */
 function workerCountLabel(condition: MultiWorkerCondition): string {
   return condition.workerCount === null
-    ? "server.workerCount is unreadable"
-    : `server.workerCount=${condition.workerCount}`;
+    ? "the worker count is unreadable"
+    : `worker count=${condition.workerCount}`;
 }
 
 /** /Health's `multiWorker` field, or null on a single worker — the field is
@@ -175,25 +179,39 @@ export function multiWorkerRefusalResponse(
 
 let cached: MultiWorkerCondition | null = null;
 
-/**
- * `server.workerCount` as read once, or null when it is not a positive integer.
- *
- * Harper defines `workerCount` on the server object on every worker thread (its
- * getter returns the configured thread count there, and 1 on the main worker),
- * and starts workers while `i < count`: a count that is not an integer (1.5)
- * starts more workers than it names. So a value that is not a positive integer
- * — and a getter that throws — is UNKNOWN, and the guard refuses it rather than
- * read it as one worker.
- */
-export function readWorkerCount(): number | null {
+/** A positive integer from `read()`, or null when the read throws or is not one. */
+function readPositiveInteger(read: () => unknown): number | null {
   let raw: unknown;
   try {
-    raw = (server as { workerCount?: unknown } | undefined)?.workerCount;
+    raw = read();
   } catch {
     return null;
   }
   if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) return null;
   return raw;
+}
+
+/**
+ * Harper's effective worker count for this thread, or null when it is unknown.
+ *
+ * `server.workerCount` is Harper's per-thread value: the configured count on a
+ * worker thread, and 1 in the single-thread mode where the main thread is the
+ * worker. On the main thread alongside worker threads it is `undefined`, so the
+ * count falls back to Harper's effective configured count,
+ * `server.config.threads.count`. Harper starts workers while `i < count`, so a
+ * value that is not an integer (1.5) starts more workers than it names: a count
+ * that is not a positive integer on either path — and a getter that throws — is
+ * UNKNOWN, and the guard refuses it rather than read it as one worker.
+ */
+export function readWorkerCount(): number | null {
+  const perThread = readPositiveInteger(
+    () => (server as { workerCount?: unknown } | undefined)?.workerCount,
+  );
+  if (perThread !== null) return perThread;
+  return readPositiveInteger(
+    () =>
+      ((server as { config?: { threads?: { count?: unknown } } } | undefined)?.config)?.threads?.count,
+  );
 }
 
 /** The condition, resolved once per worker module instance. */

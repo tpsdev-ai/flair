@@ -461,7 +461,7 @@ export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObserva
 
 /** What a /Health probe found: whether the port is Flair, and what it observed. */
 export interface FlairHealthProbe {
-  /** The port answered as Flair: a 2xx /Health, or a /Health 503 carrying a recognized `multiWorker` refusal. */
+  /** The port answered with a recognized shape: a 2xx /Health, or a 503 carrying a recognized `multiWorker` refusal field. */
   reaching: boolean;
   status: number;
   /** The parsed response body, or null when it was not JSON. */
@@ -471,13 +471,15 @@ export interface FlairHealthProbe {
 }
 
 /**
- * Interpret a /Health status and body: is this port Flair, and what did it
- * observe?
+ * Interpret a /Health status and body: did this port answer with a recognized
+ * shape, and what did it observe?
  *
- * A 2xx is Flair. A 503 is Flair ONLY when its `multiWorker` field names the
- * refusal — the state field a refused flair instance answers with, so discovery
- * recognises the refused instance instead of skipping it. Any other non-2xx is
- * not an observation. A malformed `multiWorker` is `unknown`, never serving.
+ * A 2xx is reaching. A 503 is reaching ONLY when its `multiWorker` field names
+ * the refusal — the state field a refused flair instance answers with, so
+ * discovery recognises the refused instance instead of skipping it. Any other
+ * non-2xx is not reaching. A 2xx with a malformed `multiWorker` is `unknown`,
+ * never serving; a 503 with no recognized `multiWorker` field is not reaching,
+ * so its worker check is skipped rather than blocking.
  */
 export function interpretFlairHealth(status: number, body: unknown): { reaching: boolean; observation: WorkerThreadsObservation | null } {
   const observation = readWorkerThreadsObservation((body as { multiWorker?: unknown })?.multiWorker);

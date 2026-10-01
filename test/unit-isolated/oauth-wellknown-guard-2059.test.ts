@@ -52,7 +52,7 @@ function mount(): void {
   });
 }
 
-describe("oauth-wellknown mounts ordered ahead of the multi-worker guard", () => {
+describe("oauth-wellknown mounts ordered after the multi-worker guard", () => {
   it("registers the guard as a runFirst mount at each well-known path", () => {
     mount();
     for (const path of WELL_KNOWN) {
