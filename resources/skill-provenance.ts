@@ -218,7 +218,7 @@ function priorityRank(p: string): number {
   return PRIORITY_RANK[p] ?? PRIORITY_RANK.standard;
 }
 
-function formatBase(name: string, priority: string, source: string | undefined): string {
+export function formatBase(name: string, priority: string, source: string | undefined): string {
   const src = source ? `, source: ${source}` : "";
   return `- ${name} (${priority} priority${src})`;
 }

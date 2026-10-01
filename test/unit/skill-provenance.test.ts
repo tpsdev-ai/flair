@@ -249,9 +249,10 @@ describe("negative control — a normally-installed skill loads silently", () =>
 });
 
 describe("wiring tripwires — main's inline report-and-load-both must be gone", () => {
-  test("MemoryBootstrap delegates Active Skills to resolveActiveSkills", () => {
+  test("MemoryBootstrap delegates Active Skills to resolveActiveSkills (through resolveSkillManifest, flair#2141)", () => {
     const src = readFileSync("resources/MemoryBootstrap.ts", "utf8");
-    expect(src).toContain("resolveActiveSkills");
+    expect(src).toContain("resolveSkillManifest(");
+    expect(readFileSync("resources/skill-manifest.ts", "utf8")).toContain("resolveActiveSkills(");
     expect(src).not.toMatch(/if \(peers\.length > 1\)/);
     expect(src).not.toMatch(/line \+= " \[SKILL_CONFLICT\]"/);
   });
