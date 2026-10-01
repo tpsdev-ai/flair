@@ -264,8 +264,9 @@ operator audit trail.
 | GET / write | `/IdpConfig` | Admin Basic | XAA IdP registration (`flair idp add`). |
 | GET | `/MCPClientMetadata` | Public / handler-gated | CIMD documents for allowed hosts. |
 
-`OAuthAuthCode`, `OAuthToken`, and `IdJagReplay` are internal tables (no
-`@export`). They hold codes, hashed tokens, and used `jti` values.
+`OAuthAuthCode`, `OAuthToken`, `IdJagReplay`, and `OAuthSingleUse` are internal
+tables (no `@export`). They hold codes, hashed tokens, used `jti` values, and
+the hashed keys of redeemed codes and rotated refresh tokens.
 
 OAuth rate limits and env vars: [docs/auth.md](auth.md#rate-limiting).
 
@@ -489,6 +490,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **OAuthToken** | oauth.graphql | no | Hashed access/refresh tokens |
 | **IdpConfig** | oauth.graphql | yes | XAA IdP (`issuer`, `jwksUri`, `requiredDomain`) |
 | **IdJagReplay** | oauth.graphql | no | Used ID-JAG `jti` values |
+| **OAuthSingleUse** | oauth.graphql | no | A redeemed authorization code or rotated refresh token, keyed by its SHA-256 |
 
 ---
 

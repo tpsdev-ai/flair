@@ -227,7 +227,7 @@ Give every agent its own. A per-agent context costs nothing — no client to con
 
 ### In a cluster
 
-Harper replicates every table in a replicated database unless the table opts out with `@table(replicate: false)`. None of Flair's do. So:
+Harper replicates every table in a replicated database unless the table opts out with `@table(replicate: false)`. One Flair table does: `ReplayNonce`, the local replay store behind agent-auth and federation nonces, is kept on the instance that serves the request. Every other Flair table replicates. So:
 
 - **The registry replicates.** An agent registered on node A is visible on node B with no coordination. (Replication comes from the *database* being replicated — not from `@export`, which only controls REST exposure. `Memory` carries no `@export` and still replicates.)
 - **Authority is local.** The context is constructed per call, in whichever process handles it. No node asks another who a caller is.

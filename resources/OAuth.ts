@@ -2,6 +2,12 @@ import { Resource, databases } from "harper";
 import { createHash, randomBytes } from "node:crypto";
 import { handleJwtBearerGrant } from "./XAA.js";
 import { resolveAgentAuth } from "./agent-auth.js";
+import {
+  claimOAuthSingleUse,
+  oauthSingleUseDeps,
+  reportReplayStoreGapsAtBoot,
+  type ReplayStoreBootStore,
+} from "./replay-store.js";
 import { decideRegistration } from "./dcr-gate.js";
 import { buildAuthorizationServerMetadata } from "./oauth-discovery.js";
 import { esc } from "./admin-layout.js";
@@ -33,6 +39,42 @@ const ALLOWED_REDIRECT_ORIGIN = new URL(ALLOWED_REDIRECT_URI).origin;
 const ACCESS_TOKEN_TTL_MS = 3600_000;        // 1 hour
 const REFRESH_TOKEN_TTL_MS = 7 * 86400_000;  // 7 days
 const AUTH_CODE_TTL_MS = 600_000;            // 10 minutes
+
+/**
+ * Seconds a redeemed authorization code, or a rotated refresh token, is
+ * remembered (schemas/oauth.graphql: `expiration:` on `OAuthSingleUse`). MUST
+ * equal that value — both pinned by
+ * test/unit-isolated/oauth-single-use-2145.test.ts. It must outlive the longest
+ * either can be presented after its row is recorded: AUTH_CODE_TTL_MS, and
+ * REFRESH_TOKEN_TTL_MS.
+ */
+export const OAUTH_SINGLE_USE_RETENTION_S = 691_200; // 8 days
+
+/**
+ * The longest a code or refresh token can be presented after its row is
+ * recorded (AUTH_CODE_TTL_MS for a code, REFRESH_TOKEN_TTL_MS for a refresh
+ * token): the store must outlive this, and the boot report names a table that
+ * does not.
+ */
+export const OAUTH_SINGLE_USE_MIN_RETENTION_MS = Math.max(AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS);
+
+// Once per worker thread at boot, with the replay guards' own report: a
+// misconfigured OAuthSingleUse table is named before the first redemption.
+export const OAUTH_SINGLE_USE_BOOT_STORE: ReplayStoreBootStore = {
+  label: "OAuth single-use",
+  deps: oauthSingleUseDeps,
+  minRetentionMs: OAUTH_SINGLE_USE_MIN_RETENTION_MS,
+  retentionBasis: "a redeemed authorization code or refresh token can be presented",
+};
+reportReplayStoreGapsAtBoot(OAUTH_SINGLE_USE_BOOT_STORE);
+
+/** A store error: nothing is issued, and the caller may retry (fail closed). */
+function storeUnavailable(): Response {
+  return new Response(JSON.stringify({ error: "temporarily_unavailable", error_description: "replay_store_unavailable" }), {
+    status: 503,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 /**
  * The scopes this server can issue, straight from the authorization-server
@@ -493,6 +535,16 @@ export class OAuthToken extends Resource {
       }
     }
 
+    // Redeemed once per instance: the code's use is recorded under a per-key
+    // lock before any token is issued (resources/replay-store.ts).
+    const claim = await claimOAuthSingleUse("code", sha256(code), AUTH_CODE_TTL_MS);
+    if (claim === "unavailable") return storeUnavailable();
+    if (claim === "replay") {
+      return new Response(JSON.stringify({ error: "invalid_grant", error_description: "code already used" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+
     // Mark code as used
     await (databases as any).flair.OAuthAuthCode.put({ ...authCode, used: true });
 
@@ -544,6 +596,16 @@ export class OAuthToken extends Resource {
 
     if (clientId && refreshRecord.clientId !== clientId) {
       return new Response(JSON.stringify({ error: "invalid_grant" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Rotated once per instance: the refresh token's use is recorded under a
+    // per-key lock before the new pair is issued (resources/replay-store.ts).
+    const claim = await claimOAuthSingleUse("refresh", tokenHash, REFRESH_TOKEN_TTL_MS);
+    if (claim === "unavailable") return storeUnavailable();
+    if (claim === "replay") {
+      return new Response(JSON.stringify({ error: "invalid_grant", error_description: "token revoked" }), {
         status: 400, headers: { "content-type": "application/json" },
       });
     }

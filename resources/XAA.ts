@@ -5,7 +5,7 @@ import { DEFAULT_HTTP_PORT } from "./a2a-url.js";
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
-import { claimIdJagJti, ReplayStoreUnavailable } from "./replay-store.js";
+import { claimIdJagJti, idJagReplayDeps, ReplayStoreUnavailable, reportReplayStoreGapsAtBoot, type ReplayStoreBootStore } from "./replay-store.js";
 
 /**
  * XAA (Enterprise-Managed Authorization) — ID-JAG validation for Flair.
@@ -49,6 +49,17 @@ export const ID_JAG_LONGEST_ACCEPTANCE_MS = ID_JAG_MAX_VALIDITY_MS + 2 * CLOCK_S
  * (both pinned by test/unit-isolated/xaa-jti-replay.test.ts).
  */
 export const ID_JAG_REPLAY_RETENTION_S = 90_000;
+
+// Once per worker thread at boot, with the replay guards' own report: a
+// misconfigured IdJagReplay table is named before the first jwt-bearer grant,
+// not on the first claim.
+export const XAA_JTI_REPLAY_BOOT_STORE: ReplayStoreBootStore = {
+  label: "XAA jti",
+  deps: idJagReplayDeps,
+  minRetentionMs: ID_JAG_LONGEST_ACCEPTANCE_MS,
+  retentionBasis: "an assertion can stay acceptable",
+};
+reportReplayStoreGapsAtBoot(XAA_JTI_REPLAY_BOOT_STORE);
 
 // JWKS remote key set cache per issuer (jose handles caching internally)
 const jwksSetCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();

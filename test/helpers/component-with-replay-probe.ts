@@ -36,6 +36,13 @@ export const XAA_JTI_PROBE: ProbeFiles = {
   out: "xaa-jti-probe-2073",
 };
 
+/** flair#2145's OAuth single-use probe (test/integration/oauth-single-use-two-workers-2145.test.ts). */
+export const OAUTH_SINGLE_USE_PROBE: ProbeFiles = {
+  source: join("test", "fixtures", "oauth-single-use-probe-2145", "probe.js"),
+  target: join("dist", "resources", "zz-oauth-single-use-probe-2145.js"),
+  out: "oauth-single-use-probe-2145",
+};
+
 export interface ProbeComponent {
   /** Pass as `startHarper({ cwd })`. */
   dir: string;
