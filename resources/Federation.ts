@@ -21,6 +21,7 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance } from "./instance-create-lock.js";
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
+import { isReservedSeedId } from "./seed-reservation.js";
 import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -847,6 +848,13 @@ export class FederationSync extends Resource {
         // gate. Skip it: skills are written locally via skill_store, never synced.
         if (record.table === "Memory" && isSkillWrite(mergedData)) {
           recordSkip("skill_not_federated");
+          continue;
+        }
+
+        // flair#2141 S2: the merge skips a row on the seed's fixed id
+        // (resources/seed-reservation.ts), whatever its tags.
+        if (isReservedSeedId(record.table, record.id)) {
+          recordSkip("seed_id_not_federated");
           continue;
         }
 

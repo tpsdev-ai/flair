@@ -250,8 +250,9 @@ jobs:
     # one level up from the case budgets):
     #   per-case budgets: 660 + 760 + 740 + 450 + 420 = 3030 s
     #   setup allowance (bun install + bun run build + build:cli +
-    #     check-darwin-gated-tests + the embedding-model fetch): ~240 s
-    #   3030 + 240 = 3270 s; rounded up with margin to 60 min (3600 s)
+    #     check-darwin-gated-tests): ~240 s
+    #   embedding-model fetch: at most 180 s (its step timeout)
+    #   3030 + 240 + 180 = 3450 s; rounded up with margin to 60 min (3600 s)
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -282,6 +283,8 @@ jobs:
       # embeds (flair#715). After the unit step, so <cwd>/models is absent
       # while the darwin-gated unit tests run.
       - name: Pre-download embedding model
+        # Bounded so a stalled download cannot spend the case budgets above.
+        timeout-minutes: 3
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
       - name: Real-launchd doctor --fix integration (flair#1581)
         run: bun test test/integration/doctor-fix-launchd-darwin.test.ts

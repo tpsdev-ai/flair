@@ -38,7 +38,7 @@ export const USING_FLAIR_SKILL_CONTENT = [
   "- `permanent` and `persistent` default to `shared`; `standard` and `ephemeral` default to `private`. Set `visibility: \"shared\"` explicitly to share an ordinary working fact with teammates.",
   "",
   "## Provenance",
-  "- Write as yourself: Flair records the provenance of the credential the request authenticated with, and refuses a non-operator write whose `agentId` is not the writer's own, so a request body cannot claim another agent's id. Basic-auth operator credentials are recorded the same way.",
+  "- Write as yourself: a row's provenance records the principal id the request authenticated as. Flair refuses a non-admin write whose `agentId` names another principal; an admin's write is not checked against `agentId`.",
   "- Confirm a write with the returned id and a short preview.",
   "",
   "## Recall habits",
@@ -65,10 +65,10 @@ export function usingFlairSkillHash(content: string): string {
 
 /**
  * The hashes of every `using-flair` text this repository has shipped. A stored
- * row whose content hash is in this list is an UNEDITED shipped version, so the
- * installer may replace it; a hash that is not in the list is a locally modified
- * or unrecognized version, which is left alone. (A hash does not identify its
- * editor.) Append a new hash here whenever the text above changes.
+ * row whose content hash is in this list holds text that matches a listed
+ * shipped version, so the installer may replace it; any other text is left
+ * alone. (A hash does not identify who wrote the text.) Append a new hash here
+ * whenever the text above changes.
  */
 export const USING_FLAIR_SHIPPED_HASHES: readonly string[] = Object.freeze([
   usingFlairSkillHash(USING_FLAIR_SKILL_CONTENT),

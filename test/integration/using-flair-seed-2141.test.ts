@@ -193,7 +193,7 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
     expect((await assignmentRows()).length).toBe(1);
   }, 150_000);
 
-  test("an unedited shipped version is replaced (upgrade)", async () => {
+  test("a row whose text matches a listed shipped version is replaced (the seed helper through real Harper, not a built-CLI upgrade)", async () => {
     const oldText = "an older shipped text";
     const oldCurrent: SeedCurrent = { name: "using-flair", content: oldText, trigger: "old trigger", hashes: [], priority: "standard" };
     await ops({ operation: "delete", database: "flair", table: "Memory", ids: [SEED_SKILL_ID] });
@@ -207,7 +207,7 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
     expect((await memoryRow()).content).toBe(USING_FLAIR_SKILL_CONTENT);
   }, 30_000);
 
-  test("a locally modified row is kept and reported", async () => {
+  test("an operator row whose text matches no listed shipped version is kept and reported", async () => {
     await ops({ operation: "update", database: "flair", table: "Memory", records: [{ id: SEED_SKILL_ID, content: "an operator's own text", updatedAt: now() }] });
     const run = runInit();
     expect(run.status, `init failed: ${run.stderr.slice(-800)}`).toBe(0);
@@ -231,6 +231,24 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
     const all = await ops({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "content", search_value: USING_FLAIR_SKILL_CONTENT, get_attributes: ["id"] });
     expect((all ?? []).filter((r: any) => r.id === SEED_SKILL_ID).length).toBe(1);
   }, 30_000);
+
+  test("an operator-owned row that is archived or private fails `flair init`, and init writes nothing", async () => {
+    for (const [change, phrase] of [
+      [{ archived: true }, "it is archived"],
+      [{ visibility: "private" }, 'its visibility is "private"'],
+    ] as const) {
+      const before = await memoryRow();
+      await ops({ operation: "update", database: "flair", table: "Memory", records: [{ id: SEED_SKILL_ID, ...change }] });
+      const run = runInit();
+      expect(run.status, run.stdout + run.stderr).not.toBe(0);
+      expect(run.stderr).toContain(`the "${SEED_SKILL_ID}" Memory row is not a live org skill`);
+      expect(run.stderr).toContain(phrase);
+      expect(run.stderr).toContain("init wrote nothing");
+      await ops({ operation: "update", database: "flair", table: "Memory", records: [{ id: SEED_SKILL_ID, archived: false, visibility: before.visibility }] });
+    }
+    const run = runInit();
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+  }, 300_000);
 
   test("an assignment pointing at another skill row fails `flair init` with a remedy", async () => {
     await ops({ operation: "update", database: "flair", table: "OrgSkillAssignment", records: [{ id: SEED_ASSIGNMENT_ID, skillRef: "some-other-row" }] });

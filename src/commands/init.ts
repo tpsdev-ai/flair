@@ -1117,15 +1117,14 @@ program
     persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost, httpBind.host);
 
     // flair#2141 S2 — seed the org-wide using-flair skill on this instance, as
-    // the operator. It runs on the install path, where init has verified a
-    // serving instance (it started Harper or waited on its health check);
-    // --skip-start neither starts nor verifies one, so it does not seed and
-    // says so rather than reporting an install it did not confirm. A refusal
-    // fails this run rather than reporting a successful init without the skill,
-    // so both install paths call it before they print their success summary.
+    // the operator. Local `--skip-start` is a deliberate seeding exclusion:
+    // init does not seed, and says so. (Remote init, `--target`, seeds with or
+    // without `--skip-start`.) A refusal fails this run rather than reporting a
+    // successful init without the skill, so both local paths call it before
+    // they print their success summary.
     const seedUsingFlairSkillOnInstall = async (): Promise<void> => {
       if (opts.skipStart) {
-        console.log("using-flair skill: not seeded (--skip-start does not verify an instance)");
+        console.log("using-flair skill: not seeded (a local --skip-start init does not seed; run 'flair init' without --skip-start to seed)");
         return;
       }
       await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);

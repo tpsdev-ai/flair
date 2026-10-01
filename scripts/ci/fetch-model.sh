@@ -82,7 +82,9 @@ verify() {
 download() {
   local url="$1" label="$2"
   echo "fetch-model.sh: attempting ${label}: ${url}"
-  if curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+  # --max-time bounds each attempt's transfer, so a stalled download fails
+  # and is retried instead of hanging the lane.
+  if curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 --max-time 120 \
       "$url" -o "${DEST_PATH}.partial"; then
     mv "${DEST_PATH}.partial" "$DEST_PATH"
     return 0

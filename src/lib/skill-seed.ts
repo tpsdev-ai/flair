@@ -3,25 +3,35 @@
  * write (flair#2141 S2).
  *
  * `flair init` is the install path. It writes BOTH rows as the operator — a
- * verified Basic administrator over the normal signed REST APIs
- * (`PUT /Memory/<id>`, `PUT /OrgSkillAssignment/<id>`) — so the write carries
- * operator provenance and operator authority, with no reserved agent id and no
- * extra route.
+ * verified Basic administrator, over authenticated Basic REST requests
+ * (`PUT /Memory/<id>`, `PUT /OrgSkillAssignment/<id>`) — so the rows carry
+ * the operator's id. The instance refuses any other caller's create, PUT,
+ * PATCH or DELETE of either fixed id (resources/seed-reservation.ts,
+ * resources/OrgSkillAssignment.ts).
  *
- * The rule for the row is small and pure, so it is unit-tested without a server:
+ * Before it writes anything, the seed refuses:
+ *   - a read that FAILS (never read as "absent");
+ *   - an Agent record whose id is the operator's: a row owned by that id could
+ *     have been written by the agent, so its owner is ambiguous;
+ *   - an existing skill row not owned by the operator;
+ *   - an existing skill row whose content is not text, or that is not a live
+ *     org skill: no `skill` tag, visibility not `shared`, archived, closed
+ *     (`validTo`) or expired (`expiresAt`), or another id;
+ *   - an existing assignment with another id, `skillRef`, `skillName` or
+ *     priority.
+ *
+ * Otherwise the rule for the row is small and pure, so it is unit-tested
+ * without a server:
  *
  *   - no stored row                   → write the current text;
  *   - stored text = the current text  → unchanged;
- *   - stored text's hash is shipped   → replace (an unedited shipped version);
- *   - otherwise                       → keep, and report it;
- *   - stored content is NOT a string  → refuse (a malformed row is never read
- *                                       as "absent", which would overwrite it);
- *   - a read that FAILS               → refuse (never "absent").
+ *   - stored text's hash is listed    → replace (the text matches a listed
+ *                                       shipped version);
+ *   - otherwise                       → keep, and report it.
  *
- * An existing assignment whose `skillRef` is not the skill row's id is refused.
- * Both ids are fixed, so a re-run reads by primary key: it updates the same
- * rows instead of creating duplicates, and a concurrent re-run lands on the
- * same rows too. Every write is checked and read back before success.
+ * Both ids are fixed, so a re-run reads by primary key and updates the same
+ * rows instead of adding rows. After each write the seed reads the row back
+ * and applies the same checks; it reports success only when both rows pass.
  *
  * The IO seam is a tiny REST client, so the fail-closed contract is testable
  * without a server and the real path is the one `flair init` runs.
@@ -34,7 +44,10 @@ import {
   usingFlairSkillHash,
 } from "./using-flair-skill.js";
 
-/** The skill Memory row's id, and the org assignment's `skillRef`. */
+/**
+ * The skill Memory row's id, and the org assignment's `skillRef`. Must equal
+ * `SEED_SKILL_ROW_ID` in resources/seed-ids.ts (a unit test pins it).
+ */
 export const SEED_SKILL_ID = "skill:using-flair";
 
 /** The org assignment's id. Fixed, so a re-run lands on the same row. */
@@ -71,6 +84,11 @@ export interface SeedRowShape {
   id?: unknown;
   agentId?: unknown;
   content?: unknown;
+  tags?: unknown;
+  visibility?: unknown;
+  archived?: unknown;
+  validTo?: unknown;
+  expiresAt?: unknown;
 }
 
 /** An OrgSkillAssignment row as the seed reads it. */
@@ -78,6 +96,7 @@ export interface SeedAssignment {
   id?: unknown;
   skillName?: unknown;
   skillRef?: unknown;
+  priority?: unknown;
 }
 
 /** A read result. `ok:false` means the read FAILED — never "the row is absent". */
@@ -87,8 +106,12 @@ export type SeedRead<T> = { ok: boolean; row?: T | null; detail?: string };
 export type SeedWrite = { ok: boolean; detail?: string };
 
 export interface SkillSeedIo {
+  /** The operator principal the writes run as: the Basic administrator's username. */
+  operator: string;
   readRow(): Promise<SeedRead<SeedRowShape>>;
   readAssignment(): Promise<SeedRead<SeedAssignment>>;
+  /** The Agent record whose id equals `operator`; `row: null` when there is none. */
+  readOperatorAgent(): Promise<SeedRead<unknown>>;
   putRow(): Promise<SeedWrite>;
   putAssignment(): Promise<SeedWrite>;
 }
@@ -134,27 +157,102 @@ export function decideSkillSeed(
   return "keep";
 }
 
+function isPast(value: unknown, now: number): boolean {
+  return typeof value === "string" && value.length > 0 && Date.parse(value) < now;
+}
+
+/**
+ * What keeps a stored skill row from being the live org `using-flair` skill
+ * that bootstrap's manifest resolves (resources/skill-manifest.ts,
+ * resolvableSkillRows), or [] when nothing does. Ownership and content are
+ * checked separately.
+ */
+export function seedRowProblems(row: SeedRowShape, now: number = Date.now()): string[] {
+  const problems: string[] = [];
+  if (row.id !== SEED_SKILL_ID) problems.push(`its id is ${JSON.stringify(row.id ?? null)}`);
+  if (!Array.isArray(row.tags) || !row.tags.includes("skill")) problems.push('it has no "skill" tag');
+  if (row.visibility !== "shared") problems.push(`its visibility is ${JSON.stringify(row.visibility ?? null)}, not "shared"`);
+  if (row.archived === true) problems.push("it is archived");
+  if (isPast(row.validTo, now)) problems.push("it is closed (validTo is past)");
+  if (isPast(row.expiresAt, now)) problems.push("it has expired (expiresAt is past)");
+  return problems;
+}
+
+/** What makes a stored org assignment differ from the seed's, or [] when nothing does. */
+export function seedAssignmentProblems(row: SeedAssignment, current: SeedCurrent): string[] {
+  const problems: string[] = [];
+  if (row.id !== SEED_ASSIGNMENT_ID) problems.push(`its id is ${JSON.stringify(row.id ?? null)}`);
+  if (row.skillRef !== SEED_SKILL_ID) problems.push(`it names ${JSON.stringify(row.skillRef ?? null)} instead of "${SEED_SKILL_ID}"`);
+  if (row.skillName !== current.name) problems.push(`its skillName is ${JSON.stringify(row.skillName ?? null)}, not "${current.name}"`);
+  if (row.priority !== current.priority) problems.push(`its priority is ${JSON.stringify(row.priority ?? null)}, not "${current.priority}"`);
+  return problems;
+}
+
 function refused(error: string, message: string): SkillSeedOutcome {
   return { kind: "refused", error, message };
 }
 
-/** Apply the seed rule over `io`. Never writes when a read failed. */
+const NOTHING_WRITTEN = "init wrote nothing";
+const ROW_PATH = `/Memory/${encodeURIComponent(SEED_SKILL_ID)}`;
+const ASSIGNMENT_PATH = `/OrgSkillAssignment/${encodeURIComponent(SEED_ASSIGNMENT_ID)}`;
+const ROW_REMEDY =
+  `Inspect it (GET ${ROW_PATH}), delete it with the operator's Basic credentials (DELETE ${ROW_PATH}), ` +
+  "then re-run 'flair init'";
+const ASSIGNMENT_REMEDY =
+  `Inspect it (GET ${ASSIGNMENT_PATH}), correct or delete it with the operator's Basic credentials, ` +
+  "then re-run 'flair init'";
+
+/** Apply the seed rule over `io`. Writes nothing unless every read and check passes. */
 export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promise<SkillSeedOutcome> {
   const rowRead = await io.readRow();
   if (!rowRead.ok) {
     return refused(
       "skill_seed_row_unreadable",
-      `the existing "${SEED_SKILL_ID}" skill row could not be read (${rowRead.detail ?? "no detail"}); ` +
-        `check the instance and re-run 'flair init'`,
+      `the "${SEED_SKILL_ID}" Memory row could not be read (${rowRead.detail ?? "no detail"}); ${NOTHING_WRITTEN}. ` +
+        "Check the instance and re-run 'flair init'",
     );
   }
-  const stored = rowRead.row ?? null;
-  if (stored && typeof stored.content !== "string") {
+
+  const agentRead = await io.readOperatorAgent();
+  if (!agentRead.ok) {
     return refused(
-      "skill_seed_row_malformed",
-      `the Memory row "${SEED_SKILL_ID}" exists but its content is not text; ` +
-        `give it text or delete the row, then re-run 'flair init'`,
+      "skill_seed_operator_unreadable",
+      `the Agent record for the operator id "${io.operator}" could not be read (${agentRead.detail ?? "no detail"}); ` +
+        `${NOTHING_WRITTEN}. Check the instance and re-run 'flair init'`,
     );
+  }
+  // Checked before any write, with or without a stored row: a row init wrote
+  // now would be refused by the next run for the same reason.
+  if (agentRead.row) {
+    return refused(
+      "skill_seed_operator_ambiguous",
+      `an Agent record has the operator's id "${io.operator}", so a skill row owned by "${io.operator}" cannot be ` +
+        `told apart from one that agent wrote; ${NOTHING_WRITTEN}. Rename or remove that agent, then re-run 'flair init'`,
+    );
+  }
+
+  const stored = rowRead.row ?? null;
+  if (stored) {
+    if (stored.agentId !== io.operator) {
+      return refused(
+        "skill_seed_row_foreign_owner",
+        `the "${SEED_SKILL_ID}" Memory row is owned by ${JSON.stringify(stored.agentId ?? null)}, not the operator ` +
+          `"${io.operator}"; ${NOTHING_WRITTEN}. ${ROW_REMEDY}`,
+      );
+    }
+    if (typeof stored.content !== "string") {
+      return refused(
+        "skill_seed_row_malformed",
+        `the "${SEED_SKILL_ID}" Memory row exists but its content is not text; ${NOTHING_WRITTEN}. ${ROW_REMEDY}`,
+      );
+    }
+    const problems = seedRowProblems(stored);
+    if (problems.length > 0) {
+      return refused(
+        "skill_seed_row_incomplete",
+        `the "${SEED_SKILL_ID}" Memory row is not a live org skill: ${problems.join("; ")}; ${NOTHING_WRITTEN}. ${ROW_REMEDY}`,
+      );
+    }
   }
   const storedContent = typeof stored?.content === "string" ? stored.content : null;
 
@@ -162,16 +260,18 @@ export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promi
   if (!assignRead.ok) {
     return refused(
       "skill_seed_assignment_unreadable",
-      `the existing "${SEED_ASSIGNMENT_ID}" org assignment could not be read (${assignRead.detail ?? "no detail"}); ` +
-        `check the instance and re-run 'flair init'`,
+      `the "${SEED_ASSIGNMENT_ID}" org assignment could not be read (${assignRead.detail ?? "no detail"}); ` +
+        `${NOTHING_WRITTEN}. Check the instance and re-run 'flair init'`,
     );
   }
-  if (assignRead.row && assignRead.row.skillRef !== SEED_SKILL_ID) {
-    return refused(
-      "skill_seed_assignment_mismatch",
-      `the org assignment "${SEED_ASSIGNMENT_ID}" names ${JSON.stringify(assignRead.row.skillRef)} ` +
-        `instead of "${SEED_SKILL_ID}"; delete it or re-point it, then re-run 'flair init'`,
-    );
+  if (assignRead.row) {
+    const problems = seedAssignmentProblems(assignRead.row, current);
+    if (problems.length > 0) {
+      return refused(
+        "skill_seed_assignment_mismatch",
+        `the "${SEED_ASSIGNMENT_ID}" org assignment ${problems.join("; ")}; ${NOTHING_WRITTEN}. ${ASSIGNMENT_REMEDY}`,
+      );
+    }
   }
 
   const action = decideSkillSeed(storedContent, current.content, current.hashes);
@@ -180,7 +280,8 @@ export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promi
     if (!write.ok) {
       return refused(
         "skill_seed_write_failed",
-        `writing the "${SEED_SKILL_ID}" skill row failed (${write.detail ?? "no detail"}); re-run 'flair init'`,
+        `writing the "${SEED_SKILL_ID}" skill row failed (${write.detail ?? "no detail"}); the org assignment was not ` +
+          "written. Re-run 'flair init'",
       );
     }
     const after = await io.readRow();
@@ -188,14 +289,18 @@ export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promi
       return refused(
         "skill_seed_verify_failed",
         `the "${SEED_SKILL_ID}" skill row could not be read back after the write (${after.detail ?? "no detail"}); ` +
-          `check the instance and re-run 'flair init'`,
+          "the org assignment was not written. Check the instance and re-run 'flair init'",
       );
     }
-    if (after.row?.id !== SEED_SKILL_ID || after.row?.content !== current.content) {
+    const row = after.row ?? null;
+    const problems = row ? seedRowProblems(row) : ["it is absent"];
+    if (row && row.agentId !== io.operator) problems.push(`it is owned by ${JSON.stringify(row.agentId ?? null)}`);
+    if (row && row.content !== current.content) problems.push("it does not hold the current text");
+    if (problems.length > 0) {
       return refused(
         "skill_seed_verify_failed",
-        `the "${SEED_SKILL_ID}" skill row does not hold the current text after the write; ` +
-          `check the Memory table and re-run 'flair init'`,
+        `the "${SEED_SKILL_ID}" skill row read back after the write is not the operator's live org skill: ` +
+          `${problems.join("; ")}; the org assignment was not written. Check the Memory table and re-run 'flair init'`,
       );
     }
   }
@@ -217,10 +322,11 @@ export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promi
           `check the instance and re-run 'flair init'`,
       );
     }
-    if (after.row?.id !== SEED_ASSIGNMENT_ID || after.row?.skillRef !== SEED_SKILL_ID) {
+    const problems = after.row ? seedAssignmentProblems(after.row, current) : ["it is absent"];
+    if (problems.length > 0) {
       return refused(
         "skill_seed_verify_failed",
-        `the "${SEED_ASSIGNMENT_ID}" org assignment does not point at "${SEED_SKILL_ID}" after the write; ` +
+        `the "${SEED_ASSIGNMENT_ID}" org assignment read back after the write ${problems.join("; ")}; ` +
           `check the OrgSkillAssignment table and re-run 'flair init'`,
       );
     }
@@ -234,7 +340,7 @@ export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promi
         ? `replaced the using-flair skill with the current shipped text (${SEED_SKILL_ID})`
         : action === "unchanged"
           ? `using-flair is already current (${SEED_SKILL_ID})`
-          : `using-flair was locally modified or is not a shipped version; kept it unchanged (${SEED_SKILL_ID})`;
+          : `the using-flair text matches no listed shipped version; kept it unchanged (${SEED_SKILL_ID})`;
 
   return { kind: "ok", action, skillId: SEED_SKILL_ID, assignmentId, message };
 }
@@ -298,7 +404,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   const skillWriteMs = opts.skillWriteTimeoutMs ?? SEED_SKILL_WRITE_TIMEOUT_MS;
   const skillNoticeMs = opts.skillWriteNoticeMs ?? SEED_SKILL_WRITE_NOTICE_MS;
 
-  const readById = async (table: string, id: string): Promise<SeedRead<SeedRowShape>> => {
+  const readById = async <T>(table: string, id: string): Promise<SeedRead<T>> => {
     let res: Response;
     try {
       res = await fetchImpl(`${base}/${table}/${encodeURIComponent(id)}`, {
@@ -316,7 +422,7 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         return { ok: false, detail: "the response was not one record" };
       }
-      return { ok: true, row: parsed as SeedRowShape };
+      return { ok: true, row: parsed as T };
     } catch {
       return { ok: false, detail: "the response was not JSON" };
     }
@@ -351,7 +457,9 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   // The skill row's write waits on the instance's embedding model (see
   // SEED_SKILL_WRITE_TIMEOUT_MS), so it gets its own bound and says what it is
   // waiting on. A client-side timeout does not cancel the write on the
-  // instance: a re-run reads the fixed id and writes nothing twice.
+  // instance, which may still land it. The id is fixed, so a re-run updates
+  // that row rather than adding one; a re-run started while the first write is
+  // still pending can send a second PUT to the same id.
   const putRow = async (): Promise<SeedWrite> => {
     const notice = setTimeout(() => {
       opts.notify?.(
@@ -363,8 +471,8 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     try {
       return await putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current), skillWriteMs, (ms) =>
         `no answer within ${seconds(ms)} — the instance embeds a skill row as it writes it, so this write also ` +
-        `waits for its embedding model to download and load; 'flair doctor' reports embeddings, ` +
-        `and a re-run writes nothing twice`,
+        `waits for its embedding model to download and load; 'flair doctor' reports embeddings. The write may ` +
+        `still land; the id is fixed, so a re-run updates that row rather than adding one`,
       );
     } finally {
       clearTimeout(notice);
@@ -372,8 +480,10 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
   };
 
   return {
-    readRow: () => readById("Memory", SEED_SKILL_ID),
-    readAssignment: () => readById("OrgSkillAssignment", SEED_ASSIGNMENT_ID),
+    operator: opts.user,
+    readRow: () => readById<SeedRowShape>("Memory", SEED_SKILL_ID),
+    readAssignment: () => readById<SeedAssignment>("OrgSkillAssignment", SEED_ASSIGNMENT_ID),
+    readOperatorAgent: () => readById<unknown>("Agent", opts.user),
     putRow,
     putAssignment: () =>
       putById(

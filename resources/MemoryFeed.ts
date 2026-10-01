@@ -13,6 +13,7 @@ import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./mem
 import { buildProvenance } from "./provenance.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
+import { reservedSeedWriteDenial } from "./seed-reservation.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -29,6 +30,11 @@ export class FeedMemories extends Resource {
     if (auth.kind === "anonymous") {
       return UNAUTH();
     }
+
+    // flair#2141 S2: a body id may name the seed's fixed id, which is written
+    // only with operator authority (resources/seed-reservation.ts).
+    const seedDenial = reservedSeedWriteDenial("Memory", [content?.id], ctx, auth);
+    if (seedDenial) return seedDenial;
 
     // No-forge attribution: use the kit's stampAttribution to stamp agentId
     // from the authenticated principal, never from the body.
