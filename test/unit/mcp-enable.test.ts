@@ -1003,8 +1003,8 @@ describe("enableMcp — full happy path", () => {
     expect(result.pasteBlock).not.toContain("Client ID:");
     expect(result.secretsMechanism).toBe("env-file");
 
-    // flair#756: no DCR call anywhere in the flow — the only calls after
-    // restart are the ops API restart itself and self-verify.
+    // flair#756: no DCR call anywhere in the flow. Metadata is read from the
+    // target after restart, then checked at the public issuer.
     expect(calls).not.toContain("dcr-register");
     expect(calls.some((c) => c.includes("oauth/mcp/register"))).toBe(false);
     // flair#1136: set_configuration is removed — only restart is called.
@@ -1045,6 +1045,32 @@ describe("enableMcp — full happy path", () => {
 });
 
 describe("enableMcp — self-verify failure names the step to re-run", () => {
+  test("standalone refuses an unrelated issuer before checking its valid public metadata", async () => {
+    const publicIssuer = "https://other.public.example";
+    const { fetchImpl: baseFetch, calls } = fullMockFetch();
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      if (String(url) === `${publicIssuer}/.well-known/oauth-authorization-server`) {
+        calls.push("public-self-verify");
+        return new Response(JSON.stringify({
+          ...CIMD_METADATA,
+          issuer: publicIssuer,
+          token_endpoint: `${publicIssuer}/oauth/mcp/token`,
+        }), { status: 200 });
+      }
+      return baseFetch(url, init);
+    }) as typeof fetch;
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), issuer: publicIssuer, confirmSecretsApplied: true },
+      { fetchImpl },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("self-verify");
+    expect(result.refused?.message).toContain(`names issuer="${ISSUER}"; expected ${publicIssuer}`);
+    expect(result.pasteBlock).toBeUndefined();
+    expect(calls).not.toContain("public-self-verify");
+  });
+
   test("ok:false, failedStep 'self-verify', but the restart step already succeeded", async () => {
     const { fetchImpl } = fullMockFetch({ verifyStatus: 404 });
     const result = await enableMcp(
@@ -1637,11 +1663,9 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(fabricStep).toBeDefined();
     expect(fabricStep!.ok).toBe(false);
     expect(fabricStep!.detail).toContain("harperfabric.com");
-    // flair#1152: the guidance is env-first — set FLAIR_MCP_OAUTH in the
-    // instance environment; NEVER "edit the deployed config.yaml" (a
-    // re-packed deploy reverts that edit, which was the whole bug).
-    expect(fabricStep!.detail).toContain("FLAIR_MCP_OAUTH");
-    expect(fabricStep!.detail).toContain("environment");
+    // A target response without an issuer cannot bind the public check.
+    expect(fabricStep!.detail).toContain("FLAIR_MCP_ISSUER");
+    expect(fabricStep!.detail).toContain("target's own metadata");
     expect(fabricStep!.detail).not.toContain("mcp.enabled: true");
     // Earlier steps (secrets, identity) still succeeded.
     const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
@@ -1700,31 +1724,111 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(result.steps.map((s) => s.step).slice(-2)).toEqual(["fabric-operator-deploy", "self-verify"]);
     const step = result.steps.find((s) => s.step === "fabric-operator-deploy")!;
     expect(step.detail).toContain(`already passes self-verify on ${FABRIC}`);
+    expect(step.detail).toContain(`Issuer ${FABRIC} matched the target's own OAuth authorization-server metadata`);
     expect(result.pasteBlock).toContain(`${FABRIC}/mcp`);
     // Still never restarts a Fabric instance.
     expect(calls).not.toContain("ops:restart");
     expect(calls).toContain("self-verify");
   });
 
-  test("Fabric first run: the step says self-verify has not passed, why, and what the re-run needs", async () => {
+  const PUBLIC = "https://flair.public.example";
+  const publicMetadata = {
+    ...CIMD_METADATA,
+    issuer: PUBLIC,
+    token_endpoint: `${PUBLIC}/oauth/mcp/token`,
+  };
+  function proxyFetch(targetResponse: () => Response) {
+    const { fetchImpl: opsFetch } = fabricFetch(async () => new Response("unused", { status: 500 }));
+    const calls: string[] = [];
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const address = String(url);
+      if (address === `${FABRIC}/.well-known/oauth-authorization-server`) {
+        calls.push("target-metadata");
+        return targetResponse();
+      }
+      if (address === `${PUBLIC}/.well-known/oauth-authorization-server`) {
+        calls.push("public-metadata");
+        return new Response(JSON.stringify(publicMetadata), { status: 200 });
+      }
+      return opsFetch(url, init);
+    }) as typeof fetch;
+    return { fetchImpl, calls };
+  }
+
+  test("unrelated public issuer metadata cannot complete a Fabric target", async () => {
+    const { fetchImpl, calls } = proxyFetch(() => new Response(JSON.stringify({
+      ...CIMD_METADATA,
+      issuer: FABRIC,
+      token_endpoint: `${FABRIC}/oauth/mcp/token`,
+    }), { status: 200 }));
+    const result = await enableMcp({ ...fabricParams(), issuer: PUBLIC }, { fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("fabric-operator-deploy");
+    expect(result.refused?.message).toContain(`names issuer="${FABRIC}"; expected ${PUBLIC}`);
+    expect(result.pasteBlock).toBeUndefined();
+    expect(calls).toEqual(["target-metadata"]);
+  });
+
+  test("a matching public proxy issuer completes even when it differs from --instance", async () => {
+    const { fetchImpl, calls } = proxyFetch(() => new Response(JSON.stringify(publicMetadata), { status: 200 }));
+    const result = await enableMcp({ ...fabricParams(), issuer: PUBLIC }, { fetchImpl });
+
+    expect(result.ok).toBe(true);
+    expect(result.issuer).toBe(PUBLIC);
+    expect(result.pasteBlock).toContain(`${PUBLIC}/mcp`);
+    expect(result.steps.find((s) => s.step === "fabric-operator-deploy")?.detail)
+      .toContain(`Issuer ${PUBLIC} matched the target's own OAuth authorization-server metadata at ${FABRIC}/.well-known/oauth-authorization-server`);
+    expect(calls).toEqual(["target-metadata", "public-metadata"]);
+    expect(readFileSync(join(dir, "secrets.env"), "utf8")).toContain(`FLAIR_MCP_ISSUER=${PUBLIC}`);
+  });
+
+  test("the target's own OAuth server cannot bind a public MCP issuer", async () => {
+    const { fetchImpl, calls } = proxyFetch(() => new Response(JSON.stringify({
+      issuer: PUBLIC,
+      token_endpoint: `${PUBLIC}/OAuthToken`,
+    }), { status: 200 }));
+    const result = await enableMcp({ ...fabricParams(), issuer: PUBLIC }, { fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.refused?.message).toContain("not the MCP authorization server's token endpoint");
+    expect(result.pasteBlock).toBeUndefined();
+    expect(calls).toEqual(["target-metadata"]);
+  });
+
+  test("unparseable target metadata refuses before public issuer verification", async () => {
+    const { fetchImpl, calls } = proxyFetch(() => new Response("not json", { status: 200 }));
+    const result = await enableMcp({ ...fabricParams(), issuer: PUBLIC }, { fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.refused?.message).toContain(`${FABRIC}/.well-known/oauth-authorization-server did not return JSON`);
+    expect(result.refused?.message).toContain("Check the OAuth authorization-server metadata served by --instance");
+    expect(result.pasteBlock).toBeUndefined();
+    expect(calls).toEqual(["target-metadata"]);
+  });
+
+  test("Fabric first run: missing target metadata refuses with a named remedy", async () => {
     const { fetchImpl } = fabricFetch(async () => new Response("Not found", { status: 404 }));
     const result = await enableMcp(fabricParams(), { fetchImpl });
 
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("fabric-operator-deploy");
     const step = result.steps.find((s) => s.step === "fabric-operator-deploy")!;
-    expect(step.detail).toContain("self-verify on https://my-flair.harperfabric.com has not passed yet");
+    expect(result.refused?.message).toBe(step.detail);
+    expect(step.detail).toContain("Cannot confirm the target's configured issuer");
     expect(step.detail).toContain("returned HTTP 404");
-    // Nothing was pushed (the capability probe found no env-secrets support), so the staged file is the remedy.
-    expect(step.detail).toContain("apply the staged secrets");
-    expect(step.detail).toContain("--confirm-secrets-applied");
-    expect(step.detail).not.toContain("earlier steps are idempotent");
+    expect(step.detail).toContain("Check the OAuth authorization-server metadata served by --instance");
+    expect(step.detail).toContain("FLAIR_MCP_ISSUER");
+    expect(result.pasteBlock).toBeUndefined();
   });
 
-  test("Fabric first run after an env-secrets push: the step says to restart, not to apply the staged file", async () => {
+  test("Fabric first run after an env-secrets push: matching target metadata still needs public activation", async () => {
     const { publicKey } = generateRsaSigningKeyPair();
+    let metadataReads = 0;
     const { fetchImpl } = fabricFetch(
-      async () => new Response("Not found", { status: 404 }),
+      async () => ++metadataReads === 1
+        ? new Response(JSON.stringify({ ...CIMD_METADATA, issuer: FABRIC, token_endpoint: `${FABRIC}/oauth/mcp/token` }), { status: 200 })
+        : new Response("Not found", { status: 404 }),
       (body) => {
         if (body.operation === "get_secrets_public_key") return new Response(JSON.stringify({ public_key: publicKey }), { status: 200 });
         if (body.operation === "set_secret") return new Response("{}", { status: 200 });
@@ -1740,11 +1844,17 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(result.steps.find((s) => s.step === "secrets-provisioning")!.detail).toContain("pushed to the target");
     const step = result.steps.find((s) => s.step === "fabric-operator-deploy")!;
     expect(step.detail).toContain("the secrets were pushed to the instance above");
+    expect(step.detail).toContain("self-verify on https://my-flair.harperfabric.com has not passed yet");
     expect(step.detail).not.toContain("apply the staged secrets");
+    expect(metadataReads).toBe(2);
   });
 
-  test("Fabric: a failed self-verify read never completes enable, and asks for checks, not activation", async () => {
-    const { fetchImpl, calls } = fabricFetch(async () => { throw new Error("ECONNRESET"); });
+  test("Fabric: a failed public self-verify read after a matching target read never completes enable", async () => {
+    let metadataReads = 0;
+    const { fetchImpl, calls } = fabricFetch(async () => {
+      if (++metadataReads === 1) return new Response(JSON.stringify({ ...CIMD_METADATA, issuer: FABRIC, token_endpoint: `${FABRIC}/oauth/mcp/token` }), { status: 200 });
+      throw new Error("ECONNRESET");
+    });
     const result = await enableMcp(fabricParams(), { fetchImpl });
 
     expect(result.ok).toBe(false);
@@ -1753,18 +1863,13 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(result.steps.some((s) => s.step === "self-verify")).toBe(false);
     expect(calls).not.toContain("ops:restart");
     const detail = result.steps.find((s) => s.step === "fabric-operator-deploy")!.detail;
-    // flair#2116: says what was tried and that it failed …
     expect(detail).toContain(`the public issuer could not be reached (could not reach ${FABRIC}/.well-known/oauth-authorization-server: ECONNRESET)`);
     expect(detail).toContain("does not show that the environment is wrong or that a restart is needed");
-    // … gives checks to run …
     expect(detail).toContain("resolves in DNS");
     expect(detail).toContain("reach it over HTTPS");
-    expect(detail).toContain("the instance is running in Fabric");
-    expect(detail).toContain("--confirm-secrets-applied");
-    // … and not the activation instruction, which a failed read gives no reason for.
     expect(detail).not.toContain("To activate");
-    expect(detail).not.toContain("apply the staged secrets");
-    expect(detail).not.toContain("restart the instance");
+    expect(result.refused).toBeUndefined();
+    expect(metadataReads).toBe(2);
   });
 
   test("Fabric origin: result includes issuer and resource for status checks", async () => {

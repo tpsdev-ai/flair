@@ -1,0 +1,1 @@
+- **`flair mcp enable` now matches the checked issuer to the target's own OAuth metadata before reporting a successful metadata check.** (Closes #2134)

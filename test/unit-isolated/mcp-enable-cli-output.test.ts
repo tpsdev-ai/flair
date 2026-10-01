@@ -185,6 +185,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.foreign).toEqual([]);
     expect(r.exit).toBeNull();
     expect(r.out).toContain("The OAuth metadata check passed.");
+    expect(r.out).toContain(`Issuer ${ISSUER} matched the target's own OAuth authorization-server metadata at ${ISSUER}/.well-known/oauth-authorization-server`);
     expect(r.out).toContain("The /mcp route itself was not probed.");
     expect(r.out).toContain("connector identity: mapped sub 'octocat' (provider 'github') to Agent 'self'; see docs/access-control.md for how /mcp tool calls use it.");
     expect(r.out).not.toContain("every /mcp call reads and writes AS");

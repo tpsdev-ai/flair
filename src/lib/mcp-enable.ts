@@ -1398,6 +1398,52 @@ export interface SelfVerifyResult {
   detail: string;
 }
 
+/** Fetch and parse the metadata document at an origin without assuming its
+ * `issuer` equals that origin. A target can serve a public proxy issuer. */
+async function fetchOAuthMetadata(
+  origin: string,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<{ ok: true; url: string; body: any } | { ok: false; detail: string; unreachable?: true }> {
+  const url = `${origin.replace(/\/+$/, "")}/.well-known/oauth-authorization-server`;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  let res: Response;
+  try {
+    res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) } as RequestInit);
+  } catch (err: any) {
+    return { ok: false, unreachable: true, detail: `could not reach ${url}: ${err?.message ?? err}` };
+  }
+  if (!res.ok) {
+    return { ok: false, detail: `${url} returned HTTP ${res.status} — is FLAIR_MCP_OAUTH actually set on the restarted instance?` };
+  }
+  try {
+    return { ok: true, url, body: await res.json() };
+  } catch {
+    return { ok: false, detail: `${url} did not return JSON` };
+  }
+}
+
+async function verifyTargetIssuer(
+  instance: string,
+  issuer: string,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<{ ok: boolean; detail: string }> {
+  const target = await fetchOAuthMetadata(instance, deps);
+  const remedy = `Check the OAuth authorization-server metadata served by --instance (${instance}), make sure the target's FLAIR_MCP_ISSUER is ${issuer}, then re-run \`flair mcp enable\`.`;
+  if (target.ok === false) return { ok: false, detail: `Cannot confirm the target's configured issuer: ${target.detail} ${remedy}` };
+  if (target.body?.issuer !== issuer) {
+    const actual = target.body?.issuer;
+    const found = typeof actual === "string" ? `names issuer=${JSON.stringify(actual)}` : `has no string issuer (got ${JSON.stringify(actual)})`;
+    return { ok: false, detail: `The target's own metadata at ${target.url} ${found}; expected ${issuer}. ${remedy}` };
+  }
+  if (target.body?.token_endpoint !== `${issuer}/oauth/mcp/token`) {
+    return {
+      ok: false,
+      detail: `The target's metadata at ${target.url} has token_endpoint=${JSON.stringify(target.body?.token_endpoint)}, not the MCP authorization server's token endpoint. Check FLAIR_MCP_OAUTH and the @harperfast/oauth component on the target, then re-run \`flair mcp enable\`.`,
+    };
+  }
+  return { ok: true, detail: `Issuer ${issuer} matched the target's own OAuth authorization-server metadata at ${target.url}` };
+}
+
 /**
  * Hit the OAuth metadata endpoint from the operator's machine against the
  * PUBLIC origin — the verification that matters is the one claude.ai's
@@ -1415,28 +1461,10 @@ export async function selfVerifyMcpMetadata(
   issuer: string,
   deps: { fetchImpl?: typeof fetch } = {},
 ): Promise<SelfVerifyResult> {
-  const fetchImpl = deps.fetchImpl ?? fetch;
   const normalizedIssuer = issuer.replace(/\/+$/, "");
-  const url = `${normalizedIssuer}/.well-known/oauth-authorization-server`;
-
-  let res: Response;
-  try {
-    res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) } as RequestInit);
-  } catch (err: any) {
-    return { ok: false, unreachable: true, detail: `could not reach ${url}: ${err?.message ?? err}` };
-  }
-  if (!res.ok) {
-    return {
-      ok: false,
-      detail: `${url} returned HTTP ${res.status} — is FLAIR_MCP_OAUTH actually set on the restarted instance?`,
-    };
-  }
-  let body: any;
-  try {
-    body = await res.json();
-  } catch {
-    return { ok: false, detail: `${url} did not return JSON` };
-  }
+  const metadata = await fetchOAuthMetadata(normalizedIssuer, deps);
+  if (metadata.ok === false) return metadata;
+  const { url, body } = metadata;
   // ── The flair's-own-server check runs BEFORE the shape check (flair#1094) ──
   //
   // It used to run after, and that made the DEFAULT flag-off case misreport.
@@ -1772,9 +1800,8 @@ export interface EnableMcpResult {
  * hope).
  *
  * flair#756: no DCR step anywhere in this flow — CIMD needs no
- * pre-registration, so there is nothing to do after the restart besides
- * self-verify. `self-verify` is now the ONLY live call that happens after
- * `apply-config-and-restart`.
+ * pre-registration. After restart, the target's MCP metadata issuer is
+ * checked before the public issuer metadata can count as completion.
  */
 export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {}): Promise<EnableMcpResult> {
   const steps: EnableStepResult[] = [];
@@ -1943,6 +1970,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       idpClientSecret: params.idpClientSecret,
     });
     currentStep = "secrets-provisioning";
+    if (bundle.FLAIR_MCP_ISSUER !== issuer) {
+      throw new Error(`the FLAIR_MCP_ISSUER being pushed does not equal the issuer checked (${issuer})`);
+    }
     // Stage first, unconditionally. If the push works the file is a no-op the
     // operator never opens; if anything about the push is uncertain they still
     // have the thing that always works, without a re-run. Staging costs a 0600
@@ -2078,12 +2108,16 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       const host = new URL(params.instance).hostname;
       // flair#2116: this step used to fail unconditionally, so a re-run after
       // the operator's restart ended here with the same instructions, forever.
-      // Ask the public origin first. Only self-verify passing ends this step
-      // with success; a failed or unusable read fails it as before.
+      const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
+      if (!binding.ok) {
+        push(false, binding.detail);
+        return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "fabric-operator-deploy", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, signingKeyFilePath: keyResult.path, callbackUrl };
+      }
+      // The target's metadata names the issuer. Now check the public origin.
       const live = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
       if (live.ok) {
         push(true,
-          `Fabric deployment (${host}): the /mcp OAuth surface already passes self-verify on ${issuer}. ` +
+          `Fabric deployment (${host}): ${binding.detail}; the /mcp OAuth surface already passes self-verify on ${issuer}. ` +
             `If this run changed a secret value (a new IdP client secret, for example), restart the instance so its process picks the new value up.`,
         );
         currentStep = "self-verify";
@@ -2197,8 +2231,13 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
        );
     push(true, `process restarted: pid changed ${preDiscriminator.pid} -> ${postDiscriminator.pid}`);
 
-    // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
+    // ── Match the target's issuer, then self-verify the public origin ────────
     currentStep = "self-verify";
+    const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
+    if (!binding.ok) {
+      push(false, binding.detail);
+      return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "self-verify", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, signingKeyFilePath: keyResult.path, callbackUrl, cimdAllowedHosts: writtenCimd?.hosts, cimdAllowedHostsConfigPath: writtenCimd?.path };
+    }
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {
       push(false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry.`);
@@ -2213,7 +2252,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         cimdAllowedHostsConfigPath: writtenCimd?.path,
       };
     }
-    push(true, verify.detail);
+    push(true, `${binding.detail}; ${verify.detail}`);
 
     const resource = `${issuer}/mcp`;
     return {
