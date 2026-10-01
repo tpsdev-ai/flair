@@ -232,6 +232,8 @@ import { classifyInstalledVersion, shouldPrintUpgradeLine, upgradeStatusSuffix, 
 import {
   classifyDaemonState,
   verifyIdentity,
+  isNodeHarperCommandLine,
+  isStartTimeMatch,
   parseSidecarJson,
   classifyHealthProbe,
   classifyPortOwner,
@@ -5639,10 +5641,25 @@ function resolveInstanceServingPid(dataDir: string, port: number): number | null
   try {
     listeningPids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
   } catch { /* lsof unavailable — the PID file may still answer */ }
+  // flair#2056: identify the process, not just the pid. A live `hdb.pid` is
+  // trusted only when the flair#1454 sidecar matches (same pid, start time
+  // within ±2s) AND the command line is node running harper.js; otherwise the
+  // pid may have been recycled and is treated as stale, so the port listener
+  // answers instead. Reuses the existing sidecar reader (readSidecar).
+  const sidecar = readSidecar(dataDir);
+  const isIdentified = (pid: number): boolean => {
+    if (sidecar.kind !== "present") return false;
+    if (sidecar.pid !== pid) return false;
+    const actual = readProcessStartTimeMs(pid);
+    if (actual === null || !isStartTimeMatch(actual, sidecar.startTimeMs)) return false;
+    const cmdline = defaultReadProcessCmdline(pid);
+    return cmdline !== null && isNodeHarperCommandLine(cmdline);
+  };
   return pickInstancePid({
     pidFilePid: readHarperPid(dataDir),
     isAlive: isProcessAlive,
     listeningPids,
+    isIdentified,
   });
 }
 

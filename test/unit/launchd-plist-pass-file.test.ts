@@ -298,12 +298,14 @@ describe("launcher script — non-interactive start", () => {
   });
 });
 
-// flair#2040: when launchd starts the job (RunAtLoad at a console login, or a
-// KeepAlive retry) while a DIRECT process already serves the same data
-// directory, the launcher must not start a second Harper on it. Harper's own
-// hdb.pid check would refuse too, but only after loading its config and
-// applying HARPER_SET_CONFIG to the data directory; the launcher refuses before
-// Harper runs at all. Platform-independent: plain sh + `kill -0`.
+// flair#2040 / flair#2056: when launchd starts the job (RunAtLoad at a console
+// login, or a KeepAlive retry) while a DIRECT process already serves the same
+// data directory, the launcher must not start a second Harper on it — but only
+// when that process is IDENTIFIED as the direct Flair process (the flair-daemon
+// sidecar plus a node/harper command line; see
+// test/unit/launcher-pid-identity-2056.test.ts). Harper's own hdb.pid check
+// would refuse too, but only after loading its config and applying
+// HARPER_SET_CONFIG to the data directory. Platform-independent: plain sh.
 describe("launcher script — never a second instance on a served data directory (flair#2040)", () => {
   const LAUNCHER = join(import.meta.dir, "../../templates/launchd/start-flair-with-admin-pass.sh");
 
@@ -327,15 +329,16 @@ describe("launcher script — never a second instance on a served data directory
     });
   }
 
-  test("hdb.pid names a LIVE process -> exit 0, says why, and node is never exec'd", () => {
+  test("hdb.pid names a LIVE process with NO identity (flair#2056) -> treated as stale; the launcher starts Harper", () => {
     const f = fixture();
-    // A live pid this test owns: its own process.
+    // A live pid this test owns, but no flair-daemon.json identity: it cannot be
+    // shown to be the direct Flair process, so it is treated as stale (its pid
+    // may have been recycled) and Harper is exec'd. See
+    // test/unit/launcher-pid-identity-2056.test.ts for the identified-process refusal.
     writeFileSync(join(f.rootPath, "hdb.pid"), String(process.pid));
     const r = launch(f);
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain(`${f.rootPath} is already served by pid ${process.pid}`);
-    expect(r.stderr).toContain("not starting a second instance");
-    expect(existsSync(f.marker)).toBe(false);
+    expect(existsSync(f.marker)).toBe(true);
     // The pid file is left as it was.
     expect(readFileSync(join(f.rootPath, "hdb.pid"), "utf-8")).toBe(String(process.pid));
   });

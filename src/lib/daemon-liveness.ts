@@ -274,6 +274,24 @@ export function isStartTimeMatch(actualMs: number, recordedMs: number, tolerance
 }
 
 /**
+ * Does a process command line look like `node` running Harper (flair#2056)?
+ *
+ * The launcher and `resolveInstanceServingPid` trust a pidfile pid only when
+ * the sidecar matches AND the command line is a node process running
+ * `harper.js` — a recycled pid usually belongs to something else. The first
+ * token must be a `node` executable and some token must end in `harper.js`
+ * (however flair's launcher spells the absolute path). A command line that
+ * cannot be read is a caller concern; an empty string is not this.
+ */
+export function isNodeHarperCommandLine(cmdline: string): boolean {
+  const tokens = cmdline.split(/\u0000|\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) return false;
+  const exe = tokens[0].split("/").pop() ?? "";
+  if (exe !== "node" && exe !== "node.exe") return false;
+  return tokens.some((t) => /(^|\/)harper\.js$/.test(t));
+}
+
+/**
  * Parse `/proc/<pid>/stat` field 22 (starttime, in clock ticks).
  *
  * Field 2 (comm) is parenthesised and may itself contain spaces and `)`

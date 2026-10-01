@@ -25,25 +25,51 @@ ADMIN_PASS_FILE="$1"
 NODE="$2"
 HARPER_BIN="$3"
 
-# flair#2040: never start a SECOND instance on a data directory that a live
-# process already serves. `flair init`, and a `flair start`/`doctor --fix` that
-# fell back to a direct start, leave the instance running outside launchd with
-# this plist on disk (RunAtLoad + KeepAlive). When launchd later starts the job
-# — at the next console login, say — Harper's own "already running" check
-# (hdb.pid) would refuse, but only AFTER it has loaded its config and applied
-# HARPER_SET_CONFIG to the data directory's config state. Refuse here, before
-# Harper runs at all: no config load, no hdb.pid write, no port bind, no store
-# open, and the admin password is never read. Exit 0 — a deliberate no-op, not a
-# crash. KeepAlive makes launchd retry after its throttle interval (10 s by
-# default); once the direct process has exited, the next attempt starts Harper
-# and launchd owns the instance.
-# Mirrors Harper's getHdbPid(): a pid that is ours, 1, or not alive is no
-# evidence. ROOTPATH comes from the plist's EnvironmentVariables.
+# flair#2040 / flair#2056: never start a SECOND instance on a data directory
+# that a live process already serves — but only when that process is IDENTIFIED
+# as the direct Flair process. `kill -0` alone proves only that SOME process has
+# the pid; a crashed direct process that left hdb.pid behind can have its pid
+# reused by anything, and then every KeepAlive retry would exit 0 forever and
+# launchd would never start Flair. Identity is the flair#1454 sidecar
+# (`flair-daemon.json`: the same pid and a start time within ±2 s of
+# `ps -o lstart=`) AND a node/harper command line. Anything less is
+# unidentifiable, and unidentifiable is treated as STALE: fall through and exec
+# Harper, whose own hdb.pid check still applies. Refuse only on a positive
+# identification. Exit 0 on the refusal — a deliberate no-op, not a crash;
+# KeepAlive retries after its throttle interval, and the next attempt starts
+# Harper once the direct process has exited.
 if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
   LIVE_PID="$(tr -cd '0-9' < "$ROOTPATH/hdb.pid" 2>/dev/null || true)"
   if [ -n "$LIVE_PID" ] && [ "$LIVE_PID" != "$$" ] && [ "$LIVE_PID" -gt 1 ] 2>/dev/null && kill -0 "$LIVE_PID" 2>/dev/null; then
-    echo "start-flair-with-admin-pass: $ROOTPATH is already served by pid $LIVE_PID (not started by this launchd job); not starting a second instance. launchd retries after its throttle interval and starts Flair once that process has exited." >&2
-    exit 0
+    IDENTIFIED=0
+    SIDE="$ROOTPATH/flair-daemon.json"
+    if [ -f "$SIDE" ]; then
+      SIDE_PID="$(grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$SIDE" 2>/dev/null | grep -o '[0-9][0-9]*$' || true)"
+      SIDE_START="$(grep -o '"startTimeMs"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$SIDE" 2>/dev/null | grep -o '[0-9][0-9]*$' || true)"
+      if [ -n "$SIDE_PID" ] && [ "$SIDE_PID" = "$LIVE_PID" ] && [ -n "$SIDE_START" ]; then
+        LSTART="$(ps -o lstart= -p "$LIVE_PID" 2>/dev/null || true)"
+        ACT_S=""
+        case "$(uname -s)" in
+          Darwin) if [ -n "$LSTART" ]; then ACT_S="$(date -j -f "%a %b %e %T %Y" "$LSTART" +%s 2>/dev/null || true)"; fi ;;
+          *)      if [ -n "$LSTART" ]; then ACT_S="$(date -d "$LSTART" +%s 2>/dev/null || true)"; fi ;;
+        esac
+        if [ -n "$ACT_S" ]; then
+          START_S=$((SIDE_START / 1000))
+          DIFF=$((ACT_S - START_S))
+          if [ "$DIFF" -lt 0 ]; then DIFF=$((0 - DIFF)); fi
+          if [ "$DIFF" -le 2 ]; then
+            CMD="$(ps -o command= -p "$LIVE_PID" 2>/dev/null || true)"
+            case "$CMD" in
+              *node*harper*) IDENTIFIED=1 ;;
+            esac
+          fi
+        fi
+      fi
+    fi
+    if [ "$IDENTIFIED" = "1" ]; then
+      echo "start-flair-with-admin-pass: $ROOTPATH is already served by pid $LIVE_PID (not started by this launchd job); not starting a second instance. launchd retries after its throttle interval and starts Flair once that process has exited." >&2
+      exit 0
+    fi
   fi
 fi
 
