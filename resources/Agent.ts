@@ -1,6 +1,7 @@
 import { databases } from "harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
+import { statusWriteRefusal } from "./agent-status-guard.js";
 import { applyOriginatorInstanceId, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 
 /**
@@ -75,13 +76,17 @@ export class Agent extends (databases as any).flair.Agent {
    * does not route through put() — so every rule written here was enforced on
    * one verb and not the other. Returns a Response to send, or null to proceed.
    *
-   * Two rules:
+   * Three rules:
    *   1. Only an admin principal may modify a principal OTHER than itself.
    *   2. Only an admin principal may change a principal's ADMIN STATUS — on any
    *      record, including the caller's own. Rule 1 alone never covered this:
    *      an agent editing its own record is inside its rights for ordinary
    *      fields (runtime, displayName, subjects) and must not be for the fields
    *      that decide whether it is an administrator.
+   *   3. A non-admin caller may not write `status` — the principal's LIFECYCLE
+   *      state — on any record, including its own (flair#2108). A body that
+   *      includes `status` is refused whole, so the other fields in that
+   *      request are not written either.
    *
    * `internal` (in-process maintenance, federation merge) and admin agents pass
    * through unchanged.
@@ -96,6 +101,11 @@ export class Agent extends (databases as any).flair.Agent {
       });
     }
     if (auth.kind !== "agent" || auth.isAdmin) return null;
+
+    // 3. A non-admin caller may not write `status`, on ANY row, including its
+    // own. Refused before any read or write, so nothing in the request is applied.
+    const statusDenial = statusWriteRefusal(content, auth.isAdmin);
+    if (statusDenial) return statusDenial;
 
     const existing = await Promise.resolve(super.get()).catch(() => null);
 

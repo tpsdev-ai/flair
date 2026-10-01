@@ -1,0 +1,1 @@
+- **`Agent.status` is writable only by an administrator or an internal caller (Closes #2108).** A write from any other caller that includes `status` is refused with `403` naming the field and pointing at Presence, and writes nothing — not the status, and not the other fields in the same request. Other self-editable Agent fields are unchanged.
