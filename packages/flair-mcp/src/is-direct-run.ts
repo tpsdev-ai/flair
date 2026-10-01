@@ -3,8 +3,9 @@
  *
  * `import.meta.main` answers where the runtime provides it (Bun; Node 22.18+).
  * Otherwise compare filesystem paths, both resolved through symlinks: the
- * module URL is percent-encoded (a space is `%20`) and an npm bin shim is a
- * symlink, so a string comparison of the URL with `argv[1]` misses both.
+ * module URL is percent-encoded (a space is `%20`) and, on macOS and Linux, an
+ * npm bin shim is a symlink, so a string comparison of the URL with `argv[1]`
+ * misses both.
  */
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
