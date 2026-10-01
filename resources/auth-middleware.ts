@@ -2,8 +2,9 @@ import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
-import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
-import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
+import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
+import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
 import { multiWorkerCondition, multiWorkerRefusalResponse } from "./multi-worker-guard.js";
 import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
@@ -145,11 +146,11 @@ function getAdminPass(): string | null {
 // an admin — one implementation guarantees they can't diverge.
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
-// WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
-// importEd25519Key all live in ./ed25519-auth.ts — the single
-// shared implementation imported by auth-middleware.ts, agent-auth.ts, and
-// Presence.ts so a nonce recorded via any one of the three call sites is
-// visible to the other two, and the crypto/decoder logic can't drift.
+// WINDOW_MS and importEd25519Key live in ./ed25519-auth.ts, and the replay
+// guard (isKnownAgentReplay / claimAgentNonce) in ./replay-store.ts — shared by
+// auth-middleware.ts, agent-auth.ts and Presence.ts, so a nonce recorded via
+// any one of the three call sites, on any worker thread, is refused by all of
+// them, and the crypto/decoder logic can't drift.
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
   try {
@@ -464,7 +465,9 @@ server.http(async (request: any, nextLayer: any) => {
   if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS)
     return new Response(JSON.stringify({ error: "timestamp_out_of_window" }), { status: 401 });
 
-  if (isNonceReplay(agentId, nonce, now))
+  // A nonce this thread already saw recorded is refused before any lookup. A
+  // miss here proves nothing: claimAgentNonce below is the authoritative check.
+  if (isKnownAgentReplay(agentId, nonce, now))
     return new Response(JSON.stringify({ error: "nonce_replay_detected" }), { status: 401 });
 
   const agent = await (databases as any).flair.Agent.get(agentId);
@@ -491,7 +494,12 @@ server.http(async (request: any, nextLayer: any) => {
       return new Response(JSON.stringify({ error: "signature_verification_failed", detail: e?.message }), { status: 401 });
   }
 
-  recordNonce(agentId, nonce, ts);
+  // Record the nonce instance-wide now that the signature has verified, and
+  // before the request reaches anything else. A replay (401) or an unusable
+  // replay store (503, named in the server log) refuses.
+  const claim = await claimAgentNonce(agentId, nonce);
+  if (!claim.ok) return new Response(JSON.stringify({ error: claim.error }), { status: claim.status });
+
   request.tpsAgent = agentId;
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
@@ -587,9 +595,7 @@ server.http(async (request: any, nextLayer: any) => {
       try {
         const record = await (databases as any).flair[guarded.table]?.get(guarded.id);
         if (isForbiddenOwnerMutation(record, guarded.ownerField, agentId)) {
-          return new Response(JSON.stringify({
-            error: `forbidden: cannot modify ${guarded.table} owned by another principal`,
-          }), { status: 403, headers: { "Content-Type": "application/json" } });
+          return ownerMutationRefusal(guarded.table);
         }
       } catch { /* unreadable row → fall through to the resource's own rules */ }
     }

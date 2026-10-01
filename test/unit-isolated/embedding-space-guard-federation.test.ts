@@ -84,7 +84,6 @@ const databasesMock = {
     MemoryGrant: { search: (q: any) => { const conds = Array.isArray(q?.conditions) ? q.conditions : []; let g = memoryGrants.slice(); for (const c of conds) g = g.filter((x) => matchesCondition(x, c)); async function* gen() { for (const x of g) yield x; } return gen(); } },
     Agent: { get: async () => null, search: async () => [] },
     Instance: { search: () => { async function* gen() {} return gen(); } },
-    Nonce: { search: () => { async function* gen() {} return gen(); } }, // silence Federation's nonce-store hydrate
   },
 };
 mock.module("harper", () => ({ databases: databasesMock, Resource: class {}, server: { getUser: async () => null } }));

@@ -44,6 +44,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createDataSnapshot, launchdLabel, launchdPlistPath } from "../../src/cli";
+import { installFakeServiceManager } from "../helpers/fake-launchctl.ts";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 
@@ -58,6 +59,8 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
   let shimBin: string;
   let defaultDataDir: string;
   let launchctlLog: string;
+  let svc: ReturnType<typeof installFakeServiceManager> | undefined;
+  let savedPath: string | undefined;
   const scratchDirs: string[] = [];
   const spawned: Array<{ kill: (s?: number) => void }> = [];
 
@@ -74,9 +77,16 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
     launchctlLog = join(tmpHome, "launchctl-invocations.log");
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
+    // flair#2062: on a systemd host, the doctor/snapshot paths here ask
+    // `systemctl --user show` about the caller's cgroup unit. Lay a recording
+    // fake first on PATH (this file's own launchctl shim stays ahead of it) with
+    // a fail-closed tripwire behind it, so no run can reach the host systemctl.
+    savedPath = process.env.PATH;
+    svc = installFakeServiceManager("flair914-svc-");
+    process.env.PATH = `${svc.pathEntry}:${savedPath ?? ""}`;
   });
 
   afterEach(() => {
@@ -84,6 +94,14 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
       // SIGKILL: one stub deliberately ignores SIGTERM, and a survivor would
       // hold its port into the next test.
       try { proc.kill(9); } catch { /* already gone */ }
+    }
+    try {
+      svc?.assertClear();
+    } finally {
+      svc?.cleanup();
+      svc = undefined;
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
     }
     for (const dir of [tmpHome, shimBin, ...scratchDirs.splice(0)]) {
       rmSync(dir, { recursive: true, force: true });
@@ -951,7 +969,12 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
 
       expect(exitCode).toBe(0);
       expect(stdout + stderr).toMatch(/Flair stopped/i);
-      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(true);
+      // flair#2055: the self-heal wrote the sidecar to verify this identity, and
+      // the stop that followed CONFIRMED the pid gone — so the sidecar is
+      // removed on the way out. "Flair stopped" (which requires a VERIFIED
+      // identity, i.e. the self-heal fired) plus the dead pid is the heal proof;
+      // a leftover sidecar naming a dead pid is exactly what #2055 removes.
+      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(false);
       expect(pidAlive(pid)).toBe(false);
     },
     30_000,

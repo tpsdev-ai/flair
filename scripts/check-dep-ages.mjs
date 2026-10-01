@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * check-dep-ages.mjs — supply-chain bake-time guard.
+ * check-dep-ages.mjs — supply-chain bake-time gate.
  *
  * Fails CI if any production dep declared in any workspace package was
  * published to the npm registry less than MIN_AGE_DAYS ago. Defends against
@@ -8,252 +8,264 @@
  * (Intercom npm Apr 30 2026), Ruby/Go sleeper packages (May 1), NuGet
  * typosquats (May 6), all in the past two weeks.
  *
- * Why we don't just rely on Socket.dev / npm audit:
- * - Socket scans declared deps against known-bad signatures. Doesn't catch
- *   the *new* compromise that nobody has flagged yet.
- * - npm audit has the same lag.
- * - The bake-time defense complements both: even if a freshly-published
- *   package is malicious, it has to survive N days in the wild before we'll
- *   pull it. By then, multiple security tools have had a chance to flag.
+ * THIS SCRIPT IS THE CLI ENTRY POINT. It imports the pure gate logic from
+ * scripts/lib/check-dep-ages-collect.mjs and always runs the gate.
+ * There is no "am I the main module" check: the gate ALWAYS executes.
  *
- * pnpm 11 (May 4 2026) shipped this as a default at 1 day. We go with 7 as
- * the conservative start; can be tuned via FLAIR_DEP_MIN_AGE_DAYS env or
- * the policy doc.
+ * Override for the repo root this script scans (for TEST FIXTURES only):
+ *   FLAIR_CHECK_DEP_AGES_ROOT=/path/to/fixture node scripts/check-dep-ages.mjs
  *
- * Internal `@tpsdev-ai/*` deps are exempt — we publish ourselves and the
- * 0.8.0 / 0.8.1 patch sequence already shipped same-day.
+ * `--ci` marks THIS invocation as the CI gate (the workflow passes it). The CI
+ * gate scans the checked-out repository whatever the environment says, so it
+ * REFUSES to run (exit 2, naming FLAIR_CHECK_DEP_AGES_ROOT) when that override
+ * is PRESENT (even empty) alongside `--ci`.
  *
- * Allow-list a one-off via the `// flair-deps:allow-fresh` comment in
- * package.json's nearby line — used sparingly for known-trusted vendors
- * we intentionally pull early. (Not implemented yet; deferred until first
- * real conflict.)
+ * The gate accepts ONLY no arguments or exactly `--ci`; any other argument
+ * exits 2, so a typo cannot silently run WITHOUT the CI guard.
  *
- * Usage:
- *   node scripts/check-dep-ages.mjs
- *   FLAIR_DEP_MIN_AGE_DAYS=14 node scripts/check-dep-ages.mjs
+ * An explicit flag is used rather than a sniffed `CI=true`: the flag is the
+ * invocation's OWN statement of intent, it cannot be set by accident in a
+ * developer shell, and it is visible in the workflow file — unlike an ambient
+ * variable any environment can set.
  *
  * Exit codes:
- *   0 — all checked deps older than the threshold (or workspace-internal)
+ *   0 — all checked deps older than the threshold (or nothing to check)
  *   1 — at least one dep too fresh
- *   2 — registry fetch failure (treated as fail, not warn — better safe)
+ *   2 — registry fetch failure (treated as fail, not warn — better safe), a
+ *       REFUSED CI run (the fixture-root override present together with `--ci`),
+ *       or an unexpected argument
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { collectDeps } from "./lib/check-dep-ages-collect.mjs";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const MIN_AGE_DAYS = Number(process.env.FLAIR_DEP_MIN_AGE_DAYS ?? "7");
-const REGISTRY = process.env.FLAIR_NPM_REGISTRY ?? "https://registry.npmjs.org";
+const ARGS = process.argv.slice(2);
 
-if (!Number.isFinite(MIN_AGE_DAYS) || MIN_AGE_DAYS < 0) {
-  console.error(`❌ Invalid FLAIR_DEP_MIN_AGE_DAYS: ${process.env.FLAIR_DEP_MIN_AGE_DAYS}`);
+// Accept ONLY no arguments (tests, local use) or exactly `--ci` (the CI gate).
+// Anything else exits 2 BEFORE scanning: a typo must not silently run without
+// the CI guard.
+const IS_CI_GATE = ARGS.length === 1 && ARGS[0] === "--ci";
+if (ARGS.length > 0 && !IS_CI_GATE) {
+  console.error(`check-dep-ages: unexpected argument(s): ${ARGS.join(" ")}`);
+  console.error("Accepted: no arguments, or exactly --ci (the CI gate's own flag).");
   process.exit(2);
 }
 
-/**
- * Keep-current allow-list — packages we deliberately want at the latest
- * published version regardless of bake time. The expectation: deps in this
- * list are tightly coupled to Flair's runtime correctness (Harper bug fixes
- * and security patches land here), and we'd rather take the bake-time risk
- * than miss a needed fix. The package owners are also high-trust — if any
- * of these is compromised, the broader ecosystem is in a bad state, and
- * our 7-day delay wouldn't have saved us anyway.
- *
- * Add a package here only when:
- *   - the upstream is well-known and high-volume (gets eyeballs fast)
- *   - we have a direct reason to want patches as soon as published (security,
- *     correctness, or a known bug we're tracking)
- *   - we accept that a freshly-malicious version could land in our build
- *     before broader detection
- *
- * Not a long list. Document in docs/supply-chain-policy.md alongside any
- * additions — the doc is the audit trail.
- *
- * Override per-run via FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3" env.
- */
-const DEFAULT_KEEP_CURRENT = new Set([
-  // `harper` is the BARE package name upstream publishes as its primary public
-  // name; `@harperfast/harper` is a permanent lockstep publish of the same
-  // source. flair aligned to the bare name in flair#870 so a stock install
-  // stops materialising both copies.
-  "harper",
-  "harper-fabric-embeddings",
-  // @harperfast/oauth: same high-trust upstream owner as `harper`
-  // (already exempt). Used ONLY by the default-OFF native-MCP OAuth surface
-  // (FLAIR_MCP_OAUTH), which dynamically imports it only when the flag is on — so
-  // it is not loaded in the shipped default build (zero exposure until an operator
-  // opts in). Pinned to the exact version whose withMCPAuth API the surface was
-  // built against. See docs/supply-chain-policy.md §1a.
-  "@harperfast/oauth",
-]);
-const KEEP_CURRENT = new Set([
-  ...DEFAULT_KEEP_CURRENT,
-  ...(process.env.FLAIR_DEP_KEEP_CURRENT ?? "").split(",").map((s) => s.trim()).filter(Boolean),
-]);
+const REPO_ROOT = process.env.FLAIR_CHECK_DEP_AGES_ROOT ??
+  join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function readPkg(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-// ── Build the set of (name, version) pairs to check ─────────────────────────
-const allPkgs = [];
-allPkgs.push({ pkg: readPkg(join(REPO_ROOT, "package.json")), path: "package.json" });
+// ── Main gate logic (always runs — no main-detection guard) ──────────────────
 
-const packagesDir = join(REPO_ROOT, "packages");
-for (const entry of readdirSync(packagesDir)) {
-  const path = join(packagesDir, entry, "package.json");
-  try {
-    allPkgs.push({ pkg: readPkg(path), path: `packages/${entry}/package.json` });
-  } catch {
-    // not a directory with a package.json — skip
+async function main() {
+  // The CI gate scans the CHECKED-OUT repository, whatever the environment
+  // says. FLAIR_CHECK_DEP_AGES_ROOT exists so tests can point the gate at a
+  // fixture repository; honouring it on a CI run would let a stray variable
+  // divert the gate away from the tree under review. The workflow declares
+  // itself with an explicit --ci flag, and we refuse when the override is
+  // PRESENT (even empty) before scanning or fetching. A PRESENCE test, not a
+  // truthiness test: an empty value would otherwise slip through and resolve
+  // the root to "".
+  if (IS_CI_GATE && process.env.FLAIR_CHECK_DEP_AGES_ROOT !== undefined) {
+    console.error(
+      "FLAIR_CHECK_DEP_AGES_ROOT is present, but the CI gate must scan the checked-out repository.",
+    );
+    console.error(
+      "Refusing to run. Unset FLAIR_CHECK_DEP_AGES_ROOT: it is for tests, which point the gate at a fixture repository and do not pass --ci.",
+    );
+    process.exit(2);
   }
-}
 
-// Collect (name → exact-version) — only production deps; devDependencies and
-// peerDependencies don't ship in the published tarball, so they don't add
-// supply-chain risk to consumers.
-const toCheck = new Map(); // key: "name@version", value: { name, version, declaredIn[] }
-for (const { pkg, path } of allPkgs) {
-  const deps = pkg.dependencies ?? {};
-  for (const [name, version] of Object.entries(deps)) {
-    if (name.startsWith("@tpsdev-ai/")) continue; // workspace-internal — exempt
-    if (KEEP_CURRENT.has(name)) continue;          // explicitly kept-current — exempt
-    if (typeof version !== "string") continue;
-    if (version.startsWith("workspace:")) continue;
-    if (version.startsWith("file:") || version.startsWith("link:")) continue;
-    if (version.startsWith("git+") || version.startsWith("github:")) continue;
-    // Only check exact-pinned. Range specifiers (^, ~, >=) are a different
-    // class of risk — flagged separately by other tools — and resolving them
-    // to a concrete version would require running an install, which is too
-    // heavy for a fast CI gate.
-    const exactVersion = /^\d/.test(version) ? version : null;
-    if (!exactVersion) continue;
-    const key = `${name}@${exactVersion}`;
-    if (!toCheck.has(key)) {
-      toCheck.set(key, { name, version: exactVersion, declaredIn: [] });
-    }
-    toCheck.get(key).declaredIn.push(path);
+  const MIN_AGE_DAYS = Number(process.env.FLAIR_DEP_MIN_AGE_DAYS ?? "7");
+  const REGISTRY = process.env.FLAIR_NPM_REGISTRY ?? "https://registry.npmjs.org";
+
+  if (!Number.isFinite(MIN_AGE_DAYS) || MIN_AGE_DAYS < 0) {
+    console.error(`Invalid FLAIR_DEP_MIN_AGE_DAYS: ${process.env.FLAIR_DEP_MIN_AGE_DAYS}`);
+    process.exit(2);
   }
-}
 
-if (toCheck.size === 0) {
-  console.log("✓ No external pinned production deps to check.");
-  if (KEEP_CURRENT.size > 0) {
-    console.log(`(${KEEP_CURRENT.size} packages on the keep-current allow-list: ${[...KEEP_CURRENT].sort().join(", ")})`);
-  }
-  process.exit(0);
-}
+  // Keep-current allow-list — packages we deliberately want at the latest
+  // published version regardless of bake time.
+  const DEFAULT_KEEP_CURRENT = new Set([
+    "harper",
+    "harper-fabric-embeddings",
+    "@harperfast/oauth",
+  ]);
+  const KEEP_CURRENT = new Set([
+    ...DEFAULT_KEEP_CURRENT,
+    ...(process.env.FLAIR_DEP_KEEP_CURRENT ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+  ]);
 
-console.log(`Checking ${toCheck.size} pinned production deps against ${MIN_AGE_DAYS}-day bake-time policy...`);
-if (KEEP_CURRENT.size > 0) {
-  console.log(`Keep-current allow-list (${KEEP_CURRENT.size} packages, exempt from bake-time): ${[...KEEP_CURRENT].sort().join(", ")}`);
-}
-console.log("");
+  // Build the set of (name, version) pairs to check
+  const allPkgs = [];
+  allPkgs.push({ pkg: readPkg(join(REPO_ROOT, "package.json")), path: "package.json" });
 
-// ── Fetch publish dates from the npm registry ────────────────────────────────
-const now = Date.now();
-const cutoff = now - MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
-const tooFresh = [];
-const fetchFails = [];
-
-/** Transient registry/network errors retry; missing data and 4xx do not. */
-function isRetryablePublishTimeError(err) {
-  const msg = String(err?.message ?? err);
-  if (msg.startsWith("no publish time")) return false;
-  if (/^HTTP 4\d\d/.test(msg) && !/^HTTP 408/.test(msg) && !/^HTTP 429/.test(msg)) {
-    return false;
-  }
-  return true;
-}
-
-async function getPublishTimeOnce(name, version) {
-  // Registry endpoint: /<name> returns full document with a `time` map of
-  // version → ISO timestamp. Cheap; ~1 request per package, parallel.
-  // NB: the abbreviated `application/vnd.npm.install-v1+json` accept header
-  // does NOT include the `time` map. Use default JSON for the full doc.
-  const url = `${REGISTRY}/${encodeURIComponent(name).replace(/^%40/, "@")}`;
-  const res = await fetch(url, {
-    headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
-  }
-  const body = await res.json();
-  const time = body?.time?.[version];
-  if (!time) {
-    throw new Error(`no publish time for ${name}@${version}`);
-  }
-  return Date.parse(time);
-}
-
-async function getPublishTime(name, version) {
-  // One undici `fetch failed` on a single package used to fail the whole
-  // matrix leg (PR #1637 node-26: @types/js-yaml@4.0.9 in ~300ms, before
-  // bun install). Still fail-closed after retries — don't bypass.
-  const attempts = 3;
-  let lastErr;
-  for (let i = 1; i <= attempts; i++) {
+  const packagesDir = join(REPO_ROOT, "packages");
+  const { readdirSync } = await import("node:fs");
+  for (const entry of readdirSync(packagesDir)) {
+    const p = join(packagesDir, entry, "package.json");
     try {
-      return await getPublishTimeOnce(name, version);
-    } catch (err) {
-      lastErr = err;
-      if (!isRetryablePublishTimeError(err) || i === attempts) break;
-      await new Promise((r) => setTimeout(r, 200 * 2 ** (i - 1)));
+      allPkgs.push({ pkg: readPkg(p), path: `packages/${entry}/package.json` });
+    } catch {
+      // not a directory with a package.json — skip
     }
   }
-  throw lastErr;
-}
 
-// Parallelize but cap concurrency to be polite to the registry.
-const tasks = [...toCheck.values()];
-const CONCURRENCY = 10;
-async function runChecks() {
-  const cursor = { i: 0 };
-  const workers = Array.from({ length: CONCURRENCY }, async () => {
-    while (cursor.i < tasks.length) {
-      const t = tasks[cursor.i++];
+  const toCheck = collectDeps(allPkgs, KEEP_CURRENT);
+
+  if (toCheck.size === 0) {
+    console.log("✓ No external pinned production deps to check.");
+    if (KEEP_CURRENT.size > 0) {
+      console.log(
+        `(${KEEP_CURRENT.size} packages on the keep-current allow-list: ${[...KEEP_CURRENT].sort().join(", ")})`,
+      );
+    }
+    process.exit(0);
+  }
+
+  console.log(
+    `Checking ${toCheck.size} pinned production deps against ${MIN_AGE_DAYS}-day bake-time policy...`,
+  );
+  if (KEEP_CURRENT.size > 0) {
+    console.log(
+      `Keep-current allow-list (${KEEP_CURRENT.size} packages, exempt from bake-time): ${[...KEEP_CURRENT].sort().join(", ")}`,
+    );
+  }
+  console.log("");
+
+  // Fetch publish dates from the npm registry
+  const now = Date.now();
+  const cutoff = now - MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
+  const tooFresh = [];
+  const fetchFails = [];
+
+  // Transient registry/network errors retry; missing data and 4xx do not.
+  function isRetryablePublishTimeError(err) {
+    const msg = String(err?.message ?? err);
+    if (msg.startsWith("no publish time")) return false;
+    // A malformed value is not transient; retrying fetches the same bad body.
+    if (msg.startsWith("unparseable publish time")) return false;
+    if (/^HTTP 4\d\d/.test(msg) && !/^HTTP 408/.test(msg) && !/^HTTP 429/.test(msg)) {
+      return false;
+    }
+    return true;
+  }
+
+  async function getPublishTimeOnce(name, version) {
+    const url = `${REGISTRY}/${encodeURIComponent(name).replace(/^%40/, "@")}`;
+    const res = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const body = await res.json();
+    const time = body?.time?.[version];
+    if (!time) {
+      throw new Error(`no publish time for ${name}@${version}`);
+    }
+    // Validate the SHAPE before parsing. The publish time must be a STRING.
+    // Date.parse coerces a number to a finite date (Date.parse(1) is not an
+    // error, so a non-string would be silently accepted) and THROWS on an
+    // object whose toString is not callable — and a thrown error here would be
+    // RETRIED. Both are registry failures, not age comparisons, so fail closed
+    // with the same non-retryable error.
+    if (typeof time !== "string") {
+      throw new Error(`unparseable publish time for ${name}@${version}: ${JSON.stringify(time)}`);
+    }
+    const publishedAt = Date.parse(time);
+    if (Number.isNaN(publishedAt)) {
+      // A present STRING that is not a valid date is equally untrustworthy:
+      // fail closed like a fetch failure — never compare it to the cutoff (NaN
+      // comparisons are always false and would slip through).
+      throw new Error(`unparseable publish time for ${name}@${version}: ${JSON.stringify(time)}`);
+    }
+    return publishedAt;
+  }
+
+  async function getPublishTime(name, version) {
+    // One undici fetch failure on a single package used to fail the whole
+    // matrix leg. Still fail-closed after retries — don't bypass.
+    const attempts = 3;
+    let lastErr;
+    for (let i = 1; i <= attempts; i++) {
       try {
-        const publishedAt = await getPublishTime(t.name, t.version);
-        if (publishedAt > cutoff) {
-          const ageDays = (now - publishedAt) / (24 * 60 * 60 * 1000);
-          tooFresh.push({ ...t, publishedAt, ageDays });
-        }
+        return await getPublishTimeOnce(name, version);
       } catch (err) {
-        fetchFails.push({ ...t, error: String(err?.message ?? err) });
+        lastErr = err;
+        if (!isRetryablePublishTimeError(err) || i === attempts) break;
+        await new Promise((r) => setTimeout(r, 200 * 2 ** (i - 1)));
       }
     }
-  });
-  await Promise.all(workers);
+    throw lastErr;
+  }
+
+  // Parallelize but cap concurrency to be polite to the registry.
+  const tasks = [...toCheck.values()];
+  const CONCURRENCY = 10;
+  async function runChecks() {
+    const cursor = { i: 0 };
+    const workers = Array.from({ length: CONCURRENCY }, async () => {
+      while (cursor.i < tasks.length) {
+        const t = tasks[cursor.i++];
+        try {
+          const publishedAt = await getPublishTime(t.name, t.version);
+          if (publishedAt > cutoff) {
+            const ageDays = (now - publishedAt) / (24 * 60 * 60 * 1000);
+            tooFresh.push({ ...t, publishedAt, ageDays });
+          }
+        } catch (err) {
+          fetchFails.push({ ...t, error: String(err?.message ?? err) });
+        }
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  await runChecks();
+
+  // ── Report ────────────────────────────────────────────────────────
+  if (tooFresh.length > 0) {
+    console.error("Pinned production deps younger than the bake-time policy:");
+    console.error("");
+    for (const f of tooFresh.sort((a, b) => b.publishedAt - a.publishedAt)) {
+      const days = f.ageDays.toFixed(1);
+      console.error(`    ${f.name}@${f.version}    — published ${days} days ago (policy: >=${MIN_AGE_DAYS} days)`);
+      for (const p of f.declaredIn) console.error(`    declared in ${p}`);
+    }
+    console.error(
+      "",
+      "Why this matters: supply chain bake-time policy keeps us out of the early-discovery window.",
+    );
+    console.error(
+      "",
+      "To bypass for a known-good fresh dep: set FLAIR_DEP_MIN_AGE_DAYS=0 for this CI run, OR pin to an older version, OR document the exception in docs/supply-chain-policy.md.",
+    );
+    process.exit(1);
+  }
+
+  if (fetchFails.length > 0) {
+    console.error("Failed to fetch publish times for some deps:");
+    for (const f of fetchFails) {
+      console.error(`   ${f.name}@${f.version}: ${f.error}`);
+    }
+    console.error("");
+    console.error("Treating as fail. If the registry is genuinely down, retry; don't bypass.");
+    process.exit(2);
+  }
+
+  console.log(
+    `All ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old.`,
+  );
 }
 
-await runChecks();
-
-// ── Report ──────────────────────────────────────────────────────────────────
-if (tooFresh.length > 0) {
-  console.error("❌ Pinned production deps younger than the bake-time policy:");
-  console.error("");
-  for (const f of tooFresh.sort((a, b) => b.publishedAt - a.publishedAt)) {
-    const days = f.ageDays.toFixed(1);
-    console.error(`  ${f.name}@${f.version}  — published ${days} days ago (policy: ≥${MIN_AGE_DAYS} days)`);
-    for (const p of f.declaredIn) console.error(`    declared in ${p}`);
-  }
-  console.error("");
-  console.error("Why this matters: Mini Shai-Hulud (Intercom npm, Apr 30 2026), Mini Shai-Hulud Composer/PHP (Apr 30), Ruby gem + Go module sleeper packages (May 1) — all compromises that survived N hours-to-days before detection. The bake-time policy keeps us out of the early-discovery window.");
-  console.error("");
-  console.error("To bypass for a known-good fresh dep (use sparingly): set FLAIR_DEP_MIN_AGE_DAYS=0 for this CI run, OR pin to an older version, OR document the exception in docs/supply-chain-policy.md.");
-  process.exit(1);
-}
-
-if (fetchFails.length > 0) {
-  console.error("❌ Failed to fetch publish times for some deps:");
-  for (const f of fetchFails) {
-    console.error(`  ${f.name}@${f.version}: ${f.error}`);
-  }
-  console.error("");
-  console.error("Treating as fail. If the registry is genuinely down, retry; don't bypass.");
+main().catch((err) => {
+  console.error(err);
   process.exit(2);
-}
-
-console.log(`✓ All ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old.`);
+});

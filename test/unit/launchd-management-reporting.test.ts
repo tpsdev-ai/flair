@@ -66,6 +66,7 @@ import {
   readLaunchctlJobState,
   readPlistProgramRefs,
   renderDetachedWarning,
+  verifyLaunchdManagement,
   type LaunchctlLister,
 } from "../../src/lib/launchd-management.ts";
 import {
@@ -198,18 +199,32 @@ describe("flair#1022 — assessLaunchdManagement distinguishes healthy from mana
 
   // ─── the false-positive guards. An over-eager check is its own defect. ───
 
-  test("POSITIVE CONTROL: a running job with an unreadable instance PID is managed, not detached", () => {
+  test("a running job with an UNIDENTIFIED instance PID is unverified: no alarm, and no success claim (flair#2040)", () => {
     // hdb.pid missing and lsof unavailable is a real condition on a working
-    // install. A live job under THIS instance's label is positive evidence;
-    // demanding a second, less reliable source before believing it would warn
-    // on healthy installs every time.
+    // install, so this must not WARN (not detached) — but a live job under the
+    // label does not prove it serves this instance, so it is not "managed"
+    // either, and the strict verifier every success claim uses refuses it.
     const m = assessLaunchdManagement({
       ...base,
       platform: "darwin",
       instancePid: null,
       list: listerFor(listRunning(base.label, 4242)),
     });
-    expect(m.state).toBe("managed");
+    expect(m.state).toBe("unverified");
+    expect(isDetached(m)).toBe(false);
+    expect(m.detail).toContain("could not be identified");
+    expect(verifyLaunchdManagement(m).verified).toBe(false);
+  });
+
+  test("verifyLaunchdManagement: verified ONLY when launchd's pid equals an IDENTIFIED serving pid", () => {
+    const managed = assessLaunchdManagement({ ...base, platform: "darwin", instancePid: 4242, list: listerFor(listRunning(base.label, 4242)) });
+    expect(verifyLaunchdManagement(managed)).toMatchObject({ verified: true, pid: 4242 });
+    const detached = assessLaunchdManagement({ ...base, platform: "darwin", instancePid: 4242, list: listerFor(listRunning(base.label, 9999)) });
+    expect(verifyLaunchdManagement(detached).verified).toBe(false);
+    // A hand-built "managed" with no identified serving pid is not trusted either.
+    expect(verifyLaunchdManagement({ state: "managed", detail: "x", launchdPid: 4242 }).verified).toBe(false);
+    expect(verifyLaunchdManagement({ state: "managed", detail: "x", launchdPid: 4242, servingPid: null }).verified).toBe(false);
+    expect(verifyLaunchdManagement({ state: "managed", detail: "x", launchdPid: 1, servingPid: 2 }).verified).toBe(false);
   });
 
   test("POSITIVE CONTROL: off darwin nothing is claimed, and launchctl is never consulted", () => {
@@ -564,6 +579,12 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
         `  printf 'Could not find service "%s"\\n' "$2" >&2`,
         `  exit 113`,
         `fi`,
+        // flair#2040: the preflight reads the job's enabled state from a
+        // RECOGNISED print-disabled listing (an unrecognised one is unknown),
+        // and a fallback VERIFIES the job is gone with `print <domain>/<label>`
+        // — which, in this file's world, finds no loaded job.
+        `if [ "$1" = "print-disabled" ]; then printf 'disabled services = {\\n}\\n'; fi`,
+        `case "$1 $2" in "print gui/"*/*) printf 'Could not find service "%s"\\n' "$2" >&2; exit 113 ;; esac`,
         "exit 0",
       ].join("\n"),
       { mode: 0o755 },
@@ -826,7 +847,11 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
 
       expect(exitCode).toBe(1);
       // Named cause, named fix — the whole difference from a bare timeout.
-      expect(stderr).toContain("launchd start failed");
+      // flair#2040: the fallback line names the actor, the job and the error —
+      // and a stale plist is a VALIDATION refusal: nothing was loaded or
+      // unloaded, and the start leg boots nothing out after it (round 7).
+      expect(stderr).toContain("did not load the launchd job");
+      expect(stderr).toContain("Nothing was loaded or unloaded");
       expect(stderr).toContain(gone);
       expect(stderr).toContain("Fix it with: flair init && flair restart");
 
@@ -835,11 +860,15 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
       // Matched per line on the VERB, not as a substring: `unload <plist>`
       // contains `load <plist>`, so a substring check here passes for the
       // wrong reason and would keep passing if the pre-flight were removed.
+      // flair#2040: the load is now `bootstrap`/`kickstart gui/<uid>…`; the
+      // legacy verbs are asserted absent too, so neither form slips through.
       const verbs = readFileSync(launchctlLog, "utf-8")
         .split("\n").map((l) => l.trim()).filter(Boolean)
         .map((l) => l.split(/\s+/)[0]);
       expect(verbs).not.toContain("load");
       expect(verbs).not.toContain("start");
+      expect(verbs).not.toContain("bootstrap");
+      expect(verbs).not.toContain("kickstart");
       // Positive control on that parse: the stop leg's unload DID happen, so
       // an empty or mis-parsed log cannot make the two assertions above pass
       // vacuously.
@@ -868,7 +897,14 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
       // Same property test/unit/snapshot-datadir-instance-targeting.test.ts
       // pins, re-asserted here because this file adds new launchctl traffic
       // (`list`) to the same code paths.
-      expect(lines.filter((l) => !l.includes(label))).toEqual([]);
+      //
+      // flair#2040: the label-less lines are the read-only DOMAIN preflight
+      // (`launchctl print gui/<uid>` and `print-disabled gui/<uid>`), which
+      // name the user's GUI domain, not an install — they read the domain's
+      // state and touch no job. Every INSTANCE-scoped invocation still carries
+      // this fixture's label.
+      const instanceLines = lines.filter((l) => !/^print(-disabled)?\s+gui\/\d+$/.test(l));
+      expect(instanceLines.filter((l) => !l.includes(label))).toEqual([]);
       const plistArgs = lines.flatMap((l) => l.split(/\s+/).filter((a) => a.endsWith(".plist")));
       expect(plistArgs.filter((a) => a !== plistPath)).toEqual([]);
     },

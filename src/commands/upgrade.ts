@@ -26,7 +26,8 @@ import { collectUpgradeExecPathWarning, findFlairPackageDir, resolveNpmGlobalFla
 import { PlainTreeUpgradePlan, UPGRADE_FAILED_SUFFIX, decidePlainTreeRollback, discardPlainTreePrevious, findSystemdUnitsForTree, formatPlainTreeBanner, formatPlainTreePlan, formatPlainTreeScopeFooter, planPlainTreeUpgrade, resolvePlainTreeListingTarget, resolvePlainTreeTarget, restartSystemdUnits, stopSystemdUnits, restorePlainTreePrevious, treeSibling } from "../lib/upgrade-plain-tree.js";
 import { probeInstance } from "../probe.js";
 import * as render from "../render.js";
-import { FLAIR_PKG_NAME, primeVersionCheckCache } from "../version-check.js";
+import { FLAIR_PKG_NAME, primeVersionCheckCache, probeInstanceVersion } from "../version-check.js";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 
 import { join, resolve, sep } from "node:path";
@@ -38,8 +39,10 @@ import { create as tarCreate } from "tar";
 import type { UpgradeStatus } from "../lib/upgrade-status.js";
 import { classifyInstalledVersion, formatUpgradeStatusLine } from "../lib/upgrade-status.js";
 import { resolveHome } from "../lib/home.js";
+import { formatTreeAssessmentLines, withRunningVersion, type TreeAssessment } from "../lib/tree-divergence.js";
 
 export type UpgradeCli = {
+  assessInstallTree: (...args: any[]) => any;
   decideAfterRollbackVerify: (...args: any[]) => any;
   decideAfterVerify: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
@@ -979,20 +982,47 @@ program
     }
     const treeLane = treeDecision.kind === "use" ? treeDecision.inspection : null;
 
+    // flair#2034 §2: compare this CLI's install tree with the tree PROVEN to
+    // serve the instance (the service manager owns the serving process), once,
+    // before any branch — and with the version the instance actually runs.
+    // Not on the plain-tree lane: there a separate tree serving is the point.
+    let treeAssessment: TreeAssessment | null = null;
+    if (!treeLane) {
+      try {
+        const upgradePort = resolveHttpPort({});
+        treeAssessment = cli.assessInstallTree(defaultDataDir(), upgradePort, { local: true }) as TreeAssessment;
+        if (treeAssessment.state !== "unknown") {
+          treeAssessment = withRunningVersion(
+            treeAssessment,
+            await probeInstanceVersion(`http://127.0.0.1:${upgradePort}`, 2000),
+          );
+        }
+      } catch {
+        treeAssessment = null;
+      }
+    }
+    const treesDiverge = treeAssessment?.state === "diverged";
+
     // flair#1109 (b): print the mismatch warning only when this run will
     // still treat npm-global as the install. Collect always, so the (b)
-    // wiring test keeps seeing the call.
+    // wiring test keeps seeing the call. A PROVEN tree divergence (#2034)
+    // says the same thing with the serving tree named and the remedy, so it
+    // replaces this warning rather than printing beside it.
     try {
       const execPathWarning = collectUpgradeExecPathWarning({
         servingPid: upgradeServingPid,
         cliPackageDir: flairPackageDir(),
         npmGlobalPrefix: upgradeNpmPrefix,
       });
-      if (execPathWarning && !treeLane) {
+      if (execPathWarning && !treeLane && !treesDiverge) {
         console.log(execPathWarning);
         console.log("");
       }
     } catch { /* never fail upgrade over a path probe */ }
+    if (treesDiverge && treeAssessment) {
+      for (const line of formatTreeAssessmentLines(treeAssessment, { context: "upgrade" })) console.log(line);
+      console.log("");
+    }
 
     if (treeLane) {
       console.log(formatPlainTreeBanner(treeLane));
@@ -1262,6 +1292,17 @@ program
       const unknownFindings = findings.filter((f) => f.status === "unknown");
       for (const f of unknownFindings) {
         console.log(`\n❔ ${f.name}: could not parse installed version ${JSON.stringify(f.installed)} — not reporting it as up to date.`);
+      }
+      // flair#2034 §2: never claim convergence while a DIFFERENT install tree
+      // is proven to serve the instance — the listing above is about this
+      // CLI's tree, not the one serving. The divergence block was printed once,
+      // above the listing.
+      if (treesDiverge) {
+        console.log(
+          "\nNo upgrades available for this CLI's tree — but the instance is served from a different install tree " +
+            "(see above), so that is not a statement about what is running.",
+        );
+        return;
       }
       console.log(anyAhead || unknownFindings.length > 0 ? "\nNo upgrades available." : "\n✅ Everything is up to date.");
       return;

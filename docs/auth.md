@@ -66,6 +66,8 @@ The native `/mcp` OAuth surface (see below) doesn't need any client-side wiring 
 
 Flair includes a built-in OAuth 2.1 authorization server for client integrations (e.g., Claude connecting to Flair as an MCP server).
 
+The native `/mcp` endpoint is guarded by the `@harperfast/oauth` authorization server instead; who can connect through it, and how to revoke that access, is in [access-control.md](access-control.md).
+
 ### Dynamic Client Registration
 
 **Registration is off by default.** `POST /OAuthRegister` answers `403

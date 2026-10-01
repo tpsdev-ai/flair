@@ -9,7 +9,7 @@
  * messages do not offer `flair stop`. The self-started seed keeps today's
  * credential hint. Init does not signal a process it did not start.
  */
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +30,7 @@ import {
   type OccupiedHarperListener,
 } from "../../src/lib/init-occupied-listener.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+import { installFakeServiceManager } from "../helpers/fake-launchctl.ts";
 
 const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
 const CHILD_DEADLINE_MS = 30_000;
@@ -81,6 +82,46 @@ function denied(_req, res) {
 
 let scratch: string | null = null;
 const children: ChildProcess[] = [];
+
+// flair#2057: init drives a darwin launchd step. Its one launchctl call is a
+// `launchctl unload` of the legacy (pre-flair#693) plist, made only when that
+// plist exists and its ROOTPATH is the data dir being initialised
+// (cleanupLegacyLaunchdPlist in src/cli.ts). No fixture here creates one, but
+// if a fixture or init ever reaches that call it must not land on the
+// developer's own GUI launchd domain. flair#2062: on a systemd host, init's
+// Linux tree assessment also asks `systemctl --user show` about the caller's
+// cgroup unit. So lay the shared fake `launchctl`/`systemctl` first on PATH
+// (like the command-level launchd tests do) with a tripwire directly behind it:
+// no run in this file — in-process or spawned — can reach the host's service
+// manager. See test/helpers/fake-launchctl.ts.
+let fakeServiceManager: ReturnType<typeof installFakeServiceManager> | undefined;
+let savedPath: string | undefined;
+
+beforeEach(() => {
+  // Capture PATH before installing, so a failed install cannot leave teardown
+  // restoring an unset value (which would delete PATH for later tests).
+  savedPath = process.env.PATH;
+  fakeServiceManager = undefined;
+  fakeServiceManager = installFakeServiceManager("flair-1749-svc-");
+  process.env.PATH = `${fakeServiceManager.pathEntry}:${savedPath ?? ""}`;
+  // Proves the fakes — not the tripwire, not the host binaries — answer
+  // launchctl and systemctl for this PATH. This is the tripwire's own mutation
+  // check: drop a fake and this throws the named tripwire message.
+  fakeServiceManager.assertShadowed("launchctl");
+  fakeServiceManager.assertShadowed("systemctl");
+});
+
+afterEach(() => {
+  try {
+    // Any byte in the tripwire log means some run reached a service manager that
+    // was not the fake. That must never happen in a unit test.
+    fakeServiceManager?.assertClear();
+  } finally {
+    fakeServiceManager?.cleanup();
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+  }
+});
 
 afterEach(() => {
   for (const child of children) {

@@ -13,9 +13,10 @@
  * harper mock captures that callback so these tests invoke the middleware
  * directly with a REAL Ed25519-signed request and inspect the URL it passes on.
  */
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { generateKeyPairSync, randomUUID, sign as edSign } from "node:crypto";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
+import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
 
 let memoryGetCalls = 0;
 
@@ -36,6 +37,8 @@ mock.module("harper", () => ({
           return null;
         },
       },
+      // Every signed request records its nonce here (flair#2061).
+      ReplayNonce: createFakeReplayNonceTable(),
     },
   },
   server: {
@@ -87,6 +90,14 @@ async function loadMiddleware() {
   }
   return authMiddleware;
 }
+
+// replay-store.ts reads Harper's transaction() from the global, as Harper
+// assigns it; install a stand-in for this file only.
+let restoreTransaction: () => void = () => {};
+beforeAll(() => {
+  restoreTransaction = ensureGlobalHarperTransaction();
+});
+afterAll(() => restoreTransaction());
 
 beforeEach(() => {
   agentStore.clear();

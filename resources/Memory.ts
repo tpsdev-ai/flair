@@ -1393,9 +1393,12 @@ export class Memory extends (databases as any).flair.Memory {
     }
     // flair#1965 r2: a PATCH over an EXISTING row keeps the stored
     // originatorInstanceId (a body value is dropped); a PATCH whose URL target
-    // has NO stored row is a CREATE — Harper's patch path has no existing-row
-    // requirement — so it must stamp the local id rather than leave the new row
-    // un-stamped. See resources/originator-instance.ts.
+    // has NO stored row is a CREATE when it reaches the table — Harper's patch
+    // path has no existing-row requirement — so it must stamp the local id
+    // rather than leave the new row un-stamped. Only an administrator's or a
+    // trusted internal PATCH gets that far; the table guard
+    // (resources/table-patch-policy.ts) refuses the rest. See
+    // resources/originator-instance.ts.
     await applyOriginatorInstanceId(content, existingForSkill);
     // The receiver-side federation bookkeeping keeps its stored value (a patch
     // merges); a client body value is dropped.

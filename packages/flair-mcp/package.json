@@ -1,13 +1,15 @@
 {
   "name": "@tpsdev-ai/flair-mcp",
-  "version": "0.57.0",
+  "version": "0.58.0",
   "description": "MCP server for Flair — persistent memory for Claude Code, Cursor, and any MCP client.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "flair-mcp": "dist/mcp-shim.cjs",
+    "flair-precompact": "dist/precompact-hook.js",
     "flair-session-start": "dist/session-start-hook.js",
-    "flair-continuity-capture": "dist/continuity-capture-hook.js"
+    "flair-continuity-capture": "dist/continuity-capture-hook.js",
+    "flair-prompt-recall": "dist/prompt-recall-hook.js"
   },
   "files": [
     "dist/",
@@ -19,7 +21,7 @@
     "prebuild": "node ../../scripts/vendor-tool-descriptors.mjs packages/flair-mcp/src/tool-descriptors",
     "test": "bun test",
     "prepack": "npm run build",
-    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/mcp-shim.cjs','dist/index.js','dist/session-start-hook.js','dist/continuity-capture-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
+    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/mcp-shim.cjs','dist/index.js','dist/session-start-hook.js','dist/continuity-capture-hook.js','dist/prompt-recall-hook.js','dist/precompact-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
   },
   "publishConfig": {
     "access": "public"
@@ -29,7 +31,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.27.1",
-    "@tpsdev-ai/flair-client": "0.57.0",
+    "@tpsdev-ai/flair-client": "0.58.0",
     "zod": "4.3.6"
   },
   "license": "Apache-2.0",

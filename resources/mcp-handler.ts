@@ -1,8 +1,8 @@
 /**
  * mcp-handler.ts — the Model-2 custom MCP protocol handler.
  *
- * A minimal in-process MCP (JSON-RPC 2.0) handler serving the 12 curated flair
- * tools over Streamable HTTP. It is wrapped by `@harperfast/oauth`'s
+ * A minimal in-process MCP (JSON-RPC 2.0) handler serving the curated flair
+ * tools (resources/mcp-tools.ts's TOOLS) over Streamable HTTP. It is wrapped by `@harperfast/oauth`'s
  * `withMCPAuth` (see mcp-oauth.ts), which fails closed on any missing/invalid
  * Bearer token BEFORE this handler runs and, on success, sets
  * `request.mcp = { sub, client_id, aud, scope }` (verified RS256 JWT claims).
@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
 import { checkToolArguments, withoutNullArguments } from "./mcp-tool-arguments.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
+import { isPrincipalDeactivated } from "./agent-auth.js";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { resolveVersion } from "./version.js";
 
@@ -192,15 +193,46 @@ function jitProvisionEnabled(): boolean {
  * `undefined` — so existing callers/tests that don't pass one see the exact
  * same `{ agentId, isAdmin }` shape as before this field existed.
  *
+ * When a Credential maps the sub, the mapped principal must exist and be
+ * active — the rule the Ed25519 path applies (resources/agent-auth.ts,
+ * `isPrincipalDeactivated`) — and its record is read on every resolution, so a
+ * token minted while the principal was active stops resolving once the
+ * principal is deactivated. If that read fails, or the credential lookup itself
+ * fails, resolution is refused. An unreadable answer is never taken as
+ * "allowed", and never as "no mapping": JIT provisioning runs only for a
+ * subject the credential lookup answered for. Resolution writes nothing to an
+ * existing credential; the handler updates its `lastUsedAt`, best effort, after
+ * a tool has run (handleToolCall).
+ *
  * Returns:
- *   - `{ agentId, isAdmin, clientId? }` when a Credential maps the sub to an Agent.
+ *   - `{ agentId, isAdmin, clientId? }` when a Credential maps the sub to an
+ *     existing, active Agent.
  *   - null when no Credential maps the sub AND JIT-provisioning is disabled or
  *     failed → the handler denies the tool call (sub is unresolvable).
+ *
+ * Throws `PrincipalRefusedError` (the handler returns its JSON-RPC error) when
+ * the mapped principal is deactivated or missing, or when the credential or
+ * principal could not be read.
  */
 export async function resolveAgentFromSub(sub: string, clientId?: string): Promise<ResolvedAgent | null> {
+  return (await resolveMapping(sub, clientId))?.agent ?? null;
+}
+
+/**
+ * resolveAgentFromSub's result together with the credential that mapped the
+ * subject: the existing credential, or the one JIT provisioning has just
+ * created without `lastUsedAt`.
+ */
+interface SubMapping {
+  agent: ResolvedAgent;
+  credential: any | null;
+}
+
+async function resolveMapping(sub: string, clientId?: string): Promise<SubMapping | null> {
   if (!sub) return null;
 
   // 1. Existing IdP credential → its principalId is the Agent id.
+  let mapped: any = null;
   try {
     for await (const cred of (databases as any).flair.Credential.search({
       conditions: [
@@ -209,26 +241,35 @@ export async function resolveAgentFromSub(sub: string, clientId?: string): Promi
       ],
     })) {
       if (cred?.principalId && cred.status !== "revoked") {
-        // Touch lastUsedAt (best-effort; a failure here must not deny a valid call).
-        try {
-          await (databases as any).flair.Credential.put({ ...cred, lastUsedAt: new Date().toISOString() });
-        } catch { /* non-fatal */ }
-        const resolved: ResolvedAgent = { agentId: String(cred.principalId), isAdmin: await isAgentAdmin(cred.principalId) };
-        if (clientId) resolved.clientId = clientId;
-        return resolved;
+        mapped = cred;
+        break;
       }
     }
-  } catch { /* Credential table empty / search error → fall through to JIT/deny */ }
+  } catch {
+    throw new PrincipalRefusedError(
+      -32000,
+      "unavailable: the credential for this token's subject could not be read, so the call was refused. " +
+        "Retry; if this persists, an operator should check the flair server log.",
+    );
+  }
+
+  if (mapped) {
+    const principalId = String(mapped.principalId);
+    const principal = await requireActivePrincipal(principalId);
+    const resolved: ResolvedAgent = { agentId: principalId, isAdmin: agentRecordIsAdmin(principal) };
+    if (clientId) resolved.clientId = clientId;
+    return { agent: resolved, credential: mapped };
+  }
 
   // 2. No mapping. JIT-provision only behind the explicit trust anchor.
   if (!jitProvisionEnabled()) return null;
 
   try {
-    const principalId = await jitProvisionPrincipal(sub);
+    const { principalId, credential } = await jitProvisionPrincipal(sub);
     // A JIT-provisioned principal is a fresh, non-admin agent by construction.
     const resolved: ResolvedAgent = { agentId: principalId, isAdmin: false };
     if (clientId) resolved.clientId = clientId;
-    return resolved;
+    return { agent: resolved, credential };
   } catch {
     return null;
   }
@@ -239,8 +280,10 @@ export async function resolveAgentFromSub(sub: string, clientId?: string): Promi
  * token subject. Mirrors XAA.resolveOrCreatePrincipal's provisioning shape (the
  * `Credential.kind:"idp"` + `idpSubject` surface) but keyed on the MCP token sub.
  * The created agent is non-admin, `kind:"agent"`, unverified trust tier.
+ * Returns the principal id and the new credential, which is created without
+ * `lastUsedAt`.
  */
-async function jitProvisionPrincipal(sub: string): Promise<string> {
+async function jitProvisionPrincipal(sub: string): Promise<{ principalId: string; credential: any }> {
   const now = new Date().toISOString();
   const principalId = `agt_mcp_${sub.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 24)}_${randomBytes(4).toString("hex")}`;
 
@@ -263,7 +306,7 @@ async function jitProvisionPrincipal(sub: string): Promise<string> {
   };
   await stampOriginatorOnCreate(principalRow);
   await (databases as any).flair.Agent.put(principalRow);
-  await (databases as any).flair.Credential.put({
+  const credential = {
     id: `cred_mcp_${randomBytes(8).toString("hex")}`,
     principalId,
     kind: "idp",
@@ -272,33 +315,68 @@ async function jitProvisionPrincipal(sub: string): Promise<string> {
     idpProvider: "mcp-oauth",
     idpSubject: sub,
     createdAt: now,
-    lastUsedAt: now,
-  });
+  };
+  await (databases as any).flair.Credential.put(credential);
 
-  return principalId;
+  return { principalId, credential };
 }
 
 /**
- * Is this Principal a flair admin? A MCP-OAuth agent is NON-admin unless an
- * operator has explicitly marked its Agent record admin — the MCP surface never
- * elevates on its own.
- *
- * flair#941: this used to OR the two admin fields together while the primary
- * HTTP gate (resources/agent-auth.ts's isAdmin) read only `role`, so the same
- * record could be an administrator here and an ordinary agent there. It now
- * resolves through the one shared predicate, so both surfaces answer
- * identically. A record carrying `admin: true` alone — which no flair write
- * path produces, and which was never an admin on the HTTP gate — is no longer
- * an admin here either; see resources/agent-admin.ts for the remedy. This
- * surface is gated behind FLAIR_MCP_OAUTH and is default-OFF.
+ * A token subject whose principal may not call tools. `rpcCode` and the message
+ * are the JSON-RPC error the handler returns. The message names the principal
+ * when there is one, and says what an operator has to do, or that the caller
+ * should retry after a failed read.
  */
-async function isAgentAdmin(principalId: string): Promise<boolean> {
-  try {
-    const agent = await (databases as any).flair.Agent.get(principalId);
-    return agentRecordIsAdmin(agent);
-  } catch {
-    return false;
+export class PrincipalRefusedError extends Error {
+  readonly rpcCode: number;
+  constructor(rpcCode: number, message: string) {
+    super(message);
+    this.name = "PrincipalRefusedError";
+    this.rpcCode = rpcCode;
   }
+}
+
+/**
+ * Read the mapped principal for this call and require it to exist and be
+ * active (`isPrincipalDeactivated`, the predicate the Ed25519 path uses: a
+ * record with no `status` field counts as active).
+ * Returns the principal record; throws `PrincipalRefusedError` otherwise,
+ * including when the record cannot be read.
+ *
+ * Admin status is read from the same record, through the one shared predicate
+ * (resources/agent-admin.ts, flair#941): a MCP-OAuth agent is NON-admin unless
+ * an operator has set its Agent record's `role` to "admin" — the MCP surface
+ * never elevates on its own. This surface is gated behind FLAIR_MCP_OAUTH and is
+ * default-OFF.
+ */
+async function requireActivePrincipal(principalId: string): Promise<any> {
+  let principal: any;
+  try {
+    principal = await (databases as any).flair.Agent.get(principalId);
+  } catch {
+    throw new PrincipalRefusedError(
+      -32000,
+      `unavailable: the status of principal '${principalId}' could not be read, so the call was refused. ` +
+        "Retry; if this persists, an operator should check the flair server log.",
+    );
+  }
+  if (principal == null) {
+    throw new PrincipalRefusedError(
+      -32001,
+      `forbidden: this token's subject maps to principal '${principalId}', which does not exist. ` +
+        "An operator must map the subject to an existing principal: a full `flair mcp enable` run against " +
+        "this instance, with --principal <agent-id> and --idp-subject <subject>, writes that mapping in its " +
+        "identity-mapping step.",
+    );
+  }
+  if (isPrincipalDeactivated(principal)) {
+    throw new PrincipalRefusedError(
+      -32001,
+      `forbidden: principal '${principalId}' is deactivated, so this token can no longer call tools. ` +
+        "An operator must reactivate the principal (set its status to \"active\") to restore access.",
+    );
+  }
+  return principal;
 }
 
 // ─── MCP protocol dispatch ───────────────────────────────────────────────────
@@ -393,12 +471,28 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
   // stored provenance. Absent/non-string client_id → omitted, not invented.
   const clientId = typeof request?.mcp?.client_id === "string" ? request.mcp.client_id : undefined;
 
-  const agent = await resolveAgentFromSub(String(sub), clientId);
-  if (!agent) {
+  // For a call that resolves through an existing credential mapping, the
+  // principal's status is read here, on every such call (resolveMapping): a
+  // deactivated or missing principal, or one whose status cannot be read, is
+  // refused with the actionable error it carries.
+  let mapping: SubMapping | null;
+  try {
+    mapping = await resolveMapping(String(sub), clientId);
+  } catch (err) {
+    if (err instanceof PrincipalRefusedError) return rpcError(id, err.rpcCode, err.message);
+    return rpcError(
+      id,
+      -32000,
+      "unavailable: the token subject could not be resolved to a principal, so the call was refused. " +
+        "Retry; if this persists, an operator should check the flair server log.",
+    );
+  }
+  if (!mapping) {
     // Sub verified by the AS but not mapped to a flair Agent (and JIT disabled /
     // failed). Deny — do NOT fall back to anonymous or admin.
     return rpcError(id, -32001, "forbidden: token subject is not a provisioned flair agent");
   }
+  const agent = mapping.agent;
 
   // The tool implementations are written for their declared argument types;
   // a value of another type is refused before the tool runs, and a null
@@ -407,21 +501,45 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
   if (argError) return rpcError(id, -32602, `invalid arguments for ${toolName}: ${argError}`);
   const toolArgs = withoutNullArguments(args);
 
+  let result: any;
   try {
-    const result = await entry.impl(agent, toolArgs);
-    // MCP tools/call result: content blocks. Surface the handler's JSON payload
-    // as a text block (structuredContent carries the raw object for programmatic
-    // clients). A handler-level error object (from unwrap of a Response) is
-    // reported as an MCP tool error (isError) rather than a JSON-RPC error, so
-    // the client sees the structured message.
-    const text = typeof result === "string" ? result : JSON.stringify(result);
-    const isError = !!(result && typeof result === "object" && "error" in result && "status" in result);
-    return rpcResult(id, {
-      content: [{ type: "text", text }],
-      structuredContent: typeof result === "object" ? result : { value: result },
-      isError,
-    });
+    result = await entry.impl(agent, toolArgs);
   } catch (err: any) {
     return rpcError(id, -32000, `tool execution failed: ${err?.message ?? String(err)}`);
   }
+  // The tool has run and returned (a tool-level error result included): only
+  // now is the mapping credential, a JIT-provisioned one included, marked used.
+  // A refused call, rejected arguments, or a tool that throws leave `lastUsedAt`
+  // as it was. Best effort: a failed write is ignored and does not change the
+  // answer.
+  await touchLastUsed(mapping.credential);
+
+  // MCP tools/call result: content blocks. Surface the handler's JSON payload
+  // as a text block (structuredContent carries the raw object for programmatic
+  // clients). A handler-level error object (from unwrap of a Response) is
+  // reported as an MCP tool error (isError) rather than a JSON-RPC error, so
+  // the client sees the structured message.
+  const text = typeof result === "string" ? result : JSON.stringify(result);
+  const isError = !!(result && typeof result === "object" && "error" in result && "status" in result);
+  return rpcResult(id, {
+    content: [{ type: "text", text }],
+    structuredContent: typeof result === "object" ? result : { value: result },
+    isError,
+  });
+}
+
+/**
+ * Mark the mapping credential used, once a tool has run (best-effort). The
+ * update writes `lastUsedAt` alone, as a field-level patch from an internal
+ * context (no request, no user), and is skipped when a read just before it
+ * finds no stored credential row.
+ */
+async function touchLastUsed(credential: any | null): Promise<void> {
+  const credentialId = credential?.id;
+  if (credentialId == null) return;
+  try {
+    const Credential = (databases as any).flair.Credential;
+    if ((await Credential.get(credentialId, {})) == null) return;
+    await Credential.patch(credentialId, { lastUsedAt: new Date().toISOString() }, {});
+  } catch { /* non-fatal: a failure here does not change the call's answer */ }
 }

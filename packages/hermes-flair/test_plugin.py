@@ -165,7 +165,7 @@ def test_load_private_key_raw_seed_written_by_flair_agent_add(tmp_path):
     agent_id, ts, nonce, sig_b64 = auth[len("TPS-Ed25519 "):].split(":")
     payload = f"{agent_id}:{ts}:{nonce}:GET:/Memory/abc".encode("utf-8")
     # Verifies with the matching public key (raises on failure).
-    key.public_key().verify(base64.b64decode(sig_b64), payload)
+    priv.public_key().verify(base64.b64decode(sig_b64), payload)
     assert key.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     ) == priv.public_key().public_bytes(
@@ -568,3 +568,97 @@ def test_on_memory_write_skipped_in_non_primary(ed25519_key_file, monkeypatch):
         p.initialize(session_id="x", agent_context="subagent")
     with patch.object(p, "_request", side_effect=AssertionError("should not be called")):
         p.on_memory_write("add", "memory", "should not mirror", metadata={})
+
+# ─── Base64-encoded raw seed (issue #1968) ─────────────────────────────────
+
+import base64 as _b64mod
+
+def test_b64_44_char_seed_loads_and_signs(tmp_path):
+    """A 44-character base64 of a 32-byte seed loads, and the signature
+    verifies with the matching public key (flair#1968)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    seed = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    assert len(seed) == 32
+    seed_b64 = _b64mod.b64encode(seed).decode("ascii")
+    assert len(seed_b64) == 44  # 32 bytes -> 44 base64 chars
+
+    path = tmp_path / "b64seed.key"
+    path.write_text(seed_b64, encoding="utf-8")
+
+    key = flair_plugin._load_private_key(str(path))
+    auth = flair_plugin._sign_request(key, "beta", "POST", "/Memory/xyz")
+    assert auth.startswith("TPS-Ed25519 ")
+    # Signature verifies with the matching public key
+    agent_id, ts, nonce, sig_b64 = auth[len("TPS-Ed25519 "):].split(":")
+    payload = f"{agent_id}:{ts}:{nonce}:POST:/Memory/xyz".encode("utf-8")
+    priv.public_key().verify(_b64mod.b64decode(sig_b64), payload)
+
+
+def test_b64_decodes_to_31_bytes_is_refused(tmp_path):
+    """A base64 string that decodes to 31 bytes is refused with the named
+    format error, and no key material in the message.
+    The canonical decoder accepts it, but it is not 32 bytes, so it is not
+    taken for a seed; it falls through to PKCS8 DER parsing, which fails."""
+    seed = b"\x00" * 31  # 31 zero bytes
+    seed_b64 = _b64mod.b64encode(seed).decode("ascii")
+    assert len(seed_b64) == 44  # padding: ceil(31/3)*4 = 44
+
+    path = tmp_path / "short.key"
+    path.write_text(seed_b64, encoding="utf-8")
+
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    msg = str(ei.value)
+    assert str(path) in msg  # names the path
+    assert "32-byte" in msg  # names the accepted formats
+    assert seed_b64 not in msg  # no key material
+
+
+def test_b64_decodes_to_33_bytes_is_refused(tmp_path):
+    """A base64 string that decodes to 33 bytes is refused with the named
+    format error, and no key material in the message.
+    The canonical decoder accepts it, but it is not 32 bytes, so it is not
+    taken for a seed; it falls through to PKCS8 DER parsing, which fails."""
+    seed = b"\x00" * 33  # 33 zero bytes
+    seed_b64 = _b64mod.b64encode(seed).decode("ascii")
+    assert len(seed_b64) == 44  # ceil(33/3)*4 = 44
+
+    path = tmp_path / "long.key"
+    path.write_text(seed_b64, encoding="utf-8")
+
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    msg = str(ei.value)
+    assert str(path) in msg  # names the path
+    assert "32-byte" in msg  # names the accepted formats
+    assert seed_b64 not in msg  # no key material
+
+
+def test_non_canonical_b64_of_32_bytes_is_refused(tmp_path):
+    """An unpadded base64 of 32 bytes is refused: it is NOT decoded to
+    anything. The base64 decoder's padding validation (validate=True) rejects
+    the missing padding, so neither the 32-byte gate nor DER parsing runs."""
+    # Generate payload that produces a non-canonical base64
+    payload = b"\x00" * 32
+    canonical = _b64mod.b64encode(payload).decode("ascii")  # padded
+    assert canonical.endswith("=")  # payload needs padding
+
+    # Strip the padding to make it non-canonical
+    non_canon = canonical.rstrip("=")
+    assert len(non_canon) < len(canonical)
+
+    path = tmp_path / "noncanon.key"
+    path.write_text(non_canon, encoding="utf-8")
+
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    msg = str(ei.value)
+    assert str(path) in msg  # names the path
+    assert "32-byte" in msg  # names the accepted formats

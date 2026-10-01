@@ -493,6 +493,11 @@ function runLaunchdManagement(ctx: DoctorRunContext): DoctorCheckResult {
   if (m.state === "not-applicable" || m.state === "no-service") {
     return result(id, label, "skip", { detail: m.detail, launchd: m });
   }
+  // flair#2040: launchd runs the job but the serving process is unidentified —
+  // not an alarm (nothing shows it is detached), and never a pass.
+  if (m.state === "unverified") {
+    return result(id, label, "warn", { detail: m.detail, remedy: m.remedy?.join(" && "), launchd: m });
+  }
   // flair#1693: a registered plist that carries the admin password INLINE is a
   // downgrade from the flair#1573 pass-file shape — the secret lives in a
   // world-readable config file. The running job may be unaffected (launchd

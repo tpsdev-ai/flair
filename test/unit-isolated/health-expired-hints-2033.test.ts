@@ -194,6 +194,7 @@ async function statusOutput(detail: Record<string, any>, args: string[]): Promis
     resolveSigningAgentId: () => ({ agentId: "fixture-agent", source: "flag" }),
     sortSoulKeyEntries: () => [], defaultDataDir: () => HOME + "/data",
     readHarperConfig: () => null, readPortFromConfig: () => null, __pkgVersion: "fixture",
+    resolveHttpPort: () => 0, assessInstallTree: () => null,
   });
   const program = new Command();
   register(program);
