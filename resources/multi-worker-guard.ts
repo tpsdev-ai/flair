@@ -59,7 +59,7 @@ export function multiWorkerBootLine(condition: MultiWorkerCondition): string | n
   if (condition.state === "single-worker") return null;
   const reason =
     "the multi-worker readiness work (flair#2052) is not complete — a per-worker embedding " +
-    "engine and BM25 index, and the XAA jti record until flair#2073";
+    "engine and BM25 index";
   if (condition.state === "refused") {
     return (
       `[multi-worker] refused: ${workerCountLabel(condition)}; flair does not serve on more than one ` +
