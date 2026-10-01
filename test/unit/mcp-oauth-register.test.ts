@@ -1,19 +1,4 @@
-/**
- * mcp-oauth-register.test.ts — the flag-OFF NO-OP contract for /mcp registration.
- *
- * registerMcpOAuthRoute() must:
- *   - flag OFF  → NEVER call server.http, NEVER load the oauth plugin (returns
- *     false). This is the byte-identical boot contract.
- *   - flag ON but no issuer → NEVER mount (no floating-issuer guard) → false.
- *   - flag ON + issuer → register withMCPAuth(handler) on urlPath '/mcp' ONLY,
- *     ordered after the multi-worker guard.
- *
- * We call the exported registration function directly with injected deps (a spy
- * server + a stub withMCPAuth loader), so the test never depends on the load-time
- * side effect or the real Harper `server`. harper is mocked only so
- * the module's static `import { server }` resolves; the module-level fire-and-
- * forget call runs with the flag OFF (default) and returns before touching it.
- */
+// MCP OAuth route registration.
 
 import { mock, describe, it, expect, beforeEach } from "bun:test";
 
@@ -105,8 +90,6 @@ describe("registerMcpOAuthRoute — flag-OFF no-op", () => {
     const mounted = await registerMcpOAuthRoute(deps);
     expect(mounted).toBe(true);
     expect(httpCalls).toHaveLength(1);
-    // Registered on the /mcp urlPath subroute (its own chain), pulled into the
-    // multi-worker guard before the handler.
     expect(httpCalls[0].options).toEqual({ urlPath: "/mcp", after: MULTI_WORKER_GUARD_HTTP_NAME });
     // The registered handler is the withMCPAuth-wrapped one.
     expect(httpCalls[0].handler.__wrapped).toBe(true);

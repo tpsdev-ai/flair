@@ -12,10 +12,6 @@
  * The documents themselves, and every path-screening decision, live in
  * resources/oauth-discovery.ts — this file is only the Harper wiring.
  *
- * Flair orders its discovery mounts after the multi-worker guard. The
- * @harperfast/oauth plugin registers mounts when its component loads and checks
- * enabled state per request. The guard is also mounted runFirst at those paths.
- *
  * ── Why `server.http({ urlPath })` and not a Resource ───────────────────────
  * Harper's REST layer maps a Resource CLASS NAME to a path segment; no class
  * name produces `/.well-known/oauth-protected-resource`. A urlPath mount is the

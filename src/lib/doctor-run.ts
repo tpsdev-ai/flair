@@ -77,7 +77,6 @@ export interface DoctorRunContext {
   detectedClientIds: readonly string[];
   /** Observed launchd state. Omit to skip the check as N/A. */
   launchd?: LaunchdManagement;
-  /** Observed worker-thread state. Omit to skip the check as N/A. */
   workerThreads?: WorkerThreadsObservation;
   keysDir?: string;
   keyAgentIds?: string[];
@@ -424,28 +423,14 @@ function runKeysPrune(ctx: DoctorRunContext): DoctorCheckResult {
   });
 }
 
-/**
- * Classification of the `multiWorker` field in the configured /Health response.
- * An absent field maps to `serving`, a recognized state to `refused`, and a
- * malformed field to `unknown`.
- */
 export type WorkerThreadsObservation =
   | { kind: "serving" }
   | { kind: "refused"; state: "refused" | "unsafe-opt-in"; workerCount: number | null }
   | { kind: "unknown" };
 
-/**
- * Read the doctor observation from a /Health `multiWorker` value.
- *
- * An ABSENT field (undefined/null) reads as serving: a one-worker /Health
- * omits `multiWorker`. A value that NAMES the refusal (`state` of "refused" or
- * "unsafe-opt-in") is the refusal, carrying its worker count when that is a
- * number. Anything else — a non-object, or an object with no recognized state —
- * is UNKNOWN, never promoted to serving.
- */
 export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObservation {
-  if (raw === undefined || raw === null) return { kind: "serving" };
-  if (typeof raw !== "object") return { kind: "unknown" };
+  if (raw === undefined) return { kind: "serving" };
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { kind: "unknown" };
   const rec = raw as { state?: unknown; workerCount?: unknown };
   if (rec.state !== "refused" && rec.state !== "unsafe-opt-in") return { kind: "unknown" };
   const workerCount = rec.workerCount;
@@ -456,26 +441,13 @@ export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObserva
   };
 }
 
-/** What the configured /Health URL returned. */
 export interface FlairHealthProbe {
-  /** A 2xx, or a 503 whose body carries a recognized `multiWorker` refusal state field. */
   reaching: boolean;
   status: number;
-  /** The parsed response body, or null when it was not JSON. */
   body: unknown;
-  /** The worker-thread observation, or null when none was observed. */
   observation: WorkerThreadsObservation | null;
 }
 
-/**
- * Interpret a /Health status and body: does the response count as reaching
- * (a 2xx with any body, or a 503 carrying the multiWorker field), and what did it observe?
- *
- * A 2xx is reaching, whatever its body. A 2xx with a malformed
- * `multiWorker` is `unknown`, never serving; a 503 with no recognized
- * `multiWorker` field is not reaching, so its worker check is skipped rather
- * than blocking.
- */
 export function interpretFlairHealth(status: number, body: unknown): { reaching: boolean; observation: WorkerThreadsObservation | null } {
   const observation = readWorkerThreadsObservation((body as { multiWorker?: unknown })?.multiWorker);
   if (status >= 200 && status < 300) return { reaching: true, observation };
@@ -483,7 +455,6 @@ export function interpretFlairHealth(status: number, body: unknown): { reaching:
   return { reaching: false, observation: null };
 }
 
-/** Probe a /Health URL. A failed fetch is not reaching. */
 export async function probeFlairHealth(
   url: string,
   fetchImpl: typeof fetch = fetch,

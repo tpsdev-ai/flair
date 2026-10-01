@@ -463,20 +463,13 @@ program
       }
     }
 
-    // Helper: try to reach Harper on a given port.
-    // Must return true ONLY when /Health answers a 2xx (any body), OR a 503 whose
-    // body carries a recognized `multiWorker` refusal state field. It cannot
-    // identify the responder beyond that status/field pair — a generic HTTP
-    // status > 0 (flair#862) would accept 404 from a Node inspector on 9229 or
-    // any other service: "present but wrong" beats "absent but correct".
+    // Probe a port for a recognized /Health response.
     async function probePort(p: number): Promise<boolean> {
       const probe = await probeFlairHealth(`http://127.0.0.1:${p}/Health`);
-      return probe.reaching; // 2xx /Health, or a 503 carrying the recognized multiWorker refusal field
+      return probe.reaching;
     }
 
-    // Helper: discover what port a Harper PID is listening on.
-    // Scans ALL listening ports for this PID and returns the first one that
-    // returns a recognized /Health response. A 404 from a debug port is excluded.
+    // Find a PID port with a recognized /Health response.
     async function discoverPortFromPid(pid: string): Promise<number | null> {
       // Defense-in-depth: caller already validates, but re-check here
       if (!/^\d+$/.test(pid)) return null;
@@ -486,7 +479,6 @@ program
         // Extract all ports from lsof -Fn output (lines like "n127.0.0.1:PORT")
         const ports = [...out.matchAll(/n(?:\S+):(\d+)/g)].map(m => Number(m[1]));
         if (ports.length === 0) return null;
-        // Try each port until one returns a recognized /Health response
         for (const port of ports) {
           if (await probePort(port)) return port;
         }
@@ -601,13 +593,6 @@ program
     let workerThreads: WorkerThreadsObservation | undefined;
     if (harperResponding) {
       try {
-        // flair#2059: the refused multi-worker state is reported by /Health as a
-        // 503 WITH a body, so the probe reads the body whether or not the status
-        // is OK. On a 2xx, the `multiWorker` field becomes the worker-threads
-        // observation (an absent one reads as serving — a one-worker /Health
-        // omits it; a malformed one is unknown, never serving). A 503 is reached
-        // only when that field names the refusal; any other 503 is not reached,
-        // so its worker check is skipped.
         const probe = await probeFlairHealth(`${baseUrl}/Health`);
         if (probe.reaching) {
           workerThreads = probe.observation ?? undefined;

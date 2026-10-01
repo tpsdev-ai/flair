@@ -1,14 +1,3 @@
-/**
- * multi-worker-doctor-2059.test.ts — flair#2059, slice S0 of #2052.
- *
- * The `worker-threads` doctor check turns the public /Health `multiWorker` field
- * into a verdict: it fails on the refused state (naming `THREADS_COUNT=1` as the
- * remedy) and under the explicit opt-in, passes on a serving
- * observation, SKIPS when no response was observed, and FAILS — blocking the run —
- * for an unrecognized observation. The discovery probe (`probeFlairHealth`, the
- * path `flair doctor` uses) must recognise a `/Health` 503 carrying the
- * `multiWorker` refusal field so the response is observed.
- */
 import { afterAll, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import {
@@ -37,7 +26,7 @@ function checkWorkerThreads(workerThreads?: WorkerThreadsObservation) {
 }
 
 describe("readWorkerThreadsObservation", () => {
-  it("names the refusal from the /Health field", () => {
+  it("reads refusal states", () => {
     expect(readWorkerThreadsObservation({ state: "refused", workerCount: 2 })).toEqual({
       kind: "refused",
       state: "refused",
@@ -48,7 +37,6 @@ describe("readWorkerThreadsObservation", () => {
       state: "unsafe-opt-in",
       workerCount: 4,
     });
-    // A recognized state with no usable count is still the refusal.
     expect(readWorkerThreadsObservation({ state: "refused" })).toEqual({
       kind: "refused",
       state: "refused",
@@ -56,38 +44,44 @@ describe("readWorkerThreadsObservation", () => {
     });
   });
 
-  it("classifies an absent field as a serving observation", () => {
+  it("treats undefined as absent", () => {
     expect(readWorkerThreadsObservation(undefined)).toEqual({ kind: "serving" });
-    expect(readWorkerThreadsObservation(null)).toEqual({ kind: "serving" });
   });
 
-  it("treats a malformed or unrecognized field as unknown, never serving", () => {
+  it("classifies present malformed fields", () => {
+    expect(readWorkerThreadsObservation(null)).toEqual({ kind: "unknown" });
     expect(readWorkerThreadsObservation({})).toEqual({ kind: "unknown" });
     expect(readWorkerThreadsObservation({ state: "something-else", workerCount: 2 })).toEqual({
       kind: "unknown",
     });
     expect(readWorkerThreadsObservation("refused")).toEqual({ kind: "unknown" });
     expect(readWorkerThreadsObservation(2)).toEqual({ kind: "unknown" });
+    expect(readWorkerThreadsObservation(false)).toEqual({ kind: "unknown" });
+    expect(readWorkerThreadsObservation([])).toEqual({ kind: "unknown" });
   });
 });
 
 describe("interpretFlairHealth", () => {
-  it("reads a 2xx /Health as reaching, serving when the field is absent", () => {
+  it("reads 2xx without field", () => {
     expect(interpretFlairHealth(200, { ok: true })).toEqual({ reaching: true, observation: { kind: "serving" } });
   });
 
-  it("reads a 503 with a refusal field as reaching, refused", () => {
+  it("reads refusal 503", () => {
     expect(interpretFlairHealth(503, { ok: false, multiWorker: { state: "refused", workerCount: 2 } })).toEqual({
       reaching: true,
       observation: { kind: "refused", state: "refused", workerCount: 2 },
     });
   });
 
-  it("does not treat a 503 without a refusal field as reaching", () => {
+  it("rejects unrelated 503", () => {
     expect(interpretFlairHealth(503, { ok: false })).toEqual({ reaching: false, observation: null });
   });
 
-  it("keeps a malformed 2xx field unknown, never serving", () => {
+  it("classifies malformed 2xx fields", () => {
+    expect(interpretFlairHealth(200, { multiWorker: null })).toEqual({
+      reaching: true,
+      observation: { kind: "unknown" },
+    });
     expect(interpretFlairHealth(200, { multiWorker: { state: "??" } })).toEqual({
       reaching: true,
       observation: { kind: "unknown" },
@@ -95,49 +89,47 @@ describe("interpretFlairHealth", () => {
   });
 });
 
-describe("worker-threads doctor check", () => {
-  it("is a member of the doctor catalog", () => {
+describe("worker-threads check", () => {
+  it("registers catalog check", () => {
     expect(DOCTOR_CHECK_IDS).toContain("worker-threads");
   });
 
-  it("fails on the refused state and names THREADS_COUNT=1", () => {
+  it("fails refusal", () => {
     const r = checkWorkerThreads({ kind: "refused", state: "refused", workerCount: 2 });
     expect(r.status).toBe("fail");
     expect(r.remedy).toContain("THREADS_COUNT=1");
     expect(r.detail).toContain("2 Harper worker threads");
   });
 
-  it("fails on an unreadable refused count", () => {
+  it("fails unreadable count", () => {
     const r = checkWorkerThreads({ kind: "refused", state: "refused", workerCount: null });
     expect(r.status).toBe("fail");
     expect(r.detail).toContain("unreadable worker count");
   });
 
-  it("fails under the explicit opt-in and still names the remedy", () => {
+  it("fails unsafe opt-in", () => {
     const r = checkWorkerThreads({ kind: "refused", state: "unsafe-opt-in", workerCount: 4 });
     expect(r.status).toBe("fail");
     expect(r.remedy).toContain("THREADS_COUNT=1");
     expect(r.detail).toContain("unsafe opt-in");
   });
 
-  it("passes on a serving observation", () => {
+  it("passes serving observation", () => {
     const r = checkWorkerThreads({ kind: "serving" });
     expect(r.status).toBe("pass");
   });
 
-  it("skips when no /Health response was observed", () => {
+  it("skips absent observation", () => {
     expect(checkWorkerThreads(undefined).status).toBe("skip");
   });
 
-  it("fails — blocking — on an unrecognized observation, and renders an error line", () => {
+  it("blocks unknown observation", () => {
     const run = runDoctorChecks(
       { ...baseCtx, workerThreads: { kind: "unknown" } },
       { catalogIds: ["worker-threads"] as const },
     );
-    // The whole verdict: a reachable but unrecognized observation is not healthy.
     expect(run.healthy).toBe(false);
     expect(run.results[0].status).toBe("fail");
-    // The rendered line: the OK icon must not appear for an unrecognized state.
     const [line] = renderCatalogDoctorLines(run);
     expect(line.icon).toBe("error");
     expect(line.line).toContain("worker threads: fail");
@@ -145,7 +137,7 @@ describe("worker-threads doctor check", () => {
   });
 });
 
-describe("probeFlairHealth (the doctor discovery path) against a local HTTP fixture", () => {
+describe("Health probe", () => {
   const servers: Server[] = [];
   afterAll(async () => {
     await Promise.all(servers.map((s) => new Promise<void>((r) => s.close(() => r()))));
@@ -163,7 +155,7 @@ describe("probeFlairHealth (the doctor discovery path) against a local HTTP fixt
     return `http://127.0.0.1:${addr.port}/Health`;
   }
 
-  it("recognises a fixture's 503 + refusal body as reaching, and observes the refusal", async () => {
+  it("recognizes refusal 503", async () => {
     const url = await serve(
       503,
       JSON.stringify({ ok: false, multiWorker: { state: "refused", workerCount: 2, remedy: "THREADS_COUNT=1" } }),
@@ -173,14 +165,14 @@ describe("probeFlairHealth (the doctor discovery path) against a local HTTP fixt
     expect(probe.observation).toEqual({ kind: "refused", state: "refused", workerCount: 2 });
   });
 
-  it("does not treat an unrelated 503 as reaching", async () => {
+  it("rejects unrelated 503", async () => {
     const url = await serve(503, JSON.stringify({ ok: false }), "text/plain");
     const probe = await probeFlairHealth(url);
     expect(probe.reaching).toBe(false);
     expect(probe.observation).toBeNull();
   });
 
-  it("reports a closed port as not reaching", async () => {
+  it("handles closed port", async () => {
     const probe = await probeFlairHealth("http://127.0.0.1:1/Health", fetch, 500);
     expect(probe.reaching).toBe(false);
   });

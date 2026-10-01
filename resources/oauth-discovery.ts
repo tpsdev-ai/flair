@@ -38,12 +38,6 @@ export const PRM_PATH = "/.well-known/oauth-protected-resource";
 /** RFC 8414 §3 — Authorization Server Metadata well-known path. */
 export const AS_METADATA_PATH = "/.well-known/oauth-authorization-server";
 
-/**
- * The JWKS well-known path. flair registers no document at this path:
- * @harperfast/oauth registers its own mount here when its component loads (it checks whether MCP OAuth is enabled per request), and
- * oauth-wellknown.ts registers the multi-worker guard as a runFirst mount at
- * this path so it precedes the plugin's handler.
- */
 export const JWKS_PATH = "/.well-known/jwks.json";
 
 /**

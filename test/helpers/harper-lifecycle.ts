@@ -759,13 +759,6 @@ export interface StartHarperOptions {
    * one worker regardless, so such a test must skip there.
    */
   threads?: number;
-  /**
-   * Whether a `threads > 1` spawn sets `FLAIR_MULTI_WORKER_UNSAFE=1`, the
-   * documented opt-in (flair#2059). Defaults to true so an existing two-worker
-   * test keeps exercising its cross-worker path; pass false to boot a REFUSED
-   * local instance without the opt-in whose requests answer 503. External mode
-   * rejects an explicit false because it cannot configure the external service.
-   */
   multiWorkerUnsafe?: boolean;
   /**
    * Raw YAML appended to the instance's `harperdb-config.yaml` AFTER `harper

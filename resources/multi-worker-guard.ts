@@ -1,72 +1,26 @@
-/**
- * multi-worker-guard.ts — the S0 multi-worker refusal (flair#2059, slice S0 of #2052).
- *
- * Flair's shipped launch paths set one Harper worker thread. More than one is
- * not yet supported while the readiness work (flair#2052) is incomplete.
- * Linux can select several workers when nothing pins the count.
- *
- * This module is the single home for the condition and the state. It reads the
- * worker count ONCE per worker module instance (each worker loads its own copy,
- * so the named boot line is emitted once per worker instance), decides the
- * state, and answers the questions the rest of the server asks: what does
- * /Health report, and does this request serve or get the named 503. The count is
- * `server.workerCount`, Harper's per-thread value. Where reading it fails or it
- * is not a positive integer (on the main thread alongside worker threads it is
- * `undefined`), the count is read from Harper's effective configured count,
- * `server.config.threads.count`. Only when that read also fails or is not a
- * positive integer is the count UNKNOWN, which is refused, never read as one
- * worker.
- *
- * The refused state is enforced before dispatch for every request except `/Health` and `/health`, which the guard passes to the Health resource to answer with its own 503. This module registers ONE
- * named http entry, runFirst and ordered ahead of the default REST middleware
- * (auth-middleware.ts, which orders itself after this entry): so the refusal
- * lands before the method allowlist, before Harper's `authentication` and
- * before any flair handler on the default chain. A urlPath mount (for example
- * `/mcp`) gets its OWN dispatch chain, so flair's mounts declare
- * `after: MULTI_WORKER_GUARD_HTTP_NAME` to pull this entry into their chains,
- * and oauth-wellknown.ts registers this same guard function as a runFirst mount
- * at the @harperfast/oauth plugin's well-known paths, whose mounts carry no
- * ordering constraint of their own.
- *
- * With one worker nothing changes: no boot line, and /Health is unchanged.
- */
 import { server } from "harper";
 import * as harper from "harper";
 
-/** The named refused state. One name for the boot line, /Health and the 503. */
 export const MULTI_WORKER_REFUSED_STATE = "multi-worker-unsupported";
-/** The error name on every refused-request body (machine-readable). */
 export const MULTI_WORKER_ERROR_NAME = "multi_worker_unsupported";
-/** The remedy named in the boot line, the 503 body and /Health. */
 export const MULTI_WORKER_REMEDY = "THREADS_COUNT=1";
-/** Environment key for the explicit unsafe state. */
 export const MULTI_WORKER_UNSAFE_ENV = "FLAIR_MULTI_WORKER_UNSAFE";
-/** This module's http-entry name, so flair's mounts order it ahead of themselves. */
 export const MULTI_WORKER_GUARD_HTTP_NAME = "flair-multi-worker-guard";
-/** The default REST middleware's http-entry name (auth-middleware.ts). */
 export const FLAIR_AUTH_MIDDLEWARE_HTTP_NAME = "flair-auth-middleware";
 
-/** The three states the guard can be in. */
 export type MultiWorkerState = "single-worker" | "refused" | "unsafe-opt-in";
 
 export interface MultiWorkerCondition {
   state: MultiWorkerState;
-  /** Harper's effective worker count as read once, or null when it is not a positive integer. */
   workerCount: number | null;
 }
 
-/**
- * The /Health `multiWorker` field. Closed schema on purpose — /Health is public
- * and every worker renders this same value, so it carries only enumerated
- * strings and one coarse number: no message, no path, no request-scoped data.
- */
 export interface MultiWorkerHealthField {
   state: "refused" | "unsafe-opt-in";
   workerCount: number | null;
   remedy: string;
 }
 
-/** The refusal body. Constant except the coarse worker count. */
 export interface MultiWorkerRefusalBody {
   error: string;
   workerCount: number | null;
@@ -74,34 +28,24 @@ export interface MultiWorkerRefusalBody {
   detail: string;
 }
 
-/**
- * The pure decision, isolated so it is unit-testable without Harper.
- *
- * An unknown count (`null`) refuses: it is not a number, so it is not evidence
- * of one worker. A known count > 1 refuses unless the opt-in is set.
- */
 export function decideMultiWorkerState(workerCount: number | null, optIn: boolean): MultiWorkerState {
   if (workerCount === null) return "refused";
   if (!(workerCount > 1)) return "single-worker";
   return optIn ? "unsafe-opt-in" : "refused";
 }
 
-/** Read the explicit unsafe state from an env map (defaults to `process.env`). */
 export function multiWorkerUnsafeOptIn(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   return env[MULTI_WORKER_UNSAFE_ENV] === "1";
 }
 
-/** The condition's worker count as a label, naming an unreadable count as such. */
 function workerCountLabel(condition: MultiWorkerCondition): string {
   return condition.workerCount === null
     ? "the worker count is unreadable"
     : `worker count=${condition.workerCount}`;
 }
 
-/** /Health's `multiWorker` field, or null on a single worker — the field is
- *  omitted when one worker, so /Health is byte-identical to before this guard. */
 export function multiWorkerHealthField(condition: MultiWorkerCondition): MultiWorkerHealthField | null {
   if (condition.state === "single-worker") return null;
   return {
@@ -111,7 +55,6 @@ export function multiWorkerHealthField(condition: MultiWorkerCondition): MultiWo
   };
 }
 
-/** The named boot line for a condition, or null on a single worker. */
 export function multiWorkerBootLine(condition: MultiWorkerCondition): string | null {
   if (condition.state === "single-worker") return null;
   const reason =
@@ -130,7 +73,6 @@ export function multiWorkerBootLine(condition: MultiWorkerCondition): string | n
   );
 }
 
-/** The body the request guard returns, and the source of /Health's field. */
 export function multiWorkerRefusalBody(condition: MultiWorkerCondition): MultiWorkerRefusalBody {
   return {
     error: MULTI_WORKER_ERROR_NAME,
@@ -141,23 +83,14 @@ export function multiWorkerRefusalBody(condition: MultiWorkerCondition): MultiWo
   };
 }
 
-/** Paths that keep answering in the refused state. /Health renders the refusal
- *  itself, so the request guard steps aside for it (both spellings Harper maps). */
 export function isMultiWorkerExemptPath(pathname: string): boolean {
   return pathname === "/Health" || pathname === "/health";
 }
 
-/**
- * The named 503 for a refused request, or null when the request serves. Exempt
- * paths return null so /Health can render the refusal body. The opt-in serves
- * requests too; only /Health reports it.
- */
 export function multiWorkerRefusalResponse(
   condition: MultiWorkerCondition,
   pathname: string,
 ): Response | null {
-  // Only the refused state blocks a request. A single worker serves, and the
-  // explicit opt-in serves too (its /Health stays non-OK via the health field).
   if (condition.state !== "refused" || isMultiWorkerExemptPath(pathname)) return null;
   return new Response(JSON.stringify(multiWorkerRefusalBody(condition)), {
     status: 503,
@@ -167,7 +100,6 @@ export function multiWorkerRefusalResponse(
 
 let cached: MultiWorkerCondition | null = null;
 
-/** A positive integer from `read()`, or null when the read throws or is not one. */
 function readPositiveInteger(read: () => unknown): number | null {
   let raw: unknown;
   try {
@@ -179,18 +111,6 @@ function readPositiveInteger(read: () => unknown): number | null {
   return raw;
 }
 
-/**
- * Harper's effective worker count for this thread, or null when it is unknown.
- *
- * `server.workerCount` is Harper's per-thread value: the configured count on a
- * worker thread, and 1 in the single-thread mode where the main thread is the
- * worker. On the main thread alongside worker threads it is `undefined`, so the
- * count falls back to Harper's effective configured count,
- * `server.config.threads.count`. Harper starts workers while `i < count`, so a
- * value that is not an integer (1.5) starts more workers than it names. Only
- * when both reads lack a positive integer is the count UNKNOWN; the guard
- * refuses it rather than reading it as one worker.
- */
 export function readWorkerCount(): number | null {
   const perThread = readPositiveInteger(
     () => (server as { workerCount?: unknown } | undefined)?.workerCount,
@@ -202,7 +122,6 @@ export function readWorkerCount(): number | null {
   );
 }
 
-/** The condition, resolved once per worker module instance. */
 export function resolveMultiWorkerCondition(): MultiWorkerCondition {
   if (cached) return cached;
   const workerCount = readWorkerCount();
@@ -210,12 +129,10 @@ export function resolveMultiWorkerCondition(): MultiWorkerCondition {
   return cached;
 }
 
-/** The condition as read once at load. Every caller shares this one read. */
 export function multiWorkerCondition(): MultiWorkerCondition {
   return resolveMultiWorkerCondition();
 }
 
-/** Emit the named boot line, when there is one. */
 export function announceMultiWorkerCondition(
   condition: MultiWorkerCondition = resolveMultiWorkerCondition(),
 ): void {
@@ -226,11 +143,6 @@ export function announceMultiWorkerCondition(
   else console.error(line);
 }
 
-/**
- * The request guard, as its own http entry. It refuses a refused instance with
- * one named 503 and steps aside otherwise (including for /Health, which renders
- * the refusal itself).
- */
 export async function multiWorkerRequestGuard(request: any, nextLayer: any): Promise<Response> {
   const pathname: string = typeof request?.pathname === "string" ? request.pathname : "/";
   const refusal = multiWorkerRefusalResponse(multiWorkerCondition(), pathname);
@@ -238,17 +150,10 @@ export async function multiWorkerRequestGuard(request: any, nextLayer: any): Pro
   return nextLayer(request);
 }
 
-/** Test seam: forget the memoised condition so a test can re-resolve it. */
 export function _resetMultiWorkerGuardForTests(): void {
   cached = null;
 }
 
-// Register the guard as its own http entry: runFirst, named, and ordered ahead
-// of the default REST middleware. A urlPath mount pulls it in by name (see
-// mcp-oauth.ts / oauth-wellknown.ts), so the refusal precedes the handlers on
-// the default chain and on each mount that declares `after`. Skipped where
-// `server.http` is absent (a partial mock outside a running Harper, where there
-// is no dispatch to guard).
 if (typeof (server as { http?: unknown } | undefined)?.http === "function") {
   server.http(multiWorkerRequestGuard, {
     runFirst: true,
@@ -257,7 +162,4 @@ if (typeof (server as { http?: unknown } | undefined)?.http === "function") {
   });
 }
 
-// Every worker loads this module once, so the named boot line is emitted once
-// per worker module instance; every later read answers from the memoised
-// condition.
 announceMultiWorkerCondition();

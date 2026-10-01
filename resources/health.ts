@@ -122,8 +122,6 @@ export class Health extends Resource {
       version: build?.version ?? resolveVersion(),
       buildCommit: build?.commit ?? null,
     }));
-    // Report refusal or explicit opt-in with HTTP 503. On one worker the field
-    // is omitted and this response is unchanged.
     const multiWorker = multiWorkerHealthField(multiWorkerCondition());
     let status = readiness.status;
     if (multiWorker) {

@@ -1,17 +1,3 @@
-/**
- * oauth-wellknown-guard-2059.test.ts — the guard is registered ahead of the
- * OAuth plugin's own well-known mounts (flair#2059).
- *
- * @harperfast/oauth registers its mounts at component load and checks enabled
- * state per request. oauth-wellknown.ts mounts the guard runFirst at those paths.
- *
- * This pins the registration itself; the real-Harper proof — the enabled plugin
- * route answers 503 on a refused instance and 200 on a one-worker control — is
- * test/integration/multi-worker-refusal-2059.test.ts.
- *
- * Module mocks are process-global, so this file runs in its own process
- * (test/unit-isolated).
- */
 import { describe, expect, it, mock } from "bun:test";
 
 process.env.FLAIR_WELLKNOWN_NO_AUTOSTART = "1";
@@ -46,8 +32,8 @@ function mount(): void {
   });
 }
 
-describe("oauth-wellknown mounts ordered after the multi-worker guard", () => {
-  it("registers the guard as a runFirst mount at each well-known path", () => {
+describe("well-known mounts", () => {
+  it("registers guard mounts", () => {
     mount();
     for (const path of WELL_KNOWN) {
       const guardMount = httpEntries.find(
@@ -58,7 +44,7 @@ describe("oauth-wellknown mounts ordered after the multi-worker guard", () => {
     }
   });
 
-  it("orders flair's protected-resource and authorization-server handlers after the guard", () => {
+  it("orders discovery handlers", () => {
     mount();
     for (const path of [PRM_PATH, AS_METADATA_PATH]) {
       const entry = httpEntries.find(
@@ -68,7 +54,7 @@ describe("oauth-wellknown mounts ordered after the multi-worker guard", () => {
     }
   });
 
-  it("registers a guard mount at every well-known path and the two flair documents", () => {
+  it("lists mounted paths", () => {
     mount();
     const guardPaths = httpEntries
       .filter((e) => e.handler === multiWorkerRequestGuard)

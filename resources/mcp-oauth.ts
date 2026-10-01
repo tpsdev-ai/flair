@@ -270,13 +270,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
   // stub build of harper lacks the export.
   const srv = deps.server ?? ((harper as any).server);
 
-  // Primary registration: urlPath subroute → own chain. flair's auth-middleware
-  // does not run here, but the multi-worker refusal must: the `after` pulls the
-  // guard entry (multi-worker-guard.ts) into this chain before the handler.
-  // `getConfig` pins iss/resource to the AS's values so the
-  // wrapper's iss/aud checks match the minted tokens even if this component
-  // resolves a different node_modules copy of the plugin (docs/mcp-oauth.md
-  // §"Using withMCPAuth from a different component").
+  // Mount /mcp after the guard.
   srv.http(
     withMCPAuth(rateLimitedMcpHandler(handler), {
       getConfig: () => mcpAuthConfig(),
