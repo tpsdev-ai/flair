@@ -11,8 +11,7 @@
   `DELETE` need Admin Basic credentials or Flair's internal path; agent keys,
   admin-agent keys included, get 403. Each accepted write appends an
   `OrgSkillAssignmentHistory` row (actor, source class, and the hash of the row
-  before the write, null on a create); writes to one assignment are serialized
-  within a Harper process. There is no direct `/OrgSkillAssignmentHistory`
+  before the write, null on a create). There is no direct `/OrgSkillAssignmentHistory`
   route. Neither table is federated.
 
   Soul `POST`, `PUT` and `PATCH` refuse with 400 a `skill-assignment` row whose

@@ -80,7 +80,7 @@ function validFields(body: Record<string, unknown>): Fields | Response {
     return badRequest("skill_name_required", "skillName must be a non-empty string");
   }
   if (typeof skillRef !== "string" || skillRef.trim() === "") {
-    return badRequest("skill_ref_required", "skillRef must be the id of a skill-tagged Memory row");
+    return badRequest("skill_ref_required", "skillRef must be a non-empty string");
   }
   if (typeof priority !== "string" || !Object.hasOwn(PRIORITY_RANK, priority)) {
     return badRequest("invalid_priority", `priority must be one of ${Object.keys(PRIORITY_RANK).join(", ")}`);
@@ -113,9 +113,8 @@ const LOCK_ATTEMPTS = 200;
 const LOCK_WAIT_MS = 10;
 
 /**
- * Run `fn` holding this process's lock on assignment `id` (resources/key-lock.ts),
- * so no other write to that assignment through this process reads or commits
- * in between. `fn` must commit before it returns. 409 when the lock stays held
+ * Run `fn` holding this process's lock on assignment `id` (resources/key-lock.ts).
+ * `fn` must commit before it returns. 409 when the lock stays held
  * past the wait; 503 when the store has no lock.
  */
 async function withAssignmentLock(id: string, fn: () => Promise<unknown>): Promise<unknown> {
