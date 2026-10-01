@@ -62,10 +62,19 @@ for (const [name, isDirectRun] of checks) {
     });
 
     test("a defined import.meta.main decides, true or false", () => {
-      const file = join(dir, `${name}.js`);
-      writeFileSync(file, "");
-      expect(isDirectRun("file:///nowhere/x.js", undefined, true)).toBe(true);
-      expect(isDirectRun(pathToFileURL(file).href, file, false)).toBe(false);
+      // No space in this path: `file://${file}` equals the module URL, so a
+      // string comparison that ignores import.meta.main === false returns true.
+      const plain = mkdtempSync(join(tmpdir(), "flair-mcp-entry-"));
+      try {
+        const file = join(plain, `${name}.js`);
+        writeFileSync(file, "");
+        const url = pathToFileURL(file).href;
+        expect(url).toBe(`file://${file}`);
+        expect(isDirectRun("file:///nowhere/x.js", undefined, true)).toBe(true);
+        expect(isDirectRun(url, file, false)).toBe(false);
+      } finally {
+        rmSync(plain, { recursive: true, force: true });
+      }
     });
   });
 }
