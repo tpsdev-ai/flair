@@ -387,9 +387,10 @@ claude.ai → Settings → Connectors → Add custom connector
   (no client ID to enter — Claude presents its own Client ID Metadata Document URL automatically)
 ```
 
-On a `*.harperfabric.com` instance, the command reaches its
-`fabric-operator-deploy` step after the confirmation and checks whether the
-public `/mcp` OAuth surface already passes self-verify. If it does, the command
+On a `*.harperfabric.com` instance, the command checks the target's OAuth
+metadata after confirmation. If that check passes, the command
+reaches its `fabric-operator-deploy` step and checks whether the public `/mcp`
+OAuth surface already passes self-verify. If it does, the command
 finishes there and prints the same connector details. If it does not, the run
 stops at that step with instructions: apply the staged secrets, which include
 `FLAIR_MCP_OAUTH=true`, to the instance's environment (when this run already

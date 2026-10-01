@@ -1045,6 +1045,43 @@ describe("enableMcp — full happy path", () => {
 });
 
 describe("enableMcp — self-verify failure names the step to re-run", () => {
+  test("standalone refuses target metadata redirected to a valid public issuer", async () => {
+    const publicIssuer = "https://other.public.example";
+    const targetUrl = `${ISSUER}/.well-known/oauth-authorization-server`;
+    const publicUrl = `${publicIssuer}/.well-known/oauth-authorization-server`;
+    const publicMetadata = {
+      ...CIMD_METADATA,
+      issuer: publicIssuer,
+      token_endpoint: `${publicIssuer}/oauth/mcp/token`,
+    };
+    const { fetchImpl: baseFetch, calls } = fullMockFetch();
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      if (String(url) === targetUrl) {
+        calls.push("target-metadata");
+        return init?.redirect === "manual"
+          ? new Response(null, { status: 302, headers: { Location: publicUrl } })
+          : new Response(JSON.stringify(publicMetadata), { status: 200 });
+      }
+      if (String(url) === publicUrl) {
+        calls.push("public-metadata");
+        return new Response(JSON.stringify(publicMetadata), { status: 200 });
+      }
+      return baseFetch(url, init);
+    }) as typeof fetch;
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), issuer: publicIssuer, confirmSecretsApplied: true },
+      { fetchImpl },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("self-verify");
+    expect(result.refused?.message).toContain("--instance answered with a redirect; point --instance at the instance itself");
+    expect(result.pasteBlock).toBeUndefined();
+    expect(calls).toContain("ops:restart");
+    expect(calls).toContain("target-metadata");
+    expect(calls).not.toContain("public-metadata");
+  });
+
   test("standalone refuses an unrelated issuer before checking its valid public metadata", async () => {
     const publicIssuer = "https://other.public.example";
     const { fetchImpl: baseFetch, calls } = fullMockFetch();
@@ -1625,7 +1662,7 @@ rest: true
 // ─── flair#1136: Fabric operator-deploy path ────────────────────────────────
 
 describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
-  test("Fabric origin: reports operator-deploy requirement, never restarts", async () => {
+  test("Fabric origin: missing target issuer refuses at binding before restart", async () => {
     const FABRIC_ISSUER = "https://my-flair.harperfabric.com";
     const calls: string[] = [];
     const creds = credentialTable();
@@ -1655,18 +1692,17 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     );
 
     expect(result.ok).toBe(false);
-    expect(result.failedStep).toBe("fabric-operator-deploy");
+    expect(result.failedStep).toBe("issuer-target-binding");
     // Must NOT call restart.
     expect(calls).not.toContain("ops:restart");
-    // Must report the requirement loudly.
-    const fabricStep = result.steps.find((s) => s.step === "fabric-operator-deploy");
-    expect(fabricStep).toBeDefined();
-    expect(fabricStep!.ok).toBe(false);
-    expect(fabricStep!.detail).toContain("harperfabric.com");
+    const bindingStep = result.steps.find((s) => s.step === "issuer-target-binding");
+    expect(bindingStep).toBeDefined();
+    expect(bindingStep!.ok).toBe(false);
+    expect(bindingStep!.detail).toContain("harperfabric.com");
     // A target response without an issuer cannot bind the public check.
-    expect(fabricStep!.detail).toContain("FLAIR_MCP_ISSUER");
-    expect(fabricStep!.detail).toContain("target's own metadata");
-    expect(fabricStep!.detail).not.toContain("mcp.enabled: true");
+    expect(bindingStep!.detail).toContain("FLAIR_MCP_ISSUER");
+    expect(bindingStep!.detail).toContain("target's own metadata");
+    expect(bindingStep!.detail).not.toContain("mcp.enabled: true");
     // Earlier steps (secrets, identity) still succeeded.
     const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
     expect(byStep["secrets-provisioning"]).toBe(true);
@@ -1737,14 +1773,14 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     issuer: PUBLIC,
     token_endpoint: `${PUBLIC}/oauth/mcp/token`,
   };
-  function proxyFetch(targetResponse: () => Response) {
+  function proxyFetch(targetResponse: (init?: RequestInit) => Response) {
     const { fetchImpl: opsFetch } = fabricFetch(async () => new Response("unused", { status: 500 }));
     const calls: string[] = [];
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const address = String(url);
       if (address === `${FABRIC}/.well-known/oauth-authorization-server`) {
         calls.push("target-metadata");
-        return targetResponse();
+        return targetResponse(init);
       }
       if (address === `${PUBLIC}/.well-known/oauth-authorization-server`) {
         calls.push("public-metadata");
@@ -1764,7 +1800,7 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     const result = await enableMcp({ ...fabricParams(), issuer: PUBLIC }, { fetchImpl });
 
     expect(result.ok).toBe(false);
-    expect(result.failedStep).toBe("fabric-operator-deploy");
+    expect(result.failedStep).toBe("issuer-target-binding");
     expect(result.refused?.message).toContain(`names issuer="${FABRIC}"; expected ${PUBLIC}`);
     expect(result.pasteBlock).toBeUndefined();
     expect(calls).toEqual(["target-metadata"]);
@@ -1781,6 +1817,32 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
       .toContain(`Issuer ${PUBLIC} matched the target's own OAuth authorization-server metadata at ${FABRIC}/.well-known/oauth-authorization-server`);
     expect(calls).toEqual(["target-metadata", "public-metadata"]);
     expect(readFileSync(join(dir, "secrets.env"), "utf8")).toContain(`FLAIR_MCP_ISSUER=${PUBLIC}`);
+  });
+
+  test("Fabric refuses target metadata redirected to valid public issuer metadata", async () => {
+    const publicUrl = `${PUBLIC}/.well-known/oauth-authorization-server`;
+    const { fetchImpl, calls } = proxyFetch((init) => init?.redirect === "manual"
+      ? new Response(null, { status: 302, headers: { Location: publicUrl } })
+      : new Response(JSON.stringify(publicMetadata), { status: 200 }));
+    const result = await enableMcp({ ...fabricParams(), issuer: PUBLIC }, { fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("issuer-target-binding");
+    expect(result.refused?.message).toContain("--instance answered with a redirect; point --instance at the instance itself");
+    expect(result.pasteBlock).toBeUndefined();
+    expect(calls).toEqual(["target-metadata"]);
+  });
+
+  test("Fabric refuses an opaque redirect from target metadata", async () => {
+    const opaque = new Response(null, { status: 200 });
+    Object.defineProperty(opaque, "type", { value: "opaqueredirect" });
+    const { fetchImpl, calls } = proxyFetch(() => opaque);
+    const result = await enableMcp({ ...fabricParams(), issuer: PUBLIC }, { fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("issuer-target-binding");
+    expect(result.refused?.message).toContain("--instance answered with a redirect; point --instance at the instance itself");
+    expect(calls).toEqual(["target-metadata"]);
   });
 
   test("the target's own OAuth server cannot bind a public MCP issuer", async () => {
@@ -1812,8 +1874,8 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     const result = await enableMcp(fabricParams(), { fetchImpl });
 
     expect(result.ok).toBe(false);
-    expect(result.failedStep).toBe("fabric-operator-deploy");
-    const step = result.steps.find((s) => s.step === "fabric-operator-deploy")!;
+    expect(result.failedStep).toBe("issuer-target-binding");
+    const step = result.steps.find((s) => s.step === "issuer-target-binding")!;
     expect(result.refused?.message).toBe(step.detail);
     expect(step.detail).toContain("Cannot confirm the target's configured issuer");
     expect(step.detail).toContain("returned HTTP 404");

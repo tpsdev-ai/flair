@@ -1402,15 +1402,21 @@ export interface SelfVerifyResult {
  * `issuer` equals that origin. A target can serve a public proxy issuer. */
 async function fetchOAuthMetadata(
   origin: string,
-  deps: { fetchImpl?: typeof fetch } = {},
+  deps: { fetchImpl?: typeof fetch; redirect?: RequestRedirect } = {},
 ): Promise<{ ok: true; url: string; body: any } | { ok: false; detail: string; unreachable?: true }> {
   const url = `${origin.replace(/\/+$/, "")}/.well-known/oauth-authorization-server`;
   const fetchImpl = deps.fetchImpl ?? fetch;
   let res: Response;
   try {
-    res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) } as RequestInit);
+    res = await fetchImpl(url, {
+      signal: AbortSignal.timeout(15_000),
+      ...(deps.redirect ? { redirect: deps.redirect } : {}),
+    });
   } catch (err: any) {
     return { ok: false, unreachable: true, detail: `could not reach ${url}: ${err?.message ?? err}` };
+  }
+  if (deps.redirect === "manual" && (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400))) {
+    return { ok: false, detail: "--instance answered with a redirect; point --instance at the instance itself." };
   }
   if (!res.ok) {
     return { ok: false, detail: `${url} returned HTTP ${res.status} — is FLAIR_MCP_OAUTH actually set on the restarted instance?` };
@@ -1427,7 +1433,7 @@ async function verifyTargetIssuer(
   issuer: string,
   deps: { fetchImpl?: typeof fetch } = {},
 ): Promise<{ ok: boolean; detail: string }> {
-  const target = await fetchOAuthMetadata(instance, deps);
+  const target = await fetchOAuthMetadata(instance, { ...deps, redirect: "manual" });
   const remedy = `Check the OAuth authorization-server metadata served by --instance (${instance}), make sure the target's FLAIR_MCP_ISSUER is ${issuer}, then re-run \`flair mcp enable\`.`;
   if (target.ok === false) return { ok: false, detail: `Cannot confirm the target's configured issuer: ${target.detail} ${remedy}` };
   if (target.body?.issuer !== issuer) {
@@ -1700,6 +1706,7 @@ export type EnableStepName =
   | "secrets-provisioning"
   | "identity-mapping"
   | "local-config-update"
+  | "issuer-target-binding"
   | "fabric-operator-deploy"
   | "restart"
   | "verify-restart"
@@ -1800,7 +1807,7 @@ export interface EnableMcpResult {
  * hope).
  *
  * flair#756: no DCR step anywhere in this flow — CIMD needs no
- * pre-registration. After restart, the target's MCP metadata issuer is
+ * pre-registration. The target's MCP metadata issuer is
  * checked before the public issuer metadata can count as completion.
  */
 export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {}): Promise<EnableMcpResult> {
@@ -2108,11 +2115,13 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       const host = new URL(params.instance).hostname;
       // flair#2116: this step used to fail unconditionally, so a re-run after
       // the operator's restart ended here with the same instructions, forever.
+      currentStep = "issuer-target-binding";
       const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
       if (!binding.ok) {
         push(false, binding.detail);
-        return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "fabric-operator-deploy", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, signingKeyFilePath: keyResult.path, callbackUrl };
+        return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "issuer-target-binding", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, signingKeyFilePath: keyResult.path, callbackUrl };
       }
+      currentStep = "fabric-operator-deploy";
       // The target's metadata names the issuer. Now check the public origin.
       const live = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
       if (live.ok) {

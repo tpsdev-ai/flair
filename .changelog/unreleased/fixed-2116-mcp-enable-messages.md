@@ -12,7 +12,7 @@
 
   On a Fabric instance the `fabric-operator-deploy` step failed on every run, so a
   re-run after the operator's restart stopped there again. The step now runs
-  self-verify against the public origin first and completes `enable` when it
+  self-verify against the public origin and completes `enable` when it
   passes. When a response came back but self-verify did not pass, the step
   reports why and asks for a re-run with `--confirm-secrets-applied` after the
   restart; if the run pushed the secrets to the instance, it asks for a restart
