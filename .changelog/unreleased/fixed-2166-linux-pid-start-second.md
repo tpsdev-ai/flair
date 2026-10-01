@@ -1,0 +1,1 @@
+- **Stabilized Linux PID-file identity checks at process start-second boundaries.** The serving-process resolver now compares sidecar timestamps against `/proc` start ticks and boot time, avoiding occasional false disagreement from separately sampled uptime and wall-clock time.

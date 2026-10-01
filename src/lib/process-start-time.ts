@@ -3,7 +3,8 @@
  *
  * Parsers and the ±2s match live in `daemon-liveness.ts` (pure). This file
  * is the I/O adapter those parsers need: Linux `/proc/<pid>/stat` field 22
- * plus `/proc/uptime`, macOS `ps -o lstart=`. One reader for the production
+ * plus `/proc/stat` btime (whole seconds) or `/proc/uptime` (full ms), and
+ * macOS `ps -o lstart=`. One reader for the production
  * daemon identity check and the harness scratch-owner stamp (flair#1372).
  *
  * Darwin `ps -o lstart=` prints local time without a zone. `Date.parse` of
@@ -54,16 +55,46 @@ function readPsLstart(pid: number): string | null {
 }
 
 /**
+ * Linux's whole start second from the same boot epoch and start ticks that
+ * `ps -o lstart=` uses. `/proc/uptime` plus `Date.now()` is sampled at two
+ * different moments, so its reconstructed boot epoch can move across a
+ * second boundary between reads of the same pid.
+ *
+ * `/proc/<pid>/stat` reports starttime in USER_HZ ticks (100 per second), and
+ * `/proc/stat` reports btime in whole epoch seconds. Truncate the tick count
+ * before adding btime so the answer is stable for a living process.
+ */
+export function procStartSecondMsFromStat(processStat: string, systemStat: string): number | null {
+  const starttimeTicks = parseProcStatStartTime(processStat);
+  const bootTimeMatch = /^btime[ \t]+([0-9]+)[ \t]*$/m.exec(systemStat);
+  if (starttimeTicks === null || !Number.isSafeInteger(starttimeTicks) || starttimeTicks < 0 || bootTimeMatch === null) return null;
+  const bootTimeSeconds = Number(bootTimeMatch[1]);
+  if (!Number.isSafeInteger(bootTimeSeconds) || bootTimeSeconds <= 0) return null;
+  const startSecondMs = (bootTimeSeconds + Math.floor(starttimeTicks / 100)) * 1000;
+  return Number.isSafeInteger(startSecondMs) ? startSecondMs : null;
+}
+
+/**
  * The pid's start time truncated to a whole second, in epoch ms (flair#2056).
  *
  * macOS: the second `ps -o lstart=` reports. The zone correction is the
  * `applyLstartZoneOffset` offset rounded to a whole minute: that offset is the
  * parser's zone error (whole minutes) minus this process's sub-second start
- * fraction, and the rounding drops the fraction. Linux: the `/proc` start time
- * truncated to the second.
+ * fraction, and the rounding drops the fraction. Linux: btime plus the
+ * `/proc` start ticks truncated to the second.
  */
 export function readProcessStartSecondMs(pid: number): number | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      return procStartSecondMsFromStat(
+        readFileSync(`/proc/${pid}/stat`, "utf-8"),
+        readFileSync("/proc/stat", "utf-8"),
+      );
+    } catch {
+      return null;
+    }
+  }
   if (process.platform === "darwin") {
     const targetRaw = readPsLstart(pid);
     if (targetRaw === null) return null;
@@ -77,8 +108,7 @@ export function readProcessStartSecondMs(pid: number): number | null {
     const zoneErrorMs = Math.round((ownParsed - ownTrueStartMs) / 60_000) * 60_000;
     return targetParsed - zoneErrorMs;
   }
-  const ms = readProcessStartTimeMs(pid);
-  return ms === null ? null : Math.floor(ms / 1000) * 1000;
+  return null;
 }
 
 export function readProcessStartTimeMs(pid: number): number | null {
