@@ -111,7 +111,7 @@ flair agent
   subcommands: add, list, show, rotate-key, remove
 
 flair agent add
-  description: Register a new agent in a running Flair instance
+  description: Register a new agent. Refuses an id whose Agent record already exists
   usage: [options] <id>
   arguments:
     id (required)
@@ -2719,7 +2719,8 @@ Global Options:
   -v, --version              output the version number
 
 Commands:
-  add [options] <id>         Register a new agent in a running Flair instance
+  add [options] <id>         Register a new agent. Refuses an id whose Agent
+                             record already exists
   list [options]             List all agents
   show [options] <id>        Show agent details
   rotate-key [options] <id>  Rotate an agent's Ed25519 keypair
@@ -2729,7 +2730,7 @@ Commands:
 ----- flair agent add -----
 Usage: flair agent add [options] <id>
 
-Register a new agent in a running Flair instance
+Register a new agent. Refuses an id whose Agent record already exists
 
 Options:
   --name <name>             Display name (defaults to id)
