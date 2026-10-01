@@ -463,13 +463,13 @@ program
       }
     }
 
-    // Probe a port for a recognized /Health response.
+    // Probe a port's /Health.
     async function probePort(p: number): Promise<boolean> {
       const probe = await probeFlairHealth(`http://127.0.0.1:${p}/Health`);
       return probe.reaching;
     }
 
-    // Find a PID port with a recognized /Health response.
+    // Find the PID's port by probing /Health.
     async function discoverPortFromPid(pid: string): Promise<number | null> {
       // Defense-in-depth: caller already validates, but re-check here
       if (!/^\d+$/.test(pid)) return null;
