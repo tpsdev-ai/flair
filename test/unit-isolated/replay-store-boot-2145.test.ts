@@ -3,12 +3,11 @@
  * the OAuth single-use store (flair#2145 item 2).
  *
  * Each store's owner declares its store and calls reportReplayStoreGapsAtBoot
- * at load (resources/XAA.ts: XAA_JTI_REPLAY_BOOT_STORE; resources/OAuth.ts:
- * OAUTH_SINGLE_USE_BOOT_STORE), so a misconfigured table is named once per
- * worker thread — before the first request, not on the first claim. This test
- * imports those modules with both tables missing at the worker's boot and reads
- * the console lines the report writes, then pins each gap through the exported
- * specs and replayStoreStoreGaps.
+ * during Harper's awaited resource import (resources/XAA.ts:
+ * XAA_JTI_REPLAY_BOOT_STORE; resources/OAuth.ts:
+ * OAUTH_SINGLE_USE_BOOT_STORE). This test imports those modules with both
+ * tables missing, checks their lines before invoking a resource handler, then
+ * pins each gap through the exported specs and replayStoreStoreGaps.
  *
  * Isolated lane: this file stubs `harper` for `databases` and sets the
  * `server` global, so it must run one-process-per-file (flair#1817).
@@ -19,8 +18,8 @@ import { createFakeReplayNonceTable, ensureGlobalHarperTransaction, type FakeRep
 class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 
 // The report only runs on a Harper worker thread (replay-store.ts checks
-// `server.workerCount`), and its deps are resolved when the report runs, so the
-// modules below are imported with the worker globals set and both stores absent.
+// `server.workerCount`), and its deps are resolved during import, so the modules
+// below are imported with the worker globals set and both stores absent.
 (globalThis as any).server = { workerCount: 2 };
 
 const flairStub: any = new Proxy({}, { get: (target: any, prop) => (prop in target ? target[prop] : NoopBase) });
@@ -49,7 +48,6 @@ try {
   rs = await import("../../resources/replay-store.ts");
   xaa = await import("../../resources/XAA.ts");
   oauth = await import("../../resources/OAuth.ts");
-  await new Promise((r) => setTimeout(r, 5)); // the report is scheduled with setTimeout(0)
 } finally {
   console.error = origError;
 }
@@ -74,13 +72,12 @@ function goodSingleUse(): FakeReplayNonceTable {
 }
 
 /** Run `fn` with console.error captured, and return the `[flair-replay]` lines written. */
-async function linesAtBoot(report: () => void): Promise<string[]> {
+function linesAtBoot(report: () => void): string[] {
   const lines: string[] = [];
   const orig = console.error;
   console.error = (...a: unknown[]) => lines.push(a.join(" "));
   try {
     report();
-    await new Promise((r) => setTimeout(r, 5)); // the report is scheduled with setTimeout(0)
   } finally {
     console.error = orig;
   }
@@ -94,10 +91,13 @@ beforeEach(() => {
 });
 
 describe("the store modules report their store when the worker boots", () => {
-  it("both stores were named, with the table that is missing", () => {
+  it("both stores are named during import, before a resource serves a request", async () => {
     expect(bootLines.some((l) => l.includes("ReplayStoreUnavailable at boot (XAA jti: table flair.IdJagReplay is not defined)"))).toBe(true);
     expect(bootLines.some((l) => l.includes("ReplayStoreUnavailable at boot (OAuth single-use: table flair.OAuthSingleUse is not defined)"))).toBe(true);
     expect(bootLines.some((l) => l.includes("Requests through that store are refused until it is usable"))).toBe(true);
+    // Calling a real resource handler in this turn must follow those lines;
+    // a timer scheduled during import would leave bootLines empty above.
+    expect((await new oauth.OAuthMetadata().get()).issuer).toBeDefined();
   });
 });
 

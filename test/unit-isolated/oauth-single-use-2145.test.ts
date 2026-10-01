@@ -377,7 +377,7 @@ describe("the single-use key and the table", () => {
     expect(oauth.OAUTH_SINGLE_USE_MIN_RETENTION_MS).toBeGreaterThanOrEqual(7 * 86400_000); // the refresh token's 7 days
   });
 
-  it("a record row the previous release wrote for a code (same table, same key) refuses that code", async () => {
+  it("a seeded record row for a code (same table, same key) refuses that code", async () => {
     const code = mintCode();
     singleUse.rows.set(codeKey(code), { id: codeKey(code), seenAt: Date.now() } as any);
     expect(await redeemCode(code)).toEqual(CODE_USED);

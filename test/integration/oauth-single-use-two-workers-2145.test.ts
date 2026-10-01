@@ -5,9 +5,9 @@
 // per Harper instance (resources/OAuth.ts → claimOAuthSingleUse in
 // resources/replay-store.ts), so a code or refresh token accepted on one worker
 // is refused on the other, and simultaneous presentations of one yield exactly
-// one acceptance, on one worker or across both. A store error refuses with 503
-// and records nothing. A `jti` the store cannot encode as a key is one such
-// store error, so that grant refuses with 503 too.
+// one acceptance, on one worker or across both. The injected prewrite store
+// error refuses with 503 and leaves no row. A `jti` the store cannot encode as a
+// key is another store error, so that grant refuses with 503 too.
 //
 // HTTP cannot aim a request at a chosen worker (see
 // replay-store-two-workers-2061.test.ts), so a private composed copy of the
@@ -138,7 +138,7 @@ describe(`OAuth single-use records are instance-shared across ${WORKERS} Harper 
     }
   });
 
-  test("a store error refuses the redemption with 503 and records nothing, and the value is redeemable once the store recovers", () => {
+  test("an injected prewrite store error refuses with 503, leaves no row, and permits redemption after recovery", () => {
     for (const kind of ["code", "refresh"]) {
       const s = result.storeError[kind];
       expect(s.during).toEqual(UNAVAILABLE); // assertion: fail closed

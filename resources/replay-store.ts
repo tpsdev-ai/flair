@@ -442,22 +442,21 @@ export function replayStoreBootGaps(deps: ReplayStoreDeps = harperReplayDeps()):
   return gaps;
 }
 
-/** Run `fn` once per worker thread, after the schema's tables are bound. */
-function scheduleAtBoot(fn: () => void): void {
+/** Run during the awaited resource-module import, after graphqlSchema loads. */
+function reportAtBoot(fn: () => void): void {
   // Harper defines `server.workerCount` on worker threads; unit tests and the
-  // CLI never reach this.
-  if (typeof setTimeout === "undefined" || typeof (globalThis as any).server?.workerCount !== "number") return;
-  setTimeout(() => {
-    try {
-      fn();
-    } catch (err: any) {
-      console.error(`[flair-replay] ReplayStoreUnavailable at boot: ${err?.message ?? err}`);
-    }
-  }, 0);
+  // CLI never reach this. The jsResource initial load awaits module imports,
+  // and the worker waits for that load before it starts listening.
+  if (typeof (globalThis as any).server?.workerCount !== "number") return;
+  try {
+    fn();
+  } catch (err: any) {
+    console.error(`[flair-replay] ReplayStoreUnavailable at boot: ${err?.message ?? err}`);
+  }
 }
 
 // Once per worker thread, after the schema's tables are bound.
-scheduleAtBoot(() => {
+reportAtBoot(() => {
   for (const gap of replayStoreBootGaps()) {
     console.error(`[flair-replay] ReplayStoreUnavailable at boot (${gap}). Signed requests on this path are refused.`);
   }
@@ -491,10 +490,10 @@ export function replayStoreStoreGaps(store: ReplayStoreBootStore): string[] {
  * Print `store`'s gaps once per worker thread at boot, beside the replay
  * guards' (`replayStoreBootGaps`): a misconfigured table is named before the
  * first request instead of on the first claim. Call it at module load, from the
- * module that owns the store.
+ * module that owns the store, while Harper awaits that resource import.
  */
 export function reportReplayStoreGapsAtBoot(store: ReplayStoreBootStore): void {
-  scheduleAtBoot(() => {
+  reportAtBoot(() => {
     for (const gap of replayStoreStoreGaps(store)) {
       console.error(
         `[flair-replay] ReplayStoreUnavailable at boot (${gap}). Requests through that store are refused until it is usable (see resources/replay-store.ts).`,
