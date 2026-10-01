@@ -172,7 +172,7 @@ the same identity plane.
 | POST | `/MemoryDedupStats` | Admin Basic | Dedup diagnostics. Fleet-wide sweep; `allowCreate` is `allowAdmin`. |
 | POST | `/SkillScan` | Ed25519 | Skill-tag scan on Memory writes. |
 | GET | `/OrgSkillAssignment`, `/OrgSkillAssignment/<id>` | Ed25519 | Any verified agent. Org-scope skill assignments; see the `skills` paragraph in [docs/mcp-clients.md](mcp-clients.md). Not federated. |
-| POST / PUT / PATCH / DELETE | `/OrgSkillAssignment` | **Operator / internal** | Not Ed25519, admin-agent keys included. Each accepted write appends an `OrgSkillAssignmentHistory` row. |
+| POST / PUT / PATCH / DELETE | `/OrgSkillAssignment/` (POST), `/OrgSkillAssignment/<id>` (PUT / PATCH / DELETE) | **Operator / internal** | Not Ed25519, admin-agent keys included. Each accepted write appends an `OrgSkillAssignmentHistory` row. |
 
 Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 `content`. MCP tools: `skill_store`, `skill_search`, `skill_get`.

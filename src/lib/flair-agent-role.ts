@@ -13,16 +13,6 @@
 // `super_user` and no operations grants, /sql and /graphql become NATIVELY 403
 // for agents (the raw-query block the gate hand-rolled is now enforced by
 // Harper itself).
-//
-// VALIDATION GATES (must confirm against a live Harper before this role goes
-// live — flagged for Sherlock + the PR, not assumed):
-//   1. HNSW/vector search (SemanticSearch over Memory) works with table `read`
-//      alone — the old elevation comment claimed admin perms were needed for
-//      "HNSW-capable" access; confirm `read` suffices or widen precisely.
-//   2. Role table keys must EXACTLY match the @table names (Memory, OrgEvent,
-//      WorkspaceState, OAuthClient — NOT the logical Memory/Event/Workspace/OAuth
-//      shorthand the flair_pair_initiator spec used, which was harmless only
-//      because every grant there is false).
 
 // Harper 5.0.21 add_role requires an `attribute_permissions` array on EVERY table
 // grant (empty = no attribute-level restriction, so the table-level CRUD applies);

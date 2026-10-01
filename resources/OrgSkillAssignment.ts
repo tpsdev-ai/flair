@@ -11,7 +11,7 @@ import { soulWriteSource, type SoulWriteSource } from "./soul-write-policy.js";
 /**
  * OrgSkillAssignment — org-scope skill assignments (flair#2141 S1).
  *
- * A row assigns the skill row `skillRef` under `skillName` and `priority`;
+ * A row assigns `skillRef` under `skillName` and `priority`;
  * bootstrap's skills manifest resolves it for an agent that receives org
  * skills (resources/skill-manifest.ts).
  *
@@ -25,9 +25,8 @@ import { soulWriteSource, type SoulWriteSource } from "./soul-write-policy.js";
  * (actor, source class, a hash of the stored row before the write) in the
  * write's transaction. put, patch and delete hold a per-assignment lock shared
  * by the threads of this Harper process (`withAssignmentLock`) while they read
- * the stored row and commit, so two writes to one assignment through this
- * process record distinct predecessors. Writes on other replicated nodes are
- * not covered by that lock.
+ * the stored row and commit. Writes on other replicated nodes are not covered
+ * by that lock.
  */
 
 const TABLE = "OrgSkillAssignment";
