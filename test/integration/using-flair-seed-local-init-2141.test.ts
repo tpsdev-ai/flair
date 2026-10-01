@@ -15,8 +15,8 @@
 //   - PATH starts with a `launchctl` stub that answers "no such service", so on
 //     macOS init's read-only launchd checks never reach the real launchd domain
 //     (a fresh init writes a plist into HOME and does not load it);
-//   - teardown kills only the pid in this data dir's hdb.pid that listens on
-//     this test's port;
+//   - teardown kills only the pid in this data dir's hdb.pid when lsof finds
+//     no listener or identifies that pid on this test's port;
 //   - the CLI runs under Node, so the Harper it starts runs under Node too.
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";

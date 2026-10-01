@@ -249,13 +249,13 @@ describe("flair#2141 S2 — the seed's fixed ids belong to the operator", () => 
       const run = runInit();
       expect(run.status, run.stdout + run.stderr).not.toBe(0);
       expect(run.stderr).toContain(`an Agent record has the operator's id "${harper.admin.username}"`);
-      expect(run.stderr).toContain("init wrote nothing");
+      expect(run.stderr).toContain("the seed wrote neither seed row");
     } finally {
       await ops({ operation: "delete", database: "flair", table: "Agent", ids: [shadow.id] });
     }
   }, 150_000);
 
-  test("`flair init` refuses a pre-existing seed row written by an agent, writes nothing, and the remedy works", async () => {
+  test("`flair init` refuses a pre-existing agent-written seed row before either seed row is written, and the remedy works", async () => {
     expect(await asOperator("DELETE", ROW_PATH)).toBeLessThan(300);
     await ops({ operation: "delete", database: "flair", table: "OrgSkillAssignment", ids: [SEED_ASSIGNMENT_ID] });
     // A row an agent wrote before the server reserved the id: the current text,
@@ -268,7 +268,7 @@ describe("flair#2141 S2 — the seed's fixed ids belong to the operator", () => 
     const refused = runInit();
     expect(refused.status, refused.stdout + refused.stderr).not.toBe(0);
     expect(refused.stderr).toContain(`the "${SEED_SKILL_ID}" Memory row is owned by "${AGENT.id}"`);
-    expect(refused.stderr).toContain("init wrote nothing");
+    expect(refused.stderr).toContain("the seed wrote neither seed row");
     expect(refused.stderr).toContain(`DELETE ${ROW_PATH}`);
     expect(await assignmentRows()).toEqual([]);
     expect((await memoryRow())?.agentId).toBe(AGENT.id);

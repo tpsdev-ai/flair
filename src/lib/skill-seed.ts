@@ -5,8 +5,9 @@
  * `flair init` is the install path. It writes BOTH rows as the operator — a
  * verified Basic administrator, over authenticated Basic REST requests
  * (`PUT /Memory/<id>`, `PUT /OrgSkillAssignment/<id>`) — so the rows carry
- * the operator's id. The instance refuses any other caller's create, PUT,
- * PATCH or DELETE of either fixed id (resources/seed-reservation.ts,
+ * the operator's id. Resource write paths check the operator source (Basic
+ * administrator or deliberate internal call) for the fixed ids. The Memory
+ * reservation has documented bookkeeping writes (resources/seed-reservation.ts,
  * resources/OrgSkillAssignment.ts).
  *
  * Before it writes anything, the seed refuses:
@@ -192,7 +193,7 @@ function refused(error: string, message: string): SkillSeedOutcome {
   return { kind: "refused", error, message };
 }
 
-const NOTHING_WRITTEN = "init wrote nothing";
+const NOTHING_WRITTEN = "the seed wrote neither seed row";
 const ROW_PATH = `/Memory/${encodeURIComponent(SEED_SKILL_ID)}`;
 const ASSIGNMENT_PATH = `/OrgSkillAssignment/${encodeURIComponent(SEED_ASSIGNMENT_ID)}`;
 const ROW_REMEDY =

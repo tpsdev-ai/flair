@@ -4,27 +4,26 @@ import { readFileSync } from "node:fs";
 import { rawTableWriteSites } from "../helpers/raw-table-writers";
 
 /**
- * seed-id-writer-coverage.test.ts — flair#2141 S2: every raw Memory write site
- * is classified for the seed's reserved id (resources/seed-reservation.ts).
+ * seed-id-writer-coverage.test.ts — flair#2141 S2: classify raw Memory write
+ * sites detected by the inventory helper for the reserved id.
  *
- * A write to the reserved skill row id needs operator authority. No storage
- * hook sees every Memory write, so the rule is one decision
- * (`reservedSeedWriteDenial`) that each write path taking a caller-chosen id
- * calls before it writes. This test enumerates every raw Memory write site the
- * same way memory-skill-writer-coverage.test.ts does, and requires each to be
- * declared one of:
+ * The guarded Resource paths require the operator source: an authenticated
+ * Basic administrator or a deliberate internal call. No storage hook sees
+ * every Memory write, so those paths call one decision
+ * (`reservedSeedWriteDenial`) before writing. This test inventories raw Memory
+ * write sites in its supported source patterns and classifies each as:
  *
  *   GUARDED     — the decision runs on the ids this write can land on;
  *   OPERATOR    — the route already requires the operator source;
- *   BOOKKEEPING — the server writes one field it chose (a counter, a
- *                 timestamp, an embedding) onto a row it did not choose by a
- *                 caller id; never content, tags, owner or visibility;
+ *   BOOKKEEPING — lastReflected and embedding backfill update selected fields;
+ *                 usage recording intends to change only usageCount but
+ *                 re-PUTs the stored row and can take an agent-supplied id;
  *   SERVER      — the server selects the rows (a sweep, a migration, a row it
  *                 just wrote under a generated id), or another table, or a
  *                 read-only alias.
  *
- * A new raw writer fails this test until it is classified, so a path that
- * skips the decision is a reviewed change, not an accident.
+ * A new raw writer detected by the inventory fails until classified. This
+ * test does not establish coverage for every possible write path.
  */
 
 const classified = new Map<string, string>();
@@ -51,7 +50,7 @@ add("Federation", ["writer:table.put#1"],
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
   "OPERATOR: POST /AgentSeed requires the operator source (authorizeSoulWrite), the authority the reservation asks for.");
 
-// ── BOOKKEEPING (deliberately open: the field is server-chosen and never content) ──
+// ── BOOKKEEPING (deliberately open; see the distinctions above) ──
 add("Memory", ["writer:patchRecord#1"],
   "BOOKKEEPING: lastReflected on each derivedFrom source of a new row.");
 add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
@@ -63,7 +62,7 @@ add("MemoryReflect", ["writer:patchRecordSilent#1"],
 
 // ── SERVER ──
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
-  "SERVER: the sweep selects rows by state (expired ephemeral, closed, old session notes). The seed row is persistent and only an operator supersede can close it.");
+  "SERVER: the sweep selects rows by state (expired ephemeral, closed, old session notes). The seed row is persistent and closing it by supersede requires the operator-source decision.");
 add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource pointer rows, another table.");
 add("MemoryReindex", ["writer:Memory.put#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields.");
 add("promotion-stamp", ["writer:table.put#1"],
@@ -113,7 +112,7 @@ for (const [file, alias] of [
   add(file, [alias], "SERVER: a table handle; its writes, if any, are the sites classified above.");
 }
 
-test("every raw Memory write site has an explicit classification for the reserved seed id", () => {
+test("raw Memory write sites detected by the inventory are classified for the reserved seed id", () => {
   const sites = [...new Glob("{resources,src}/**/*.ts").scanSync(".")].flatMap((file) => rawTableWriteSites(file, readFileSync(file, "utf8"), "Memory"));
   expect(sites.filter((site) => !classified.has(site.key)).map((site) => site.key)).toEqual([]);
   expect([...classified.keys()].filter((key) => !sites.some((site) => site.key === key))).toEqual([]);

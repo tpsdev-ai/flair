@@ -1,6 +1,6 @@
 /**
- * seed-reservation.ts — the `using-flair` seed's fixed ids are written only with
- * operator authority (flair#2141 S2).
+ * seed-reservation.ts — reserve the `using-flair` seed's fixed ids for the
+ * operator source (flair#2141 S2).
  *
  * `flair init` seeds one skill row at a FIXED Memory id and one org assignment
  * at a FIXED OrgSkillAssignment id that points at it. Bootstrap lists the
@@ -21,14 +21,14 @@
  * already requires the operator source (resources/OrgSkillAssignment.ts), and
  * test/unit/org-skill-assignment-writer-coverage.test.ts pins its writers.
  *
- * Where it applies: each Memory write path that can take a caller-chosen id
- * runs this decision before it writes — Memory post/put/patch/delete, the
- * supersede target, and FeedMemories — and the federation merge skips a
- * reserved id (`seed_id_not_federated`). Server bookkeeping that writes one
- * server-chosen field onto a row (usageCount, lastReflected, the embedding
- * backfill) never writes content, tags, owner or visibility, and is left open.
- * test/unit/seed-id-writer-coverage.test.ts classifies every raw Memory write
- * site, so a new path is a reviewed change.
+ * Where it applies: Memory post/put/patch/delete, the supersede target, and
+ * FeedMemories check caller-chosen ids before writing; federation skips a
+ * reserved id (`seed_id_not_federated`). Server bookkeeping is also allowed:
+ * lastReflected and embedding backfill update their selected fields. Usage
+ * recording intends to change only usageCount, but re-PUTs the stored row and
+ * can receive an agent-supplied id. The coverage test classifies raw Memory
+ * write sites detected by its supported source patterns; it does not prove
+ * that every possible write path is classified.
  */
 import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { FORBIDDEN, UNAUTH } from "./record-type-kit.js";
@@ -37,7 +37,7 @@ import { SEED_SKILL_ROW_ID } from "./seed-ids.js";
 
 export { SEED_SKILL_ROW_ID };
 
-/** Table → the ids on it that only the operator may write. */
+/** Table → ids reserved for the operator source, subject to documented bookkeeping writes. */
 export const RESERVED_SEED_IDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   Memory: Object.freeze([SEED_SKILL_ROW_ID]),
 });
@@ -79,8 +79,8 @@ export function reservedSeedWriteDenial(
   if (auth.kind === "anonymous") return UNAUTH();
   if (soulWriteSource(context, auth)) return null;
   return FORBIDDEN(
-    `seed_id_reserved: ${table} ${JSON.stringify(String(reserved))} is written only by the operator ` +
-      "(an authenticated Basic administrator)",
+    `seed_id_reserved: ${table} ${JSON.stringify(String(reserved))} requires the operator source ` +
+      "(an authenticated Basic administrator or deliberate internal call)",
   );
 }
 

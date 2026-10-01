@@ -232,7 +232,7 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
     expect((all ?? []).filter((r: any) => r.id === SEED_SKILL_ID).length).toBe(1);
   }, 30_000);
 
-  test("an operator-owned row that is archived or private fails `flair init`, and init writes nothing", async () => {
+  test("an operator-owned row that is archived or private fails `flair init` before either seed row is written", async () => {
     for (const [change, phrase] of [
       [{ archived: true }, "it is archived"],
       [{ visibility: "private" }, 'its visibility is "private"'],
@@ -243,7 +243,7 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
       expect(run.status, run.stdout + run.stderr).not.toBe(0);
       expect(run.stderr).toContain(`the "${SEED_SKILL_ID}" Memory row is not a live org skill`);
       expect(run.stderr).toContain(phrase);
-      expect(run.stderr).toContain("init wrote nothing");
+      expect(run.stderr).toContain("the seed wrote neither seed row");
       await ops({ operation: "update", database: "flair", table: "Memory", records: [{ id: SEED_SKILL_ID, archived: false, visibility: before.visibility }] });
     }
     const run = runInit();

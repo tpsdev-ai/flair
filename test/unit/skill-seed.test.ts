@@ -214,7 +214,7 @@ describe("runSkillSeed — ownership", () => {
     const message = (out as { message: string }).message;
     expect(message).toContain(`"${SEED_SKILL_ID}"`);
     expect(message).toContain('"some-agent"');
-    expect(message).toContain("init wrote nothing");
+    expect(message).toContain("the seed wrote neither seed row");
     expect(message).toContain("DELETE /Memory/skill%3Ausing-flair");
     expect(message).toContain("re-run 'flair init'");
     expect(io.calls).toEqual(NO_WRITES);
@@ -224,7 +224,7 @@ describe("runSkillSeed — ownership", () => {
     const io = fakeIo({ row: { ok: true, row: liveRow(CURRENT) }, operatorAgent: { ok: true, row: { id: OPERATOR } } });
     const out = await runSkillSeed(io, current);
     expect(out).toMatchObject({ kind: "refused", error: "skill_seed_operator_ambiguous" });
-    expect((out as { message: string }).message).toContain("init wrote nothing");
+    expect((out as { message: string }).message).toContain("the seed wrote neither seed row");
     expect(io.calls).toEqual(NO_WRITES);
   });
 
@@ -263,7 +263,7 @@ describe("runSkillSeed — a row or assignment the manifest cannot resolve is re
       const out = await runSkillSeed(io, current);
       expect(out).toMatchObject({ kind: "refused", error: "skill_seed_row_incomplete" });
       expect((out as { message: string }).message).toContain(phrase);
-      expect((out as { message: string }).message).toContain("init wrote nothing");
+      expect((out as { message: string }).message).toContain("the seed wrote neither seed row");
       expect(io.calls).toEqual(NO_WRITES);
     });
   }
@@ -331,7 +331,7 @@ describe("runSkillSeed — a row or assignment the manifest cannot resolve is re
 // The instance embeds a skill row as it writes it, and the first embed waits
 // for the embedding model to download and load — after Harper reports healthy.
 // This fake instance answers each request after a per-route delay, honours the
-// client's abort, and (like Harper) still finishes a PUT the client gave up on.
+// client's abort, and models the case where an abandoned PUT still finishes.
 
 interface SlowInstance {
   rows: Map<string, Record<string, unknown>>;

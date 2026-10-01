@@ -31,8 +31,8 @@ export class FeedMemories extends Resource {
       return UNAUTH();
     }
 
-    // flair#2141 S2: a body id may name the seed's fixed id, which is written
-    // only with operator authority (resources/seed-reservation.ts).
+    // flair#2141 S2: check a body id against the operator-source seed
+    // reservation (resources/seed-reservation.ts).
     const seedDenial = reservedSeedWriteDenial("Memory", [content?.id], ctx, auth);
     if (seedDenial) return seedDenial;
 

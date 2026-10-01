@@ -938,8 +938,8 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
-    // flair#2141 S2: the seed's fixed id is written only with operator
-    // authority (resources/seed-reservation.ts).
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
@@ -1291,8 +1291,8 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   async patch(content: any, query?: any) {
-    // flair#2141 S2: the seed's fixed id is written only with operator
-    // authority (resources/seed-reservation.ts).
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
@@ -1420,8 +1420,8 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async put(content: any) {
-    // flair#2141 S2: the seed's fixed id is written only with operator
-    // authority (resources/seed-reservation.ts).
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
@@ -1862,8 +1862,8 @@ export class Memory extends (databases as any).flair.Memory {
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();
-    // flair#2141 S2: the seed's fixed id is written only with operator
-    // authority (resources/seed-reservation.ts).
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
     const seedDenial = reservedSeedWriteDenial(
       "Memory", [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], ctx, auth,
     );
