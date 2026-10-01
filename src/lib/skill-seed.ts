@@ -2,8 +2,10 @@
  * skill-seed.ts — the `using-flair` seed: the decision, and its install-time
  * write (flair#2141 S2).
  *
- * `flair init` is the install path. It writes BOTH rows as the operator — a
- * verified Basic administrator, over authenticated Basic REST requests
+ * A normal `flair init` writes both rows; local `--skip-start` on the default
+ * install defers them until `flair start`. Re-runs may find both rows already
+ * current. Writes use
+ * a verified Basic administrator over authenticated Basic REST requests
  * (`PUT /Memory/<id>`, `PUT /OrgSkillAssignment/<id>`) — so the rows carry
  * the operator's id. Resource write paths check the operator source (Basic
  * administrator or deliberate internal call) for the fixed ids. The Memory
@@ -16,8 +18,9 @@
  *     have been written by the agent, so its owner is ambiguous;
  *   - an existing skill row not owned by the operator;
  *   - an existing skill row whose content is not text, or that is not a live
- *     org skill: no `skill` tag, visibility not `shared`, archived, closed
- *     (`validTo`) or expired (`expiresAt`), or another id;
+ *     org skill: no `skill` tag, durability not `persistent`, visibility not
+ *     `shared`, archived, closed (`validTo`) or expired (`expiresAt`), or
+ *     another id;
  *   - an existing assignment with another id, `skillRef`, `skillName` or
  *     priority.
  *
@@ -66,12 +69,12 @@ export const SEED_REQUEST_TIMEOUT_MS = 15_000;
 /**
  * The bound on the skill row's write. The instance embeds a skill row as it
  * writes it (`Memory.put` awaits `getEmbedding`), and the first embed awaits
- * the embedding model's readiness: a first start downloads the model (~80 MB)
- * and loads it in the background, and Harper reports healthy before that ends.
- * So this one write can outlast the 15 s bound on a healthy instance. 180 s
- * covers a first-start download on an ordinary link, and stays under the 300 s
- * default headers timeout of Node's fetch, so this bound and its message fire
- * first.
+ * the embedding model's readiness: a first start may download the model
+ * (~80 MB) and load it in the background, and Harper can report healthy before
+ * that ends. So this one write can outlast the 15 s bound on a healthy instance.
+ * The 180 s limit bounds the wait; it does not guarantee a download completes.
+ * It stays under the 300 s default headers timeout of Node's fetch, so this
+ * bound and its message fire first.
  */
 export const SEED_SKILL_WRITE_TIMEOUT_MS = 180_000;
 
@@ -86,6 +89,7 @@ export interface SeedRowShape {
   agentId?: unknown;
   content?: unknown;
   tags?: unknown;
+  durability?: unknown;
   visibility?: unknown;
   archived?: unknown;
   validTo?: unknown;
@@ -172,6 +176,7 @@ export function seedRowProblems(row: SeedRowShape, now: number = Date.now()): st
   const problems: string[] = [];
   if (row.id !== SEED_SKILL_ID) problems.push(`its id is ${JSON.stringify(row.id ?? null)}`);
   if (!Array.isArray(row.tags) || !row.tags.includes("skill")) problems.push('it has no "skill" tag');
+  if (row.durability !== "persistent") problems.push(`its durability is ${JSON.stringify(row.durability ?? null)}, not "persistent"`);
   if (row.visibility !== "shared") problems.push(`its visibility is ${JSON.stringify(row.visibility ?? null)}, not "shared"`);
   if (row.archived === true) problems.push("it is archived");
   if (isPast(row.validTo, now)) problems.push("it is closed (validTo is past)");
@@ -203,7 +208,7 @@ const ASSIGNMENT_REMEDY =
   `Inspect it (GET ${ASSIGNMENT_PATH}), correct or delete it with the operator's Basic credentials, ` +
   "then re-run 'flair init'";
 
-/** Apply the seed rule over `io`. Writes nothing unless every read and check passes. */
+/** Apply the seed rule over `io`. Preflight reads and checks pass before either write. */
 export async function runSkillSeed(io: SkillSeedIo, current: SeedCurrent): Promise<SkillSeedOutcome> {
   const rowRead = await io.readRow();
   if (!rowRead.ok) {
@@ -465,14 +470,14 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     const notice = setTimeout(() => {
       opts.notify?.(
         `using-flair skill: still writing "${SEED_SKILL_ID}" — the instance embeds a skill row as it writes it, ` +
-          `and a first start downloads (~80 MB) and loads the embedding model first; waiting up to ${seconds(skillWriteMs)}`,
+          `and it may need to download (~80 MB) and load the embedding model first; waiting up to ${seconds(skillWriteMs)}`,
       );
     }, skillNoticeMs);
     (notice as unknown as { unref?: () => void }).unref?.();
     try {
       return await putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current), skillWriteMs, (ms) =>
         `no answer within ${seconds(ms)} — the instance embeds a skill row as it writes it, so this write also ` +
-        `waits for its embedding model to download and load; 'flair doctor' reports embeddings. The write may ` +
+        `wait for its embedding model to download and load; 'flair doctor' reports embeddings. The write may ` +
         `still land; the id is fixed, so a re-run updates that row rather than adding one`,
       );
     } finally {
@@ -501,8 +506,9 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
 }
 
 /**
- * Seed `using-flair` on the instance at `baseUrl`, as the operator. The one
- * call `flair init` makes: it reports what it did, or refuses with a remedy.
+ * Seed `using-flair` on the instance at `baseUrl`, as the operator. Used by
+ * `flair init` and a pending `flair start`; reports the action or a refusal
+ * with a remedy.
  */
 export function seedUsingFlairSkill(opts: SkillSeedRestOptions): Promise<SkillSeedOutcome> {
   return runSkillSeed(skillSeedRestIo(opts), currentSeed());

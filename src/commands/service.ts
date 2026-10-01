@@ -7,7 +7,9 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { DEFAULT_ADMIN_USER } from "../lib/auth-resolve.js";
+import { DEFAULT_ADMIN_USER, defaultAdminPassPath, readAdminPassFileSecure } from "../lib/auth-resolve.js";
+import { seedUsingFlairSkill } from "../lib/skill-seed.js";
+import { reconcilePendingSkillSeed, skillSeedPendingPath } from "../lib/skill-seed-pending.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
 import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, verifyLaunchdManagement } from "../lib/launchd-management.js";
 import {
@@ -190,6 +192,31 @@ function waitForProcessExit(...args: any[]): any {
 
 function writeDaemonSidecar(...args: any[]): any {
   return cli.writeDaemonSidecar(...args);
+}
+
+/** Finish a local --skip-start init after this command has started its instance. */
+async function seedAfterStart(dataDir: string, port: number): Promise<boolean> {
+  try {
+    const outcome = await reconcilePendingSkillSeed(dataDir, async () => {
+      const passPath = defaultAdminPassPath();
+      const pass = process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD ||
+        (existsSync(passPath) ? readAdminPassFileSecure(passPath) : "");
+      if (!pass) throw new Error(`admin credentials are needed; set FLAIR_ADMIN_PASS or restore ${passPath}`);
+      return seedUsingFlairSkill({
+        baseUrl: `http://127.0.0.1:${port}`,
+        user: DEFAULT_ADMIN_USER,
+        pass,
+        notify: (line) => console.log(line),
+      });
+    });
+    if (!outcome) return true;
+    if (outcome.kind === "refused") throw new Error(outcome.message);
+    console.log(`using-flair skill: ${outcome.message}`);
+    return true;
+  } catch (err: any) {
+    console.error(`❌ Flair started, but the using-flair skill seed is pending: ${err?.message ?? err}`);
+    return false;
+  }
 }
 
 export function register(program: Command): void {
@@ -398,6 +425,7 @@ program
             const managed = observeLaunchdManagement(dataDir, port);
             const verdict = verifyLaunchdManagement(managed);
             if (verdict.verified) {
+              if (!await seedAfterStart(dataDir, port)) process.exit(1);
               // The migration's check mark too only after the strict verifier
               // passed: moving a plist is not launchd running this instance.
               if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
@@ -409,6 +437,10 @@ program
             console.error(`⚠️  Flair is running on port ${port}, but it is NOT verified as launchd-managed: ${managed.detail}`);
             if (migrated) console.error(`   The launchd service was moved off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label}.`);
             if (managed.remedy?.length) console.error(`   Fix: ${managed.remedy.join(" && ")}`);
+            if (existsSync(skillSeedPendingPath(dataDir))) {
+              console.error("❌ Flair started, but its identity is unverified; the using-flair skill seed remains pending. Run 'flair doctor' before retrying.");
+              process.exit(1);
+            }
             return;
           } catch (err: any) {
             // flair#2040: start directly below only when no job for this
@@ -465,6 +497,14 @@ program
       await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
       readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
       stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
+      if (existsSync(skillSeedPendingPath(dataDir))) {
+        const observed = classifyDaemonState(await gatherDaemonEvidence(port, dataDir), { port, dataDir });
+        if (observed.state !== "RUNNING" || observed.pid !== proc.pid) {
+          console.error("❌ Flair answered health, but this start did not prove the serving process; the using-flair skill seed remains pending.");
+          process.exit(1);
+        }
+        if (!await seedAfterStart(dataDir, port)) process.exit(1);
+      }
       if (launchdFellBack) {
         // flair#2040: a direct start that took launchd's place says so.
         const [headline, ...rest] = renderDirectRunNotice(port, proc.pid ?? null);

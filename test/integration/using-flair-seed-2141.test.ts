@@ -6,8 +6,8 @@
 // agent's bootstrap lists `using-flair` with no per-agent setup. The seeding
 // call is init's, so removing it fails this file.
 //
-// HOME is a scratch directory and every target is asserted to be this test's own
-// instance before the CLI runs.
+// HOME is a scratch directory; target URLs are checked for loopback and
+// nondefault ports before the CLI runs.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -54,7 +54,7 @@ function assertOwnInstance(h: HarperInstance): void {
   }
 }
 
-/** The seed's REST options, pointed ONLY at this test's own instance. */
+/** The seed's REST options, using the instance started by this test. */
 function restOpts() {
   const u = new URL(harper.httpURL);
   expect(["127.0.0.1", "localhost"]).toContain(u.hostname);
@@ -183,7 +183,7 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
     expect((souls ?? []).some((s: any) => s.key === "skill-assignment")).toBe(false);
   }, 30_000);
 
-  test("a second `flair init` changes nothing", async () => {
+  test("a second `flair init` preserves the skill text and assignment count", async () => {
     const before = await memoryRow();
     const run = runInit();
     expect(run.status, `init failed: ${run.stderr.slice(-800)}`).toBe(0);

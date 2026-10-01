@@ -141,9 +141,9 @@ export function resolvableSkillRows(
 }
 
 /**
- * flair#2141 S2 hook: the skill rows written by the reserved system writer
- * (the operator seed), the only candidates besides the agent's own rows. None
- * exist before S2, so this returns no rows.
+ * Name-only assignments resolve against the agent's own rows. The operator's
+ * shipped skill is assigned by explicit `skillRef`; it is not an implicit
+ * fallback for an agent's name-only assignment.
  */
 export function seedSkillRows(_rows: SkillRow[]): SkillRow[] {
   return [];
@@ -151,7 +151,7 @@ export function seedSkillRows(_rows: SkillRow[]): SkillRow[] {
 
 /**
  * Resolve a name-only assignment to one skill row: the target agent's own row
- * with that name (then, from flair#2141 S2, a seed row; see seedSkillRows).
+ * with that name. Explicit org `skillRef` assignments use resolveOrgRef.
  * More than one row at a step is ambiguous; no row is unresolved.
  */
 export function resolveSkillRef(name: string, rows: SkillRow[], agentId: string): SkillRefResolution {

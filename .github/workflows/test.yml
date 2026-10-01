@@ -276,11 +276,10 @@ jobs:
         run: bun scripts/check-darwin-gated-tests.mjs
       # flair#2141 S2 — `flair init` seeds a skill row, and the instance embeds
       # it as it writes it, so the init case below is this job's first embed.
-      # Every instance the test boots reads FLAIR_MODELS_DIR=<repo>/models (the
-      # test's doctorEnv); without a model there, each one starts the same
-      # HuggingFace download and is torn down mid-way, and the next waits out
-      # the dead download's lock. Same pinned fetch as every other lane that
-      # embeds (flair#715). After the unit step, so <cwd>/models is absent
+      # Test instances read FLAIR_MODELS_DIR=<repo>/models. Without a model
+      # there, they may download it during embedding, delaying the init case.
+      # Same pinned fetch as other lanes that embed (flair#715).
+      # After the unit step, so <cwd>/models is absent
       # while the darwin-gated unit tests run.
       - name: Pre-download embedding model
         # Bounded so a stalled download cannot spend the case budgets above.

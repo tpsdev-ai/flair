@@ -1,7 +1,8 @@
 // ─── flair#2141 S2 — the seed's fixed ids belong to the operator ─────────────
 //
 // Real Harper. The seed writes a skill row and an org assignment at fixed ids,
-// and bootstrap lists that assignment for every agent principal, so:
+// and eligible agent bootstraps may list it when it wins same-name resolution
+// and fits the budget, so:
 //
 //   - an agent cannot create, replace, patch, delete or supersede the seed row,
 //     through POST/PUT/PATCH/DELETE /Memory or POST /FeedMemories, and a
@@ -12,8 +13,8 @@
 //     operator, and refuses when an Agent record holds the operator's id;
 //   - the operator's own rows still upgrade.
 //
-// HOME is a scratch directory and every target is asserted to be this test's
-// own instance before the CLI runs.
+// HOME is a scratch directory; target URLs are checked for loopback and
+// nondefault ports before the CLI runs.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";

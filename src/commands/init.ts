@@ -20,6 +20,7 @@ import {
 } from "../lib/init-admin-pass.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { seedUsingFlairSkill } from "../lib/skill-seed.js";
+import { clearSkillSeedPending, markSkillSeedPending } from "../lib/skill-seed-pending.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
 import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
@@ -1117,17 +1118,24 @@ program
     persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost, httpBind.host);
 
     // flair#2141 S2 — seed the org-wide using-flair skill on this instance, as
-    // the operator. Local `--skip-start` is a deliberate seeding exclusion:
-    // init does not seed, and says so. (Remote init, `--target`, seeds with or
+    // the operator. Local `--skip-start` on the default install defers seeding
+    // to `flair start`, which has no `--data-dir` flag.
+    // (Remote init, `--target`, seeds with or
     // without `--skip-start`.) A refusal fails this run rather than reporting a
     // successful init without the skill, so both local paths call it before
     // they print their success summary.
     const seedUsingFlairSkillOnInstall = async (): Promise<void> => {
       if (opts.skipStart) {
-        console.log("using-flair skill: not seeded (a local --skip-start init does not seed; run 'flair init' without --skip-start to seed)");
+        if (dataDir === defaultDataDir()) {
+          markSkillSeedPending(dataDir);
+          console.log("using-flair skill: pending (local --skip-start init defers seeding until 'flair start')");
+        } else {
+          console.log("using-flair skill: not seeded (start this custom data-dir instance, then run 'flair init' without --skip-start to seed)");
+        }
         return;
       }
       await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);
+      clearSkillSeedPending(dataDir);
     };
 
     if (agentId) {

@@ -2,10 +2,13 @@
  * seed-reservation.ts — reserve the `using-flair` seed's fixed ids for the
  * operator source (flair#2141 S2).
  *
- * `flair init` seeds one skill row at a FIXED Memory id and one org assignment
- * at a FIXED OrgSkillAssignment id that points at it. Bootstrap lists the
- * assignment for every agent principal, so the row behind that id must be the
- * operator's. The rule:
+ * Normal `flair init` seeds one skill row at a FIXED Memory id and one org
+ * assignment at a FIXED OrgSkillAssignment id that points at it. Local
+ * `--skip-start` on the default install defers the seed until `flair start`.
+ * Bootstrap may list the
+ * assignment for an active agent when it wins same-name conflict resolution,
+ * the agent has not opted out, and the entry fits its budget. The row behind
+ * that id must be the operator's. The rule:
  *
  *   A create, PUT, PATCH or DELETE of the reserved Memory id needs the operator
  *   source: an authenticated Basic administrator, or a deliberate internal call

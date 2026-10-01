@@ -1,9 +1,11 @@
 /**
  * using-flair-skill.ts — the shipped `using-flair` skill text (flair#2141 S2).
  *
- * `flair init` is the install path: it writes this text as ONE skill-tagged
- * Memory row, and an org-scope assignment that points at it, so a new agent's
- * bootstrap lists `using-flair` with no per-agent setup.
+ * Normal `flair init` writes this text as one skill-tagged Memory row and an
+ * org assignment; local `--skip-start` on the default install defers that
+ * write until `flair start`.
+ * Re-runs preserve edited text. An eligible agent's bootstrap may list it when
+ * the assignment wins same-name conflict resolution and fits the budget.
  *
  * ONE reviewed text, reconciled from the flair best-practices guidance and the
  * cursor-flair skills (remember, bootstrap, coordinate, soul). It covers when to
@@ -55,7 +57,7 @@ export const USING_FLAIR_SKILL_CONTENT = [
   "",
   "## Finding teammates",
   "- Read the `Agent` table for who is in this office: one row per principal, with `kind`, `role`, and `status` fields. A record identifies a principal; it is not a promise that the principal is reachable.",
-  "- Read `Presence` for who is live: `lastHeartbeatAt` and `activity` for each agent. Presence reports liveness, not a guaranteed address.",
+  "- Read `Presence` for who is live where a record exists: `lastHeartbeatAt` and `activity` report liveness, not a guaranteed address.",
 ].join("\n");
 
 /** sha256 of a skill row's `content` — the value the shipped-hash list holds. */

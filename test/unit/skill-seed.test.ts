@@ -37,7 +37,7 @@ const current: SeedCurrent = {
 
 /** A live, operator-owned org skill row holding `content`. */
 const liveRow = (content: unknown, extra: Partial<SeedRowShape> = {}): SeedRowShape => ({
-  id: SEED_SKILL_ID, agentId: OPERATOR, content, tags: ["skill"], visibility: "shared", archived: false, ...extra,
+  id: SEED_SKILL_ID, agentId: OPERATOR, content, tags: ["skill"], durability: "persistent", visibility: "shared", archived: false, ...extra,
 });
 
 /** The seed's own assignment. */
@@ -248,11 +248,13 @@ describe("runSkillSeed — ownership", () => {
 
 // ─── What a live, readable org using-flair skill needs (flair#2141 S2) ───────
 
-describe("runSkillSeed — a row or assignment the manifest cannot resolve is refused", () => {
+describe("runSkillSeed — rows outside the seed's required shape are refused", () => {
   const rowCases: Array<[string, Partial<SeedRowShape>, string]> = [
     ["no skill tag", { tags: ["note"] }, 'no "skill" tag'],
     ["no tags at all", { tags: undefined }, 'no "skill" tag'],
     ["private visibility", { visibility: "private" }, 'visibility is "private"'],
+    ["standard durability", { durability: "standard" }, 'durability is "standard"'],
+    ["missing durability", { durability: undefined }, 'durability is null'],
     ["archived", { archived: true }, "archived"],
     ["closed by a supersede", { validTo: "2000-01-01T00:00:00.000Z" }, "closed"],
     ["expired", { expiresAt: "2000-01-01T00:00:00.000Z" }, "expired"],
@@ -301,6 +303,12 @@ describe("runSkillSeed — a row or assignment the manifest cannot resolve is re
     expect(await runSkillSeed(io, current)).toMatchObject({ kind: "refused", error: "skill_seed_verify_failed" });
   });
 
+  it("refuses a row read back with nonpersistent durability before writing the assignment", async () => {
+    const io = fakeIo({ row: { ok: true, row: null }, putRow: () => ({ ok: true, rowAfter: { ok: true, row: liveRow(CURRENT, { durability: "standard" }) } }) });
+    expect(await runSkillSeed(io, current)).toMatchObject({ kind: "refused", error: "skill_seed_verify_failed" });
+    expect(io.calls).toEqual({ putRow: 1, putAssignment: 0 });
+  });
+
   it("refuses when the row read-back itself fails", async () => {
     let reads = 0;
     const io = fakeIo({ row: { ok: true, row: null } });
@@ -329,7 +337,8 @@ describe("runSkillSeed — a row or assignment the manifest cannot resolve is re
 
 // ─── The REST seam against a slow instance ───────────────────────────────────
 // The instance embeds a skill row as it writes it, and the first embed waits
-// for the embedding model to download and load — after Harper reports healthy.
+// for the embedding model to become ready. This may require a download after
+// Harper reports healthy.
 // This fake instance answers each request after a per-route delay, honours the
 // client's abort, and models the case where an abandoned PUT still finishes.
 

@@ -121,6 +121,17 @@ function runLocalInit(install: Install, extraArgs: string[]) {
   return { status: res.status, signal: res.signal, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
+function runLocalService(install: Install, command: "start" | "stop") {
+  const res = spawnSync(nodeBin(), [CLI, command, "--port", String(install.httpPort)], {
+    cwd: ROOT,
+    encoding: "utf8",
+    timeout: 240_000,
+    killSignal: "SIGKILL",
+    env: childEnv(install.home, launchctlStub(install.home)),
+  });
+  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
 const basic = () => "Basic " + Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString("base64");
 
 async function ops(install: Install, operation: Record<string, unknown>): Promise<any> {
@@ -233,4 +244,25 @@ describe("flair#2141 S2 — a local fresh `flair init` seeds using-flair", () =>
     expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
     await expectSeeded(install);
   }, 330_000);
+
+  test("local --skip-start leaves the seed pending until flair start", async () => {
+    ensureCliBuild();
+    const install = await newInstall();
+    const initial = runLocalInit(install, []);
+    expect(initial.status, initial.stdout + initial.stderr).toBe(0);
+    await ops(install, { operation: "delete", database: "flair", table: "Memory", ids: [SEED_SKILL_ID] });
+    await ops(install, { operation: "delete", database: "flair", table: "OrgSkillAssignment", ids: [SEED_ASSIGNMENT_ID] });
+
+    const skipped = runLocalInit(install, ["--skip-start"]);
+    expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
+    expect(skipped.stdout).toContain("defers seeding until 'flair start'");
+    expect((await seedRows(install)).row).toBeNull();
+
+    const stopped = runLocalService(install, "stop");
+    expect(stopped.status, stopped.stdout + stopped.stderr).toBe(0);
+    const started = runLocalService(install, "start");
+    expect(started.status, started.stdout + started.stderr).toBe(0);
+    expect(started.stdout).toContain("using-flair skill: seeded the using-flair skill");
+    await expectSeeded(install);
+  }, 600_000);
 });
