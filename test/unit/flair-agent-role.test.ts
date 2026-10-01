@@ -68,6 +68,15 @@ describe("ensureFlairAgentRole — idempotency", () => {
     expect(capturedBodies[1].role).toBe(ROLE_NAME);
     expect(capturedBodies[1].id).toBe(ROLE_NAME);
   });
+
+  it("refuses to alter a role whose list_roles row carries no id", async () => {
+    installFetch([
+      { ok: true, body: [{ role: ROLE_NAME, permission: { super_user: true } }] },
+    ]);
+    await expect(ensureFlairAgentRole(OPS_URL, ADMIN, PASS)).rejects.toThrow("no id");
+    // Refused before any write: no alter_role was attempted.
+    expect(capturedBodies.map((b) => b.operation)).toEqual(["list_roles"]);
+  });
 });
 
 describe("ensureFlairAgentRole — security invariants of the grant spec", () => {
