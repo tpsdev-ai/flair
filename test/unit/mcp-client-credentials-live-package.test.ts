@@ -99,8 +99,8 @@ describe("signClientAssertion vs the REAL published verifyClientAssertion", () =
     // The issuer audience and `typ: client-authentication+jwt` are merged
     // upstream (HarperFast/oauth #245) but are not in this release, which is
     // why the switch's default stays the token-endpoint form. When this test
-    // starts failing on the issuer form, a release that accepts it has landed
-    // and the default can flip.
+    // fails, inspect the pinned verifier: the issuer form may have become
+    // accepted, or its rejection reason may have changed.
     const { privateKey } = generateKeyPairSync("ed25519");
     const jwk = publicJwkFromPrivateKey(privateKey);
     const tokenEndpointForm = signClientAssertion({ clientId: CLIENT_ID, tokenEndpoint: TOKEN_ENDPOINT, privateKey });

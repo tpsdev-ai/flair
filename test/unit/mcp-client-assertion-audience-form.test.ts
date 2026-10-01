@@ -195,7 +195,17 @@ describe("the issuer audience form (#2103)", () => {
   });
 
   test("refuses, naming the switch and the metadata URL, when the issuer is missing or unusable", async () => {
-    for (const body of [{}, { issuer: 42 }, { issuer: "" }, { issuer: "not-a-url" }, { issuer: 7 }]) {
+    for (const body of [
+      {},
+      { issuer: 42 },
+      { issuer: "" },
+      { issuer: "not-a-url" },
+      { issuer: 7 },
+      { issuer: "https://as.example.com/?q=1" },
+      { issuer: "https://as.example.com/#fragment" },
+      { issuer: "https://as.example.com/?" },
+      { issuer: "https://as.example.com/#" },
+    ]) {
       const { fetchImpl } = metadataFetch(body);
       const message = await refusalMessage(
         resolveClientAssertionAudience({ form: "issuer", tokenEndpoint: TOKEN_ENDPOINT, metadataUrl: METADATA_URL, fetchImpl }),

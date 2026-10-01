@@ -27,7 +27,7 @@
  * --assertion-audience`. The issuer form signs `aud` = the issuer read from
  * the authorization server's metadata document — never derived from the
  * token-endpoint URL — with `typ: "client-authentication+jwt"`. The default
- * flips once the verifier release that accepts the issuer audience ships.
+ * will be changed in a later PR after a compatible verifier release.
  *
  * ── oauth#161/#162/#163, shipped in @harperfast/oauth@2.2.0 ─────────────────
  * The token-endpoint grant that CONSUMES this assertion
@@ -143,10 +143,13 @@ export function oauthMetadataUrl(origin: string): string {
   return `${origin.replace(/\/+$/, "")}/.well-known/oauth-authorization-server`;
 }
 
-function isAbsoluteHttpUrl(value: string): boolean {
+function isUsableIssuerUrl(value: string): boolean {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:";
+    // RFC 8414 issuer identifiers cannot contain query or fragment components,
+    // including empty delimiters (`?` and `#`). URL.search/hash alone miss those.
+    return (url.protocol === "https:" || url.protocol === "http:") &&
+      !url.href.includes("?") && !url.href.includes("#");
   } catch {
     return false;
   }
@@ -177,7 +180,7 @@ export async function fetchAuthorizationServerIssuer(
     throw new Error(`${setting}, but the metadata document at ${metadataUrl} did not return JSON`);
   }
   const issuer = body?.issuer;
-  if (typeof issuer !== "string" || !isAbsoluteHttpUrl(issuer)) {
+  if (typeof issuer !== "string" || !isUsableIssuerUrl(issuer)) {
     throw new Error(
       `${setting}, but the metadata document at ${metadataUrl} has no usable issuer (got ${JSON.stringify(issuer)}).`,
     );
@@ -352,7 +355,7 @@ export function signClientAssertion(params: SignClientAssertionParams): SignedCl
 
   // header.typ is optional per RFC 7515 §4.1.9, but the verifier checks it
   // when present — include it: "JWT" for the token-endpoint form (what the
-  // released verifier requires), and "client-authentication+jwt" (RFC
+  // released verifier accepts when present), and "client-authentication+jwt" (RFC
   // 7523bis) for the issuer form.
   const audience: ClientAssertionAudience =
     params.audience ?? { aud: tokenEndpoint, typ: CLIENT_ASSERTION_TYP_JWT };
@@ -590,8 +593,8 @@ export interface GetMcpAccessTokenParams {
   /**
    * The `aud`/`typ` to sign with. Default: the token-endpoint form (see
    * `signClientAssertion`); `resolveClientAssertionAudience` builds either
-   * form. The audience form does not change the minted token, so it is not
-   * part of the cache key.
+   * form. A cached token is keyed by clientId, tokenEndpoint and resource;
+   * this value is used only when a fresh assertion is signed.
    */
   audience?: ClientAssertionAudience;
   /** Re-mint once fewer than this many ms remain before the cached token's expiry. Default 30s — comfortably inside the client_credentials grant's short (default 300s) TTL. */

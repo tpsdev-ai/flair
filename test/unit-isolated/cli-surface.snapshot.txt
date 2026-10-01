@@ -322,10 +322,10 @@ flair mcp token
       description: Client ID Metadata Document URL for this agent (defaults to this instance's MCPClientMetadata URL, derived from FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)
       attr: clientId
     --token-endpoint <url>
-      description: Token-endpoint URL — becomes the `aud` claim (defaults to this instance's own oauth token endpoint, same env vars)
+      description: Token-endpoint URL — becomes the `aud` claim in token-endpoint mode (defaults to this instance's own oauth token endpoint, same env vars)
       attr: tokenEndpoint
     --assertion-audience <form>
-      description: Audience form: "token-endpoint" (default — aud is the token-endpoint URL, header typ "JWT") or "issuer" (aud is the authorization server metadata document's issuer, header typ "client-authentication+jwt"). Defaults to FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE.
+      description: Audience form: "token-endpoint" (default — aud is the token-endpoint URL, header typ "JWT") or "issuer" (aud is the authorization server metadata document's issuer, header typ "client-authentication+jwt"). Uses FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE when set; otherwise token-endpoint.
       attr: assertionAudience
     --issuer <url>
       description: Authorization server origin whose metadata document supplies the `aud` for the "issuer" audience form (defaults to this instance's issuer, same env vars)
@@ -2983,15 +2983,16 @@ Options:
                                (defaults to this instance's MCPClientMetadata
                                URL, derived from
                                FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)
-  --token-endpoint <url>       Token-endpoint URL — becomes the `aud` claim
-                               (defaults to this instance's own oauth token
-                               endpoint, same env vars)
+  --token-endpoint <url>       Token-endpoint URL — becomes the `aud` claim in
+                               token-endpoint mode (defaults to this instance's
+                               own oauth token endpoint, same env vars)
   --assertion-audience <form>  Audience form: "token-endpoint" (default — aud is
                                the token-endpoint URL, header typ "JWT") or
                                "issuer" (aud is the authorization server
                                metadata document's issuer, header typ
-                               "client-authentication+jwt"). Defaults to
-                               FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE.
+                               "client-authentication+jwt"). Uses
+                               FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE when set;
+                               otherwise token-endpoint.
   --issuer <url>               Authorization server origin whose metadata
                                document supplies the `aud` for the "issuer"
                                audience form (defaults to this instance's

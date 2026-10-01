@@ -512,14 +512,14 @@ export function register(program: Command): void {
     )
     .option(
       "--token-endpoint <url>",
-      "Token-endpoint URL — becomes the `aud` claim (defaults to this instance's " +
+      "Token-endpoint URL — becomes the `aud` claim in token-endpoint mode (defaults to this instance's " +
         "own oauth token endpoint, same env vars)",
     )
     .option(
       "--assertion-audience <form>",
       'Audience form: "token-endpoint" (default — aud is the token-endpoint URL, header typ "JWT") ' +
         'or "issuer" (aud is the authorization server metadata document\'s issuer, header typ ' +
-        '"client-authentication+jwt"). Defaults to FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE.',
+        '"client-authentication+jwt"). Uses FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE when set; otherwise token-endpoint.',
     )
     .option(
       "--issuer <url>",
