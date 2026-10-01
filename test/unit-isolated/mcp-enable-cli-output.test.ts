@@ -162,7 +162,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.exit).toBeNull();
     expect(r.out).toContain("The OAuth metadata check passed.");
     expect(r.out).toContain("The /mcp route itself was not probed.");
-    expect(r.out).toContain("connector identity: calls authenticated as sub 'octocat' (provider 'github') act as Agent 'self'; see docs/access-control.md for what that principal can read and write.");
+    expect(r.out).toContain("connector identity: mapped sub 'octocat' (provider 'github') to Agent 'self'; see docs/access-control.md for how /mcp tool calls use it.");
     expect(r.out).not.toContain("every /mcp call reads and writes AS");
     expect(r.out).not.toContain("can now connect");
     expect(r.out).not.toContain("claude.ai is not in");
