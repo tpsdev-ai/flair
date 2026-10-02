@@ -86,49 +86,53 @@ interface PublishOrgEventResult {
  */
 
 export async function publishOrgEvent(params: PublishOrgEventParams): Promise<PublishOrgEventResult> {
-  if (params.summary.length > MAX_ORGEVENT_SUMMARY_LENGTH) {
-    return { ok: false, error: `summary exceeds ${MAX_ORGEVENT_SUMMARY_LENGTH} character limit (got ${params.summary.length})` };
+  try {
+    if (params.summary.length > MAX_ORGEVENT_SUMMARY_LENGTH) {
+      return { ok: false, error: `summary exceeds ${MAX_ORGEVENT_SUMMARY_LENGTH} character limit (got ${params.summary.length})` };
+    }
+    if (params.detail && params.detail.length > MAX_ORGEVENT_DETAIL_LENGTH) {
+      return { ok: false, error: `detail exceeds ${MAX_ORGEVENT_DETAIL_LENGTH} character limit (got ${params.detail.length})` };
+    }
+
+    const keyPath = resolveKeyPath(params.agentId);
+    if (!keyPath) {
+      return { ok: false, error: `private key not found for agent '${params.agentId}'. Check ~/.flair/keys/ or set FLAIR_KEY_DIR.` };
+    }
+
+    const id = `${params.agentId}-${randomUUID()}`;
+    // Sign the final request target, including any base URL path prefix.
+    const path = `/OrgEvent/${encodeRecordId(id)}`;
+    const url = requestUrl(params.baseUrl, path);
+    const auth = buildEd25519Auth(params.agentId, "PUT", requestTarget(url), keyPath);
+
+    const body: Record<string, unknown> = {
+      id,
+      authorId: params.agentId,
+      kind: params.kind,
+      summary: params.summary,
+      createdAt: new Date().toISOString(),
+    };
+    if (params.detail) body.detail = params.detail;
+    if (params.scope) body.scope = params.scope;
+    if (params.targetIds && params.targetIds.length > 0) body.targetIds = params.targetIds;
+    if (params.entities && params.entities.length > 0) body.entities = params.entities;
+
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, error: `PUT ${path} failed (${res.status}): ${text}` };
+    }
+
+    const data = await res.json().catch(() => null);
+    return { ok: true, id: data?.id ?? id };
+  } catch (err) {
+    return { ok: false, error: `could not publish OrgEvent: ${err instanceof Error ? err.message : String(err)}` };
   }
-  if (params.detail && params.detail.length > MAX_ORGEVENT_DETAIL_LENGTH) {
-    return { ok: false, error: `detail exceeds ${MAX_ORGEVENT_DETAIL_LENGTH} character limit (got ${params.detail.length})` };
-  }
-
-  const keyPath = resolveKeyPath(params.agentId);
-  if (!keyPath) {
-    return { ok: false, error: `private key not found for agent '${params.agentId}'. Check ~/.flair/keys/ or set FLAIR_KEY_DIR.` };
-  }
-
-  const id = `${params.agentId}-${randomUUID()}`;
-  // Sign the final request target, including any base URL path prefix.
-  const path = `/OrgEvent/${encodeRecordId(id)}`;
-  const url = requestUrl(params.baseUrl, path);
-  const auth = buildEd25519Auth(params.agentId, "PUT", requestTarget(url), keyPath);
-
-  const body: Record<string, unknown> = {
-    id,
-    authorId: params.agentId,
-    kind: params.kind,
-    summary: params.summary,
-    createdAt: new Date().toISOString(),
-  };
-  if (params.detail) body.detail = params.detail;
-  if (params.scope) body.scope = params.scope;
-  if (params.targetIds && params.targetIds.length > 0) body.targetIds = params.targetIds;
-  if (params.entities && params.entities.length > 0) body.entities = params.entities;
-
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json", Authorization: auth },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    return { ok: false, error: `PUT ${path} failed (${res.status}): ${text}` };
-  }
-
-  const data = await res.json().catch(() => null);
-  return { ok: true, id: data?.id ?? id };
 }
 
 

@@ -9,8 +9,8 @@
  * A real Ed25519 key and a real signature check prove it: the test captures the
  * request, recomputes `agentId:ts:nonce:PUT:<path>` from the request's own
  * Authorization header and the path it received, and verifies it with the
- * public key. The agent id carries `#`, `?`, `%` and a space so the encoded and
- * raw spellings differ.
+ * public key. The agent id carries `#`, `?`, and `%` so the encoded and raw
+ * spellings differ while the id still satisfies the server auth-header grammar.
  */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -21,7 +21,7 @@ import { publishOrgEvent } from "../../src/commands/orgevent.js";
 import { authFetch, authedRequest } from "../../src/lib/auth-resolve.js";
 import { encodeRecordId } from "../../src/lib/record-id-path.js";
 
-const AGENT = "org agent#1?%x"; // no ":" and no "/": the key file must exist and the header must split
+const AGENT = "org-agent#1?%x"; // no ":" or whitespace: accepted by TPS_ED25519_HEADER_RE
 const BASE = "http://example.test";
 
 const realFetch = globalThis.fetch;
@@ -89,6 +89,18 @@ describe("flair#1970: orgevent signs the exact encoded path it sends", () => {
     expect(nacl.sign.detached.verify(Buffer.from(payload), Buffer.from(sig, "base64"), publicKey)).toBe(true);
     });
   }
+
+  test("an invalid base URL is reported instead of throwing", async () => {
+    try {
+      const res = await publishOrgEvent({ agentId: AGENT, baseUrl: "not a URL", kind: "note", summary: "hello" });
+      expect(res.ok).toBe(false);
+      expect(res.error).toContain("could not publish OrgEvent");
+      expect(res.error).toMatch(/url/i);
+    } finally {
+      globalThis.fetch = realFetch;
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
 
   test("shared CLI auth paths sign the final prefixed pathname and query", async () => {
     const captured: Captured[] = [];

@@ -35,6 +35,18 @@ function resolveHttpPort(...args: any[]): any {
   return cli.resolveHttpPort(...args);
 }
 
+const AGENT_REQUIRED_FIELDS = ["id", "name", "publicKey", "createdAt"] as const;
+const MEMORY_REQUIRED_FIELDS = ["id", "agentId", "content", "createdAt"] as const;
+const SOUL_REQUIRED_FIELDS = ["id", "agentId", "key", "value", "createdAt"] as const;
+const GRANT_REQUIRED_FIELDS = ["id", "ownerId", "granteeId", "scope"] as const;
+
+function hasRequiredStringFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
+  return !!value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && fields.every((field) => typeof (value as Record<string, unknown>)[field] === "string");
+}
+
 export function register(program: Command): void {
 // ─── flair export ────────────────────────────────────────────────────────────
 
@@ -81,15 +93,17 @@ program
       console.error(`Error: could not read agent '${agentId}': ${err instanceof Error ? err.message : String(err)}. Check instance access and retry.`);
       process.exit(1);
     }
-    if (!agent || typeof agent !== "object" || Array.isArray(agent) || agent.id !== agentId) {
-      console.error(`Error: could not read agent '${agentId}': response did not contain the requested agent. Check the instance and retry.`);
+    if (!hasRequiredStringFields(agent, AGENT_REQUIRED_FIELDS) || agent.id !== agentId) {
+      console.error(`Error: could not read agent '${agentId}': response did not contain a complete requested agent. Check the instance and retry.`);
       process.exit(1);
     }
 
-    async function readCollection(path: string, name: string): Promise<any[]> {
+    async function readCollection(path: string, name: string, requiredFields: readonly string[]): Promise<any[]> {
       try {
         const rows = await adminGet(path);
         if (!Array.isArray(rows)) throw new Error(`GET ${path} returned a non-array body`);
+        const malformedIndex = rows.findIndex((row) => !hasRequiredStringFields(row, requiredFields));
+        if (malformedIndex !== -1) throw new Error(`GET ${path} returned a malformed item at index ${malformedIndex}`);
         return rows;
       } catch (err) {
         console.error(`Error: could not read ${name}: ${err instanceof Error ? err.message : String(err)}. Check instance access and retry.`);
@@ -97,13 +111,13 @@ program
       }
     }
 
-    const allMemories = await readCollection("/Memory/", "memories");
+    const allMemories = await readCollection("/Memory/", "memories", MEMORY_REQUIRED_FIELDS);
     const memories = allMemories.filter((m: any) => m.agentId === agentId);
 
-    const allSouls = await readCollection("/Soul/", "souls");
+    const allSouls = await readCollection("/Soul/", "souls", SOUL_REQUIRED_FIELDS);
     const souls = allSouls.filter((s: any) => s.agentId === agentId);
 
-    const allGrants = await readCollection("/MemoryGrant/", "grants");
+    const allGrants = await readCollection("/MemoryGrant/", "grants", GRANT_REQUIRED_FIELDS);
     const grants = allGrants.filter((g: any) => g.ownerId === agentId || g.granteeId === agentId);
 
     // Optionally include private key

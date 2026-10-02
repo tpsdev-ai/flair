@@ -90,6 +90,19 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     expect(existsSync(output)).toBe(false);
   }, 25_000);
 
+  test("a 200 id-only Agent body reports an incomplete record and writes no file", async () => {
+    const output = join(scratch, "id-only-agent.json");
+    const { stderr, code, paths } = await runCli(
+      ["export", AGENT, "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+      { MOCK_AGENT_STATUS: "200", MOCK_ID_ONLY_AGENT: "1" }, scratch,
+    );
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("could not read agent");
+    expect(stderr).toContain("complete requested agent");
+    expect(paths).toEqual([`/Agent/${encodeURIComponent(AGENT)}`]);
+    expect(existsSync(output)).toBe(false);
+  }, 25_000);
+
   test("successful reads write a complete export", async () => {
     const output = join(scratch, "complete.json");
     const { code, paths } = await runCli(
@@ -114,6 +127,19 @@ describe("flair export: failed reads never create a complete-looking file (#1970
       );
       expect(code).not.toBe(0);
       expect(stderr).toContain(`could not read ${name}`);
+      expect(paths).toContain(path);
+      expect(existsSync(output)).toBe(false);
+    }, 25_000);
+
+    test(`a malformed ${name} item writes no file`, async () => {
+      const output = join(scratch, `malformed-${name}.json`);
+      const { stderr, code, paths } = await runCli(
+        ["export", AGENT, "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+        { MOCK_AGENT_STATUS: "200", MOCK_MALFORMED_COLLECTION: path }, scratch,
+      );
+      expect(code).not.toBe(0);
+      expect(stderr).toContain(`could not read ${name}`);
+      expect(stderr).toContain("malformed item at index 0");
       expect(paths).toContain(path);
       expect(existsSync(output)).toBe(false);
     }, 25_000);
