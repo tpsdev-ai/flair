@@ -78,7 +78,7 @@ export function looksLikeSecretKey(name: string): boolean {
 }
 
 /**
- * Is this URL one only the machine serving it can reach?
+ * Does this URL name a loopback or unspecified destination?
  *
  * Deliberately a TEXT test, not a DNS lookup: this decides what gets baked into a
  * deployed artifact, and a resolver answer at deploy time is not a property of the
@@ -109,6 +109,7 @@ export function isLoopbackHost(host: string): boolean {
     return false;
   }
   if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "0.0.0.0" || h === "[::]") return true;
   if (h === "[::1]" || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(h)) return true;
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }

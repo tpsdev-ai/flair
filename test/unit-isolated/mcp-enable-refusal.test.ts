@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Command } from "commander";
 import { tempDir } from "../helpers/temp-dir.ts";
+import { NON_CANONICAL_TARGETS, UNSPECIFIED_TARGETS } from "../helpers/mcp-enable-target-shapes.ts";
 
 let prompts = 0;
 mock.module("node:readline", () => ({
@@ -23,6 +24,8 @@ for (const [instance, issuer, fabric, refusal] of [
   ["http://[::ffff:127.0.0.1]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
   ["http://[::ffff:7f00:1]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
   ["http://[0:0:0:0:0:ffff:127.1.2.3]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
+  ...UNSPECIFIED_TARGETS.map(instance => [instance, "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"] as const),
+  ...NON_CANONICAL_TARGETS.map(([instance, canonical]) => [instance, "https://mcp.example.com", false, `Use ${canonical}`] as const),
   ["https://acme.harperfabric.com", "https://[fd00::1]", false, "Issuer refused:"],
   ["https://acme.harperfabric.com", "https://[fe80::1]", false, "Issuer refused:"],
   ["https://acme.harperfabric.com", "https://[::ffff:192.168.1.1]", false, "Issuer refused:"],
@@ -55,12 +58,12 @@ for (const [instance, issuer, fabric, refusal] of [
         "--secrets-path", join(dir, "secrets.env"),
         ...(fabric ? ["--fabric"] : []), ...(dryRun ? ["--dry-run"] : []),
       ])).rejects.toThrow("exit 1");
+      expect(readdirSync(dir)).toEqual(["config.yaml"]);
+      expect(readFileSync(join(dir, "config.yaml"), "utf8")).toBe(config);
       expect(output.join("\n")).toContain(refusal);
       if (issuer === "not a url") expect(output.join("\n")).not.toContain("local");
       expect(prompts).toBe(0);
       expect(calls).toBe(0);
-      expect(readdirSync(dir)).toEqual(["config.yaml"]);
-      expect(readFileSync(join(dir, "config.yaml"), "utf8")).toBe(config);
     } finally {
       process.chdir(cwd);
       if (tty) Object.defineProperty(process.stdin, "isTTY", tty);

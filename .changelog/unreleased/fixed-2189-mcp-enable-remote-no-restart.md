@@ -1,3 +1,3 @@
-- **Outside `--dry-run`, `flair mcp enable` refuses a target URL unless its host is localhost, `*.localhost`, in 127/8, `::1` or `::ffff:127/8`, ends in `.harperfabric.com`, or `--fabric` is set.** (Closes #2189)
+- **`flair mcp enable` refuses non-canonical targets before writes and supports custom-domain Fabric targets with `--fabric`.** (Closes #2189)
 
-  `--fabric` selects the Fabric branch, defaults to Fabric secrets staging, and refuses `--cimd-allowed-hosts` and a localhost, `*.localhost`, 127/8, `::1` or `::ffff:127/8` host.
+  `--fabric` selects the Fabric branch, defaults to Fabric secrets staging, and refuses `--cimd-allowed-hosts` and a localhost, `*.localhost`, 127/8, `::1`, `::ffff:127/8`, `0.0.0.0` or `::` host.

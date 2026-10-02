@@ -1130,6 +1130,13 @@ function canonicalHttpOrigin(value: unknown): URL | null {
   return null;
 }
 
+export function targetOriginRefusal(instance: string): string | undefined {
+  if (canonicalHttpOrigin(instance)) return;
+  const origin = showOpsTarget(instance);
+  return "Target must be a canonical http:// or https:// origin, optionally followed by /." +
+    (canonicalHttpOrigin(origin) ? ` Use ${origin}.` : "");
+}
+
 /** Resolve the ops target, or throw naming the field, its safe display and the
  *  accepted forms. */
 function identityMappingOpsUrl(target: IdentityMappingOpsTarget): { url: string; hosted: boolean } {
@@ -1936,11 +1943,11 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   }
   push(true, `${issuer}: URL parsed; hostname/IP-literal check passed (no DNS lookup)`);
 
-  const fabricRefusal = fabricLoopbackRefusal(params.instance, params.fabric);
-  if (fabricRefusal) {
+  const targetRefusal = fabricLoopbackRefusal(params.instance, params.fabric) ?? targetOriginRefusal(params.instance);
+  if (targetRefusal) {
     currentStep = "target-shape-check";
-    push(false, fabricRefusal);
-    return { ok: false, dryRun, refused: { message: fabricRefusal }, steps, failedStep: "target-shape-check" };
+    push(false, targetRefusal);
+    return { ok: false, dryRun, refused: { message: targetRefusal }, steps, failedStep: "target-shape-check" };
   }
 
   const idpProvider = params.idpProvider ?? "github";

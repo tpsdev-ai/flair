@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+import { NON_CANONICAL_TARGETS, UNSPECIFIED_TARGETS } from "../helpers/mcp-enable-target-shapes.ts";
 import { enableMcp, generateRsaSigningKeyPair, type SecretsMechanism } from "../../src/lib/mcp-enable.ts";
 
 const PUBLIC = "https://mcp.acme.example";
@@ -56,7 +57,7 @@ function targetFetch(push = false) {
 }
 
 describe("enableMcp target URL and Fabric declaration", () => {
-  for (const instance of ["http://127.0.0.1:9926", "http://localhost:9926", "http://[::1]:9926", ...LOOPBACK_SPELLINGS]) {
+  for (const instance of ["http://127.0.0.1:9926", "http://localhost:9926", "http://[::1]:9926", ...LOOPBACK_SPELLINGS, ...UNSPECIFIED_TARGETS]) {
     test.each([false, true])(`refuses --fabric with loopback ${instance} without CIMD (dryRun=%s)`, async (dryRun) => {
       const f = fixture(instance);
       const { calls, fetchImpl } = targetFetch();
@@ -91,14 +92,41 @@ describe("enableMcp target URL and Fabric declaration", () => {
     });
   }
 
-  test.each(LOOPBACK_SPELLINGS)("passes loopback %s through the target URL check without --fabric", async (instance) => {
+  for (const [instance, canonical] of NON_CANONICAL_TARGETS) {
+    test.each([false, true])(`refuses non-canonical ${instance} before writes (dryRun=%s)`, async (dryRun) => {
+      const f = fixture(instance);
+      const { calls, fetchImpl } = targetFetch();
+      let prompts = 0;
+      const result = await enableMcp({ ...f.params, dryRun, confirmSecretsApplied: true }, {
+        fetchImpl, confirmPrompt: async () => { prompts++; return true; },
+      });
+      expect(readdirSync(f.dir)).toEqual(["config.yaml"]);
+      expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
+      expect(result.failedStep).toBe("target-shape-check");
+      expect(result.refused?.message).toContain(`Use ${canonical}`);
+      expect(result.refused?.message).not.toContain("secret");
+      expect(calls).toEqual([]);
+      expect(prompts).toBe(0);
+    });
+  }
+
+  test.each(["http://localhost.:9926", "http://sub.localhost.:9926", "http://[::ffff:7f00:1]:9926", ...UNSPECIFIED_TARGETS])(
+    "accepts canonical local origin %s without --fabric in dry run", async (instance) => {
+      const f = fixture(instance);
+      const { calls, fetchImpl } = targetFetch();
+      const result = await enableMcp({ ...f.params, dryRun: true }, { fetchImpl });
+      expect(result.ok).toBe(true);
+      expect(calls).toEqual([]);
+      expect(readdirSync(f.dir)).toEqual(["config.yaml"]);
+    },
+  );
+
+  test.each(UNSPECIFIED_TARGETS)("accepts local destination %s through identity mapping without --fabric", async (instance) => {
     const f = fixture(instance);
-    const { calls, fetchImpl } = targetFetch();
-    const result = await enableMcp(f.params, { fetchImpl, confirmPrompt: async () => false });
+    const { fetchImpl } = targetFetch();
+    const result = await enableMcp({ ...f.params, confirmSecretsApplied: true }, { fetchImpl });
+    expect(result.steps.find(s => s.step === "identity-mapping")?.ok).toBe(true);
     expect(result.steps.map(s => s.step)).not.toContain("target-shape-check");
-    expect(result.steps.map(s => s.step)).toContain("signing-key");
-    expect(result.steps.map(s => s.detail).join("\n")).not.toContain("not a loopback URL");
-    expect(calls).not.toContain("restart");
   });
 
   test.each([PUBLIC, "https://127.0.0.1.evil.example", "http://10.0.0.1", "http://machine.local"])(

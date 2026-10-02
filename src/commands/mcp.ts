@@ -43,6 +43,7 @@ import {
   mcpStatus,
   checkLocalOriginRefusal,
   fabricLoopbackRefusal,
+  targetOriginRefusal,
   selfVerifyMcpMetadata,
   cimdAllowedHostsFromFlag,
   claudeAiExcludedNote,
@@ -800,7 +801,7 @@ export function register(program: Command): void {
         "IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), " +
         "and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.",
     )
-    .option("--instance <url>", "Target flair instance to enable against (else FLAIR_URL)")
+    .option("--instance <url>", "Canonical http(s) target origin, optionally followed by / (else FLAIR_URL)")
     .option("--issuer <url>", "Public origin claude.ai will use (else --instance)")
     .option("--idp-provider <name>", "Upstream IdP provider", "github")
     .option("--idp-client-id <id>", "IdP OAuth app client id (else prompted interactively)")
@@ -824,7 +825,7 @@ export function register(program: Command): void {
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
-    .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1 or ::ffff:127/8 target host")
+    .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
     .option("--dry-run", "Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
@@ -840,9 +841,9 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      const fabricRefusal = fabricLoopbackRefusal(instance, Boolean(opts.fabric));
-      if (fabricRefusal) {
-        console.error(`${render.icons.error} ${fabricRefusal}`);
+      const targetRefusal = fabricLoopbackRefusal(instance, Boolean(opts.fabric)) ?? targetOriginRefusal(instance);
+      if (targetRefusal) {
+        console.error(`${render.icons.error} ${targetRefusal}`);
         process.exit(1);
       }
 
