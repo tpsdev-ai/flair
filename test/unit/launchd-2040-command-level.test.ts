@@ -2057,7 +2057,7 @@ describe("flair#2078 — init: a lint that throws puts back the plist init wrote
     const state: Record<string, string> = {};
     for (const name of readdirSync(fx.agentsDir).sort()) {
       const path = join(fx.agentsDir, name);
-      state[name] = `${(statSync(path).mode & 0o777).toString(8)} ${readFileSync(path).toString("base64")}`;
+      state[name] = `${(statSync(path).mode & 0o7777).toString(8)} ${readFileSync(path).toString("base64")}`;
     }
     return state;
   }
@@ -2201,7 +2201,7 @@ describe("flair#2085 — init validates the plist it writes when there is no leg
     const state: Record<string, string> = {};
     for (const name of readdirSync(fx.agentsDir).sort()) {
       const path = join(fx.agentsDir, name);
-      state[name] = `${(statSync(path).mode & 0o777).toString(8)} ${readFileSync(path).toString("base64")}`;
+      state[name] = `${(statSync(path).mode & 0o7777).toString(8)} ${readFileSync(path).toString("base64")}`;
     }
     return state;
   }
