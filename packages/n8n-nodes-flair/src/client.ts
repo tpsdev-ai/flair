@@ -39,8 +39,9 @@ export function usesDeprecatedAdminPassword(credentials: FlairCredentials): bool
 export function adminPasswordWarning(agentId: string): string {
   return (
     "Flair API credential: using the deprecated Admin Password, not an agent key. " +
-    "This execution runs as the Harper administrator, which can read and write every " +
-    `agent's memories (including private ones) rather than being signed as agent '${agentId}'. ` +
+    "This execution selected Harper administrator Basic authentication; if Flair accepts the " +
+    "credentials, it can read and write every agent's memories (including private ones) " +
+    `rather than being signed as agent '${agentId}'. ` +
     "Set the credential's Agent Private Key to sign as that agent."
   );
 }

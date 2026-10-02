@@ -274,6 +274,9 @@ describe("the deprecated admin password still works and warns (flair#1942)", () 
     await expect((new FlairWrite().execute as any).call(writeCtx(credentials, logger))).rejects.toThrow();
 
     expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("selected Harper administrator Basic authentication");
+    expect(warns[0]).toContain("if Flair accepts the credentials");
+    expect(warns[0]).not.toContain("runs as the Harper administrator");
   }, 10_000);
 
   test("the credential test reports the deprecated path when the request succeeds", async () => {
@@ -456,7 +459,7 @@ for (const [name, run] of entryPoints) {
         expect(request.headers.authorization).toBe("Basic " + Buffer.from("admin:legacy-secret").toString("base64"));
       }
       expect(warns).toHaveLength(1);
-      expect(warns[0]).toContain("This execution runs as the Harper administrator");
+      expect(warns[0]).toContain("This execution selected Harper administrator Basic authentication");
     } finally {
       if (savedKeyDir === undefined) delete process.env.FLAIR_KEY_DIR;
       else process.env.FLAIR_KEY_DIR = savedKeyDir;
