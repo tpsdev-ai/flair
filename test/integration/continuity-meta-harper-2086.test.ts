@@ -10,8 +10,10 @@
  * returned). One negative case guards the read: a row whose `meta.hook` is not
  * "PreCompact" is not surfaced.
  *
- * HOME/ROOTPATH are the helper's own scratch install (OS-assigned ports); the
- * only HTTP targets are that instance's httpURL/opsURL.
+ * External HARPER_HTTP_URL mode is refused before the helper starts or any
+ * rows are inserted. HOME/ROOTPATH are the helper's own scratch install
+ * (OS-assigned ports); the only HTTP targets are that instance's
+ * httpURL/opsURL.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -66,7 +68,12 @@ function row(id: string, hook: string, extra: Record<string, unknown> = {}): Rec
 
 describe("flair#2086: the SessionStart meta read against a real Harper", () => {
   beforeAll(async () => {
+    if (process.env.HARPER_HTTP_URL) {
+      throw new Error("continuity-meta-harper-2086 requires an isolated Harper instance; unset HARPER_HTTP_URL");
+    }
     harper = await startHarper();
+    expect(harper.external).toBe(false);
+    expect(harper.ownsInstallDir).toBe(true);
     const ins = await adminInsert({
       operation: "insert",
       database: "flair",

@@ -5,9 +5,9 @@
  * the published loadPrivateKey export remains synchronous. A FIFO cannot
  * stall loadPrivateKeyBounded (the open is non-blocking and the descriptor is refused as
  * non-regular BEFORE a byte is read). A file already oversized at fstat is
- * refused before reading; growth during reading is detected by one extra
- * byte. Oversized-file errors name the path and cap, never the file's
- * contents.
+ * refused before reading; growth beyond the cap that is observed during
+ * reading is detected by the extra byte past it. Oversized-file errors name
+ * the path and cap, never the file's contents.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";

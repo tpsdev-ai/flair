@@ -23,8 +23,9 @@ export const KEY_FILE_MAX_BYTES = 64 * 1024;
  * Read a key file with asynchronous file I/O and a size cap. The open is non-blocking (a
  * FIFO at the path cannot stall it) and the opened descriptor is checked with
  * fstat BEFORE any byte is read. At most KEY_FILE_MAX_BYTES + 1 bytes are ever
- * read, so a file that grew after the check is refused too, never cut. A
- * missing file throws the same ENOENT `readFileSync` threw. */
+ * read, so growth beyond the cap that is observed during reading is refused
+ * by the extra byte past it, never cut. A missing file throws the same ENOENT
+ * `readFileSync` threw. */
 async function readKeyFileBounded(path: string): Promise<Buffer> {
   const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
   try {
