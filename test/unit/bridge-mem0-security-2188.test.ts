@@ -5,7 +5,8 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mem0MemoryBridge } from "../../src/bridges/builtins/mem0.js";
-import type { BridgeContext } from "../../src/bridges/types.js";
+import { formatBridgeErrorLines, serializeBridgeLogLine } from "../../src/commands/bridge.js";
+import { BridgeRuntimeError, type BridgeContext } from "../../src/bridges/types.js";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 
 const KEY = "mem0-secret-security-2188";
@@ -25,7 +26,7 @@ async function drain(opts: Record<string, unknown>, ctx: BridgeContext): Promise
 }
 
 describe("mem0 credential diagnostics (socket-free)", () => {
-  test("every invalid explicit base URL refuses before fetch", async () => {
+  test("representative invalid explicit base URLs refuse before fetch", async () => {
     let calls = 0;
     const ctx = fakeContext(async () => { calls++; throw new Error("fetch called"); }, []);
     for (const baseUrl of ["", " ", "not-a-url", "ftp://mem0.example", "https://user:pass@mem0.example", "https://mem0.example/?q=1"]) {
@@ -87,6 +88,41 @@ describe("mem0 credential diagnostics (socket-free)", () => {
     expect(diagnostic).toContain("network error");
     expect(diagnostic).not.toContain(KEY);
     expect(diagnostic).not.toContain("https://mem0.example/");
+  });
+
+  test("the final serialized log line redacts a metadata field named with the key", () => {
+    const line = serializeBridgeLogLine({
+      message: "metadata probe",
+      meta: { [KEY]: { nested: `value-${KEY}` } },
+    }, KEY);
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain(KEY);
+  });
+
+  test("structured and trust errors redact the key from every rendered line", () => {
+    const structured = new BridgeRuntimeError({
+      bridge: "mem0",
+      op: "import",
+      field: "response",
+      expected: "fixed diagnostic",
+      got: "failure",
+      hint: `error message contains ${KEY}`,
+    });
+    const trust = new BridgeRuntimeError({
+      bridge: "mem0",
+      op: "import",
+      field: "(trust)",
+      expected: "approved package",
+      got: "path-mismatch",
+      hint: `trust error contains ${KEY}`,
+      context: {
+        approvedPath: `/approved/${KEY}`,
+        observedPath: `/observed/${KEY}`,
+      },
+    });
+    const output = [...formatBridgeErrorLines(structured, KEY), ...formatBridgeErrorLines(trust, KEY)].join("\n");
+    expect(output).toContain("[REDACTED]");
+    expect(output).not.toContain(KEY);
   });
 });
 
@@ -162,6 +198,14 @@ globalThis.fetch = async (_input, init) => {
       expect(result.stderr).toContain("--base-url");
       expect(result.stderr).not.toContain(KEY);
     }
+  }, 25_000);
+
+  test("an invalid Flair URL containing the active key is redacted from the error", async () => {
+    const result = await cli(["mem0", "--user", "u1", "--base-url", "https://mem0.example", "--agent", "a1", "--url", KEY, "--dry-run"], { MEM0_API_KEY: KEY });
+    expect(result.code).not.toBe(0);
+    expect(result.fetches).toBe(0);
+    expect(result.stderr).toContain("Flair base URL must be a valid URL");
+    expect(result.stdout + result.stderr).not.toContain(KEY);
   }, 25_000);
 
   test("an empty --api-key-file refuses despite MEM0_API_KEY", async () => {
