@@ -57,7 +57,7 @@ describe("local --skip-start seed handoff", () => {
       });
       expect(run.status, run.stdout + run.stderr).toBe(0);
       expect(run.stdout).toContain("using-flair skill: not seeded");
-      expect(run.stdout).toContain(`flair init --data-dir '${dataDir}'`);
+      expect(run.stdout).not.toContain(`flair init --data-dir '${dataDir}'`);
       expect(existsSync(skillSeedPendingPath(dataDir))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });

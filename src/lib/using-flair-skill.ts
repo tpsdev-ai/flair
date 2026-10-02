@@ -42,7 +42,7 @@ export const USING_FLAIR_SKILL_CONTENT = [
   "- `permanent` and `persistent` default to `shared`; `standard` and `ephemeral` default to `private`.",
   "",
   "### Provenance",
-  "- Flair refuses a non-admin write whose `agentId` names another principal; an admin's write is not checked against `agentId`.",
+  "- `Memory.post` and `Memory.put` refuse a non-admin write whose `agentId` names another principal; admins bypass this mismatch check.",
   "",
   "### Identity and office records",
   "- Your identity and standing instructions live in Soul. A bootstrap carries them when it is asked for soul (`includeSoul`) and when they fit its token budget.",
