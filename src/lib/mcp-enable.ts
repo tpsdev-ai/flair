@@ -1470,7 +1470,7 @@ async function verifyTargetIssuer(
  * this checks the public metadata's issuer, MCP token endpoint, and CIMD
  * advertisement; it does not exercise the token route or `/mcp`. The check
  * is reused by `enable`'s self-verify step, `grant`/`revoke`'s workflow gate
- * (src/cli.ts), and `flair mcp status`, so all four commands use the same
+ * (src/commands/mcp.ts), and `flair mcp status`, so all four commands use the same
  * public metadata criterion.
  */
 export async function selfVerifyMcpMetadata(
