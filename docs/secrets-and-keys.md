@@ -144,6 +144,14 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 - **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate-key <id>`).
 - **Backup separately**, encrypted. The `flair backup` command excludes private keys by default. Roll your own backup of `~/.flair/keys/` via age-encrypted archive if you want offsite recovery.
 
+## Key cleanup
+
+`flair keys prune` reports node-shaped files (`flair_<hex8>.key` without `.pub`)
+as orphan candidates only when absent from the checked target's Instance and
+Agent tables. Unreadable rows leave them unidentified. `--apply` leaves all
+node-shaped seeds in place: ownership cannot be proven from one target's tables;
+removal needs per-file ownership proof ([#2200](https://github.com/tpsdev-ai/flair/issues/2200)).
+
 ## What about a `flair secret` CLI?
 
 Considered, deferred. Flair could ship a thin wrapper around the OS keyring (`flair secret get/set/list`) — but the OS primitives already work and are universally trusted. Adding a Flair-shaped wrapper would mean we own the bug surface for marginal ergonomic gain. Better path: document the OS primitives well (this page) and stay focused on identity + memory.

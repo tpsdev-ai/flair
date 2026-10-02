@@ -7,6 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
+import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
@@ -24,7 +25,6 @@ import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import {
   instanceIdentityLines,
   probeInstanceIdentity,
-  probeInstanceIds,
 } from "../lib/instance-identity-row.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { mcpClientPinFindings, refreshOwnedPins, repinSessionStartHookGuarded, sessionStartHookPinFindings } from "../lib/owned-pins.js";
@@ -38,6 +38,19 @@ import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "nod
 
 import { dirname, join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
+
+export async function readNodeSeedAdvisory(
+  input: Parameters<typeof makeReadInstanceIds>[0] & { nodeKeyIds: string[]; keysDir: string },
+): Promise<string | null> {
+  if (input.nodeKeyIds.length === 0) return null;
+  const read = await makeReadInstanceIds(input)();
+  return orphanInstanceSeedAdvisory({
+    ...input,
+    instanceIds: read.state === "read" ? read.ids : null,
+    agentIds: read.state === "read" ? read.agentIds : null,
+    unreadableReason: read.state === "read" ? read.agentReadReason : read.reason,
+  });
+}
 
 export type DoctorCli = {
   api: (...args: any[]) => any;
@@ -672,34 +685,11 @@ program
         issues++;
       }
 
-      // flair#1925: an instance-shaped seed (`flair_<hex8>.key`, no `.pub`) that
-      // no Instance row names is an ORPHAN (e.g. left by an abandoned first-boot
-      // mint). Advisory ONLY: doctor never removes a
-      // key, and this is not an issue (an unreferenced file is clutter, not a
-      // broken state). The rows come from the local ops API, the same
-      // admin-credentialed read the instance-identity section below uses. A
-      // read that does not happen prints NOTHING — never a zero count, which
-      // would read as an all-clear over rows nobody saw.
       if (nodeKeyIds.length > 0 && harperResponding) {
-        let pass: string | undefined;
-        let credIssue: string | null = null;
-        try {
-          pass = resolveLocalAdminPass(undefined);
-        } catch (err: unknown) {
-          credIssue = err instanceof Error ? err.message : String(err);
-        }
-        if (!credIssue) {
-          const read = await probeInstanceIds({
-            opsUrl: `http://127.0.0.1:${resolveOpsPort(opts)}`,
-            credentials: { user: resolveAdminUser(undefined), pass: pass ?? "" },
-          });
-          const advisory = orphanInstanceSeedAdvisory({
-            nodeKeyIds,
-            instanceIds: read.state === "read" ? read.ids : null,
-            keysDir,
-          });
-          if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
-        }
+        const advisory = await readNodeSeedAdvisory({
+          nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
+        });
+        if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
       }
     } else {
       console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);

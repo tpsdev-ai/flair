@@ -638,22 +638,22 @@ export async function probeInstanceIdentity(
   return { rows, roleNames };
 }
 
-/**
- * The ids of this instance's Instance rows, plus the reason when they could not
- * be read — the read `flair keys prune` (orphan instance seeds, flair#1925) and
- * `flair doctor` (the orphan advisory) decide on.
- *
- * A failed read is `unreadable`, NEVER an empty id list: `[]` is the answer a
- * SUCCESSFUL read of zero rows gives, and a caller that pruned every
- * node-shaped seed on the strength of a read it never made would delete live
- * federation keys. A read that did not happen licenses nothing.
- */
 export async function probeInstanceIds(
   endpoint: OpsEndpoint,
-): Promise<{ state: "read"; ids: string[] } | { state: "unreadable"; reason: string }> {
+): Promise<{ state: "read"; ids: string[]; agentIds: string[] | null; agentReadReason?: string } | { state: "unreadable"; reason: string }> {
   try {
     const rows = await readInstanceRows(endpoint);
-    return { state: "read", ids: rows.map((r) => r.id) };
+    const ids = rows.map((r) => r.id);
+    try {
+      const parsed = await opsPost(endpoint, { operation: "sql", sql: "SELECT id FROM flair.Agent" }, "Agent read");
+      const agents = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
+      if (agents === null || agents.some((row: any) => typeof row?.id !== "string" || !row.id.trim())) {
+        throw new Error("Agent read returned no usable row list");
+      }
+      return { state: "read", ids, agentIds: agents.map((row: { id: string }) => row.id) };
+    } catch (err: unknown) {
+      return { state: "read", ids, agentIds: null, agentReadReason: err instanceof Error ? err.message : String(err) };
+    }
   } catch (err: unknown) {
     return { state: "unreadable", reason: err instanceof Error ? err.message : String(err) };
   }

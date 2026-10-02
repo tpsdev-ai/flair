@@ -2184,7 +2184,7 @@ export function resolveCollisionSafeName(existingNames: Iterable<string>, filena
   return `${filename}.${n}`;
 }
 
-export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan" | "unidentified" | "ignored";
+export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan-candidate" | "unidentified" | "ignored";
 
 /**
  * The reason classifyKeyFile reports an unparseable `.key` file with. "I could not parse this"
@@ -2246,59 +2246,48 @@ export function classifyKeyFile(
   };
 }
 
-/**
- * Classify a node-scoped federation seed (`flair_<hex8>.key`, no `.pub` —
- * isNodeKeyId) against the Instance rows the instance reports (flair#1925).
- * Pure — no fs/crypto/network; the caller does the read and passes the ids.
- *
- * The first-boot `GET /FederationInstance` create path mints an instance id,
- * writes its seed (src/keystore.ts keyPath), and — when the confirming re-read
- * shows another row, or the table holds several rows and the request answers
- * 409 — does not keep it, and the seed stays. A node id no Instance row names
- * is an ORPHAN (e.g. left by that path); one an Instance row names is a LIVE
- * federation key.
- *
- * `instanceIds: null` means the rows were NOT read. Nothing is then offered as
- * orphan — a seed whose row set is unknown is not a seed proven unreferenced,
- * and unknown evidence never licenses a move (flair#1925).
- */
+/** Report node-shaped seeds against the checked target tables; never authorize removal. */
 export function classifyNodeKeySeed(
   id: string,
   instanceIds: readonly string[] | null,
   baseUrl: string,
+  agentIds: readonly string[] | null = null,
+  unreadableReason?: string,
 ): KeyPruneDecision {
-  if (instanceIds === null) {
+  if (instanceIds === null || agentIds === null) {
     return {
       class: "unidentified",
-      reason: `node-scoped federation seed — the Instance rows were not read, so whether any row names '${id}' is unknown; left in place`,
+      reason: `${instanceIds === null ? "Instance" : "Agent"} rows unreadable${unreadableReason ? ` (${unreadableReason})` : ""}; node-shaped seed left in place`,
     };
   }
-  if (instanceIds.includes(id)) {
-    return { class: "keep", reason: `instance id '${id}' is named by an Instance row on ${baseUrl} — a live federation key, never pruned` };
+  if (agentIds.includes(id)) {
+    return { class: "unidentified", reason: `id '${id}' is registered in the checked Agent table on ${baseUrl}; left in place` };
   }
-  return { class: "orphan", reason: `no Instance row names '${id}' on ${baseUrl} — unreferenced (e.g. an abandoned first-boot mint, flair#1925)` };
+  if (instanceIds.includes(id)) {
+    return { class: "keep", reason: `id '${id}' is named by an Instance row in the checked target table on ${baseUrl}; kept` };
+  }
+  return {
+    class: "orphan-candidate",
+    reason: `id '${id}' is absent from the checked Instance and Agent tables on ${baseUrl}; ownership cannot be proven; not removed (see #2200)`,
+  };
 }
 
-/**
- * The ONE line `flair doctor` prints about orphan instance seeds (flair#1925),
- * or null when there is nothing to say.
- *
- * Doctor only ADVISES — it never removes a key. `instanceIds: null` means the
- * Instance rows were not read, which prints nothing at all: a zero count over
- * rows nobody saw would read as an all-clear. A node-shaped seed no Instance
- * row names is an orphan (`flair keys prune` moves it under its
- * own `--apply`).
- */
 export function orphanInstanceSeedAdvisory(input: {
   nodeKeyIds: readonly string[];
   instanceIds: readonly string[] | null;
+  agentIds?: readonly string[] | null;
+  unreadableReason?: string;
   keysDir: string;
+  baseUrl: string;
 }): string | null {
-  const { nodeKeyIds, instanceIds, keysDir } = input;
-  if (instanceIds === null || nodeKeyIds.length === 0) return null;
-  const orphans = nodeKeyIds.filter((id) => !instanceIds.includes(id)).length;
-  if (orphans === 0) return null;
-  return `${orphans} orphan instance seed(s) in ${keysDir} — remove with: flair keys prune --apply`;
+  const { nodeKeyIds, instanceIds, agentIds, keysDir, baseUrl } = input;
+  if (nodeKeyIds.length === 0) return null;
+  if (instanceIds === null || agentIds == null) {
+    return `${instanceIds === null ? "Instance" : "Agent"} rows unreadable (${input.unreadableReason ?? "read unavailable"}); node-shaped seeds in ${keysDir} remain unidentified`;
+  }
+  const candidates = nodeKeyIds.filter((id) => classifyNodeKeySeed(id, instanceIds, baseUrl, agentIds).class === "orphan-candidate").length;
+  if (candidates === 0) return null;
+  return `${candidates} orphan candidate(s) in ${keysDir}, absent from the checked Instance and Agent tables on ${baseUrl}; ownership cannot be proven; not removed (see #2200)`;
 }
 
 // ── Node-scoped federation keys vs agent signing keys (flair#1193) ─────────

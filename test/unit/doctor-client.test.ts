@@ -461,37 +461,30 @@ describe("classifyKeyFile", () => {
   });
 });
 
-/**
- * flair#1925 — a node-shaped seed (`flair_<hex8>.key`, no `.pub`) whose id no
- * Instance row names is an ORPHAN (e.g. left by an abandoned first-boot mint). The
- * classifier decides from the ids the caller read; `null` means the read did
- * not happen, and then NOTHING is offered as orphan.
- */
 describe("classifyNodeKeySeed", () => {
   const BASE_URL = "http://127.0.0.1:19926";
   const NODE = "flair_1111aaaa";
 
-  it("no Instance row names the id → class 'orphan'", () => {
-    const d = classifyNodeKeySeed(NODE, [], BASE_URL);
-    expect(d.class).toBe("orphan");
+  it("neither checked target table names the id → class 'orphan-candidate'", () => {
+    const d = classifyNodeKeySeed(NODE, [], BASE_URL, []);
+    expect(d.class).toBe("orphan-candidate");
     expect(d.reason).toContain(NODE);
     expect(d.reason).toContain(BASE_URL);
   });
 
-  it("an Instance row names the id → class 'keep' (a live federation key, never pruned)", () => {
-    const d = classifyNodeKeySeed(NODE, [NODE], BASE_URL);
+  it("an Instance row names the id → class 'keep' (named by the checked target table; kept)", () => {
+    const d = classifyNodeKeySeed(NODE, [NODE], BASE_URL, []);
     expect(d.class).toBe("keep");
-    expect(d.class).not.toBe("orphan");
+    expect(d.class).not.toBe("orphan-candidate");
   });
 
-  // The failed read: the rows are unknown, so no seed is proven unreferenced.
   it("Instance rows NOT read (null) → 'unidentified', NEVER 'orphan'", () => {
     const d = classifyNodeKeySeed(NODE, null, BASE_URL);
     expect(d.class).toBe("unidentified");
-    expect(d.class).not.toBe("orphan");
+    expect(d.class).not.toBe("orphan-candidate");
     expect(d.class).not.toBe("keep");
     expect(d.reason).toBe(
-      `node-scoped federation seed — the Instance rows were not read, so whether any row names '${NODE}' is unknown; left in place`,
+      "Instance rows unreadable; node-shaped seed left in place",
     );
   });
 });
@@ -499,27 +492,28 @@ describe("classifyNodeKeySeed", () => {
 describe("orphanInstanceSeedAdvisory (flair#1925)", () => {
   const KEYS = "/home/u/.flair/keys";
 
-  it("counts the node ids no Instance row names, and names the prune command", () => {
+  it("counts candidates in the checked target tables without naming a command", () => {
     const line = orphanInstanceSeedAdvisory({
       nodeKeyIds: ["flair_1111aaaa", "flair_2222bbbb"],
       instanceIds: ["flair_2222bbbb"],
-      keysDir: KEYS,
+      keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [],
     });
-    expect(line).toContain("1 orphan instance seed(s)");
-    expect(line).toContain("flair keys prune --apply");
+    expect(line).toContain("1 orphan candidate(s)");
+    expect(line).not.toContain("flair keys prune");
+    expect(line).toContain("#2200");
     expect(line).toContain(KEYS);
   });
 
   it("no orphans → no line", () => {
-    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: ["flair_1111aaaa"], instanceIds: ["flair_1111aaaa"], keysDir: KEYS })).toBeNull();
+    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: ["flair_1111aaaa"], instanceIds: ["flair_1111aaaa"], keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [] })).toBeNull();
   });
 
   it("no node-shaped seed → no line (and no read was needed)", () => {
-    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: [], instanceIds: [], keysDir: KEYS })).toBeNull();
+    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: [], instanceIds: [], keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [] })).toBeNull();
   });
 
-  it("Instance rows NOT read → no line (never a zero count over rows nobody saw)", () => {
-    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: ["flair_1111aaaa"], instanceIds: null, keysDir: KEYS })).toBeNull();
+  it("Instance rows NOT read → an unreadable advisory", () => {
+    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: ["flair_1111aaaa"], instanceIds: null, keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [] })).toContain("Instance rows unreadable");
   });
 });
 
