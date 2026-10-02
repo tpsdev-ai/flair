@@ -712,7 +712,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
 
       expect(attempted).toEqual(Array(5).fill(`${origin}/`));
       expect(received.map((r) => r.operation)).toEqual([
-        "search_by_value", "insert", "search_by_conditions", "upsert", "search_by_conditions",
+        "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions",
       ]);
       expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
       expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
