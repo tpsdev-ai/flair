@@ -259,15 +259,13 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     const firstStop = runLocalService(install, "stop");
     expect(firstStop.status, firstStop.stdout + firstStop.stderr).toBe(0);
 
-    // Re-init with --skip-start and an inline password; init re-persists it to
-    // the admin-pass file. The operator then removes that file.
     const skipped = runLocalInit(install, ["--skip-start"]);
     expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
     expect(skipped.stdout).toContain("using-flair skill: pending");
     expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
     const adminPassPath = join(install.home, ".flair", "admin-pass");
-    expect(readFileSync(adminPassPath, "utf8").trim()).toBe(ADMIN_PASS);
-    rmSync(adminPassPath);
+    // Remove the operator credential regardless of the persisted-admin detector (#2210).
+    rmSync(adminPassPath, { force: true });
 
     const withoutCredential = runLocalService(install, "start");
     expect(withoutCredential.status, withoutCredential.stdout + withoutCredential.stderr).toBe(0);
