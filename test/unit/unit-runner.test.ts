@@ -395,7 +395,8 @@ describe("shared unit lane", () => {
     expect(STEP_TIMEOUT_MS).toBeGreaterThanOrEqual(3 * otherStep);
     expect(ROOT_STEP_TIMEOUT_MS).toBeGreaterThan(rootStep);
     // The budget carries headroom over the slowest measured lane (flair#2224),
-    // so a runner slower than the worst observed does not kill a late step.
+    // so a runner up to half again as slow as the worst observed does not kill a
+    // late step.
     expect(KEEP_GOING_LANE_BUDGET_MS).toBeGreaterThanOrEqual(1.5 * lane);
     // One hung step, wherever it is, still leaves every later step room to run
     // inside the budget.

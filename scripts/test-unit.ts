@@ -530,10 +530,10 @@ export function runUnitSteps(
         ? { ms: remaining, reason: `timed out: ${budgetRanOut}` }
         : { ms: limit, reason: `timed out after ${seconds(limit)}` };
     const detail = runStep(step, executable, timeout, createSandbox, tripwire.dir);
-    // Per-step timing, printed for every step that ran, pass or fail
-    // (flair#2224): the budget above is sized from measured step times, so the
-    // lane reports them; otherwise the next resize can only be re-derived from
-    // CI timestamps that no longer exist.
+    // Per-step timing, printed after every step the lane attempts, pass or
+    // fail (flair#2224): the budget above is sized from measured step times, so
+    // the lane reports them; otherwise the next resize can only be re-derived
+    // from CI timestamps that no longer exist.
     console.log(`${step.name}: ${seconds(Date.now() - stepStartedMs)}`);
     // The tripwire is checked after EVERY step, whatever the step's own
     // outcome, so a call that reached it is named with the step that made it.

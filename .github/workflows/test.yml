@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
     # hung 16+ min on 2026-07-04, blocking merge on a required check. 15 min
-    # bounds a hung install/runner. The unit lane takes 401-514 s of it
+    # bounds a hung install/runner. The unit lane takes 401-510 s of it
     # (measured 2026-10-02). scripts/test-unit.ts derives its keep-going lane
     # budget from this value (CI_JOB_LIMIT_MS minus a 120 s reserve for the
     # job's other steps, flair#2030/#2224); its per-step limits are fixed values
