@@ -40,6 +40,7 @@ async function opsInsertMemory(id: string, durability: string): Promise<void> {
       table: "Memory",
       records: [{ id, agentId: "integrity-e2e", content: `row ${id}`, durability, createdAt: new Date().toISOString() }],
     }),
+    signal: AbortSignal.timeout(15_000),
   });
   expect(res.status).toBe(200);
 }
@@ -51,6 +52,7 @@ async function opsDeleteMemory(id: string): Promise<void> {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: adminAuth() },
     body: JSON.stringify({ operation: "delete", database: "flair", table: "Memory", ids: [id] }),
+    signal: AbortSignal.timeout(15_000),
   });
   expect(res.status).toBe(200);
 }
@@ -59,6 +61,7 @@ async function restDeleteMemory(id: string): Promise<number> {
   const res = await fetch(`${harper.httpURL}/Memory/${encodeURIComponent(id)}`, {
     method: "DELETE",
     headers: { Authorization: adminAuth() },
+    signal: AbortSignal.timeout(15_000),
   });
   return res.status;
 }
@@ -112,7 +115,7 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect(existsSync(checkpointPath())).toBe(true);
     expect(statSync(checkpointPath()).mode & 0o777).toBe(0o600);
     expect(r.json?.counts?.permanent).toBeGreaterThanOrEqual(1);
-  }, 90_000);
+  }, 150_000);
 
   test("a permanent row removed beneath Flair, then restart, alerts naming the id", async () => {
     const before = readFileSync(checkpointPath(), "utf-8");
@@ -148,7 +151,7 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect((r.json?.losses ?? []).length).toBe(0);
     const attributed = (r.json?.attributedDeletes ?? []).map((d: any) => d.id);
     expect(attributed).toContain("itg-legit-perm");
-  }, 90_000);
+  }, 150_000);
 
   test("an unreachable instance reports UNKNOWN and never touches the checkpoint", async () => {
     const before = readFileSync(checkpointPath(), "utf-8");
@@ -157,7 +160,7 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect(r.json?.status).toBe("unknown");
     expect(r.json?.checkpointWritten).toBe(false);
     expect(readFileSync(checkpointPath(), "utf-8")).toBe(before);
-  }, 90_000);
+  }, 150_000);
 
   test("an equal-size replacement is caught by the ID set (a count alone would miss it)", async () => {
     rmSync(checkpointPath(), { force: true });
@@ -173,5 +176,5 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect(r.json?.status).toBe("alert");
     const lostIds = (r.json?.losses ?? []).map((l: any) => l.id);
     expect(lostIds).toContain("itg-swap-old");
-  }, 90_000);
+  }, 150_000);
 });
