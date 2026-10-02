@@ -18,6 +18,7 @@ import {
   resolveInitAdminPasswordRefuseReason,
   resolveInitAdminPasswordSource,
 } from "../lib/init-admin-pass.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
@@ -1130,7 +1131,7 @@ program
       // Verify Ed25519 auth
       console.log("Verifying Ed25519 auth...");
       const httpUrl = `http://127.0.0.1:${httpPort}`;
-      const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${agentId}`);
+      const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${encodeRecordId(agentId)}`);
       if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
       console.log("Ed25519 auth verified ✓");
 

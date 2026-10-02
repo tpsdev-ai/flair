@@ -15,6 +15,7 @@
 import { Command } from "commander";
 import * as render from "../render.js";
 import { resolveKeyPath, buildEd25519Auth } from "../lib/auth-resolve.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type BridgeCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -22,23 +23,6 @@ export type BridgeCli = {
 };
 
 let cli: BridgeCli;
-
-/**
- * Percent-encode a Memory id so it addresses exactly that record as ONE path
- * segment (flair#1970). REFUSES an id that is exactly `.` or `..`: percent-
- * encoding leaves those unchanged and URL normalization collapses `/Memory/.`
- * to `/Memory/` and `/Memory/..` to `/`, so the sent path would not be the id
- * (nor the signed path). Such an id cannot address its record.
- */
-function encodeRecordId(id: string): string {
-  if (id === "." || id === "..") {
-    throw new Error(
-      `record id ${JSON.stringify(id)} is a URL path dot-segment ("." or ".."); ` +
-        `it cannot be addressed as one path segment of /Memory/<id>. Use a different id.`,
-    );
-  }
-  return encodeURIComponent(id);
-}
 
 /** Bind shared CLI helpers. cli.ts calls this immediately before register(program). */
 export function bindCli(fns: BridgeCli): void {

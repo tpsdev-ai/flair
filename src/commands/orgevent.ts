@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { buildEd25519Auth, resolveKeyPath } from "../lib/auth-resolve.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
@@ -98,7 +99,10 @@ export async function publishOrgEvent(params: PublishOrgEventParams): Promise<Pu
   }
 
   const id = `${params.agentId}-${randomUUID()}`;
-  const auth = buildEd25519Auth(params.agentId, "PUT", `/OrgEvent/${id}`, keyPath);
+  // Sign the exact path that is sent (flair#1970): the id is one encoded segment,
+  // and the signature covers that same string.
+  const path = `/OrgEvent/${encodeRecordId(id)}`;
+  const auth = buildEd25519Auth(params.agentId, "PUT", path, keyPath);
 
   const body: Record<string, unknown> = {
     id,
@@ -112,7 +116,7 @@ export async function publishOrgEvent(params: PublishOrgEventParams): Promise<Pu
   if (params.targetIds && params.targetIds.length > 0) body.targetIds = params.targetIds;
   if (params.entities && params.entities.length > 0) body.entities = params.entities;
 
-  const res = await fetch(`${params.baseUrl}/OrgEvent/${id}`, {
+  const res = await fetch(`${params.baseUrl}${path}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", Authorization: auth },
     body: JSON.stringify(body),
@@ -120,7 +124,7 @@ export async function publishOrgEvent(params: PublishOrgEventParams): Promise<Pu
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    return { ok: false, error: `PUT /OrgEvent/${id} failed (${res.status}): ${text}` };
+    return { ok: false, error: `PUT ${path} failed (${res.status}): ${text}` };
   }
 
   const data = await res.json().catch(() => null);

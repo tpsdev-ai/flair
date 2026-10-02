@@ -13,6 +13,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 
 import { join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type ExportCli = {
   privKeyPath: (...args: any[]) => any;
@@ -54,9 +55,12 @@ program
     if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
 
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
+    class HttpError extends Error {
+      constructor(message: string, readonly status: number) { super(message); }
+    }
     async function adminGet(path: string): Promise<any> {
       const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: auth }, signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) throw new Error(`GET ${path} failed (${res.status})`);
+      if (!res.ok) throw new HttpError(`GET ${path} failed (${res.status})`, res.status);
       return res.json();
     }
 
@@ -64,8 +68,19 @@ program
 
     // Fetch agent record
     let agent: any;
-    try { agent = await adminGet(`/Agent/${agentId}`); }
-    catch { console.error(`Agent '${agentId}' not found`); process.exit(1); }
+    try {
+      agent = await adminGet(`/Agent/${encodeRecordId(agentId)}`);
+    } catch (err) {
+      // flair#1970 acceptance: a read that FAILS is not "not found". Only a
+      // definite 404 is; a transport failure, a 5xx, or an unreadable body is a
+      // refusal that names what happened rather than an absent agent.
+      if (err instanceof HttpError && err.status === 404) {
+        console.error(`Agent '${agentId}' not found`);
+        process.exit(1);
+      }
+      console.error(`Error: could not read agent '${agentId}': ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
 
     // Fetch memories
     const allMemories: any[] = await adminGet("/Memory/").catch(() => []);

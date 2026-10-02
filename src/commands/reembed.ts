@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { authFetch, defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { existsSync } from "node:fs";
 
 export type ReembedCli = {
@@ -205,7 +206,7 @@ program
           const batch = memories.slice(i, i + batchSize);
           for (const memory of batch) {
             try {
-              const updateRes = await authFetch(baseUrl, agent, privPath, "PUT", `/Memory/${memory.id}`, {
+              const updateRes = await authFetch(baseUrl, agent, privPath, "PUT", `/Memory/${encodeRecordId(memory.id)}`, {
                 id: memory.id, content: memory.content, embedding: undefined, embeddingModel: undefined, agentId: memory.agentId || agent,
               });
               if (updateRes.ok) processed++;
@@ -299,7 +300,7 @@ program
       const batch = candidates.slice(i, i + batchSize);
       for (const memory of batch) {
         try {
-          const updateRes = await authFetch(baseUrl, agentId, privPath, "PUT", `/Memory/${memory.id}`, {
+          const updateRes = await authFetch(baseUrl, agentId, privPath, "PUT", `/Memory/${encodeRecordId(memory.id)}`, {
             id: memory.id, content: memory.content, embedding: undefined, embeddingModel: undefined, agentId: memory.agentId || opts.agent,
           });
           if (updateRes.ok) processed++;
