@@ -1428,6 +1428,14 @@ async function fetchOAuthMetadata(
   }
 }
 
+/** The MCP authorization server's token endpoint for `issuer` — the one
+ *  derivation of "the MCP token endpoint of this instance", shared by target
+ *  binding (`verifyTargetIssuer`) and public self-verification
+ *  (`selfVerifyMcpMetadata`) so the two checks cannot disagree. */
+function mcpTokenEndpoint(issuer: string): string {
+  return `${issuer.replace(/\/+$/, "")}/oauth/mcp/token`;
+}
+
 async function verifyTargetIssuer(
   instance: string,
   issuer: string,
@@ -1441,7 +1449,7 @@ async function verifyTargetIssuer(
     const found = typeof actual === "string" ? `names issuer=${JSON.stringify(actual)}` : `has no string issuer (got ${JSON.stringify(actual)})`;
     return { ok: false, detail: `The target's own metadata at ${target.url} ${found}; expected ${issuer}. ${remedy}` };
   }
-  if (target.body?.token_endpoint !== `${issuer}/oauth/mcp/token`) {
+  if (target.body?.token_endpoint !== mcpTokenEndpoint(issuer)) {
     return {
       ok: false,
       detail: `The target's metadata at ${target.url} has token_endpoint=${JSON.stringify(target.body?.token_endpoint)}, not the MCP authorization server's token endpoint. Check FLAIR_MCP_OAUTH and the @harperfast/oauth component on the target, then re-run \`flair mcp enable\`.`,
@@ -1571,6 +1579,25 @@ export async function selfVerifyMcpMetadata(
       tokenEndpoint: body.token_endpoint,
       cimdSupported: false,
       detail: `${url} answered but does not advertise CIMD support (client_id_metadata_document_supported / "none" in token_endpoint_auth_methods_supported) — is clientIdMetadataDocuments.enabled explicitly false?`,
+    };
+  }
+
+  // flair#2190: the public document must name the MCP authorization server's
+  // token endpoint exactly — the same derivation target binding requires
+  // (mcpTokenEndpoint). The flair's-own-server and CIMD checks above run
+  // first, so those cases keep their specific remedies.
+  if (body.token_endpoint !== mcpTokenEndpoint(normalizedIssuer)) {
+    return {
+      ok: false,
+      issuer: body.issuer,
+      registrationEndpoint: body.registration_endpoint,
+      tokenEndpoint: body.token_endpoint,
+      cimdSupported: true,
+      detail:
+        `${url} answered with token_endpoint=${JSON.stringify(body.token_endpoint)}, not the MCP authorization server's ` +
+        `${mcpTokenEndpoint(normalizedIssuer)} — the /mcp surface is NOT enabled on that instance. ` +
+        `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
+        `component declared in its config.yaml?`,
     };
   }
 

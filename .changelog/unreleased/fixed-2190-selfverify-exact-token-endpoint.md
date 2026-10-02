@@ -1,0 +1,1 @@
+- **`flair mcp enable`'s public self-verification now requires the discovery document's `token_endpoint` to be the exact MCP token endpoint.** A document with a valid issuer and CIMD fields but a different token endpoint is refused, naming what it found and what it expected; the check reuses the derivation target binding already used for the instance.
