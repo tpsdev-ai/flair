@@ -402,7 +402,7 @@ export function register(program: Command): void {
       const adminPassFromEnv = !opts.adminPass && (!!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD);
       if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
         console.error(
-          "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
+          "warning: --admin-pass passed inline. Consider the FLAIR_ADMIN_PASS env " +
           "to keep secrets out of shell history."
         );
       }
@@ -533,7 +533,7 @@ export function register(program: Command): void {
       const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
       if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
         console.error(
-          "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
+          "warning: --admin-pass passed inline. Consider the FLAIR_ADMIN_PASS env " +
           "to keep secrets out of shell history."
         );
       }

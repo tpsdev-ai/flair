@@ -128,27 +128,6 @@ const OTHER_COMMAND_REFERENCES: Array<Exemption & { command: string; why: string
  */
 const KNOWN_DEFECTS: Array<Exemption & { defect: string }> = [
   {
-    file: "src/commands/agent.ts",
-    flag: "--admin-pass-from",
-    context: "agent list",
-    literal: "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env ",
-    defect: "`agent list`'s inline-password warning suggests a flag no command declares",
-  },
-  {
-    file: "src/commands/agent.ts",
-    flag: "--admin-pass-from",
-    context: "agent rotate-key",
-    literal: "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env ",
-    defect: "`agent rotate-key`'s inline-password warning suggests a flag no command declares",
-  },
-  {
-    file: "src/commands/deploy.ts",
-    flag: "--remote",
-    context: "agent add",
-    literal: "     flair agent add --remote ${…} --name my-agent",
-    defect: "`flair deploy`'s next-steps example runs `flair agent add --remote`; `agent add` declares --target",
-  },
-  {
     file: "src/bridges/builtins/mem0.ts",
     flag: "--user",
     context: "*",
@@ -742,39 +721,19 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
   // flag in the same file must fail, whether it copies the original literal
   // exactly (the entry then matches two findings) or words it differently (a
   // finding no entry covers). The unmutated file is the control.
-  const DEPLOY = "src/commands/deploy.ts";
-  const DEPLOY_ANCHOR = "      console.log(`     flair agent add --remote ${result.url} --name my-agent`);\n";
-  const duplicateRows: Array<{ name: string; extra: string; problems: RegExp[]; unexempted: string[] }> = [
-    {
-      name: "an exact copy of the exempted --remote example",
-      extra: DEPLOY_ANCHOR,
-      problems: [/^src\/commands\/deploy\.ts --remote \[agent add\] .* matches 2 findings, not exactly one$/],
-      unexempted: [],
-    },
-    {
-      name: "a differently worded second --remote example",
-      extra: "      console.log(`     flair agent add --remote ${result.url} --name other-agent`);\n",
-      problems: [],
-      unexempted: ["--remote → flair agent add"],
-    },
-  ];
-  for (const row of duplicateRows) {
-    test(`mutation: ${row.name} in ${DEPLOY} fails the exemption check`, () => {
-      const original = readFileSync(join(REPO, DEPLOY), "utf8");
-      expect(original.split(DEPLOY_ANCHOR)).toHaveLength(2); // the anchor exists, once
-      const scope = { registry, fallback: tree.fallbackFor(DEPLOY) };
-      // This file's findings against this file's exemptions only, so no other
-      // file's findings affect the rows.
-      const exemptions = EXEMPTIONS.filter((e) => e.file === DEPLOY);
-      const control = applyExemptions(scanSource(DEPLOY, original, scope).findings, exemptions);
-      expect(control).toEqual({ unexempted: [], problems: [] });
-      const mutated = original.replace(DEPLOY_ANCHOR, DEPLOY_ANCHOR + row.extra);
-      const result = applyExemptions(scanSource(DEPLOY, mutated, scope).findings, exemptions);
-      expect(result.problems).toHaveLength(row.problems.length);
-      row.problems.forEach((re, i) => expect(result.problems[i]).toMatch(re));
-      expect(result.unexempted.map((f) => `${f.flag} → ${f.checkedAgainst}`)).toEqual(row.unexempted);
-    });
-  }
+  // flair#2124: the deploy next-steps example must name only flags `agent add`
+  // declares, and carry the positional agent id (the exemption that used to
+  // cover this line is gone, so the message-flags check owns it now).
+  test("flair#2124: the deploy next-steps example names only flags `agent add` declares", () => {
+    const line = readFileSync(join(REPO, "src/commands/deploy.ts"), "utf8")
+      .split("\n")
+      .find((l) => l.includes("flair agent add"));
+    expect(line).toBeTruthy();
+    expect(line!).toMatch(/flair agent add [^\s-]\S*\s+--target /);
+    const accepted = registry.get("agent add");
+    expect(accepted).toBeTruthy();
+    for (const flag of line!.match(FLAG_TOKEN) ?? []) expect(accepted!.has(flag)).toBe(true);
+  });
 
   // A mutation run against the real sources: one bogus flag put back into one
   // message must be found, in the command it belongs to; the unmutated file is

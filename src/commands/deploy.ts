@@ -180,7 +180,7 @@ program
       console.log(`\nNext steps:`);
       console.log(dim(`  1. Set an admin password in Fabric Studio (Cluster Settings → Admin)`));
       console.log(dim(`  2. Seed your first agent:`));
-      console.log(`     flair agent add --remote ${result.url} --name my-agent`);
+      console.log(`     flair agent add my-agent --target ${result.url}`);
     } catch (err: any) {
       console.error(red(`\n✗ deploy failed: ${err.message}`));
       const hint = err.message?.toLowerCase();
