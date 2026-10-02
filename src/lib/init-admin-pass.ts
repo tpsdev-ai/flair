@@ -26,6 +26,7 @@
  */
 import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
+import { createRequire } from "node:module";
 import { existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -135,17 +136,80 @@ export function resolveInitAdminPasswordRefuseReason(
 }
 
 /**
- * Harper's own install-validator signal that a rootPath already has a user
- * record (`system/hdb_user/data.mdb` or the legacy `system/hdb_user.mdb`).
- * Config presence alone is not enough — an interrupted install can write
- * harper-config.yaml before the user hash lands.
+ * Where each storage engine keeps the system schema (and so the admin user).
+ *
+ * Older data directories use LMDB: one file per table, at
+ * `system/hdb_user/data.mdb`, or the legacy single `system/hdb_user.mdb`.
+ *
+ * Harper 5 uses RocksDB: the whole `system` database is ONE column-family
+ * database at `database/system`, and each table's primary store is a column
+ * family named `<table>/` (Harper names a table's primary store with a
+ * trailing slash). A persisted admin user is therefore a row in the
+ * `hdb_user/` column family — not a file name. Detect it by reading THAT
+ * store, using the same engine Harper wrote it with, rather than guessing
+ * paths.
+ */
+export const HARPER_SYSTEM_DB_REL = join("database", "system");
+export const HDB_USER_PRIMARY_CF = "hdb_user/";
+
+/**
+ * Count the rows in the `hdb_user/` primary store of a Harper 5 system
+ * database, opened READ-ONLY (RocksDB read-only needs no lock, so this works
+ * while the instance is running, and writes nothing).
+ *
+ * `@harperfast/rocksdb-js` is resolved through the installed `harper`
+ * package: flair does not depend on it directly, and the reader must be the
+ * same engine Harper wrote the store with. A read failure PROPAGATES — an
+ * unreadable store is never read as "no user".
+ */
+export function countRocksAdminUsers(systemDbDir: string): number {
+  const requireFromHere = createRequire(import.meta.url);
+  const rocksPath = createRequire(requireFromHere.resolve("harper")).resolve(
+    "@harperfast/rocksdb-js",
+  );
+  const { RocksDatabase } = requireFromHere(rocksPath) as {
+    RocksDatabase: {
+      open: (path: string, options?: Record<string, unknown>) => {
+        columns?: string[];
+        name?: string;
+        getKeysCount: () => number;
+        close?: () => void;
+      };
+    };
+  };
+  const probe = RocksDatabase.open(systemDbDir, { readOnly: true });
+  let hasUserStore: boolean;
+  try {
+    hasUserStore = Array.isArray(probe.columns) && probe.columns.includes(HDB_USER_PRIMARY_CF);
+  } finally {
+    probe.close?.();
+  }
+  if (!hasUserStore) return 0;
+  const users = RocksDatabase.open(systemDbDir, { name: HDB_USER_PRIMARY_CF, readOnly: true });
+  try {
+    return users.getKeysCount();
+  } finally {
+    users.close?.();
+  }
+}
+
+/**
+ * Harper persists the admin user by its OWN storage engine. This returns true
+ * when THIS data directory holds one: the LMDB paths for older data
+ * directories, and the `hdb_user/` RocksDB store for Harper 5. Config presence
+ * alone is not enough — mount creates the empty `hdb_user/` store before any
+ * user is added, so a config file (or an empty store) must not read as a user.
+ *
+ * A system database that exists but cannot be read is NOT `false`: the read
+ * throws so the caller refuses rather than generating a fresh, desynced
+ * admin-pass file.
  */
 export function detectPersistedAdminUser(dataDir: string): boolean {
-  const dir = dataDir;
-  return (
-    existsSync(join(dir, "system", "hdb_user", "data.mdb")) ||
-    existsSync(join(dir, "system", "hdb_user.mdb"))
-  );
+  if (existsSync(join(dataDir, "system", "hdb_user", "data.mdb"))) return true;
+  if (existsSync(join(dataDir, "system", "hdb_user.mdb"))) return true;
+  const systemDbDir = join(dataDir, HARPER_SYSTEM_DB_REL);
+  if (!existsSync(systemDbDir)) return false;
+  return countRocksAdminUsers(systemDbDir) > 0;
 }
 
 export function initAdminPassRefusalMessage(

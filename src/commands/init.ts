@@ -599,7 +599,20 @@ program
     let reusedExistingAdminPass = false;
     let pendingAdminPassRotate = false;
     const adminPassPath = defaultAdminPassPath();
-    const persistedAdminUser = detectPersistedAdminUser(dataDir);
+    // Harper's persisted user is read from its OWN store. An unreadable store is
+    // NOT `false` — refuse rather than generate a fresh, desynced file.
+    let persistedAdminUser: boolean;
+    try {
+      persistedAdminUser = detectPersistedAdminUser(dataDir);
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(
+        `❌ Refusing to initialize: the Harper system database under ${dataDir} could not be read, ` +
+          `so I cannot tell whether an admin user is already persisted (${detail}). ` +
+          `Repair that data directory (or point --data-dir at the right one) and re-run.`
+      );
+      process.exit(1);
+    }
     let alreadyRunning = false;
     try {
       const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });

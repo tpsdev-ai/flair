@@ -743,16 +743,33 @@ program
     // The remedy names the two exits: `--admin-pass-file` / `--reset-admin-pass`.
     try {
       const dataDir = defaultDataDir();
-      const finding = adminPassDesyncFinding({
-        adminPassFileExists: existsSync(defaultAdminPassPath()),
-        persistedAdminUser: detectPersistedAdminUser(dataDir),
-        dataDir,
-        adminPassPath: defaultAdminPassPath(),
-      });
-      if (finding?.flagged) {
-        console.log(`  ${render.icons.error} ${finding.message}`);
-        console.log(`     ${render.wrap(render.c.dim, finding.remedy)}`);
-        issues++;
+      // An unreadable system store is UNVERIFIED, not "no user": say so rather
+      // than reporting nothing (which would read as no desync).
+      let persistedAdminUser: boolean | null;
+      try {
+        persistedAdminUser = detectPersistedAdminUser(dataDir);
+      } catch {
+        persistedAdminUser = null;
+      }
+      if (persistedAdminUser === null) {
+        console.log(
+          `  ${render.icons.warn} ${render.wrap(
+            render.c.yellow,
+            `could not read the Harper system database under ${dataDir} to tell whether an admin user is persisted — not assessing the admin-pass desync`,
+          )}`,
+        );
+      } else {
+        const finding = adminPassDesyncFinding({
+          adminPassFileExists: existsSync(defaultAdminPassPath()),
+          persistedAdminUser,
+          dataDir,
+          adminPassPath: defaultAdminPassPath(),
+        });
+        if (finding?.flagged) {
+          console.log(`  ${render.icons.error} ${finding.message}`);
+          console.log(`     ${render.wrap(render.c.dim, finding.remedy)}`);
+          issues++;
+        }
       }
     } catch { /* best-effort — a missing data dir is not a doctor crash */ }
 
