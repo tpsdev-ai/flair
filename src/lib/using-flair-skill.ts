@@ -3,7 +3,7 @@
  *
  * Normal `flair init` writes this text as one skill-tagged Memory row and an
  * org assignment; local `--skip-start` on the default install defers that
- * write until `flair start`.
+ * write to a later `flair start` with the admin credential.
  * Re-runs preserve edited text. An eligible agent's bootstrap may list it when
  * the assignment wins same-name conflict resolution and fits the budget.
  *

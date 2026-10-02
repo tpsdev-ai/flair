@@ -194,14 +194,25 @@ function writeDaemonSidecar(...args: any[]): any {
   return cli.writeDaemonSidecar(...args);
 }
 
-/** Finish a local --skip-start init after this command has started its instance. */
-async function seedAfterStart(dataDir: string, port: number): Promise<boolean> {
+/**
+ * Finish a local --skip-start init's deferred seed after this command has
+ * started its instance (flair#2141 S2). A seed it cannot complete is a
+ * WARNING, not a failure: the server started, so `flair start` exits 0 and the
+ * pending marker stays for the next `flair start`. The credential case names
+ * the remedy.
+ */
+async function seedAfterStart(dataDir: string, port: number): Promise<void> {
   try {
     const outcome = await reconcilePendingSkillSeed(dataDir, async () => {
       const passPath = defaultAdminPassPath();
       const pass = process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD ||
         (existsSync(passPath) ? readAdminPassFileSecure(passPath) : "");
-      if (!pass) throw new Error(`admin credentials are needed; set FLAIR_ADMIN_PASS or restore ${passPath}`);
+      if (!pass) {
+        throw new Error(
+          `admin credentials are needed to seed it — set FLAIR_ADMIN_PASS or restore ${passPath}, ` +
+          "then run 'flair start' again",
+        );
+      }
       return seedUsingFlairSkill({
         baseUrl: `http://127.0.0.1:${port}`,
         user: DEFAULT_ADMIN_USER,
@@ -209,13 +220,14 @@ async function seedAfterStart(dataDir: string, port: number): Promise<boolean> {
         notify: (line) => console.log(line),
       });
     });
-    if (!outcome) return true;
-    if (outcome.kind === "refused") throw new Error(outcome.message);
+    if (!outcome) return;
+    if (outcome.kind === "refused") {
+      console.error(`⚠️  Flair started, but the using-flair skill seed is still pending: ${outcome.message}`);
+      return;
+    }
     console.log(`using-flair skill: ${outcome.message}`);
-    return true;
   } catch (err: any) {
-    console.error(`❌ Flair started, but the using-flair skill seed is pending: ${err?.message ?? err}`);
-    return false;
+    console.error(`⚠️  Flair started, but the using-flair skill seed is still pending: ${err?.message ?? err}`);
   }
 }
 
@@ -425,7 +437,7 @@ program
             const managed = observeLaunchdManagement(dataDir, port);
             const verdict = verifyLaunchdManagement(managed);
             if (verdict.verified) {
-              if (!await seedAfterStart(dataDir, port)) process.exit(1);
+              await seedAfterStart(dataDir, port);
               // The migration's check mark too only after the strict verifier
               // passed: moving a plist is not launchd running this instance.
               if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
@@ -503,7 +515,7 @@ program
           console.error("❌ Flair answered health, but this start did not prove the serving process; the using-flair skill seed remains pending.");
           process.exit(1);
         }
-        if (!await seedAfterStart(dataDir, port)) process.exit(1);
+        await seedAfterStart(dataDir, port);
       }
       if (launchdFellBack) {
         // flair#2040: a direct start that took launchd's place says so.

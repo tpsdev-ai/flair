@@ -1119,7 +1119,8 @@ program
 
     // flair#2141 S2 — seed the org-wide using-flair skill on this instance, as
     // the operator. Local `--skip-start` on the default install defers seeding
-    // to `flair start`, which has no `--data-dir` flag.
+    // to a later `flair start` with the admin credential; that command has no
+    // `--data-dir` flag.
     // (Remote init, `--target`, seeds with or
     // without `--skip-start`.) A refusal fails this run rather than reporting a
     // successful init without the skill, so both local paths call it before
@@ -1128,7 +1129,7 @@ program
       if (opts.skipStart) {
         if (dataDir === defaultDataDir()) {
           markSkillSeedPending(dataDir);
-          console.log("using-flair skill: pending (local --skip-start init defers seeding until 'flair start')");
+          console.log("using-flair skill: pending (local --skip-start init defers seeding to a 'flair start' with the admin credential)");
         } else {
           console.log("using-flair skill: not seeded (start this custom data-dir instance, then run 'flair init' without --skip-start to seed)");
         }

@@ -3,7 +3,9 @@
  * write (flair#2141 S2).
  *
  * A normal `flair init` writes both rows; local `--skip-start` on the default
- * install defers them until `flair start`. Re-runs may find both rows already
+ * install defers them to a later `flair start` that has the admin credential
+ * (FLAIR_ADMIN_PASS or the admin-pass file; without one that start warns and
+ * leaves the seed pending). Re-runs may find both rows already
  * current. Writes use
  * a verified Basic administrator over authenticated Basic REST requests
  * (`PUT /Memory/<id>`, `PUT /OrgSkillAssignment/<id>`) — so the rows carry

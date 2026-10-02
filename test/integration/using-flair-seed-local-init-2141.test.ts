@@ -28,6 +28,7 @@ import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { SEED_ASSIGNMENT_ID, SEED_SKILL_ID } from "../../src/lib/skill-seed.js";
+import { skillSeedPendingPath } from "../../src/lib/skill-seed-pending.js";
 import { USING_FLAIR_SKILL_CONTENT } from "../../src/lib/using-flair-skill.js";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
@@ -69,9 +70,6 @@ function childEnv(home: string, shimDir: string): Record<string, string> {
   }
   env.HOME = home;
   env.PATH = `${shimDir}:${process.env.PATH ?? ""}`;
-  // `flair start` completes a deferred seed as the Basic administrator, so the
-  // child needs this install's credential; FLAIR_ADMIN_PASS is the source it reads first.
-  env.FLAIR_ADMIN_PASS = ADMIN_PASS;
   // The model the CI lanes pre-fetch; else <repo>/models (the harper-lifecycle default).
   env.FLAIR_MODELS_DIR = process.env.FLAIR_MODELS_DIR ?? join(ROOT, "models");
   return env;
@@ -111,7 +109,7 @@ function nodeBin(): string {
 function runLocalInit(install: Install, extraArgs: string[]) {
   const res = spawnSync(
     nodeBin(),
-    [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort),
+    [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), "--admin-pass", ADMIN_PASS,
       "--skip-soul", "--no-mcp", "--skip-smoke", "--skip-claude-md", "--skip-hook", ...extraArgs],
     {
       cwd: ROOT,
@@ -124,13 +122,13 @@ function runLocalInit(install: Install, extraArgs: string[]) {
   return { status: res.status, signal: res.signal, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
-function runLocalService(install: Install, command: "start" | "stop") {
+function runLocalService(install: Install, command: "start" | "stop", extraEnv: Record<string, string> = {}) {
   const res = spawnSync(nodeBin(), [CLI, command, "--port", String(install.httpPort)], {
     cwd: ROOT,
     encoding: "utf8",
     timeout: 240_000,
     killSignal: "SIGKILL",
-    env: childEnv(install.home, launchctlStub(install.home)),
+    env: { ...childEnv(install.home, launchctlStub(install.home)), ...extraEnv },
   });
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
@@ -248,24 +246,44 @@ describe("flair#2141 S2 — a local fresh `flair init` seeds using-flair", () =>
     await expectSeeded(install);
   }, 330_000);
 
-  test("local --skip-start leaves the seed pending until flair start", async () => {
+  test("a --skip-start init with an inline password leaves the seed pending; flair start warns without the credential and completes with it", async () => {
     ensureCliBuild();
     const install = await newInstall();
+    // Harper must be installed before `flair start` can boot it, and a
+    // `--skip-start` init installs nothing (src/commands/init.ts). Install with
+    // a normal init, then clear the seed so the deferred seed is observable.
     const initial = runLocalInit(install, []);
     expect(initial.status, initial.stdout + initial.stderr).toBe(0);
     await ops(install, { operation: "delete", database: "flair", table: "Memory", ids: [SEED_SKILL_ID] });
     await ops(install, { operation: "delete", database: "flair", table: "OrgSkillAssignment", ids: [SEED_ASSIGNMENT_ID] });
+    const firstStop = runLocalService(install, "stop");
+    expect(firstStop.status, firstStop.stdout + firstStop.stderr).toBe(0);
 
+    // The operator's step: re-init with --skip-start and an inline password.
+    // The inline password is not persisted, so the data dir has no credential
+    // and the seed stays pending.
     const skipped = runLocalInit(install, ["--skip-start"]);
     expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
-    expect(skipped.stdout).toContain("defers seeding until 'flair start'");
+    expect(skipped.stdout).toContain("defers seeding to a 'flair start' with the admin credential");
+    expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
+    expect(existsSync(join(install.home, ".flair", "admin-pass"))).toBe(false);
+
+    // flair start WITHOUT a credential: the server starts, so this exits 0 with
+    // one warning and the marker stays; no skill row is written.
+    const withoutCredential = runLocalService(install, "start");
+    expect(withoutCredential.status, withoutCredential.stdout + withoutCredential.stderr).toBe(0);
+    expect(withoutCredential.stderr).toContain("using-flair skill seed is still pending");
+    expect(withoutCredential.stderr).toContain("FLAIR_ADMIN_PASS");
+    expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
     expect((await seedRows(install)).row).toBeNull();
 
-    const stopped = runLocalService(install, "stop");
-    expect(stopped.status, stopped.stdout + stopped.stderr).toBe(0);
-    const started = runLocalService(install, "start");
-    expect(started.status, started.stdout + started.stderr).toBe(0);
-    expect(started.stdout).toContain("using-flair skill: seeded the using-flair skill");
+    // flair start WITH FLAIR_ADMIN_PASS completes the seed and removes the marker.
+    const secondStop = runLocalService(install, "stop");
+    expect(secondStop.status, secondStop.stdout + secondStop.stderr).toBe(0);
+    const withCredential = runLocalService(install, "start", { FLAIR_ADMIN_PASS: ADMIN_PASS });
+    expect(withCredential.status, withCredential.stdout + withCredential.stderr).toBe(0);
+    expect(withCredential.stdout).toContain("using-flair skill: seeded the using-flair skill");
+    expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(false);
     await expectSeeded(install);
-  }, 600_000);
+  }, 900_000);
 });
