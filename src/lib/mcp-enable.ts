@@ -1960,14 +1960,16 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const fabricTarget = isFabricTarget(params.instance, params.fabric);
 
   try {
+    if (!dryRun && !fabricTarget && !isLoopbackUrl(params.instance)) {
+      currentStep = "target-shape-check";
+      const message =
+        `${params.instance} is not a loopback URL or a *.harperfabric.com target. ` +
+        `For Harper Fabric behind a custom domain, use --fabric. Nothing was changed.`;
+      push(false, message);
+      return { ok: false, dryRun, refused: { message }, steps, failedStep: "target-shape-check" };
+    }
+
     // ── --cimd-allowed-hosts (flair#2113) ─────────────────────────────────────
-    // Before any step with a side effect: the hosts are validated, a Fabric
-    // target is refused, the config.yaml to edit must exist with an
-    // @harperfast/oauth mcp block, and (except under --dry-run, which skips it)
-    // the preflight match must pass. Any of these failing refuses the flag with
-    // nothing changed. The list itself is ensured
-    // at local-config-update, before the restart: written unless the file
-    // already holds that exact list, then read back.
     let cimdAllowedHosts: string[] | undefined;
     if (params.cimdAllowedHosts !== undefined) {
       currentStep = "cimd-allowed-hosts";
@@ -2016,15 +2018,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
             `then reads it back; a run that stops before that step does not write it); ${target.detail}`,
         );
       }
-    }
-
-    if (!dryRun && !fabricTarget && !isLoopbackUrl(params.instance)) {
-      currentStep = "target-shape-check";
-      const message =
-        `${params.instance} is not a loopback URL or a *.harperfabric.com target. ` +
-        `For Harper Fabric behind a custom domain, use --fabric. Nothing was changed.`;
-      push(false, message);
-      return { ok: false, dryRun, refused: { message }, steps, failedStep: "target-shape-check" };
     }
 
     // ── RS256 signing keypair ─────────────────────────────────────────────────

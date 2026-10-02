@@ -109,7 +109,7 @@ export function isLoopbackHost(host: string): boolean {
     return false;
   }
   if (h === "localhost" || h.endsWith(".localhost")) return true;
-  if (h === "0.0.0.0" || h === "[::]") return true;
+  if (h === "0.0.0.0" || h === "[::]" || h === "[::ffff:0:0]") return true;
   if (h === "[::1]" || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(h)) return true;
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }

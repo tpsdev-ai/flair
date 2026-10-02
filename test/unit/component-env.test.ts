@@ -59,6 +59,7 @@ describe("isLoopbackUrl", () => {
       "https://192.168.1.10",
       "http://[::ffff:10.0.0.4]:9926",
       "http://[::ffff:7e00:1]:9926",
+      "http://[::ffff:0:1]:9926",
     ]) {
       expect({ url, loopback: isLoopbackUrl(url) }).toEqual({ url, loopback: false });
     }

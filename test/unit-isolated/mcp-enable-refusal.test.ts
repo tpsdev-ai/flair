@@ -25,7 +25,8 @@ for (const [instance, issuer, fabric, refusal] of [
   ["http://[::ffff:7f00:1]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"],
   ["http://[0:0:0:0:0:ffff:127.1.2.3]:9926", "https://mcp.example.com", true, "Use http://[::ffff:7f01:203]:9926"],
   ["http://LOCALHOST.:9926", undefined, false, "Use http://localhost.:9926"],
-  ...UNSPECIFIED_TARGETS.map(instance => [instance, "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"] as const),
+  ...UNSPECIFIED_TARGETS.map(instance => [instance, "https://mcp.example.com", true, instance === new URL(instance).origin
+    ? "--fabric cannot be used with a loopback or unspecified target" : `Use ${new URL(instance).origin}`] as const),
   ...NON_CANONICAL_TARGETS.map(([instance, canonical]) => [instance, "https://mcp.example.com", false, `Use ${canonical}`] as const),
   ["https://acme.harperfabric.com", "https://[fd00::1]", false, "Issuer refused:"],
   ["https://acme.harperfabric.com", "https://[fe80::1]", false, "Issuer refused:"],

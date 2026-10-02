@@ -131,7 +131,7 @@ describe("enableMcp target URL and Fabric declaration", () => {
 
   test.each(["http://localhost.:9926", "http://sub.localhost.:9926", "http://[::ffff:7f00:1]:9926", ...UNSPECIFIED_TARGETS])(
     "accepts canonical local origin %s without --fabric in dry run", async (instance) => {
-      const f = fixture(instance);
+      const f = fixture(new URL(instance).origin);
       const { calls, fetchImpl } = targetFetch();
       const result = await enableMcp({ ...f.params, dryRun: true }, { fetchImpl });
       expect(result.ok).toBe(true);
@@ -141,7 +141,7 @@ describe("enableMcp target URL and Fabric declaration", () => {
   );
 
   test.each(UNSPECIFIED_TARGETS)("accepts local destination %s through identity mapping without --fabric", async (instance) => {
-    const f = fixture(instance);
+    const f = fixture(new URL(instance).origin);
     const { fetchImpl } = targetFetch();
     const result = await enableMcp({ ...f.params, confirmSecretsApplied: true }, { fetchImpl });
     expect(result.steps.find(s => s.step === "identity-mapping")?.ok).toBe(true);
@@ -162,6 +162,21 @@ describe("enableMcp target URL and Fabric declaration", () => {
       expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
     },
   );
+
+  test("refuses a custom remote with CIMD before any network call", async () => {
+    const f = fixture();
+    const calls: { url: string; authorization: string | null }[] = [];
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      calls.push({ url: String(url), authorization: new Headers(init?.headers).get("Authorization") });
+      return Response.json({ system: { hostname: "not-this-machine" }, harperdb_processes: { core: [{ pid: process.pid }] } });
+    }) as typeof fetch;
+    const result = await enableMcp({ ...f.params, cimdAllowedHosts: ["claude.ai"] }, { fetchImpl });
+    expect(calls).toEqual([]);
+    expect(result.failedStep).toBe("target-shape-check");
+    expect(result.refused?.message).toContain("--fabric");
+    expect(readdirSync(f.dir)).toEqual(["config.yaml"]);
+    expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
+  });
 
   for (const [instance, fabric] of [[PUBLIC, true], [FABRIC, false], ["http://127.0.0.1:9926", true]] as const) {
     test.each([false, true])(`CIMD refusal before side effects: ${instance}, fabric=${fabric}, dryRun=%s`, async (dryRun) => {
