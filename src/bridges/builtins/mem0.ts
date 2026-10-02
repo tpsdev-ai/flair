@@ -60,6 +60,25 @@ function isPaginatedEnvelope(body: Mem0Response): body is Mem0PaginatedEnvelope 
   return !Array.isArray(body) && typeof body === "object" && body !== null && Array.isArray((body as any).results);
 }
 
+function mem0BaseUrl(value: unknown): string {
+  if (value === undefined) return "https://api.mem0.ai";
+  // An explicit value must never select the cloud default by accident.
+  if (typeof value !== "string" || !value || value !== value.trim()) {
+    throw new Error("--base-url must be a non-empty HTTP(S) URL");
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("--base-url must be a valid HTTP(S) URL");
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password ||
+      url.href.includes('?') || url.href.includes('#')) {
+    throw new Error("--base-url must be an HTTP(S) URL without credentials, query, or fragment");
+  }
+  return url.href.replace(/\/+$/, "");
+}
+
 async function* importMem0(
   opts: Record<string, unknown>,
   ctx: BridgeContext,
@@ -88,17 +107,20 @@ async function* importMem0(
     });
   }
 
-  const baseUrl = typeof opts.baseUrl === "string" && opts.baseUrl.length > 0
-    ? opts.baseUrl.replace(/\/+$/, "")
-    : "https://api.mem0.ai";
+  let baseUrl: string;
+  try {
+    baseUrl = mem0BaseUrl(opts.baseUrl);
+  } catch (err) {
+    throw new BridgeRuntimeError({
+      bridge: "mem0", op: "import", field: "baseUrl", expected: "valid HTTP(S) URL",
+      got: "invalid explicit --base-url", hint: (err as Error).message,
+    });
+  }
 
   const maxPages = typeof opts.maxPages === "number" ? opts.maxPages : 0;
   const pageSize = 100;
 
-  ctx.log.info("starting mem0 import", {
-    user_id: userId,
-    base_url: baseUrl,
-  });
+  ctx.log.info("starting mem0 import");
 
   let pageCount = 0;
   let totalKept = 0;
@@ -111,24 +133,24 @@ async function* importMem0(
       break;
     }
 
-    ctx.log.debug("fetching page", { url: cursor, page: pageCount + 1 });
+    ctx.log.debug("fetching page", { page: pageCount + 1 });
 
     let res: Response;
     try {
       res = await ctx.fetch(cursor, {
+        redirect: "manual",
         headers: {
           Authorization: `Token ${apiKey}`,
           Accept: "application/json",
         },
       });
-    } catch (err: any) {
+    } catch {
       throw new BridgeRuntimeError({
         bridge: "mem0",
         op: "import",
-        path: cursor,
         field: "fetch",
         expected: "HTTP 200",
-        got: `network error: ${err?.message ?? err}`,
+        got: "network error",
         hint: "check the base URL is reachable and the network is up",
       });
     }
@@ -137,7 +159,6 @@ async function* importMem0(
       throw new BridgeRuntimeError({
         bridge: "mem0",
         op: "import",
-        path: cursor,
         field: "apiKey",
         expected: "valid Mem0 API token",
         got: "HTTP 401 Unauthorized",
@@ -149,7 +170,6 @@ async function* importMem0(
       throw new BridgeRuntimeError({
         bridge: "mem0",
         op: "import",
-        path: cursor,
         field: "apiKey",
         expected: "authorized token",
         got: "HTTP 403 Forbidden",
@@ -161,24 +181,21 @@ async function* importMem0(
       throw new BridgeRuntimeError({
         bridge: "mem0",
         op: "import",
-        path: cursor,
         field: "user",
         expected: "existing user_id",
         got: "HTTP 404 Not Found",
-        hint: `user_id "${userId}" was not found on this Mem0 instance`,
+        hint: "user_id was not found on this Mem0 instance",
       });
     }
 
     if (!res.ok) {
-      const body = await res.text().catch(() => "(could not read body)");
       throw new BridgeRuntimeError({
         bridge: "mem0",
         op: "import",
-        path: cursor,
         field: "response",
         expected: "HTTP 200",
-        got: `HTTP ${res.status} ${res.statusText}`,
-        hint: `unexpected response (${res.status}): ${body.slice(0, 200)}`,
+        got: `HTTP ${res.status}`,
+        hint: `unexpected response (HTTP ${res.status}); check the Mem0 API server logs`,
       });
     }
 
@@ -189,7 +206,6 @@ async function* importMem0(
         throw new BridgeRuntimeError({
           bridge: "mem0",
           op: "import",
-          path: cursor,
           field: "(response)",
           expected: "JSON body",
           got: "empty response",
@@ -202,11 +218,10 @@ async function* importMem0(
       throw new BridgeRuntimeError({
         bridge: "mem0",
         op: "import",
-        path: cursor,
         field: "(response)",
         expected: "valid JSON: bare array OR { results: [...], next: string|null }",
         got: "parse error",
-        hint: `could not parse response: ${err?.message ?? err}`,
+        hint: "could not parse Mem0 API response as JSON",
       });
     }
 
@@ -224,11 +239,28 @@ async function* importMem0(
       // v3 / DRF-style envelope — use server-provided next URL.
       mems = body.results;
       nextCursor = typeof body.next === "string" && body.next.length > 0 ? body.next : null;
+      if (nextCursor !== null) {
+        let nextUrl: URL;
+        try {
+          nextUrl = new URL(nextCursor, baseUrl);
+        } catch {
+          throw new BridgeRuntimeError({
+            bridge: "mem0", op: "import", field: "next", expected: "same-origin HTTP(S) pagination URL",
+            got: "invalid pagination URL", hint: "Mem0 API returned an invalid pagination URL",
+          });
+        }
+        if (nextUrl.origin !== new URL(baseUrl).origin || nextUrl.username || nextUrl.password) {
+          throw new BridgeRuntimeError({
+            bridge: "mem0", op: "import", field: "next", expected: "same-origin HTTP(S) pagination URL",
+            got: "unsafe pagination URL", hint: "Mem0 API returned an unsafe pagination URL",
+          });
+        }
+        nextCursor = nextUrl.href;
+      }
     } else {
       throw new BridgeRuntimeError({
         bridge: "mem0",
         op: "import",
-        path: cursor,
         field: "(response)",
         expected: "bare array OR { results: [...], next: string|null }",
         got: typeof body,
@@ -236,7 +268,7 @@ async function* importMem0(
       });
     }
 
-    ctx.log.debug("received page", { count: mems.length, next: nextCursor });
+    ctx.log.debug("received page", { count: mems.length, hasNext: nextCursor !== null });
 
     for (const m of mems) {
       const content = typeof m?.memory === "string" ? m.memory : "";

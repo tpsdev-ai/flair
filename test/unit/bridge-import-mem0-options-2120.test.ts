@@ -8,10 +8,12 @@
  *
  *   - the user reaches the bridge via `--user <id>`;
  *   - the API key reaches the bridge via `MEM0_API_KEY` or `--api-key-file <path>`
- *     (mode 0600 enforced), never as an argv value;
+ *     (group/world permissions refused; 0600 recommended), never as an argv value;
  *   - a missing user or key refuses with the remedy and a non-zero exit;
  *   - a group/world-readable key file is refused (named remedy), before any fetch;
- *   - the key never appears in stdout or stderr.
+ *   - the key is absent from output on these normal file and env paths.
+ * Hostile response and pagination diagnostics are tested without a listener in
+ * bridge-mem0-security-2188.test.ts.
  *
  * The mem0 API is a local mock (like test/unit/bridge-mem0.test.ts); the CLI runs
  * HOME-isolated to a scratch dir so nothing touches a real ~/.flair.

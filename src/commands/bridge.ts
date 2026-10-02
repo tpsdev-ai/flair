@@ -52,6 +52,17 @@ const api = (method: string, path: string, body?: any, options?: any): Promise<a
 const resolveHttpPort = (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create"): number =>
   cli.resolveHttpPort(opts, mode);
 
+function redactBridgeSecret(value: string, secret: string): string {
+  if (!secret) return value;
+  const redacted = value.replaceAll(secret, "[REDACTED]");
+  try {
+    const encoded = encodeURIComponent(secret);
+    return encoded === secret ? redacted : redacted.replaceAll(encoded, "[REDACTED]");
+  } catch {
+    return redacted;
+  }
+}
+
 /** Register the `flair bridge` command group. */
 export function register(program: Command): void {
   // ─── flair bridge ────────────────────────────────────────────────────────────
@@ -152,7 +163,7 @@ export function register(program: Command): void {
     .option("--source <path>", "Source directory (for directory-based imports like markdown)")
     .option("--user <id>", "Foreign-system user id for bridges that import one user (e.g. mem0)")
     .option("--base-url <url>", "Base URL of the foreign API for API bridges (e.g. a self-hosted mem0)")
-    .option("--api-key-file <path>", "Read the bridge's API key from a file (chmod 600 enforced). Keeps the key out of argv — prefer this or the bridge's own env var (e.g. MEM0_API_KEY).")
+    .option("--api-key-file <path>", "For API bridges with an apiKey option, read the key from a file that has no group/world permissions (chmod 600 recommended); or use the bridge's env var (e.g. MEM0_API_KEY).")
     .action(async (name: string, srcArg: string | undefined, opts) => {
       const agentId: string | undefined = opts.agent ?? process.env.FLAIR_AGENT_ID;
       const cwd: string = opts.cwd ?? srcArg ?? process.cwd();
@@ -196,7 +207,16 @@ export function register(program: Command): void {
       // base names.
       const joinBase = `${parsedBase.href.replace(/\/+$/, "")}/`;
 
-      const ctx = makeContext({ bridge: name });
+      // Redact the active key even when a plugin or an imported record repeats
+      // it in a log, progress event, or error. Mem0 also avoids emitting
+      // server-controlled response text and pagination URLs in the first place.
+      let bridgeApiKey = name === "mem0" ? process.env.MEM0_API_KEY ?? "" : "";
+      const safe = (value: string): string => redactBridgeSecret(value, bridgeApiKey);
+      const ctx = makeContext({
+        bridge: name,
+        emit: (event) => process.stderr.write(JSON.stringify(event, (_key, value) =>
+          typeof value === "string" ? safe(value) : value) + "\n"),
+      });
 
       // Memory POST: Ed25519-signed when an agent key is available, fall back
       // to the shared `api()` helper otherwise. Mirrors how `flair memory add`
@@ -222,8 +242,7 @@ export function register(program: Command): void {
           body: JSON.stringify(body),
         });
         if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(`PUT ${signedPath} → ${res.status}: ${text || res.statusText}`);
+          throw new Error(`PUT /Memory → HTTP ${res.status}: Flair rejected the write`);
         }
       };
 
@@ -235,9 +254,9 @@ export function register(program: Command): void {
         if (ev.type === "done") {
           const noun = (n: number): string => `${n} ${n === 1 ? "memory" : "memories"}`;
           if (opts.dryRun) {
-            console.log(`\n${target.name}: would import ${noun(ev.total)}. Re-run without --dry-run to write to Flair.`);
+            console.log(safe(`\n${target.name}: would import ${noun(ev.total)}. Re-run without --dry-run to write to Flair.`));
           } else {
-            console.log(`\n${target.name}: imported ${ev.imported}/${ev.total} memories${ev.skipped > 0 ? ` (${ev.skipped} skipped)` : ""}.`);
+            console.log(safe(`\n${target.name}: imported ${ev.imported}/${ev.total} memories${ev.skipped > 0 ? ` (${ev.skipped} skipped)` : ""}.`));
           }
           return;
         }
@@ -246,14 +265,17 @@ export function register(program: Command): void {
         lastReportedAt = now;
         lastReportedOrdinal = ev.ordinal;
         if (ev.type === "memory-imported") {
-          process.stdout.write(`\r  ${ev.ordinal} imported (${ev.foreignId ?? ev.flairId})`.padEnd(80));
+          process.stdout.write(safe(`\r  ${ev.ordinal} imported (${ev.foreignId ?? ev.flairId})`.padEnd(80)));
         } else if (ev.type === "memory-skipped") {
-          process.stdout.write(`\r  ${ev.ordinal} skipped (${ev.reason})`.padEnd(80));
+          process.stdout.write(safe(`\r  ${ev.ordinal} skipped (${ev.reason})`.padEnd(80)));
         }
       };
 
       try {
         if (loaded.kind === "yaml") {
+          if (opts.apiKeyFile !== undefined) {
+            throw new Error("--api-key-file requires an API bridge with an apiKey option; YAML imports cannot use it");
+          }
           await runImport({
             bridgeName: target.name,
             descriptor: loaded.descriptor,
@@ -271,23 +293,32 @@ export function register(program: Command): void {
             console.error(`Bridge "${name}" is a code plugin without an import() function — can only export through it.`);
             process.exit(1);
           }
-          // Code-plugin options: start from the parsed flags, then resolve the
-          // plugin's own declared `options` so its descriptor is its real CLI
-          // contract, not just documentation:
+          // Code-plugin options: start from the parsed flags, then use only
+          // the declared `env` entries as fallbacks. The CLI does not apply
+          // descriptor `default` or `required` entries here:
           //   - an option no flag set falls back to the env var it names
           //     (`BridgeOptionSpec.env`, e.g. MEM0_API_KEY);
-          //   - `--api-key-file` fills the bridge's `apiKey` option, read here so
-          //     the secret never appears in argv (0600 enforced by the reader).
+          //   - `--api-key-file` fills a declared `apiKey` option, read here so
+          //     the secret never appears in argv (group/world access refused).
           const pluginOpts: Record<string, unknown> = { ...opts };
           const declaredOptions: Record<string, BridgeOptionSpec> = loaded.plugin.options ?? {};
+          if (opts.apiKeyFile !== undefined) {
+            if (!declaredOptions.apiKey) {
+              throw new Error("--api-key-file requires an API bridge with an apiKey option");
+            }
+            if (typeof opts.apiKeyFile !== "string" || opts.apiKeyFile.trim() === "") {
+              throw new Error("--api-key-file requires a non-empty path");
+            }
+          }
           for (const [key, spec] of Object.entries(declaredOptions)) {
             if (pluginOpts[key] === undefined && spec.env && process.env[spec.env] !== undefined) {
               pluginOpts[key] = process.env[spec.env];
             }
           }
-          if (typeof opts.apiKeyFile === "string" && opts.apiKeyFile.length > 0) {
+          if (opts.apiKeyFile !== undefined) {
             pluginOpts.apiKey = readSecretFileSecure(opts.apiKeyFile, "--api-key-file");
           }
+          if (typeof pluginOpts.apiKey === "string") bridgeApiKey = pluginOpts.apiKey;
           const source = loaded.plugin.import(pluginOpts, ctx);
           await runImport({
             bridgeName: target.name,
@@ -302,10 +333,10 @@ export function register(program: Command): void {
         }
       } catch (err: any) {
         if (err instanceof BridgeRuntimeError) {
-          printBridgeError(err);
+          printBridgeError(err, bridgeApiKey);
           process.exit(1);
         }
-        console.error(`Bridge import failed: ${err?.message ?? err}`);
+        console.error(safe(`Bridge import failed: ${err?.message ?? err}`));
         process.exit(1);
       }
     });
@@ -610,7 +641,7 @@ export function register(program: Command): void {
       }
     });
 
-  function printBridgeError(err: unknown): void {
+  function printBridgeError(err: unknown, secret = ""): void {
     // Pretty-print BridgeRuntimeError as the structured shape from §10 of the
     // spec, plus a one-line human summary so the operator gets both.
     const detail = (err as { detail?: Record<string, unknown> })?.detail;
@@ -623,10 +654,11 @@ export function register(program: Command): void {
         printTrustError(detail as any);
         return;
       }
-      console.error(`Bridge error: ${(detail as any).hint ?? (err as Error).message}`);
-      console.error(JSON.stringify(detail, null, 2));
+      console.error(redactBridgeSecret(`Bridge error: ${(detail as any).hint ?? (err as Error).message}`, secret));
+      console.error(JSON.stringify(detail, (_key, value) =>
+        typeof value === "string" ? redactBridgeSecret(value, secret) : value, 2));
     } else {
-      console.error(`Bridge error: ${(err as Error).message ?? String(err)}`);
+      console.error(redactBridgeSecret(`Bridge error: ${(err as Error).message ?? String(err)}`, secret));
     }
   }
 

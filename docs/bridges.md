@@ -73,9 +73,9 @@ Common runtime options for `import`:
 | `--port <port>` | Harper HTTP port |
 | `--url <url>` | Flair base URL (overrides `--port`) |
 | `--key <path>` | Ed25519 private key path (default: resolved from agent) |
-| `--user <id>` | Foreign-system user id, for bridges that import one user (e.g. mem0) |
-| `--base-url <url>` | Base URL of the foreign API, for API bridges (e.g. a self-hosted mem0) |
-| `--api-key-file <path>` | Read the bridge's API key from a file (chmod 600 enforced); the key never comes from a flag value |
+| `--user <id>` | Foreign-system user id for bridges that import one user (e.g. mem0); YAML imports do not use it |
+| `--base-url <url>` | HTTP(S) base URL of the foreign API for API bridges (e.g. a self-hosted mem0); an explicit empty or invalid mem0 URL is refused |
+| `--api-key-file <path>` | For API bridges that declare an `apiKey` option, read the key from a file with no group/world permissions (`chmod 600` recommended). YAML imports refuse this flag. For mem0, `MEM0_API_KEY` is the alternative; the key is never a flag value. |
 
 ## Your first import (worked example: agentic-stack)
 
