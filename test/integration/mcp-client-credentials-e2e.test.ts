@@ -228,7 +228,9 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
     expect(body.token_endpoint_auth_methods_supported).toContain("private_key_jwt");
     // @harperfast/oauth 2.8.1 advertises the assertion algorithms of BOTH
     // enabled verification paths: the headless client_credentials path (EdDSA)
-    // and the interactive CIMD path (RS256, ES256), which is on by default.
+    // and the interactive CIMD path (RS256, ES256). The interactive path is
+    // active here because this test enables headless client_credentials, whose
+    // advertisement steers interactive clients too.
     expect(body.token_endpoint_auth_signing_alg_values_supported).toEqual(["RS256", "ES256", "EdDSA"]);
     expect(body.client_id_metadata_document_supported).toBe(true);
   }, 30_000);

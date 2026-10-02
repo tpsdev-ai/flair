@@ -380,7 +380,7 @@ describe("enableMcp — the flag is refused, or fails loudly, where it cannot ta
       expect(result.ok).toBe(false);
       expect(result.failedStep).toBe("cimd-allowed-hosts");
       expect(result.refused?.message).toContain("mcp.clientIdMetadataDocuments.allowedHosts");
-      expect(result.steps.map((s) => s.step)).toEqual(["local-origin-check", "cimd-allowed-hosts"]);
+      expect(result.steps.map((s) => s.step)).toEqual(["local-origin-check", "issuer-origin-check", "cimd-allowed-hosts"]);
     }
     expect(calls).toEqual([]);
     expect(existsSync(p.signingKeyFilePath)).toBe(false);

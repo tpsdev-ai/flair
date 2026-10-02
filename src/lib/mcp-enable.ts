@@ -201,6 +201,37 @@ export function checkLocalOriginRefusal(url: string): { refused: true; message: 
   return { refused: false };
 }
 
+/**
+ * Is `issuer` an absolute http(s) origin — no path, query, fragment or
+ * embedded credentials? This mirrors the check the plugin runs on
+ * `mcp.issuer` at load (`mcp.issuer must be an absolute http(s) origin …`):
+ * a schemeless or path-bearing value produces malformed endpoint URLs and
+ * fails the plugin's load. Returns a refusal message, or null when the issuer
+ * is a valid origin. Called before `--dry-run` can report success and before
+ * any secrets are staged, so a run whose issuer the plugin would reject never
+ * reports that it validated its inputs.
+ */
+export function issuerOriginRefusal(issuer: string): string | null {
+  let valid = false;
+  try {
+    const url = new URL(issuer);
+    valid =
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      url.pathname.replace(/\/+$/, "") === "" &&
+      url.search === "" &&
+      url.hash === "" &&
+      url.username === "" &&
+      url.password === "";
+  } catch {
+    valid = false;
+  }
+  if (valid) return null;
+  return (
+    `--issuer must be an absolute http(s) origin with no path (got: ${JSON.stringify(issuer)}); ` +
+    `set it to the instance's public origin, e.g. https://flair.example.com. Nothing was changed.`
+  );
+}
+
 // ─── Fabric-shape detection (secrets-mechanism default) ────────────────────
 
 /** Is this a Harper Fabric-hosted origin? (`*.harperfabric.com`.) Used only
@@ -463,8 +494,8 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         // 2.8.1 fails the plugin's load when the key is DECLARED and its
         // whole-token placeholder is unresolved, so an unconditional pin made
         // every MCP-on boot without a staged key degrade. Absent, the
-        // component self-generates a key and persists it in
-        // oauth.harper_oauth_mcp_keys. To pin, add
+        // component generates and persists a key in
+        // oauth.harper_oauth_mcp_keys on the first token mint. To pin, add
         // `signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}` and stage the
         // variable.
       },
@@ -1811,6 +1842,7 @@ export async function captureBootDiscriminator(
 
 export type EnableStepName =
   | "local-origin-check"
+  | "issuer-origin-check"
   | "cimd-allowed-hosts"
   | "config-block"
   | "idp-credentials"
@@ -1951,6 +1983,20 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const principalKind = params.principalKind ?? "human";
 
   try {
+    // ── Issuer origin (flair#2194) ────────────────────────────────────────────
+    // The plugin refuses a path-bearing or non-http(s) mcp.issuer at load, so a
+    // run whose --issuer it would reject must not report that it validated its
+    // inputs — including under --dry-run, which returns before staging. This
+    // also stops buildSecretsBundle from silently reducing a path-bearing
+    // issuer to its origin.
+    currentStep = "issuer-origin-check";
+    const issuerIssue = issuerOriginRefusal(issuer);
+    if (issuerIssue) {
+      push(false, issuerIssue);
+      return { ok: false, dryRun, refused: { message: issuerIssue }, steps, failedStep: "issuer-origin-check" };
+    }
+    push(true, `issuer ${issuer} is an absolute http(s) origin`);
+
     // ── --cimd-allowed-hosts (flair#2113) ─────────────────────────────────────
     // Before any step with a side effect: the hosts are validated, a Fabric
     // target is refused, the config.yaml to edit must exist with an

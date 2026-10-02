@@ -165,17 +165,20 @@ instead (see below).
   `client_id` before it sends the person to the identity provider; the person
   continues from there.
 - **Public clients with PKCE.** The document of an app that signs people in
-  must declare `token_endpoint_auth_method: none`, or leave the field out. Any
-  other value is refused with `invalid_client`. Every authorization request must
-  carry a PKCE `code_challenge` with method `S256`. With the shipped
-  `config.yaml`, the server's metadata advertises `none`, `client_secret_basic`
-  and `client_secret_post` as token endpoint auth methods (the last two apply
-  only to registered clients) and does not advertise `private_key_jwt`. Setting
+  declares its token endpoint auth method. With the shipped `config.yaml` it
+  must be `token_endpoint_auth_method: none`, or the field left out; any other
+  value is refused with `invalid_client`. Every authorization request must
+  carry a PKCE `code_challenge` with method `S256`. The shipped `config.yaml`'s
+  server advertises `none`, `client_secret_basic` and `client_secret_post` as
+  token endpoint auth methods (the last two apply only to registered clients)
+  and does not advertise `private_key_jwt`. Setting
   `mcp.clientCredentials.enabled: true`, which turns on the headless grant,
   changes the metadata: it then also lists `private_key_jwt`, the
-  `client_credentials` grant type and `EdDSA` as the assertion signing
-  algorithm. The document of an app that signs people in is still refused
-  unless it declares `none` or leaves the field out.
+  `client_credentials` grant type and `RS256`, `ES256` and `EdDSA` as the
+  assertion signing algorithms. Setting
+  `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true` also lists
+  `private_key_jwt` and those three algorithms. With either setting, a document
+  may declare `private_key_jwt` (with usable keys) instead of `none`.
 
 ### Changing the list
 
@@ -217,18 +220,15 @@ an upgrade replaces that file, run the command again or edit the file.
 ### ChatGPT
 
 ChatGPT's published metadata document, `https://chatgpt.com/oauth/client.json`,
-declares `token_endpoint_auth_method: private_key_jwt`. The `@harperfast/oauth`
-version Flair pins, 2.5.0, accepts only `none` in the metadata document of an
-app that signs people in, so ChatGPT's CIMD client is refused on 2.5.0 even with
-`chatgpt.com` on the list. A sign-in that presents that document gets HTTP 400,
-error `invalid_client`, and the description
-`token_endpoint_auth_method 'private_key_jwt' is not supported for interactive CIMD clients; use 'none'`.
+declares `token_endpoint_auth_method: private_key_jwt`. `@harperfast/oauth`
+2.8.1, the version Flair pins, admits an interactive CIMD client that
+authenticates with `private_key_jwt` once the operator adds the client's host
+(`chatgpt.com`) to `mcp.clientIdMetadataDocuments.allowedHosts` and sets
+`mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true`. The shipped
+`config.yaml` does neither — its list is `claude.ai` and `claude.com`, and that
+setting is off — so a stock instance still refuses ChatGPT's CIMD client.
 Stored registrations are a separate path (see [2. Which apps](#2-which-apps)),
 and registration of new clients is off.
-
-> **Upstream:** verification of `private_key_jwt` for interactive clients is in
-> progress upstream in
-> [HarperFast/oauth#245](https://github.com/HarperFast/oauth/pull/245).
 
 ## 3. What they can touch
 
@@ -472,7 +472,8 @@ shares her connector's memories.
 
 **How to choose:** use one principal when both apps should see the same private
 memories. Keep two when you want to revoke or audit them separately.
-ChatGPT's CIMD client cannot be the second app yet; see [ChatGPT](#chatgpt).
+ChatGPT's CIMD client needs the settings in [ChatGPT](#chatgpt) before it can
+be the second app.
 
 **Check:** `bootstrap` in each app returns the `agentId` you chose.
 **Revoke:** `flair principal disable` for the principal you want to stop.

@@ -167,9 +167,10 @@ describe("buildMcpOAuthConfigBlock", () => {
     // flair#2194: the shipped block carries NO signingKeyPem. @harperfast/oauth
     // 2.8.1 fails the plugin's load when a DECLARED signingKeyPem's whole-token
     // placeholder is unresolved, so an unconditional pin made every MCP-on boot
-    // without a staged key degrade. The component self-generates (and persists)
-    // a key when the field is absent; `flair mcp enable` adds the pin reference
-    // to the config it manages so its provisioned key still pins.
+    // without a staged key degrade. The component generates and persists a
+    // key when the field is absent, on the first token mint. Pinning is a
+    // manual choice: add the field to the deployed config and stage the
+    // variable.
     expect("signingKeyPem" in oauth.mcp).toBe(false);
   });
 
@@ -1071,19 +1072,32 @@ describe("enableMcp — dry-run", () => {
   });
 });
 
-describe("enableMcp — the confirm-secrets-applied gate", () => {
-  test("unknown issuer origin refuses before staging GitHub credentials", async () => {
-    const { fetchImpl, calls } = fullMockFetch();
-    const paths = tempPaths();
-    const result = await enableMcp({ ...BASE_PARAMS, ...paths, issuer: "" }, { fetchImpl });
-    expect(result.ok).toBe(false);
-    expect(result.failedStep).toBe("secrets-provisioning");
-    expect(result.steps.find((step) => step.step === "secrets-provisioning")?.detail)
-      .toContain("OAUTH_GITHUB_REDIRECT_URI");
-    expect(existsSync(paths.secretsStagingPath)).toBe(false);
-    expect(calls).toHaveLength(0);
-  });
+describe("enableMcp — the issuer must be an http(s) origin", () => {
+  test.each(["https://flair.example.com/issuer", "https://flair.example.com/oauth", ""])(
+    "refuses --issuer %s before any write, with and without --dry-run",
+    async (badIssuer) => {
+      for (const dryRun of [true, false]) {
+        const { fetchImpl, calls } = fullMockFetch();
+        const paths = tempPaths();
+        const listingBefore = readdirSync(dir).sort();
+        const configBefore = readFileSync(paths.localConfigPath, "utf-8");
+        const result = await enableMcp(
+          { ...BASE_PARAMS, ...paths, issuer: badIssuer, confirmSecretsApplied: true, dryRun },
+          { fetchImpl },
+        );
+        expect(result.ok).toBe(false);
+        expect(result.failedStep).toBe("issuer-origin-check");
+        expect(result.refused?.message).toContain("must be an absolute http(s) origin");
+        expect(calls).toHaveLength(0);
+        expect(existsSync(paths.secretsStagingPath)).toBe(false);
+        expect(readdirSync(dir).sort()).toEqual(listingBefore);
+        expect(readFileSync(paths.localConfigPath, "utf-8")).toBe(configBefore);
+      }
+    },
+  );
+});
 
+describe("enableMcp — the confirm-secrets-applied gate", () => {
   function pushedSecretsFetch() {
     const { fetchImpl: baseFetch, calls } = fullMockFetch();
     const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
@@ -1224,6 +1238,7 @@ describe("enableMcp — full happy path", () => {
     expect(result.steps.every((s) => s.ok)).toBe(true);
     expect(result.steps.map((s) => s.step)).toEqual([
       "local-origin-check",
+      "issuer-origin-check",
       "config-block",
       "idp-credentials",
       "secrets-provisioning",

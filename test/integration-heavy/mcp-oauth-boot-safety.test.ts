@@ -29,8 +29,9 @@
  *      positive control, not a flake.
  *   2b. NO SIGNING KEY (flair#2194): the shipped config with FLAIR_MCP_OAUTH on
  *      and NO signing key boots CLEAN — the block no longer declares
- *      signingKeyPem, so @harperfast/oauth self-generates (and persists) a key
- *      instead of refusing the load over an unresolved placeholder.
+ *      signingKeyPem, so @harperfast/oauth no longer refuses the load over that
+ *      unresolved placeholder. The library generates and persists the key on
+ *      the FIRST MINT, not at boot.
  *   2c. DECLARED PIN STILL FAILS (flair#2194): a config that DOES declare
  *      `signingKeyPem: ${VAR}` with the variable unset still degrades the boot,
  *      the load error naming the variable — the library's check is NOT loosened.
@@ -263,14 +264,15 @@ describe("flair#1136/#1152 boot-safety: shipped config with env-referenced mcp.e
 
 describe("flair#2194 boot-safety: shipped config with MCP on and no signing key", () => {
   test(
-    "FLAIR_MCP_OAUTH=true + issuer set + NO signing key boots CLEAN (the component self-generates and persists a key)",
+    "FLAIR_MCP_OAUTH=true + issuer set + NO signing key boots CLEAN (the library generates and persists a key on first mint)",
     async () => {
       // The shape multi-worker-refusal-2059 boots (FLAIR_MCP_OAUTH + FLAIR_MCP_ISSUER,
       // no signing key). The shipped block used to declare
       // `signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}` unconditionally, and
       // @harperfast/oauth 2.8.1 refuses the plugin's load when that placeholder
-      // is unresolved — so this boot DEGRADED (health 500). With the pin gone,
-      // the component self-generates a key, so the boot is clean.
+      // is unresolved — so this boot DEGRADED (health 500). With the pin gone
+      // the component no longer refuses the load; it generates and persists a
+      // signing key on the first mint, not at boot.
       clearMcpEnv();
       process.env.FLAIR_MCP_OAUTH = "true";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";

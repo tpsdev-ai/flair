@@ -1,41 +1,42 @@
 /**
  * mcp-signing-key-lifecycle.test.ts — flair#2194: with the shipped config no
- * longer declaring `mcp.signingKeyPem`, prove a token still verifies across a
- * restart, and that a pinned-key install keeps verifying after the pin is
+ * longer declaring `mcp.signingKeyPem`, prove the INSTALLED @harperfast/oauth
+ * generates and persists a signing key through its OWN mint path, and that a
+ * token it minted still verifies across a restart and after a real pin is
  * removed.
  *
- * ── What can and cannot be driven live, stated ─────────────────────────────
- * A token is minted here the way this repo's MCP suites mint one (see
- * mcp-audience-binding-igmt.test.ts, mcp-principal-status.test.ts): a keypair
- * WE control is seeded into `oauth.harper_oauth_mcp_keys` — the table
- * withMCPAuth's `getAllPublicKeys` reads — and the token is hand-signed with
- * `jose`. The component's OWN mint endpoint (/oauth/mcp/token) cannot be
- * driven in an ephemeral, network-isolated instance: its CIMD client
+ * ── The mint is the plugin's real one, over HTTP ───────────────────────────
+ * A token is minted by POSTing an authorization_code grant to the live
+ * component's /oauth/mcp/token, exactly as the plugin mints any access token
+ * (mintTokenPair → MCPKeyStore.getSigningKey → signAccessToken). The client is
+ * a stored (DCR) registration rather than a CIMD client, because CIMD
  * resolution enforces an unconditional SSRF gate (https-only, no loopback
- * exception), which the live e2e suite documents at length. So "mints a
- * token" here means: a token signed by the key the component's key store
- * holds verifies against the running component. The property under test is
- * that the key store survives a restart and an unpin, which is what keeps
- * previously-minted tokens valid.
+ * exception — see mcp-client-credentials-e2e.test.ts), which an ephemeral
+ * loopback instance can never satisfy. A stored client resolves through
+ * MCPClientStore instead. The authorization code is seeded into
+ * oauth.mcp_auth_codes (the same table /oauth/mcp/authorize writes), so the
+ * exchange needs no IdP and no network. NOTHING seeds a signing key: the key
+ * the token is signed with is the one the library generates and persists on
+ * this first mint.
  */
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, copyFileSync, symlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SignJWT, importPKCS8 } from "jose";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SHIPPED_CONFIG = join(REPO_ROOT, "config.yaml");
 const ISSUER = "https://signing-key-lifecycle.flair.test";
 const RESOURCE = `${ISSUER}/mcp`;
-const KID = "lifecycle-test-key";
+const CLIENT_ID = "lifecycle-dcr-client";
+const REDIRECT_URI = `${ISSUER}/callback`;
 
 const ENV_KEYS = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_MCP_SIGNING_KEY_PEM", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
 
-let privateKeyPem: string;
-let publicKeyPem: string;
+let pinPrivatePem: string;
+let pinPublicPem: string;
 const instances: HarperInstance[] = [];
 const tempDirs: string[] = [];
 
@@ -45,8 +46,8 @@ beforeAll(() => {
     publicKeyEncoding: { type: "spki", format: "pem" },
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
-  privateKeyPem = privateKey;
-  publicKeyPem = publicKey;
+  pinPrivatePem = privateKey;
+  pinPublicPem = publicKey;
 });
 
 afterAll(async () => {
@@ -85,29 +86,94 @@ function basicHeader(h: HarperInstance): string {
   return "Basic " + Buffer.from(`${h.admin.username}:${h.admin.password}`).toString("base64");
 }
 
-async function seedKey(h: HarperInstance): Promise<void> {
-  const res = await fetch(h.opsURL, {
+async function adminOp(h: HarperInstance, op: Record<string, unknown>): Promise<Response> {
+  return fetch(h.opsURL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: basicHeader(h) },
-    body: JSON.stringify({
-      operation: "insert",
-      database: "oauth",
-      table: "harper_oauth_mcp_keys",
-      records: [{ kid: KID, alg: "RS256", public_key_pem: publicKeyPem, private_key_pem: privateKeyPem, created_at: Math.floor(Date.now() / 1000) }],
-    }),
+    body: JSON.stringify(op),
   });
-  expect(res.status).toBe(200);
 }
 
-async function signToken(): Promise<string> {
-  const key = await importPKCS8(privateKeyPem, "RS256");
-  return new SignJWT({ client_id: "lifecycle-client", scope: "openid" })
-    .setProtectedHeader({ alg: "RS256", kid: KID })
-    .setIssuer(ISSUER)
-    .setAudience(RESOURCE)
-    .setSubject("lifecycle-agent")
-    .setExpirationTime("30m")
-    .sign(key);
+/** A PKCE S256 verifier/challenge pair (43-char unreserved verifier). */
+function pkcePair(): { verifier: string; challenge: string } {
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+
+/**
+ * Seed a stored (DCR) public client + one authorization code, exactly the rows
+ * /oauth/mcp/register and /oauth/mcp/authorize would write. No signing key.
+ */
+async function seedClientAndCode(h: HarperInstance, code: string, challenge: string): Promise<void> {
+  const clientRes = await adminOp(h, {
+    operation: "insert",
+    database: "oauth",
+    table: "harper_oauth_mcp_clients",
+    records: [{
+      client_id: CLIENT_ID,
+      grant_types: JSON.stringify(["authorization_code"]),
+      response_types: JSON.stringify(["code"]),
+      redirect_uris: JSON.stringify([REDIRECT_URI]),
+      token_endpoint_auth_method: "none",
+    }],
+  });
+  expect(clientRes.status).toBe(200);
+  const codeRes = await adminOp(h, {
+    operation: "insert",
+    database: "oauth",
+    table: "mcp_auth_codes",
+    records: [{
+      code,
+      client_id: CLIENT_ID,
+      user: "lifecycle-agent",
+      resource: RESOURCE,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      redirect_uri: REDIRECT_URI,
+      scope: "",
+      client_auth_method: "none",
+    }],
+  });
+  expect(codeRes.status).toBe(200);
+}
+
+/** Exchange the seeded code at the live token endpoint — the plugin's real mint. */
+async function mint(h: HarperInstance, code: string, verifier: string): Promise<string> {
+  const res = await fetch(`${h.httpURL}/oauth/mcp/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: CLIENT_ID,
+      code,
+      code_verifier: verifier,
+      redirect_uri: REDIRECT_URI,
+    }).toString(),
+  });
+  const text = await res.text();
+  expect(res.status, `token endpoint → ${res.status}: ${text.slice(0, 400)}`).toBe(200);
+  const json = JSON.parse(text) as { access_token?: unknown };
+  expect(typeof json.access_token).toBe("string");
+  return json.access_token as string;
+}
+
+/** The persisted signing-key rows the component's verifier reads. */
+async function readKeyRows(h: HarperInstance): Promise<any[]> {
+  const res = await adminOp(h, {
+    operation: "search_by_value",
+    database: "oauth",
+    table: "harper_oauth_mcp_keys",
+    search_attribute: "kid",
+    search_value: "*",
+    get_attributes: ["kid", "alg", "public_key_pem", "created_at"],
+  });
+  expect(res.status).toBe(200);
+  return (await res.json()) as any[];
+}
+
+function jwtHeader(token: string): any {
+  return JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString("utf8"));
 }
 
 async function postMcp(h: HarperInstance, token: string): Promise<number> {
@@ -119,12 +185,12 @@ async function postMcp(h: HarperInstance, token: string): Promise<number> {
   return res.status;
 }
 
-describe("flair#2194 signing-key lifecycle: no pin, token verifies across a restart", () => {
+describe("flair#2194 signing-key lifecycle: no pin, the library's own mint persists a key", () => {
   let workDir: string;
   let harper: HarperInstance;
 
   test(
-    "MCP on + issuer + provider, NO signing-key variable or field: the component loads and a token signs+verifies",
+    "no seeded key: the token endpoint mints (generating + persisting a key), and the token verifies before and after a restart",
     async () => {
       setEnableEnv(undefined);
       workDir = makeWorkDir("flair-lifecycle-nopin-");
@@ -132,39 +198,43 @@ describe("flair#2194 signing-key lifecycle: no pin, token verifies across a rest
       instances.push(harper);
 
       // Clean boot — the component loaded (no refused signingKeyPem pin).
-      const ops = await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) });
-      expect(ops.status).toBe(200);
+      expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
       expect(harper.getLog?.() ?? "").not.toContain("mcp.signingKeyPem is the unresolved env placeholder");
 
-      await seedKey(harper);
-      expect(await postMcp(harper, await signToken())).toBe(200);
-    },
-    180_000,
-  );
+      // NO seeded key: the store is empty before the first mint.
+      expect(await readKeyRows(harper)).toEqual([]);
 
-  test(
-    "the same token still verifies after a restart (the key store persists)",
-    async () => {
-      const installDir = harper.installDir;
-      const token = await signToken();
+      const { verifier, challenge } = pkcePair();
+      await seedClientAndCode(harper, "nopin-code", challenge);
+      const token = await mint(harper, "nopin-code", verifier);
+      const kid = jwtHeader(token).kid;
+
+      // The library generated AND persisted the key row — nothing here seeded one.
+      const rows = await readKeyRows(harper);
+      expect(rows.map((r) => r.kid)).toEqual([kid]);
+      expect(typeof rows[0].public_key_pem).toBe("string");
+      expect(rows[0].public_key_pem).toContain("BEGIN PUBLIC KEY");
+
+      // The minted token verifies against the running component.
       expect(await postMcp(harper, token)).toBe(200);
 
+      // ...and still verifies after a restart (the persisted key survived).
+      const installDir = harper.installDir;
       await stopHarper(harper, { keepInstallDir: true });
       harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, installDir });
       instances.push(harper);
-
       expect(await postMcp(harper, token)).toBe(200);
     },
-    180_000,
+    300_000,
   );
 });
 
 describe("flair#2194 signing-key lifecycle: pinned then unpinned (upgrade path)", () => {
   test(
-    "a token minted while a pin is set keeps verifying after the pin is removed",
+    "a token the library minted under a REAL pin still verifies after the pin is removed",
     async () => {
       // Boot WITH the pin declared and staged.
-      setEnableEnv(privateKeyPem);
+      setEnableEnv(pinPrivatePem);
       const pinnedDir = makeWorkDir("flair-lifecycle-pinned-", (shipped) =>
         shipped.replace("    enabled: ${FLAIR_MCP_OAUTH}", "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}"),
       );
@@ -172,24 +242,30 @@ describe("flair#2194 signing-key lifecycle: pinned then unpinned (upgrade path)"
       instances.push(harper);
       expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
 
-      // The pin is a valid PEM, so this boot is clean; seed the key the store
-      // would hold and mint (sign) a token.
-      await seedKey(harper);
-      const token = await signToken();
+      const { verifier, challenge } = pkcePair();
+      await seedClientAndCode(harper, "pinned-code", challenge);
+      const token = await mint(harper, "pinned-code", verifier);
+
+      // The pin wins the signer selection and the library persisted it.
+      const rows = await readKeyRows(harper);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].kid).toBe("rs256-default");
+      expect(String(rows[0].public_key_pem).trim()).toBe(pinPublicPem.trim());
+      expect(jwtHeader(token).kid).toBe("rs256-default");
       expect(await postMcp(harper, token)).toBe(200);
 
       // Remove the pin (shipped config, no signing-key env) and restart on the
-      // SAME data dir: the key stays in the store, so the token still verifies.
+      // SAME data dir: the persisted pin stays in the store, so the token still
+      // verifies.
       const installDir = harper.installDir;
       await stopHarper(harper, { keepInstallDir: true });
       setEnableEnv(undefined);
       const shippedDir = makeWorkDir("flair-lifecycle-unpinned-");
       harper = await startHarper({ cwd: shippedDir, harperBinDir: REPO_ROOT, installDir });
       instances.push(harper);
-
       expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
       expect(await postMcp(harper, token)).toBe(200);
     },
-    240_000,
+    360_000,
   );
 });
