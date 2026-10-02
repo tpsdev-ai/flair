@@ -13,6 +13,7 @@
 import { Command } from "commander";
 import * as render from "../render.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type SoulCli = {
   api: (...args: any[]) => Promise<any>;
@@ -64,7 +65,7 @@ export function register(program: Command): void {
       // wrote a record owned by X while signing as Y (the soul family's stale rung).
       const { agentId, source } = resolveSigningAgentId(opts, "soul set");
       const id = `${opts.agent}:${opts.key}`;
-      const out = await api("PUT", `/Soul/${encodeURIComponent(id)}`, {
+      const out = await api("PUT", `/Soul/${encodeRecordId(id)}`, {
         id,
         agentId: opts.agent,
         key: opts.key,
@@ -96,7 +97,7 @@ export function register(program: Command): void {
       // signer through the canonical seam so soul get honors the SAME precedence
       // as every other family; a null result lets api() fall to admin-pass/floor.
       const { agentId, source } = resolveSigningAgentId(opts, "soul get");
-      const out = await api("GET", `/Soul/${id}`, undefined, { agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser, baseUrl: opts.url });
+      const out = await api("GET", `/Soul/${encodeRecordId(id)}`, undefined, { agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser, baseUrl: opts.url });
       const mode = render.resolveOutputMode(opts);
       if (mode === "json") {
         console.log(render.asJSON(out));

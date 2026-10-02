@@ -910,6 +910,43 @@ describe("selfVerifyMcpMetadata", () => {
     // Must NOT blame CIMD configuration — that is the misdirection this guards.
     expect(result.detail).not.toContain("clientIdMetadataDocuments");
   });
+
+  test("flair#2190: a valid issuer + CIMD with a DIFFERENT token endpoint is refused, naming expected vs found", async () => {
+    const wrong = "https://tokens.elsewhere.example/mcp/token";
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ ...CIMD_METADATA, token_endpoint: wrong }), { status: 200 })) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain(`token_endpoint=${JSON.stringify(wrong)}`);
+    expect(result.detail).toContain(`${ISSUER}/oauth/mcp/token`);
+  });
+
+  test("flair#2190: the exact MCP token endpoint passes", async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify(CIMD_METADATA), { status: 200 })) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+    expect(result.ok).toBe(true);
+    expect(result.tokenEndpoint).toBe(`${ISSUER}/oauth/mcp/token`);
+  });
+
+  test("flair#2190: a trailing slash on the issuer is normalized, so the exact endpoint still matches", async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify(CIMD_METADATA), { status: 200 })) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(`${ISSUER}/`, { fetchImpl });
+    expect(result.ok).toBe(true);
+  });
+
+  test("flair#2190: the endpoint comparison is exact, like the rest of the code — trailing slash, case and default-port variants on token_endpoint are refused", async () => {
+    for (const token_endpoint of [
+      `${ISSUER}/oauth/mcp/token/`,
+      `${ISSUER}/oauth/MCP/token`,
+      "https://flair.example.com:443/oauth/mcp/token",
+    ]) {
+      const fetchImpl = (async () =>
+        new Response(JSON.stringify({ ...CIMD_METADATA, token_endpoint }), { status: 200 })) as typeof fetch;
+      const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+      expect(result.ok).toBe(false);
+      expect(result.detail).toContain("not the MCP authorization server's");
+    }
+  });
 });
 
 describe("buildClaudePasteBlock", () => {

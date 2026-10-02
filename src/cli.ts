@@ -69,6 +69,7 @@ import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemi
 import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning } from "./lib/mcp-spec.js";
 import { harperPortValue } from "./lib/harper-port-value.js";
 import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
+import { encodeRecordId } from "./lib/record-id-path.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -2836,7 +2837,7 @@ export async function verifySemanticSearch(
   let stored = false;
   try {
     // Write the test memory (ephemeral so it's never durable). PUT /Memory/<id>.
-    const writeRes = await authFetch(baseUrl, agentId, keyPath, "PUT", `/Memory/${id}`, {
+    const writeRes = await authFetch(baseUrl, agentId, keyPath, "PUT", `/Memory/${encodeRecordId(id)}`, {
       id, agentId, content, durability: "ephemeral", createdAt: new Date().toISOString(),
     });
     if (!writeRes.ok && writeRes.status !== 204) {
@@ -2905,7 +2906,7 @@ export async function verifySemanticSearch(
     // Best-effort cleanup of the ephemeral probe memory.
     if (stored) {
       try {
-        await authFetch(baseUrl, agentId, keyPath, "DELETE", `/Memory/${id}`);
+        await authFetch(baseUrl, agentId, keyPath, "DELETE", `/Memory/${encodeRecordId(id)}`);
       } catch { /* leave the ephemeral row; it'll age out */ }
     }
   }
@@ -3007,7 +3008,7 @@ export async function verifyAuditLog(
   }
 
   const id = `flair-doctor-audit-probe-${randomUUID()}`;
-  const path = `/Memory/${id}`;
+  const path = `/Memory/${encodeRecordId(id)}`;
   let stored = false;
   try {
     // Write 1: PUT the probe row. Ephemeral durability — TTL is the cleanup
@@ -3187,7 +3188,7 @@ export async function checkAgentRegistered(
     return { state: "no-key", detail: `no local key for agent '${agentId}' to sign the check` };
   }
   try {
-    const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Agent/${agentId}`);
+    const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Agent/${encodeRecordId(agentId)}`);
     if (res.ok) return { state: "registered" };
     if (res.status === 404) return { state: "not-registered" };
     const text = await res.text().catch(() => "");

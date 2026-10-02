@@ -33,6 +33,7 @@ import {
 import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { fetchErrorLabel, redactUrl } from "./federation.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type PrincipalCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -410,7 +411,7 @@ export function register(program: Command): void {
     .description("Show principal details")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (id: string, opts) => {
-      const result = await api("GET", `/Agent/${id}`);
+      const result = await api("GET", `/Agent/${encodeRecordId(id)}`);
       const mode = render.resolveOutputMode(opts);
       if (mode === "json") {
         console.log(render.asJSON(result));

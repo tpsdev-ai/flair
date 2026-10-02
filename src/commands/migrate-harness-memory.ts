@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from "no
 
 import { join, resolve, sep } from "node:path";
 import { resolveHome } from "../lib/home.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type MigrateHarnessMemoryCli = {
   resolveHttpPort: (...args: any[]) => any;
@@ -250,7 +251,7 @@ program
               tags: tags,
               createdAt: new Date().toISOString(),
             };
-            const memoryPath = `/Memory/${memoryId}`;
+            const memoryPath = `/Memory/${encodeRecordId(memoryId)}`;
             const res = await authFetch(httpUrl, agentId, keyPath, "PUT", memoryPath, body);
             if (res.ok) {
               authSuccess = true;
@@ -271,7 +272,7 @@ program
                 tags: tags,
                 createdAt: new Date().toISOString(),
               };
-              const memoryPath = `/Memory/${memoryId}`;
+              const memoryPath = `/Memory/${encodeRecordId(memoryId)}`;
               const auth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
               const res = await fetch(`${httpUrl}${memoryPath}`, {
                 method: "PUT",
