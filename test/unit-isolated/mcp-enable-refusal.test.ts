@@ -15,16 +15,17 @@ mock.module("node:readline", () => ({
 const { register } = await import("../../src/commands/mcp.ts");
 
 for (const [instance, issuer, fabric, refusal] of [
-  ["http://127.0.0.1:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ["http://localhost:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ["http://[::1]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ["http://localhost.:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ["http://LOCALHOST.:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ["http://sub.localhost.:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ["http://[::ffff:127.0.0.1]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ["http://[::ffff:7f00:1]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ["http://[0:0:0:0:0:ffff:127.1.2.3]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"],
-  ...UNSPECIFIED_TARGETS.map(instance => [instance, "https://mcp.example.com", true, "--fabric cannot be used with a loopback target"] as const),
+  ["http://127.0.0.1:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"],
+  ["http://localhost:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"],
+  ["http://[::1]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"],
+  ["http://localhost.:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"],
+  ["http://LOCALHOST.:9926", "https://mcp.example.com", true, "Use http://localhost.:9926"],
+  ["http://sub.localhost.:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"],
+  ["http://[::ffff:127.0.0.1]:9926", "https://mcp.example.com", true, "Use http://[::ffff:7f00:1]:9926"],
+  ["http://[::ffff:7f00:1]:9926", "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"],
+  ["http://[0:0:0:0:0:ffff:127.1.2.3]:9926", "https://mcp.example.com", true, "Use http://[::ffff:7f01:203]:9926"],
+  ["http://LOCALHOST.:9926", undefined, false, "Use http://localhost.:9926"],
+  ...UNSPECIFIED_TARGETS.map(instance => [instance, "https://mcp.example.com", true, "--fabric cannot be used with a loopback or unspecified target"] as const),
   ...NON_CANONICAL_TARGETS.map(([instance, canonical]) => [instance, "https://mcp.example.com", false, `Use ${canonical}`] as const),
   ["https://acme.harperfabric.com", "https://[fd00::1]", false, "Issuer refused:"],
   ["https://acme.harperfabric.com", "https://[fe80::1]", false, "Issuer refused:"],
@@ -53,7 +54,8 @@ for (const [instance, issuer, fabric, refusal] of [
       const program = new Command();
       register(program);
       await expect(program.parseAsync([
-        "node", "flair", "mcp", "enable", "--instance", instance, "--issuer", issuer,
+        "node", "flair", "mcp", "enable", "--instance", instance,
+        ...(issuer === undefined ? [] : ["--issuer", issuer]),
         "--admin-pass", "fixture", "--signing-key-file", join(dir, "key.pem"),
         "--secrets-path", join(dir, "secrets.env"),
         ...(fabric ? ["--fabric"] : []), ...(dryRun ? ["--dry-run"] : []),

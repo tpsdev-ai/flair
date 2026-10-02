@@ -278,7 +278,7 @@ for (const instance of [ISSUER, TARGET]) {
     const r = await runEnable(SHIPPED, ["--instance", instance, "--fabric", "--cimd-allowed-hosts", "claude.ai", ...(dryRun ? ["--dry-run"] : [])], true);
     expect(r.exit).toBe("process.exit(1)");
     expect(r.err).toContain(instance === TARGET
-      ? "--fabric cannot be used with a loopback target" : "refused for a Fabric instance");
+      ? "--fabric cannot be used with a loopback or unspecified target" : "refused for a Fabric instance");
     expect(r.out).toBe("");
     expect(r.configAfter).toBe(r.configBefore);
     expect(r.keyWritten).toBe(false);

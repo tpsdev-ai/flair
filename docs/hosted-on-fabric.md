@@ -65,13 +65,13 @@ On Fabric / managed deploys, Harper's secrets mechanism can provision environmen
 
 `flair mcp enable` provisions five variables for the target's process, including `FLAIR_MCP_OAUTH` and the RS256 signing key. Those two are read from `process.env` only, so `set_configuration` cannot deliver them.
 
-Use `--fabric` for a Fabric target whose URL host is not `*.harperfabric.com`.
+Use `--fabric` for a non-loopback custom-domain Fabric target.
 
 It asks the target what it can do, rather than assuming from the hostname or the version:
 
 | The target… | What happens |
 |-------------|--------------|
-| returns a usable env-secrets public key | `enable` attempts a sealed push over the ops API. If the push fails, it reports a staged-file fallback. After confirmation, an already active surface can pass without a restart or re-run; restart if this run changed a secret value. If the surface is inactive, restart a `*.harperfabric.com` target after a successful push, or apply the staged values and restart, then re-run with `--confirm-secrets-applied`. |
+| returns a usable env-secrets public key | `enable` attempts a sealed push over the ops API. If the push fails, it reports a staged-file fallback. After confirmation, an already active surface can pass without a restart or re-run; restart if this run changed a secret value. If the surface is inactive, restart the Fabric target after a successful push, or apply the staged values and restart, then re-run with `--confirm-secrets-applied`. |
 | reports no env-secrets public-key operation | the vars are staged to a `0600` file and you apply them yourself, then re-run with `--confirm-secrets-applied` |
 | is unreachable, refuses the probe, or answers unusably | same staged-file fallback, and the output says **which** of those happened |
 

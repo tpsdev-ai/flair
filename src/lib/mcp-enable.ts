@@ -223,7 +223,7 @@ export function isFabricTarget(instanceUrl: string, fabric = false): boolean {
 }
 
 export function fabricLoopbackRefusal(instanceUrl: string, fabric = false): string | undefined {
-  if (fabric && isLoopbackUrl(instanceUrl)) return "--fabric cannot be used with a loopback target. Remove --fabric.";
+  if (fabric && isLoopbackUrl(instanceUrl)) return "--fabric cannot be used with a loopback or unspecified target. Remove --fabric.";
 }
 
 export type SecretsMechanism = "fabric-env-secrets" | "env-file";
@@ -1929,9 +1929,16 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   //
   // Initialised to the first step rather than left undefined so a throw before
   // any assignment cannot be attributed to an arbitrary fallback name.
-  let currentStep: EnableStepName = "local-origin-check";
+  let currentStep: EnableStepName = "target-shape-check";
   const dryRun = Boolean(params.dryRun);
   const push = (ok: boolean, detail: string) => steps.push({ step: currentStep, ok, detail });
+
+  const targetRefusal = targetOriginRefusal(params.instance) ?? fabricLoopbackRefusal(params.instance, params.fabric);
+  if (targetRefusal) {
+    currentStep = "target-shape-check";
+    push(false, targetRefusal);
+    return { ok: false, dryRun, refused: { message: targetRefusal }, steps, failedStep: "target-shape-check" };
+  }
 
   // ── Local-origin refusal (scenario addendum, binding) ─────────────────────
   currentStep = "local-origin-check";
@@ -1942,13 +1949,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     return { ok: false, dryRun, refused: { reason: localCheck.reason, message: localCheck.message }, steps, failedStep: "local-origin-check" };
   }
   push(true, `${issuer}: URL parsed; hostname/IP-literal check passed (no DNS lookup)`);
-
-  const targetRefusal = fabricLoopbackRefusal(params.instance, params.fabric) ?? targetOriginRefusal(params.instance);
-  if (targetRefusal) {
-    currentStep = "target-shape-check";
-    push(false, targetRefusal);
-    return { ok: false, dryRun, refused: { message: targetRefusal }, steps, failedStep: "target-shape-check" };
-  }
 
   const idpProvider = params.idpProvider ?? "github";
   const principal = params.principal ?? "self";

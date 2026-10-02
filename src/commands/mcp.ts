@@ -435,9 +435,6 @@ export async function revokeMcpClient(params: McpRevokeParams, deps: McpRevokeDe
 }
 
 // ─── flair mcp enable / disable / status ────────────────────────────────────
-// flair#719 — the last piece of the paved-paths command family. Automates
-// docs/notes/mcp-oauth-model2.md's 8-step operator checklist into one
-// command.
 
 /** Simple y/N confirmation over readline — TTY-only, mirrors the existing
  *  restore-confirmation pattern (`flair snapshot restore`) above. */
@@ -796,8 +793,8 @@ export function register(program: Command): void {
   mcp
     .command("enable")
     .description(
-      "One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the " +
-        "docs/notes/mcp-oauth-model2.md checklist. Rejects invalid issuer URLs, localhost/.localhost/.local hosts, " +
+      "Enable the OAuth /mcp surface for claude.ai. " +
+        "Rejects invalid issuer URLs, localhost/.localhost/.local hosts, " +
         "IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), " +
         "and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.",
     )
@@ -826,7 +823,7 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
     .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
-    .option("--dry-run", "Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call")
+    .option("--dry-run", "Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config; report the signing key path. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
@@ -835,15 +832,15 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      const localCheck = checkLocalOriginRefusal(opts.issuer ?? instance);
-      if (localCheck.refused) {
-        console.error(`${render.icons.error} ${localCheck.message}`);
+      const targetRefusal = targetOriginRefusal(instance) ?? fabricLoopbackRefusal(instance, Boolean(opts.fabric));
+      if (targetRefusal) {
+        console.error(`${render.icons.error} ${targetRefusal}`);
         process.exit(1);
       }
 
-      const targetRefusal = fabricLoopbackRefusal(instance, Boolean(opts.fabric)) ?? targetOriginRefusal(instance);
-      if (targetRefusal) {
-        console.error(`${render.icons.error} ${targetRefusal}`);
+      const localCheck = checkLocalOriginRefusal(opts.issuer ?? instance);
+      if (localCheck.refused) {
+        console.error(`${render.icons.error} ${localCheck.message}`);
         process.exit(1);
       }
 

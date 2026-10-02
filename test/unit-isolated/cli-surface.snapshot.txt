@@ -420,7 +420,7 @@ flair mcp list
       attr: json
 
 flair mcp enable
-  description: One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the docs/notes/mcp-oauth-model2.md checklist. Rejects invalid issuer URLs, localhost/.localhost/.local hosts, IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.
+  description: Enable the OAuth /mcp surface for claude.ai. Rejects invalid issuer URLs, localhost/.localhost/.local hosts, IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.
   usage: [options]
   options:
     --instance <url>
@@ -475,7 +475,7 @@ flair mcp enable
       description: Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host
       attr: fabric
     --dry-run
-      description: Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
+      description: Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config; report the signing key path. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run
       attr: dryRun
     --json
       description: Print machine-readable JSON instead of a human summary
@@ -2986,9 +2986,7 @@ Commands:
                            its backing Agent record), then clean up locally.
   list [options]           List granted machine clients (name, client_id,
                            status, created).
-  enable [options]         One-command hosted-shape enablement of the OAuth /mcp
-                           surface for claude.ai — automates the
-                           docs/notes/mcp-oauth-model2.md checklist. Rejects
+  enable [options]         Enable the OAuth /mcp surface for claude.ai. Rejects
                            invalid issuer URLs, localhost/.localhost/.local
                            hosts, IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12,
                            192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1,
@@ -3110,11 +3108,10 @@ Global Options:
 ----- flair mcp enable -----
 Usage: flair mcp enable [options]
 
-One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai —
-automates the docs/notes/mcp-oauth-model2.md checklist. Rejects invalid issuer
-URLs, localhost/.localhost/.local hosts, IPv4 0/8, 10/8, 127/8, 169.254/16,
-172.16/12, 192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1, fc00::/7,
-fe80::/10; no DNS lookup.
+Enable the OAuth /mcp surface for claude.ai. Rejects invalid issuer URLs,
+localhost/.localhost/.local hosts, IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12,
+192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1, fc00::/7, fe80::/10; no
+DNS lookup.
 
 Options:
   --instance <url>                                   Canonical http(s) target origin, optionally followed by / (else FLAIR_URL)
@@ -3133,7 +3130,7 @@ Options:
   --admin-user <name>                                Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
   --fabric                                           Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host
-  --dry-run                                          Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
+  --dry-run                                          Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config; report the signing key path. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run
   --json                                             Print machine-readable JSON instead of a human summary
   -h, --help                                         display help for command
 
