@@ -7,9 +7,10 @@
  * api failure (fail-stops-cycle + error in log row), soul shape coercion
  * (single row vs multi row), and step 5 distillation (§3B, issue #707): success populates
  * `api failure (fail-stops-cycle + error in log row), soul shape coercion\n * (single row vs multi row), and step 5 distillation (§3B, issue #707): success populates
- * `candidates` and flips `slice` to "2"; failure is recorded in `errors[]`
- * and the run is reported `failed` (flair#924 defect 1: a populated errors[]
- * must never coexist with `status: "completed"` — see the "status honesty"
+ * `candidates` and flips `slice` to "2"; a real failure is recorded in
+ * `errors[]` and the run is reported `failed`, while a deliberate skip (no
+ * generative backend, idle ADK, operator pause) goes to `skips[]` and the run
+ * stays `completed` (flair#924 defect 1 / #1503 — see the "status honesty"
  * regression block below); dry-run skips the /ReflectMemories call
  * entirely and `slice` stays "2-maintenance".
  */
@@ -256,7 +257,7 @@ describe("step 5: distillation", () => {
     expect(r.logRow.errors[0]).toContain("fetch failed: connection reset");
   });
 
-  it("no-backend (503) failure is recorded distinctly — structured message, not raw JSON", async () => {
+  it("no-backend (503) is a deliberate SKIP — completed run, listed apart from errors", async () => {
     const r = await runNightlyCycle(baseOpts({
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
@@ -269,11 +270,15 @@ describe("step 5: distillation", () => {
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
-    // A distillation that did not execute is a FAILED run (flair#924 defect 1),
-    // not a "completed" one with an error buried underneath.
-    expect(r.status).toBe("failed");
-    expect(r.logRow.errors.length).toBe(1);
-    expect(r.logRow.errors[0]).toBe("distillation: No generative backend configured. See the models configuration docs.");
+    // A stage that cannot run for lack of a model is a skip (flair#924 defect 1
+    // / #1503), not a failure: the run completes and records the reason. The
+    // old shape — status "failed" so the nightly job exited 1 every night — is
+    // gone.
+    expect(r.status).toBe("completed");
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips).toEqual(["distillation skipped: no generative backend configured"]);
+    // Distillation did not execute, so no distilledAt is recorded.
+    expect(r.logRow.distilledAt).toBeUndefined();
   });
 
   it("distillation_failed (502) failure surfaces the detail, distinct from the no-backend case", async () => {
@@ -697,11 +702,12 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
 
-    expect(r.status).toBe("failed");
+    expect(r.status).toBe("completed");
     expect(reflectCalls).toEqual([]);
     expect(reflectCalls.some((c) => c.scope === "all")).toBe(false);
     expect(autoPromoteCalls).toEqual([]);
-    expect(r.logRow.errors.some((e) => e.includes("cross-user bleed"))).toBe(true);
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips.some((e) => e.includes("cross-user bleed"))).toBe(true);
   });
 
   it("a per-tag failure does not abort the remaining tags — recorded, and the run reports failed", async () => {
@@ -1122,10 +1128,11 @@ describe("per-run distill cap + health refuse (#1515)", () => {
       },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
-    expect(r.status).toBe("failed");
+    expect(r.status).toBe("completed");
     expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
     expect(r.logRow.candidates).toEqual(["cand_alice"]);
-    expect(r.logRow.errors.some((e) => e.includes("aborted by operator"))).toBe(true);
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips.some((e) => e.includes("aborted by operator"))).toBe(true);
     expect(r.logRow.distill?.aborted).toBe(true);
     expect(r.logRow.dedup).toBeUndefined();
   });
@@ -1179,26 +1186,19 @@ describe("per-run distill cap + health refuse (#1515)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// flair#924 (defect 1) — status/exit-code honesty.
+// flair#924 (defect 1) / #1503 — deliberate skips are not failures.
 //
-// A REM nightly run whose distillation stage did not execute is NOT a
-// completed run. Before this fix, src/rem/runner.ts built the audit row's
-// status as `opts.dryRun ? "dry-run" : "completed"` unconditionally, so a
-// cycle that recorded `distillation: No generative backend configured …` in
-// errors[] still logged `status: "completed"` — while `flair rem nightly
-// run-once` exited 1 (src/commands/rem.ts: `if (row.errors.length > 0)
-// process.exit(1)`). The reported status and the one signal launchd records
-// disagreed, and the failure hid for 58 consecutive nights.
-//
-// These tests encode the invariant the fix restores: a populated errors[]
-// can NEVER coexist with status "completed". They FAIL on the pre-fix runner
-// (which returned "completed" alongside a populated errors[]) and PASS after
-// it. See the PR body for both results.
+// A stage that cannot run for lack of configuration (no generative backend), an
+// idle ADK agent, and an operator pause are recorded in `skips[]`, not
+// `errors[]`, and leave the run "completed" with exit 0 — so `flair doctor`
+// stops reporting a valid no-model install as DEGRADED every night. Real
+// failures (a per-tag distill error, a network error, the dedup stat) still
+// populate `errors[]` and fail the run. The invariant below — a populated
+// errors[] can NEVER coexist with status "completed" — is unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
-describe("status honesty — a run that skipped a core stage is not 'completed' (flair#924 defect 1)", () => {
-  // The real failure shape from the issue: snapshot + maintenance succeed,
-  // distillation cannot start (503 no generative backend), so the run records
-  // `distillation: No generative backend configured …` in errors[].
+describe("status honesty — deliberate skips are not failures (flair#924 defect 1 / #1503)", () => {
+  // The real shape from the issue: snapshot + maintenance succeed, distillation
+  // cannot start (503 no generative backend).
   const noBackendOpts = () => baseOpts({
     apiCall: makeApi({
       "GET:/Memory": () => sampleMemories,
@@ -1212,25 +1212,35 @@ describe("status honesty — a run that skipped a core stage is not 'completed' 
     }),
   });
 
-  it("distillation not executing reports a non-success status", async () => {
+  it("a deliberate skip completes the run and is recorded under skips[]", async () => {
     const r = await runNightlyCycle(noBackendOpts());
 
-    // The distillation stage did not execute, and it said so:
-    expect(r.logRow.errors.length).toBeGreaterThan(0);
-    expect(r.logRow.errors[0]).toContain("distillation:");
-    // …so the run MUST NOT claim success:
-    expect(r.status).not.toBe("completed");
-    expect(r.status).toBe("failed");
-  });
-
-  it("INVARIANT: a populated errors[] cannot coexist with status 'completed'", async () => {
-    const r = await runNightlyCycle(noBackendOpts());
-
-    expect(r.logRow.errors.length).toBeGreaterThan(0);
-    expect(r.status).not.toBe("completed");
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips).toEqual(["distillation skipped: no generative backend configured"]);
+    expect(r.status).toBe("completed");
     // The status the caller (`flair rem nightly run-once`) received and the
     // status persisted to the audit log are the same value — the scheduler
     // summary and the launchd exit code both read from this contract.
+    const rows = readLogRows();
+    expect(rows[0].status).toBe(r.status);
+    expect(rows[0].skips).toEqual(r.logRow.skips);
+  });
+
+  it("INVARIANT: a populated errors[] cannot coexist with status 'completed'", async () => {
+    // A REAL distillation failure (not a deliberate skip) stays an error.
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => { throw new Error("fetch failed: connection reset"); },
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
+      }),
+    }));
+
+    expect(r.logRow.errors.length).toBeGreaterThan(0);
+    expect(r.status).not.toBe("completed");
+    expect(r.status).toBe("failed");
     const rows = readLogRows();
     expect(rows[0].status).toBe(r.status);
     expect(rows[0].errors.length).toBeGreaterThan(0);
@@ -1240,5 +1250,37 @@ describe("status honesty — a run that skipped a core stage is not 'completed' 
     const r = await runNightlyCycle(baseOpts());
     expect(r.logRow.errors).toEqual([]);
     expect(r.status).toBe("completed");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// flair#1503 — a skipped run still records when distillation last ran.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("distillation staleness timestamp (flair#1503)", () => {
+  it("records distilledAt when the stage executed — even with zero candidates", async () => {
+    const r = await runNightlyCycle(baseOpts());
+    expect(r.logRow.skips).toEqual([]);
+    // Distillation ran (the stub's /ReflectMemories returned), so the cycle
+    // carries a distilledAt for the staleness surface.
+    expect(r.logRow.distilledAt).toBe(r.logRow.runAt);
+    expect(readLogRows()[0].distilledAt).toBe(r.logRow.runAt);
+  });
+
+  it("no-backend across an ADK agent's tags records ONE skip and stops the loop", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice", "adk:app:bob"],
+      reflect: () => {
+        throw new Error(JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
+      },
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    // One failed call is enough to know every tag will fail — the loop stops,
+    // and the reason is recorded once, not once per tag.
+    expect(reflectCalls.length).toBe(1);
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips).toEqual(["distillation skipped: no generative backend configured"]);
+    expect(r.status).toBe("completed");
+    expect(r.logRow.distilledAt).toBeUndefined();
   });
 });

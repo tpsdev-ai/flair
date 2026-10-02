@@ -328,6 +328,52 @@ export async function discoverLocalFlairPort(originalUrl: string): Promise<numbe
 }
 
 
+/**
+ * flair#1503: distillation staleness beside the pending-candidate count.
+ *
+ * A zero pending count means "nothing to review" only when distillation is
+ * actually running. When it is not, the same zero is indistinguishable from a
+ * healthy, fully-reviewed instance — the shape #924/#1503 reported: nights of
+ * `0 pending` rendered dim while distillation had not run since July.
+ *
+ * `lastDistilledAt` is the newest cycle whose distillation executed
+ * (resources/health.ts derives it from the nightly log). With zero pending and
+ * nightly not explicitly disabled, a distillation older than
+ * DISTILL_STALE_AFTER_MS — or one that has never run — is stale; an unknown
+ * `nightlyEnabled` is not treated as healthy.
+ */
+export const DISTILL_STALE_AFTER_MS = 2 * 24 * 3600 * 1000;
+
+export interface DistillStaleness {
+  lastDistilledAt: string | null;
+  stale: boolean;
+}
+
+export function distillationStaleness(rem: {
+  lastDistilledAt?: string | null;
+  pendingCandidates?: number | null;
+  nightlyEnabled?: boolean | null;
+}, now: number = Date.now()): DistillStaleness {
+  const last = typeof rem.lastDistilledAt === "string" && rem.lastDistilledAt.length > 0
+    ? rem.lastDistilledAt
+    : null;
+  const pending = typeof rem.pendingCandidates === "number" ? rem.pendingCandidates : null;
+  const age = last ? now - new Date(last).getTime() : null;
+  const stale = pending === 0
+    && rem.nightlyEnabled !== false
+    && (age === null || !Number.isFinite(age) || age > DISTILL_STALE_AFTER_MS);
+  return { lastDistilledAt: last, stale };
+}
+
+/** Text for the "Last distilled" line: a relative time (or "never"), with a
+ *  stale marker appended when the count is a stale zero. */
+export function distillStalenessLine(ds: DistillStaleness, relative: (iso: string) => string): string {
+  const base = ds.lastDistilledAt ? relative(ds.lastDistilledAt) : "never";
+  return ds.stale ? base + DISTILL_STALE_HINT : base;
+}
+
+const DISTILL_STALE_HINT = " — distillation has not run recently";
+
 export function register(program: Command): void {
   const __pkgVersion = cli.__pkgVersion;
 
@@ -628,6 +674,13 @@ const statusCmd = program
       if (typeof r.pendingCandidates === "number" && r.pendingCandidates > 0) {
         console.log(render.kv("Pending candidates", render.wrap(render.c.yellow, String(r.pendingCandidates))));
       }
+      // flair#1503: zero pending only reads as healthy when distillation is
+      // current; render the staleness beside it otherwise.
+      const ds = distillationStaleness(r);
+      if (ds.lastDistilledAt || ds.stale) {
+        const text = distillStalenessLine(ds, render.relativeTime);
+        console.log(render.kv("Last distilled", ds.stale ? render.wrap(render.c.yellow, text) : render.wrap(render.c.dim, text)));
+      }
     }
 
     if (healthData?.federation) {
@@ -715,11 +768,16 @@ statusCmd
     if (r.lastNightlyAt) {
       console.log(render.kv("Last nightly", `${render.relativeTime(r.lastNightlyAt)} ${render.wrap(render.c.dim, `(${r.lastNightlyAt})`)}`, 18));
     }
+    const ds = distillationStaleness(r);
     if (typeof r.pendingCandidates === "number") {
-      const pendingColor = r.pendingCandidates > 0 ? render.c.yellow : render.c.dim;
+      const pendingColor = ds.stale || r.pendingCandidates > 0 ? render.c.yellow : render.c.dim;
       console.log(render.kv("Pending candidates", render.wrap(pendingColor, String(r.pendingCandidates)), 18));
     } else {
       console.log(render.kv("Pending candidates", render.wrap(render.c.dim, "— (schema not available)"), 18));
+    }
+    if (ds.lastDistilledAt || ds.stale) {
+      const text = distillStalenessLine(ds, render.relativeTime);
+      console.log(render.kv("Last distilled", ds.stale ? render.wrap(render.c.yellow, text) : render.wrap(render.c.dim, text), 18));
     }
   });
 
@@ -1084,6 +1142,11 @@ statusCmd
       console.log(`Nightly:           ${nightly}`);
       if (r.lastNightlyAt) console.log(`Last nightly:      ${relativeTime(r.lastNightlyAt)} (${r.lastNightlyAt})`);
       if (typeof r.pendingCandidates === "number") console.log(`Pending candidates: ${r.pendingCandidates}`);
+      const ds = distillationStaleness(r);
+      if (ds.lastDistilledAt || ds.stale) {
+        const base = ds.lastDistilledAt ? `${relativeTime(ds.lastDistilledAt)} (${ds.lastDistilledAt})` : "never";
+        console.log(`Last distilled:     ${ds.stale ? base + DISTILL_STALE_HINT : base}`);
+      }
     }
 
     if (healthData?.federation) {
