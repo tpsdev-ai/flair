@@ -37,11 +37,19 @@ header `{alg: "EdDSA", typ: "JWT"}`; claims `iss = sub = client_id`, `aud =
 token endpoint`, `exp - iat ≤ 60s` (hard-capped, not just defaulted), `iat`,
 random `jti`. Signed with `node:crypto` alone (no new dependency, matching
 the plugin's own approach and this repo's existing `flair-client.mjs` /
-`buildEd25519Auth` signing style). The claim shape is pinned to what PR #165
+`buildEd25519Auth` signing style). The default claim shape is pinned to what PR #165
 (`src/lib/mcp/clientAssertion.ts`) verifies, and
-`test/unit/mcp-client-credentials-live-package.test.ts` proves assertions
-this module signs pass the plugin's **real** `verifyClientAssertion` —
-including negative cases (wrong signing key, tampered payload).
+`test/unit/mcp-client-credentials-live-package.test.ts` proves default-form
+assertions this module signs pass the pinned plugin's **real**
+`verifyClientAssertion`; it also checks refusals for the issuer form, wrong
+signing keys, and tampered payloads.
+
+The audience form is a transition switch (`FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE`,
+or `flair mcp token --assertion-audience`): the default is the shape above, and
+`issuer` signs `aud` = the authorization server metadata document's `issuer`
+with `typ: "client-authentication+jwt"` — the RFC 7523bis form, for the
+verifier release that accepts it (HarperFast/oauth #245, merged upstream but
+not released).
 
 Key loading (`resolveAgentKeyPath` / `loadEd25519PrivateKeyFromFile`) mirrors
 `src/cli.ts`'s existing `resolveKeyPath` / `buildEd25519Auth` (used by the

@@ -18,6 +18,179 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.59.0] - 2026-10-02
+
+### Added
+
+- **A successful bootstrap now returns a `skills` manifest and `skillDiagnostics`, over REST and native `/mcp`.** A `skills` entry is `{ name, skillId, scope, priority, source }` for an assigned skill that won priority resolution; fetch its procedure with `skill_get` and the `skillId`. A `skillDiagnostics` entry is a refused, superseded, unresolved or ambiguous assignment with its reason. A name-only assignment resolves when the agent has exactly one live skill row of its own with that name; with none it is unresolved, with more than one ambiguous. Both arrays are present with `includeSoul: false` and at the `/mcp` default, and hold the entries admitted within the remaining `maxTokens` content budget: `skillsTokens` and `skillDiagnosticsTokens` count their cost, and `skillsTruncated` and `skillDiagnosticsTruncated` count the entries that did not fit.
+
+  The prose `## Active Skills` section now lists only the entries in `skills`, and only when both `includeSoul` and `includeContext` are true. In 0.58.0 it also listed refused and superseded assignments with a `SKILL_CONFLICT` or `refused` note, and assignments that named no skill row.
+
+- **Bootstrap now resolves org-scope skill assignments (`OrgSkillAssignment`) together with the agent's own; an org entry in `skills` has `scope: "org"`.** (flair#2141)
+  A row carries `skillName`, `priority` and `skillRef`; its `skillId` in
+  `skills` is that `skillRef`. It applies to a target whose Agent record has
+  `kind` agent and `status` active (absent counts as both), under the same
+  priority and tie rules as the agent's own assignments. A Soul
+  `skill-assignment` row with `metadata.optOut: true` removes the org
+  assignments with that name for that agent when this instance's id can be
+  read and the row's `originatorInstanceId` equals it.
+
+  Verified agents read `GET /OrgSkillAssignment`. `POST`, `PUT`, `PATCH` and
+  `DELETE` need Admin Basic credentials or Flair's internal path; agent keys,
+  admin-agent keys included, get 403. Each accepted write appends an
+  `OrgSkillAssignmentHistory` row (actor, source class, and the hash of the row
+  before the write, null on a create). There is no direct `/OrgSkillAssignmentHistory`
+  route. Neither table is federated.
+
+  Soul `POST`, `PUT` and `PATCH` refuse with 400 a `skill-assignment` row whose
+  `metadata.optOut` is not a boolean; `AgentSeed` refuses with 400 a request
+  whose `soulTemplate` has a `skill-assignment` key. At start, the server
+  attempts to bring an existing `flair_agent` role up to this release's grants
+  and logs a failure.
+
+- **New operator page: who can connect to your Flair.** `docs/access-control.md`
+  covers the three checks on a hosted Flair's native `/mcp` endpoint (which
+  people, which apps, what they can reach), how to revoke access, and worked
+  examples for people and bots. Linked from the README, `docs/auth.md` and
+  `docs/mcp-clients.md`.
+
+### Changed
+
+- **The `Integration Tests` CI job now runs as three parallel shards behind the same required check.** Each shard runs the same steps on its share of `test/integration/*.test.ts`, assigned by `scripts/ci/integration-shards.mjs`; a final job named `Integration Tests` fails unless every shard succeeds.
+
+  (Closes #2149, #2131)
+
+### Fixed
+
+- **The launchd launcher and `resolveInstanceServingPid` now check the command line of the process `hdb.pid` names, not only that the pid is alive (flair#2056).**
+
+  The launcher refuses to start a second Harper, and `resolveInstanceServingPid` uses the `hdb.pid` pid as PID-file evidence, only when that live process's command line is `node` or `bun` followed by a Harper entry path (`…/node_modules/harper/dist/bin/harper.js`, its `@<scope>/harper` equivalent, or `dist/bin/harper.js`, which Harper's own restart forks). A Harper path in a later argument does not count. The launcher reads the line `ps -o command=` reports, which joins arguments with spaces, so it does not establish which argument is the script; `resolveInstanceServingPid` reads `/proc/<pid>/cmdline` when it can (Linux), and otherwise the `ps` line (macOS, or a `/proc` that cannot be read). A flair#1454 identity sidecar (`flair-daemon.json`) is not required. A sidecar disagrees when it names a different pid, or a `startTimeMs` more than 2000 ms from the process's start second (whole seconds, as `ps -o lstart=` reports; `/proc` on Linux for `resolveInstanceServingPid`). Then the launcher does not refuse and continues its normal start, and `resolveInstanceServingPid` returns the first process listening on the port, if any, which can be the same pid.
+
+- **Boot readiness recovery mocks now exit after parent loss or a bounded wait.**
+
+  (Closes #2080)
+
+- **The README's federation and REM feature rows now match what the code does (Closes #2093).**
+
+- **Through the Agent resource, only an administrator or trusted internal call can set `Agent.status`; federated peers cannot change existing local principals' status (Closes #2108).**
+
+  A non-admin agent's `PUT` or `PATCH` that includes `status` is refused with `403` naming the field and pointing at Presence, and writes nothing — not the `status`, and not the other fields in the same request. A non-admin agent's edit of its own record without `status` is unchanged. An anonymous request is refused and writes nothing. A federated peer's Agent record whose `status` differs from an existing local principal's stored value — a missing or undefined `status` counting as `active` on either side — is skipped whole — also when the record is older than the stored row — and reported as `agent_status_not_federated` when it reaches the status comparison.
+
+- **`flair mcp enable --cimd-allowed-hosts` sets the list in the edited `config.yaml` only after a preflight match with the target; without `--dry-run`, a mismatch is refused.** `--dry-run` skips the match and writes nothing, but still refuses a Fabric instance, an invalid host list, and a `config.yaml` that is missing, unreadable or not valid YAML, or has no `@harperfast/oauth` `mcp` mapping. Before this release, the flag's value only appeared in the command's output, and the list the instance used did not change.
+
+  The edited file is the `config.yaml` the command edits for `mcp.enabled` on the machine it runs on (`./config.yaml`, else `~/.flair/config.yaml`). The preflight match links the host and process ID the target's operations API reports, a readable process on this machine, and that file (by `realpath`). If the match passes and the run reaches `local-config-update`, the command writes `mcp.clientIdMetadataDocuments.allowedHosts` unless the file already holds that exact list, then reads the file back before restarting the instance; if the write or the read-back fails, it stops before the restart. The flag is refused before anything changes for an entry that is not a lowercase bare hostname, for a `*.harperfabric.com` instance, and when that `config.yaml` is missing or has no `@harperfast/oauth` `mcp` block. Without the flag the command does not inspect or change the list.
+
+  In a successful `flair mcp enable` run (without `--dry-run` or `--json`), the closing summary after the step list now opens with "The OAuth metadata check passed. The /mcp route itself was not probed." instead of "claude.ai can now connect."; the claude.ai note, when it applies, and the connector paste block follow it. That check reads only the authorization-server metadata.
+
+  `flair mcp enable --dry-run` no longer creates the signing key. It reports the path where a run without `--dry-run` would reuse or generate one, and writes no file.
+
+- **`flair mcp enable` corrects stale setup messages; a Fabric re-run completes after target-issuer binding and public-origin self-verify pass.**
+  In 0.57.0 the error for a missing target admin password named an
+  `--admin-pass-file` flag, and the ops-API 404 hint named `--ops-url`; the
+  command has neither. The error now asks for `--admin-pass`, and the hint names
+  the address the command derived from the instance URL (same host, port 9925),
+  which no option overrides. The `config-block` step printed `mcp.enabled=false`,
+  and listed a `--cimd-allowed-hosts` value as the shipped `allowedHosts`. It now
+  reports the `${FLAIR_MCP_OAUTH}` reference and the allowed hosts that
+  `config.yaml` ships, says the step writes nothing, and shows a
+  `--cimd-allowed-hosts` value as requested, pointing to the
+  `cimd-allowed-hosts` step for whether and when the run writes it.
+
+  On a Fabric instance the `fabric-operator-deploy` step failed on every run, so a
+  re-run after the operator's restart stopped there again. The run first checks that the target’s own OAuth metadata names the requested issuer, then self-verifies the public origin; `enable` completes only when both pass. When a response came back but self-verify did not pass, the step
+  reports why and asks for a re-run with `--confirm-secrets-applied` after the
+  restart; if the run pushed the secrets to the instance, it asks for a restart
+  instead of asking to apply the staged file. When the request itself fails, it
+  names the URL it tried and asks the operator to check DNS, HTTPS reachability
+  from this machine and that the instance is running before re-running. A run
+  reaches that step only after `--confirm-secrets-applied` or a yes at the
+  prompt. The Fabric summary no longer says to set `mcp.enabled: true` in `config.yaml` and redeploy. On success it mentions restarting if a secret value changed; when the public surface answers but remains inactive, it asks for a restart after a verified push, or for staged secrets to be applied and the instance restarted.
+
+  (Closes #2116)
+
+- **`flair mcp disable` now asks for the remote target's admin password via `--admin-pass` in its help and missing-password error.**
+  (Closes #2121)
+
+- **`flair mcp enable` now tells operators to restart Fabric or load verified pushed secrets when confirmation is pending.**
+  The confirmation prompt and failure step no longer instruct operators to apply
+  the staged file after the secrets were pushed and read back. Runs without a
+  verified push retain the staged-file instructions. (Closes #2129)
+
+- **Release PR text explains automatic tagging and the admin fallback for a missed run (Closes #2132)**
+
+- **`flair mcp enable` now matches the checked issuer to the target's own OAuth metadata before reporting a successful metadata check.** (Closes #2134)
+
+- **`flair mcp enable` now describes the connector identity mapping without claiming unconditional reads or writes.** See `docs/access-control.md` for the principal's access scope. (Closes #2135)
+
+- **The promote block's final check waits up to 120 s for the registry to show the new `latest` before it reports skew.**
+  In 0.58.0 the check read each package's `latest` once with `npm view`, straight
+  after the last `npm dist-tag add`. The registry can serve the previous `latest`
+  for a short time after a move, so after the 0.57.0 and 0.58.0 promotes the check
+  reported skew for `@tpsdev-ai/flair` and printed RESTORE lines for a promote that
+  had succeeded. The block now runs the check in a wait mode
+  (`scripts/ci/registry-latest-skew.mjs <version> --await 120`, with each package's
+  previous `latest`). It reads every `latest` from the registry's dist-tags
+  endpoint (`npm dist-tag ls --prefer-online`) and re-reads a package that is not
+  yet at the new version, with backoff, until it is or the wait ends. If every such
+  package still reads its previous `latest` then, the check exits 3 and the block
+  prints the command to re-run the check, then the RESTORE lines as a fallback.
+  Skew and an unreadable `latest` still exit 1 and 2, and the block prints the
+  RESTORE lines for them as before. Without `--await` the check reads and reports
+  as in 0.58.0, including the canary's pre-promote report; an extra argument it
+  used to ignore is now a usage error (exit 2).
+
+  (Closes #2140)
+
+- **The CLI's role update sends the role's `id`, so `ensureFlairAgentRole` and
+  `ensureFlairPairInitiatorRole` can change an existing role on Harper 5.2.8.**
+  Harper's `alter_role` addresses a role by that `id` and refuses a call without
+  it ("Id can't be blank"). In the previous release the call omitted it, so
+  bringing an existing role's permissions to the expected spec failed and the
+  role kept its old permissions.
+
+  (Closes #2154)
+
+- **`flair mcp disable` reports the restart request without claiming the unchecked `/mcp` route is unmounted.**
+  (Closes #2159)
+
+- **`flair agent add` refuses an id that already has an Agent record, and reports success only after the stored public key matches.**
+  Re-running add for an existing id used to print `registered` while Harper 5.2.8 left the old public key in place, so a newly generated key then failed with `invalid_signature`. The command looks the id up first and accepts only a JSON `[]` as absence. When a record is already there, it exits with an error that names the id. A new id is inserted as before; the command reads the row back and prints the stored public key only when it matches the key generated or reused by this command.
+
+  > **Heads-up:** `flair agent add <id>` no longer finishes silently when that id already exists. A well-formed existing row names `flair agent rotate-key <id>` or `flair agent remove <id>`. An unreadable row exits without that remedy. `flair agent rotate-key` writes the new private key on the Flair host. The new key file must be on the signing host before that process can use it. Configure the signing process to use the local file, then restart it. `flair agent remove` tries to delete that agent's Memory and Soul rows.
+
+### Security
+
+- **An XAA assertion's `jti` is recorded once per instance, under the same per-key lock as agent-auth and federation nonces.** (flair#2073)
+  When a `jwt-bearer` grant's assertion carries a `jti` and validates, the
+  `jti` is recorded in `IdJagReplay` before any token is issued,
+  so a serving instance accepts the assertion at most once; with `FLAIR_MULTI_WORKER_UNSAFE=1`, that replay refusal spans its workers. When
+  the store is unavailable or the write fails, that grant is refused with
+  `503 temporarily_unavailable` (`replay_store_unavailable`), and the server log
+  names the cause. New rows expire after 25 hours. An existing `IdJagReplay` row is treated as a replay while that row remains in the store.
+
+  > **Heads-up:** a `jti` claim, when present, must be a nonempty string, and
+  > the assertion must then carry an `exp` no more than 24 hours (plus 30
+  > seconds of clock skew) ahead. Otherwise the grant is refused with
+  > `400 invalid_grant`.
+
+  (Closes #2073)
+
+- Flair returns a named 503 for non-health requests when Harper reports multiple workers without the unsafe opt-in or cannot read the worker count.
+  > **Heads-up:** Set `THREADS_COUNT=1` and restart Flair; investigate a worker count that remains unreadable.
+
+- **A raised root dependency override for fastify moves the repo lockfile out of the affected ranges of five fastify advisories published 2026-09-30.**
+  `fastify` ^5.12.5 resolves 5.12.5 in `bun.lock` (GHSA-hwr6-493r-vm6h, GHSA-9q9j-q6p8-xq58,
+  GHSA-p68q-wchp-6fh7, GHSA-667r-xxjv-c9mm, GHSA-4mh8-r7rc-xpvc).
+  > **Heads-up:** npm installs still carry Harper 5.2.8’s Fastify 5.11.3 pin, so these five advisories remain allowlisted until Flair uses a Harper release outside their affected ranges. No upgrade action is required.
+
+- **A root dependency override for `@grpc/grpc-js` moves the repo lockfile out of the affected ranges of GHSA-f596-whhp-79r4 and GHSA-m9gg-hp2v-232j.**
+  `@grpc/grpc-js` ^1.14.5 resolves 1.14.5 in `bun.lock`. In this repository the package comes
+  only from `@google/adk`, a dependency of `@tpsdev-ai/adk-flair`; an npm install of
+  `@tpsdev-ai/flair` does not include it. Root overrides do not apply to npm installs of a published package, so this override does not set `@grpc/grpc-js` for npm installs of `@tpsdev-ai/adk-flair`; npm resolves it from `@google/adk`’s dependency tree.
+  > **Heads-up:** An install whose lockfile already records an affected version keeps it until that lockfile's `@grpc/grpc-js` entry changes.
+
+  Flair's own code imports no gRPC package.
+
 ## [0.58.0] - 2026-09-30
 
 ### Added
