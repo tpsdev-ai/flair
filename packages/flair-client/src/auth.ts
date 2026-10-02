@@ -13,15 +13,32 @@ import { readEnvOrUnset } from "./env-guard.js";
 
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
-/** Resolve an Ed25519 private key from a file (base64 PKCS8 DER or raw 32-byte seed). */
-export function loadPrivateKey(path: string): KeyObject {
-  const raw = readFileSync(path);
+/** Decode an Ed25519 private key from the bytes of a key file (raw 32-byte seed, or base64 PKCS8 DER). */
+function decodePrivateKey(raw: Buffer): KeyObject {
   // Try as base64-encoded PKCS8 DER first
   const decoded = raw.length === 32 ? raw : Buffer.from(raw.toString("utf-8").trim(), "base64");
   const der = decoded.length === 32
     ? Buffer.concat([PKCS8_ED25519_PREFIX, decoded])
     : decoded;
   return createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+}
+
+/** Resolve an Ed25519 private key from a file (base64 PKCS8 DER or raw 32-byte seed). */
+export function loadPrivateKey(path: string): KeyObject {
+  return decodePrivateKey(readFileSync(path));
+}
+
+/**
+ * Resolve an Ed25519 private key held as TEXT rather than a file — the same
+ * encodings `loadPrivateKey` reads (base64 PKCS8 DER, or a base64 raw 32-byte
+ * seed). For callers whose key has to travel inside a configuration value and
+ * cannot be read from the local filesystem (e.g. a remote workflow platform).
+ *
+ * A PEM is NOT accepted: `loadPrivateKey`/key files use the raw encodings
+ * above, and a PEM decodes to garbage instead of failing at the format check.
+ */
+export function loadPrivateKeyString(text: string): KeyObject {
+  return decodePrivateKey(Buffer.from(text, "utf-8"));
 }
 
 /** Injectable homes so tests can diverge `$HOME` / `os.homedir()` / passwd home. */

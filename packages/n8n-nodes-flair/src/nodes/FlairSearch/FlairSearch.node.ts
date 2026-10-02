@@ -10,34 +10,16 @@ import {
   NodeConnectionTypes,
 } from "n8n-workflow";
 
-// See FlairWrite.node.ts header for the rationale on dynamic-import.
-// flair-client is ESM-only; static `import` from a CJS-compiled n8n node
-// crashes at boot on Node 24+ with "No exports main defined".
 import type { FlairClient } from "@tpsdev-ai/flair-client";
 
-interface FlairCredentials {
-  baseUrl: string;
-  agentId: string;
-  adminPassword: string;
-}
+import {
+  flairCredentialTest,
+  makeClient,
+  warnDeprecatedAdminPassword,
+  type FlairCredentials,
+} from "../../client";
 
 type Operation = "search" | "getBySubject";
-
-// See FlairWrite.node.ts for the rationale on Function-wrapped dynamic
-// import (prevents TSC from downleveling to require() under
-// module: "CommonJS").
-const importFlairClient = (): Promise<typeof import("@tpsdev-ai/flair-client")> =>
-  (new Function("return import('@tpsdev-ai/flair-client')") as () => Promise<any>)();
-
-async function makeClient(credentials: FlairCredentials): Promise<FlairClient> {
-  const mod = await importFlairClient();
-  return new mod.FlairClient({
-    url: credentials.baseUrl,
-    agentId: credentials.agentId,
-    adminUser: "admin",
-    adminPassword: credentials.adminPassword,
-  });
-}
 
 async function runSearch(
   flair: FlairClient,
@@ -87,6 +69,7 @@ export class FlairSearch implements INodeType {
       {
         name: "flairApi",
         required: true,
+        testedBy: "flairCredentialTest",
       },
     ],
     codex: {
@@ -162,8 +145,11 @@ export class FlairSearch implements INodeType {
     ],
   };
 
+  methods = { credentialTest: { flairCredentialTest } };
+
   async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
     const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
+    warnDeprecatedAdminPassword(this.logger, credentials);
     const operation = this.getNodeParameter("operation", itemIndex) as Operation;
     const limit = this.getNodeParameter("limit", itemIndex, 5) as number;
     const flair = await makeClient(credentials);
@@ -203,6 +189,7 @@ export class FlairSearch implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
+    warnDeprecatedAdminPassword(this.logger, credentials);
     const flair = await makeClient(credentials);
     const inputs = this.getInputData();
     const out: INodeExecutionData[] = [];

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -11,8 +11,20 @@ const {
   formatKeyLookup,
   inspectKeyLookup,
   keyPathCandidates,
+  loadPrivateKey,
+  loadPrivateKeyString,
   resolveKeyPath,
+  signRequest,
 } = await import("../src/auth.js");
+
+/** True when `header` carries an agent signature over `${agentId}:${ts}:${nonce}:${method}:${path}`. */
+function verifySignedHeader(header: string, publicKey: ReturnType<typeof createPublicKey>, method: string, path: string): boolean {
+  const rest = header.replace(/^TPS-Ed25519 /, "");
+  const cut = rest.indexOf(":");
+  const agentId = rest.slice(0, cut);
+  const [ts, nonce, signature] = rest.slice(cut + 1).split(":");
+  return verify(null, Buffer.from(`${agentId}:${ts}:${nonce}:${method}:${path}`), publicKey, Buffer.from(signature, "base64"));
+}
 
 function uniqueId(label: string): string {
   return `flair-1271-${label}-${randomBytes(4).toString("hex")}`;
@@ -280,5 +292,53 @@ describe("formatKeyLookup (flair#1271)", () => {
     expect(text).toContain("signed with /home/agent/.flair/keys/grok-cos.key");
     expect(text).toContain("(found)");
     expect(text).toContain("flair agent add");
+  });
+});
+
+describe("loadPrivateKeyString — a key held as text (flair#1942)", () => {
+  test("decodes a base64 PKCS8 DER key and signs with it", () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const text = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer).toString("base64");
+
+    const header = signRequest("agent-text", loadPrivateKeyString(text), "GET", "/Memory");
+
+    expect(verifySignedHeader(header, publicKey, "GET", "/Memory")).toBe(true);
+  });
+
+  test("decodes a base64 raw 32-byte seed", () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const seedText = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer)
+      .subarray(-32)
+      .toString("base64");
+
+    const header = signRequest("agent-seed", loadPrivateKeyString(seedText), "POST", "/Memory/x");
+
+    expect(verifySignedHeader(header, publicKey, "POST", "/Memory/x")).toBe(true);
+  });
+
+  test("resolves the same key as loadPrivateKey over a file with the same contents", () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const text = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer).toString("base64");
+    const dir = mkdtempSync(join(tmpdir(), "flair-1942-keytext-"));
+    try {
+      const file = join(dir, "agent.key");
+      writeFileSync(file, text);
+      const fromFile = createPublicKey(loadPrivateKey(file));
+      const fromText = createPublicKey(loadPrivateKeyString(text));
+      expect(fromText.export({ type: "spki", format: "pem" })).toBe(fromFile.export({ type: "spki", format: "pem" }));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a PEM — key files are not PEM", () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    const keyText = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer).toString("base64");
+
+    // The valid encoding resolves, so this test cannot pass on a tree where
+    // `loadPrivateKeyString` is missing — only the PEM case throws.
+    expect(() => loadPrivateKeyString(keyText)).not.toThrow();
+    expect(() => loadPrivateKeyString(pem)).toThrow();
   });
 });

@@ -55,8 +55,9 @@ Notes on each step:
 2. **Configure the Flair credential**:
    - Settings → Credentials → New → Flair API
    - Base URL: `http://127.0.0.1:19926` (or your Flair host)
-   - Agent ID: any agent who should *own* the imported memories (e.g., `flint`, `pulse`, `archive`)
-   - Admin Password: contents of `~/.flair/admin-pass`
+   - Agent ID: the agent who should *own* the imported memories (e.g., `flint`, `pulse`, `archive`)
+   - Agent Private Key: that agent's Ed25519 key, base64-encoded — `flair agent add flint` then `base64 < ~/.flair/keys/flint.key`
+   - The deprecated **Admin Password** field also works (it authenticates as the instance administrator, which can read and write every agent's memories, and it warns on every execution) — prefer the agent key.
 
 3. **Import this workflow**:
    - Workflows → Import from File → select `workflow.json` from this dir
