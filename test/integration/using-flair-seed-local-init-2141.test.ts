@@ -69,6 +69,9 @@ function childEnv(home: string, shimDir: string): Record<string, string> {
   }
   env.HOME = home;
   env.PATH = `${shimDir}:${process.env.PATH ?? ""}`;
+  // `flair start` completes a deferred seed as the Basic administrator, so the
+  // child needs this install's credential; FLAIR_ADMIN_PASS is the source it reads first.
+  env.FLAIR_ADMIN_PASS = ADMIN_PASS;
   // The model the CI lanes pre-fetch; else <repo>/models (the harper-lifecycle default).
   env.FLAIR_MODELS_DIR = process.env.FLAIR_MODELS_DIR ?? join(ROOT, "models");
   return env;
@@ -108,7 +111,7 @@ function nodeBin(): string {
 function runLocalInit(install: Install, extraArgs: string[]) {
   const res = spawnSync(
     nodeBin(),
-    [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), "--admin-pass", ADMIN_PASS,
+    [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort),
       "--skip-soul", "--no-mcp", "--skip-smoke", "--skip-claude-md", "--skip-hook", ...extraArgs],
     {
       cwd: ROOT,
