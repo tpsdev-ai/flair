@@ -12,8 +12,7 @@
  * (`PUT /Memory/<id>`, `PUT /OrgSkillAssignment/<id>`) — so the rows carry
  * the operator's id. Resource write paths check the operator source (Basic
  * administrator or deliberate internal call) for the fixed ids. The Memory
- * reservation has documented bookkeeping writes (resources/seed-reservation.ts,
- * resources/OrgSkillAssignment.ts).
+ * reservation has documented bookkeeping writes (resources/seed-reservation.ts).
  *
  * Before it writes anything, the seed refuses:
  *   - a read that FAILS (never read as "absent");

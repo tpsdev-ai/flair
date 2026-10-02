@@ -18,7 +18,7 @@
  * repo has ever shipped. `src/lib/skill-seed.ts` (the decision and the write)
  * reads them.
  *
- * Pure constants + one hash function, no runtime import, so the seed decision is
+ * Pure constants + one hash function, no Harper import, so the seed decision is
  * unit-testable without a server.
  */
 import { createHash } from "node:crypto";
