@@ -5636,10 +5636,19 @@ function validateLaunchdPlistContent(
  * `null` (neither available) is handled by the caller as "no evidence", never
  * as "detached".
  */
-function resolveInstanceServingPid(dataDir: string, port: number): number | null {
+function resolveInstanceServingPid(
+  dataDir: string,
+  port: number,
+  deps: {
+    readStartSecondMs?: (pid: number) => number | null;
+    findListeningPids?: (port: number) => number[];
+    readCmdline?: (pid: number) => string | null;
+  } = {},
+): number | null {
   let listeningPids: number[] = [];
   try {
-    listeningPids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+    listeningPids = deps.findListeningPids?.(port)
+      ?? listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
   } catch { /* lsof unavailable — the PID file may still answer */ }
   // flair#2056: the `hdb.pid` pid is used as PID-file evidence only when it is
   // alive, its command line passes isHarperProcessCommandLine (node or bun
@@ -5655,10 +5664,10 @@ function resolveInstanceServingPid(dataDir: string, port: number): number | null
   const isPidFileEvidence = (pid: number): boolean => {
     if (sidecar.kind === "present") {
       if (sidecar.pid !== pid) return false;
-      const startSecondMs = readProcessStartSecondMs(pid);
+      const startSecondMs = (deps.readStartSecondMs ?? readProcessStartSecondMs)(pid);
       if (startSecondMs === null || !sidecarStartAgrees(startSecondMs, sidecar.startTimeMs)) return false;
     }
-    const cmdline = defaultReadProcessCmdline(pid);
+    const cmdline = (deps.readCmdline ?? defaultReadProcessCmdline)(pid);
     return cmdline !== null && isHarperProcessCommandLine(cmdline);
   };
   return pickInstancePid({

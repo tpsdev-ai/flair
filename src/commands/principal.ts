@@ -87,7 +87,7 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
       const ops = new URL(opsUrl);
       if (!["http:", "https:"].includes(ops.protocol) || !ops.hostname) throw new Error("invalid ops URL");
     } else {
-      opsUrl = `http://127.0.0.1:${resolveOpsPort(opts)}/`;
+      opsUrl = resolveOpsUrl(resolveOpsPort(opts));
     }
   } catch {
     console.error(`Error: invalid --instance target ${redactUrl(instance ?? "")}. Pass a valid http(s) Flair instance URL and check its operations API address.`);

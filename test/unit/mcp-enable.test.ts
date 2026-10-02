@@ -56,6 +56,7 @@ import {
   mcpStatus,
   REQUIRED_ACCESS_TOKEN_TTL,
   DEFAULT_CIMD_ALLOWED_HOSTS,
+  HOSTED_OPS_PORT,
   type EnableMcpResult,
 } from "../../src/lib/mcp-enable.ts";
 
@@ -586,7 +587,7 @@ describe("provisionIdpIdentityMapping", () => {
       // message pointed at principals; this one has to point at the port.
       const { fetchImpl } = mockOpsFetch({ failFind: true, failFindStatus: 404 });
       const err: Error = await provisionIdpIdentityMapping(
-        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { hostedOrigin: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
         { fetchImpl },
       ).then(() => { throw new Error("expected a throw"); }, (e: Error) => e);
       expect(err.message).toMatch(/served origin rather than the ops API/);
@@ -597,6 +598,191 @@ describe("provisionIdpIdentityMapping", () => {
       expect(err.message).toContain("has no option to override it");
       expect(err.message).toContain("answer at https://flair.example.com:9925/");
     });
+});
+
+// ─── flair#2102 — the ops target is the one the caller names ─────────────────
+
+describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
+  const MAPPING = {
+    adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human" as const,
+    idpProvider: "github", idpSubject: "octocat",
+  };
+
+  test("a local URL string with a non-default port: every request goes to exactly that port, and nothing else is contacted", async () => {
+    const creds = credentialTable();
+    const received: { host: string; operation: string }[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const body: any = await req.json().catch(() => ({}));
+        received.push({ host: req.headers.get("host") ?? "", operation: body.operation });
+        if (body.operation === "search_by_value") return Response.json([]);
+        if (body.operation === "insert") return Response.json({ message: "inserted" });
+        return creds.handle(body) ?? new Response("unexpected operation", { status: 400 });
+      },
+    });
+    try {
+      expect(server.port).not.toBe(HOSTED_OPS_PORT);
+      const origin = `http://127.0.0.1:${server.port}`;
+      // Every destination the helper asks for is recorded, and only the stub's
+      // is forwarded: a wrong port fails here and never reaches the network.
+      const attempted: string[] = [];
+      const fetchImpl = (async (url: any, init?: RequestInit) => {
+        attempted.push(String(url));
+        if (String(url) !== `${origin}/`) throw new Error(`unexpected destination ${String(url)}`);
+        return fetch(url, { ...init, signal: AbortSignal.timeout(5_000) });
+      }) as typeof fetch;
+
+      const result = await provisionIdpIdentityMapping({ opsPortOrUrl: origin, ...MAPPING }, { fetchImpl });
+
+      expect(attempted).toEqual(Array(5).fill(`${origin}/`));
+      expect(received.map((r) => r.operation)).toEqual([
+        "search_by_value", "insert", "search_by_conditions", "upsert", "search_by_conditions",
+      ]);
+      expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
+      expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
+    } finally {
+      server.stop(true);
+    }
+  }, 15_000);
+
+  test.each([
+    [19925, "http://127.0.0.1:19925/"],
+    ["http://127.0.0.1:19925", "http://127.0.0.1:19925/"],
+    ["https://ops.example.com:8443/", "https://ops.example.com:8443/"],
+    ["https://flair.example.com", "https://flair.example.com/"],
+  ] as const)("opsPortOrUrl %p is used as given: %s", async (opsPortOrUrl, expected) => {
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
+    await provisionIdpIdentityMapping({ opsPortOrUrl, ...MAPPING }, { fetchImpl });
+    expect(calls.length).toBe(4);
+    expect(calls.every((c) => c.url === expected)).toBe(true);
+  });
+
+  test.each([
+    ["https://flair.example.com", `https://flair.example.com:${HOSTED_OPS_PORT}/`],
+    ["https://flair.example.com/", `https://flair.example.com:${HOSTED_OPS_PORT}/`],
+    ["http://10.0.0.5:8443", `http://10.0.0.5:${HOSTED_OPS_PORT}/`],
+  ])("hostedOrigin %p resolves to its host at the hosted ops port", async (hostedOrigin, expected) => {
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
+    await provisionIdpIdentityMapping({ hostedOrigin, ...MAPPING }, { fetchImpl });
+    expect(calls.length).toBe(4);
+    expect(calls.every((c) => c.url === expected)).toBe(true);
+  });
+
+  test.each([
+    ["a bare host name", { opsPortOrUrl: "flair.example.com" }, "opsPortOrUrl <unparseable value> names"],
+    ["host:port with no scheme", { opsPortOrUrl: "127.0.0.1:19925" }, "opsPortOrUrl <unparseable value> names"],
+    ["a non-http scheme", { opsPortOrUrl: "ftp://ops.example.com:21" }, "opsPortOrUrl ftp://ops.example.com names"],
+    ["a parsed ops URL without a hostname", { opsPortOrUrl: "file:///tmp" }, "opsPortOrUrl <unparseable value> names"],
+    ["a URL with a path", { opsPortOrUrl: "http://127.0.0.1:19925/ops" }, "opsPortOrUrl http://127.0.0.1:19925 names"],
+    ["a URL with a query", { opsPortOrUrl: "http://127.0.0.1:19925/?a=1" }, "opsPortOrUrl http://127.0.0.1:19925 names"],
+    ["port 0", { opsPortOrUrl: 0 }, "opsPortOrUrl <unparseable value> names"],
+    ["port 65536", { opsPortOrUrl: 65536 }, "opsPortOrUrl <unparseable value> names"],
+    ["a fractional port", { opsPortOrUrl: 19925.5 }, "opsPortOrUrl <unparseable value> names"],
+    ["a non-string, non-number", { opsPortOrUrl: null }, "opsPortOrUrl <unparseable value> names"],
+    ["both forms", { opsPortOrUrl: 19925, hostedOrigin: "https://flair.example.com" }, "got both opsPortOrUrl <unparseable value> and hostedOrigin https://flair.example.com"],
+    ["neither form", {}, "got neither opsPortOrUrl nor hostedOrigin"],
+    ["an unparseable hostedOrigin", { hostedOrigin: "::::not a url::::" }, "hostedOrigin <unparseable value> as a served origin"],
+    ["a non-http hostedOrigin", { hostedOrigin: "ftp://flair.example.com" }, "hostedOrigin ftp://flair.example.com as a served origin"],
+    ["a parsed hostedOrigin without a hostname", { hostedOrigin: "file:///tmp" }, "hostedOrigin <unparseable value> as a served origin"],
+    ["a bare hostedOrigin", { hostedOrigin: "flair.example.com" }, "hostedOrigin <unparseable value> as a served origin"],
+    ["a hostedOrigin with a path", { hostedOrigin: "https://flair.example.com/path" }, "hostedOrigin https://flair.example.com as a served origin"],
+    ["a hostedOrigin with a query", { hostedOrigin: "https://flair.example.com/?x=1" }, "hostedOrigin https://flair.example.com as a served origin"],
+  ])("refuses %s before any request, showing only parsed URL components and the accepted forms", async (_label, target, named) => {
+    const attempted: string[] = [];
+    const fetchImpl = (async (url: any) => {
+      attempted.push(String(url));
+      throw new Error("no request expected");
+    }) as typeof fetch;
+    const err = await provisionIdpIdentityMapping({ ...MAPPING, ...target } as any, { fetchImpl }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toContain(named);
+    expect(err!.message).toContain("Accepted, exactly one of: opsPortOrUrl as a port number (1-65535) on 127.0.0.1");
+    expect(err!.message).toContain(`hostedOrigin as the same canonical http:// or https:// origin form`);
+    expect(err!.message).toContain("exactly equal its parsed URL origin or that origin followed by /");
+    expect(err!.message).toContain("No request was sent.");
+    expect(attempted).toEqual([]);
+  });
+
+  test.each([
+    [{ opsPortOrUrl: "http://user:s3cret@127.0.0.1:19925" }, "http://127.0.0.1:19925", ["user", "s3cret"]],
+    [{ hostedOrigin: "user:s3cret@flair.example.com" }, "<unparseable value>", ["user", "s3cret"]],
+    [{ opsPortOrUrl: "https://alice@private.invalid:pw123@ops.example.com" }, "https://ops.example.com", ["alice", "private.invalid", "pw123"]],
+    [{ hostedOrigin: "https://alice@private.invalid:pw123@flair.example.com" }, "https://flair.example.com", ["alice", "private.invalid", "pw123"]],
+  ])("refuses a target carrying credentials, and the message does not repeat them: %p", async (target, shown, hidden) => {
+    const attempted: string[] = [];
+    const fetchImpl = (async (url: any) => {
+      attempted.push(String(url));
+      throw new Error("no request expected");
+    }) as typeof fetch;
+    const err = await provisionIdpIdentityMapping({ ...MAPPING, ...target } as any, { fetchImpl }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    for (const part of hidden) expect(err!.message).not.toContain(part);
+    expect(err!.message).toContain(shown);
+    expect(attempted).toEqual([]);
+  });
+
+  test.each(([
+    "https:/flair.example.com",
+    "https:\n//alice:pw123@ops.example.com",
+    "https://ops.example.com/?",
+    "https://ops.example.com/#",
+  ] as const).flatMap((value) => (["opsPortOrUrl", "hostedOrigin"] as const).map((field) => [value, field] as const)))(
+    "rejects noncanonical URL %p as %s without including its raw value or credentials",
+    async (value, field) => {
+      const attempted: string[] = [];
+      const fetchImpl = (async (url: any) => {
+        attempted.push(String(url));
+        throw new Error("no request expected");
+      }) as typeof fetch;
+      const err = await provisionIdpIdentityMapping({ ...MAPPING, [field]: value } as any, { fetchImpl }).then(
+        () => null,
+        (e: Error) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).toContain("Accepted, exactly one of:");
+      expect(err!.message).not.toContain(value);
+      expect(err!.message).not.toContain("alice");
+      expect(err!.message).not.toContain("pw123");
+      expect(attempted).toEqual([]);
+    },
+  );
+
+  test("a 404 from a caller-named ops URL gives a neutral hint, not a served-origin diagnosis", async () => {
+    const { fetchImpl } = mockOpsFetch({ failFind: true, failFindStatus: 404 });
+    const err = await provisionIdpIdentityMapping(
+      { opsPortOrUrl: "https://ops.example.com:8443", ...MAPPING },
+      { fetchImpl },
+    ).then(() => null, (e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toContain("failed (HTTP 404)");
+    expect(err!.message).toContain("opsPortOrUrl names this address; verify that the ops API answers requests at https://ops.example.com:8443/");
+    expect(err!.message).not.toContain("served origin rather than the ops API");
+    expect(err!.message).not.toContain('REST component owns "/"');
+    expect(err!.message).not.toContain("DIFFERENT port");
+    expect(err!.message).not.toContain("flair mcp enable");
+  });
+
+  test("`flair mcp enable` asks for the hosted form: its identity-mapping requests go to the instance host at the hosted ops port", async () => {
+    const { fetchImpl: inner } = fullMockFetch();
+    const mappingUrls: string[] = [];
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.table === "Agent" || body.table === "Credential") mappingUrls.push(String(url));
+      return inner(url, init);
+    }) as typeof fetch;
+    const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true }, { fetchImpl });
+    expect(result.ok).toBe(true);
+    expect(mappingUrls.length).toBe(4);
+    expect(mappingUrls.every((u) => u === `https://flair.example.com:${HOSTED_OPS_PORT}/`)).toBe(true);
+  });
 });
 
 // ─── restart only ────────────────────────────────────────────────────────────

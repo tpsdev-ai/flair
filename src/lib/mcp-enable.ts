@@ -1055,22 +1055,28 @@ export function provisionSecrets(
  */
 export const HOSTED_OPS_PORT = 9925;
 
+/** The served origin's host at HOSTED_OPS_PORT, or null when the origin does
+ *  not parse. A bare host name is read as https. */
+function hostedOpsUrl(servedOrigin: string): URL | null {
+  try {
+    const u = new URL(servedOrigin.includes("://") ? servedOrigin : `https://${servedOrigin}`);
+    u.port = String(HOSTED_OPS_PORT);
+    u.pathname = "/";
+    u.search = "";
+    return u;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveOpsUrl(target: number | string, explicitOpsUrl?: string): string {
   if (explicitOpsUrl) return `${explicitOpsUrl.replace(/\/+$/, "")}/`;
   if (typeof target === "number") return `http://127.0.0.1:${target}/`;
   // A string target is the SERVED origin. Its own port serves the REST surface,
   // not the ops API, so reuse the host and apply the hosted ops port.
-  try {
-    const u = new URL(target.includes("://") ? target : `https://${target}`);
-    u.port = String(HOSTED_OPS_PORT);
-    u.pathname = "/";
-    u.search = "";
-    return u.toString();
-  } catch {
-    // Unparseable — preserve the old behaviour rather than inventing a URL, and
-    // let the caller's error path name the remedy.
-    return `${target.replace(/\/+$/, "")}/`;
-  }
+  // Unparseable — preserve the old behaviour rather than inventing a URL, and
+  // let the caller's error path name the remedy.
+  return hostedOpsUrl(target)?.toString() ?? `${target.replace(/\/+$/, "")}/`;
 }
 
 function opsBaseUrl(opsPortOrUrl: number | string): string {
@@ -1081,8 +1087,31 @@ function basicAuthHeader(adminUser: string, adminPass: string): string {
   return `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 }
 
-export interface IdentityMappingParams {
-  opsPortOrUrl: number | string;
+/**
+ * Where `provisionIdpIdentityMapping` sends its ops calls: exactly one of the
+ * two fields (flair#2102).
+ */
+export type IdentityMappingOpsTarget =
+  | {
+      /**
+       * The ops API itself. A number is a port on 127.0.0.1. A string is the ops
+       * API's own canonical http(s) origin, optionally followed by `/`, used
+       * with its own host and port.
+       */
+      opsPortOrUrl: number | string;
+      hostedOrigin?: never;
+    }
+  | {
+      /**
+       * A canonical http(s) served origin, optionally followed by `/`. The ops
+       * calls go to its host at HOSTED_OPS_PORT, the address `resolveOpsUrl`
+       * gives for the same string.
+       */
+      hostedOrigin: string;
+      opsPortOrUrl?: never;
+    };
+
+export type IdentityMappingParams = IdentityMappingOpsTarget & {
   adminUser: string;
   adminPass: string;
   /** Personal-shape default per #718: one principal per instance. */
@@ -1090,6 +1119,74 @@ export interface IdentityMappingParams {
   principalKind: "human" | "agent";
   idpProvider: string;
   idpSubject: string;
+};
+
+const IDENTITY_MAPPING_TARGET_FORMS =
+  `Accepted, exactly one of: opsPortOrUrl as a port number (1-65535) on 127.0.0.1, or as the ops API's own ` +
+  `canonical http:// or https:// origin, optionally followed by /, with no credentials, non-root path, query or fragment, used with its own host and port; or ` +
+  `hostedOrigin as the same canonical http:// or https:// origin form, whose host is used at port ${HOSTED_OPS_PORT}. ` +
+  `The string must exactly equal its parsed URL origin or that origin followed by /. No request was sent.`;
+
+/** Show only the parsed protocol, hostname and port of a refused target. The
+ *  display is built without interpolating the raw input, and excludes its
+ *  userinfo, path, query and fragment. Parsed components can match input text.
+ *  Use the placeholder for a non-string, a parse error or an empty hostname. */
+function showOpsTarget(value: unknown): string {
+  if (typeof value !== "string") return "<unparseable value>";
+  try {
+    const u = new URL(value);
+    if (!u.hostname) return "<unparseable value>";
+    return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+  } catch {
+    return "<unparseable value>";
+  }
+}
+
+/** A URL string is accepted only when parsing leaves its origin spelling
+ *  unchanged (apart from an optional `/`). This also rejects empty ? and #. */
+function canonicalHttpOrigin(value: unknown): URL | null {
+  if (typeof value !== "string") return null;
+  try {
+    const u = new URL(value);
+    if (
+      (u.protocol === "http:" || u.protocol === "https:") &&
+      !u.username && !u.password &&
+      (value === u.origin || value === `${u.origin}/`)
+    ) return u;
+  } catch {
+    // A malformed URL is not an ops target.
+  }
+  return null;
+}
+
+/** Resolve the ops target, or throw naming the field, its safe display and the
+ *  accepted forms. */
+function identityMappingOpsUrl(target: IdentityMappingOpsTarget): { url: string; hosted: boolean } {
+  const { opsPortOrUrl, hostedOrigin } = target as { opsPortOrUrl?: unknown; hostedOrigin?: unknown };
+  const refuse = (what: string): never => {
+    throw new Error(`Identity mapping: ${what}. ${IDENTITY_MAPPING_TARGET_FORMS}`);
+  };
+  if (opsPortOrUrl !== undefined && hostedOrigin !== undefined) {
+    return refuse(`got both opsPortOrUrl ${showOpsTarget(opsPortOrUrl)} and hostedOrigin ${showOpsTarget(hostedOrigin)}`);
+  }
+  if (hostedOrigin !== undefined) {
+    const u = canonicalHttpOrigin(hostedOrigin);
+    if (!u) {
+      return refuse(`cannot read hostedOrigin ${showOpsTarget(hostedOrigin)} as a served origin`);
+    }
+    return { url: resolveOpsUrl(u.origin), hosted: true };
+  }
+  if (opsPortOrUrl === undefined) return refuse("got neither opsPortOrUrl nor hostedOrigin");
+  if (typeof opsPortOrUrl === "number" && Number.isInteger(opsPortOrUrl) && opsPortOrUrl >= 1 && opsPortOrUrl <= 65535) {
+    return { url: resolveOpsUrl(opsPortOrUrl), hosted: false };
+  }
+  if (typeof opsPortOrUrl === "string") {
+    const u = canonicalHttpOrigin(opsPortOrUrl);
+    if (u) {
+      return { url: `${u.origin}/`, hosted: false };
+    }
+  }
+  return refuse(`cannot tell which ops API opsPortOrUrl ${showOpsTarget(opsPortOrUrl)} names`);
 }
 
 export interface IdentityMappingResult {
@@ -1169,9 +1266,10 @@ export async function provisionIdpIdentityMapping(
   params: IdentityMappingParams,
   deps: { fetchImpl?: typeof fetch; now?: () => string } = {},
 ): Promise<IdentityMappingResult> {
+  const target = identityMappingOpsUrl(params);
+  const opsUrl = target.url;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = (deps.now ?? (() => new Date().toISOString()))();
-  const opsUrl = opsBaseUrl(params.opsPortOrUrl);
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
 
   // Ensure the principal Agent exists.
@@ -1195,14 +1293,15 @@ export async function provisionIdpIdentityMapping(
     // identity is absent — and saying "failed to look up principal 'x'" sends
     // the reader to look at principals, which is where an evening goes.
     //
-    // 404 in particular almost always means the request reached the SERVED
-    // origin instead of the ops API: the flair REST component owns `/` there and
-    // answers 404. Say that, and say where the address came from: `enable` has
-    // no option to point its ops calls elsewhere (flair#2116: this hint used to
-    // name an --ops-url flag that does not exist).
+    // For `hostedOrigin`, retain the served-origin diagnosis and explain that
+    // `enable` derived the address: it has no option to point its ops calls
+    // elsewhere (flair#2116). A 404 at a caller-named opsPortOrUrl does not
+    // establish which service answered, so give that path a neutral hint.
     const hint =
       findRes.status === 404
-        ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
+        ? target.hosted
+          ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
+          : ` — opsPortOrUrl names this address; verify that the ops API answers requests at ${opsUrl}.`
         : "";
     throw new Error(
       `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
@@ -2040,7 +2139,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     currentStep = "identity-mapping";
     const mapping = await provisionIdpIdentityMapping(
       {
-        opsPortOrUrl: params.instance,
+        // The instance URL is the served origin: ask for its host at the hosted
+        // ops port, the address resolveOpsUrl gives the other steps (flair#2102).
+        hostedOrigin: params.instance,
         adminUser: params.adminUser,
         adminPass: params.adminPass,
         principal,
