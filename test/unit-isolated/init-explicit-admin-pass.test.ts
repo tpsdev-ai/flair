@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -50,6 +50,8 @@ describe("fresh init persists explicit admin credentials", () => {
         const home = tempDir("i-");
         const dataDir = tempDir("d-");
         const passPath = join(home, ".flair", "admin-pass");
+        mkdirSync(join(home, ".flair"));
+        symlinkSync(dataDir, join(home, ".flair", "data"));
         expect(detectPersistedAdminUser(dataDir)).toBe(false);
         const result = runInit(home, dataDir, source, platform);
         expect(result.error).toBeUndefined();
@@ -59,7 +61,7 @@ describe("fresh init persists explicit admin credentials", () => {
         expect(statSync(passPath).mode & 0o777).toBe(0o600);
         mkdirSync(join(dataDir, "system"));
         writeFileSync(join(dataDir, "system", "hdb_user.mdb"), "fixture-user");
-        symlinkSync(dataDir, join(home, ".flair", "data"));
+        expect(realpathSync(join(home, ".flair", "data"))).toBe(realpathSync(dataDir));
         expect(detectPersistedAdminUser(dataDir)).toBe(true);
         const doctor = offlineDoctor(home, null);
         const output = doctor();

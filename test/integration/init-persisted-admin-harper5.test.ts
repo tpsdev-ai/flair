@@ -13,7 +13,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
@@ -138,6 +138,9 @@ describe.skipIf(process.platform !== "linux")("fresh explicit credentials on a r
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
       mkdirSync(home, { recursive: true });
+      mkdirSync(dataDir, { recursive: true });
+      mkdirSync(join(home, ".flair"), { recursive: true });
+      symlinkSync(dataDir, join(home, ".flair", "data"));
       const password = "fixture-fresh-explicit-password";
       const args = ["--data-dir", dataDir, "--port", String(httpPort), "--ops-port", String(opsPort), ...SKIP_EXTRAS];
       const env: Record<string, string> = {};
@@ -152,7 +155,7 @@ describe.skipIf(process.platform !== "linux")("fresh explicit credentials on a r
       expect(readFileSync(adminPassPath, "utf8")).toBe(password + "\n");
       expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
       expect(detectPersistedAdminUser(dataDir)).toBe(true);
-      symlinkSync(dataDir, join(home, ".flair", "data"));
+      expect(realpathSync(join(home, ".flair", "data"))).toBe(realpathSync(dataDir));
       const doctor = spawnSync(process.execPath, [CLI, "doctor", "--port", String(httpPort)], {
         cwd: REPO_ROOT, env: initEnv(), encoding: "utf8", timeout: 30_000,
       });
