@@ -6,7 +6,7 @@
  */
 
 import { randomUUID, sign as ed25519Sign, createPrivateKey, type KeyObject } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { open, constants as fsConstants } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -48,20 +48,23 @@ async function readKeyFileBounded(path: string): Promise<Buffer> {
   }
 }
 
-/**
- * Resolve an Ed25519 private key from a file (base64 PKCS8 DER or raw 32-byte
- * seed). Asynchronous and size-capped (flair#2086): a hook binary that needs a
- * strict deadline of its own can interrupt this read, which the previous
- * `readFileSync` could not be. A parse failure still throws.
- */
-export async function loadPrivateKey(path: string): Promise<KeyObject> {
-  const raw = await readKeyFileBounded(path);
+function parsePrivateKey(raw: Buffer): KeyObject {
   // Try as base64-encoded PKCS8 DER first
   const decoded = raw.length === 32 ? raw : Buffer.from(raw.toString("utf-8").trim(), "base64");
   const der = decoded.length === 32
     ? Buffer.concat([PKCS8_ED25519_PREFIX, decoded])
     : decoded;
   return createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+}
+
+/** Resolve an Ed25519 private key from a file (base64 PKCS8 DER or raw 32-byte seed). */
+export function loadPrivateKey(path: string): KeyObject {
+  return parsePrivateKey(readFileSync(path));
+}
+
+/** Asynchronously load an Ed25519 private key with a size cap for callers with their own deadline. */
+export async function loadPrivateKeyBounded(path: string): Promise<KeyObject> {
+  return parsePrivateKey(await readKeyFileBounded(path));
 }
 
 /** Injectable homes so tests can diverge `$HOME` / `os.homedir()` / passwd home. */

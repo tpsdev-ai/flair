@@ -975,15 +975,22 @@ describe("bootstrap", () => {
 });
 
 describe("privateKey config option", () => {
-  let resolveKeyPathSpy: ReturnType<typeof spyOn>;
-  let loadPrivateKeySpy: ReturnType<typeof spyOn>;
+  let inspectKeyLookupSpy: ReturnType<typeof spyOn>;
+  let loadPrivateKeyBoundedSpy: ReturnType<typeof spyOn>;
 
   beforeEach(() => {
     // Prevent any actual file reads when privateKey is supplied
-    resolveKeyPathSpy = spyOn(authMod, "resolveKeyPath").mockImplementation(() => null);
-    loadPrivateKeySpy = spyOn(authMod, "loadPrivateKey").mockImplementation(() => {
-      throw new Error("loadPrivateKey should not be called when privateKey is set");
+    inspectKeyLookupSpy = spyOn(authMod, "inspectKeyLookup").mockImplementation(() => ({
+      agentId: "test", home: "/tmp", candidates: [], resolvedPath: null,
+    }));
+    loadPrivateKeyBoundedSpy = spyOn(authMod, "loadPrivateKeyBounded").mockImplementation(() => {
+      throw new Error("loadPrivateKeyBounded should not be called when privateKey is set");
     });
+  });
+
+  afterEach(() => {
+    inspectKeyLookupSpy.mockRestore();
+    loadPrivateKeyBoundedSpy.mockRestore();
   });
 
   test("privateKey as PEM string resolves to KeyObject without reading files", async () => {
@@ -996,9 +1003,9 @@ describe("privateKey config option", () => {
     await client.health();
     // fetch was called — signing succeeded with the PEM key
     expect(mockFetch).toHaveBeenCalled();
-    // resolveKeyPath and loadPrivateKey must never be called
-    expect(resolveKeyPathSpy).toHaveBeenCalledTimes(0);
-    expect(loadPrivateKeySpy).toHaveBeenCalledTimes(0);
+    // In-memory keys bypass both the file lookup and bounded read.
+    expect(inspectKeyLookupSpy).toHaveBeenCalledTimes(0);
+    expect(loadPrivateKeyBoundedSpy).toHaveBeenCalledTimes(0);
   });
 
   test("privateKey as KeyObject is used directly without reading files", async () => {
@@ -1008,8 +1015,8 @@ describe("privateKey config option", () => {
 
     await client.health();
     expect(mockFetch).toHaveBeenCalled();
-    expect(resolveKeyPathSpy).toHaveBeenCalledTimes(0);
-    expect(loadPrivateKeySpy).toHaveBeenCalledTimes(0);
+    expect(inspectKeyLookupSpy).toHaveBeenCalledTimes(0);
+    expect(loadPrivateKeyBoundedSpy).toHaveBeenCalledTimes(0);
   });
 
   test("privateKey wins when both privateKey and keyPath are supplied", async () => {
@@ -1024,30 +1031,18 @@ describe("privateKey config option", () => {
 
     await client.health();
     expect(mockFetch).toHaveBeenCalled();
-    // resolveKeyPath should never be called — privateKey short-circuits
-    expect(resolveKeyPathSpy).toHaveBeenCalledTimes(0);
+    // File lookup should never run — privateKey short-circuits.
+    expect(inspectKeyLookupSpy).toHaveBeenCalledTimes(0);
+    expect(loadPrivateKeyBoundedSpy).toHaveBeenCalledTimes(0);
   });
 
   test("without privateKey, falls back to keyPath resolution (existing behavior)", async () => {
-    // Restore original implementation, then spy again to count calls
-    resolveKeyPathSpy.mockRestore();
-    loadPrivateKeySpy.mockRestore();
-
-    const inspectSpy = spyOn(authMod, "inspectKeyLookup").mockImplementation(() => ({
-      agentId: "test",
-      home: "/tmp",
-      candidates: [],
-      resolvedPath: null,
-    }));
-
     const client = new FlairClient({ agentId: "test" });
     await client.health();
 
     // inspectKeyLookup SHOULD be called (no privateKey → file fallback)
-    expect(inspectSpy).toHaveBeenCalledTimes(1);
-    expect(inspectSpy).toHaveBeenCalledWith("test", undefined);
-
-    inspectSpy.mockRestore();
+    expect(inspectKeyLookupSpy).toHaveBeenCalledTimes(1);
+    expect(inspectKeyLookupSpy).toHaveBeenCalledWith("test", undefined);
   });
 });
 

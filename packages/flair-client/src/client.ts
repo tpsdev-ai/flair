@@ -10,7 +10,7 @@
 
 import type { KeyObject } from "node:crypto";
 import { createHash, createPrivateKey } from "node:crypto";
-import { inspectKeyLookup, loadPrivateKey, signRequest, type KeyLookupState } from "./auth.js";
+import { inspectKeyLookup, loadPrivateKeyBounded, signRequest, type KeyLookupState } from "./auth.js";
 import { readEnvOrUnset } from "./env-guard.js";
 import { FLAIR_CLIENT_VERSION_HEADER, flairClientVersionToken } from "./version.js";
 import type {
@@ -190,7 +190,7 @@ export class FlairClient {
       // Silent fallback to unauthenticated would be a security risk. The read
       // is asynchronous and size-capped (flair#2086), so a slow or oversized
       // file cannot hold a hook binary past its process deadline.
-      this.privateKey = await loadPrivateKey(lookup.resolvedPath);
+      this.privateKey = await loadPrivateKeyBounded(lookup.resolvedPath);
     }
     this.lastKeyLookup = {
       ...lookup,

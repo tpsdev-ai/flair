@@ -1,6 +1,7 @@
 export { FlairClient, FlairError, canonicalRelationshipId, encodeRecordId } from "./client.js";
 export {
   loadPrivateKey,
+  loadPrivateKeyBounded,
   resolveKeyPath,
   signRequest,
   inspectKeyLookup,
