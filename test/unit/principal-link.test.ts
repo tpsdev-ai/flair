@@ -1,17 +1,16 @@
 /**
  * principal-link.test.ts — `flair principal link` / `unlink` / `links`
- * (flair#2115): map ONE IdP login to a principal on an already-enabled
- * instance, without walking `flair mcp enable`'s whole flow.
+ * (flair#2115): link maps one IdP login to a principal; unlink revokes a
+ * mapping; links lists the principal's current mappings.
  *
  * The ops store is an in-memory stub
  * served by an injected fetch: every URL is asserted before it is served, and
  * no test makes a network call.
  *
- * The mapping WRITE is `provisionIdpIdentityMapping` (the `mcp enable` step),
- * so the "nothing was written" assertions look at the stub's whole call log —
- * no insert, no upsert, no update.
  */
 import { describe, test, expect } from "bun:test";
+import { Command } from "commander";
+import { register } from "../../src/commands/principal.ts";
 import {
   linkPrincipalMapping,
   unlinkPrincipalMapping,
@@ -56,6 +55,8 @@ function mappingStub(opts: {
   mismatchAgentId?: boolean;
   /** Fail every write (insert / upsert / update). */
   failWrites?: boolean;
+  updateResult?: unknown;
+  updateIds?: string[];
   /** Answer reads with 200 and a body that is NOT a record list. */
   answerNotAList?: boolean;
   /** Answer every Credential read with 200 and this body. */
@@ -116,8 +117,12 @@ function mappingStub(opts: {
     }
     if ((body.operation === "upsert" || body.operation === "update") && body.table === "Credential") {
       if (opts.failWrites) return new Response("nope", { status: 500 });
-      write(body.records ?? []);
-      return Response.json({ message: body.operation === "upsert" ? "upserted" : "updated" });
+      const records = body.records ?? [];
+      write(body.operation === "update" && opts.updateIds !== undefined
+        ? records.filter((r: any) => opts.updateIds!.includes(r.id)) : records);
+      return Response.json(body.operation === "update"
+        ? ("updateResult" in opts ? opts.updateResult : { update_hashes: records.map((r: any) => r.id), skipped_hashes: [] })
+        : { message: "upserted" });
     }
     return Response.json({});
   }) as unknown as typeof fetch;
@@ -426,7 +431,81 @@ describe("flair principal link (flair#2115)", () => {
   });
 });
 
+async function invokeUnlink(fetchImpl: typeof fetch) {
+  const old = { fetch: globalThis.fetch, exit: process.exit, log: console.log, error: console.error };
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const exitSignal = Symbol("unlink-exit");
+  let exitCode = 0;
+  try {
+    globalThis.fetch = fetchImpl;
+    console.log = (...args: unknown[]) => { logs.push(args.join(" ")); };
+    console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
+    process.exit = ((code?: number) => { exitCode = code ?? 0; throw exitSignal; }) as typeof process.exit;
+    const command = new Command();
+    register(command);
+    try {
+      await command.parseAsync(["principal", "unlink", "alice", "--idp-subject", "octocat",
+        "--instance", HOSTED, "--admin-pass", ADMIN.adminPass], { from: "user" });
+    } catch (err) {
+      if (err !== exitSignal) throw err;
+    }
+    return { exitCode, logs: logs.join("\n"), errors: errors.join("\n") };
+  } finally {
+    globalThis.fetch = old.fetch;
+    process.exit = old.exit;
+    console.log = old.log;
+    console.error = old.error;
+  }
+}
+
 describe("flair principal unlink (flair#2115)", () => {
+  const credentials = ["cred_c1", "cred_c2"].map(id => ({
+    id, idpSubject: "octocat", idpProvider: "github", principalId: "alice", status: "active",
+  }));
+  for (const [name, updateResult, updateIds, unconfirmed] of [
+    ["skipped_hashes", { update_hashes: ["cred_c1", "cred_c2"], skipped_hashes: ["cred_c2"] }, ["cred_c1"], ["cred_c2"]],
+    ["missing ID in update_hashes", { update_hashes: ["cred_c1"] }, ["cred_c1", "cred_c2"], ["cred_c2"]],
+    ["partial update", { update_hashes: ["cred_c1"], skipped_hashes: ["cred_c2"] }, ["cred_c1"], ["cred_c2"]],
+    ["missing update_hashes", { message: "updated" }, [], ["cred_c1", "cred_c2"]],
+    ["error in update result", { update_hashes: ["cred_c1", "cred_c2"], error: "failed" }, [], ["cred_c1", "cred_c2"]],
+    ["confirmed result with active readback", { update_hashes: ["cred_c1", "cred_c2"] }, ["cred_c1"], ["cred_c2"]],
+  ] as Array<[string, unknown, string[], string[]]>) {
+    test(`unlink exits nonzero without Unlinked on HTTP 200 ${name}`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials, updateResult, updateIds });
+      const result = await invokeUnlink(st.fetchImpl);
+      expect(result.exitCode).toBe(1);
+      expect(result.logs).not.toContain("Unlinked");
+      for (const id of unconfirmed) expect(result.errors).toContain(id);
+      expect(st.writes()).toHaveLength(1);
+      for (const row of credentials) {
+        expect(st.rows.get(row.id)?.status).toBe(updateIds.includes(row.id) ? "revoked" : "active");
+      }
+    });
+  }
+
+  test("unlink exits nonzero without Unlinked when readback fails", async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials, failCredReadAt: 2 });
+    const result = await invokeUnlink(st.fetchImpl);
+    expect(result.exitCode).toBe(1);
+    expect(result.logs).not.toContain("Unlinked");
+    for (const row of credentials) expect(result.errors).toContain(row.id);
+    expect(result.errors).toContain("read");
+  });
+
+  test("unlink prints Unlinked only after all IDs and the subject readback are confirmed", async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials });
+    const result = await invokeUnlink(st.fetchImpl);
+    expect(result.exitCode).toBe(0);
+    expect(result.logs).toContain("Unlinked");
+    expect(result.logs).toContain("cred_c1, cred_c2");
+    expect(result.errors).toBe("");
+    expect(st.calls.map(c => c.body.operation)).toEqual([
+      "search_by_value", "search_by_conditions", "update", "search_by_conditions",
+    ]);
+    expect([...st.rows.values()].every(row => row.status === "revoked")).toBe(true);
+  });
+
   test("revokes the subject's mapping to that principal and prints it", async () => {
     const st = mappingStub({
       expectedUrl: HOSTED_OPS,

@@ -148,6 +148,7 @@ import { join, dirname, resolve } from "node:path";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
+import { writeConfirmed } from "./instance-identity-row.js";
 import { defaultReadProcessCmdline, defaultReadProcessCwd } from "./upgrade-exec-path.js";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
@@ -1851,10 +1852,9 @@ export async function linkPrincipalMapping(
 }
 
 /**
- * `flair principal unlink` — the inverse: revoke the subject's mapping to this
- * principal. A subject that is not mapped to that principal (or whose mapping
- * carries a different provider name) is refused by name; a failed read is
- * refused too. Nothing is written on either refusal.
+ * `flair principal unlink` — revoke the subject's mapping to this principal.
+ * A subject not mapped to that principal or carrying a different provider
+ * name is refused before writing.
  */
 export async function unlinkPrincipalMapping(
   params: PrincipalMappingParams,
@@ -1889,26 +1889,33 @@ export async function unlinkPrincipalMapping(
   }
 
   const ids = mine.map((c) => String(c?.id));
+  const unconfirmedMessage = (unconfirmed: string[]) =>
+    `Identity mapping: revocation unconfirmed for Credential IDs: ${unconfirmed.join(", ")}`;
   const res = await fetchImpl(opsUrl, {
     method: "POST",
     headers: opsHeaders(authHeader),
-    // The row is retained with status "revoked" (never deleted), the same
-    // terminal state `provisionIdpIdentityMapping` gives a superseded row: the
-    // resolver counts only credentials that are not revoked, so this is the
-    // inverse of the mapping and stays legible in storage.
     body: JSON.stringify({
       operation: "update",
       database: "flair",
       table: "Credential",
       records: ids.map((id) => ({ id, status: "revoked", updatedAt: now })),
     }),
+  }).catch((err: unknown) => {
+    throw new Error(`${unconfirmedMessage(ids)} — ${err instanceof Error ? err.message : String(err)}`);
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      `Identity mapping: failed to revoke the Credential(kind:idp) mapping for subject '${params.idpSubject}' ` +
-        `(HTTP ${res.status})${text ? `: ${text}` : ""}`,
-    );
+    throw new Error(`${unconfirmedMessage(ids)} (HTTP ${res.status})${text ? `: ${text}` : ""}`);
+  }
+  const result = await res.json().catch(() => null);
+  const unconfirmed = ids.filter(id => !writeConfirmed(result, "update_hashes", id));
+  if (unconfirmed.length > 0) throw new Error(unconfirmedMessage(unconfirmed));
+  const remaining = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)
+    .catch((err: unknown) => {
+      throw new Error(`${unconfirmedMessage(ids)} — ${err instanceof Error ? err.message : String(err)}`);
+    })).filter(isResolvableCredential);
+  if (remaining.length > 0) {
+    throw new Error(`${unconfirmedMessage(remaining.map(c => c.id))} — subject '${params.idpSubject}' still has resolvable mappings.`);
   }
   return {
     principal: params.principal,

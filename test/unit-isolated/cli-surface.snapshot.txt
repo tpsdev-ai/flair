@@ -671,7 +671,7 @@ flair principal link
       attr: adminUser
 
 flair principal unlink
-  description: Remove one IdP login's mapping to a principal on an already-enabled instance (revokes the mapping; the principal and its memories stay). Targets a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local name, or a loopback, unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused before any request.
+  description: Revoke one IdP login's mapping; success requires confirmed updates and no resolvable subject mapping on readback. Targets a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local name, or a loopback, unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused before any request.
   usage: [options] <principal>
   arguments:
     principal (required)
@@ -3272,14 +3272,14 @@ Commands:
                                  unspecified, RFC1918, link-local or IPv6
                                  unique-local address literal is refused before
                                  any request.
-  unlink [options] <principal>   Remove one IdP login's mapping to a principal
-                                 on an already-enabled instance (revokes the
-                                 mapping; the principal and its memories stay).
-                                 Targets a REMOTE instance: --instance must be
-                                 HTTPS, and an unparseable URL, localhost, a
-                                 .local name, or a loopback, unspecified,
-                                 RFC1918, link-local or IPv6 unique-local
-                                 address literal is refused before any request.
+  unlink [options] <principal>   Revoke one IdP login's mapping; success
+                                 requires confirmed updates and no resolvable
+                                 subject mapping on readback. Targets a REMOTE
+                                 instance: --instance must be HTTPS, and an
+                                 unparseable URL, localhost, a .local name, or a
+                                 loopback, unspecified, RFC1918, link-local or
+                                 IPv6 unique-local address literal is refused
+                                 before any request.
   links [options] <principal>    List a principal's current IdP mappings on an
                                  already-enabled instance. Targets a REMOTE
                                  instance: --instance must be HTTPS, and an
@@ -3423,11 +3423,11 @@ Global Options:
 ----- flair principal unlink -----
 Usage: flair principal unlink [options] <principal>
 
-Remove one IdP login's mapping to a principal on an already-enabled instance
-(revokes the mapping; the principal and its memories stay). Targets a REMOTE
-instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local
-name, or a loopback, unspecified, RFC1918, link-local or IPv6 unique-local
-address literal is refused before any request.
+Revoke one IdP login's mapping; success requires confirmed updates and no
+resolvable subject mapping on readback. Targets a REMOTE instance: --instance
+must be HTTPS, and an unparseable URL, localhost, a .local name, or a loopback,
+unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused
+before any request.
 
 Options:
   --idp-subject <login>  The login the identity provider reports for this person

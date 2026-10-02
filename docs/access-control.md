@@ -103,8 +103,8 @@ flair principal link alice --instance https://flair.example.com \
 The principal must already exist: a missing one is refused by name. A subject
 already mapped to that principal is reported with nothing written; a subject
 mapped to a different principal is refused unless `--replace` moves it, which
-prints the prior principal and any superseded credential. Ambiguous prior
-principals are refused before writing.
+prints the prior principal and any superseded credential. More than one active
+principal mapped to the subject is refused before writing.
 `--instance` (else `FLAIR_URL`) must be HTTPS: these commands
 send the target's admin credential to its operations API, which on a hosted
 instance is the instance host at port 9925. <!-- docs-freshness-allow: hosted operations API port, not the data port -->
@@ -114,8 +114,9 @@ request, and a REMOTE target gets no `--admin-pass` fallback (the rule
 `flair mcp enable` applies).
 
 `flair principal unlink <principal> --idp-subject <login>` defaults to provider
-`github`; pass `--idp-provider <name>` for a different provider. It revokes a
-matching mapping. With `FLAIR_MCP_JIT_PROVISION` on, a known tool call after an
+`github`; pass `--idp-provider <name>` for a different provider. Unlink reports
+success only after confirmed updates and no resolvable subject mapping on
+readback. With `FLAIR_MCP_JIT_PROVISION` on, a known tool call after an
 unmapped login may provision a new principal.
 `flair principal links <principal>` lists a principal's current mappings, and
 both take the same `--instance` and `--admin-pass`.

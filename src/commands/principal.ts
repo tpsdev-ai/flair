@@ -500,12 +500,8 @@ export function register(program: Command): void {
 
   // ── flair principal link / unlink / links (flair#2115) ─────────────────────
   //
-  // Map ONE IdP login to an EXISTING principal on an instance that is already
-  // enabled — `flair mcp enable`'s identity-mapping step, without the rest of
-  // its flow (and without its restart prompt). The mapping write, the ops
-  // target and the admin-credential rule are `flair mcp enable`'s, reused from
-  // src/lib/mcp-enable.ts; the target policy is enforced there too, before the
-  // first request.
+  // link maps one IdP login to an existing principal; unlink revokes a mapping;
+  // links lists the principal's current mappings.
 
   /**
    * The instance and admin credential these commands need: `--instance` (else
@@ -517,7 +513,7 @@ export function register(program: Command): void {
   function mappingTarget(opts: any, command: string): { instance: string; adminUser: string; adminPass: string } {
     const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
     if (!instance) {
-      console.error(`Error: --instance is required (or set FLAIR_URL) — \`${command}\` maps an IdP login on one specific instance.`);
+      console.error(`Error: --instance is required (or set FLAIR_URL) — \`${command}\` operates on one specific instance.`);
       process.exit(1);
     }
     const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
@@ -582,8 +578,7 @@ export function register(program: Command): void {
   principal
     .command("unlink <principal>")
     .description(
-      "Remove one IdP login's mapping to a principal on an already-enabled instance (revokes the mapping; the " +
-        "principal and its memories stay). " + MAPPING_TARGET_HELP,
+      "Revoke one IdP login's mapping; success requires confirmed updates and no resolvable subject mapping on readback. " + MAPPING_TARGET_HELP,
     )
     .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
     .option("--idp-provider <name>", "Upstream IdP provider the mapping carries", "github")
