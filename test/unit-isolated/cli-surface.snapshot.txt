@@ -623,7 +623,7 @@ flair principal promote
       attr: opsPort
 
 flair principal link
-  description: Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step `flair mcp enable` runs, and nothing else. Targets a REMOTE instance with a public HTTPS origin; refuses honestly against a local-origin instance.
+  description: Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step `flair mcp enable` runs, and nothing else. Targets a REMOTE instance: --instance must be a public HTTPS origin, and a local, private, non-HTTPS or unparseable one is refused before any request.
   usage: [options] <principal>
   arguments:
     principal (required)
@@ -649,7 +649,7 @@ flair principal link
       attr: adminUser
 
 flair principal unlink
-  description: Remove one IdP login's mapping to a principal on an already-enabled instance (revokes the mapping; the principal and its memories stay). Targets a REMOTE instance; refuses against a local-origin one.
+  description: Remove one IdP login's mapping to a principal on an already-enabled instance (revokes the mapping; the principal and its memories stay). Targets a REMOTE instance: --instance must be a public HTTPS origin, and a local, private, non-HTTPS or unparseable one is refused before any request.
   usage: [options] <principal>
   arguments:
     principal (required)
@@ -672,7 +672,7 @@ flair principal unlink
       attr: adminUser
 
 flair principal links
-  description: List a principal's current IdP mappings on an already-enabled instance. Targets a REMOTE instance with a public HTTPS origin; refuses honestly against a local-origin instance.
+  description: List a principal's current IdP mappings on an already-enabled instance. Targets a REMOTE instance: --instance must be a public HTTPS origin, and a local, private, non-HTTPS or unparseable one is refused before any request.
   usage: [options] <principal>
   arguments:
     principal (required)
@@ -3234,18 +3234,22 @@ Commands:
   link [options] <principal>     Map one IdP login to an existing principal on
                                  an already-enabled instance — the
                                  identity-mapping step `flair mcp enable` runs,
-                                 and nothing else. Targets a REMOTE instance
-                                 with a public HTTPS origin; refuses honestly
-                                 against a local-origin instance.
+                                 and nothing else. Targets a REMOTE instance:
+                                 --instance must be a public HTTPS origin, and a
+                                 local, private, non-HTTPS or unparseable one is
+                                 refused before any request.
   unlink [options] <principal>   Remove one IdP login's mapping to a principal
                                  on an already-enabled instance (revokes the
                                  mapping; the principal and its memories stay).
-                                 Targets a REMOTE instance; refuses against a
-                                 local-origin one.
+                                 Targets a REMOTE instance: --instance must be a
+                                 public HTTPS origin, and a local, private,
+                                 non-HTTPS or unparseable one is refused before
+                                 any request.
   links [options] <principal>    List a principal's current IdP mappings on an
                                  already-enabled instance. Targets a REMOTE
-                                 instance with a public HTTPS origin; refuses
-                                 honestly against a local-origin instance.
+                                 instance: --instance must be a public HTTPS
+                                 origin, and a local, private, non-HTTPS or
+                                 unparseable one is refused before any request.
   help [command]                 display help for command
 
 ----- flair principal add -----
@@ -3335,8 +3339,8 @@ Usage: flair principal link [options] <principal>
 
 Map one IdP login to an existing principal on an already-enabled instance — the
 identity-mapping step `flair mcp enable` runs, and nothing else. Targets a
-REMOTE instance with a public HTTPS origin; refuses honestly against a
-local-origin instance.
+REMOTE instance: --instance must be a public HTTPS origin, and a local, private,
+non-HTTPS or unparseable one is refused before any request.
 
 Options:
   --idp-subject <login>  The login the identity provider reports for this person
@@ -3362,7 +3366,8 @@ Usage: flair principal unlink [options] <principal>
 
 Remove one IdP login's mapping to a principal on an already-enabled instance
 (revokes the mapping; the principal and its memories stay). Targets a REMOTE
-instance; refuses against a local-origin one.
+instance: --instance must be a public HTTPS origin, and a local, private,
+non-HTTPS or unparseable one is refused before any request.
 
 Options:
   --idp-subject <login>  The login the identity provider reports for this person
@@ -3386,8 +3391,8 @@ Global Options:
 Usage: flair principal links [options] <principal>
 
 List a principal's current IdP mappings on an already-enabled instance. Targets
-a REMOTE instance with a public HTTPS origin; refuses honestly against a
-local-origin instance.
+a REMOTE instance: --instance must be a public HTTPS origin, and a local,
+private, non-HTTPS or unparseable one is refused before any request.
 
 Options:
   --instance <url>     Remote flair instance holding the mapping (else

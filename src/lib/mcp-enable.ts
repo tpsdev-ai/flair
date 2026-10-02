@@ -203,6 +203,96 @@ export function checkLocalOriginRefusal(url: string): { refused: true; message: 
   return { refused: false };
 }
 
+/**
+ * flair#2115 — the target policy for `flair principal link|unlink|links`.
+ *
+ * These commands send the target instance's admin credential to its operations
+ * API, so the promise their help makes is narrower than
+ * `checkLocalOriginRefusal`'s claude.ai-oriented one: HTTPS is required, and
+ * every local, private or unparseable host is refused — including forms the
+ * older check let through (a trailing-dot `localhost.`, a private or
+ * link-local IPv6 literal, an IPv4-mapped IPv6 address). Self-contained on
+ * purpose, so it does not depend on the shared structural host check widening.
+ *
+ * Refusals are only ADDED relative to `checkLocalOriginRefusal`: everything
+ * that check refuses, this one refuses too.
+ */
+export function checkPublicHttpsTargetRefusal(url: string): { refused: true; message: string } | { refused: false } {
+  let host: string;
+  let protocol: string;
+  try {
+    const parsed = new URL(url);
+    host = parsed.hostname;
+    protocol = parsed.protocol;
+  } catch {
+    return { refused: true, message: mappingTargetRefusalMessage(url) };
+  }
+  if (protocol !== "https:" || host === "") return { refused: true, message: mappingTargetRefusalMessage(url) };
+  if (isLocalOrPrivateHost(host)) return { refused: true, message: mappingTargetRefusalMessage(url) };
+  return { refused: false };
+}
+
+/** The one sentence a non-public target gets, whichever way it failed that test. */
+function mappingTargetRefusalMessage(url: string): string {
+  return (
+    "these commands send the target instance's admin credential to its operations API, so --instance must be a " +
+    `public HTTPS origin; '${url}' is not one. See the hosted-shape docs.`
+  );
+}
+
+/** Is `hostname` (lowercased, as `URL.hostname` gives it) local, private or
+ *  otherwise unroutable from the public internet? IPv6 literals stay bracketed
+ *  in `URL.hostname`; a trailing dot is the absolute form of the same name. */
+function isLocalOrPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.+$/, "");
+  if (host === "") return true;
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.endsWith(".local")) return true;
+  if (host.startsWith("[") && host.endsWith("]")) return isLocalOrPrivateIpv6(host.slice(1, -1));
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) return isLocalOrPrivateIpv4(ipv4.slice(1).map((part) => Number(part)));
+  return false;
+}
+
+function isLocalOrPrivateIpv4(octets: number[]): boolean {
+  const [a, b] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function isLocalOrPrivateIpv6(literal: string): boolean {
+  const addr = literal.toLowerCase();
+  // An IPv4-mapped address carries an IPv4 address in its low 32 bits; WHATWG
+  // URL normalises the dotted form to two hex groups ("::ffff:c0a8:1").
+  const mapped = addr.match(/^::ffff:([0-9a-f:.]+)$/);
+  if (mapped) {
+    const tail = mapped[1];
+    const dotted = tail.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (dotted) return isLocalOrPrivateIpv4(dotted.slice(1).map((part) => Number(part)));
+    const groups = tail.split(":");
+    if (groups.length === 2) {
+      const hi = Number.parseInt(groups[0] || "0", 16);
+      const lo = Number.parseInt(groups[1] || "0", 16);
+      if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+        return isLocalOrPrivateIpv4([(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff]);
+      }
+    }
+    return true; // an IPv4-mapped form this cannot read is not a public origin
+  }
+  if (addr === "::" || addr === "::1") return true; // unspecified, loopback
+  const first = Number.parseInt(addr.split(":")[0] || "0", 16);
+  if (Number.isNaN(first)) return true;
+  if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  return false;
+}
+
 // ─── Fabric-shape detection (secrets-mechanism default) ────────────────────
 
 /** Is this a Harper Fabric-hosted origin? (`*.harperfabric.com`.) Used only
@@ -1356,25 +1446,22 @@ export async function provisionIdpIdentityMapping(
   // ── flair#1317: look SUBJECT-WIDE, not (provider, subject) ─────────────────
   // The resolver's key is (kind, idpSubject); anything narrower here leaves
   // credentials that dedup cannot see but resolution can.
-  const findCredentialsForSubject = async (): Promise<any[]> => {
-    const res = await fetchImpl(opsUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: authHeader },
-      body: JSON.stringify({
-        operation: "search_by_conditions",
-        database: "flair",
-        table: "Credential",
-        operator: "and",
-        conditions: [
-          { search_attribute: "kind", search_type: "equals", search_value: "idp" },
-          { search_attribute: "idpSubject", search_type: "equals", search_value: params.idpSubject },
-        ],
-        get_attributes: ["id", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"],
-      }),
+  // A read that FAILED, or answered with something that is not a record list,
+  // is not "no credential for this subject": this read decides which rows the
+  // batch below revokes, so it refuses rather than standing in for an empty
+  // table (flair#2115). `opsReadRows` is the one strict read on this surface.
+  const findCredentialsForSubject = async (): Promise<any[]> =>
+    opsReadRows(fetchImpl, opsUrl, authHeader, {
+      operation: "search_by_conditions",
+      database: "flair",
+      table: "Credential",
+      operator: "and",
+      conditions: [
+        { search_attribute: "kind", search_type: "equals", search_value: "idp" },
+        { search_attribute: "idpSubject", search_type: "equals", search_value: params.idpSubject },
+      ],
+      get_attributes: ["id", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"],
     });
-    const body = res.ok ? await res.json().catch(() => []) : [];
-    return Array.isArray(body) ? body : [];
-  };
 
   const subjectCreds = await findCredentialsForSubject();
   const activeCreds = subjectCreds.filter(isResolvableCredential);
@@ -1468,10 +1555,11 @@ export async function provisionIdpIdentityMapping(
 // without walking `flair mcp enable`'s whole flow (and its restart prompt).
 // The mapping WRITE is `provisionIdpIdentityMapping` above — the same step
 // `mcp enable` runs. These functions add only the checks an operator acting on
-// one person needs: the principal must exist, a subject already mapped to the
-// same principal is reported and not rewritten, a subject mapped elsewhere is
-// refused unless the operator says `replace`, and a read that FAILED refuses
-// rather than standing in for "no mapping".
+// one person needs: a target that is not a public HTTPS origin is refused
+// before the first request, the principal must exist, a subject already mapped
+// to the same principal is reported and not rewritten, a subject mapped
+// elsewhere is refused unless the operator says `replace`, and a read that
+// FAILED refuses rather than standing in for "no mapping".
 
 /** One current mapping, as `flair principal links` reports it. */
 export interface PrincipalMappingRow {
@@ -1482,7 +1570,8 @@ export interface PrincipalMappingRow {
 
 /** Where the three commands send their ops calls — the same exactly-one target
  *  forms `provisionIdpIdentityMapping` takes (flair#2102), resolved by the same
- *  function, plus the admin credentials the target's ops API requires. */
+ *  function (`assertMappingTarget` adds these commands' public-HTTPS policy
+ *  first), plus the admin credentials the target's ops API requires. */
 export type PrincipalMappingBase = IdentityMappingOpsTarget & {
   adminUser: string;
   adminPass: string;
@@ -1614,6 +1703,7 @@ async function readIdpCredentialsForPrincipal(
  *
  * A read that FAILED propagates: an unreadable Agent table is not an absent
  * principal, and this check stands in front of a mapping write (flair#2115).
+ * The id is compared, not just the non-emptiness of the answer.
  */
 async function assertPrincipalExists(
   fetchImpl: typeof fetch,
@@ -1629,15 +1719,32 @@ async function assertPrincipalExists(
     search_value: principal,
     get_attributes: ["id"],
   });
-  if (rows.length === 0) throw new Error(principalMissingMessage(principal));
+  if (!rows.some((r) => String(r?.id) === principal)) throw new Error(principalMissingMessage(principal));
 }
 
 /** The one refusal a missing principal gets, wherever it is checked. */
 function principalMissingMessage(principal: string): string {
   return (
-    `No principal '${principal}' — nothing was written. Create it first ` +
-    `(\`flair principal add ${principal}\`) and re-run, or use \`flair mcp enable\`, which creates the principal it maps.`
+    `No principal '${principal}' — nothing was written. Create the principal on the TARGET instance ` +
+    `(run \`flair mcp enable\` against it: it creates the principal it maps), then re-run.`
   );
+}
+
+/**
+ * flair#2115 — `flair principal link|unlink|links` carry the target instance's
+ * admin credential to its operations API, so the target they accept is narrower
+ * than `checkLocalOriginRefusal`'s claude.ai-oriented one: a `hostedOrigin` is
+ * refused unless it is a public HTTPS origin (and `checkPublicHttpsTargetRefusal`
+ * refuses every form of local, private and unparseable host). The numeric
+ * `opsPortOrUrl` form names the caller's own address and is left alone.
+ *
+ * Called before the first request, so a refused target never sees one.
+ */
+function assertMappingTarget(target: IdentityMappingOpsTarget): void {
+  const { hostedOrigin } = target as { hostedOrigin?: unknown };
+  if (hostedOrigin === undefined) return;
+  const check = checkPublicHttpsTargetRefusal(String(hostedOrigin));
+  if (check.refused) throw new Error(check.message);
 }
 
 /** The exactly-one target fields, rebuilt so they can be spread into a fresh
@@ -1659,15 +1766,22 @@ function mappingTargetFields(target: IdentityMappingOpsTarget): IdentityMappingO
  *   `replace` is set; with `replace`, the write re-points it and the result
  *   names the principal it left;
  * - a missing principal is refused by name with nothing written;
- * - a failed read is refused: it never counts as "no mapping".
+ * - a failed read is refused: it never counts as "no mapping";
+ * - a target that is not a public HTTPS origin is refused before any request.
  */
 export async function linkPrincipalMapping(
   params: LinkPrincipalMappingParams,
   deps: PrincipalMappingDeps = {},
 ): Promise<LinkPrincipalMappingResult> {
+  assertMappingTarget(params);
   const { url: opsUrl } = identityMappingOpsUrl(params);
   const fetchImpl = deps.fetchImpl ?? fetch;
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
+
+  // flair#2115 — the principal is checked before either branch below, so an
+  // orphaned credential naming a deleted principal is not reported as a live
+  // mapping and a missing principal gets its own refusal.
+  await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
   const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)).filter(
     isResolvableCredential,
@@ -1740,6 +1854,7 @@ export async function unlinkPrincipalMapping(
   params: PrincipalMappingParams,
   deps: PrincipalMappingDeps = {},
 ): Promise<UnlinkPrincipalMappingResult> {
+  assertMappingTarget(params);
   const { url: opsUrl } = identityMappingOpsUrl(params);
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = (deps.now ?? (() => new Date().toISOString()))();
@@ -1809,6 +1924,7 @@ export async function listPrincipalMappings(
   params: ListPrincipalMappingsParams,
   deps: PrincipalMappingDeps = {},
 ): Promise<ListPrincipalMappingsResult> {
+  assertMappingTarget(params);
   const { url: opsUrl } = identityMappingOpsUrl(params);
   const fetchImpl = deps.fetchImpl ?? fetch;
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);

@@ -90,7 +90,7 @@ read-back described under [One mapping per login](#one-mapping-per-login)
 passed. The command stops before restarting the instance, reports the
 `secrets-provisioning` step as not applied, and exits non-zero.
 
-### Add or remove one person
+### Link or unlink one login
 
 `flair principal link` does only the mapping step, on an instance that is
 already enabled:
@@ -104,14 +104,19 @@ The principal must already exist: a missing one is refused by name. A subject
 already mapped to that principal is reported with nothing written; a subject
 mapped to a different principal is refused unless `--replace` moves it, which
 prints the principal it left and any credential the move superseded.
-`--instance`, the local-origin refusal and the `--admin-pass` rule are the ones
-`flair mcp enable` applies: a public-shaped origin (else `FLAIR_URL`) whose host
-answers the operations API on port 9925. <!-- docs-freshness-allow: hosted operations API port, not the data port -->
+`--instance` (else `FLAIR_URL`) must be a public HTTPS origin: these commands
+send the target's admin credential to its operations API, which on a hosted
+instance is the instance host at port 9925. <!-- docs-freshness-allow: hosted operations API port, not the data port -->
+A local, private, non-HTTPS or unparseable address is refused before any
+request, and a REMOTE target gets no `--admin-pass` fallback (the rule
+`flair mcp enable` applies).
 
-`flair principal unlink <principal> --idp-subject <login>` revokes that mapping
-(the row stays, `revoked`, and stops resolving), and `flair principal links
-<principal>` lists the principal's current mappings. Both take the same
-`--instance` and `--admin-pass`.
+`flair principal unlink <principal> --idp-subject <login>` revokes that mapping:
+the row stays with status `revoked` and stops resolving. It does not withdraw
+access — with just-in-time provisioning on (`FLAIR_MCP_JIT_PROVISION`), the next
+login that presents that subject is provisioned again as a fresh principal.
+`flair principal links <principal>` lists a principal's current mappings, and
+both take the same `--instance` and `--admin-pass`.
 
 ### One mapping per login
 

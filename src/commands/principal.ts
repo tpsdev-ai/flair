@@ -31,7 +31,6 @@ import {
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import {
-  checkLocalOriginRefusal,
   linkPrincipalMapping,
   unlinkPrincipalMapping,
   listPrincipalMappings,
@@ -403,26 +402,21 @@ export function register(program: Command): void {
   // Map ONE IdP login to an EXISTING principal on an instance that is already
   // enabled — `flair mcp enable`'s identity-mapping step, without the rest of
   // its flow (and without its restart prompt). The mapping write, the ops
-  // target, the local-origin refusal and the admin-credential rule are all
-  // `flair mcp enable`'s, reused from src/lib/mcp-enable.ts.
+  // target and the admin-credential rule are `flair mcp enable`'s, reused from
+  // src/lib/mcp-enable.ts; the target's public-HTTPS policy is enforced there
+  // too, before the first request.
 
   /**
-   * The instance and admin credential these commands need, resolved exactly as
-   * `flair mcp enable` resolves them: `--instance` (else FLAIR_URL) must be a
-   * public-shaped origin, and a REMOTE target gets no local-credential fallback.
-   * Every refusal here happens before any ops call, so nothing is written.
+   * The instance and admin credential these commands need: `--instance` (else
+   * FLAIR_URL) names the target, and a REMOTE target gets no local-credential
+   * fallback (`flair mcp enable`'s `--admin-pass` rule). The target's own
+   * public-HTTPS policy is enforced in src/lib/mcp-enable.ts before the first
+   * request; every refusal here happens before any ops call too.
    */
   function mappingTarget(opts: any, command: string): { instance: string; adminUser: string; adminPass: string } {
     const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
     if (!instance) {
       console.error(`Error: --instance is required (or set FLAIR_URL) — \`${command}\` maps an IdP login on one specific instance.`);
-      process.exit(1);
-    }
-    // Locality comes from the URL itself, as `flair mcp enable` decides it —
-    // never from what the target reports about itself.
-    const localCheck = checkLocalOriginRefusal(instance);
-    if (localCheck.refused) {
-      console.error(`${render.icons.error} ${localCheck.message}`);
       process.exit(1);
     }
     const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
@@ -441,6 +435,9 @@ export function register(program: Command): void {
 
   const MAPPING_INSTANCE_OPTION = "--instance <url>";
   const MAPPING_INSTANCE_HELP = "Remote flair instance holding the mapping (else FLAIR_URL)";
+  const MAPPING_TARGET_HELP =
+    "Targets a REMOTE instance: --instance must be a public HTTPS origin, and a local, private, non-HTTPS or " +
+    "unparseable one is refused before any request.";
   const MAPPING_ADMIN_PASS_HELP =
     "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this " +
     "machine's local credentials and are never sent to a remote instance)";
@@ -450,8 +447,7 @@ export function register(program: Command): void {
     .command("link <principal>")
     .description(
       "Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step " +
-        "`flair mcp enable` runs, and nothing else. Targets a REMOTE instance with a public HTTPS origin; " +
-        "refuses honestly against a local-origin instance.",
+        "`flair mcp enable` runs, and nothing else. " + MAPPING_TARGET_HELP,
     )
     .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
     .option("--idp-provider <name>", "Upstream IdP provider", "github")
@@ -486,7 +482,7 @@ export function register(program: Command): void {
     .command("unlink <principal>")
     .description(
       "Remove one IdP login's mapping to a principal on an already-enabled instance (revokes the mapping; the " +
-        "principal and its memories stay). Targets a REMOTE instance; refuses against a local-origin one.",
+        "principal and its memories stay). " + MAPPING_TARGET_HELP,
     )
     .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
     .option("--idp-provider <name>", "Upstream IdP provider the mapping carries", "github")
@@ -518,8 +514,7 @@ export function register(program: Command): void {
   principal
     .command("links <principal>")
     .description(
-      "List a principal's current IdP mappings on an already-enabled instance. Targets a REMOTE instance with a " +
-        "public HTTPS origin; refuses honestly against a local-origin instance.",
+      "List a principal's current IdP mappings on an already-enabled instance. " + MAPPING_TARGET_HELP,
     )
     .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
     .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)

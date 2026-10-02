@@ -4,7 +4,8 @@
  * refusal text are the ones an operator sees.
  *
  * Every case here is refused BEFORE any operations call, so each one can be run
- * against a target that could never answer (`.invalid` never resolves) and the
+ * against a target that must never be reached (`.invalid` never resolves, and
+ * the other inputs are private, local or unparseable addresses) and the
  * assertion is that the CLI printed its OWN refusal rather than a fetch error:
  * a refusal that only happens after a call is not a refusal.
  *
@@ -89,15 +90,27 @@ describe("flair principal link / unlink / links pre-flight (flair#2115)", () => 
     expect(out.stdout).toBe("");
   }, 25_000);
 
-  test("a local-origin instance is refused before any call", async () => {
-    // The prod-shaped hazard the brief names: a local origin must never become
-    // an ops target, least of all the hosted ops port on this machine.
-    const out = await runCli([
-      "principal", "links", "alice", "--instance", "http://127.0.0.1:9925", "--admin-pass", "pw",
-    ]);
-    expect(out.code).toBe(1);
-    expect(out.stderr).toContain("claude.ai connectors need a public HTTPS origin");
-    expect(out.stderr).not.toMatch(/fetch failed|ECONNREFUSED|HTTP \d/);
-    expect(out.stdout).toBe("");
-  }, 25_000);
+  // A target that is not a public HTTPS origin must be refused before any call.
+  // No input here derives an ops target on THIS machine (the library refuses
+  // loopback before it derives anything, and the per-input no-request proofs
+  // run against an injected fetch in test/unit/principal-link.test.ts).
+  const REFUSED_INSTANCES: Array<[string, string]> = [
+    ["http://flair.invalid", "a remote origin over plain HTTP"],
+    ["ftp://flair.invalid", "a non-HTTP scheme"],
+    ["not-a-url", "an unparseable value"],
+    ["https://10.0.0.1", "an RFC1918 address"],
+    ["https://169.254.0.1", "a link-local address"],
+    ["https://[fd00::1]", "an IPv6 unique-local address"],
+    ["https://[fe80::1]", "an IPv6 link-local address"],
+  ];
+
+  for (const [instance, what] of REFUSED_INSTANCES) {
+    test(`refuses ${what} before any call`, async () => {
+      const out = await runCli(["principal", "links", "alice", "--instance", instance, "--admin-pass", "pw"]);
+      expect(out.code).toBe(1);
+      expect(out.stderr).toContain("public HTTPS origin");
+      expect(out.stderr).not.toMatch(/fetch failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|HTTP \d/);
+      expect(out.stdout).toBe("");
+    }, 25_000);
+  }
 });

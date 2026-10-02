@@ -362,6 +362,10 @@ function mockOpsFetch(opts: {
   failFindStatus?: number;
   failInsert?: boolean;
   failUpsert?: boolean;
+  /** flair#2115 — answer the Credential search with a failed response. */
+  failCredSearch?: boolean;
+  /** flair#2115 — answer the Credential search with 200 and a body that is NOT a list. */
+  credSearchNotAList?: boolean;
   /** flair#1317 — make the post-write invariant read-back lie (see its test). */
   poisonReadBack?: (rows: Map<string, any>) => void;
 } = {}): { fetchImpl: typeof fetch; calls: any[]; creds: ReturnType<typeof credentialTable> } {
@@ -383,6 +387,10 @@ function mockOpsFetch(opts: {
     }
     if (body.operation === "upsert" && body.table === "Credential" && opts.failUpsert) {
       return new Response("upsert failed", { status: 500 });
+    }
+    if (body.operation === "search_by_conditions" && body.table === "Credential") {
+      if (opts.failCredSearch) return new Response("boom", { status: 500 });
+      if (opts.credSearchNotAList) return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
     const credRes = creds.handle(body);
     if (credRes) {
@@ -437,6 +445,34 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialId).toBe("cred_existing");
     const ops = calls.map((c) => c.body.operation);
     expect(ops).toEqual(["search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+  });
+
+  // ─── flair#2115 — the pre-write read (the step `flair principal link` reuses) ──
+
+  test("flair#2115: the pre-write Credential read refuses a FAILED response, writing nothing", async () => {
+    // This read decides which rows the batch revokes. Answered with [] on
+    // failure, it said "no rows for this subject" — and the write that followed
+    // re-pointed a mapping it could not see. It refuses instead.
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true, failCredSearch: true });
+    await expect(
+      provisionIdpIdentityMapping(
+        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/ops API read at .* failed \(HTTP 500\)/);
+    // The call log itself: no upsert, no revocation, after the failed read.
+    expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value", "search_by_conditions"]);
+  });
+
+  test("flair#2115: the pre-write Credential read refuses a body that is NOT a record list", async () => {
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true, credSearchNotAList: true });
+    await expect(
+      provisionIdpIdentityMapping(
+        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/did not answer with a record list/);
+    expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value", "search_by_conditions"]);
   });
 
   // ─── flair#1317 — the (kind, idpSubject) uniqueness constraint ─────────────
