@@ -94,7 +94,8 @@ function paths() {
 }
 
 const BASE = {
-  instance: ISSUER,
+  instance: "http://127.0.0.1:9926",
+  issuer: ISSUER,
   idpClientId: "client-id",
   idpClientSecret: "client-secret",
   idpSubject: "octocat",
@@ -146,7 +147,7 @@ function mockFetch(
   let sysInfo = 0;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const u = new URL(String(url));
-    if (u.hostname !== host) {
+    if (u.hostname !== host && u.hostname !== "127.0.0.1") {
       foreign.push(String(url));
       return new Response("refused by test", { status: 599 });
     }

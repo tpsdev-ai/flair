@@ -1,0 +1,126 @@
+import { describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { hostname } from "node:os";
+import { join } from "node:path";
+import { tempDir } from "../helpers/temp-dir.ts";
+import { enableMcp, generateRsaSigningKeyPair, type SecretsMechanism } from "../../src/lib/mcp-enable.ts";
+
+const PUBLIC = "https://mcp.acme.example";
+const FABRIC = "https://acme.harperfabric.com";
+
+function fixture(instance = PUBLIC) {
+  const dir = tempDir("flair-2189-");
+  const config = readFileSync(join(import.meta.dir, "../../config.yaml"), "utf8");
+  const localConfigPath = join(dir, "config.yaml");
+  writeFileSync(localConfigPath, config);
+  return {
+    dir, config,
+    params: {
+      instance, issuer: PUBLIC, adminUser: "admin", adminPass: "pw",
+      idpClientId: "client", idpClientSecret: "secret", idpSubject: "octocat",
+      localConfigPath, signingKeyFilePath: join(dir, "key.pem"), secretsStagingPath: join(dir, "secrets.env"),
+    },
+  };
+}
+
+function targetFetch(push = false) {
+  const publicKey = push ? generateRsaSigningKeyPair().publicKey : undefined;
+  const calls: string[] = [];
+  const credentials = new Map<string, any>();
+  const fetchImpl = (async (url: any, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    calls.push(body.operation ?? String(url));
+    if (new URL(String(url)).pathname === "/.well-known/oauth-authorization-server") {
+      return Response.json({ issuer: PUBLIC, token_endpoint: `${PUBLIC}/oauth/mcp/token`,
+        client_id_metadata_document_supported: true, token_endpoint_auth_methods_supported: ["none"] });
+    }
+    if (body.operation === "system_information") {
+      return Response.json({ system: { hostname: hostname() }, harperdb_processes: { core: [{ pid: process.pid }] } });
+    }
+    if (body.operation === "get_secrets_public_key") return publicKey ? Response.json({ public_key: publicKey }) : new Response("missing", { status: 404 });
+    if (body.operation === "set_secret") return Response.json({});
+    if (body.operation === "search_by_value") return Response.json(body.table === "hdb_secret"
+      ? [{ name: body.search_value, processEnv: true }] : [{ id: "self" }]);
+    if (body.operation === "search_by_conditions") return Response.json([...credentials.values()]);
+    if (body.operation === "upsert") {
+      for (const r of body.records) credentials.set(r.id, r);
+      return Response.json({});
+    }
+    throw new Error(`Unexpected operation ${body.operation}`);
+  }) as typeof fetch;
+  return { calls, fetchImpl };
+}
+
+describe("enableMcp target URL and Fabric declaration", () => {
+  test.each([PUBLIC, "https://127.0.0.1.evil.example", "http://10.0.0.1", "http://machine.local"])(
+    "refuses non-loopback %s even when its stub reports this machine", async (instance) => {
+      const f = fixture(instance);
+      const { calls, fetchImpl } = targetFetch();
+      let prompts = 0;
+      const result = await enableMcp(f.params, { fetchImpl, confirmPrompt: async () => { prompts++; return true; } });
+      expect(result.failedStep).toBe("target-shape-check");
+      expect(result.refused?.message).toContain("--fabric");
+      expect(calls).toEqual([]);
+      expect(prompts).toBe(0);
+      expect(readdirSync(f.dir)).toEqual(["config.yaml"]);
+      expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
+    },
+  );
+
+  for (const [instance, fabric] of [[PUBLIC, true], [FABRIC, false], ["http://127.0.0.1:9926", true]] as const) {
+    test.each([false, true])(`CIMD refusal before side effects: ${instance}, fabric=${fabric}, dryRun=%s`, async (dryRun) => {
+      const f = fixture(instance);
+      const { calls, fetchImpl } = targetFetch();
+      let prompts = 0;
+      const result = await enableMcp({ ...f.params, fabric, dryRun, cimdAllowedHosts: ["claude.ai"] }, {
+        fetchImpl, confirmPrompt: async () => { prompts++; return true; },
+      });
+      expect(result.failedStep).toBe("cimd-allowed-hosts");
+      expect(result.refused?.message).toContain("refused for a Fabric instance");
+      expect(calls).toEqual([]);
+      expect(prompts).toBe(0);
+      expect(readdirSync(f.dir)).toEqual(["config.yaml"]);
+      expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
+    });
+  }
+
+  for (const [instance, fabric] of [[PUBLIC, true], [FABRIC, false]] as const) {
+    test.each([false, true])(`Fabric staging and confirmation: ${instance}, push=%s`, async (push) => {
+      const f = fixture(instance);
+      const { calls, fetchImpl } = targetFetch(push);
+      let prompt = "";
+      const result = await enableMcp({ ...f.params, fabric }, {
+        fetchImpl, confirmPrompt: async (message) => { prompt = message; return false; },
+      });
+      expect(result.failedStep).toBe("secrets-provisioning");
+      expect(result.secretsMechanism).toBe("fabric-env-secrets");
+      expect(result.secretsPath).toBe(f.params.secretsStagingPath);
+      expect(readFileSync(f.params.secretsStagingPath, "utf8")).toContain(`FLAIR_MCP_ISSUER=${PUBLIC}`);
+      const detail = result.steps.find(s => s.step === "secrets-provisioning")!.detail;
+      if (push) {
+        expect(calls.filter(c => c === "set_secret")).toHaveLength(5);
+        expect(prompt).toContain("Have you restarted the Fabric instance to load them?");
+        expect(result.steps.at(-1)!.detail).toContain("restart the Fabric instance");
+      } else {
+        expect(calls).not.toContain("set_secret");
+        expect(detail).toContain("Fabric Studio");
+        expect(detail).not.toContain("systemd/launchd");
+        expect(prompt).toContain(f.params.secretsStagingPath);
+      }
+      expect(calls).not.toContain("restart");
+      expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
+    });
+
+    test.each(["env-file", "fabric-env-secrets"] as SecretsMechanism[])(`explicit mechanism preserved: ${instance}, %s`, async (secretsMechanism) => {
+      const f = fixture(instance);
+      const { calls, fetchImpl } = targetFetch();
+      const result = await enableMcp({ ...f.params, fabric, secretsMechanism, confirmSecretsApplied: true }, { fetchImpl });
+      expect(result.ok).toBe(true);
+      expect(result.secretsMechanism).toBe(secretsMechanism);
+      expect(result.steps.some(s => s.step === "fabric-operator-deploy")).toBe(true);
+      expect(calls).not.toContain("get_secrets_public_key");
+      expect(calls).not.toContain("restart");
+      expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
+    });
+  }
+});

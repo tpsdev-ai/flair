@@ -115,7 +115,7 @@ describe("isLocalOrigin / checkLocalOriginRefusal", () => {
     const result = checkLocalOriginRefusal("http://localhost:9926");
     expect(result).toEqual({
       refused: true,
-      message: "claude.ai connectors need a public HTTPS origin; this instance is local. See the hosted-shape docs.",
+      message: "claude.ai connectors need a public HTTPS origin; the issuer is local. See the hosted-shape docs.",
     });
   });
 
@@ -743,7 +743,7 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sys
   let _sysInfoCallCount = 0;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const urlStr = String(url);
-    if (urlStr === `${ISSUER}/.well-known/oauth-authorization-server`) {
+    if (new URL(urlStr).pathname === "/.well-known/oauth-authorization-server") {
       calls.push("self-verify");
       const status = overrides.verifyStatus ?? 200;
       const body = overrides.verifyBody ?? CIMD_METADATA;
@@ -755,11 +755,6 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sys
     if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 }); // principal exists
     const credRes = creds.handle(body); // Credential search/upsert against a real (tiny) store
     if (credRes) return credRes;
-    // flair#2189: the target-shape check asks only for `system`; it must answer
-    // as a process on THIS machine, and must not consume a boot-discriminator call.
-    if (body.operation === "system_information" && (body.attributes ?? []).includes("system")) {
-      return new Response(JSON.stringify({ system: { hostname: osHostname() } }), { status: 200 });
-    }
     if (body.operation === "system_information") {
        _sysInfoCallCount++;
        const pid = overrides.sysInfoPidProvider
@@ -772,8 +767,11 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sys
   return { fetchImpl, calls };
 }
 
+const TARGET = "http://127.0.0.1:9926";
+
 const BASE_PARAMS = {
-  instance: ISSUER,
+  instance: TARGET,
+  issuer: ISSUER,
   idpClientId: "client-id",
   idpClientSecret: "client-secret",
   idpSubject: "octocat",
@@ -793,7 +791,7 @@ describe("enableMcp — local-origin refusal", () => {
   test("refuses immediately with zero fetch calls", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const result = await enableMcp(
-      { ...BASE_PARAMS, ...tempPaths(), instance: "http://localhost:9926" },
+      { ...BASE_PARAMS, ...tempPaths(), instance: "http://localhost:9926", issuer: undefined },
       { fetchImpl },
     );
     expect(result.ok).toBe(false);
@@ -886,7 +884,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     // Identity mapping DOES run before the gate.
     expect(calls).toContain("ops:search_by_value");
     expect(result.steps.at(-1)?.detail).toBe(
-      `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${ISSUER}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
+      `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${TARGET}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
     );
   });
 
@@ -898,7 +896,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
       { fetchImpl, confirmPrompt: async (message) => { prompt = message; return false; } },
     );
     expect(result.ok).toBe(false);
-    expect(prompt).toBe(`Have you applied the 5 vars staged at ${join(dir, "secrets.env")} to ${ISSUER}'s environment?`);
+    expect(prompt).toBe(`Have you applied the 5 vars staged at ${join(dir, "secrets.env")} to ${TARGET}'s environment?`);
   });
 
   test("pushed and read-back Fabric secrets, without confirmation: asks for a restart and never calls restart", async () => {
@@ -929,11 +927,11 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     expect(result.failedStep).toBe("secrets-provisioning");
     expect(setNames.length).toBeGreaterThan(0);
     expect(readBackNames).toEqual(setNames);
-    expect(prompt).toContain(`secrets were pushed to ${ISSUER} and read back`);
+    expect(prompt).toContain(`secrets were pushed to ${TARGET} and read back`);
     expect(prompt).toContain("loaded them into the instance's process environment");
     expect(prompt).not.toContain("staged");
     const detail = result.steps.at(-1)!.detail;
-    expect(detail).toContain(`the secrets were pushed to ${ISSUER} and read back; load them into the instance's process environment`);
+    expect(detail).toContain(`the secrets were pushed to ${TARGET} and read back; load them into the instance's process environment`);
     expect(detail).not.toContain("staged secrets");
     expect(calls).not.toContain("ops:restart");
   });
@@ -1052,7 +1050,7 @@ describe("enableMcp — full happy path", () => {
 describe("enableMcp — self-verify failure names the step to re-run", () => {
   test("standalone refuses target metadata redirected to a valid public issuer", async () => {
     const publicIssuer = "https://other.public.example";
-    const targetUrl = `${ISSUER}/.well-known/oauth-authorization-server`;
+    const targetUrl = `${TARGET}/.well-known/oauth-authorization-server`;
     const publicUrl = `${publicIssuer}/.well-known/oauth-authorization-server`;
     const publicMetadata = {
       ...CIMD_METADATA,
@@ -1251,9 +1249,6 @@ describe("enableMcp — flair#1120 restart verification", () => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
       calls.push({ url: urlStr, body });
-      if (body.operation === "system_information" && (body.attributes ?? []).includes("system")) {
-        return new Response(JSON.stringify({ system: { hostname: osHostname() } }), { status: 200 });
-      }
       if (body.operation === "system_information") {
         sysInfoCount++;
            // First call (pre-restart capture) always fails
@@ -1297,9 +1292,6 @@ describe("enableMcp — flair#1120 restart verification", () => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
       calls.push({ url: urlStr, body });
-      if (body.operation === "system_information" && (body.attributes ?? []).includes("system")) {
-        return new Response(JSON.stringify({ system: { hostname: osHostname() } }), { status: 200 });
-      }
       if (body.operation === "system_information") {
         sysInfoCallCount++;
          // Always same PID — thread bounce
@@ -1351,9 +1343,6 @@ describe("enableMcp — flair#1120 restart verification", () => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
       calls.push({ url: urlStr, body });
-      if (body.operation === "system_information" && (body.attributes ?? []).includes("system")) {
-        return new Response(JSON.stringify({ system: { hostname: osHostname() } }), { status: 200 });
-      }
       if (body.operation === "system_information") {
         sysInfoCallCount++;
          // First call = pre-restart PID, second call = post-restart PID
@@ -1401,9 +1390,6 @@ describe("enableMcp — flair#1120 restart verification", () => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
       calls.push({ url: urlStr, body });
-      if (body.operation === "system_information" && (body.attributes ?? []).includes("system")) {
-        return new Response(JSON.stringify({ system: { hostname: osHostname() } }), { status: 200 });
-      }
       if (body.operation === "system_information") {
         sysInfoCount++;
         if (sysInfoCount === 1) {
@@ -1454,9 +1440,6 @@ describe("enableMcp — flair#1120 restart verification", () => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
       calls.push({ url: urlStr, body });
-      if (body.operation === "system_information" && (body.attributes ?? []).includes("system")) {
-        return new Response(JSON.stringify({ system: { hostname: osHostname() } }), { status: 200 });
-      }
       if (body.operation === "system_information") {
         sysInfoCount++;
           // Always same PID — thread bounce, never changes
@@ -1988,27 +1971,24 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
   });
 });
 
-// ─── flair#2189: a remote target does not take the local restart branch ───────
-
-describe("enableMcp — a remote target never takes the local restart branch (flair#2189)", () => {
-  // A Harper Fabric instance reached through a custom domain: not a
-  // *.harperfabric.com host, and not the instance on this machine.
+describe("enableMcp — URL target classification (flair#2189)", () => {
   const CUSTOM = "https://mcp.acme.example";
   const customParams = () => ({
     ...BASE_PARAMS,
     ...tempPaths(),
     instance: CUSTOM,
+    issuer: CUSTOM,
     confirmSecretsApplied: true,
   });
 
-  test("a Fabric-shaped remote target under a custom hostname is refused before any change", async () => {
+  test("a remote target reporting this machine's hostname is refused before any change", async () => {
     const calls: string[] = [];
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       calls.push(`ops:${body.operation ?? String(url)}`);
       if (body.operation === "system_information") {
         return new Response(
-          JSON.stringify({ system: { hostname: "fabric-node-0" }, harperdb_processes: { core: [{ pid: 4242 }] } }),
+          JSON.stringify({ system: { hostname: osHostname() }, harperdb_processes: { core: [{ pid: 4242 }] } }),
           { status: 200 },
         );
       }
@@ -2022,7 +2002,7 @@ describe("enableMcp — a remote target never takes the local restart branch (fl
     expect(result.failedStep).toBe("target-shape-check");
     expect(result.refused?.message).toContain("--fabric");
     expect(result.refused?.message).toContain(CUSTOM);
-    // No restart, no secret push, no file written.
+    expect(calls).toEqual([]);
     expect(calls).not.toContain("ops:restart");
     expect(calls.some((c) => c.includes("get_secrets_public_key") || c.includes("set_secret"))).toBe(false);
     expect(readFileSync(join(dir, "config.yaml"), "utf-8")).toBe(configBefore);
@@ -2061,9 +2041,10 @@ describe("enableMcp — a remote target never takes the local restart branch (fl
     expect(result.steps.some((s) => s.step === "target-shape-check")).toBe(false);
   });
 
-  test("the instance on this machine still takes the standalone branch", async () => {
-    const { fetchImpl } = fullMockFetch();
-    const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true }, { fetchImpl });
+  test.each(["http://127.0.0.1:9926", "http://127.23.45.67:9926", "http://localhost:9926", "http://[::1]:9926"])("loopback target %s with a public issuer takes the standalone branch", async (instance) => {
+    const { fetchImpl, calls } = fullMockFetch();
+    const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), instance, confirmSecretsApplied: true }, { fetchImpl });
+    expect(calls).toContain("ops:restart");
     expect(result.ok).toBe(true);
     expect(result.steps.some((s) => s.step === "target-shape-check")).toBe(false);
   });

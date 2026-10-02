@@ -762,10 +762,9 @@ export function register(program: Command): void {
     .command("enable")
     .description(
       "One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the " +
-        "docs/notes/mcp-oauth-model2.md checklist. Targets a REMOTE instance with a public HTTPS origin; " +
-        "refuses honestly against a local-origin instance.",
+        "docs/notes/mcp-oauth-model2.md checklist. Rejects local/private issuer origins.",
     )
-    .option("--instance <url>", "Remote flair instance to enable against (else FLAIR_URL)")
+    .option("--instance <url>", "Target flair instance to enable against (else FLAIR_URL)")
     .option("--issuer <url>", "Public origin claude.ai will use (else --instance)")
     .option("--idp-provider <name>", "Upstream IdP provider", "github")
     .option("--idp-client-id <id>", "IdP OAuth app client id (else prompted interactively)")
@@ -773,7 +772,7 @@ export function register(program: Command): void {
     .option("--idp-subject <value>", "Your expected `sub`/login at the IdP (GitHub: your username; else prompted interactively)")
     .option("--principal <id>", "Principal (Agent) to map your IdP identity to — personal-shape default", "self")
     .option("--principal-kind <human|agent>", "Kind for a newly-created principal", "human")
-    .option("--secrets-mechanism <fabric-env-secrets|env-file>", "Override the shape-aware secrets mechanism (else auto-detected from --instance)")
+    .option("--secrets-mechanism <fabric-env-secrets|env-file>", "Override the shape-aware secrets mechanism (else selected from --instance and --fabric)")
     .option("--secrets-path <path>", "Override the secrets staging file path")
     .option(
       "--cimd-allowed-hosts <hosts>",
@@ -782,27 +781,27 @@ export function register(program: Command): void {
         "that exact list, then read back, before the restart. " +
         "Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable " +
         "process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. " +
-        "Always refused for a *.harperfabric.com instance. " +
+        "Always refused with --fabric or a *.harperfabric.com instance. " +
         "Without it the list is not changed (shipped: claude.ai,claude.com)",
     )
     .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
-    .option("--fabric", "Declare the target a Harper Fabric instance reached through a custom domain (not *.harperfabric.com), so it takes the Fabric branch instead of the refused local-restart branch")
+    .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging")
     .option("--dry-run", "Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
       if (!instance) {
-        console.error("Error: --instance is required (or set FLAIR_URL) — `flair mcp enable` targets a specific remote instance.");
+        console.error("Error: --instance is required (or set FLAIR_URL) — `flair mcp enable` targets a specific instance.");
         process.exit(1);
       }
 
       // Local-origin refusal short-circuits before we ask for anything else —
       // never walk the operator through IdP app creation for a connector that
       // can never connect.
-      const localCheck = checkLocalOriginRefusal(instance);
+      const localCheck = checkLocalOriginRefusal(opts.issuer ?? instance);
       if (localCheck.refused) {
         console.error(`${render.icons.error} ${localCheck.message}`);
         process.exit(1);
@@ -811,17 +810,13 @@ export function register(program: Command): void {
       // flair#2113: an invalid --cimd-allowed-hosts, or one for a Fabric
       // instance, is refused here, before anything is asked for. An explicit empty
       // value is refused too: it used to be dropped as if the flag were absent.
-      const cimdFlag = cimdAllowedHostsFromFlag(opts.cimdAllowedHosts, instance);
+      const cimdFlag = cimdAllowedHostsFromFlag(opts.cimdAllowedHosts, instance, Boolean(opts.fabric));
       if (cimdFlag.error) {
         console.error(`${render.icons.error} ${cimdFlag.error}`);
         process.exit(1);
       }
 
       const dryRun = Boolean(opts.dryRun);
-      // --instance is ALWAYS remote for this command (local is refused above)
-      // — isRemoteTarget=true so a missing --admin-pass/FLAIR_ADMIN_PASS never
-      // silently falls back to THIS machine's local ~/.flair/admin-pass file
-      // against someone else's instance (see resolveLocalAdminPass's doc comment).
       const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!dryRun && !adminPass) {
         console.error(

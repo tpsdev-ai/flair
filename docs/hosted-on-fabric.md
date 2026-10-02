@@ -65,7 +65,7 @@ On Fabric / managed deploys, environment variables are provisioned through Harpe
 
 `flair mcp enable` needs five variables live in the target's process before it restarts — including `FLAIR_MCP_OAUTH` and the RS256 signing key, both read from `process.env` only and therefore impossible to deliver via `set_configuration`.
 
-`flair mcp enable` also needs `--fabric` when a Fabric instance is reached through a custom domain (a CDN, proxy or vanity domain, not `*.harperfabric.com`): without it the target is refused rather than treated as a local standalone instance.
+Use `--fabric` for a Fabric target whose URL host is not `*.harperfabric.com`.
 
 It asks the target what it can do, rather than assuming from the hostname or the version:
 

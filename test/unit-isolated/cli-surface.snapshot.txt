@@ -414,11 +414,11 @@ flair mcp list
       attr: json
 
 flair mcp enable
-  description: One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the docs/notes/mcp-oauth-model2.md checklist. Targets a REMOTE instance with a public HTTPS origin; refuses honestly against a local-origin instance.
+  description: One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the docs/notes/mcp-oauth-model2.md checklist. Rejects local/private issuer origins.
   usage: [options]
   options:
     --instance <url>
-      description: Remote flair instance to enable against (else FLAIR_URL)
+      description: Target flair instance to enable against (else FLAIR_URL)
       attr: instance
     --issuer <url>
       description: Public origin claude.ai will use (else --instance)
@@ -445,13 +445,13 @@ flair mcp enable
       attr: principalKind
       default: "human"
     --secrets-mechanism <fabric-env-secrets|env-file>
-      description: Override the shape-aware secrets mechanism (else auto-detected from --instance)
+      description: Override the shape-aware secrets mechanism (else selected from --instance and --fabric)
       attr: secretsMechanism
     --secrets-path <path>
       description: Override the secrets staging file path
       attr: secretsPath
     --cimd-allowed-hosts <hosts>
-      description: Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused for a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
+      description: Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused with --fabric or a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
       attr: cimdAllowedHosts
     --signing-key-file <path>
       description: RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)
@@ -466,7 +466,7 @@ flair mcp enable
       description: Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
       attr: confirmSecretsApplied
     --fabric
-      description: Declare the target a Harper Fabric instance reached through a custom domain (not *.harperfabric.com), so it takes the Fabric branch instead of the refused local-restart branch
+      description: Use the Fabric branch and default to Fabric secrets staging
       attr: fabric
     --dry-run
       description: Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
@@ -2958,9 +2958,8 @@ Commands:
                            status, created).
   enable [options]         One-command hosted-shape enablement of the OAuth /mcp
                            surface for claude.ai — automates the
-                           docs/notes/mcp-oauth-model2.md checklist. Targets a
-                           REMOTE instance with a public HTTPS origin; refuses
-                           honestly against a local-origin instance.
+                           docs/notes/mcp-oauth-model2.md checklist. Rejects
+                           local/private issuer origins.
   disable [options]        Flag off + restart = byte-identical boot (Model-2
                            contract) — removes the /mcp OAuth surface.
   status [options]         Surface the /mcp OAuth surface's live state: enabled?
@@ -3065,12 +3064,11 @@ Global Options:
 Usage: flair mcp enable [options]
 
 One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai —
-automates the docs/notes/mcp-oauth-model2.md checklist. Targets a REMOTE
-instance with a public HTTPS origin; refuses honestly against a local-origin
-instance.
+automates the docs/notes/mcp-oauth-model2.md checklist. Rejects local/private
+issuer origins.
 
 Options:
-  --instance <url>                                   Remote flair instance to enable against (else FLAIR_URL)
+  --instance <url>                                   Target flair instance to enable against (else FLAIR_URL)
   --issuer <url>                                     Public origin claude.ai will use (else --instance)
   --idp-provider <name>                              Upstream IdP provider (default: "github")
   --idp-client-id <id>                               IdP OAuth app client id (else prompted interactively)
@@ -3078,14 +3076,14 @@ Options:
   --idp-subject <value>                              Your expected `sub`/login at the IdP (GitHub: your username; else prompted interactively)
   --principal <id>                                   Principal (Agent) to map your IdP identity to — personal-shape default (default: "self")
   --principal-kind <human|agent>                     Kind for a newly-created principal (default: "human")
-  --secrets-mechanism <fabric-env-secrets|env-file>  Override the shape-aware secrets mechanism (else auto-detected from --instance)
+  --secrets-mechanism <fabric-env-secrets|env-file>  Override the shape-aware secrets mechanism (else selected from --instance and --fabric)
   --secrets-path <path>                              Override the secrets staging file path
-  --cimd-allowed-hosts <hosts>                       Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused for a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
+  --cimd-allowed-hosts <hosts>                       Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused with --fabric or a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
   --signing-key-file <path>                          RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)
   --admin-pass <pass>                                Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
   --admin-user <name>                                Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
-  --fabric                                           Declare the target a Harper Fabric instance reached through a custom domain (not *.harperfabric.com), so it takes the Fabric branch instead of the refused local-restart branch
+  --fabric                                           Use the Fabric branch and default to Fabric secrets staging
   --dry-run                                          Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
   --json                                             Print machine-readable JSON instead of a human summary
   -h, --help                                         display help for command

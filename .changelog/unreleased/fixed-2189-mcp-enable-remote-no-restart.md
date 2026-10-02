@@ -1,3 +1,3 @@
-- **`flair mcp enable` refuses a target that is neither a `*.harperfabric.com` host nor the instance on this machine, instead of taking the local restart branch.** (Closes #2189)
+- **Outside `--dry-run`, `flair mcp enable` refuses non-loopback target URLs unless the host ends in `.harperfabric.com` or `--fabric` is set.** (Closes #2189)
 
-  A Harper Fabric instance reached through a custom domain takes the Fabric (operator-deploy) branch with the new `--fabric` flag.
+  `--fabric` selects the Fabric branch, defaults to Fabric secrets staging, and refuses `--cimd-allowed-hosts`.

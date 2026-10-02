@@ -27,6 +27,7 @@ import { program } from "../../src/cli.ts";
 import { generateRsaSigningKeyPair } from "../../src/lib/mcp-enable.ts";
 
 const REPO_CONFIG = join(import.meta.dir, "..", "..", "config.yaml");
+const TARGET = "http://127.0.0.1:9926";
 const HOST = "flair.example.com";
 const ISSUER = `https://${HOST}`;
 
@@ -79,7 +80,7 @@ async function runEnable(
     process.env.HOME = join(tmp, "home");
     globalThis.fetch = (async (url: any, init?: RequestInit) => {
       const u = new URL(String(url));
-      if (u.hostname !== HOST) {
+      if (u.hostname !== HOST && u.hostname !== "127.0.0.1") {
         foreign.push(String(url));
         return new Response("refused by test", { status: 599 });
       }
@@ -132,7 +133,8 @@ async function runEnable(
     try {
       await program.parseAsync([
         "node", "flair", "mcp", "enable",
-        "--instance", ISSUER,
+        "--instance", TARGET,
+        "--issuer", ISSUER,
         "--idp-client-id", "client-id",
         "--idp-client-secret", "client-secret",
         "--idp-subject", "octocat",
@@ -185,7 +187,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.foreign).toEqual([]);
     expect(r.exit).toBeNull();
     expect(r.out).toContain("The OAuth metadata check passed.");
-    expect(r.out).toContain(`Issuer ${ISSUER} matched the target's own OAuth authorization-server metadata at ${ISSUER}/.well-known/oauth-authorization-server`);
+    expect(r.out).toContain(`Issuer ${ISSUER} matched the target's own OAuth authorization-server metadata at ${TARGET}/.well-known/oauth-authorization-server`);
     expect(r.out).toContain("The /mcp route itself was not probed.");
     expect(r.out).toContain("connector identity: mapped sub 'octocat' (provider 'github') to Agent 'self'; see docs/access-control.md for how /mcp tool calls use it.");
     expect(r.out).not.toContain("every /mcp call reads and writes AS");
@@ -258,7 +260,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.exit).toBe("process.exit(1)");
     expect(r.secretSets.length).toBeGreaterThan(0);
     expect(r.secretReads).toEqual(r.secretSets);
-    expect(r.out).toContain(`the secrets were pushed to ${ISSUER} and read back; load them into the instance's process environment`);
+    expect(r.out).toContain(`the secrets were pushed to ${TARGET} and read back; load them into the instance's process environment`);
     expect(r.out).not.toContain("apply the staged secrets");
     expect(r.out).not.toContain("once the staged secrets are live");
   }, 20000);
@@ -267,6 +269,19 @@ describe("flair mcp enable — the printed success claims only what was checked"
     const r = await runEnable(SHIPPED, [], true, { confirmed: false });
     expect(r.exit).toBe("process.exit(1)");
     expect(r.secretSets).toEqual([]);
-    expect(r.out).toContain(`not applied: pass --confirm-secrets-applied once the staged secrets are live on ${ISSUER}`);
+    expect(r.out).toContain(`not applied: pass --confirm-secrets-applied once the staged secrets are live on ${TARGET}`);
   }, 20000);
 });
+
+for (const instance of [ISSUER, TARGET]) {
+  test.each([false, true])(`--fabric refuses --cimd-allowed-hosts for ${instance} before writes (dryRun=%s)`, async (dryRun) => {
+    const r = await runEnable(SHIPPED, ["--instance", instance, "--fabric", "--cimd-allowed-hosts", "claude.ai", ...(dryRun ? ["--dry-run"] : [])], true);
+    expect(r.exit).toBe("process.exit(1)");
+    expect(r.err).toContain("refused for a Fabric instance");
+    expect(r.out).toBe("");
+    expect(r.configAfter).toBe(r.configBefore);
+    expect(r.keyWritten).toBe(false);
+    expect(r.secretsWritten).toBe(false);
+    expect(r.secretSets).toEqual([]);
+  });
+}
