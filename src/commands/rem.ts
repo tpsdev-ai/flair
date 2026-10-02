@@ -11,6 +11,7 @@
  * Do not import src/cli.ts from here — that would cycle and pull the
  * non-strict entry into the strict check.
  */
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
@@ -616,7 +617,7 @@ export function register(program: Command): void {
           return;
         }
         // Fetch the candidate
-        const candidate = await api("GET", `/MemoryCandidate/${encodeURIComponent(candidateId)}`);
+        const candidate = await api("GET", `/MemoryCandidate/${encodeRecordId(candidateId)}`);
         const candidateData = (candidate && !candidate.error) ? candidate : null;
         const decision = decideCandidateAction(candidateData, "promote");
         if (!decision.ok) {
@@ -643,7 +644,7 @@ export function register(program: Command): void {
           const sourceIds: string[] = Array.isArray(candidate.sourceMemoryIds) ? candidate.sourceMemoryIds : [];
           for (const sid of sourceIds) {
             try {
-              const mem = await api("GET", `/Memory/${encodeURIComponent(String(sid))}`);
+              const mem = await api("GET", `/Memory/${encodeRecordId(String(sid))}`);
               if (mem && !mem.error) {
                 sourceFetches.push({ ok: true, tags: Array.isArray(mem.tags) ? mem.tags : [] });
               } else {
@@ -675,7 +676,7 @@ export function register(program: Command): void {
 
         // Memory promotion is handled by the server workflow above.
         const soulId = `${candidate.agentId}-${opts.key}`;
-        const soulWrite = await api("PUT", `/Soul/${encodeURIComponent(soulId)}`, {
+        const soulWrite = await api("PUT", `/Soul/${encodeRecordId(soulId)}`, {
           id: soulId,
           agentId: candidate.agentId,
           key: opts.key,
@@ -691,7 +692,7 @@ export function register(program: Command): void {
         }
         console.log(`✅ Wrote Soul ${soulId} (key=${opts.key})`);
         // Update the candidate row
-        const upd = await api("PUT", `/MemoryCandidate/${encodeURIComponent(candidateId)}`, {
+        const upd = await api("PUT", `/MemoryCandidate/${encodeRecordId(candidateId)}`, {
           ...candidate,
           status: "promoted",
           target: opts.to,
@@ -730,7 +731,7 @@ export function register(program: Command): void {
       const reviewerId = opts.reviewer || process.env.FLAIR_AGENT_ID || "admin";
 
       try {
-        const candidate = await api("GET", `/MemoryCandidate/${encodeURIComponent(candidateId)}`);
+        const candidate = await api("GET", `/MemoryCandidate/${encodeRecordId(candidateId)}`);
         const candidateData = (candidate && !candidate.error) ? candidate : null;
         const decision = decideCandidateAction(candidateData, "reject");
         if (!decision.ok) {
@@ -744,7 +745,7 @@ export function register(program: Command): void {
         }
 
         const decidedAt = new Date().toISOString();
-        const upd = await api("PUT", `/MemoryCandidate/${encodeURIComponent(candidateId)}`, {
+        const upd = await api("PUT", `/MemoryCandidate/${encodeRecordId(candidateId)}`, {
           ...candidate,
           status: "rejected",
           reviewerId,

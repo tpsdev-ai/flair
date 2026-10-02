@@ -15,6 +15,7 @@ import { Command, Option } from "commander";
 import * as render from "../render.js";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
@@ -148,7 +149,7 @@ export function register(program: Command): void {
         const entities = parseEntitiesOptionOrExit(String(opts.entities));
         if (entities.length > 0) body.entities = entities;
       }
-      const out = await api("PUT", `/Memory/${memId}`, body, {
+      const out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, {
         agentId,
         agentIdSource: source,
         explicitAdminPass: opts.adminPass,
@@ -229,7 +230,7 @@ export function register(program: Command): void {
         body.derivedFrom = String(opts.derivedFrom).split(",").map((x: string) => x.trim()).filter(Boolean);
       }
 
-      const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { agentId, agentIdSource: source });
+      const out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, { agentId, agentIdSource: source });
       if (out?.error) {
         console.error(`Error writing task summary: ${out.error}`);
         process.exit(1);

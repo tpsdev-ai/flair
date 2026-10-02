@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 import yaml from "js-yaml";
+import { resolveHome, withHome } from "../../src/lib/home.ts";
 
 import {
   isLocalOrigin,
@@ -929,6 +930,43 @@ describe("selfVerifyMcpMetadata", () => {
     // Must NOT blame CIMD configuration — that is the misdirection this guards.
     expect(result.detail).not.toContain("clientIdMetadataDocuments");
   });
+
+  test("flair#2190: a valid issuer + CIMD with a DIFFERENT token endpoint is refused, naming expected vs found", async () => {
+    const wrong = "https://tokens.elsewhere.example/mcp/token";
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ ...CIMD_METADATA, token_endpoint: wrong }), { status: 200 })) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain(`token_endpoint=${JSON.stringify(wrong)}`);
+    expect(result.detail).toContain(`${ISSUER}/oauth/mcp/token`);
+  });
+
+  test("flair#2190: the exact MCP token endpoint passes", async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify(CIMD_METADATA), { status: 200 })) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+    expect(result.ok).toBe(true);
+    expect(result.tokenEndpoint).toBe(`${ISSUER}/oauth/mcp/token`);
+  });
+
+  test("flair#2190: a trailing slash on the issuer is normalized, so the exact endpoint still matches", async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify(CIMD_METADATA), { status: 200 })) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(`${ISSUER}/`, { fetchImpl });
+    expect(result.ok).toBe(true);
+  });
+
+  test("flair#2190: the endpoint comparison is exact, like the rest of the code — trailing slash, case and default-port variants on token_endpoint are refused", async () => {
+    for (const token_endpoint of [
+      `${ISSUER}/oauth/mcp/token/`,
+      `${ISSUER}/oauth/MCP/token`,
+      "https://flair.example.com:443/oauth/mcp/token",
+    ]) {
+      const fetchImpl = (async () =>
+        new Response(JSON.stringify({ ...CIMD_METADATA, token_endpoint }), { status: 200 })) as typeof fetch;
+      const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+      expect(result.ok).toBe(false);
+      expect(result.detail).toContain("not the MCP authorization server's");
+    }
+  });
 });
 
 describe("buildClaudePasteBlock", () => {
@@ -1783,22 +1821,32 @@ rest: true
     expect(readFileSync(configPath, "utf-8")).toBe(CONFIG_WITH_ENV_REF);
   });
 
-  test("file not found at explicit path", () => {
-    const result = updateLocalConfigMcpEnabled(true, "/nonexistent/config.yaml");
+  test("file not found at explicit path: re-run with the same explicit path", () => {
+    const result = updateLocalConfigMcpEnabled(true, configPath);
     expect(result.ok).toBe(false);
-    expect(result.detail).toContain("not found");
+    expect(result.detail).toBe(
+      `local config.yaml not found (tried: ${configPath}). ` +
+      `Place your component config.yaml at ${configPath}, then re-run with the same explicit path.`,
+    );
   });
 
-  test("file not found: reports the searched path (no ambient mutation)", () => {
-    // Do NOT call updateLocalConfigMcpEnabled(true) with no path: its default
-    // search is ["config.yaml", ~/.flair/config.yaml], so from the repo root it
-    // finds and MUTATES the repo's own config.yaml, and from elsewhere would
-    // mutate a real ~/.flair config. That poisoned the boot-safety integration
-    // test during the flair#1136 release cut. Use an explicit missing path.
-    const missing = join(configDir, "does-not-exist", "config.yaml");
-    const result = updateLocalConfigMcpEnabled(true, missing);
-    expect(result.ok).toBe(false);
-    expect(result.detail).toContain("not found");
+  test("file not found without explicit path: CLI remedy names only its search paths", () => {
+    const cwd = process.cwd();
+    try {
+      process.chdir(configDir);
+      withHome(configDir, () => {
+        const homeConfig = join(resolveHome(), ".flair", "config.yaml");
+        expect(homeConfig).toBe(join(configDir, ".flair", "config.yaml"));
+        const result = updateLocalConfigMcpEnabled(true);
+        expect(result.ok).toBe(false);
+        expect(result.detail).toBe(
+          `local config.yaml not found (tried: config.yaml, ${homeConfig}). ` +
+          `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${homeConfig}).`,
+        );
+      });
+    } finally {
+      process.chdir(cwd);
+    }
   });
 
   test("no @harperfast/oauth block in config", () => {
@@ -2200,5 +2248,56 @@ describe("enableMcp — standalone local config update (flair#1136)", () => {
       { fetchImpl },
     );
     expect(calls).toContain("ops:restart");
+  });
+
+  // ─── flair#2193: a failed local config update must stop before the restart ──
+
+  test.each(["explicit-path", "CLI-shaped"])("flair#2193: %s assembled failure detail preserves the caller's retry path and stops before restart", async (caller) => {
+    const { fetchImpl, calls } = fullMockFetch();
+    const explicitPath = join(dir, "absent-config.yaml");
+    const { localConfigPath, ...paths } = tempPaths();
+    const homeDir = mkdtempSync(join(dir, "home-"));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    const cwd = process.cwd();
+    let homeConfig: string;
+    let result: EnableMcpResult;
+    try {
+      process.env.HOME = homeDir;
+      process.env.USERPROFILE = homeDir;
+      homeConfig = join(resolveHome(), ".flair", "config.yaml");
+      expect(homeConfig).toBe(join(homeDir, ".flair", "config.yaml"));
+      if (caller === "CLI-shaped") {
+        rmSync(localConfigPath);
+        expect(existsSync(homeConfig)).toBe(false);
+        process.chdir(dir);
+      }
+      result = await enableMcp(
+        { ...BASE_PARAMS, ...paths, ...(caller === "explicit-path" ? { localConfigPath: explicitPath } : {}), confirmSecretsApplied: true },
+        { fetchImpl },
+      );
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevProfile;
+      process.chdir(cwd);
+    }
+
+    // No success result (the CLI exits non-zero on ok:false).
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("local-config-update");
+    // No restart, and none of the restart step's own calls: the flow stopped
+    // before captureBootDiscriminator.
+    expect(calls).not.toContain("ops:restart");
+    expect(calls).not.toContain("ops:system_information");
+    const failed = result.steps.find((s) => s.step === "local-config-update" && !s.ok);
+    expect(failed?.detail).toBe(caller === "explicit-path"
+      ? `local config.yaml not found (tried: ${explicitPath}). ` +
+        `Place your component config.yaml at ${explicitPath}, then re-run with the same explicit path. ` +
+        "This command did not restart the instance. Fix the cause above, then retry the call with the same explicit path."
+      : `local config.yaml not found (tried: config.yaml, ${homeConfig}). ` +
+        `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${homeConfig}). ` +
+        "This command did not restart the instance. Fix the cause above, then re-run `flair mcp enable`.");
   });
 });
