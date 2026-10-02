@@ -463,7 +463,7 @@ describe("classifyKeyFile", () => {
 
 /**
  * flair#1925 — a node-shaped seed (`flair_<hex8>.key`, no `.pub`) whose id no
- * Instance row names is an ORPHAN left by an abandoned first-boot mint. The
+ * Instance row names is an ORPHAN (e.g. left by an abandoned first-boot mint). The
  * classifier decides from the ids the caller read; `null` means the read did
  * not happen, and then NOTHING is offered as orphan.
  */
@@ -490,6 +490,9 @@ describe("classifyNodeKeySeed", () => {
     expect(d.class).toBe("unidentified");
     expect(d.class).not.toBe("orphan");
     expect(d.class).not.toBe("keep");
+    expect(d.reason).toBe(
+      `node-scoped federation seed — the Instance rows were not read, so whether any row names '${NODE}' is unknown; left in place`,
+    );
   });
 });
 

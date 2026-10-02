@@ -673,8 +673,8 @@ program
       }
 
       // flair#1925: an instance-shaped seed (`flair_<hex8>.key`, no `.pub`) that
-      // no Instance row names is an ORPHAN left by an abandoned first-boot mint
-      // — dead weight nothing cleans up. Advisory ONLY: doctor never removes a
+      // no Instance row names is an ORPHAN (e.g. left by an abandoned first-boot
+      // mint). Advisory ONLY: doctor never removes a
       // key, and this is not an issue (an unreferenced file is clutter, not a
       // broken state). The rows come from the local ops API, the same
       // admin-credentialed read the instance-identity section below uses. A

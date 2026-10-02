@@ -2187,8 +2187,7 @@ export function resolveCollisionSafeName(existingNames: Iterable<string>, filena
 export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan" | "unidentified" | "ignored";
 
 /**
- * The reason an unparseable `.key` file is reported with, shared by the two
- * classifiers (classifyKeyFile, classifyNodeKeySeed). "I could not parse this"
+ * The reason classifyKeyFile reports an unparseable `.key` file with. "I could not parse this"
  * and "this is a stale agent key" are different findings, and only the second
  * is safe to act on: `~/.flair/keys/<id>.key` is a namespace shared by two
  * writers, and an AES-256-GCM keystore blob is unparseable AS A SEED while
@@ -2255,8 +2254,9 @@ export function classifyKeyFile(
  * The first-boot `GET /FederationInstance` create path mints an instance id,
  * writes its seed (src/keystore.ts keyPath), and — when the confirming re-read
  * shows another row, or the table holds several rows and the request answers
- * 409 — does not keep it. The seed stays, referenced by nothing: an ORPHAN.
- * A node id an Instance row still names is a LIVE federation key.
+ * 409 — does not keep it, and the seed stays. A node id no Instance row names
+ * is an ORPHAN (e.g. left by that path); one an Instance row names is a LIVE
+ * federation key.
  *
  * `instanceIds: null` means the rows were NOT read. Nothing is then offered as
  * orphan — a seed whose row set is unknown is not a seed proven unreferenced,
@@ -2267,11 +2267,16 @@ export function classifyNodeKeySeed(
   instanceIds: readonly string[] | null,
   baseUrl: string,
 ): KeyPruneDecision {
-  if (instanceIds === null) return { class: "unidentified", reason: UNIDENTIFIED_SEED_REASON };
+  if (instanceIds === null) {
+    return {
+      class: "unidentified",
+      reason: `node-scoped federation seed — the Instance rows were not read, so whether any row names '${id}' is unknown; left in place`,
+    };
+  }
   if (instanceIds.includes(id)) {
     return { class: "keep", reason: `instance id '${id}' is named by an Instance row on ${baseUrl} — a live federation key, never pruned` };
   }
-  return { class: "orphan", reason: `no Instance row names '${id}' on ${baseUrl} — an abandoned first-boot mint (flair#1925)` };
+  return { class: "orphan", reason: `no Instance row names '${id}' on ${baseUrl} — unreferenced (e.g. an abandoned first-boot mint, flair#1925)` };
 }
 
 /**
@@ -2281,7 +2286,7 @@ export function classifyNodeKeySeed(
  * Doctor only ADVISES — it never removes a key. `instanceIds: null` means the
  * Instance rows were not read, which prints nothing at all: a zero count over
  * rows nobody saw would read as an all-clear. A node-shaped seed no Instance
- * row names is the abandoned-mint orphan (`flair keys prune` moves it under its
+ * row names is an orphan (`flair keys prune` moves it under its
  * own `--apply`).
  */
 export function orphanInstanceSeedAdvisory(input: {

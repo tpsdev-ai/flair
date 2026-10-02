@@ -21,7 +21,7 @@ import { join } from "node:path";
 import * as render from "../render.js";
 import { loadEd25519PrivateKeyFromFile } from "../mcp-client-assertion.js";
 import { defaultAdminPassPath, defaultKeysDir, isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
-import { probeInstanceIds } from "../lib/instance-identity-row.js";
+import { probeInstanceIds, type OpsEndpoint } from "../lib/instance-identity-row.js";
 import {
   describeAgentGateFinding,
   classifyKeyFile,
@@ -44,6 +44,7 @@ export type KeysCli = {
   probeFlairReachable: (url: string, timeoutMs?: number) => Promise<boolean>;
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveHttpPort: (opts: { port?: string | number }) => number;
 };
 
 let cli: KeysCli;
@@ -67,6 +68,9 @@ const resolveBaseUrl = (opts: { target?: string; url?: string; port?: string | n
 
 const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | number }): number =>
   cli.resolveOpsPort(opts);
+
+const resolveHttpPort = (opts: { port?: string | number }): number =>
+  cli.resolveHttpPort(opts);
 
 // ─── flair keys ────────────────────────────────────────────────────────────────
 // flair#734 — recoverable cleanup of stale/unregistered/invalid key files in
@@ -145,8 +149,8 @@ function isValidPrivateKeySeedFile(keyPath: string): boolean {
  *
  * Node-shaped seeds (`flair_<hex8>.key`, no `.pub` — isNodeKeyId) never enter
  * the agent path above. They are classified against the ids `readInstanceIds`
- * returns (flair#1925): a node id no Instance row names is an ORPHAN seed left
- * by an abandoned first-boot mint, and is prunable like a stale key. The read
+ * returns (flair#1925): a node id no Instance row names is an ORPHAN seed (e.g.
+ * left by an abandoned first-boot mint), and is prunable like a stale key. The read
  * runs once, and only when such a seed is present. When the read does not
  * happen (`unreadable`), every node seed stays `unidentified` and NOTHING is
  * offered as orphan: a seed whose row set is unknown is not a seed proven
@@ -269,6 +273,50 @@ export function applyKeyPrune(
   return moved;
 }
 
+/**
+ * The Instance-row read the orphan check decides against (flair#1925). The rows
+ * come from the local ops API — the one reader that does not need a signing key
+ * (a node-only keys dir has none) — with the local admin credential. A target
+ * not on this host or not on the HTTP port the ops port is derived from, or a
+ * missing credential, is `unreadable`: the command says why and offers NO orphan.
+ */
+export function makeReadInstanceIds(deps: {
+  baseUrl: string;
+  port?: string | number;
+  resolveHttpPort: (opts: { port?: string | number }) => number;
+  resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveAdminPass?: () => string | undefined;
+  probe?: (endpoint: OpsEndpoint) => Promise<InstanceIdsRead>;
+}): () => Promise<InstanceIdsRead> {
+  const { baseUrl, port } = deps;
+  const resolveAdminPass = deps.resolveAdminPass ?? (() => resolveLocalAdminPass(undefined));
+  const probe = deps.probe ?? probeInstanceIds;
+  return async () => {
+    if (!isLocalBase(baseUrl)) {
+      return {
+        state: "unreadable",
+        reason: `the Instance rows are read through the local ops API, and ${baseUrl} is not on this host`,
+      };
+    }
+    if (Number(new URL(baseUrl).port) !== deps.resolveHttpPort({ port })) {
+      return { state: "unreadable", reason: `the ops port for ${baseUrl} is not known on this host` };
+    }
+    let pass: string | undefined;
+    try {
+      pass = resolveAdminPass();
+    } catch (err: unknown) {
+      return { state: "unreadable", reason: err instanceof Error ? err.message : String(err) };
+    }
+    if (pass === undefined) {
+      return { state: "unreadable", reason: `no local admin credential at ${defaultAdminPassPath()} to read the Instance rows with` };
+    }
+    return probe({
+      opsUrl: `http://127.0.0.1:${deps.resolveOpsPort({ port })}`,
+      credentials: { user: resolveAdminUser(undefined), pass },
+    });
+  };
+}
+
 /** Register the `flair keys` command group (flair#1629). */
 export function register(program: Command): void {
   const keys = program.command("keys").description("Manage Ed25519 key files in the key directory");
@@ -284,33 +332,7 @@ export function register(program: Command): void {
       const keysDir: string = opts.keysDir ?? process.env.FLAIR_KEY_DIR ?? defaultKeysDir();
       const baseUrl = resolveBaseUrl({ target: opts.instance, port: opts.port });
       const apply = !!opts.apply;
-
-      // The Instance rows the orphan check decides against (flair#1925). They
-      // come from the local ops API — the one reader that does not need a
-      // signing key (a node-only keys dir has none) — with the instance's
-      // local admin credential. A target that is not on this host, or a missing
-      // credential, is `unreadable`: the command says why and offers NO orphan.
-      const readInstanceIds = async (): Promise<InstanceIdsRead> => {
-        if (!isLocalBase(baseUrl)) {
-          return {
-            state: "unreadable",
-            reason: `the Instance rows are read through the local ops API, and ${baseUrl} is not on this host`,
-          };
-        }
-        let pass: string | undefined;
-        try {
-          pass = resolveLocalAdminPass(undefined);
-        } catch (err: unknown) {
-          return { state: "unreadable", reason: err instanceof Error ? err.message : String(err) };
-        }
-        if (pass === undefined) {
-          return { state: "unreadable", reason: `no local admin credential at ${defaultAdminPassPath()} to read the Instance rows with` };
-        }
-        return probeInstanceIds({
-          opsUrl: `http://127.0.0.1:${resolveOpsPort({ port: opts.port })}`,
-          credentials: { user: resolveAdminUser(undefined), pass },
-        });
-      };
+      const readInstanceIds = makeReadInstanceIds({ baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort });
 
       console.log(`\n${render.wrap(render.c.bold, "🔑 Flair Keys Prune")}${apply ? "" : render.wrap(render.c.dim, " (dry run)")}\n`);
       console.log(`  Keys directory: ${render.wrap(render.c.dim, keysDir)}`);

@@ -4661,6 +4661,7 @@ bindKeysCli({
   probeFlairReachable,
   resolveBaseUrl,
   resolveOpsPort,
+  resolveHttpPort,
 });
 registerKeys(program);
 

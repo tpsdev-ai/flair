@@ -32,6 +32,7 @@ import nacl from "tweetnacl";
 
 import { classifyKeysDir, applyKeyPrune, program } from "../../src/cli.ts";
 import { PRUNED_DIR_NAME } from "../../src/doctor-client.ts";
+import { makeReadInstanceIds } from "../../src/commands/keys.ts";
 
 const BASE_URL = "http://127.0.0.1:19926";
 const CLI_SOURCE = join(__dirname, "..", "..", "src", "cli.ts");
@@ -265,6 +266,47 @@ describe("classifyKeysDir — orphan instance seeds (flair#1925)", () => {
   });
 });
 
+describe("makeReadInstanceIds — the Instance rows are read only for the targeted local instance (flair#1925)", () => {
+  function build(baseUrl: string, pass: string | null = "pw") {
+    let probes = 0;
+    const read = makeReadInstanceIds({
+      baseUrl,
+      resolveHttpPort: () => 9926,
+      resolveOpsPort: () => 9925,
+      resolveAdminPass: () => pass ?? undefined,
+      probe: async () => { probes++; return { state: "read" as const, ids: [] }; },
+    });
+    return { read, probes: () => probes };
+  }
+
+  it("a local target on another port → unreadable, no read", async () => {
+    const b = build("http://127.0.0.1:29926");
+    const res = await b.read();
+    expect(res.state).toBe("unreadable");
+    expect(b.probes()).toBe(0);
+  });
+
+  it("a non-local target → unreadable, no read", async () => {
+    const b = build("http://flair.example.com:9926");
+    const res = await b.read();
+    expect(res.state).toBe("unreadable");
+    expect(b.probes()).toBe(0);
+  });
+
+  it("no local admin credential → unreadable, the ops read is never called", async () => {
+    const b = build("http://127.0.0.1:9926", null);
+    const res = await b.read();
+    expect(res.state).toBe("unreadable");
+    expect(b.probes()).toBe(0);
+  });
+
+  it("the targeted local instance with a credential → the rows are read", async () => {
+    const b = build("http://127.0.0.1:9926");
+    expect((await b.read()).state).toBe("read");
+    expect(b.probes()).toBe(1);
+  });
+});
+
 describe("classifyKeysDir — unreachable instance aborts the whole run", () => {
   it("a network failure on the registration check aborts before classifying anything, nothing moved", async () => {
     writeSeedKey(keysDir, "agent-a");
@@ -444,9 +486,8 @@ describe("flair keys prune — subprocess acceptance checks", () => {
   // flair#1026 prune-guard: the CLI must *report* an unparseable file as
   // unidentified and must not treat an unidentified-only dir as empty.
   // flair#1925: a NODE-shaped file's orphan status needs the Instance rows,
-  // which this isolated HOME has no admin credential to read — the run says so
-  // and offers nothing as orphan. No request is sent (there is nothing to send
-  // it with), so exit 0.
+  // which this run does not read — the run says so and offers nothing as
+  // orphan. No request is sent, so exit 0.
   test("unparseable .key is reported unidentified, not 'no key files found', and not pruned", { timeout: 30_000 }, () => {
     const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
     writeFileSync(join(subKeysDir, "flair_deadbeef.key"), blob);
