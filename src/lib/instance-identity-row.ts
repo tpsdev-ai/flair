@@ -638,6 +638,27 @@ export async function probeInstanceIdentity(
   return { rows, roleNames };
 }
 
+export async function probeInstanceIds(
+  endpoint: OpsEndpoint,
+): Promise<{ state: "read"; ids: string[]; agentIds: string[] | null; agentReadReason?: string } | { state: "unreadable"; reason: string }> {
+  try {
+    const rows = await readInstanceRows(endpoint);
+    const ids = rows.map((r) => r.id);
+    try {
+      const parsed = await opsPost(endpoint, { operation: "sql", sql: "SELECT id FROM flair.Agent" }, "Agent read");
+      const agents = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
+      if (agents === null || agents.some((row: any) => typeof row?.id !== "string" || !row.id.trim())) {
+        throw new Error("Agent read returned no usable row list");
+      }
+      return { state: "read", ids, agentIds: agents.map((row: { id: string }) => row.id) };
+    } catch (err: unknown) {
+      return { state: "read", ids, agentIds: null, agentReadReason: err instanceof Error ? err.message : String(err) };
+    }
+  } catch (err: unknown) {
+    return { state: "unreadable", reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /**
  * What a prune prints when it is about to delete rows (flair#1883 round 3).
  *

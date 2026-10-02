@@ -508,8 +508,7 @@ function resolveLocalConfigPath(explicitPath?: string): { configPath: string | n
  * to the reference). `enabled: false` writes literal `false` — decisively off
  * regardless of environment.
  *
- * Looks for config.yaml at `explicitPath`, then `./config.yaml`, then
- * `~/.flair/config.yaml`.
+ * Uses `explicitPath` alone if given; otherwise `./config.yaml`, then `~/.flair/config.yaml`.
  */
 export function updateLocalConfigMcpEnabled(
   enabled: boolean,
@@ -526,7 +525,11 @@ export function updateLocalConfigMcpEnabled(
     return {
       ok: false,
       detail: `local config.yaml not found (tried: ${candidates.join(", ")}). ` +
-        `Set mcp.enabled: ${targetLabel} in your component config.yaml manually, then restart.`,
+        (enabled
+          ? explicitPath
+            ? `Place your component config.yaml at ${explicitPath}, then re-run with the same explicit path.`
+            : `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${candidates[1]}).`
+          : `Set mcp.enabled: ${targetLabel} in your component config.yaml manually, then restart.`),
     };
   }
 
@@ -2306,7 +2309,28 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // ── Standalone (non-Fabric): update local config + restart ────────────
     currentStep = "local-config-update";
     const localConfigResult = updateLocalConfigMcpEnabled(true, params.localConfigPath);
-    push(localConfigResult.ok, localConfigResult.detail);
+    if (!localConfigResult.ok) {
+      // flair#2193: stop BEFORE the restart. The mcp.enabled update was not
+      // confirmed (the file may have changed), and the metadata checks below
+      // could still pass and report success.
+      const retry = params.localConfigPath
+        ? "retry the call with the same explicit path"
+        : "re-run `flair mcp enable`";
+      push(false, `${localConfigResult.detail} This command did not restart the instance. Fix the cause above, then ${retry}.`);
+      return {
+        ok: false,
+        dryRun,
+        steps,
+        failedStep: "local-config-update",
+        issuer,
+        resource: `${issuer}/mcp`,
+        secretsMechanism: secretsResult.mechanism,
+        secretsPath: secretsResult.path,
+        signingKeyFilePath: keyResult.path,
+        callbackUrl,
+      };
+    }
+    push(true, localConfigResult.detail);
 
     // flair#2113: ensure --cimd-allowed-hosts (written unless the file already
     // holds that exact list) and read it back. A failure here stops the flow

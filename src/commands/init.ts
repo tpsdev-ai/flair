@@ -79,6 +79,7 @@ export type InitCli = {
   waitForHealth: (...args: any[]) => any;
   writeDaemonSidecar: (...args: any[]) => any;
   registerInitLaunchdService: (...args: any[]) => any;
+  initLaunchdExitCode: (kind: string) => number;
   MQTT_DISABLED_CONFIG: any;
   STARTUP_TIMEOUT_MS: any;
 };
@@ -252,6 +253,11 @@ function writeDaemonSidecar(...args: any[]): any {
 
 function registerInitLaunchdService(...args: any[]): any {
   return cli.registerInitLaunchdService(...args);
+}
+
+/** `flair init`'s launchd-step exit code (flair#2040, flair#2085): 1 for a refused, down or uncertain outcome, else 0. */
+function initLaunchdExitCode(kind: string): number {
+  return cli.initLaunchdExitCode(kind);
 }
 
 function repointMainServiceUnit(...args: any[]): any {
@@ -1008,9 +1014,8 @@ program
           for (const line of launchdStep.lines as Array<{ stream: "out" | "err"; text: string }>) {
             (line.stream === "err" ? console.error : console.log)(line.text);
           }
-          if (launchdStep.kind === "refused" || launchdStep.kind === "down" || launchdStep.kind === "uncertain") {
-            process.exit(1);
-          }
+          const launchdExit = initLaunchdExitCode(launchdStep.kind);
+          if (launchdExit !== 0) process.exit(launchdExit);
         }
       }
 
