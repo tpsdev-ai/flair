@@ -23,11 +23,13 @@ let signalError: string | undefined;
 let pollError: string | undefined;
 let goneAtDeadline = false;
 let deadlineDuringLiveness = false;
-let identityAtDeadline: number | null = started;
-let finalProbe: "timeout" | "error" | "garbage" | "self" | "empty" | "exit1" = "empty";
+let identityAfterTerm: number | null = started;
+let identityReadMs = 0;
+let finalProbe: "timeout" | "error" | "garbage" | "self" | "empty" | "whitespace" | "exit1" | "exit1-stderr" | "exit1-stdout" | "exit1-signal" | "exit1-error" | "exit0-error" = "empty";
 let healthAfterTerm: "refused" | "hang" | "late-refused" = "refused";
 let accelerateProbe = false;
 const identityChecks: number[] = [];
+const identityBudgets: number[] = [];
 const finalProbeTimeouts: number[] = [];
 const healthChecks: number[] = [];
 const savedHome = process.env.HOME;
@@ -38,10 +40,14 @@ process.env.HOME = home;
 Object.defineProperty(process, "platform", { value: "darwin" });
 mock.module("node:os", () => ({ ...require("node:os"), homedir: () => home }));
 mock.module("../../src/lib/process-start-time.js", () => ({
-  readProcessStartTimeMs: () => {
-    if (signalled && elapsed >= 60_000) {
+  readProcessStartTimeMs: (_pid: number, deadline = Infinity) => {
+    if (signalled) identityBudgets.push(deadline - Date.now());
+    if (Date.now() >= deadline) return null;
+    if (signalled) {
+      elapsed += Math.min(identityReadMs, deadline - Date.now());
+      if (Date.now() >= deadline) return null;
       identityChecks.push(elapsed);
-      return identityAtDeadline;
+      return identityAfterTerm;
     }
     return started;
   },
@@ -69,8 +75,14 @@ mock.module("node:child_process", () => ({
       }
       if (finalProbe === "error") throw Object.assign(new Error("failed"), { status: 2, stdout: "", stderr: "lsof failed" });
       if (finalProbe === "exit1") throw Object.assign(new Error("no match"), { status: 1, stdout: "", stderr: "" });
+      if (finalProbe === "exit1-stderr") throw Object.assign(new Error("failed"), { status: 1, stdout: "", stderr: "lsof failed" });
+      if (finalProbe === "exit1-stdout") throw Object.assign(new Error("failed"), { status: 1, stdout: String(pid), stderr: "" });
+      if (finalProbe === "exit1-signal") throw Object.assign(new Error("failed"), { status: 1, stdout: "", stderr: "", signal: "SIGKILL" });
+      if (finalProbe === "exit1-error") throw Object.assign(new Error("failed"), { status: 1, stdout: "", stderr: "", error: new Error("failed") });
+      if (finalProbe === "exit0-error") throw Object.assign(new Error("failed"), { status: 0, stdout: "", stderr: "" });
       if (finalProbe === "garbage") return "not a pid";
       if (finalProbe === "self") return String(process.pid);
+      if (finalProbe === "whitespace") return " \t\n";
       return "";
     }
     if (cmd === "ps") return `node /fixture/node_modules/harper/dist/bin/harper.js run .`;
@@ -146,11 +158,12 @@ beforeEach(() => {
   signalError = pollError = undefined;
   goneAtDeadline = false;
   deadlineDuringLiveness = false;
-  identityAtDeadline = started;
+  identityAfterTerm = started;
+  identityReadMs = 0;
   finalProbe = "empty";
   healthAfterTerm = "refused";
   accelerateProbe = false;
-  for (const items of [commands, signals, identityChecks, finalProbeTimeouts, healthChecks]) items.length = 0;
+  for (const items of [commands, signals, identityChecks, identityBudgets, finalProbeTimeouts, healthChecks]) items.length = 0;
   writeFileSync(join(dataDir, "hdb.pid"), String(pid));
   writeFileSync(join(dataDir, "flair-daemon.json"), JSON.stringify({ pid, port, startTimeMs: started, flairVersion: "test" }));
   const config = { rootPath: dataDir, http: { port }, operationsApi: { network: { port: port - 1 } } };
@@ -180,40 +193,52 @@ async function failedStop() {
 }
 
 test("a direct process surviving SIGTERM consumes only the shared 60s stop deadline", async () => {
+  identityReadMs = 100;
   const result = await failedStop();
   expect(elapsed).toBe(60_000);
   expect(result.detail).toContain(`waiting for direct Harper process ${pid}`);
   expect(result.detail).toContain("not observed to exit before the deadline");
   expect(result.detail).toContain("SIGTERM sent");
   expect(result.detail).toContain(dataDir);
-  expect(identityChecks).toEqual([60_000]);
+  expect(identityChecks).toEqual([100]);
+  expect(identityBudgets).toEqual([2_000]);
+  expect(result.detail).toContain(`identity: verified, observed at ${new Date(started + 100).toISOString()}`);
   expect(healthChecks).toEqual([]);
   expect(finalProbeTimeouts).toEqual([]);
   expect(signals).toEqual(["SIGTERM"]);
 });
 
+test("a slow identity read is bounded before the shared deadline", async () => {
+  identityReadMs = 10_000;
+  const result = await failedStop();
+  expect(identityBudgets).toEqual([2_000]);
+  expect(identityChecks).toEqual([]);
+  expect(result.detail).toContain(`identity: unverified, observed at ${new Date(started + 2_000).toISOString()}`);
+  expect(elapsed).toBe(60_000);
+});
+
 for (const code of ["EPERM", "EINVAL"]) {
   test(`signal and liveness ${code} are not proof of exit`, async () => {
     signalError = pollError = code;
-    identityAtDeadline = null;
+    identityAfterTerm = null;
     const result = await failedStop();
     expect(elapsed).toBe(60_000);
     expect(result.detail).toContain(`SIGTERM failed (${code})`);
     expect(result.detail).toContain("identity: unverified");
     expect(result.detail).toContain(`liveness: ${code === "EPERM" ? "eperm" : "unknown"}`);
-    expect(identityChecks).toEqual([60_000]);
+    expect(identityChecks).toEqual([0]);
     expect(healthChecks).toEqual([]);
   });
 }
 
 test("ESRCH at the deadline is reported without claiming the process is still alive", async () => {
   goneAtDeadline = true;
-  identityAtDeadline = null;
+  identityAfterTerm = null;
   const result = await failedStop();
   expect(result.detail).toContain("liveness: gone");
   expect(result.detail).not.toContain("still alive");
   expect(elapsed).toBe(60_000);
-  expect(identityChecks).toEqual([60_000]);
+  expect(identityChecks).toEqual([0]);
   expect(healthChecks).toEqual([]);
 });
 
@@ -226,7 +251,7 @@ test("a final listener probe timeout is a named stop failure", async () => {
   expect(finalProbeTimeouts).toEqual([2_000]);
 });
 
-for (const outcome of ["error", "garbage", "self"] as const) {
+for (const outcome of ["error", "garbage", "self", "empty", "whitespace", "exit1-stderr", "exit1-stdout", "exit1-signal", "exit1-error", "exit0-error"] as const) {
   test(`the final listener probe rejects ${outcome}`, async () => {
     exitsOnTerm = true;
     finalProbe = outcome;
@@ -244,7 +269,7 @@ test("the final listener probe gets only the shared deadline's remaining time", 
   expect(elapsed).toBe(60_000);
 });
 
-test("a hanging health response body cannot outlive the shared deadline", async () => {
+test("the stop path's wait for a hanging health body is bounded by the shared deadline", async () => {
   exitsOnTerm = true;
   healthAfterTerm = "hang";
   accelerateProbe = true;
@@ -254,14 +279,12 @@ test("a hanging health response body cannot outlive the shared deadline", async 
   expect(finalProbeTimeouts).toEqual([]);
 });
 
-for (const noListener of ["empty", "exit1"] as const) {
-  test(`a successful ${noListener} listener result allows the replacement load attempt`, async () => {
-    exitsOnTerm = true;
-    finalProbe = noListener;
-    await repairLaunchdManagement(dataDir, port);
-    expect(commands.some((cmd) => /launchctl bootstrap/.test(cmd))).toBe(true);
-  });
-}
+test("a clean exit-status-1 no-match allows the replacement load attempt", async () => {
+  exitsOnTerm = true;
+  finalProbe = "exit1";
+  await repairLaunchdManagement(dataDir, port);
+  expect(commands.some((cmd) => /launchctl bootstrap/.test(cmd))).toBe(true);
+});
 
 test("SIGTERM ESRCH permits the remaining probes without claiming delivery", async () => {
   signalError = "ESRCH";
@@ -288,5 +311,5 @@ test("a liveness probe reaching the deadline does not start another sleep", asyn
   await failedStop();
   expect(elapsed).toBe(60_000);
   expect(sleep.mock.calls.filter((call: unknown[]) => Number(call[1]) <= 500)).toEqual([]);
-  expect(identityChecks).toEqual([60_000]);
+  expect(identityChecks).toEqual([0]);
 });

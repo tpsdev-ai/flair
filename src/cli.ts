@@ -7706,6 +7706,12 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
     catch (err: any) {
       signalResult = err?.code === "ESRCH" ? "SIGTERM found no process (ESRCH)" : `SIGTERM failed (${err?.code ?? "unknown error"})`;
     }
+    const identity = verifyIdentity({
+      pidfilePid: state.pid,
+      sidecar: evidence.identity.kind === "verified" ? readSidecar(dataDir) : { kind: "absent" },
+      readStartTime: (pid) => readProcessStartTimeMs(pid, Math.min(stopDeadline, Date.now() + 2_000)),
+    });
+    const identityObservedAt = Date.now();
     while (Date.now() < stopDeadline && probePidLiveness(state.pid).kind !== "gone") {
       const remaining = stopDeadline - Date.now();
       if (remaining <= 0) break;
@@ -7713,13 +7719,11 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
     }
     if (Date.now() >= stopDeadline) {
       const liveness = probePidLiveness(state.pid);
-      const identity = verifyIdentity({
-        pidfilePid: state.pid,
-        sidecar: evidence.identity.kind === "verified" ? readSidecar(dataDir) : { kind: "absent" },
-        readStartTime: (pid) => readProcessStartTimeMs(pid, stopDeadline),
-      });
       const result = timeoutResult(`waiting for direct Harper process ${state.pid} to exit`);
-      if (result.kind === "failed") result.detail += ` ${signalResult}; not observed to exit before the deadline (liveness: ${liveness.kind}; identity: ${identity.kind}).`;
+      const identityDetail = identityObservedAt < stopDeadline
+        ? `${identity.kind}, observed at ${new Date(identityObservedAt).toISOString()}`
+        : "not observed before the deadline";
+      if (result.kind === "failed") result.detail += ` ${signalResult}; not observed to exit before the deadline (liveness: ${liveness.kind}; identity: ${identityDetail}).`;
       return result;
     }
   }
@@ -7740,6 +7744,7 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
   const listenerTimeout = Math.min(2_000, stopDeadline - Date.now());
   if (listenerTimeout <= 0) return timeoutResult(`checking the final listener on port ${port}`);
   let output: string;
+  let noMatch = false;
   try {
     output = execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], {
       encoding: "utf-8", timeout: listenerTimeout, killSignal: "SIGKILL",
@@ -7749,6 +7754,7 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
         typeof err?.stdout === "string" && err.stdout.trim() === "" &&
         typeof err?.stderr === "string" && err.stderr.trim() === "") {
       output = "";
+      noMatch = true;
     } else {
       return {
         kind: "failed",
@@ -7758,10 +7764,11 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
     }
   }
   if (Date.now() >= stopDeadline) return timeoutResult(`checking the final listener on port ${port}`);
-  if (typeof output !== "string") {
+  if (noMatch) return null;
+  if (typeof output !== "string" || output.trim() === "") {
     return { kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] };
   }
-  const lines = output.trim() === "" ? [] : output.trim().split("\n");
+  const lines = output.trim().split("\n");
   if (lines.some((line) => !/^[1-9][0-9]*$/.test(line.trim()) || !Number.isSafeInteger(Number(line.trim())))) {
     return { kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] };
   }

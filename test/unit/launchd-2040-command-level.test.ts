@@ -7,8 +7,7 @@
 //
 // Each case drives the REAL executor — doctor's
 // `repairLaunchdManagement`, init's `registerInitLaunchdService`, and the
-// `flair start` command itself — not a helper, so removing a gate from the
-// executor turns a test red (see the mutation table in the PR).
+// `flair start` command itself.
 //
 // SAFETY — this host may run a real Flair under launchd:
 //
