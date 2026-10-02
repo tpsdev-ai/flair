@@ -42,12 +42,15 @@ export function applyLstartZoneOffset(
   return targetParsedMs - (ownParsedMs - ownTrueStartMs);
 }
 
-function readPsLstart(pid: number): string | null {
+function readPsLstart(pid: number, deadline = Infinity): string | null {
+  const timeout = Math.min(2000, deadline - Date.now());
+  if (timeout <= 0) return null;
   try {
     return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf-8",
       env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
-      timeout: 2000,
+      timeout,
+      killSignal: "SIGKILL",
     });
   } catch {
     return null;
@@ -138,7 +141,7 @@ export function readProcessStartSecondMs(pid: number): number | null {
   return null;
 }
 
-export function readProcessStartTimeMs(pid: number): number | null {
+export function readProcessStartTimeMs(pid: number, deadline = Infinity): number | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (process.platform === "linux") {
     try {
@@ -156,11 +159,11 @@ export function readProcessStartTimeMs(pid: number): number | null {
     }
   }
   if (process.platform === "darwin") {
-    const targetRaw = readPsLstart(pid);
+    const targetRaw = readPsLstart(pid, deadline);
     if (targetRaw === null) return null;
     const targetParsed = parsePsLstart(targetRaw);
     if (targetParsed === null) return null;
-    const ownRaw = pid === process.pid ? targetRaw : readPsLstart(process.pid);
+    const ownRaw = pid === process.pid ? targetRaw : readPsLstart(process.pid, deadline);
     if (ownRaw === null) return null;
     const ownParsed = parsePsLstart(ownRaw);
     if (ownParsed === null) return null;
