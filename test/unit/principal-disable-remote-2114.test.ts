@@ -1,16 +1,7 @@
 /**
- * principal-disable-remote-2114.test.ts — flair#2114.
- *
- * `flair principal disable` gains a remote target (`--target`/`--ops-target`,
- * the shape `flair init` / `flair agent add` use). The remote path sends the
- * same ops `update` to the derived ops API; a remote target requires an
- * explicit `--admin-pass` (the local env/file credentials are never sent to
- * another instance); a request that fails, or a target that rejects it,
- * refuses with a named remedy and a non-zero exit. The local path still
- * targets `127.0.0.1` at `--ops-port`.
- *
- * Spawns the built CLI (HOME-isolated) against a mock operations API on an
- * OS-assigned port.
+ * Remote principal state changes through the built CLI. Runs with loopback
+ * listeners outside the restricted agent sandbox. The same suite checks the
+ * local fallback and both enable/disable verbs.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -23,17 +14,22 @@ import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
+// mcp enable's served-instance resolver uses ops port 9925. Bind an unusual
+// loopback address so this stub cannot be confused with a real local instance.
+const REMOTE_HOST = "127.77.21.14";
+const REMOTE_OPS_PORT = 9925;
+const REMOTE_INSTANCE = `http://${REMOTE_HOST}:19926`;
+interface Observed { operation: string; authorization: string; body: any; url: string }
+type Mode = "ok" | "empty-body" | "empty-result" | "error-payload" | "wrong-state" | "read-empty" | "read-error" | "read-other-id" | "deny" | "redirect" | "hang";
 
-interface Observed { method: string; url: string; authorization: string; body: string }
-
-function runCli(args: string[], env: Record<string, string>): Promise<{ stdout: string; stderr: string; code: number | null }> {
+function runCli(args: string[], env: Record<string, string> = {}): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     const child = spawn("bun", [CLI_PATH, ...args], {
       cwd: env.HOME,
       env: { ...process.env, FLAIR_AGENT_ID: "", FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TARGET: "", FLAIR_OPS_TARGET: "", ...env },
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 20_000, // literal so the spawn-budget gate sees a deadline (flair#1807)
+      timeout: 20_000,
     });
     let stdout = "";
     let stderr = "";
@@ -49,117 +45,191 @@ function runCli(args: string[], env: Record<string, string>): Promise<{ stdout: 
   });
 }
 
-function startStub(): Promise<{ server: Server; url: string; port: number; seen: Observed[]; status: () => number; setStatus: (n: number) => void }> {
-  let status = 200;
+async function startStub(host: string, port: number) {
   const seen: Observed[] = [];
-  return new Promise((resolve) => {
-    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-      let body = "";
-      req.on("data", (c) => (body += c));
-      req.on("end", () => {
-        seen.push({ method: req.method ?? "", url: req.url ?? "", authorization: String(req.headers.authorization ?? ""), body });
-        res.writeHead(status, { "Content-Type": "application/json" });
-        res.end(status === 200 ? "[]" : JSON.stringify({ error: "denied" }));
-      });
-    });
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      const port = typeof addr === "object" && addr ? addr.port : 0;
-      resolve({ server, url: `http://127.0.0.1:${port}`, port, seen, status: () => status, setStatus: (n) => { status = n; } });
+  let mode: Mode = "ok";
+  let redirectTo = "";
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const body = JSON.parse(raw);
+      seen.push({ operation: body.operation, authorization: String(req.headers.authorization ?? ""), body, url: req.url ?? "" });
+      if (mode === "hang") return;
+      if (mode === "redirect") {
+        res.writeHead(307, { Location: redirectTo });
+        res.end();
+        return;
+      }
+      if (mode === "deny") {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end('{"error":"secret-response-token"}');
+        return;
+      }
+      const response = body.operation === "update"
+        ? mode === "empty-body" ? "" : mode === "empty-result" ? "[]" : mode === "error-payload" ? '{"error":"secret-response-token"}' : JSON.stringify({ update_hashes: [body.records[0].id], skipped_hashes: [] })
+        : mode === "read-empty" ? "[]" : mode === "read-error" ? '{"error":"secret-response-token"}' : JSON.stringify([{ id: mode === "read-other-id" ? "mallory" : body.search_value, status: mode === "wrong-state" ? "active" : body.search_value === "bob" ? "active" : expectedStatus }]);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(response);
     });
   });
+  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+  const address = server.address();
+  const boundPort = typeof address === "object" && address ? address.port : port;
+  return { server, seen, port: boundPort, url: `http://${host}:${boundPort}`, setMode: (m: Mode) => { mode = m; }, setRedirect: (u: string) => { redirectTo = u; } };
 }
 
-async function closedPort(): Promise<number> {
-  const s = await startStub();
-  const p = s.port;
-  await new Promise<void>((r) => s.server.close(() => r()));
-  return p;
-}
+let expectedStatus = "deactivated";
+const args = (verb: "disable" | "enable", id = "alice") => ["principal", verb, id, "--instance", REMOTE_INSTANCE, "--admin-pass", "target-pass-2114"];
 
-describe("flair principal disable: remote target (#2114)", () => {
+// Tests are sequential: each case sets the stub's response mode and inspects
+// the exact requests made by one child process.
+describe("principal disable/enable remote instance (#2114)", () => {
   let scratch: string;
-  let stub: Awaited<ReturnType<typeof startStub>>;
-
+  let remote: Awaited<ReturnType<typeof startStub>>;
+  let local: Awaited<ReturnType<typeof startStub>>;
+  let sink: Awaited<ReturnType<typeof startStub>>;
   beforeAll(async () => {
     ensureCliBuild();
     scratch = mkdtempSync(join(tmpdir(), "flair-2114-home-"));
-    stub = await startStub();
+    remote = await startStub(REMOTE_HOST, REMOTE_OPS_PORT);
+    local = await startStub("127.0.0.1", 0);
+    sink = await startStub("127.0.0.1", 0);
   });
-
   afterAll(async () => {
-    await new Promise<void>((r) => stub.server.close(() => r()));
+    for (const stub of [remote, local, sink]) {
+      stub.server.closeAllConnections();
+      await new Promise<void>((resolve) => stub.server.close(() => resolve()));
+    }
     rmSync(scratch, { recursive: true, force: true });
   });
 
-  test("remote: sends the ops update to the target's ops API and reports success", async () => {
-    stub.seen.length = 0;
-    stub.setStatus(200);
-    const { stdout, stderr, code } = await runCli(
-      ["principal", "disable", "alice", "--ops-target", stub.url, "--admin-pass", "target-pass-2114"],
-      { HOME: scratch },
-    );
-    expect(stderr).toBe("");
-    expect(code).toBe(0);
-    expect(stdout).toContain("Principal 'alice' deactivated");
-    expect(stub.seen).toHaveLength(1);
-    expect(stub.seen[0].method).toBe("POST");
-    expect(stub.seen[0].url).toBe("/");
-    expect(stub.seen[0].authorization.startsWith("Basic ")).toBe(true);
-    const body = JSON.parse(stub.seen[0].body);
-    expect(body).toMatchObject({ operation: "update", database: "flair", table: "Agent" });
-    expect(body.records[0]).toMatchObject({ id: "alice", status: "deactivated" });
+  for (const [verb, status, word] of [["disable", "deactivated", "deactivated"], ["enable", "active", "activated"]] as const) {
+    test(`${verb}: explicit --instance wins over all ambient targets and confirms ${status}`, async () => {
+      remote.seen.length = 0;
+      sink.seen.length = 0;
+      remote.setMode("ok");
+      expectedStatus = status;
+      const result = await runCli(args(verb), { HOME: scratch, FLAIR_URL: "https://wrong.example", FLAIR_TARGET: sink.url, FLAIR_OPS_TARGET: sink.url, FLAIR_ADMIN_PASS: "local-secret" });
+      expect(result.code).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain(`Principal 'alice' ${word}`);
+      expect(remote.seen.map((x) => x.operation)).toEqual(["update", "search_by_value"]);
+      expect(remote.seen[0].body.records[0]).toMatchObject({ id: "alice", status });
+      expect(remote.seen[1].body.search_value).toBe("alice");
+      expect(remote.seen[0].authorization).toBe(`Basic ${Buffer.from("admin:target-pass-2114").toString("base64")}`);
+      expect(sink.seen).toHaveLength(0);
+    }, 25_000);
+  }
+
+  test("FLAIR_URL supplies the instance when --instance is absent", async () => {
+    remote.seen.length = 0;
+    remote.setMode("ok");
+    expectedStatus = "deactivated";
+    const result = await runCli(["principal", "disable", "alice", "--admin-pass", "target-pass-2114"], { HOME: scratch, FLAIR_URL: REMOTE_INSTANCE, FLAIR_OPS_TARGET: sink.url });
+    expect(result.code).toBe(0);
+    expect(remote.seen).toHaveLength(2);
   }, 25_000);
 
-  test("local: still targets 127.0.0.1 at --ops-port, unchanged", async () => {
-    stub.seen.length = 0;
-    stub.setStatus(200);
-    const { stdout, code } = await runCli(
-      ["principal", "disable", "bob", "--ops-port", String(stub.port), "--admin-pass", "local-pass-2114"],
-      { HOME: scratch },
-    );
-    expect(code).toBe(0);
-    expect(stdout).toContain("Principal 'bob' deactivated");
-    expect(stub.seen).toHaveLength(1);
-    expect(stub.seen[0].url).toBe("/");
-    expect(JSON.parse(stub.seen[0].body).records[0].id).toBe("bob");
+  test("local fallback uses --ops-port only when no instance is set", async () => {
+    local.seen.length = 0;
+    local.setMode("ok");
+    expectedStatus = "active";
+    const result = await runCli(["principal", "enable", "bob", "--ops-port", String(local.port), "--admin-pass", "local-pass"], { HOME: scratch, FLAIR_OPS_TARGET: sink.url });
+    expect(result.code).toBe(0);
+    expect(local.seen.map((x) => x.operation)).toEqual(["update", "search_by_value"]);
+    expect(result.stdout).toContain("Principal 'bob' activated");
   }, 25_000);
 
-  test("remote: an auth failure refuses with a named remedy and exits non-zero", async () => {
-    stub.seen.length = 0;
-    stub.setStatus(401);
-    const { stdout, stderr, code } = await runCli(
-      ["principal", "disable", "alice", "--ops-target", stub.url, "--admin-pass", "wrong-pass"],
-      { HOME: scratch },
-    );
-    expect(code).not.toBe(0);
-    expect(stdout + stderr).not.toContain("deactivated");
-    expect(stderr).toContain("refused the update (HTTP 401)");
-    expect(stderr).toContain("--admin-pass");
-    stub.setStatus(200);
+  test("empty explicit --instance refuses even when FLAIR_URL and FLAIR_OPS_TARGET are set", async () => {
+    remote.seen.length = 0;
+    const result = await runCli(["principal", "disable", "alice", "--instance", "", "--admin-pass", "pass"], { HOME: scratch, FLAIR_URL: REMOTE_INSTANCE, FLAIR_OPS_TARGET: sink.url });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--instance is empty");
+    expect(remote.seen).toHaveLength(0);
   }, 25_000);
 
-  test("remote: a local env credential is never sent — no --admin-pass refuses", async () => {
-    stub.seen.length = 0;
-    const { stdout, stderr, code } = await runCli(
-      ["principal", "disable", "alice", "--ops-target", stub.url],
-      { HOME: scratch, FLAIR_ADMIN_PASS: "this-machines-secret" },
-    );
-    expect(code).not.toBe(0);
-    expect(stderr).toContain("required for a remote target");
-    expect(stdout + stderr).not.toContain("deactivated");
-    // No request reached the target at all.
-    expect(stub.seen).toHaveLength(0);
+  test("remote credential must be explicit even with local env password", async () => {
+    remote.seen.length = 0;
+    const result = await runCli(["principal", "enable", "alice", "--instance", REMOTE_INSTANCE], { HOME: scratch, FLAIR_ADMIN_PASS: "local-secret", FLAIR_OPS_TARGET: sink.url });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--admin-pass");
+    expect(remote.seen).toHaveLength(0);
   }, 25_000);
 
-  test("remote: an unreachable target refuses with a named remedy and exits non-zero", async () => {
-    const port = await closedPort();
-    const { stdout, stderr, code } = await runCli(
-      ["principal", "disable", "alice", "--ops-target", `http://127.0.0.1:${port}`, "--admin-pass", "target-pass-2114"],
-      { HOME: scratch },
-    );
-    expect(code).not.toBe(0);
-    expect(stdout + stderr).not.toContain("deactivated");
-    expect(stderr).toContain("could not reach the operations API");
+  test("empty explicit remote password never falls back to the local env password", async () => {
+    remote.seen.length = 0;
+    const result = await runCli([...args("disable").slice(0, -1), ""], { HOME: scratch, FLAIR_ADMIN_PASS: "local-secret" });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--admin-pass");
+    expect(remote.seen).toHaveLength(0);
+  }, 25_000);
+
+  for (const mode of ["empty-body", "empty-result", "error-payload", "wrong-state", "read-empty", "read-error", "read-other-id"] as const) {
+    test(`2xx ${mode} never reports success`, async () => {
+      remote.seen.length = 0;
+      remote.setMode(mode);
+      expectedStatus = "deactivated";
+      const result = await runCli(args("disable"), { HOME: scratch, FLAIR_OPS_TARGET: sink.url });
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).not.toContain("deactivated");
+      expect(result.stderr).toContain("Check");
+      expect(result.stderr).not.toContain("secret-response-token");
+      expect(remote.seen).toHaveLength(mode === "wrong-state" || mode === "read-empty" || mode === "read-error" || mode === "read-other-id" ? 2 : 1);
+    }, 25_000);
+  }
+
+  test("401 and its response body refuse without disclosing body text", async () => {
+    remote.setMode("deny");
+    const result = await runCli(args("disable"), { HOME: scratch });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("HTTP 401");
+    expect(result.stderr).toContain("--admin-pass");
+    expect(result.stderr).not.toContain("secret-response-token");
+  }, 25_000);
+
+  test("redirect is refused and the admin credential never reaches its destination", async () => {
+    remote.setMode("redirect");
+    remote.setRedirect(sink.url);
+    sink.seen.length = 0;
+    const result = await runCli(args("disable"), { HOME: scratch, FLAIR_OPS_TARGET: sink.url });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("redirected");
+    expect(sink.seen).toHaveLength(0);
+  }, 25_000);
+
+  test("invalid target reports a target-specific remedy and redacts userinfo/query", async () => {
+    const result = await runCli(["principal", "disable", "alice", "--instance", "http://user:pass@%bad/?token=topsecret", "--admin-pass", "pass"], { HOME: scratch });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("invalid --instance target");
+    expect(result.stderr).toContain("operations API address");
+    expect(result.stderr).not.toContain("user:pass");
+    expect(result.stderr).not.toContain("topsecret");
+  }, 25_000);
+
+  test("a parseable URL containing userinfo is refused without printing either secret", async () => {
+    const result = await runCli(["principal", "disable", "alice", "--instance", `http://user:pass@${REMOTE_HOST}:19926/?token=topsecret`, "--admin-pass", "pass"], { HOME: scratch });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("invalid --instance target");
+    expect(result.stderr).not.toContain("user:pass");
+    expect(result.stderr).not.toContain("topsecret");
+  }, 25_000);
+
+  test("unreachable target never prints the raw fetch error or query token", async () => {
+    const result = await runCli(["principal", "disable", "alice", "--instance", "http://127.77.21.13/?token=topsecret", "--admin-pass", "pass"], { HOME: scratch });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("could not disable update");
+    expect(result.stderr).not.toContain("topsecret");
+    expect(result.stderr).toContain("Check --instance");
+  }, 25_000);
+
+  test("target that never answers times out with a remedy", async () => {
+    remote.setMode("hang");
+    const started = Date.now();
+    const result = await runCli(args("disable"), { HOME: scratch });
+    expect(result.code).not.toBe(0);
+    expect(Date.now() - started).toBeLessThan(18_000);
+    expect(result.stderr).toContain("Check --instance");
+    expect(result.stdout).not.toContain("deactivated");
   }, 25_000);
 });

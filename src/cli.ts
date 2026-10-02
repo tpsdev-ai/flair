@@ -4693,7 +4693,6 @@ bindPrincipalCli({
   pubKeyPath,
   relativeTime,
   resolveOpsPort,
-  resolveEffectiveOpsUrl,
 });
 registerPrincipal(program);
 

@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=132 options=583
+# commands=133 options=586
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -510,7 +510,7 @@ flair principal
   description: Manage principals (humans and agents)
   usage: [options] [command]
   options: (none)
-  subcommands: add, list, show, disable, promote
+  subcommands: add, list, show, disable, enable, promote
 
 flair principal add
   description: Create a new principal
@@ -590,7 +590,7 @@ flair principal disable
     id (required)
   options:
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS for a local target; required explicitly for --target/--ops-target)
+      description: Admin password; required explicitly for a remote --instance
       attr: adminPass
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -598,12 +598,28 @@ flair principal disable
     --ops-port <port>
       description: Harper operations API port (local target)
       attr: opsPort
-    --target <url>
-      description: Remote Flair REST URL; derives the ops API URL to disable the principal there (env: FLAIR_TARGET)
-      attr: target
-    --ops-target <url>
-      description: Explicit ops API URL to disable on (env: FLAIR_OPS_TARGET; bypasses port derivation)
-      attr: opsTarget
+    --instance <url>
+      description: Remote Flair instance (else FLAIR_URL); its ops API is derived as in mcp enable
+      attr: instance
+
+flair principal enable
+  description: Reactivate a principal
+  usage: [options] <id>
+  arguments:
+    id (required)
+  options:
+    --admin-pass <pass>
+      description: Admin password; required explicitly for a remote --instance
+      attr: adminPass
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+    --ops-port <port>
+      description: Harper operations API port (local target)
+      attr: opsPort
+    --instance <url>
+      description: Remote Flair instance (else FLAIR_URL); its ops API is derived as in mcp enable
+      attr: instance
 
 flair principal promote
   description: Change a principal's trust tier (endorsed, corroborated, unverified)
@@ -3148,6 +3164,7 @@ Commands:
   show [options] <id>            Show principal details
   disable [options] <id>         Deactivate a principal (revokes access,
                                  preserves data)
+  enable [options] <id>          Reactivate a principal
   promote [options] <id> <tier>  Change a principal's trust tier (endorsed,
                                  corroborated, unverified)
   help [command]                 display help for command
@@ -3210,15 +3227,31 @@ Usage: flair principal disable [options] <id>
 Deactivate a principal (revokes access, preserves data)
 
 Options:
-  --admin-pass <pass>  Admin password (or set FLAIR_ADMIN_PASS for a local
-                       target; required explicitly for --target/--ops-target)
+  --admin-pass <pass>  Admin password; required explicitly for a remote
+                       --instance
   --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
                        default: admin)
   --ops-port <port>    Harper operations API port (local target)
-  --target <url>       Remote Flair REST URL; derives the ops API URL to disable
-                       the principal there (env: FLAIR_TARGET)
-  --ops-target <url>   Explicit ops API URL to disable on (env:
-                       FLAIR_OPS_TARGET; bypasses port derivation)
+  --instance <url>     Remote Flair instance (else FLAIR_URL); its ops API is
+                       derived as in mcp enable
+  -h, --help           display help for command
+
+Global Options:
+  -v, --version        output the version number
+
+----- flair principal enable -----
+Usage: flair principal enable [options] <id>
+
+Reactivate a principal
+
+Options:
+  --admin-pass <pass>  Admin password; required explicitly for a remote
+                       --instance
+  --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
+                       default: admin)
+  --ops-port <port>    Harper operations API port (local target)
+  --instance <url>     Remote Flair instance (else FLAIR_URL); its ops API is
+                       derived as in mcp enable
   -h, --help           display help for command
 
 Global Options:

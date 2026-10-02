@@ -225,10 +225,11 @@ export function redactUrl(u: string): string {
     url.username = "";
     url.password = "";
     url.search = "";
+    url.hash = "";
     return url.toString();
   } catch {
     // Not a parseable absolute URL: strip a userinfo-looking prefix and any query.
-    return u.replace(/\/\/[^/@]*@/, "//").replace(/\?.*$/, "");
+    return u.replace(/\/\/[^/@]*@/, "//").replace(/[?#].*$/, "");
   }
 }
 
@@ -237,7 +238,7 @@ export function redactUrl(u: string): string {
  * fetch to a user-supplied URL can carry the full URL (credentials included)
  * in err.message, so the message must never reach an error line.
  */
-function fetchErrorLabel(err: unknown): string {
+export function fetchErrorLabel(err: unknown): string {
   // Node's fetch wraps the OS error: the useful code (ECONNREFUSED, ENOTFOUND,
   // …) is on err.cause.code, so prefer it over the wrapper's code/name.
   const e = err as { code?: unknown; name?: unknown; cause?: { code?: unknown } };
