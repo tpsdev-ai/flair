@@ -1,6 +1,6 @@
 /**
  * Proves our production code interoperates with the REAL, PUBLISHED
- * @harperfast/oauth@2.8.1 package — not a mirror, not a guess. Deep-imports
+ * @harperfast/oauth@2.9.0 package — not a mirror, not a guess. Deep-imports
  * the plugin's own compiled modules directly from `node_modules` rather than
  * `import "@harperfast/oauth"`: the package's `exports` map only surfaces
  * `.` (the top-level plugin entry) and `./config`, but `clientAssertion.js`,
@@ -58,7 +58,7 @@ import { createServer, type Server } from "node:http";
 import { signClientAssertion, publicJwkFromPrivateKey, requestMcpAccessToken, buildTokenRequestForm } from "../../src/mcp-client-assertion";
 import { buildCimdDocument } from "../../resources/mcp-client-metadata-fields";
 
-// Deep imports of @harperfast/oauth@2.8.1's internals — see module header.
+// Deep imports of @harperfast/oauth@2.9.0's internals — see module header.
 import { verifyClientAssertion } from "../../node_modules/@harperfast/oauth/dist/lib/mcp/clientAssertion.js";
 import {
   resolveCimdClient,
