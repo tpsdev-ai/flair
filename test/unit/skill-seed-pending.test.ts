@@ -37,7 +37,7 @@ describe("local --skip-start seed handoff", () => {
       markSkillSeedPending(dir);
       expect(await reconcilePendingSkillSeed(dir, async () => refused)).toEqual(refused);
       expect(existsSync(skillSeedPendingPath(dir))).toBe(true);
-      expect(reconcilePendingSkillSeed(dir, async () => { throw new Error("no credential"); })).rejects.toThrow("no credential");
+      await expect(reconcilePendingSkillSeed(dir, async () => { throw new Error("no credential"); })).rejects.toThrow("no credential");
       expect(existsSync(skillSeedPendingPath(dir))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
