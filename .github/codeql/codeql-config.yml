@@ -20,3 +20,13 @@ query-filters:
   # cleartext-credential regressions in server code.
   - exclude:
       id: js/clear-text-logging
+
+# Test code is not shipped. CodeQL's hostname-regex query fires on literal
+# hostnames in test fixtures and assertions, which have no production sink
+# (checked 2026-10-02: production host matching already refuses look-alikes).
+# Analysing tests turned those fixtures into "new alerts" on PR #2188 after it
+# merged main. These exclusions leave the production JavaScript/TypeScript
+# paths (src/, resources/, packages/*/src) in scope.
+paths-ignore:
+  - test/**
+  - packages/*/test/**
