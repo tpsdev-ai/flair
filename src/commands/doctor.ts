@@ -7,8 +7,9 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
+import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
-import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
+import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
@@ -37,6 +38,19 @@ import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "nod
 
 import { dirname, join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
+
+export async function readNodeSeedAdvisory(
+  input: Parameters<typeof makeReadInstanceIds>[0] & { nodeKeyIds: string[]; keysDir: string },
+): Promise<string | null> {
+  if (input.nodeKeyIds.length === 0) return null;
+  const read = await makeReadInstanceIds(input)();
+  return orphanInstanceSeedAdvisory({
+    ...input,
+    instanceIds: read.state === "read" ? read.ids : null,
+    agentIds: read.state === "read" ? read.agentIds : null,
+    unreadableReason: read.state === "read" ? read.agentReadReason : read.reason,
+  });
+}
 
 export type DoctorCli = {
   api: (...args: any[]) => any;
@@ -669,6 +683,13 @@ program
         console.log(`  ${render.icons.error} Keys directory exists but no .key files found`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
         issues++;
+      }
+
+      if (nodeKeyIds.length > 0 && harperResponding) {
+        const advisory = await readNodeSeedAdvisory({
+          nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
+        });
+        if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
       }
     } else {
       console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);
