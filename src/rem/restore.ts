@@ -22,6 +22,7 @@
  * scope here; the operator's agent can only restore its own memories.
  * Cross-agent restore is a 1.1+ feature.
  */
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { readFileSync, existsSync, rmSync, mkdtempSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -281,7 +282,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const m of currentMem) {
     if (!m?.id) continue;
     try {
-      await opts.apiCall("DELETE", `/Memory/${encodeURIComponent(String(m.id))}`);
+      await opts.apiCall("DELETE", `/Memory/${encodeRecordId(String(m.id))}`);
       result.deleted.memories++;
     } catch (err: any) {
       errors.push(`delete-memory ${m.id}: ${err?.message ?? String(err)}`);
@@ -290,7 +291,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const s of currentSouls) {
     if (!s?.id) continue;
     try {
-      await soulWrite(opts)("DELETE", `/Soul/${encodeURIComponent(String(s.id))}`);
+      await soulWrite(opts)("DELETE", `/Soul/${encodeRecordId(String(s.id))}`);
       result.deleted.souls++;
     } catch (err: any) {
       errors.push(`delete-soul ${s.id}: ${err?.message ?? String(err)}`);
@@ -299,7 +300,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const c of currentCandidates) {
     if (!c?.id) continue;
     try {
-      await opts.apiCall("DELETE", `/MemoryCandidate/${encodeURIComponent(String(c.id))}`);
+      await opts.apiCall("DELETE", `/MemoryCandidate/${encodeRecordId(String(c.id))}`);
       result.deleted.candidates++;
     } catch (err: any) {
       errors.push(`delete-candidate ${c.id}: ${err?.message ?? String(err)}`);
@@ -312,7 +313,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const s of souls) {
     if (!s?.id) continue;
     try {
-      await soulWrite(opts)("PUT", `/Soul/${encodeURIComponent(String(s.id))}`, s);
+      await soulWrite(opts)("PUT", `/Soul/${encodeRecordId(String(s.id))}`, s);
       result.restored.souls++;
     } catch (err: any) {
       errors.push(`put-soul ${s.id}: ${err?.message ?? String(err)}`);
@@ -321,7 +322,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const m of memories) {
     if (!m?.id) continue;
     try {
-      await opts.apiCall("PUT", `/Memory/${encodeURIComponent(String(m.id))}`, m);
+      await opts.apiCall("PUT", `/Memory/${encodeRecordId(String(m.id))}`, m);
       result.restored.memories++;
     } catch (err: any) {
       errors.push(`put-memory ${m.id}: ${err?.message ?? String(err)}`);

@@ -73,6 +73,7 @@ import { createRateLimiter } from "../../node_modules/@harperfast/oauth/dist/lib
 const CLIENT_HOST = "cimd-test.flair.example";
 const TOKEN_ENDPOINT = `https://${CLIENT_HOST}/oauth/mcp/token`;
 const CLIENT_ID = `https://${CLIENT_HOST}/MCPClientMetadata/flint`;
+const ISSUER = "https://sso.example.net/tenant-a";
 
 afterEach(() => {
   _clearCimdCache();
@@ -92,6 +93,40 @@ describe("signClientAssertion vs the REAL published verifyClientAssertion", () =
       expect(result.claims.iss).toBe(CLIENT_ID);
       expect(result.claims.aud).toBe(TOKEN_ENDPOINT);
     }
+  });
+
+  test("the released verifier accepts the token-endpoint form and refuses the issuer form (#2103)", () => {
+    // The issuer audience and `typ: client-authentication+jwt` are merged
+    // upstream (HarperFast/oauth #245) but are not in this release, which is
+    // why the switch's default stays the token-endpoint form. When this test
+    // fails, inspect the pinned verifier: the issuer form may have become
+    // accepted, or its rejection reason may have changed.
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const jwk = publicJwkFromPrivateKey(privateKey);
+    const tokenEndpointForm = signClientAssertion({ clientId: CLIENT_ID, tokenEndpoint: TOKEN_ENDPOINT, privateKey });
+    const issuerForm = signClientAssertion({
+      clientId: CLIENT_ID,
+      tokenEndpoint: TOKEN_ENDPOINT,
+      privateKey,
+      audience: { aud: ISSUER, typ: "client-authentication+jwt" },
+    });
+
+    const accepted = verifyClientAssertion({
+      assertion: tokenEndpointForm.assertion,
+      clientId: CLIENT_ID,
+      tokenEndpoint: TOKEN_ENDPOINT,
+      jwks: [jwk],
+    });
+    expect(accepted.valid).toBe(true);
+
+    const refused = verifyClientAssertion({
+      assertion: issuerForm.assertion,
+      clientId: CLIENT_ID,
+      tokenEndpoint: TOKEN_ENDPOINT,
+      jwks: [jwk],
+    });
+    expect(refused.valid).toBe(false);
+    if (!refused.valid) expect(refused.reason).toMatch(/typ/);
   });
 
   test("SECURITY: an assertion signed with the WRONG key is rejected by the real verifier", () => {

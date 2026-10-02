@@ -6,6 +6,7 @@
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import { SigningIdentitySource } from "../lib/signing-identity.js";
 import * as render from "../render.js";
@@ -1166,7 +1167,7 @@ async function storeQualitySnapshot(agentId: string, agentIdSource: SigningIdent
     type: "quality-snapshot",
     createdAt: new Date().toISOString(),
   };
-  const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { baseUrl, agentId, agentIdSource });
+  const out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, { baseUrl, agentId, agentIdSource });
   if (out?.error) throw new Error(String(out.error));
   return memId;
 }

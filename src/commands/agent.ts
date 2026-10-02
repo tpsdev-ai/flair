@@ -31,6 +31,7 @@ import {
   resolveKeyPath,
   authFetch,
 } from "../lib/auth-resolve.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type AgentCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -490,7 +491,7 @@ export function register(program: Command): void {
     .description("Show agent details")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (id: string, opts) => {
-      const out = await api("GET", `/Agent/${id}`);
+      const out = await api("GET", `/Agent/${encodeRecordId(id)}`);
       const mode = render.resolveOutputMode(opts);
       if (mode === "json") {
         console.log(render.asJSON(out));
@@ -599,7 +600,7 @@ export function register(program: Command): void {
       // Verify new key works
       console.log(`Verifying new Ed25519 auth...`);
       const httpUrl = `http://127.0.0.1:${httpPort}`;
-      const verifyRes = await authFetch(httpUrl, id, currentPrivPath, "GET", `/Agent/${id}`);
+      const verifyRes = await authFetch(httpUrl, id, currentPrivPath, "GET", `/Agent/${encodeRecordId(id)}`);
       if (!verifyRes.ok) {
         console.error(`⚠️  Auth verification failed (${verifyRes.status}). Old key is backed up at: ${backupPrivPath}`);
         process.exit(1);

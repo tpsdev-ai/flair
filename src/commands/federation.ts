@@ -11,6 +11,7 @@
  * Do not import src/cli.ts from here — that would cycle and pull the
  * non-strict entry into the strict check.
  */
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import nacl from "tweetnacl";
 import { existsSync, readFileSync } from "node:fs";
@@ -1966,7 +1967,7 @@ export function register(program: Command): void {
       let errors = 0;
       for (const p of candidates) {
         try {
-          const res = await api("DELETE", `/FederationPeers/${encodeURIComponent(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
+          const res = await api("DELETE", `/FederationPeers/${encodeRecordId(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
           const ok = res?.ok ?? res?.deleted ?? true;
           if (ok) {
             deleted++;

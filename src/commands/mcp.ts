@@ -31,6 +31,11 @@ import {
   defaultMcpResource,
   defaultMcpIssuer,
   MAX_ASSERTION_LIFETIME_SECONDS,
+  clientAssertionAudienceForm,
+  resolveClientAssertionAudience,
+  oauthMetadataUrl,
+  type ClientAssertionAudience,
+  type ClientAssertionAudienceForm,
 } from "../mcp-client-assertion.js";
 import {
   enableMcp,
@@ -507,8 +512,19 @@ export function register(program: Command): void {
     )
     .option(
       "--token-endpoint <url>",
-      "Token-endpoint URL — becomes the `aud` claim (defaults to this instance's " +
+      "Token-endpoint URL — becomes the `aud` claim in token-endpoint mode (defaults to this instance's " +
         "own oauth token endpoint, same env vars)",
+    )
+    .option(
+      "--assertion-audience <form>",
+      'Audience form: "token-endpoint" (default — aud is the token-endpoint URL, header typ "JWT") ' +
+        'or "issuer" (aud is the authorization server metadata document\'s issuer, header typ ' +
+        '"client-authentication+jwt"). Uses FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE when set; otherwise token-endpoint.',
+    )
+    .option(
+      "--issuer <url>",
+      "Authorization server origin whose metadata document supplies the `aud` for the " +
+        '"issuer" audience form (defaults to this instance\'s issuer, same env vars)',
     )
     .option(
       "--resource <url>",
@@ -551,6 +567,26 @@ export function register(program: Command): void {
       const resource: string | undefined = opts.resource ?? defaultMcpResource();
       const expiresIn = opts.expiresIn ? Number(opts.expiresIn) : undefined;
 
+      let audienceForm: ClientAssertionAudienceForm;
+      try {
+        audienceForm = clientAssertionAudienceForm(opts.assertionAudience);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+      const issuerOrigin: string | undefined = opts.issuer ?? defaultMcpIssuer();
+      let audience: ClientAssertionAudience;
+      try {
+        audience = await resolveClientAssertionAudience({
+          form: audienceForm,
+          tokenEndpoint,
+          metadataUrl: issuerOrigin ? oauthMetadataUrl(issuerOrigin) : undefined,
+        });
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+
       let privateKey;
       try {
         privateKey = loadEd25519PrivateKeyFromFile(keyPath);
@@ -565,6 +601,7 @@ export function register(program: Command): void {
           tokenEndpoint,
           privateKey,
           expiresInSeconds: expiresIn,
+          audience,
         });
         const form = buildTokenRequestForm({ clientId, assertion, resource });
         if (opts.json) {
@@ -587,6 +624,7 @@ export function register(program: Command): void {
           privateKey,
           resource,
           expiresInSeconds: expiresIn,
+          audience,
           forceRefresh: Boolean(opts.forceRefresh),
         });
         if (opts.json) {

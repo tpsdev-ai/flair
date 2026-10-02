@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=132 options=582
+# commands=132 options=584
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -322,8 +322,14 @@ flair mcp token
       description: Client ID Metadata Document URL for this agent (defaults to this instance's MCPClientMetadata URL, derived from FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)
       attr: clientId
     --token-endpoint <url>
-      description: Token-endpoint URL — becomes the `aud` claim (defaults to this instance's own oauth token endpoint, same env vars)
+      description: Token-endpoint URL — becomes the `aud` claim in token-endpoint mode (defaults to this instance's own oauth token endpoint, same env vars)
       attr: tokenEndpoint
+    --assertion-audience <form>
+      description: Audience form: "token-endpoint" (default — aud is the token-endpoint URL, header typ "JWT") or "issuer" (aud is the authorization server metadata document's issuer, header typ "client-authentication+jwt"). Uses FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE when set; otherwise token-endpoint.
+      attr: assertionAudience
+    --issuer <url>
+      description: Authorization server origin whose metadata document supplies the `aud` for the "issuer" audience form (defaults to this instance's issuer, same env vars)
+      attr: issuer
     --resource <url>
       description: RFC 8707 resource indicator for the token request (defaults to this instance's canonical /mcp URI)
       attr: resource
@@ -2974,28 +2980,42 @@ access token. Caches the minted token (in-process) and reuses it until
 near-expiry — use --force-refresh to mint unconditionally.
 
 Options:
-  --agent-id <id>         Agent id — becomes the client_id (iss/sub claims)
-  --client-id <url>       Client ID Metadata Document URL for this agent
-                          (defaults to this instance's MCPClientMetadata URL,
-                          derived from FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)
-  --token-endpoint <url>  Token-endpoint URL — becomes the `aud` claim (defaults
-                          to this instance's own oauth token endpoint, same env
-                          vars)
-  --resource <url>        RFC 8707 resource indicator for the token request
-                          (defaults to this instance's canonical /mcp URI)
-  --keys-dir <dir>        Directory to look for <agentId>.key (else
-                          FLAIR_KEY_DIR, ~/.flair/keys, ~/.tps/secrets/flair)
-  --expires-in <seconds>  Assertion exp - iat window, seconds (default + hard
-                          cap: 60)
-  --dry-run               Sign the assertion and print what would be sent, but
-                          do not call the token endpoint
-  --force-refresh         Mint a fresh token even if a cached, not-near-expiry
-                          one exists
-  --json                  Print machine-readable JSON instead of a human summary
-  -h, --help              display help for command
+  --agent-id <id>              Agent id — becomes the client_id (iss/sub claims)
+  --client-id <url>            Client ID Metadata Document URL for this agent
+                               (defaults to this instance's MCPClientMetadata
+                               URL, derived from
+                               FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)
+  --token-endpoint <url>       Token-endpoint URL — becomes the `aud` claim in
+                               token-endpoint mode (defaults to this instance's
+                               own oauth token endpoint, same env vars)
+  --assertion-audience <form>  Audience form: "token-endpoint" (default — aud is
+                               the token-endpoint URL, header typ "JWT") or
+                               "issuer" (aud is the authorization server
+                               metadata document's issuer, header typ
+                               "client-authentication+jwt"). Uses
+                               FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE when set;
+                               otherwise token-endpoint.
+  --issuer <url>               Authorization server origin whose metadata
+                               document supplies the `aud` for the "issuer"
+                               audience form (defaults to this instance's
+                               issuer, same env vars)
+  --resource <url>             RFC 8707 resource indicator for the token request
+                               (defaults to this instance's canonical /mcp URI)
+  --keys-dir <dir>             Directory to look for <agentId>.key (else
+                               FLAIR_KEY_DIR, ~/.flair/keys,
+                               ~/.tps/secrets/flair)
+  --expires-in <seconds>       Assertion exp - iat window, seconds (default +
+                               hard cap: 60)
+  --dry-run                    Sign the assertion and print what would be sent,
+                               but do not call the token endpoint
+  --force-refresh              Mint a fresh token even if a cached,
+                               not-near-expiry one exists
+  --json                       Print machine-readable JSON instead of a human
+                               summary
+  -h, --help                   display help for command
 
 Global Options:
-  -v, --version           output the version number
+  -v, --version                output the version number
 
 ----- flair mcp grant -----
 Usage: flair mcp grant [options] <name>

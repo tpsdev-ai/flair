@@ -1018,22 +1018,28 @@ export function provisionSecrets(
  */
 export const HOSTED_OPS_PORT = 9925;
 
+/** The served origin's host at HOSTED_OPS_PORT, or null when the origin does
+ *  not parse. A bare host name is read as https. */
+function hostedOpsUrl(servedOrigin: string): URL | null {
+  try {
+    const u = new URL(servedOrigin.includes("://") ? servedOrigin : `https://${servedOrigin}`);
+    u.port = String(HOSTED_OPS_PORT);
+    u.pathname = "/";
+    u.search = "";
+    return u;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveOpsUrl(target: number | string, explicitOpsUrl?: string): string {
   if (explicitOpsUrl) return `${explicitOpsUrl.replace(/\/+$/, "")}/`;
   if (typeof target === "number") return `http://127.0.0.1:${target}/`;
   // A string target is the SERVED origin. Its own port serves the REST surface,
   // not the ops API, so reuse the host and apply the hosted ops port.
-  try {
-    const u = new URL(target.includes("://") ? target : `https://${target}`);
-    u.port = String(HOSTED_OPS_PORT);
-    u.pathname = "/";
-    u.search = "";
-    return u.toString();
-  } catch {
-    // Unparseable — preserve the old behaviour rather than inventing a URL, and
-    // let the caller's error path name the remedy.
-    return `${target.replace(/\/+$/, "")}/`;
-  }
+  // Unparseable — preserve the old behaviour rather than inventing a URL, and
+  // let the caller's error path name the remedy.
+  return hostedOpsUrl(target)?.toString() ?? `${target.replace(/\/+$/, "")}/`;
 }
 
 function opsBaseUrl(opsPortOrUrl: number | string): string {
@@ -1044,8 +1050,31 @@ function basicAuthHeader(adminUser: string, adminPass: string): string {
   return `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 }
 
-export interface IdentityMappingParams {
-  opsPortOrUrl: number | string;
+/**
+ * Where `provisionIdpIdentityMapping` sends its ops calls: exactly one of the
+ * two fields (flair#2102).
+ */
+export type IdentityMappingOpsTarget =
+  | {
+      /**
+       * The ops API itself. A number is a port on 127.0.0.1. A string is the ops
+       * API's own canonical http(s) origin, optionally followed by `/`, used
+       * with its own host and port.
+       */
+      opsPortOrUrl: number | string;
+      hostedOrigin?: never;
+    }
+  | {
+      /**
+       * A canonical http(s) served origin, optionally followed by `/`. The ops
+       * calls go to its host at HOSTED_OPS_PORT, the address `resolveOpsUrl`
+       * gives for the same string.
+       */
+      hostedOrigin: string;
+      opsPortOrUrl?: never;
+    };
+
+export type IdentityMappingParams = IdentityMappingOpsTarget & {
   adminUser: string;
   adminPass: string;
   /** Personal-shape default per #718: one principal per instance. */
@@ -1053,6 +1082,75 @@ export interface IdentityMappingParams {
   principalKind: "human" | "agent";
   idpProvider: string;
   idpSubject: string;
+};
+
+const IDENTITY_MAPPING_TARGET_FORMS =
+  `Accepted, exactly one of: opsPortOrUrl as a port number (1-65535) on 127.0.0.1, or as the ops API's own ` +
+  `canonical http:// or https:// origin, optionally followed by /, with no credentials, non-root path, query or fragment, used with its own host and port; or ` +
+  `hostedOrigin as the same canonical http:// or https:// origin form, whose host is used at port ${HOSTED_OPS_PORT}. ` +
+  `The string must exactly equal its parsed URL origin or that origin followed by /. No request was sent.`;
+
+/** Show only the parsed protocol, hostname and port of a refused target. The
+ *  display is built without interpolating the raw input, and excludes its
+ *  userinfo, path, query and fragment. Parsed components can match input text.
+ *  Use the placeholder for a non-string, a parse error or an empty hostname. */
+function showOpsTarget(value: unknown): string {
+  if (typeof value !== "string") return "<unparseable value>";
+  try {
+    const u = new URL(value);
+    if (!u.hostname) return "<unparseable value>";
+    return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+  } catch {
+    return "<unparseable value>";
+  }
+}
+
+/** A URL string is accepted only when parsing leaves its origin spelling
+ *  unchanged (apart from an optional `/`). This also rejects empty ? and #. */
+function canonicalHttpOrigin(value: unknown): URL | null {
+  if (typeof value !== "string") return null;
+  try {
+    const u = new URL(value);
+    if (
+      (u.protocol === "http:" || u.protocol === "https:") &&
+      !u.username && !u.password &&
+      (value === u.origin || value === `${u.origin}/`)
+    ) return u;
+  } catch {
+    // A malformed URL is not an ops target.
+  }
+  return null;
+}
+
+/** Resolve the ops target, or throw naming the field, its safe display and the
+ *  accepted forms. */
+function identityMappingOpsUrl(target: IdentityMappingOpsTarget): { url: string; hosted: boolean } {
+  const { opsPortOrUrl, hostedOrigin } = target as { opsPortOrUrl?: unknown; hostedOrigin?: unknown };
+  const refuse = (what: string): never => {
+    throw new Error(`Identity mapping: ${what}. ${IDENTITY_MAPPING_TARGET_FORMS}`);
+  };
+  if (opsPortOrUrl !== undefined && hostedOrigin !== undefined) {
+    return refuse(`got both opsPortOrUrl ${showOpsTarget(opsPortOrUrl)} and hostedOrigin ${showOpsTarget(hostedOrigin)}`);
+  }
+  if (hostedOrigin !== undefined) {
+    const u = canonicalHttpOrigin(hostedOrigin);
+    if (!u) {
+      return refuse(`cannot read hostedOrigin ${showOpsTarget(hostedOrigin)} as a served origin`);
+    }
+    u.port = String(HOSTED_OPS_PORT);
+    return { url: `${u.origin}/`, hosted: true };
+  }
+  if (opsPortOrUrl === undefined) return refuse("got neither opsPortOrUrl nor hostedOrigin");
+  if (typeof opsPortOrUrl === "number" && Number.isInteger(opsPortOrUrl) && opsPortOrUrl >= 1 && opsPortOrUrl <= 65535) {
+    return { url: `http://127.0.0.1:${opsPortOrUrl}/`, hosted: false };
+  }
+  if (typeof opsPortOrUrl === "string") {
+    const u = canonicalHttpOrigin(opsPortOrUrl);
+    if (u) {
+      return { url: `${u.origin}/`, hosted: false };
+    }
+  }
+  return refuse(`cannot tell which ops API opsPortOrUrl ${showOpsTarget(opsPortOrUrl)} names`);
 }
 
 export interface IdentityMappingResult {
@@ -1132,9 +1230,10 @@ export async function provisionIdpIdentityMapping(
   params: IdentityMappingParams,
   deps: { fetchImpl?: typeof fetch; now?: () => string } = {},
 ): Promise<IdentityMappingResult> {
+  const target = identityMappingOpsUrl(params);
+  const opsUrl = target.url;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = (deps.now ?? (() => new Date().toISOString()))();
-  const opsUrl = opsBaseUrl(params.opsPortOrUrl);
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
 
   // Ensure the principal Agent exists.
@@ -1158,14 +1257,15 @@ export async function provisionIdpIdentityMapping(
     // identity is absent — and saying "failed to look up principal 'x'" sends
     // the reader to look at principals, which is where an evening goes.
     //
-    // 404 in particular almost always means the request reached the SERVED
-    // origin instead of the ops API: the flair REST component owns `/` there and
-    // answers 404. Say that, and say where the address came from: `enable` has
-    // no option to point its ops calls elsewhere (flair#2116: this hint used to
-    // name an --ops-url flag that does not exist).
+    // For `hostedOrigin`, retain the served-origin diagnosis and explain that
+    // `enable` derived the address: it has no option to point its ops calls
+    // elsewhere (flair#2116). A 404 at a caller-named opsPortOrUrl does not
+    // establish which service answered, so give that path a neutral hint.
     const hint =
       findRes.status === 404
-        ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
+        ? target.hosted
+          ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
+          : ` — opsPortOrUrl names this address; verify that the ops API answers requests at ${opsUrl}.`
         : "";
     throw new Error(
       `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
@@ -1391,6 +1491,15 @@ async function fetchOAuthMetadata(
   }
 }
 
+/** The MCP authorization server's token endpoint for `issuer` — the one
+ *  derivation of "the MCP token endpoint of this instance", shared by target
+ *  binding (`verifyTargetIssuer`) and public self-verification
+ *  (`selfVerifyMcpMetadata`) so both checks derive the expected token endpoint
+ *  from the same function. */
+function mcpTokenEndpoint(issuer: string): string {
+  return `${issuer.replace(/\/+$/, "")}/oauth/mcp/token`;
+}
+
 async function verifyTargetIssuer(
   instance: string,
   issuer: string,
@@ -1404,7 +1513,7 @@ async function verifyTargetIssuer(
     const found = typeof actual === "string" ? `names issuer=${JSON.stringify(actual)}` : `has no string issuer (got ${JSON.stringify(actual)})`;
     return { ok: false, detail: `The target's own metadata at ${target.url} ${found}; expected ${issuer}. ${remedy}` };
   }
-  if (target.body?.token_endpoint !== `${issuer}/oauth/mcp/token`) {
+  if (target.body?.token_endpoint !== mcpTokenEndpoint(issuer)) {
     return {
       ok: false,
       detail: `The target's metadata at ${target.url} has token_endpoint=${JSON.stringify(target.body?.token_endpoint)}, not the MCP authorization server's token endpoint. Check FLAIR_MCP_OAUTH and the @harperfast/oauth component on the target, then re-run \`flair mcp enable\`.`,
@@ -1421,10 +1530,11 @@ async function verifyTargetIssuer(
  * advertise CIMD support, is `ok: false` with a specific `detail`.
  *
  * flair#756: since CIMD is the only supported client-registration path now,
- * "the /mcp OAuth surface is properly enabled" means "and a CIMD client can
- * actually use it" — this single check is reused by `enable`'s own
- * self-verify step, `grant`/`revoke`'s workflow gate (src/cli.ts), and
- * `flair mcp status`, so all four commands agree on what "enabled" means.
+ * this checks the public metadata's issuer, MCP token endpoint, and CIMD
+ * advertisement; it does not exercise the token route or `/mcp`. The check
+ * is reused by `enable`'s self-verify step, `grant`/`revoke`'s workflow gate
+ * (src/commands/mcp.ts), and `flair mcp status`, so all four commands use the same
+ * public metadata criterion.
  */
 export async function selfVerifyMcpMetadata(
   issuer: string,
@@ -1534,6 +1644,24 @@ export async function selfVerifyMcpMetadata(
       tokenEndpoint: body.token_endpoint,
       cimdSupported: false,
       detail: `${url} answered but does not advertise CIMD support (client_id_metadata_document_supported / "none" in token_endpoint_auth_methods_supported) — is clientIdMetadataDocuments.enabled explicitly false?`,
+    };
+  }
+
+  // flair#2190: the public document must name the MCP authorization server's
+  // token endpoint exactly — the same derivation target binding requires
+  // (mcpTokenEndpoint). The flair's-own-server and CIMD checks above run
+  // first, so those cases keep their specific remedies.
+  if (body.token_endpoint !== mcpTokenEndpoint(normalizedIssuer)) {
+    return {
+      ok: false,
+      issuer: body.issuer,
+      registrationEndpoint: body.registration_endpoint,
+      tokenEndpoint: body.token_endpoint,
+      cimdSupported: true,
+      detail:
+        `Found token_endpoint=${JSON.stringify(body.token_endpoint)} in ${url}, not the MCP authorization server's ` +
+        `expected token_endpoint=${mcpTokenEndpoint(normalizedIssuer)}. This metadata cannot verify the MCP endpoint. ` +
+        `Check the public OAuth authorization-server metadata or proxy for ${normalizedIssuer}, then re-run \`flair mcp enable\`.`,
     };
   }
 
@@ -2015,7 +2143,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     currentStep = "identity-mapping";
     const mapping = await provisionIdpIdentityMapping(
       {
-        opsPortOrUrl: params.instance,
+        // The instance URL is the served origin: ask for its host at the hosted
+        // ops port, the address resolveOpsUrl gives the other steps (flair#2102).
+        hostedOrigin: params.instance,
         adminUser: params.adminUser,
         adminPass: params.adminPass,
         principal,
@@ -2358,12 +2488,12 @@ export interface McpStatusResult {
 }
 
 /**
- * Surfaces LIVE state (not a stale local marker): hits the same well-known
- * metadata endpoint `enable`'s self-verify step checks. A 200 with the
- * expected shape AND CIMD advertised means the surface is enabled and
- * usable by a CIMD client; anything else means disabled/unreachable/
- * misconfigured — `status` never guesses from local files alone (this is
- * the same "never report success on hope" posture as self-verify).
+ * Reports a live public-metadata check (not a stale local marker): hits the
+ * same well-known metadata endpoint `enable`'s self-verify step checks. An expected issuer,
+ * exact MCP token endpoint, CIMD advertisement and, when present, a string
+ * `registration_endpoint` verify the public metadata;
+ * they do not prove that the token route or `/mcp` is usable. `status` reports
+ * the live metadata check's result rather than guessing from local files.
  */
 export async function mcpStatus(params: McpStatusParams, deps: McpStatusDeps = {}): Promise<McpStatusResult> {
   const verify = await selfVerifyMcpMetadata(params.instance, { fetchImpl: deps.fetchImpl });

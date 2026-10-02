@@ -201,9 +201,8 @@ describe("native MCP checks the principal's status on every tool call dispatched
       ],
     }), "seed principals");
 
-    // provisionIdpIdentityMapping reads a STRING target as a served origin and
-    // swaps in the hosted ops port; only a numeric port addresses this
-    // ephemeral instance's own ops API.
+    // provisionIdpIdentityMapping reads a numeric opsPortOrUrl as a port on
+    // 127.0.0.1, where this ephemeral instance's own ops API answers.
     const opsPort = Number(new URL(harper.opsURL).port);
     expect(opsPort > 0 && harper.opsURL === `http://127.0.0.1:${opsPort}`, `ephemeral ops API ${harper.opsURL}`).toBe(true);
     for (const p of [C, D, L]) {

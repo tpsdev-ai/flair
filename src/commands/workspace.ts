@@ -19,7 +19,8 @@
  * Compiled with the rest of src/ under tsconfig.check.src.json (strict).
  */
 import { Command } from "commander";
-import { resolveKeyPath, buildEd25519Auth } from "../lib/auth-resolve.js";
+import { resolveKeyPath, buildEd25519Auth, requestTarget, requestUrl } from "../lib/auth-resolve.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 
 export type WorkspaceCli = {
@@ -116,7 +117,9 @@ export function register(program: Command): void {
       // ref overwrites the same record, which is intentional (one row per
       // agent+ref, not an append log).
       const id = `${agentId}:${opts.ref}`;
-      const auth = buildEd25519Auth(agentId, "PUT", `/WorkspaceState/${id}`, keyPath);
+      const path = `/WorkspaceState/${encodeRecordId(id)}`;
+      const url = requestUrl(baseUrl, path);
+      const auth = buildEd25519Auth(agentId, "PUT", requestTarget(url), keyPath);
 
       // agentId IS included in the body now — WorkspaceState.put() (unlike
       // post()) does not auto-attribute from the signature, it 403s any
@@ -137,7 +140,7 @@ export function register(program: Command): void {
       if (opts.summary) body.summary = opts.summary;
       if (entities && entities.length > 0) body.entities = entities;
 
-      const res = await fetch(`${baseUrl}/WorkspaceState/${id}`, {
+      const res = await fetch(url, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: auth },
         body: JSON.stringify(body),
