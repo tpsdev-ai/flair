@@ -838,9 +838,9 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
   // the same sidecar for the same process. Without it the adopt path depends
   // on doctor's sidecar SELF-HEAL, which reconstructs the sidecar only when
   // flair-identified /Health, the pid→port bind and the worktree match all
-  // answer positively — on a loaded runner those lag the boot, doctor refuses
-  // to adopt ("its identity could not be verified (no identity sidecar)") and
-  // the case flakes (flair#2130).
+  // answer positively; when it does not fire, doctor refuses to adopt ("its
+  // identity could not be verified (no identity sidecar)") — the observed
+  // signature (flair#2130).
   writeDirectSidecar(sb, proc.pid);
   const serving = instancePid(sb.dataDir, sb.httpPort);
   if (serving === null) throw new Error("direct-spawned Harper is up but the serving PID is unreadable");
