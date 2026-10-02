@@ -104,17 +104,19 @@ The principal must already exist: a missing one is refused by name. A subject
 already mapped to that principal is reported with nothing written; a subject
 mapped to a different principal is refused unless `--replace` moves it, which
 prints the principal it left and any credential the move superseded.
-`--instance` (else `FLAIR_URL`) must be a public HTTPS origin: these commands
+`--instance` (else `FLAIR_URL`) must be HTTPS: these commands
 send the target's admin credential to its operations API, which on a hosted
 instance is the instance host at port 9925. <!-- docs-freshness-allow: hosted operations API port, not the data port -->
-A local, private, non-HTTPS or unparseable address is refused before any
+An unparseable URL, `localhost`, a `.local` name, or a loopback, unspecified,
+RFC1918, link-local or IPv6 unique-local address literal is refused before any
 request, and a REMOTE target gets no `--admin-pass` fallback (the rule
 `flair mcp enable` applies).
 
 `flair principal unlink <principal> --idp-subject <login>` revokes that mapping:
-the row stays with status `revoked` and stops resolving. It does not withdraw
-access — with just-in-time provisioning on (`FLAIR_MCP_JIT_PROVISION`), the next
-login that presents that subject is provisioned again as a fresh principal.
+the row stays with status `revoked` and stops resolving, so that login no longer
+maps to the principal. With just-in-time provisioning on
+(`FLAIR_MCP_JIT_PROVISION`), the next login that presents that subject may be
+provisioned again, as a new principal.
 `flair principal links <principal>` lists a principal's current mappings, and
 both take the same `--instance` and `--admin-pass`.
 

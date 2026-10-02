@@ -504,15 +504,15 @@ export function register(program: Command): void {
   // enabled — `flair mcp enable`'s identity-mapping step, without the rest of
   // its flow (and without its restart prompt). The mapping write, the ops
   // target and the admin-credential rule are `flair mcp enable`'s, reused from
-  // src/lib/mcp-enable.ts; the target's public-HTTPS policy is enforced there
-  // too, before the first request.
+  // src/lib/mcp-enable.ts; the target policy is enforced there too, before the
+  // first request.
 
   /**
    * The instance and admin credential these commands need: `--instance` (else
    * FLAIR_URL) names the target, and a REMOTE target gets no local-credential
-   * fallback (`flair mcp enable`'s `--admin-pass` rule). The target's own
-   * public-HTTPS policy is enforced in src/lib/mcp-enable.ts before the first
-   * request; every refusal here happens before any ops call too.
+   * fallback (`flair mcp enable`'s `--admin-pass` rule). The target policy is
+   * enforced in src/lib/mcp-enable.ts before the first request; every refusal
+   * here happens before any ops call too.
    */
   function mappingTarget(opts: any, command: string): { instance: string; adminUser: string; adminPass: string } {
     const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
@@ -537,8 +537,8 @@ export function register(program: Command): void {
   const MAPPING_INSTANCE_OPTION = "--instance <url>";
   const MAPPING_INSTANCE_HELP = "Remote flair instance holding the mapping (else FLAIR_URL)";
   const MAPPING_TARGET_HELP =
-    "Targets a REMOTE instance: --instance must be a public HTTPS origin, and a local, private, non-HTTPS or " +
-    "unparseable one is refused before any request.";
+    "Targets a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local name, or a " +
+    "loopback, unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused before any request.";
   const MAPPING_ADMIN_PASS_HELP =
     "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this " +
     "machine's local credentials and are never sent to a remote instance)";

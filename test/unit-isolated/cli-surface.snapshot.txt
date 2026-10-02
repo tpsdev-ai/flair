@@ -645,7 +645,7 @@ flair principal promote
       attr: opsPort
 
 flair principal link
-  description: Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step `flair mcp enable` runs, and nothing else. Targets a REMOTE instance: --instance must be a public HTTPS origin, and a local, private, non-HTTPS or unparseable one is refused before any request.
+  description: Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step `flair mcp enable` runs, and nothing else. Targets a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local name, or a loopback, unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused before any request.
   usage: [options] <principal>
   arguments:
     principal (required)
@@ -671,7 +671,7 @@ flair principal link
       attr: adminUser
 
 flair principal unlink
-  description: Remove one IdP login's mapping to a principal on an already-enabled instance (revokes the mapping; the principal and its memories stay). Targets a REMOTE instance: --instance must be a public HTTPS origin, and a local, private, non-HTTPS or unparseable one is refused before any request.
+  description: Remove one IdP login's mapping to a principal on an already-enabled instance (revokes the mapping; the principal and its memories stay). Targets a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local name, or a loopback, unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused before any request.
   usage: [options] <principal>
   arguments:
     principal (required)
@@ -694,7 +694,7 @@ flair principal unlink
       attr: adminUser
 
 flair principal links
-  description: List a principal's current IdP mappings on an already-enabled instance. Targets a REMOTE instance: --instance must be a public HTTPS origin, and a local, private, non-HTTPS or unparseable one is refused before any request.
+  description: List a principal's current IdP mappings on an already-enabled instance. Targets a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local name, or a loopback, unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused before any request.
   usage: [options] <principal>
   arguments:
     principal (required)
@@ -3258,21 +3258,26 @@ Commands:
                                  an already-enabled instance — the
                                  identity-mapping step `flair mcp enable` runs,
                                  and nothing else. Targets a REMOTE instance:
-                                 --instance must be a public HTTPS origin, and a
-                                 local, private, non-HTTPS or unparseable one is
-                                 refused before any request.
+                                 --instance must be HTTPS, and an unparseable
+                                 URL, localhost, a .local name, or a loopback,
+                                 unspecified, RFC1918, link-local or IPv6
+                                 unique-local address literal is refused before
+                                 any request.
   unlink [options] <principal>   Remove one IdP login's mapping to a principal
                                  on an already-enabled instance (revokes the
                                  mapping; the principal and its memories stay).
-                                 Targets a REMOTE instance: --instance must be a
-                                 public HTTPS origin, and a local, private,
-                                 non-HTTPS or unparseable one is refused before
-                                 any request.
+                                 Targets a REMOTE instance: --instance must be
+                                 HTTPS, and an unparseable URL, localhost, a
+                                 .local name, or a loopback, unspecified,
+                                 RFC1918, link-local or IPv6 unique-local
+                                 address literal is refused before any request.
   links [options] <principal>    List a principal's current IdP mappings on an
                                  already-enabled instance. Targets a REMOTE
-                                 instance: --instance must be a public HTTPS
-                                 origin, and a local, private, non-HTTPS or
-                                 unparseable one is refused before any request.
+                                 instance: --instance must be HTTPS, and an
+                                 unparseable URL, localhost, a .local name, or a
+                                 loopback, unspecified, RFC1918, link-local or
+                                 IPv6 unique-local address literal is refused
+                                 before any request.
   help [command]                 display help for command
 
 ----- flair principal add -----
@@ -3383,8 +3388,9 @@ Usage: flair principal link [options] <principal>
 
 Map one IdP login to an existing principal on an already-enabled instance — the
 identity-mapping step `flair mcp enable` runs, and nothing else. Targets a
-REMOTE instance: --instance must be a public HTTPS origin, and a local, private,
-non-HTTPS or unparseable one is refused before any request.
+REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a
+.local name, or a loopback, unspecified, RFC1918, link-local or IPv6
+unique-local address literal is refused before any request.
 
 Options:
   --idp-subject <login>  The login the identity provider reports for this person
@@ -3410,8 +3416,9 @@ Usage: flair principal unlink [options] <principal>
 
 Remove one IdP login's mapping to a principal on an already-enabled instance
 (revokes the mapping; the principal and its memories stay). Targets a REMOTE
-instance: --instance must be a public HTTPS origin, and a local, private,
-non-HTTPS or unparseable one is refused before any request.
+instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local
+name, or a loopback, unspecified, RFC1918, link-local or IPv6 unique-local
+address literal is refused before any request.
 
 Options:
   --idp-subject <login>  The login the identity provider reports for this person
@@ -3435,8 +3442,9 @@ Global Options:
 Usage: flair principal links [options] <principal>
 
 List a principal's current IdP mappings on an already-enabled instance. Targets
-a REMOTE instance: --instance must be a public HTTPS origin, and a local,
-private, non-HTTPS or unparseable one is refused before any request.
+a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost,
+a .local name, or a loopback, unspecified, RFC1918, link-local or IPv6
+unique-local address literal is refused before any request.
 
 Options:
   --instance <url>     Remote flair instance holding the mapping (else

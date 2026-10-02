@@ -207,17 +207,13 @@ export function checkLocalOriginRefusal(url: string): { refused: true; message: 
  * flair#2115 — the target policy for `flair principal link|unlink|links`.
  *
  * These commands send the target instance's admin credential to its operations
- * API, so the promise their help makes is narrower than
- * `checkLocalOriginRefusal`'s claude.ai-oriented one: HTTPS is required, and
- * every local, private or unparseable host is refused — including forms the
- * older check let through (a trailing-dot `localhost.`, a private or
- * link-local IPv6 literal, an IPv4-mapped IPv6 address). Self-contained on
- * purpose, so it does not depend on the shared structural host check widening.
+ * API. HTTPS is required, and an unparseable URL and the literal host classes
+ * `isLocalOrPrivateHost` lists are refused.
  *
  * Refusals are only ADDED relative to `checkLocalOriginRefusal`: everything
  * that check refuses, this one refuses too.
  */
-export function checkPublicHttpsTargetRefusal(url: string): { refused: true; message: string } | { refused: false } {
+export function checkMappingTargetRefusal(url: string): { refused: true; message: string } | { refused: false } {
   let host: string;
   let protocol: string;
   try {
@@ -232,17 +228,19 @@ export function checkPublicHttpsTargetRefusal(url: string): { refused: true; mes
   return { refused: false };
 }
 
-/** The one sentence a non-public target gets, whichever way it failed that test. */
+/** The one sentence a refused target gets, whichever way it failed that test. */
 function mappingTargetRefusalMessage(url: string): string {
   return (
-    "these commands send the target instance's admin credential to its operations API, so --instance must be a " +
-    `public HTTPS origin; '${url}' is not one. See the hosted-shape docs.`
+    "these commands send the target instance's admin credential to its operations API, so --instance must be an " +
+    "HTTPS URL whose host is not localhost, a .local name, or a loopback, unspecified, RFC1918, link-local or " +
+    `IPv6 unique-local address literal; '${url}' is refused. See the hosted-shape docs.`
   );
 }
 
-/** Is `hostname` (lowercased, as `URL.hostname` gives it) local, private or
- *  otherwise unroutable from the public internet? IPv6 literals stay bracketed
- *  in `URL.hostname`; a trailing dot is the absolute form of the same name. */
+/** Is `hostname` (as `URL.hostname` gives it) localhost, a .local name, or a
+ *  loopback, unspecified, RFC1918, link-local or IPv6 unique-local literal?
+ *  IPv6 literals stay bracketed in `URL.hostname`; a trailing dot is the
+ *  absolute form of the same name. */
 function isLocalOrPrivateHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/\.+$/, "");
   if (host === "") return true;
@@ -1404,13 +1402,19 @@ export async function provisionIdpIdentityMapping(
       `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
     );
   }
-  const foundAgents = await findRes.json().catch(() => []);
+  // flair#2115 — the principal is created only after a valid empty answer.
+  const foundAgents = await opsRecordList(findRes, opsUrl, "Agent", isAgentRow);
   let principalCreated = false;
-  if (!Array.isArray(foundAgents) || foundAgents.length === 0) {
+  if (!foundAgents.some((r) => r.id === params.principal)) {
     if (params.principalMustExist) {
       // flair#2115 — `link` maps an EXISTING principal. Creating one here would
       // answer a typo'd id with success, so refuse by name with nothing written.
       throw new Error(principalMissingMessage(params.principal));
+    }
+    if (foundAgents.length > 0) {
+      throw new Error(
+        `Identity mapping: the Agent read at ${opsUrl} answered with a row that is not principal '${params.principal}' — nothing was written.`,
+      );
     }
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
@@ -1450,7 +1454,7 @@ export async function provisionIdpIdentityMapping(
   // batch below revokes, so it refuses rather than standing in for an empty
   // table (flair#2115). `opsReadRows` is the one strict read on this surface.
   const findCredentialsForSubject = async (): Promise<any[]> =>
-    opsReadRows(fetchImpl, opsUrl, authHeader, {
+    opsReadRows(fetchImpl, opsUrl, authHeader, isCredentialRowFor("idpSubject", params.idpSubject), {
       operation: "search_by_conditions",
       database: "flair",
       table: "Credential",
@@ -1554,7 +1558,7 @@ export async function provisionIdpIdentityMapping(
 // without walking `flair mcp enable`'s whole flow (and its restart prompt).
 // The mapping WRITE is `provisionIdpIdentityMapping` above — the same step
 // `mcp enable` runs. These functions add only the checks an operator acting on
-// one person needs: a target that is not a public HTTPS origin is refused
+// one person needs: a target `checkMappingTargetRefusal` refuses is refused
 // before the first request, the principal must exist, a subject already mapped
 // to the same principal is reported and not rewritten, a subject mapped
 // elsewhere is refused unless the operator says `replace`, and a read that
@@ -1569,7 +1573,7 @@ export interface PrincipalMappingRow {
 
 /** Where the three commands send their ops calls — the same exactly-one target
  *  forms `provisionIdpIdentityMapping` takes (flair#2102), resolved by the same
- *  function (`assertMappingTarget` adds these commands' public-HTTPS policy
+ *  function (`assertMappingTarget` adds these commands' target policy
  *  first), plus the admin credentials the target's ops API requires. */
 export type PrincipalMappingBase = IdentityMappingOpsTarget & {
   adminUser: string;
@@ -1632,12 +1636,13 @@ function opsHeaders(authHeader: string): Record<string, string> {
  * A call that FAILED is never answered with `[]`, and a body that is not a
  * record list is not one either: these reads stand in front of a write, and a
  * table that could not be read is not an empty table (flair#2115). The caller
- * refuses; nothing is written.
+ * refuses.
  */
 async function opsReadRows(
   fetchImpl: typeof fetch,
   opsUrl: string,
   authHeader: string,
+  isRow: (row: any) => boolean,
   body: Record<string, unknown>,
 ): Promise<any[]> {
   const res = await fetchImpl(opsUrl, { method: "POST", headers: opsHeaders(authHeader), body: JSON.stringify(body) });
@@ -1645,14 +1650,52 @@ async function opsReadRows(
     const text = await res.text().catch(() => "");
     throw new Error(`Identity mapping: the ops API read at ${opsUrl} failed (HTTP ${res.status})${text ? `: ${text}` : ""}`);
   }
+  return opsRecordList(res, opsUrl, String(body.table), isRow);
+}
+
+/** A successful read's body, refused unless it is a list whose every entry is
+ *  a well-formed `table` row (flair#2115). */
+async function opsRecordList(
+  res: Response,
+  opsUrl: string,
+  table: string,
+  isRow: (row: any) => boolean,
+): Promise<any[]> {
   const parsed = await res.json().catch(() => null);
   if (!Array.isArray(parsed)) {
     throw new Error(
-      `Identity mapping: the ops API read at ${opsUrl} did not answer with a record list — nothing was written; ` +
+      `Identity mapping: the ops API read at ${opsUrl} did not answer with a record list; ` +
         `verify that the target answers operations API requests there.`,
     );
   }
+  const bad = parsed.findIndex((row) => !isRow(row));
+  if (bad !== -1) {
+    throw new Error(`Identity mapping: the ops API read at ${opsUrl} answered with a malformed ${table} record (entry ${bad}).`);
+  }
   return parsed;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value !== "";
+}
+
+function isAgentRow(row: any): boolean {
+  return row !== null && typeof row === "object" && !Array.isArray(row) && isNonEmptyString(row.id);
+}
+
+/** A Credential(kind:"idp") row with the fields the mapping decisions read,
+ *  whose `field` is the value the read searched for. */
+function isCredentialRowFor(field: "idpSubject" | "principalId", value: string): (row: any) => boolean {
+  return (row) =>
+    row !== null &&
+    typeof row === "object" &&
+    !Array.isArray(row) &&
+    isNonEmptyString(row.id) &&
+    isNonEmptyString(row.principalId) &&
+    typeof row.idpProvider === "string" &&
+    typeof row.idpSubject === "string" &&
+    (row.status == null || typeof row.status === "string") &&
+    row[field] === value;
 }
 
 /** A subject's Credential(kind:"idp") rows of every status, read with the
@@ -1664,7 +1707,7 @@ async function readIdpCredentialsForSubject(
   authHeader: string,
   idpSubject: string,
 ): Promise<any[]> {
-  return opsReadRows(fetchImpl, opsUrl, authHeader, {
+  return opsReadRows(fetchImpl, opsUrl, authHeader, isCredentialRowFor("idpSubject", idpSubject), {
     operation: "search_by_conditions",
     database: "flair",
     table: "Credential",
@@ -1684,7 +1727,7 @@ async function readIdpCredentialsForPrincipal(
   authHeader: string,
   principal: string,
 ): Promise<any[]> {
-  return opsReadRows(fetchImpl, opsUrl, authHeader, {
+  return opsReadRows(fetchImpl, opsUrl, authHeader, isCredentialRowFor("principalId", principal), {
     operation: "search_by_conditions",
     database: "flair",
     table: "Credential",
@@ -1710,7 +1753,7 @@ async function assertPrincipalExists(
   authHeader: string,
   principal: string,
 ): Promise<void> {
-  const rows = await opsReadRows(fetchImpl, opsUrl, authHeader, {
+  const rows = await opsReadRows(fetchImpl, opsUrl, authHeader, isAgentRow, {
     operation: "search_by_value",
     database: "flair",
     table: "Agent",
@@ -1718,7 +1761,7 @@ async function assertPrincipalExists(
     search_value: principal,
     get_attributes: ["id"],
   });
-  if (!rows.some((r) => String(r?.id) === principal)) throw new Error(principalMissingMessage(principal));
+  if (!rows.some((r) => r.id === principal)) throw new Error(principalMissingMessage(principal));
 }
 
 /** The one refusal a missing principal gets, wherever it is checked. */
@@ -1732,9 +1775,8 @@ function principalMissingMessage(principal: string): string {
 /**
  * flair#2115 — `flair principal link|unlink|links` carry the target instance's
  * admin credential to its operations API, so the target they accept is narrower
- * than `checkLocalOriginRefusal`'s claude.ai-oriented one: a `hostedOrigin` is
- * refused unless it is a public HTTPS origin (and `checkPublicHttpsTargetRefusal`
- * refuses every form of local, private and unparseable host). The numeric
+ * than `checkLocalOriginRefusal`'s claude.ai-oriented one: a `hostedOrigin`
+ * that `checkMappingTargetRefusal` refuses is refused. The numeric
  * `opsPortOrUrl` form names the caller's own address and is left alone.
  *
  * Called before the first request, so a refused target never sees one.
@@ -1742,7 +1784,7 @@ function principalMissingMessage(principal: string): string {
 function assertMappingTarget(target: IdentityMappingOpsTarget): void {
   const { hostedOrigin } = target as { hostedOrigin?: unknown };
   if (hostedOrigin === undefined) return;
-  const check = checkPublicHttpsTargetRefusal(String(hostedOrigin));
+  const check = checkMappingTargetRefusal(String(hostedOrigin));
   if (check.refused) throw new Error(check.message);
 }
 
@@ -1766,7 +1808,7 @@ function mappingTargetFields(target: IdentityMappingOpsTarget): IdentityMappingO
  *   names the principal it left;
  * - a missing principal is refused by name with nothing written;
  * - a failed read is refused: it never counts as "no mapping";
- * - a target that is not a public HTTPS origin is refused before any request.
+ * - a target `checkMappingTargetRefusal` refuses is refused before any request.
  */
 export async function linkPrincipalMapping(
   params: LinkPrincipalMappingParams,

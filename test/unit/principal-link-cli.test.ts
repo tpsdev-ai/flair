@@ -90,7 +90,7 @@ describe("flair principal link / unlink / links pre-flight (flair#2115)", () => 
     expect(out.stdout).toBe("");
   }, 25_000);
 
-  // A target that is not a public HTTPS origin must be refused before any call.
+  // A target the target policy refuses must be refused before any call.
   // No input here derives an ops target on THIS machine (the library refuses
   // loopback before it derives anything, and the per-input no-request proofs
   // run against an injected fetch in test/unit/principal-link.test.ts).
@@ -108,7 +108,7 @@ describe("flair principal link / unlink / links pre-flight (flair#2115)", () => 
     test(`refuses ${what} before any call`, async () => {
       const out = await runCli(["principal", "links", "alice", "--instance", instance, "--admin-pass", "pw"]);
       expect(out.code).toBe(1);
-      expect(out.stderr).toContain("public HTTPS origin");
+      expect(out.stderr).toContain("--instance must be an HTTPS URL whose host is not");
       expect(out.stderr).not.toMatch(/fetch failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|HTTP \d/);
       expect(out.stdout).toBe("");
     }, 25_000);

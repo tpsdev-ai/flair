@@ -3,8 +3,7 @@
  * (flair#2115): map ONE IdP login to a principal on an already-enabled
  * instance, without walking `flair mcp enable`'s whole flow.
  *
- * Every rule in this surface is a control, so each test asserts the outcome
- * AND the not-written side of a refusal. The ops store is an in-memory stub
+ * The ops store is an in-memory stub
  * served by an injected fetch: every URL is asserted before it is served, and
  * no test makes a network call.
  *
@@ -58,6 +57,10 @@ function mappingStub(opts: {
   failWrites?: boolean;
   /** Answer reads with 200 and a body that is NOT a record list. */
   answerNotAList?: boolean;
+  /** Answer every Credential read with 200 and this body. */
+  credBody?: unknown;
+  /** Answer the Nth Agent read (1-based) with 200 and `body`. */
+  agentBodyAt?: { n: number; body: unknown };
 }) {
   const principals = new Map<string, any>((opts.principals ?? ["alice"]).map((id) => [id, { id }]));
   const rows = new Map<string, any>(
@@ -66,6 +69,7 @@ function mappingStub(opts: {
   const calls: Call[] = [];
   let readsLeft = opts.failReads ?? 0;
   let credReads = 0;
+  let agentReads = 0;
 
   const write = (records: any[]) => {
     for (const rec of records) rows.set(String(rec.id), { ...(rows.get(String(rec.id)) ?? {}), ...rec });
@@ -77,8 +81,10 @@ function mappingStub(opts: {
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push({ url: target, body });
     if (body.operation === "search_by_value" && body.table === "Agent") {
+      agentReads += 1;
       if (opts.failAgentRead || readsLeft-- > 0) return new Response("boom", { status: 500 });
       if (opts.answerNotAList) return Response.json({ ok: true });
+      if (agentReads === opts.agentBodyAt?.n) return Response.json(opts.agentBodyAt.body);
       if (!principals.has(body.search_value)) return Response.json([]);
       return Response.json([{ id: opts.mismatchAgentId ? "someone-else" : body.search_value }]);
     }
@@ -88,6 +94,7 @@ function mappingStub(opts: {
         return new Response("boom", { status: 500 });
       }
       if (opts.answerNotAList || credReads === opts.answerNotAListAt) return Response.json({ ok: true });
+      if ("credBody" in opts) return Response.json(opts.credBody);
       const cond = (name: string) =>
         (body.conditions ?? []).find((c: any) => c.search_attribute === name)?.search_value;
       const kind = cond("kind");
@@ -357,6 +364,48 @@ describe("flair principal link (flair#2115)", () => {
     expect(st.writes()).toEqual([]);
   });
 
+  const MALFORMED_CREDENTIAL_ANSWERS: unknown[] = [
+    [null],
+    [42],
+    [[]],
+    [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", status: "active" }], // no principalId
+    [{ id: "cred_c1", idpSubject: "someone-else", idpProvider: "github", principalId: "bob", status: "active" }],
+  ];
+
+  for (const credBody of MALFORMED_CREDENTIAL_ANSWERS) {
+    test(`refuses a Credential answer of ${JSON.stringify(credBody)} with --replace, writing nothing`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["alice", "bob"], credBody });
+      await expect(
+        linkPrincipalMapping(
+          { hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT, replace: true },
+          { fetchImpl: st.fetchImpl },
+        ),
+      ).rejects.toThrow(/answered with a malformed Credential record \(entry 0\)/);
+      expect(st.writes()).toEqual([]);
+    });
+  }
+
+  const MALFORMED_SECOND_AGENT_ANSWERS: Array<[unknown, RegExp]> = [
+    [[null], /answered with a malformed Agent record \(entry 0\)/],
+    [[{ id: 7 }], /answered with a malformed Agent record \(entry 0\)/],
+    [{ ok: true }, /did not answer with a record list/],
+    [[{ id: "someone-else" }], /No principal 'alice'/],
+  ];
+
+  for (const [body, reason] of MALFORMED_SECOND_AGENT_ANSWERS) {
+    test(`refuses a second Agent answer of ${JSON.stringify(body)}, writing nothing`, async () => {
+      // Agent read 1 is `link`'s own check; read 2 is the shared provisioner's.
+      const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["alice"], agentBodyAt: { n: 2, body } });
+      await expect(
+        linkPrincipalMapping(
+          { hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT },
+          { fetchImpl: st.fetchImpl },
+        ),
+      ).rejects.toThrow(reason);
+      expect(st.writes()).toEqual([]);
+    });
+  }
+
   test("sends every call to the target it was given, and refuses a bad one before any call", async () => {
     const numeric = mappingStub({ expectedUrl: LOCAL_OPS, principals: ["alice"] });
     const result = await linkPrincipalMapping(
@@ -471,6 +520,17 @@ describe("flair principal unlink (flair#2115)", () => {
     ).rejects.toThrow(/ops API read at .* failed \(HTTP 500\)/);
     expect(credRead.writes()).toEqual([]);
   });
+
+  test("refuses [null] Credential rows, writing nothing", async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["alice"], credBody: [null] });
+    await expect(
+      unlinkPrincipalMapping(
+        { hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT },
+        { fetchImpl: st.fetchImpl },
+      ),
+    ).rejects.toThrow(/answered with a malformed Credential record \(entry 0\)/);
+    expect(st.writes()).toEqual([]);
+  });
 });
 
 describe("flair principal links (flair#2115)", () => {
@@ -525,8 +585,7 @@ describe("flair principal links (flair#2115)", () => {
 });
 
 describe("flair principal link|unlink|links — the target policy (flair#2115)", () => {
-  /** Every shape the three commands promise to refuse, so a request never carries
-   *  the admin credential to one of them. */
+  /** Representative shapes the three commands refuse. */
   const REFUSED_TARGETS: string[] = [
     "http://flair.example.com", // a REMOTE origin, but not HTTPS
     "http://127.0.0.1:41234", // loopback over http
@@ -556,16 +615,16 @@ describe("flair principal link|unlink|links — the target policy (flair#2115)",
         throw new Error(`a request was made to ${instance}`);
       }) as unknown as typeof fetch;
       const mapping = { hostedOrigin: instance, ...ADMIN, principal: "alice", ...SUBJECT };
-      await expect(linkPrincipalMapping(mapping, { fetchImpl })).rejects.toThrow(/public HTTPS origin/);
-      await expect(unlinkPrincipalMapping(mapping, { fetchImpl })).rejects.toThrow(/public HTTPS origin/);
+      await expect(linkPrincipalMapping(mapping, { fetchImpl })).rejects.toThrow(/must be an HTTPS URL whose host is not/);
+      await expect(unlinkPrincipalMapping(mapping, { fetchImpl })).rejects.toThrow(/must be an HTTPS URL whose host is not/);
       await expect(
         listPrincipalMappings({ hostedOrigin: instance, ...ADMIN, principal: "alice" }, { fetchImpl }),
-      ).rejects.toThrow(/public HTTPS origin/);
+      ).rejects.toThrow(/must be an HTTPS URL whose host is not/);
       expect(calls).toBe(0);
     });
   }
 
-  test("accepts a public HTTPS origin", async () => {
+  test("accepts an HTTPS origin with a DNS name", async () => {
     const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["alice"] });
     const result = await linkPrincipalMapping(
       { hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT },

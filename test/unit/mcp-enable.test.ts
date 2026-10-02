@@ -366,6 +366,10 @@ function mockOpsFetch(opts: {
   failCredSearch?: boolean;
   /** flair#2115 — answer the Credential search with 200 and a body that is NOT a list. */
   credSearchNotAList?: boolean;
+  /** flair#2115 — answer the Credential search with 200 and this body. */
+  credSearchBody?: unknown;
+  /** flair#2115 — answer the Agent search with 200 and this body. */
+  agentSearchBody?: unknown;
   /** flair#1317 — make the post-write invariant read-back lie (see its test). */
   poisonReadBack?: (rows: Map<string, any>) => void;
 } = {}): { fetchImpl: typeof fetch; calls: any[]; creds: ReturnType<typeof credentialTable> } {
@@ -379,6 +383,7 @@ function mockOpsFetch(opts: {
     calls.push({ url: String(url), body });
     if (body.operation === "search_by_value" && body.table === "Agent") {
       if (opts.failFind) return new Response("boom", { status: opts.failFindStatus ?? 500 });
+      if ("agentSearchBody" in opts) return new Response(JSON.stringify(opts.agentSearchBody), { status: 200 });
       return new Response(JSON.stringify(opts.existingPrincipal ? [{ id: body.search_value }] : []), { status: 200 });
     }
     if (body.operation === "insert" && body.table === "Agent") {
@@ -391,6 +396,7 @@ function mockOpsFetch(opts: {
     if (body.operation === "search_by_conditions" && body.table === "Credential") {
       if (opts.failCredSearch) return new Response("boom", { status: 500 });
       if (opts.credSearchNotAList) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if ("credSearchBody" in opts) return new Response(JSON.stringify(opts.credSearchBody), { status: 200 });
     }
     const credRes = creds.handle(body);
     if (credRes) {
@@ -474,6 +480,38 @@ describe("provisionIdpIdentityMapping", () => {
     ).rejects.toThrow(/did not answer with a record list/);
     expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value", "search_by_conditions"]);
   });
+
+  test("flair#2115: the pre-write Credential read refuses [null] rows, writing nothing", async () => {
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true, credSearchBody: [null] });
+    await expect(
+      provisionIdpIdentityMapping(
+        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/answered with a malformed Credential record \(entry 0\)/);
+    expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value", "search_by_conditions"]);
+  });
+
+  const MALFORMED_AGENT_ANSWERS: Array<[unknown, RegExp]> = [
+    [{ ok: true }, /did not answer with a record list/],
+    ["not json rows", /did not answer with a record list/],
+    [[null], /answered with a malformed Agent record \(entry 0\)/],
+    [[{ name: "self" }], /answered with a malformed Agent record \(entry 0\)/],
+    [[{ id: "someone-else" }], /answered with a row that is not principal 'self'/],
+  ];
+
+  for (const [agentSearchBody, reason] of MALFORMED_AGENT_ANSWERS) {
+    test(`flair#2115: the Agent read refuses ${JSON.stringify(agentSearchBody)} — no principal created, nothing written`, async () => {
+      const { fetchImpl, calls } = mockOpsFetch({ agentSearchBody });
+      await expect(
+        provisionIdpIdentityMapping(
+          { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+          { fetchImpl },
+        ),
+      ).rejects.toThrow(reason);
+      expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value"]);
+    });
+  }
 
   // ─── flair#1317 — the (kind, idpSubject) uniqueness constraint ─────────────
 
