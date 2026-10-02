@@ -13,7 +13,6 @@ import { readEnvOrUnset } from "./env-guard.js";
 
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
-/** Decode an Ed25519 private key from the bytes of a key file (raw 32-byte seed, or base64 PKCS8 DER). */
 function decodePrivateKey(raw: Buffer): KeyObject {
   const decoded = raw.length === 32 ? raw : Buffer.from(raw.toString("utf-8").trim(), "base64");
   const der = decoded.length === 32
@@ -22,14 +21,43 @@ function decodePrivateKey(raw: Buffer): KeyObject {
   return createPrivateKey({ key: der, format: "der", type: "pkcs8" });
 }
 
-/** Resolve an Ed25519 private key from a file (base64 PKCS8 DER or raw 32-byte seed). */
 export function loadPrivateKey(path: string): KeyObject {
   return decodePrivateKey(readFileSync(path));
 }
 
-/** Decode base64 PKCS8 DER or a base64 raw seed. */
+/** Decode canonical base64 containing an Ed25519 PKCS8 DER key or a 32-byte seed. */
 export function loadPrivateKeyString(text: string): KeyObject {
-  return decodePrivateKey(Buffer.from(text, "utf-8"));
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(text) || !text) {
+    throw new Error("INVALID_BASE64: expected canonical base64.");
+  }
+  const decoded = Buffer.from(text, "base64");
+  if (decoded.toString("base64") !== text) {
+    throw new Error("INVALID_BASE64: expected canonical base64.");
+  }
+  const der = decoded.length === 32
+    ? Buffer.concat([PKCS8_ED25519_PREFIX, decoded])
+    : decoded;
+  let key: KeyObject;
+  try {
+    const lengthBytes = der[1] & 0x80 ? der[1] & 0x7f : 0;
+    let contentLength = der[1];
+    if (lengthBytes) {
+      contentLength = 0;
+      for (let i = 0; i < lengthBytes; i++) contentLength = contentLength * 256 + der[2 + i];
+    }
+    if (der[0] !== 0x30 || der[1] === 0x80 || lengthBytes > 4 ||
+        (lengthBytes && (der[2] === 0 || contentLength < 128)) ||
+        2 + lengthBytes + contentLength !== der.length) {
+      throw new Error("Invalid DER length.");
+    }
+    key = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+  } catch {
+    throw new Error("INVALID_ED25519_KEY: expected a 32-byte seed or Ed25519 PKCS8 DER.");
+  }
+  if (key.asymmetricKeyType !== "ed25519") {
+    throw new Error("UNSUPPORTED_KEY_TYPE: expected Ed25519.");
+  }
+  return key;
 }
 
 /** Injectable homes so tests can diverge `$HOME` / `os.homedir()` / passwd home. */

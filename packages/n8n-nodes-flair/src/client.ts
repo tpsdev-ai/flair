@@ -22,11 +22,11 @@ export const importFlairClient = (): Promise<typeof import("@tpsdev-ai/flair-cli
   (new Function("return import('@tpsdev-ai/flair-client')") as () => Promise<any>)();
 
 export function asFlairCredentials(data: ICredentialDataDecryptedObject): FlairCredentials {
-  const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const text = (value: unknown): string => (typeof value === "string" ? value : "");
   return {
     baseUrl: text(data.baseUrl),
-    agentId: text(data.agentId),
-    agentPrivateKey: text(data.agentPrivateKey) || undefined,
+    agentId: text(data.agentId).trim(),
+    agentPrivateKey: text(data.agentPrivateKey).trim() || undefined,
     adminPassword: text(data.adminPassword) || undefined,
   };
 }
@@ -36,7 +36,6 @@ export function usesDeprecatedAdminPassword(credentials: FlairCredentials): bool
   return !credentials.agentPrivateKey && !!credentials.adminPassword;
 }
 
-/** The warning logged on EVERY execution that takes the deprecated path. */
 export function adminPasswordWarning(agentId: string): string {
   return (
     "Flair API credential: using the deprecated Admin Password, not an agent key. " +
@@ -54,11 +53,6 @@ function missingCredentialMessage(): string {
   );
 }
 
-/**
- * Warn when the execution is about to run under the deprecated admin password.
- * Called at every node entry point, before any request, so it warns on every
- * execution — including one that later fails.
- */
 export function warnDeprecatedAdminPassword(
   logger: Logger | undefined,
   credentials: FlairCredentials,

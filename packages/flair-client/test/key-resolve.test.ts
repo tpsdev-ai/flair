@@ -313,6 +313,48 @@ describe("formatKeyLookup (flair#1271)", () => {
 });
 
 describe("loadPrivateKeyString — a key held as text (flair#1942)", () => {
+  test("refuses invalid base64 characters, including 32 raw text bytes", () => {
+    expect(() => loadPrivateKeyString("!".repeat(32))).toThrow(/INVALID_BASE64/);
+  });
+
+  test("refuses junk-wrapped base64 and surrounding whitespace", () => {
+    const text = Buffer.alloc(32, 7).toString("base64");
+    for (const decorated of [`!!${text}!!`, ` ${text}`, `${text}\n`]) {
+      expect(() => loadPrivateKeyString(decorated)).toThrow(/INVALID_BASE64/);
+    }
+  });
+
+  test("refuses missing, excessive, misplaced and noncanonical padding", () => {
+    const text = Buffer.alloc(32).toString("base64");
+    for (const invalid of [text.slice(0, -1), `${text}=`, `=${text.slice(1)}`, `${text.slice(0, -2)}B=`, ""]) {
+      expect(() => loadPrivateKeyString(invalid)).toThrow(/INVALID_BASE64/);
+    }
+  });
+
+  test("refuses RSA and EC PKCS8 keys by type", () => {
+    const keys = [
+      generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey,
+      generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey,
+    ];
+    for (const key of keys) {
+      const text = key.export({ type: "pkcs8", format: "der" }).toString("base64");
+      expect(() => loadPrivateKeyString(text)).toThrow(/UNSUPPORTED_KEY_TYPE/);
+    }
+  });
+
+  test("refuses decoded bytes that are neither a seed nor PKCS8 DER", () => {
+    for (const length of [1, 31, 33, 64]) {
+      expect(() => loadPrivateKeyString(Buffer.alloc(length, 7).toString("base64"))).toThrow(/INVALID_ED25519_KEY/);
+    }
+  });
+
+  test("refuses truncated DER and DER with trailing junk", () => {
+    const der = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" });
+    for (const bytes of [der.subarray(0, -1), Buffer.concat([der, Buffer.from("junk")])]) {
+      expect(() => loadPrivateKeyString(bytes.toString("base64"))).toThrow(/INVALID_ED25519_KEY/);
+    }
+  });
+
   test("decodes a base64 PKCS8 DER key and signs with it", () => {
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     const text = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer).toString("base64");

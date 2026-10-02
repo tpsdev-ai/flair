@@ -85,7 +85,6 @@ export class FlairChatMemory implements INodeType {
 
   async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
     const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
-    warnDeprecatedAdminPassword(this.logger, credentials);
     const subject = this.getNodeParameter("subject", itemIndex) as string;
     const sessionKey = this.getNodeParameter("sessionKey", itemIndex, "") as string;
     const k = this.getNodeParameter("contextWindowLength", itemIndex, 10) as number;
@@ -93,6 +92,7 @@ export class FlairChatMemory implements INodeType {
     const composedSubject = sessionKey ? `${subject}:${sessionKey}` : subject;
 
     const flair = await makeClient(credentials);
+    warnDeprecatedAdminPassword(this.logger, credentials);
 
     const history = new FlairChatMessageHistory(flair, composedSubject, k);
 

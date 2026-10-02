@@ -144,8 +144,8 @@ export class FlairWrite implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
-    warnDeprecatedAdminPassword(this.logger, credentials);
     const flair = await makeClient(credentials);
+    warnDeprecatedAdminPassword(this.logger, credentials);
     const inputs = this.getInputData();
     const out: INodeExecutionData[] = [];
 

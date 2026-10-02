@@ -11,6 +11,7 @@ import { FlairChatMemory } from "../src/nodes/FlairChatMemory/FlairChatMemory.no
 import { FlairSearch } from "../src/nodes/FlairSearch/FlairSearch.node";
 import { FlairWrite } from "../src/nodes/FlairWrite/FlairWrite.node";
 import {
+  asFlairCredentials,
   flairCredentialTest,
   makeClient,
   type FlairCredentials,
@@ -136,6 +137,14 @@ function chatCtx(
     logger,
   };
 }
+
+test("credential normalization trims only Agent ID and key text", () => {
+  expect(asFlairCredentials({
+    baseUrl: ` ${BASE_URL} `, agentId: " agent ", agentPrivateKey: " key ", adminPassword: " password ",
+  })).toEqual({
+    baseUrl: ` ${BASE_URL} `, agentId: "agent", agentPrivateKey: "key", adminPassword: " password ",
+  });
+});
 
 describe("the nodes sign as the credential's agent (flair#1942)", () => {
   test("FlairWrite signs its write as the credential's agent", async () => {
@@ -395,7 +404,9 @@ for (const [name, run] of entryPoints) {
           expect(result.message).toContain("Agent ID");
           expect(result.message).not.toContain("Signed as agent ''");
           expect(seen).toHaveLength(0);
-          await expect(run(credentials, loggerStub().logger)).rejects.toThrow(/Agent ID/);
+          const { logger, warns } = loggerStub();
+          await expect(run(credentials, logger)).rejects.toThrow(/Agent ID/);
+          expect(warns).toHaveLength(0);
           expect(seen).toHaveLength(0);
           await expect(makeClient(credentials)).rejects.toThrow(/Agent ID/);
           expect(seen).toHaveLength(0);
@@ -406,6 +417,24 @@ for (const [name, run] of entryPoints) {
       }, 10_000);
     }
   }
+
+  test(`${name}: Basic preserves password edge spaces through normalization`, async () => {
+    const password = " \tlegacy-secret \t";
+    const credentials: FlairCredentials = {
+      baseUrl: BASE_URL, agentId: " n8n-legacy ", adminPassword: password,
+    };
+    const authorization = "Basic " + Buffer.from(`admin:${password}`).toString("base64");
+    const { logger, warns } = loggerStub();
+    reply = (request) => request.headers.authorization === authorization
+      ? { status: 200, body: request.method === "GET" ? [] : { id: "m", written: true, results: [] } }
+      : { status: 401, body: { error: "wrong password" } };
+    const result = await (flairCredentialTest as any).call({}, { data: credentials });
+    expect(result.status).toBe("OK");
+    await run(credentials, logger);
+    expect(seen.length).toBeGreaterThan(1);
+    for (const request of seen) expect(request.headers.authorization).toBe(authorization);
+    expect(warns).toHaveLength(1);
+  }, 10_000);
 
   test(`${name}: whitespace-only key selects Basic like the credential test, despite a local key`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-n8n-basic-"));
@@ -438,7 +467,7 @@ for (const [name, run] of entryPoints) {
   test(`${name}: surrounding whitespace in Agent ID is normalized like the credential test`, async () => {
     const { keyText, publicKey } = newAgentKey();
     const credentials: FlairCredentials = {
-      baseUrl: ` ${BASE_URL} `, agentId: " \tn8n-trimmed ", agentPrivateKey: ` ${keyText} `,
+      baseUrl: BASE_URL, agentId: " \tn8n-trimmed ", agentPrivateKey: ` ${keyText} `,
     };
     const { logger, warns } = loggerStub();
     reply = (request) => ({ status: 200, body: request.method === "GET" ? [] : { id: "m", written: true, results: [] } });

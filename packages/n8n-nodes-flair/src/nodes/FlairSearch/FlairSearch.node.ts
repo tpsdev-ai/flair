@@ -149,10 +149,10 @@ export class FlairSearch implements INodeType {
 
   async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
     const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
-    warnDeprecatedAdminPassword(this.logger, credentials);
     const operation = this.getNodeParameter("operation", itemIndex) as Operation;
     const limit = this.getNodeParameter("limit", itemIndex, 5) as number;
     const flair = await makeClient(credentials);
+    warnDeprecatedAdminPassword(this.logger, credentials);
 
     if (operation === "search") {
       const tool = new DynamicStructuredTool({
@@ -189,8 +189,8 @@ export class FlairSearch implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
-    warnDeprecatedAdminPassword(this.logger, credentials);
     const flair = await makeClient(credentials);
+    warnDeprecatedAdminPassword(this.logger, credentials);
     const inputs = this.getInputData();
     const out: INodeExecutionData[] = [];
 
