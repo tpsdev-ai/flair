@@ -555,7 +555,9 @@ export function updateLocalConfigMcpEnabled(
       ok: false,
       detail: `local config.yaml not found (tried: ${candidates.join(", ")}). ` +
         (enabled
-          ? "Re-run `flair mcp enable` from the directory that holds your component config.yaml (or place it at one of the paths tried)."
+          ? explicitPath
+            ? `Place your component config.yaml at ${explicitPath}, then re-run with the same explicit path.`
+            : `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${candidates[1]}).`
           : `Set mcp.enabled: ${targetLabel} in your component config.yaml manually, then restart.`),
     };
   }

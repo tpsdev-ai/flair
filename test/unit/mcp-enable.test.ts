@@ -33,6 +33,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import yaml from "js-yaml";
+import { withHome } from "../../src/lib/home.ts";
 
 import {
   isLocalOrigin,
@@ -1772,23 +1773,29 @@ rest: true
     expect(readFileSync(configPath, "utf-8")).toBe(CONFIG_WITH_ENV_REF);
   });
 
-  test("file not found at explicit path", () => {
-    const result = updateLocalConfigMcpEnabled(true, "/nonexistent/config.yaml");
+  test("file not found at explicit path: re-run with the same explicit path", () => {
+    const result = updateLocalConfigMcpEnabled(true, configPath);
     expect(result.ok).toBe(false);
-    expect(result.detail).toContain("not found");
-    expect(result.detail).toContain("Re-run `flair mcp enable` from the directory that holds your component config.yaml (or place it at one of the paths tried).");
+    expect(result.detail).toBe(
+      `local config.yaml not found (tried: ${configPath}). ` +
+      `Place your component config.yaml at ${configPath}, then re-run with the same explicit path.`,
+    );
   });
 
-  test("file not found: reports the searched path (no ambient mutation)", () => {
-    // Do NOT call updateLocalConfigMcpEnabled(true) with no path: its default
-    // search is ["config.yaml", ~/.flair/config.yaml], so from the repo root it
-    // finds and MUTATES the repo's own config.yaml, and from elsewhere would
-    // mutate a real ~/.flair config. That poisoned the boot-safety integration
-    // test during the flair#1136 release cut. Use an explicit missing path.
-    const missing = join(configDir, "does-not-exist", "config.yaml");
-    const result = updateLocalConfigMcpEnabled(true, missing);
-    expect(result.ok).toBe(false);
-    expect(result.detail).toContain("not found");
+  test("file not found without explicit path: CLI remedy names only its search paths", () => {
+    const cwd = process.cwd();
+    try {
+      process.chdir(configDir);
+      const result = withHome(configDir, () => updateLocalConfigMcpEnabled(true));
+      const homeConfig = join(configDir, ".flair", "config.yaml");
+      expect(result.ok).toBe(false);
+      expect(result.detail).toBe(
+        `local config.yaml not found (tried: config.yaml, ${homeConfig}). ` +
+        `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${homeConfig}).`,
+      );
+    } finally {
+      process.chdir(cwd);
+    }
   });
 
   test("no @harperfast/oauth block in config", () => {
