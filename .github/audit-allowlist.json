@@ -591,17 +591,17 @@
       "ghsa": "GHSA-86w9-cpqp-85rv",
       "package": "node-forge",
       "severity": "high",
-      "class": "vendor-pinned",
+      "class": "no-patch-published",
       "sources": [
         "bun",
         "npm-install"
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> node-forge",
-      "reason": "Added 2026-10-02. No fixed node-forge release exists: 1.4.0 is the latest and is inside the affected range (<=1.4.0). node-forge reaches flair only through harper (harper 5.2.8 depends on node-forge ^1.3.1); flair's own code does not import it. harper uses it only in dist/security/keys.js to create and PEM-encode certificates and keys (pki.createCertificate, certificateFromPem/certificateToPem, private and public key PEM conversion, setRsaPublicKey); it does not call node-forge's RSA signature verification, the path this advisory affects. The leash is 14 days so the entry is re-read as soon as a fix ships.",
+      "reason": "Added 2026-10-02. No fixed node-forge release exists: 1.4.0 is the latest and is inside the affected range (<=1.4.0). node-forge is a transitive dependency: it reaches flair only through harper (harper 5.2.8 depends on node-forge ^1.3.1); flair's own code does not import it. harper uses it only in dist/security/keys.js, to create, sign, parse and PEM-encode certificates and keys; it does not call node-forge's RSA signature verification, the path this advisory affects. The no-patch-published class makes the gate block once a fixed release is published (when the audit can reach the registry), and the entry expires on 2026-10-16 either way.",
       "added": "2026-10-02",
       "expires": "2026-10-16",
-      "removeWhen": "node-forge publishes a release outside the affected range and harper's resolution picks it up, or harper drops node-forge"
+      "removeWhen": "a fixed node-forge release is published (the gate then blocks this entry): reassess, and remove once harper's resolution moves to the fixed release or harper drops node-forge"
     }
   ]
 }
