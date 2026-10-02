@@ -36,6 +36,7 @@ import { isAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withOwnedTransaction } from "./request-transaction.js";
+import { recordMemoryDeletion } from "./memory-deletion-history.js";
 
 export class MemoryMaintenance extends Resource {
   /** POST requires auth — either an agent acting on its own memories, or admin. */
@@ -97,6 +98,14 @@ export class MemoryMaintenance extends Resource {
               await withOwnedTransaction(ctx, async (c) => {
                 await (databases as any).flair.Memory.delete(record.id, c);
                 await deletePointerRowOrThrow(record.id, c);
+                // The durable, attributable record of the expiry delete
+                // (flair#2213), in the same transaction.
+                await recordMemoryDeletion({
+                  memoryId: record.id,
+                  durability: record.durability ?? null,
+                  actor: actorId ?? null,
+                  sourceClass: callerIsAdmin ? "admin" : "agent",
+                }, c);
               });
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
