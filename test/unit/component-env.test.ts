@@ -34,6 +34,12 @@ describe("isLoopbackUrl", () => {
       "https://localhost",
       "http://sub.localhost:3000",
       "http://[::1]:9926",
+      "http://localhost.:9926",
+      "http://LOCALHOST.:9926",
+      "http://sub.localhost.:9926",
+      "http://[::ffff:127.0.0.1]:9926",
+      "http://[::ffff:7f00:1]:9926",
+      "http://[0:0:0:0:0:ffff:127.1.2.3]:9926",
     ]) {
       expect({ url, loopback: isLoopbackUrl(url) }).toEqual({ url, loopback: true });
     }
@@ -45,6 +51,8 @@ describe("isLoopbackUrl", () => {
       "https://cluster.org.harperfabric.com",
       "http://10.0.0.4:9926",
       "https://192.168.1.10",
+      "http://[::ffff:10.0.0.4]:9926",
+      "http://[::ffff:7e00:1]:9926",
     ]) {
       expect({ url, loopback: isLoopbackUrl(url) }).toEqual({ url, loopback: false });
     }

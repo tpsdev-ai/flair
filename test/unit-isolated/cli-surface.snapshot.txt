@@ -472,7 +472,7 @@ flair mcp enable
       description: Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
       attr: confirmSecretsApplied
     --fabric
-      description: Use the Fabric branch and default to Fabric secrets staging; refused for loopback targets
+      description: Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1 or ::ffff:127/8 target host
       attr: fabric
     --dry-run
       description: Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
@@ -3132,7 +3132,7 @@ Options:
   --admin-pass <pass>                                Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
   --admin-user <name>                                Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
-  --fabric                                           Use the Fabric branch and default to Fabric secrets staging; refused for loopback targets
+  --fabric                                           Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1 or ::ffff:127/8 target host
   --dry-run                                          Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
   --json                                             Print machine-readable JSON instead of a human summary
   -h, --help                                         display help for command

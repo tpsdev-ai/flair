@@ -7,6 +7,10 @@ import { enableMcp, generateRsaSigningKeyPair, type SecretsMechanism } from "../
 
 const PUBLIC = "https://mcp.acme.example";
 const FABRIC = "https://acme.harperfabric.com";
+const LOOPBACK_SPELLINGS = [
+  "http://localhost.:9926", "http://LOCALHOST.:9926", "http://sub.localhost.:9926",
+  "http://[::ffff:127.0.0.1]:9926", "http://[::ffff:7f00:1]:9926", "http://[0:0:0:0:0:ffff:127.1.2.3]:9926",
+];
 
 function fixture(instance = PUBLIC) {
   const dir = tempDir("flair-2189-");
@@ -52,7 +56,7 @@ function targetFetch(push = false) {
 }
 
 describe("enableMcp target URL and Fabric declaration", () => {
-  for (const instance of ["http://127.0.0.1:9926", "http://localhost:9926", "http://[::1]:9926"]) {
+  for (const instance of ["http://127.0.0.1:9926", "http://localhost:9926", "http://[::1]:9926", ...LOOPBACK_SPELLINGS]) {
     test.each([false, true])(`refuses --fabric with loopback ${instance} without CIMD (dryRun=%s)`, async (dryRun) => {
       const f = fixture(instance);
       const { calls, fetchImpl } = targetFetch();
@@ -86,6 +90,16 @@ describe("enableMcp target URL and Fabric declaration", () => {
       expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
     });
   }
+
+  test.each(LOOPBACK_SPELLINGS)("passes loopback %s through the target URL check without --fabric", async (instance) => {
+    const f = fixture(instance);
+    const { calls, fetchImpl } = targetFetch();
+    const result = await enableMcp(f.params, { fetchImpl, confirmPrompt: async () => false });
+    expect(result.steps.map(s => s.step)).not.toContain("target-shape-check");
+    expect(result.steps.map(s => s.step)).toContain("signing-key");
+    expect(result.steps.map(s => s.detail).join("\n")).not.toContain("not a loopback URL");
+    expect(calls).not.toContain("restart");
+  });
 
   test.each([PUBLIC, "https://127.0.0.1.evil.example", "http://10.0.0.1", "http://machine.local"])(
     "refuses non-loopback %s even when its stub reports this machine", async (instance) => {
