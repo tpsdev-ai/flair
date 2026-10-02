@@ -3,8 +3,9 @@
  * operator source (flair#2141 S2).
  *
  * Normal `flair init` seeds one skill row at a FIXED Memory id and one org
- * assignment at a FIXED OrgSkillAssignment id that points at it. Local
- * `--skip-start` on the default install defers the seed until `flair start`.
+ * assignment at a FIXED OrgSkillAssignment id that points at it. Re-initializing
+ * an already-installed default local instance with `flair init --skip-start`
+ * defers the seed until a later `flair start` that has the admin credential.
  * Bootstrap may list the
  * assignment for an active agent when it wins same-name conflict resolution,
  * the agent has not opted out, and the entry fits its budget. The row behind

@@ -47,7 +47,7 @@ describe("local --skip-start seed handoff", () => {
   it("does not leave an unreachable pending marker for a custom data directory", async () => {
     ensureCliBuild();
     const home = mkdtempSync(join(tmpdir(), "fsc-"));
-    const dataDir = join(home, "d");
+    const dataDir = join(home, "custom data");
     const root = resolve(import.meta.dirname, "..", "..");
     try {
       const run = spawnSync("node", [join(root, "dist", "cli.js"), "init", "--skip-start", "--no-mcp", "--skip-soul",
@@ -57,6 +57,7 @@ describe("local --skip-start seed handoff", () => {
       });
       expect(run.status, run.stdout + run.stderr).toBe(0);
       expect(run.stdout).toContain("start this custom data-dir instance");
+      expect(run.stdout).toContain(`flair init --data-dir '${dataDir}'`);
       expect(existsSync(skillSeedPendingPath(dataDir))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });

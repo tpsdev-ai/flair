@@ -18,7 +18,7 @@ import {
   type SkillSeedIo,
   type SkillSeedRestOptions,
 } from "../../src/lib/skill-seed.js";
-import { usingFlairSkillHash } from "../../src/lib/using-flair-skill.js";
+import { USING_FLAIR_SKILL_CONTENT, usingFlairSkillHash } from "../../src/lib/using-flair-skill.js";
 import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
 
 const CURRENT = "the current shipped text";
@@ -102,6 +102,15 @@ describe("decideSkillSeed", () => {
   });
   it("keeps a row whose text matches no listed shipped version", () => {
     expect(decideSkillSeed(LOCAL, CURRENT, current.hashes)).toBe("keep");
+  });
+});
+
+describe("shipped using-flair text", () => {
+  it("separates behavior from advice and leaves liveness to Presence", () => {
+    expect(USING_FLAIR_SKILL_CONTENT).toContain("## Current Flair behavior");
+    expect(USING_FLAIR_SKILL_CONTENT).toContain("## Recommended practice");
+    expect(USING_FLAIR_SKILL_CONTENT).not.toContain("one row per principal");
+    expect(USING_FLAIR_SKILL_CONTENT).toContain("`activity` describes work; it is not a liveness verdict");
   });
 });
 
@@ -437,7 +446,7 @@ describe("skillSeedRestIo — a slow first skill-row write", () => {
     expect(out).toMatchObject({ kind: "refused", error: "skill_seed_write_failed" });
     const message = (out as { message: string }).message;
     expect(message).toContain("no answer within 0.1 s");
-    expect(message).toContain("embedding model");
+    expect(message).toContain("waits for its embedding model, which may need to download or load");
     expect(message).toContain("the org assignment was not written. Re-run 'flair init'");
     expect(instance.puts).toEqual([`Memory/${SEED_SKILL_ID}`]);
 

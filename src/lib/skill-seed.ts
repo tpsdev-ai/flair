@@ -2,10 +2,11 @@
  * skill-seed.ts — the `using-flair` seed: the decision, and its install-time
  * write (flair#2141 S2).
  *
- * A normal `flair init` writes both rows; local `--skip-start` on the default
- * install defers them to a later `flair start` that has the admin credential
- * (FLAIR_ADMIN_PASS or the admin-pass file; without one that start warns and
- * leaves the seed pending). Re-runs may find both rows already
+ * A normal `flair init` writes both rows. Re-initializing an already-installed
+ * default local instance with `flair init --skip-start` defers them to a later
+ * `flair start` that has the admin credential (FLAIR_ADMIN_PASS or the
+ * admin-pass file; without one that start warns and leaves the seed pending).
+ * Re-runs may find both rows already
  * current. Writes use
  * a verified Basic administrator over authenticated Basic REST requests
  * (`PUT /Memory/<id>`, `PUT /OrgSkillAssignment/<id>`) — so the rows carry
@@ -71,9 +72,9 @@ export const SEED_REQUEST_TIMEOUT_MS = 15_000;
 /**
  * The bound on the skill row's write. The instance embeds a skill row as it
  * writes it (`Memory.put` awaits `getEmbedding`), and the first embed awaits
- * the embedding model's readiness: a first start may download the model
- * (~80 MB) and load it in the background, and Harper can report healthy before
- * that ends. So this one write can outlast the 15 s bound on a healthy instance.
+ * the embedding model's readiness: the model may need to download (~80 MB) or
+ * load in the background, and Harper can report healthy before that ends. So
+ * this one write can outlast the 15 s bound on a healthy instance.
  * The 180 s limit bounds the wait; it does not guarantee a download completes.
  * It stays under the 300 s default headers timeout of Node's fetch, so this
  * bound and its message fire first.
@@ -472,14 +473,14 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
     const notice = setTimeout(() => {
       opts.notify?.(
         `using-flair skill: still writing "${SEED_SKILL_ID}" — the instance embeds a skill row as it writes it, ` +
-          `and it may need to download (~80 MB) and load the embedding model first; waiting up to ${seconds(skillWriteMs)}`,
+          `and it may need to download (~80 MB) or load the embedding model first; waiting up to ${seconds(skillWriteMs)}`,
       );
     }, skillNoticeMs);
     (notice as unknown as { unref?: () => void }).unref?.();
     try {
       return await putById("Memory", SEED_SKILL_ID, seedSkillBody(opts.user, current), skillWriteMs, (ms) =>
         `no answer within ${seconds(ms)} — the instance embeds a skill row as it writes it, so this write also ` +
-        `wait for its embedding model to download and load; 'flair doctor' reports embeddings. The write may ` +
+        `waits for its embedding model, which may need to download or load; 'flair doctor' reports embeddings. The write may ` +
         `still land; the id is fixed, so a re-run updates that row rather than adding one`,
       );
     } finally {

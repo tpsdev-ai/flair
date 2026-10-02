@@ -34,6 +34,7 @@ import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
 import {
+  commandArg,
   foreignOccupiedListenerDetail,
   staleHarperBeforeAuthNotice,
   type OccupiedHarperListener,
@@ -1118,9 +1119,9 @@ program
     persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost, httpBind.host);
 
     // flair#2141 S2 — seed the org-wide using-flair skill on this instance, as
-    // the operator. Local `--skip-start` on the default install defers seeding
-    // to a later `flair start` with the admin credential; that command has no
-    // `--data-dir` flag.
+    // the operator. Re-initializing an already-installed default local instance
+    // with `flair init --skip-start` defers seeding to a later `flair start`
+    // with the admin credential; that command has no `--data-dir` flag.
     // (Remote init, `--target`, seeds with or
     // without `--skip-start`.) A refusal fails this run rather than reporting a
     // successful init without the skill, so both local paths call it before
@@ -1129,9 +1130,12 @@ program
       if (opts.skipStart) {
         if (dataDir === defaultDataDir()) {
           markSkillSeedPending(dataDir);
-          console.log("using-flair skill: pending (local --skip-start init defers seeding to a 'flair start' with the admin credential)");
+          console.log("using-flair skill: pending (re-initializing this already-installed default instance with --skip-start defers seeding to a later 'flair start' with the admin credential)");
         } else {
-          console.log("using-flair skill: not seeded (start this custom data-dir instance, then run 'flair init' without --skip-start to seed)");
+          console.log(
+            `using-flair skill: not seeded (start this custom data-dir instance, then run: ` +
+              `flair init --data-dir ${commandArg(dataDir)}; do not pass --skip-start)`,
+          );
         }
         return;
       }

@@ -1,16 +1,19 @@
-// ─── flair#2141 S2 — a LOCAL fresh `flair init` seeds using-flair ────────────
+// ─── flair#2141 S2 — local normal-init and installed-instance handoff ────────
 //
-// The built CLI runs a local install (no --target): it installs and starts its
-// own Harper in a temp data dir under a scratch HOME, then seeds. Two fresh
-// installs, one per local seeding call in src/commands/init.ts: one registers an
-// agent (the agent path), one registers none. Each asserts the skill row, the
-// org assignment, and a new agent's bootstrap entry.
+// The built CLI runs three local installations (no --target), each in a temp
+// data dir under a scratch HOME. The first two are fresh normal inits, one with
+// an agent and one without; each installs and starts Harper, then asserts the
+// skill row, org assignment, and a new agent's bootstrap entry. The third first
+// installs normally, deletes both seed rows, stops Harper, and re-initializes
+// that already-installed default instance with --skip-start. It then checks one
+// start without the credential and another with FLAIR_ADMIN_PASS.
 //
 // Isolation:
 //   - HOME is a fresh temp dir, so the data dir, admin-pass, keys and any plist
 //     land there;
 //   - FLAIR_* / HARPER_* / HDB_* / FABRIC_* are stripped from the child's env,
-//     so nothing points it at another instance;
+//     so nothing points it at another instance; FLAIR_MODELS_DIR is the sole
+//     exception, then set to its inherited value or the repo model directory;
 //   - ports are free ephemeral ports, asserted not to be 9925/9926;
 //   - PATH starts with a `launchctl` stub that answers "no such service", so on
 //     macOS init's read-only launchd checks never reach the real launchd domain
@@ -227,7 +230,7 @@ afterEach(async () => {
   while (installs.length > 0) await stopInstall(installs.pop() as Install);
 });
 
-describe("flair#2141 S2 — a local fresh `flair init` seeds using-flair", () => {
+describe("flair#2141 S2 — two fresh local init paths and one installed-instance --skip-start handoff", () => {
   test("with an agent registered (init's agent path)", async () => {
     ensureCliBuild();
     const install = await newInstall();
@@ -246,7 +249,7 @@ describe("flair#2141 S2 — a local fresh `flair init` seeds using-flair", () =>
     await expectSeeded(install);
   }, 330_000);
 
-  test("a --skip-start init with an inline password leaves the seed pending; flair start warns without the credential and completes with it", async () => {
+  test("an already-installed default instance re-initialized with --skip-start stays pending through a credential-less start and seeds on a credentialed start", async () => {
     ensureCliBuild();
     const install = await newInstall();
     // Harper must be installed before `flair start` can boot it, and a
@@ -264,7 +267,7 @@ describe("flair#2141 S2 — a local fresh `flair init` seeds using-flair", () =>
     // and the seed stays pending.
     const skipped = runLocalInit(install, ["--skip-start"]);
     expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
-    expect(skipped.stdout).toContain("defers seeding to a 'flair start' with the admin credential");
+    expect(skipped.stdout).toContain("re-initializing this already-installed default instance with --skip-start defers seeding");
     expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
     expect(existsSync(join(install.home, ".flair", "admin-pass"))).toBe(false);
 
