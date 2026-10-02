@@ -23,7 +23,7 @@ const SHORT_ROOT = "/tmp";
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 const repoRoot = join(import.meta.dirname, "..", "..");
 
-describe.skipIf(!isDarwin)("flair#2075 item 3 — the launchd stop leg drops a leftover sidecar", () => {
+describe("flair#2075 item 3 — the launchd stop leg drops a leftover sidecar", () => {
   let tmpHome: string;
   let dataDir: string;
   let shimBin: string;
@@ -64,7 +64,7 @@ describe.skipIf(!isDarwin)("flair#2075 item 3 — the launchd stop leg drops a l
     throw new Error(`pid ${pid} never reported ESRCH`);
   }
 
-  test("the launchd unload leg drops a sidecar naming a confirmed-dead pid", async () => {
+  test.skipIf(!isDarwin)("the launchd unload leg drops a sidecar naming a confirmed-dead pid", async () => {
     const dead = await confirmedDeadPid();
     writeFileSync(join(dataDir, "hdb.pid"), `${dead}\n`);
     writeFileSync(sidecar, JSON.stringify({ pid: dead, startTimeMs: Date.now() - 3_600_000, port: 9, flairVersion: "0.57.0" }));
