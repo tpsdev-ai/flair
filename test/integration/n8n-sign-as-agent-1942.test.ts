@@ -1,14 +1,4 @@
-// flair#1942 — a workflow's agent cannot read another agent's private memories.
-//
-// The n8n credential now holds an agent id + that agent's Ed25519 key, and the
-// nodes sign every request as that agent. This control runs against an
-// EPHEMERAL Harper started for this test only: it seeds two agents, writes one
-// private and one shared memory as agent A (through the FlairWrite node), and
-// reads them back as agent B (through the same credential path the nodes use).
-//
-// The read is asserted on the raw collection the client lists from, so the
-// boundary proven is the SERVER's: B's signed request is scoped to what B may
-// read, not filtered client-side afterwards.
+// flair#1942 — Agent Private Key selected: ordinary agents cannot read another agent's private memories.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 
@@ -186,7 +176,7 @@ describe("n8n signs as the credential's agent (flair#1942)", () => {
     expect(out[0][0].json._flair_id).toBeTruthy();
     expect(warns).toHaveLength(1);
 
-    // The administrator bypasses the agent scope: B's private memory is visible.
+    // Administrator Basic can read A's private memory.
     const rows = await listForOwner(adminCredentials, agentA.id);
     expect(rows.map((r) => r.content)).toContain(privateContent);
   }, 30_000);

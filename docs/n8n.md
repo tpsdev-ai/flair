@@ -13,7 +13,7 @@ Flair is the right pick when you want:
 | **Shape** | Tagged + typed memories with semantic search, plus chat-buffer compatibility | Conversation-buffer only (LangChain `BaseMessage` records) |
 | **Cross-orchestrator** | Same memory readable from Claude Code, OpenClaw, n8n | n8n-internal schema; nothing else reads it |
 | **Cross-instance** | Hub-spoke federation built-in (local ↔ Fabric, etc.) | Single-instance unless you self-build replication |
-| **Identity** | Ed25519 per-agent key (the credential's agent signs every request); the v1 admin password is still accepted, deprecated | n8n credential per workflow |
+| **Identity** | Ed25519 with Agent Private Key selected; the v1 admin password is still accepted, deprecated | n8n credential per workflow |
 
 If your AI Agent only needs to remember the last N turns of a single chat in a single n8n instance, Postgres-as-memory is fine. If you want the same memory to inform a Claude Code conversation tomorrow, or to persist across n8n redeploys via federated Flair, this package is the path.
 
@@ -39,7 +39,7 @@ In n8n: **Credentials → New → Flair API**. Fill in:
 | Field | Value |
 |---|---|
 | **Base URL** | `http://localhost:19926` (or your team's Flair URL) |
-| **Agent ID** | The identity that signs every request and owns the memories written from this credential, e.g. `n8n-support`. Workflows that share an Agent ID share memory ownership. |
+| **Agent ID** | The memory owner and, with Agent Private Key selected, signing identity, e.g. `n8n-support`. Workflows that share an Agent ID share memory ownership. |
 | **Agent Private Key** | That agent's Ed25519 private key. |
 
 Mint a key once per agent identity you want a workflow to use:
@@ -49,11 +49,11 @@ flair agent add n8n-support
 base64 < ~/.flair/keys/n8n-support.key
 ```
 
-Paste the base64 output into **Agent Private Key**. n8n encrypts credentials at rest; the key is never logged, never echoed into node output or errors, and never sent anywhere except as a request signature.
+Paste the base64 output into **Agent Private Key**.
 
-Click **Test** — the credential test signs a read as that agent, so it succeeds only when the key matches a registered agent on that instance.
+Click **Test** — it reads `/Memory` using the selected auth mode and reports that mode on success.
 
-**Admin Password (deprecated)** — the v1 field. It authenticates as the Harper administrator, which grants read/write to the entire instance — including every other agent's private memories — instead of signing as the agent above. It is used only while Agent Private Key is empty, and every execution that uses it logs a warning. Prefer the agent key.
+**Admin Password (deprecated)** — used only with Agent Private Key empty. Requests use Harper administrator Basic authentication, including access to other agents' private memories, and each node execution warns.
 
 ### 4. Wire the nodes
 
@@ -92,11 +92,11 @@ Patterns:
 
 ## Security
 
-Each workflow signs as the agent in its FlairApi credential, so the boundary is that agent's: it writes under its own agent id, and it reads its own memories plus other agents' non-private ones. Another agent's `private` memories are not readable — the server enforces that, and the credential cannot widen it.
+With Agent Private Key selected, requests sign as the credential's Agent ID. Ordinary agents write their own memories and read their own plus other agents' non-private memories; administrator-role agents have broader authority.
 
-The deprecated **Admin Password** field is the v1 behaviour: **it gives every workflow with that credential read/write access to the entire Flair instance**, not just the configured Agent ID — including every other agent's private memories, and it can write under any agent id. It is used only while Agent Private Key is empty, and every execution that uses it logs a warning. To migrate a credential still using it, mint an agent key (step 3) and fill in Agent Private Key.
+The deprecated **Admin Password** path uses Harper administrator Basic authentication, with access to other agents' private memories. It is used only while Agent Private Key is empty, and every execution that uses it logs a warning. To migrate a credential still using it, mint an agent key (step 3) and fill in Agent Private Key.
 
-Treat the key as a secret: n8n encrypts credentials at rest, but any n8n admin or backup restore can extract it. `flair agent rotate-key <agent-id>` replaces an agent's key without changing its identity; paste the new value into the credential afterwards.
+Treat the key as a secret.
 
 ## Get By Tag
 

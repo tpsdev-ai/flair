@@ -171,6 +171,23 @@ describe("missed freshly-created key (flair#1271)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test("explicit Basic mode bypasses local and in-memory signing keys", async () => {
+    const agentId = uniqueId("basic-only");
+    writeFileSync(join(dir, `${agentId}.key`), randomBytes(32));
+    const client = new FlairClient({
+      agentId, authMode: "basic", adminUser: "admin", adminPassword: "legacy-secret",
+      privateKey: generateKeyPairSync("ed25519").privateKey,
+    });
+    await client.health();
+    expect((mockFetch as any).mock.calls[0][1].headers.Authorization).toBe(
+      "Basic " + Buffer.from("admin:legacy-secret").toString("base64"),
+    );
+    writeFileSync(join(dir, `${agentId}.key`), "malformed-key");
+    const malformed = new FlairClient({ agentId, authMode: "basic", adminUser: "admin", adminPassword: "legacy-secret" });
+    await malformed.health();
+    expect((mockFetch as any).mock.calls[1][1].headers.Authorization).toStartWith("Basic ");
+  });
+
   test("a key written after the first miss is picked up on the next request", async () => {
     const agentId = uniqueId("fresh");
     const client = new FlairClient({ agentId });

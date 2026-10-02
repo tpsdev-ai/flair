@@ -23,12 +23,12 @@ Full setup walkthrough, subject/sessionId patterns, and security guidance are in
 ## Credential setup
 
 1. **Base URL** — your Flair instance, e.g. `http://localhost:19926`
-2. **Agent ID** — the identity that signs every request and owns the memories written from this n8n workspace. Workflows that share an Agent ID share memory ownership.
-3. **Agent Private Key** — that agent's Ed25519 private key, base64-encoded: `flair agent add <agent-id>` then `base64 < ~/.flair/keys/<agent-id>.key`. Every request is signed as that agent, so the workflow reaches that agent's memories and other agents' non-private memories — never their private ones. The key is a secret: it is never logged, echoed into node output or errors, or sent anywhere except as a signature.
+2. **Agent ID** — the memory owner and, with Agent Private Key selected, signing identity. Workflows that share an Agent ID share memory ownership.
+3. **Agent Private Key** — that agent's Ed25519 private key, base64-encoded: `flair agent add <agent-id>` then `base64 < ~/.flair/keys/<agent-id>.key`. With Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories; administrator-role agents have broader authority.
 
-The credential test signs a read as that agent, so you'll know the key and agent id are right when the test succeeds.
+The credential test reads `/Memory` with the selected auth mode and reports that mode on success.
 
-**Admin Password (deprecated)** — the v1 field. It authenticates as the Harper administrator, which grants read/write to the entire instance — including every other agent's private memories — instead of signing as the agent above. It is used only while Agent Private Key is empty, and every execution that uses it logs a warning. Prefer the agent key.
+**Admin Password (deprecated)** — used only with Agent Private Key empty. Requests use Harper administrator Basic authentication, including access to other agents' private memories, and each node execution warns.
 
 ## License
 

@@ -11,7 +11,7 @@ import {
   flairCredentialTest,
   makeClient,
   warnDeprecatedAdminPassword,
-  type FlairCredentials,
+  asFlairCredentials,
 } from "../../client";
 
 import { FlairChatMessageHistory } from "./FlairChatMessageHistory";
@@ -84,7 +84,7 @@ export class FlairChatMemory implements INodeType {
   methods = { credentialTest: { flairCredentialTest } };
 
   async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
-    const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
+    const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
     warnDeprecatedAdminPassword(this.logger, credentials);
     const subject = this.getNodeParameter("subject", itemIndex) as string;
     const sessionKey = this.getNodeParameter("sessionKey", itemIndex, "") as string;

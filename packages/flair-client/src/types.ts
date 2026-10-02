@@ -136,6 +136,8 @@ export interface FlairClientConfig {
   url?: string;
   /** Agent ID for authentication and data scoping. Falls back to FLAIR_AGENT_ID env var. */
   agentId?: string;
+  /** "basic" disables Ed25519 key resolution. Default: "auto". */
+  authMode?: "auto" | "basic";
   /** Path to Ed25519 private key file. Auto-resolved if omitted. */
   keyPath?: string;
   /** In-memory Ed25519 private key (PEM string or pre-loaded KeyObject).

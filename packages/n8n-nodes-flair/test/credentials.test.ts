@@ -34,7 +34,7 @@ describe("FlairApi credential", () => {
     expect(String(baseUrl.description)).toContain(":19926");
   });
 
-  test("agentId is required (it signs every request and owns the memories)", () => {
+  test("agentId is required", () => {
     const agentId = cred.properties.find((p) => p.name === "agentId")!;
     expect(agentId.required).toBe(true);
   });
@@ -52,11 +52,8 @@ describe("FlairApi credential", () => {
     expect(admin.required).toBeUndefined();
   });
 
-  test("carries no declarative auth or test — a declarative test cannot sign", () => {
-    // n8n's declarative credential test sends the credential's Basic auth; it
-    // cannot produce a `TPS-Ed25519` signature, so a test declared here would
-    // report a valid agent-key credential as failing. The nodes provide the
-    // credential test instead (`testedBy: "flairCredentialTest"`).
+  test("uses the node credential test instead of declarative Basic auth", () => {
+    // The old credential test used Basic; the node test generates Ed25519 signatures.
     expect((cred as any).authenticate).toBeUndefined();
     expect((cred as any).test).toBeUndefined();
   });

@@ -133,6 +133,7 @@ export class FlairClient {
   private lastKeyLookup: KeyLookupState | undefined;
   private timeoutMs: number;
   private basicAuth: string | null = null;
+  private authMode: "auto" | "basic";
 
   constructor(config: FlairClientConfig) {
     // Every env fallback below goes through readEnvOrUnset (flair#1254): a
@@ -142,6 +143,7 @@ export class FlairClient {
     // winning the `??`/`||` chain and poisoning the connection.
     this.url = (config.url ?? readEnvOrUnset("FLAIR_URL") ?? DEFAULT_URL).replace(/\/$/, "");
     this.agentId = config.agentId || readEnvOrUnset("FLAIR_AGENT_ID") || "";
+    this.authMode = config.authMode ?? "auto";
     this.keyPath = config.keyPath;
     if (config.privateKey !== undefined) {
       this.rawPrivateKey = config.privateKey;
@@ -160,6 +162,7 @@ export class FlairClient {
   }
 
   private resolveKey(): KeyObject | null {
+    if (this.authMode === "basic") return null;
     // Cache a FOUND key only. A miss must be retried on the next request —
     // flair#1271: `flair agent add` can write ~/.flair/keys/<id>.key after
     // this client was constructed (or after an earlier probe), and a cached

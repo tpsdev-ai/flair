@@ -1,16 +1,4 @@
-/**
- * Shared Flair client construction for the n8n nodes.
- *
- * Every node authenticates as the credential's agent: the credential holds an
- * agent id and that agent's Ed25519 private key, and each request carries a
- * `TPS-Ed25519` signature built by flair-client — the same signing path the
- * other Flair adapters use.
- *
- * The pre-existing admin-password credential keeps working as a DEPRECATED
- * path: it authenticates as the Harper administrator (whole-instance
- * read/write, including other agents' private memories) and every execution
- * that uses it logs a warning. An agent key always wins when both are present.
- */
+/** Shared n8n client construction: Agent Private Key signing or deprecated administrator Basic. */
 import type { FlairClient } from "@tpsdev-ai/flair-client";
 import type {
   ICredentialDataDecryptedObject,
@@ -24,22 +12,12 @@ import type {
 export interface FlairCredentials {
   baseUrl: string;
   agentId: string;
-  /** Ed25519 private key for `agentId` (a secret; never logged or echoed). */
+  /** Ed25519 private key for `agentId`. */
   agentPrivateKey?: string;
   /** Deprecated Harper admin password — instance-wide authority. */
   adminPassword?: string;
 }
 
-// flair-client is published ESM-only. n8n nodes compile to CJS and load via
-// `require`, so a static `import { FlairClient } from "@tpsdev-ai/flair-client"`
-// crashes at boot on Node 24+ with "No exports main defined" because the
-// flair-client package only declares an `import` condition in its exports
-// map. The `import type` above emits no runtime require, and this dynamic
-// import is the standard CJS→ESM interop path.
-//
-// The import is wrapped in Function() so TypeScript (compiled to CommonJS for
-// n8n consumption) doesn't downlevel `await import(...)` to a `require()` call,
-// which hits the ESM-only exports map and is rejected by Node 24+.
 export const importFlairClient = (): Promise<typeof import("@tpsdev-ai/flair-client")> =>
   (new Function("return import('@tpsdev-ai/flair-client')") as () => Promise<any>)();
 
@@ -54,11 +32,7 @@ export function asFlairCredentials(data: ICredentialDataDecryptedObject): FlairC
   };
 }
 
-/**
- * True when this credential has no agent key and carries the deprecated admin
- * password — i.e. the execution will run with the Harper administrator's
- * instance-wide authority instead of the agent's identity.
- */
+/** Whether the normalized credential selects administrator Basic authentication. */
 export function usesDeprecatedAdminPassword(credentials: FlairCredentials): boolean {
   return !credentials.agentPrivateKey && !!credentials.adminPassword;
 }
@@ -118,6 +92,7 @@ export async function makeClient(credentials: FlairCredentials): Promise<FlairCl
     return new mod.FlairClient({
       url: credentials.baseUrl,
       agentId: credentials.agentId,
+      authMode: "basic",
       adminUser: "admin",
       adminPassword: credentials.adminPassword,
     });
@@ -125,14 +100,7 @@ export async function makeClient(credentials: FlairCredentials): Promise<FlairCl
   throw new Error(missingCredentialMessage());
 }
 
-/**
- * The credential test, wired from each node's credential declaration
- * (`testedBy`). It builds the same client the nodes build and performs the
- * read the nodes' client lists from (`GET /Memory?agentId=<id>`), which the
- * server scopes to that agent: a wrong key fails with the server's 401. n8n's
- * declarative credential test cannot sign, so this is the only way to test the
- * agent-key path.
- */
+/** Test a Memory read with the same normalized credential and auth mode as the nodes. */
 export async function flairCredentialTest(
   this: ICredentialTestFunctions,
   credential: ICredentialsDecrypted<ICredentialDataDecryptedObject>,

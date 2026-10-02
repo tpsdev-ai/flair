@@ -16,7 +16,7 @@ import {
   flairCredentialTest,
   makeClient,
   warnDeprecatedAdminPassword,
-  type FlairCredentials,
+  asFlairCredentials,
 } from "../../client";
 
 type Operation = "search" | "getBySubject";
@@ -148,7 +148,7 @@ export class FlairSearch implements INodeType {
   methods = { credentialTest: { flairCredentialTest } };
 
   async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
-    const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
+    const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
     warnDeprecatedAdminPassword(this.logger, credentials);
     const operation = this.getNodeParameter("operation", itemIndex) as Operation;
     const limit = this.getNodeParameter("limit", itemIndex, 5) as number;
@@ -188,7 +188,7 @@ export class FlairSearch implements INodeType {
   }
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-    const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
+    const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
     warnDeprecatedAdminPassword(this.logger, credentials);
     const flair = await makeClient(credentials);
     const inputs = this.getInputData();

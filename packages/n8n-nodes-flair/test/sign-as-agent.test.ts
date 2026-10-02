@@ -1,13 +1,9 @@
-// flair#1942 — the n8n nodes authenticate as the credential's agent.
-//
-// Before this change every node built its FlairClient with `adminUser: "admin"`
-// + the credential's admin password, so a workflow ran with the instance
-// administrator's authority (every agent's memories, private included) and
-// nothing was signed. Each test below drives the real node against the real
-// flair-client with `fetch` stubbed, and verifies the Ed25519 signature the
-// request carried — i.e. as the credential's agent, not as the administrator.
+// flair#1942 — Agent Private Key requests sign as the credential's Agent ID.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { generateKeyPairSync, verify as ed25519Verify, type KeyObject } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { HumanMessage } from "@langchain/core/messages";
 
 import { FlairApi } from "../src/credentials/FlairApi.credentials";
@@ -22,7 +18,7 @@ import {
 
 const BASE_URL = "http://127.0.0.1:19926";
 
-/** A fresh Ed25519 agent key, in the encoding a `~/.flair/keys/<id>.key` file holds. */
+/** Base64 PKCS8 fixture; the CLI key file contains a raw seed. */
 function newAgentKey(): { keyText: string; publicKey: KeyObject } {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const keyText = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
@@ -85,13 +81,14 @@ function loggerStub(): { logger: any; warns: string[]; logs: string[] } {
 }
 
 /** Assert this request was signed by `publicKey` as `agentId` — a real signature, not just a header. */
-function expectAgentSignature(header: string | undefined, publicKey: KeyObject, request: SeenRequest): string {
+function expectAgentSignature(header: string | undefined, publicKey: KeyObject, request: SeenRequest, expectedAgentId: string): string {
   expect(header).toBeDefined();
   expect(header!.startsWith("TPS-Ed25519 ")).toBe(true);
   expect(header!.toLowerCase().includes("basic ")).toBe(false);
   const rest = header!.slice("TPS-Ed25519 ".length);
   const cut = rest.indexOf(":");
   const agentId = rest.slice(0, cut);
+  expect(agentId).toBe(expectedAgentId);
   const [ts, nonce, signature] = rest.slice(cut + 1).split(":");
   const url = new URL(request.url);
   const payload = `${agentId}:${ts}:${nonce}:${request.method}:${url.pathname}${url.search}`;
@@ -151,7 +148,7 @@ describe("the nodes sign as the credential's agent (flair#1942)", () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0].method).toBe("PUT");
-    expectAgentSignature(seen[0].headers["authorization"], publicKey, seen[0]);
+    expectAgentSignature(seen[0].headers["authorization"], publicKey, seen[0], credentials.agentId);
     expect(warns).toHaveLength(0);
     expect(out[0][0].json._flair_id).toBe("mem-1");
   }, 10_000);
@@ -181,7 +178,7 @@ describe("the nodes sign as the credential's agent (flair#1942)", () => {
     expect(JSON.parse(json)[0].id).toBe("m1");
     expect(seen).toHaveLength(1);
     expect(seen[0].method).toBe("POST");
-    expectAgentSignature(seen[0].headers["authorization"], publicKey, seen[0]);
+    expectAgentSignature(seen[0].headers["authorization"], publicKey, seen[0], credentials.agentId);
     expect(warns).toHaveLength(0);
   }, 10_000);
 
@@ -199,7 +196,7 @@ describe("the nodes sign as the credential's agent (flair#1942)", () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0].method).toBe("GET");
-    expectAgentSignature(seen[0].headers["authorization"], publicKey, seen[0]);
+    expectAgentSignature(seen[0].headers["authorization"], publicKey, seen[0], credentials.agentId);
   }, 10_000);
 
   test("FlairChatMemory signs its history read and write as the credential's agent", async () => {
@@ -216,7 +213,7 @@ describe("the nodes sign as the credential's agent (flair#1942)", () => {
 
     expect(seen).toHaveLength(2);
     for (const request of seen) {
-      expectAgentSignature(request.headers["authorization"], publicKey, request);
+      expectAgentSignature(request.headers["authorization"], publicKey, request, credentials.agentId);
     }
     expect(warns).toHaveLength(0);
   }, 10_000);
@@ -235,7 +232,7 @@ describe("the nodes sign as the credential's agent (flair#1942)", () => {
     await (new FlairWrite().execute as any).call(writeCtx(credentials, logger));
 
     expect(seen).toHaveLength(1);
-    expectAgentSignature(seen[0].headers["authorization"], publicKey, seen[0]);
+    expectAgentSignature(seen[0].headers["authorization"], publicKey, seen[0], credentials.agentId);
     expect(warns).toHaveLength(0);
   }, 10_000);
 });
@@ -281,7 +278,7 @@ describe("the deprecated admin password still works and warns (flair#1942)", () 
   }, 10_000);
 });
 
-describe("the agent key never leaves the credential (flair#1942)", () => {
+describe("credential key handling (flair#1942)", () => {
   test("no node output, log line or error message carries the key", async () => {
     const { keyText } = newAgentKey();
     const credentials: FlairCredentials = { baseUrl: BASE_URL, agentId: "n8n-secret", agentPrivateKey: keyText };
@@ -362,3 +359,72 @@ describe("the agent key never leaves the credential (flair#1942)", () => {
     }
   }, 10_000);
 });
+
+const entryPoints: Array<[string, (credentials: FlairCredentials, logger: any) => Promise<unknown>]> = [
+  ["FlairWrite.execute", async (credentials, logger) =>
+    (new FlairWrite().execute as any).call(writeCtx(credentials, logger))],
+  ["FlairSearch.execute", async (credentials, logger) =>
+    (new FlairSearch().execute as any).call(searchCtx(credentials, { operation: "search", query: "q", limit: 5 }, logger))],
+  ["FlairSearch.supplyData", async (credentials, logger) => {
+    const supply = await (new FlairSearch().supplyData as any).call(
+      searchCtx(credentials, { operation: "search", limit: 5 }, logger), 0,
+    );
+    return (supply.response as any).func({ query: "q" });
+  }],
+  ["FlairChatMemory.supplyData", async (credentials, logger) => {
+    const supply = await (new FlairChatMemory().supplyData as any).call(chatCtx(credentials, logger), 0);
+    await (supply.response as any).chatHistory.addMessage(new HumanMessage("hi"));
+    return (supply.response as any).chatHistory.getMessages();
+  }],
+];
+
+for (const [name, run] of entryPoints) {
+  test(`${name}: whitespace-only key selects Basic like the credential test, despite a local key`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-n8n-basic-"));
+    const savedKeyDir = process.env.FLAIR_KEY_DIR;
+    const credentials: FlairCredentials = {
+      baseUrl: BASE_URL, agentId: "n8n-local", agentPrivateKey: " \t ", adminPassword: "legacy-secret",
+    };
+    try {
+      process.env.FLAIR_KEY_DIR = dir;
+      writeFileSync(join(dir, "n8n-local.key"), Buffer.alloc(32, 7));
+      const { logger, warns } = loggerStub();
+      reply = (request) => ({ status: 200, body: request.method === "GET" ? [] : { id: "m", written: true, results: [] } });
+      const result = await (flairCredentialTest as any).call({}, { data: credentials });
+      expect(result.status).toBe("OK");
+      expect(result.message).toContain("Harper administrator");
+      await run(credentials, logger);
+      expect(seen.length).toBeGreaterThan(1);
+      for (const request of seen) {
+        expect(request.headers.authorization).toBe("Basic " + Buffer.from("admin:legacy-secret").toString("base64"));
+      }
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("This execution runs as the Harper administrator");
+    } finally {
+      if (savedKeyDir === undefined) delete process.env.FLAIR_KEY_DIR;
+      else process.env.FLAIR_KEY_DIR = savedKeyDir;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  test(`${name}: surrounding whitespace in Agent ID is normalized like the credential test`, async () => {
+    const { keyText, publicKey } = newAgentKey();
+    const credentials: FlairCredentials = {
+      baseUrl: ` ${BASE_URL} `, agentId: " \tn8n-trimmed ", agentPrivateKey: ` ${keyText} `,
+    };
+    const { logger, warns } = loggerStub();
+    reply = (request) => ({ status: 200, body: request.method === "GET" ? [] : { id: "m", written: true, results: [] } });
+    const result = await (flairCredentialTest as any).call({}, { data: credentials });
+    expect(result.status).toBe("OK");
+    expect(result.message).toBe("Signed as agent 'n8n-trimmed'.");
+    await run(credentials, logger);
+    expect(seen.length).toBeGreaterThan(1);
+    for (const request of seen) {
+      expectAgentSignature(request.headers.authorization, publicKey, request, "n8n-trimmed");
+      const url = new URL(request.url);
+      expect(url.searchParams.get("agentId")).toBeOneOf([null, "n8n-trimmed"]);
+      if (request.body && request.method === "PUT") expect(JSON.parse(request.body).agentId).toBe("n8n-trimmed");
+    }
+    expect(warns).toHaveLength(0);
+  }, 10_000);
+}

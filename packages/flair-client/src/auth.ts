@@ -28,15 +28,7 @@ export function loadPrivateKey(path: string): KeyObject {
   return decodePrivateKey(readFileSync(path));
 }
 
-/**
- * Resolve an Ed25519 private key held as TEXT rather than a file — the same
- * encodings `loadPrivateKey` reads (base64 PKCS8 DER, or a base64 raw 32-byte
- * seed). For callers whose key has to travel inside a configuration value and
- * cannot be read from the local filesystem (e.g. a remote workflow platform).
- *
- * A PEM is NOT accepted: `loadPrivateKey`/key files use the raw encodings
- * above, and a PEM decodes to garbage instead of failing at the format check.
- */
+/** Decode base64 PKCS8 DER or a base64 raw seed. */
 export function loadPrivateKeyString(text: string): KeyObject {
   return decodePrivateKey(Buffer.from(text, "utf-8"));
 }
