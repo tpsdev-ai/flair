@@ -26,20 +26,24 @@ export interface UnitStep {
   timeoutMs?: number;
 }
 
-// ── Time bounds (flair#2030) ────────────────────────────────────────────────
+// ── Time bounds (flair#2030, resized flair#2224) ───────────────────────────
 //
 // A hung step must not take the rest of the lane with it. Without a bound, the
 // CI job's own limit cancels the job mid-step, and neither the later steps, the
 // final summary nor the end-of-lane guards ever run. Every number below is
 // derived from that job: `.github/workflows/test.yml`, job `test-unit`,
-// `timeout-minutes: 10`. Measured on the 51 green `Unit Tests (node N)` legs of
-// 17 CI runs, 2026-09-28 21:52Z to 2026-09-29 03:53Z:
+// `timeout-minutes: 15`. Measured on 22 recent `Unit Tests (node N)` legs
+// (2026-10-02) plus a local run on the same tree:
 //   - the job's own steps outside the lane (setup before it, the skip-count
-//     check and post steps after it): at most 53 s;
-//   - the whole lane: 279–401 s;
-//   - `root unit tests`, the one long step: at most 266 s, and every other
-//     step at most 30 s, in the seven legs timed step by step (the slowest
-//     lane among them).
+//     check and post steps after it): at most 53 s (2026-09-29);
+//   - the whole lane: 401–510 s, and 456 s locally;
+//   - `root unit tests`, the one long step: 252–327 s (280 s locally);
+//   - every other step at most 33 s (a CLI-spawning isolated test); in that
+//     set the median is 1–2 s.
+// The budget is 1.5× the slowest measured lane (510 s), so a runner no more
+// than half again as slow as the worst observed still finishes; the old 510 s
+// budget was under that worst lane and killed whichever late step was running
+// on a busy runner (flair#2224: `flair-mcp` on #2220, `adk-flair-js` on main).
 // unit-runner.test.ts pins the job limit and re-checks the arithmetic, so a
 // change to either side fails there first.
 //
@@ -48,30 +52,31 @@ export interface UnitStep {
 // time-limited: these numbers describe a CI runner, and a slower machine must
 // not turn a slow step into a failure.
 
-/** The CI job limit the lane has to report inside (`timeout-minutes: 10`). */
-export const CI_JOB_LIMIT_MS = 10 * 60_000;
-/** Reserved for the job's own steps outside the lane: 53 s measured, 37 s spare. */
-export const CI_OUTSIDE_LANE_MS = 90_000;
+/** The CI job limit the lane has to report inside (`timeout-minutes: 15`). */
+export const CI_JOB_LIMIT_MS = 15 * 60_000;
+/** Reserved for the job's own steps outside the lane: 53 s measured, 67 s spare. */
+export const CI_OUTSIDE_LANE_MS = 120_000;
 /**
- * Keep-going's whole-lane budget: 600 − 90 = 510 s. A step still running when
- * it runs out is killed and every later step is reported as not run, so the
- * summary and both guards are expected to print before the job limit however
- * many steps hang, provided the job's steps outside the lane stay within the
- * reserve above (an observed margin, not a bound on workflow setup).
+ * Keep-going's whole-lane budget: 900 − 120 = 780 s, 1.5× the slowest measured
+ * lane (510 s). A step still running when it runs out is killed and every later
+ * step is reported as not run, so the summary and both guards are expected to
+ * print before the job limit however many steps hang, provided the job's steps
+ * outside the lane stay within the reserve above (an observed margin, not a
+ * bound on workflow setup).
  */
 export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
 /**
- * The default per-step limit: 90 s, 3× the slowest ordinary step. One hung step
- * costs at most that, so the rest of the slowest lane still runs inside the
- * budget (401 + 90 = 491 s ≤ 510 s).
+ * The default per-step limit: 100 s, 3× the slowest ordinary step (33 s). One
+ * hung step costs at most that, so the rest of the slowest lane still runs
+ * inside the budget (510 + 100 = 610 s ≤ 780 s).
  */
-export const STEP_TIMEOUT_MS = 90_000;
+export const STEP_TIMEOUT_MS = 100_000;
 /**
- * `root unit tests`' own limit: 360 s, 1.35× its slowest measured run. If it
- * hangs, the other ~135 s of the lane still fits (135 + 360 = 495 s ≤ 510 s). A
- * real root step that slow would already put the job within ~50 s of its limit.
+ * `root unit tests`' own limit: 450 s, 1.37× its slowest measured run (327 s).
+ * If it hangs, the other ~183 s of the lane still fits (183 + 450 = 633 s ≤
+ * 780 s).
  */
-export const ROOT_STEP_TIMEOUT_MS = 360_000;
+export const ROOT_STEP_TIMEOUT_MS = 450_000;
 
 /** The time limits a lane runs under (flair#2030). */
 export interface UnitLaneLimits {
@@ -517,6 +522,7 @@ export function runUnitSteps(
       break;
     }
     console.log(`\n${step.name}${step.files.length ? ` (${step.files.length} files)` : ""}`);
+    const stepStartedMs = Date.now();
     const limit = limits && (step.timeoutMs ?? limits.stepTimeoutMs);
     const timeout = limit === undefined
       ? undefined
@@ -524,6 +530,11 @@ export function runUnitSteps(
         ? { ms: remaining, reason: `timed out: ${budgetRanOut}` }
         : { ms: limit, reason: `timed out after ${seconds(limit)}` };
     const detail = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    // Per-step timing, printed for every step that ran, pass or fail
+    // (flair#2224): the budget above is sized from measured step times, so the
+    // lane reports them; otherwise the next resize can only be re-derived from
+    // CI timestamps that no longer exist.
+    console.log(`${step.name}: ${seconds(Date.now() - stepStartedMs)}`);
     // The tripwire is checked after EVERY step, whatever the step's own
     // outcome, so a call that reached it is named with the step that made it.
     const tripwireDetail = inspectTripwire();
