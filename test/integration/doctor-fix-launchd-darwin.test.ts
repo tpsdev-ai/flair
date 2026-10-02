@@ -41,6 +41,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -55,6 +56,7 @@ import {
   parseLaunchctlList,
   pickInstancePid,
 } from "../../src/lib/launchd-management.ts";
+import { readProcessStartTimeMs } from "../../src/lib/process-start-time.ts";
 import {
   buildDirectSpawnEnv,
   harperPortValue,
@@ -831,9 +833,32 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
   sb.direct = proc;
   if (!proc.pid) throw new Error("direct spawn produced no pid");
   await waitForHttp(sb.httpURL, 60_000);
+  // flair writes a flair#1454 identity sidecar whenever IT starts Harper
+  // directly (`flair start`/`flair init`); this spawn bypasses flair, so write
+  // the same sidecar for the same process. Without it the adopt path depends
+  // on doctor's sidecar SELF-HEAL, which reconstructs the sidecar only when
+  // flair-identified /Health, the pid→port bind and the worktree match all
+  // answer positively — on a loaded runner those lag the boot, doctor refuses
+  // to adopt ("its identity could not be verified (no identity sidecar)") and
+  // the case flakes (flair#2130).
+  writeDirectSidecar(sb, proc.pid);
   const serving = instancePid(sb.dataDir, sb.httpPort);
   if (serving === null) throw new Error("direct-spawned Harper is up but the serving PID is unreadable");
   return serving;
+}
+
+/** The flair#1454 sidecar a production direct spawn writes: `{pid, startTimeMs, port, flairVersion}`. */
+function writeDirectSidecar(sb: Sandbox, pid: number): void {
+  const sidecar = {
+    pid,
+    startTimeMs: readProcessStartTimeMs(pid) ?? Date.now(),
+    port: sb.httpPort,
+    flairVersion: "test",
+  };
+  const tmp = join(sb.dataDir, `.flair-daemon.json.${process.pid}.tmp`);
+  writeFileSync(tmp, `${JSON.stringify(sidecar, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+  renameSync(tmp, join(sb.dataDir, "flair-daemon.json"));
+  chmodSync(join(sb.dataDir, "flair-daemon.json"), 0o600);
 }
 
 test.skipIf(!isDarwin)(
