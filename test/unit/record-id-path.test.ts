@@ -46,8 +46,8 @@ describe("flair#1970: encodeRecordId keeps an id ONE path segment", () => {
   });
 });
 
-// Source tripwires supplement the URL behavior tests: these are the CLI record
-// sites that used direct or missing encoding before this change.
+// Source tripwires for selected CLI record sites supplement the URL behavior
+// tests; these sites used direct or missing encoding before this change.
 const RECORD_SITES: Array<[string, string]> = [
   ["soul.ts", "const out = await api(\"PUT\", `/Soul/${encodeRecordId(id)}`"],
   ["memory.ts", "const out = await api(\"PUT\", `/Memory/${encodeRecordId(memId)}`, body, { agentId, agentIdSource: source });"],
@@ -60,7 +60,7 @@ const RECORD_SITES: Array<[string, string]> = [
   ["workspace.ts", "encodeRecordId(id)"],
 ];
 
-test("CLI record write and read sites use the shared id helper", () => {
+test("selected CLI record sites use the shared id helper", () => {
   for (const [file, expression] of RECORD_SITES) {
     const source = readFileSync(new URL(`../../src/commands/${file}`, import.meta.url), "utf8");
     expect(source).toContain(expression);

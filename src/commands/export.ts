@@ -1,7 +1,7 @@
 /**
  * export.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair export`.
+ * Owns the `flair export` command.
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
