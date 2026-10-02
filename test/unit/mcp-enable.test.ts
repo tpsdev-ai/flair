@@ -2189,4 +2189,28 @@ describe("enableMcp — standalone local config update (flair#1136)", () => {
     );
     expect(calls).toContain("ops:restart");
   });
+
+  // ─── flair#2193: a failed local config update must stop before the restart ──
+
+  test("flair#2193: a failed local config update stops before the restart, names the remedy, and is not a success", async () => {
+    const { fetchImpl, calls } = fullMockFetch();
+    // Point localConfigPath at a file that is not there, so
+    // updateLocalConfigMcpEnabled fails before the restart.
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), localConfigPath: join(dir, "absent-config.yaml"), confirmSecretsApplied: true },
+      { fetchImpl },
+    );
+
+    // No success result (the CLI exits non-zero on ok:false).
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("local-config-update");
+    // No restart, and none of the restart step's own calls: the flow stopped
+    // before captureBootDiscriminator.
+    expect(calls).not.toContain("ops:restart");
+    expect(calls).not.toContain("ops:system_information");
+    // The failing step names the remedy and says the instance was not restarted.
+    const failed = result.steps.find((s) => s.step === "local-config-update" && !s.ok);
+    expect(failed?.detail).toContain("did not restart the instance");
+    expect(failed?.detail).toContain("flair mcp enable");
+  });
 });

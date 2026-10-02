@@ -1,0 +1,1 @@
+- **`flair mcp enable` stops before the restart when its local configuration update fails, exits non-zero, and names the fix.** On the non-Fabric (standalone) branch the `mcp.enabled` update result is now acted on: it used to be recorded and then ignored, so a failed update still reached the restart and a run could report success with the config file unchanged. (flair#2193)

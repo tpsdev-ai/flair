@@ -2284,7 +2284,26 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // ── Standalone (non-Fabric): update local config + restart ────────────
     currentStep = "local-config-update";
     const localConfigResult = updateLocalConfigMcpEnabled(true, params.localConfigPath);
-    push(localConfigResult.ok, localConfigResult.detail);
+    if (!localConfigResult.ok) {
+      // flair#2193: stop BEFORE the restart. The mcp.enabled update failed, so
+      // the target would restart against a config.yaml this run did not write —
+      // and the metadata checks below could still pass, reporting success for a
+      // change that never happened. Name the remedy and fail the step instead.
+      push(false, `${localConfigResult.detail} This command did not restart the instance. Set mcp.enabled: ${MCP_ENABLED_ENV_REFERENCE} in the local config.yaml, then re-run \`flair mcp enable\`.`);
+      return {
+        ok: false,
+        dryRun,
+        steps,
+        failedStep: "local-config-update",
+        issuer,
+        resource: `${issuer}/mcp`,
+        secretsMechanism: secretsResult.mechanism,
+        secretsPath: secretsResult.path,
+        signingKeyFilePath: keyResult.path,
+        callbackUrl,
+      };
+    }
+    push(true, localConfigResult.detail);
 
     // flair#2113: ensure --cimd-allowed-hosts (written unless the file already
     // holds that exact list) and read it back. A failure here stops the flow
