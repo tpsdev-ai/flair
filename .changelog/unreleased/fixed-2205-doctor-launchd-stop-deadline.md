@@ -1,0 +1,1 @@
+- **`flair doctor --fix` reports a direct Harper process that does not exit during launchd adoption (Closes #2205).** The shutdown wait has a separate budget and reports the PID, data directory and recovery action.

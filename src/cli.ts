@@ -547,6 +547,7 @@ const FABRIC_OPS_PORT = 9925;
 // DEFAULT_ADMIN_USER + resolveAdminUser (flag > FLAIR_ADMIN_USER env > "admin")
 // live in src/lib/auth-resolve.ts — imported above (flair#1345).
 const STARTUP_TIMEOUT_MS = 60_000;
+const ADOPT_STOP_TIMEOUT_MS = 10_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 
 // flair#670 — single-host default for the Harper ops API bind address.
@@ -5672,7 +5673,7 @@ function resolveInstanceServingPid(
   let listeningPids: number[] = [];
   try {
     listeningPids = deps.findListeningPids?.(port)
-      ?? listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+      ?? listeningPidsOnPort(port, () => execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], { encoding: "utf-8", timeout: 2_000, killSignal: "SIGKILL" }));
   } catch { /* lsof unavailable — the PID file may still answer */ }
   // flair#2056: the `hdb.pid` pid is used as PID-file evidence only when it is
   // alive, its command line passes isHarperProcessCommandLine (node or bun
@@ -7103,10 +7104,7 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
  * TWO PHASES (flair#2040). The rule for this handoff: the running instance
  * is not stopped, and no launchd job is unloaded, until every check that can
  * be made about the replacement from THIS session has passed; an UNKNOWN
- * answer is a failed check, never a pass. Every failure after that point is
- * followed by an attempt to bring back what was running, and the result
- * reports the state the instance was left in — including when that state
- * could not be established.
+ * answer is a failed check, never a pass.
  *
  *   1. PREPARE (prepareLaunchdRepair) — reads and validation; the running
  *      instance and launchd are untouched:
@@ -7136,14 +7134,7 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
  *      its port does not answer, and verify STRICTLY: Flair's /Health answers
  *      ok and launchd's pid is the IDENTIFIED serving pid
  *      (judgeLaunchdJobServing), and on adopt the serving pid
- *      changed and the old one is dead (flair#1684/#1685). ANY failure here
- *      goes through restoreAfterFailedRepair.
- *
- * The preflight cannot PROVE a bootstrap will succeed — only loading something
- * proves that — which is why phase 2 restores rather than assumes.
- *
- * Never reports success on a direct start or an unattributed process. Every
- * throw becomes a named result, never a crash mid-report.
+ *      changed and the old one is dead (flair#1684/#1685).
  */
 async function repairLaunchdManagement(dataDir: string, port: number): Promise<LaunchdRepairResult> {
   const { plan, plistPath, isLegacy, config } = planLaunchdRepairFor(dataDir, port);
@@ -7465,7 +7456,6 @@ interface RepairProgress {
   loaded: boolean;
 }
 
-/** Phase 2: the bounce, with restore on any failure. */
 async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRepairResult> {
   const done: RepairProgress = { unloadedPrior: false, stopped: false, wrotePlist: false, removedLegacy: false, wroteConfig: false, loaded: false };
   try {
@@ -7485,9 +7475,9 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     //    job does not collide on the port. The captured pid is the evidence the
     //    verify uses to prove the serving pid CHANGED.
     if (p.arm === "adopt") {
-      done.stopped = true;
       const stop = await stopDirectProcessForAdopt(p.port, p.dataDir);
-      if (stop) throw new Error(stop.kind === "failed" || stop.kind === "refused" ? stop.detail : "the direct process could not be stopped");
+      if (stop) return stop;
+      done.stopped = true;
     }
     // 3. Write the validated plist (pass-file mode, no secret: 0644).
     done.wrotePlist = true;
@@ -7693,9 +7683,19 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
   const state = classifyDaemonState(evidence, { port, dataDir });
   // SIGTERM + wait for exit for a verified live pid (RUNNING or WEDGED — a
   // wedged daemon is recovery, not a recycled-pid gamble).
+  const stopDeadline = Date.now() + ADOPT_STOP_TIMEOUT_MS;
   if (state.state === "RUNNING" || state.state === "WEDGED") {
     try { process.kill(state.pid, "SIGTERM"); } catch { /* already gone */ }
-    try { await waitForProcessExit(state.pid, STARTUP_TIMEOUT_MS); } catch { /* best-effort — the port check below surfaces the real problem */ }
+    try {
+      await waitForProcessExit(state.pid, ADOPT_STOP_TIMEOUT_MS);
+    } catch {
+      return {
+        kind: "failed",
+        detail: `Timed out after ${ADOPT_STOP_TIMEOUT_MS}ms waiting for direct Harper process ${state.pid} ` +
+          `for ${dataDir} to exit after SIGTERM; it is still alive. No replacement launchd job was loaded.`,
+        remedy: [`Inspect ${dataDir}/log/hdb.log and process ${state.pid}; after it exits, run flair doctor --fix`],
+      };
+    }
   }
   // flair#1827: poll the post-stop health until the port is provably free — a
   // single observation that caught the listener mid-release flaked with "port
@@ -7703,7 +7703,7 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
   // observation, and a timeout names the wait and the last probe.
   const decision = await decideAdoptStopWithWait(state, {
     observe: () => probeHealth(port),
-    deadlineMs: STARTUP_TIMEOUT_MS,
+    deadlineMs: Math.max(0, stopDeadline - Date.now()),
   });
   if (decision.decision !== "proceed") return decision.decision;
   // Belt-and-suspenders: lsof confirms no TCP listener remains before the
@@ -7711,8 +7711,7 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
   // nothing is listening, but a port that is BOUND yet refuses connections
   // (backlog-full, or a non-HTTP listener) would still EADDRINUSE on load —
   // this catches that rare case the HTTP probe cannot see.
-  const { execSync } = await import("node:child_process");
-  const listeners = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+  const listeners = listeningPidsOnPort(port, () => execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], { encoding: "utf-8", timeout: 2_000, killSignal: "SIGKILL" }));
   if (listeners.length > 0) {
     return {
       kind: "failed",

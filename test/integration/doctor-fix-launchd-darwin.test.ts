@@ -56,7 +56,7 @@ import {
   parseLaunchctlList,
   pickInstancePid,
 } from "../../src/lib/launchd-management.ts";
-import { readProcessStartTimeMs } from "../../src/lib/process-start-time.ts";
+import { readProcessStartSecondMs, readProcessStartTimeMs } from "../../src/lib/process-start-time.ts";
 import { verifyIdentity } from "../../src/lib/daemon-liveness.ts";
 import {
   buildDirectSpawnEnv,
@@ -147,7 +147,7 @@ function requireCliBuild(): void {
 }
 
 function launchctlList(label: string): { code: number | null; stdout: string } {
-  const res = spawnSync("launchctl", ["list", label], { encoding: "utf-8", timeout: 5_000 });
+  const res = spawnSync("launchctl", ["list", label], { encoding: "utf-8", timeout: 5_000, killSignal: "SIGKILL" });
   return { code: res.status, stdout: res.stdout ?? "" };
 }
 
@@ -427,7 +427,7 @@ function boundDiag(text: string): string {
 }
 
 function runDiag(cmd: string, args: string[]): string {
-  const res = spawnSync(cmd, args, { encoding: "utf-8", timeout: 5_000 });
+  const res = spawnSync(cmd, args, { encoding: "utf-8", timeout: 5_000, killSignal: "SIGKILL" });
   const how = res.error ? `error: ${res.error.message}` : res.signal ? `signal ${res.signal}` : `exit ${res.status}`;
   return `$ ${cmd} ${args.join(" ")} -> ${how}\n${res.stdout ?? ""}${res.stderr ? `[stderr]\n${res.stderr}` : ""}`;
 }
@@ -473,7 +473,7 @@ function dumpDiagnostics(sb: Sandbox, why: string): void {
     section(`launchctl print gui/${uid}/${sb.label}`, runDiag("launchctl", ["print", `gui/${uid}/${sb.label}`]));
     // The preflight's two domain reads: the domain probe's exit code, and the
     // head of print-disabled (its "disabled services" block is what it parses).
-    const domain = spawnSync("launchctl", ["print", `gui/${uid}`], { encoding: "utf-8", timeout: 5_000 });
+    const domain = spawnSync("launchctl", ["print", `gui/${uid}`], { encoding: "utf-8", timeout: 5_000, killSignal: "SIGKILL" });
     out.push(`launchctl print gui/${uid} -> exit ${domain.status}${domain.signal ? ` signal ${domain.signal}` : ""}`);
     section(`launchctl print-disabled gui/${uid} (head)`, runDiag("launchctl", ["print-disabled", `gui/${uid}`]).slice(0, 1_500));
   }
@@ -540,10 +540,10 @@ function diagnosed(body: () => Promise<void>): () => Promise<void> {
 }
 
 function unloadJob(label: string, plistPath: string): void {
-  spawnSync("launchctl", ["unload", plistPath], { encoding: "utf-8", timeout: 10_000 });
+  spawnSync("launchctl", ["unload", plistPath], { encoding: "utf-8", timeout: 10_000, killSignal: "SIGKILL" });
   const uid = process.getuid?.();
   if (uid !== undefined) {
-    spawnSync("launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf-8", timeout: 10_000 });
+    spawnSync("launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf-8", timeout: 10_000, killSignal: "SIGKILL" });
   }
 }
 
@@ -613,8 +613,8 @@ async function populateDataDir(sb: Sandbox): Promise<void> {
 }
 
 async function doctorFixToManaged(sb: Sandbox): Promise<{ stdout: string; stderr: string }> {
-  const result = await runDoctorFix(sb.tmpHome, sb.httpPort);
   trackJob(sb.label, sb.plistPath);
+  const result = await runDoctorFix(sb.tmpHome, sb.httpPort);
   await waitForHttp(sb.httpURL, 60_000);
   const after = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
   if (after.state !== "managed") {
@@ -675,61 +675,54 @@ function refreshPortsFromConfig(sb: Sandbox): void {
 }
 
 async function teardown(sb: Sandbox): Promise<void> {
+  const managedPid = parseLaunchctlList(launchctlList(sb.label).stdout).pid;
+  const managedStart = managedPid === null ? null : readProcessStartSecondMs(managedPid);
+  const restored = verifyIdentity({
+    pidfilePid: readPidFile(sb.dataDir),
+    sidecar: readSidecar(sb.dataDir),
+    readStartTime: readProcessStartTimeMs,
+  });
+  const restoredPid = restored.kind === "verified" ? restored.pid : null;
+  const restoredStart = restoredPid === null ? null : readProcessStartSecondMs(restoredPid);
   unloadJob(sb.label, sb.plistPath);
   LOADED_JOBS.forEach((j) => {
     if (j.label === sb.label) LOADED_JOBS.delete(j);
   });
-  if (sb.direct && sb.direct.pid && isAlive(sb.direct.pid)) {
+  const stopOwned = async (pid: number, stillOwned: () => boolean): Promise<void> => {
+    if (!stillOwned() || !isAlive(pid)) return;
+    try { process.kill(pid, "SIGTERM"); } catch { return; }
     try {
-      process.kill(sb.direct.pid, "SIGTERM");
+      await waitDead(pid, 2_000);
     } catch {
-      /* already gone */
+      if (!stillOwned()) return;
+      try { process.kill(pid, "SIGKILL"); } catch { return; }
+      await waitDead(pid, 2_000);
     }
-    try {
-      await waitDead(sb.direct.pid, 8_000);
-    } catch {
-      try {
-        process.kill(sb.direct.pid, "SIGKILL");
-      } catch {
-        /* gone */
-      }
-    }
-  }
-  if (sb.populate) {
-    try {
-      await stopHarper(sb.populate, { keepInstallDir: true });
-    } catch {
-      /* best effort */
-    }
-  }
-  // launchd is already unloaded above, so KeepAlive cannot resurrect this pidfile kill.
-  const pid = readPidFile(sb.dataDir);
-  if (pid && isAlive(pid)) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      /* gone */
-    }
-    try {
-      await waitDead(pid, 8_000);
-    } catch {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        /* gone */
-      }
-    }
-  }
+  };
+  const results = await Promise.allSettled([
+    sb.direct?.pid
+      ? stopOwned(sb.direct.pid, () => sb.direct!.exitCode === null && sb.direct!.signalCode === null)
+      : Promise.resolve(),
+    managedPid !== null && managedStart !== null
+      ? stopOwned(managedPid, () => readProcessStartSecondMs(managedPid) === managedStart)
+      : Promise.resolve(),
+    restoredPid !== null && restoredStart !== null && restoredPid !== managedPid && restoredPid !== sb.direct?.pid
+      ? stopOwned(restoredPid, () => readProcessStartSecondMs(restoredPid) === restoredStart)
+      : Promise.resolve(),
+    sb.populate ? stopHarper(sb.populate, { keepInstallDir: true }) : Promise.resolve(),
+  ]);
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map((r) => r.reason), `teardown failed for ${sb.tmpHome}`);
   rmSync(sb.tmpHome, { recursive: true, force: true });
 }
 
 afterEach(async () => {
-  while (live.length) {
-    const sb = live.pop();
-    if (sb) await teardown(sb);
-  }
+  const cases = live.splice(0);
+  const results = await Promise.allSettled(cases.map(teardown));
   lastCliRun = undefined;
-});
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map((r) => r.reason), "fixture teardown failed");
+}, 60_000);
 
 function assertNoPrompt(log: string, cliOut: string): void {
   expect(log, `StandardErrorPath contained a readline/prompt:\n${log}`).not.toMatch(PROMPT_RE);
