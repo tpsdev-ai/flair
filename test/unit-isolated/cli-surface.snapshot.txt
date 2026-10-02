@@ -5295,6 +5295,7 @@ Options:
 
 Global Options:
   -v, --version             output the version number
+Collections are read separately and can reflect different moments.
 
 ----- flair restore -----
 Usage: flair restore [options] <path>

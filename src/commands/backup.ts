@@ -45,6 +45,7 @@ addSharedCredentialOptions(
   program
     .command("backup")
     .description("Export agents, memories, and souls to a JSON archive")
+    .addHelpText("after", "Collections are read separately and can reflect different moments.")
     .option("--output <path>", "Output file path (default: ~/.flair/backups/flair-backup-<timestamp>.json)")
     .option("--agents <ids>", "Comma-separated agent IDs to include (default: all)")
     .option("--port <port>", "Harper HTTP port")
@@ -178,6 +179,7 @@ addSharedCredentialOptions(
     }
 
     log(`\n${render.icons.ok} ${render.wrap(render.c.green, "Backup complete")}`);
+    log("Collections are read separately and can reflect different moments.");
     log(render.kv("Agents", render.wrap(render.c.bold, String(agents.length))));
     log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
     log(render.kv("Souls", render.wrap(render.c.bold, String(souls.length))));

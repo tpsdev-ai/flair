@@ -16,13 +16,14 @@ type Reply = { body?: unknown; status?: number; raw?: string; error?: string };
 type Fault = "write" | "read" | "count" | "id" | "content" | "rename";
 
 async function runBackup(overrides: Record<string, Reply> = {}, options: {
-  fault?: Fault; filter?: string; existing?: boolean; defaultOutput?: boolean;
+  fault?: Fault; filter?: string; existing?: boolean; defaultOutput?: boolean; empty?: boolean;
 } = {}) {
   const home = tempDir("flair-backup-2214-");
   const output = join(home, "archive.json");
   if (options.existing) writeFileSync(output, "previous archive\n");
-  const fixture: Record<string, Reply> = { "/Agent/": { body: agents }, ...overrides };
-  for (const agent of agents) {
+  const fixtureAgents = options.empty ? [] : agents;
+  const fixture: Record<string, Reply> = { "/Agent/": { body: fixtureAgents }, ...overrides };
+  for (const agent of fixtureAgents) {
     for (const table of ["Memory", "Soul"] as const) {
       const path = `/${table}/?agentId=${agent.id}`;
       fixture[path] ??= { body: (table === "Memory" ? memories : souls).filter(r => r.agentId === agent.id) };
@@ -215,7 +216,7 @@ describe("backup fails closed (flair#2214)", () => {
   });
 
   test("an empty instance is a valid backup", async () => {
-    const result = await runBackup({ "/Agent/": { body: [] } });
+    const result = await runBackup({}, { empty: true });
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(readFileSync(result.output, "utf-8"))).toMatchObject({ agents: [], memories: [], souls: [] });
   });
