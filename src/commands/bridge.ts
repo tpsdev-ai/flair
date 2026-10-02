@@ -38,13 +38,17 @@ const resolveHttpPort = (opts: { port?: string | number; dataDir?: string }, mod
 
 function redactBridgeSecret(value: string, secret: string): string {
   if (!secret) return value;
-  const redacted = value.replaceAll(secret, "[REDACTED]");
-  try {
-    const encoded = encodeURIComponent(secret);
-    return encoded === secret ? redacted : redacted.replaceAll(encoded, "[REDACTED]");
-  } catch {
-    return redacted;
+  const forms = new Set<string>();
+  for (let form = secret; form.length <= value.length && !forms.has(form); form = JSON.stringify(form).slice(1, -1)) {
+    forms.add(form);
   }
+  try {
+    forms.add(encodeURIComponent(secret));
+  } catch {}
+  if (!forms.size) return value;
+  const pattern = [...forms].sort((a, b) => b.length - a.length)
+    .map((form) => form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return value.replace(new RegExp(pattern, "g"), "[REDACTED]");
 }
 
 /** Serialize first, then redact so object keys and values share one boundary. */
@@ -139,7 +143,6 @@ function formatTrustErrorLines(detail: TrustErrorDetail, secret: string): string
   return lines.map((line) => redactBridgeSecret(line, secret));
 }
 
-/** Produce already-redacted strings so console formatting cannot reveal a key. */
 export function formatBridgeErrorLines(err: unknown, secret = ""): string[] {
   const detail = (err as { detail?: Record<string, unknown> })?.detail;
   if (detail && typeof detail === "object") {
@@ -307,9 +310,6 @@ export function register(program: Command): void {
       // base names.
       const joinBase = `${parsedBase.href.replace(/\/+$/, "")}/`;
 
-      // Redact the active key even when a plugin or an imported record repeats
-      // it in a log, progress event, or error. Mem0 also avoids emitting
-      // server-controlled response text and pagination URLs in the first place.
       const ctx = makeContext({
         bridge: name,
         emit: (event) => process.stderr.write(serializeBridgeLogLine(event, bridgeApiKey) + "\n"),
