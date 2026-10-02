@@ -1776,6 +1776,7 @@ rest: true
     const result = updateLocalConfigMcpEnabled(true, "/nonexistent/config.yaml");
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("not found");
+    expect(result.detail).toContain("Re-run `flair mcp enable` from the directory that holds your component config.yaml (or place it at one of the paths tried).");
   });
 
   test("file not found: reports the searched path (no ambient mutation)", () => {
