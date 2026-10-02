@@ -1477,7 +1477,8 @@ function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }
   }
 }
 
-// Ops port resolution: --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1
+// Ops port resolution: valid --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1.
+// An explicit invalid --ops-port refuses; it never falls through to another rung.
 //
 // Deliberately NOT routed through Harper's per-instance config the way
 // resolveHttpPort is (flair#914). The last rung couples the ops port to the HTTP
@@ -1490,7 +1491,12 @@ function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }
 function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
   if (opts.opsPort !== undefined && opts.opsPort !== null) {
     const n = Number(opts.opsPort);
-    if (!isNaN(n) && n > 0) return n;
+    if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
+    console.error(
+      `Error: invalid --ops-port ${JSON.stringify(String(opts.opsPort))}. `
+        + "Pass an integer from 1 to 65535, or omit --ops-port to use FLAIR_OPS_PORT, local config, or the resolved HTTP port minus one.",
+    );
+    process.exit(1);
   }
   const envOps = process.env.FLAIR_OPS_PORT;
   if (envOps) return Number(envOps);

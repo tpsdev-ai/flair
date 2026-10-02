@@ -297,24 +297,55 @@ A connection acts as its principal:
 
 ### Revoking access
 
-Deactivate the principal, on the Flair host, with `FLAIR_ADMIN_PASS` set or
-`--admin-pass`:
+Deactivate or reactivate a local principal with `FLAIR_ADMIN_PASS` set or
+`--admin-pass` (and neither `--instance` nor `FLAIR_URL` set):
 
 ```bash
 flair principal disable alice
+flair principal enable alice
 ```
 
-When the operations API accepts the update, it prints
-`✅ Principal 'alice' deactivated`.
+For a principal on a remote instance, pass the instance URL and its admin
+password explicitly. These commands share two precedence and credential rules
+with `flair mcp enable`: an explicit `--instance` wins over `FLAIR_URL`, and a
+remote operation requires an explicit `--admin-pass`. Their complete target
+rules are not equivalent: the principal commands accept an explicit loopback
+`--instance`, while `flair mcp enable` refuses local origins.
 
-- It sends an `update` to the operations API at `127.0.0.1` on the machine it
-  runs on (port from `--ops-port`, `FLAIR_OPS_PORT` or the local Flair config).
-  It has no option for a remote instance.
-- The update sets the principal's `status` to `deactivated`, and its
-  `updatedAt`, and nothing else: the principal's memories and its login mapping
-  stay. The operations API of Harper 5.2.8, the version Flair pins, also accepts
-  an update for an id that has no record, so the ✅ line does not show that the
-  principal exists.
+```bash
+flair principal disable alice \
+  --instance https://flair.example.com \
+  --admin-pass "$TARGET_ADMIN_PASS"
+flair principal enable alice \
+  --instance https://flair.example.com \
+  --admin-pass "$TARGET_ADMIN_PASS"
+```
+
+Set `TARGET_ADMIN_PASS` to that instance's admin password before running the
+remote example. A success line appears only after the operations API names
+`alice` in its update result and a read-back confirms the requested status.
+
+- On the local path it sends an `update` to the operations API at `127.0.0.1`
+  on the machine it runs on. The port precedence is a valid explicit
+  `--ops-port`, then `FLAIR_OPS_PORT`, then `opsPort` in the local Flair config,
+  then one less than the resolved HTTP port. An invalid explicit `--ops-port`
+  is refused with a remedy; it never falls through to a lower-precedence port.
+- With `--instance` (or `FLAIR_URL`) it sends the same `update` to the ops API
+  derived from that served instance URL, using the `flair mcp enable` hosted
+  operations port convention. A remote target requires an explicit
+  `--admin-pass`: `FLAIR_ADMIN_PASS` and `~/.flair/admin-pass` are
+  this machine's local credentials and are never sent to another instance.
+  `FLAIR_TARGET` and `FLAIR_OPS_TARGET` do not select a principal target.
+  Redirects, unconfirmed results, and requests that fail or time out are
+  refused with a non-zero exit. Diagnostics omit URL userinfo, query values,
+  and response bodies; an unparseable target is printed only as
+  `<unparseable URL>`.
+- Disable sets the principal's `status` to `deactivated`; enable sets it to
+  `active`. Both update its `updatedAt` and nothing else: the principal's
+  memories and its login mapping stay. Harper can accept an update for an id
+  that has no record; this command
+  refuses success unless the result names the id and a read-back finds the row
+  in the requested state.
 - Flair reads the principal's status on every `tools/call` for a known tool, and
   refuses those calls for a deactivated principal, including calls that carry a
   token issued before the change:
@@ -327,8 +358,8 @@ When the operations API accepts the update, it prints
   401 `{"error":"principal_deactivated"}`.
 - Disabling does not revoke OAuth tokens: they stay valid until they expire,
   and their tool calls are refused. Setting the status back to `active`
-  restores access for tokens that are still valid. There is no
-  `flair principal enable` command.
+  restores access for tokens that are still valid. `flair principal enable`
+  sets the status to `active`.
 
 To close `/mcp` for everyone, unset `FLAIR_MCP_OAUTH` in the instance's
 environment (or set it to `0`) and restart the instance; `flair mcp disable`

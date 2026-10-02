@@ -218,7 +218,8 @@ const PAIR_TOKEN_MAYBE_CONSUMED =
 /**
  * Strip any userinfo (user:password) and query string from a URL before printing
  * it. An --ops-target like https://user:pass@host/?token=... must never put the
- * credential or the query token on stderr.
+ * credential or the query token on stderr. If parsing fails, none of the
+ * caller-controlled text is safe to classify, so print a fixed placeholder.
  */
 export function redactUrl(u: string): string {
   try {
@@ -226,10 +227,10 @@ export function redactUrl(u: string): string {
     url.username = "";
     url.password = "";
     url.search = "";
+    url.hash = "";
     return url.toString();
   } catch {
-    // Not a parseable absolute URL: strip a userinfo-looking prefix and any query.
-    return u.replace(/\/\/[^/@]*@/, "//").replace(/\?.*$/, "");
+    return "<unparseable URL>";
   }
 }
 
@@ -238,7 +239,7 @@ export function redactUrl(u: string): string {
  * fetch to a user-supplied URL can carry the full URL (credentials included)
  * in err.message, so the message must never reach an error line.
  */
-function fetchErrorLabel(err: unknown): string {
+export function fetchErrorLabel(err: unknown): string {
   // Node's fetch wraps the OS error: the useful code (ECONNREFUSED, ENOTFOUND,
   // …) is on err.cause.code, so prefer it over the wrapper's code/name.
   const e = err as { code?: unknown; name?: unknown; cause?: { code?: unknown } };
