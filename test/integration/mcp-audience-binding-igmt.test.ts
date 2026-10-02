@@ -84,12 +84,22 @@ describe("MCP audience binding (ops-igmt) — executed must-fail", () => {
     publicKeyPem = publicKey;
     privateKeyPem = privateKey;
 
-    // Enable MCP OAuth with a pinned issuer. "true" (not "1") so BOTH flair's
-    // mcpOAuthEnabled() and the component's coerceConfigBoolean agree (flair#1152).
+    const envKeys = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
+    const prior = envKeys.map((key) => [key, process.env[key]] as const);
     process.env.FLAIR_MCP_OAUTH = "true";
     process.env.FLAIR_MCP_ISSUER = ISSUER;
+    process.env.OAUTH_GITHUB_CLIENT_ID = "audience-binding-client";
+    process.env.OAUTH_GITHUB_CLIENT_SECRET = "audience-binding-secret";
+    process.env.OAUTH_GITHUB_REDIRECT_URI = `${ISSUER}/oauth`;
 
-    harper = await startHarper({ cwd: process.cwd() });
+    try {
+      harper = await startHarper({ cwd: process.cwd() });
+    } finally {
+      for (const [key, value] of prior) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
 
     // Seed the signing key into the table withMCPAuth verifies against.
     const seed = await adminOp({

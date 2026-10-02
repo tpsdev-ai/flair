@@ -264,18 +264,14 @@ describe("flair#1136/#1152 boot-safety: shipped config with env-referenced mcp.e
 
 describe("flair#2194 boot-safety: shipped config with MCP on and no signing key", () => {
   test(
-    "FLAIR_MCP_OAUTH=true + issuer set + NO signing key boots CLEAN (the library generates and persists a key on first mint)",
+    "configured provider and no signing key boots clean",
     async () => {
-      // The shape multi-worker-refusal-2059 boots (FLAIR_MCP_OAUTH + FLAIR_MCP_ISSUER,
-      // no signing key). The shipped block used to declare
-      // `signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}` unconditionally, and
-      // @harperfast/oauth 2.8.1 refuses the plugin's load when that placeholder
-      // is unresolved — so this boot DEGRADED (health 500). With the pin gone
-      // the component no longer refuses the load; it generates and persists a
-      // signing key on the first mint, not at boot.
       clearMcpEnv();
       process.env.FLAIR_MCP_OAUTH = "true";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
+      process.env.OAUTH_GITHUB_CLIENT_ID = "no-signing-key-client";
+      process.env.OAUTH_GITHUB_CLIENT_SECRET = "no-signing-key-secret";
+      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
 
       const workDir = makeWorkDirWithShippedConfig("flair-no-signing-key-");
       const harper = await startHarper({
@@ -287,6 +283,8 @@ describe("flair#2194 boot-safety: shipped config with MCP on and no signing key"
       // Clean boot — the ops API answers 200 (a degraded boot answers 500).
       const opsRes = await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) });
       expect(opsRes.status).toBe(200);
+      const discovery = await fetch(`${harper.httpURL}/.well-known/oauth-protected-resource`, { signal: AbortSignal.timeout(10_000) });
+      expect(discovery.status).toBe(200);
 
       // flair's /mcp is mounted and guarded (401 — not 404/disabled, not 500/degraded).
       const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
@@ -309,6 +307,9 @@ describe("flair#2194: a declared signingKeyPem with an unset variable still fail
       clearMcpEnv();
       process.env.FLAIR_MCP_OAUTH = "true";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
+      process.env.OAUTH_GITHUB_CLIENT_ID = "declared-pin-client";
+      process.env.OAUTH_GITHUB_CLIENT_SECRET = "declared-pin-secret";
+      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
       const workDir = makeWorkDirWithShippedConfig("flair-declared-pin-", (shipped) =>
         shipped.replace("    enabled: ${FLAIR_MCP_OAUTH}", "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}"),
       );

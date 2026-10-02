@@ -154,12 +154,15 @@ describe("native MCP checks the principal's status on every tool call dispatched
     });
     privateKeyPem = privateKey;
 
-    // "true" so flair's route and the oauth component both enable (flair#1152).
     // startHarper copies process.env into the spawned Harper; restore it
     // immediately so no other file sees the change.
-    const prior = { oauth: process.env.FLAIR_MCP_OAUTH, issuer: process.env.FLAIR_MCP_ISSUER, jit: process.env.FLAIR_MCP_JIT_PROVISION };
+    const envKeys = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_MCP_JIT_PROVISION", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
+    const prior = envKeys.map((key) => [key, process.env[key]] as const);
     process.env.FLAIR_MCP_OAUTH = "true";
     process.env.FLAIR_MCP_ISSUER = ISSUER;
+    process.env.OAUTH_GITHUB_CLIENT_ID = "principal-status-client";
+    process.env.OAUTH_GITHUB_CLIENT_SECRET = "principal-status-secret";
+    process.env.OAUTH_GITHUB_REDIRECT_URI = `${ISSUER}/oauth`;
     delete process.env.FLAIR_MCP_JIT_PROVISION;
     try {
       harper = await startHarper();
@@ -178,7 +181,7 @@ describe("native MCP checks the principal's status on every tool call dispatched
         throw new Error(`refusing to run: ${harper.httpURL} / ${harper.opsURL} is not an instance this test started`);
       }
     } finally {
-      for (const [k, v] of [["FLAIR_MCP_OAUTH", prior.oauth], ["FLAIR_MCP_ISSUER", prior.issuer], ["FLAIR_MCP_JIT_PROVISION", prior.jit]] as const) {
+      for (const [k, v] of prior) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }
