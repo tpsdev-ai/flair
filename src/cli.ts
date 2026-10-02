@@ -19,6 +19,7 @@ import {
   statSync,
   lstatSync,
   fstatSync,
+  fchmodSync,
   realpathSync,
   unlinkSync,
   chownSync,
@@ -724,15 +725,27 @@ export function launchdLauncherPath(packageRoot: string = flairPackageDir()): st
  * Write `content` to `path` atomically: write to a temp file in the SAME
  * directory, then rename over the target. Same-fs rename is atomic on POSIX,
  * so a reader never observes a half-written file. `mode` is applied to the
- * temp file from creation — pass 0o600 when `content` holds a secret, so the
- * secret is never briefly world-readable on disk (flair#1573 slice a).
+ * temp file from creation (subject to umask) — pass 0o600 when `content`
+ * holds a secret, so the secret is never briefly world-readable on disk
+ * (flair#1573 slice a). `exactMode` is for restoring a captured file mode:
+ * it sets that mode on the temporary file's descriptor before the rename.
  */
-export function writeFileAtomic(path: string, content: string | Uint8Array, mode: number): void {
+export function writeFileAtomic(path: string, content: string | Uint8Array, mode: number, options: { exactMode?: boolean } = {}): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true });
   const tmpPath = join(dir, `.${basename(path)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
   try {
-    writeFileSync(tmpPath, content, { mode });
+    if (options.exactMode) {
+      const fd = openSync(tmpPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, mode);
+      try {
+        writeFileSync(fd, content);
+        fchmodSync(fd, mode);
+      } finally {
+        closeSync(fd);
+      }
+    } else {
+      writeFileSync(tmpPath, content, { mode });
+    }
     renameSync(tmpPath, path);
   } catch (err) {
     try { unlinkSync(tmpPath); } catch { /* best effort */ }
@@ -6569,10 +6582,11 @@ function putInitPlistBack(path: string, prior: FileSnapshot): { ok: boolean; tex
  * targeted commands and verify it; any failure after the boot-out restores the
  * legacy plist and job (or, failing that, starts Flair directly) and says so.
  * If the preflight fails, NOTHING is unloaded, removed or written; if the
- * validation fails — a lint that throws included (flair#2078) — nothing is
- * unloaded or removed, and prior plist bytes and mode are restored. The
- * non-legacy path (no owned legacy registration) validates the plist it writes
- * the same way and restores its prior bytes and mode on failure (flair#2085).
+ * validation fails — a lint that throws included (flair#2078) — no job is
+ * unloaded; prior plist bytes and mode are restored, or a newly created plist
+ * is removed. The non-legacy path (no owned legacy registration) validates
+ * the plist it writes the same way and restores its prior bytes and mode on
+ * failure (flair#2085).
  */
 async function registerInitLaunchdService(input: {
   dataDir: string;
@@ -7225,7 +7239,7 @@ function restoreFile(path: string, snapshot: FileSnapshot): void {
     try { unlinkSync(path); } catch (err: any) { if (err?.code !== "ENOENT") throw err; }
     return;
   }
-  writeFileAtomic(path, snapshot.bytes, snapshot.mode);
+  writeFileAtomic(path, snapshot.bytes, snapshot.mode, { exactMode: true });
 }
 
 interface PreparedLaunchdRepair {

@@ -42,6 +42,7 @@ import { join } from "node:path";
 import {
   buildLaunchdPlist,
   registerInitLaunchdService,
+  setLaunchdMigrationLintForTests,
   writeInitLaunchdPlist,
   type LaunchdPlistOptions,
   type WriteInitLaunchdPlistOptions,
@@ -354,5 +355,34 @@ describe("registerInitLaunchdService — symlink preflight (#2085)", () => {
     expect(lstatSync(path).isSymbolicLink()).toBe(true);
     expect(readlinkSync(path)).toBe(target);
     expect(existsSync(target)).toBe(false);
+  });
+});
+
+describe("registerInitLaunchdService — rollback permissions (#2085)", () => {
+  test("restores a 0644 prior plist under umask 077 after validation refuses it", async () => {
+    const opts = baseOptions();
+    const prior = plistFor(DATA_DIR).replace("start-flair-with-admin-pass.sh", "prior-launcher.sh");
+    writeFileSync(opts.plistPath, prior);
+    chmodSync(opts.plistPath, 0o644);
+    writePassFile(opts.adminPassPath!, "PLACEHOLDER-existing-pass");
+
+    const previousUmask = process.umask(0o077);
+    setLaunchdMigrationLintForTests(() => "injected validation refusal");
+    try {
+      const result = await registerInitLaunchdService({
+        dataDir: DATA_DIR,
+        port: 9926,
+        plistDir: tmp,
+        write: opts,
+      });
+
+      expect(result.kind).toBe("skipped");
+      expect(result.lines.map((line) => line.text).join("\n")).toContain("the prior plist bytes and mode");
+      expect(readFileSync(opts.plistPath, "utf-8")).toBe(prior);
+      expect(statSync(opts.plistPath).mode & 0o777).toBe(0o644);
+    } finally {
+      setLaunchdMigrationLintForTests(null);
+      process.umask(previousUmask);
+    }
   });
 });
