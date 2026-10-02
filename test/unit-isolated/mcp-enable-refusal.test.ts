@@ -30,6 +30,7 @@ for (const [instance, issuer, fabric, refusal] of [
   ["https://acme.harperfabric.com", "https://[fd00::1]", false, "Issuer refused:"],
   ["https://acme.harperfabric.com", "https://[fe80::1]", false, "Issuer refused:"],
   ["https://acme.harperfabric.com", "https://[::ffff:192.168.1.1]", false, "Issuer refused:"],
+  ["https://acme.harperfabric.com", "https://0.1.2.3", false, "Issuer refused: local hostname or loopback, unspecified, reserved 0.0.0.0/8, private or link-local IP literal."],
   ["https://acme.harperfabric.com", "not a url", false, "Issuer refused: invalid URL"],
 ] as const) {
   test.each([false, true])(`CLI refuses ${instance}, issuer=${issuer}, fabric=${fabric} before prompts or writes (dryRun=%s)`, async (dryRun) => {

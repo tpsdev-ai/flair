@@ -247,7 +247,7 @@ export function planComponentEnv(
     }
     if (isLoopbackUrl(operatorValue)) {
       notices.push(
-        `${PUBLIC_URL_KEY} in ${COMPONENT_ENV_FILENAME} is a loopback address ` +
+        `${PUBLIC_URL_KEY} in ${COMPONENT_ENV_FILENAME} is a loopback or unspecified address ` +
           `(${operatorValue}). OAuth discovery and A2A discovery advertise it verbatim, so ` +
           `remote clients will be told to connect to their own machine (flair#1000).`,
       );

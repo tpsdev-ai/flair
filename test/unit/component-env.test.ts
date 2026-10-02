@@ -106,7 +106,7 @@ describe("planComponentEnv", () => {
   test.each(UNSPECIFIED_TARGETS)("warns about operator's unspecified destination %s", (url) => {
     const plan = planComponentEnv(`FLAIR_PUBLIC_URL=${url}\n`, "https://flair.example.com");
     expect(plan.action).toBe("operator-value-kept");
-    expect(plan.notices.join(" ")).toContain("loopback");
+    expect(plan.notices.join(" ")).toContain("loopback or unspecified");
   });
   test("adds FLAIR_PUBLIC_URL when the payload has no .env at all", () => {
     const plan = planComponentEnv(null, "https://flair.example.com");
@@ -148,7 +148,7 @@ describe("planComponentEnv", () => {
   test("says so out loud when the operator's own value is a loopback address", () => {
     const plan = planComponentEnv("FLAIR_PUBLIC_URL=http://127.0.0.1:9926\n", "https://flair.example.com");
     expect(plan.action).toBe("operator-value-kept");
-    expect(plan.notices.join(" ")).toContain("loopback");
+    expect(plan.notices.join(" ")).toContain("loopback or unspecified");
   });
 
   test("supplies nothing when there is no public URL to advertise", () => {

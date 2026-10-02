@@ -91,7 +91,7 @@ uncommented with `mcp.enabled: ${FLAIR_MCP_OAUTH}`, a whole-token environment re
 instance's environment and a re-packed deploy cannot revert it. There is no `config.yaml` edit and no
 re-deploy to make.
 
-For targets reached through a **`*.harperfabric.com` hostname**, `flair mcp enable` does not restart the instance. It provisions the secrets, then checks the MCP
+For **`*.harperfabric.com` targets** or non-loopback custom-domain targets selected with `--fabric`, `flair mcp enable` does not restart the instance. It provisions the secrets, then checks the MCP
 surface in this order:
 
 1. **Target/issuer binding.** The target's *own* metadata at
