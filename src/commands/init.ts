@@ -1226,7 +1226,7 @@ program
           console.log("");
           for (const [key, value] of soulEntries) {
             try {
-              await api("PUT", `/Soul/${agentId}:${key}`,
+              await api("PUT", `/Soul/${encodeRecordId(`${agentId}:${key}`)}`,
                 { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() },
                 { baseUrl: httpUrl, explicitAdminPass: adminPass, adminUser });
               console.log(`   ✓ soul:${key} set`);

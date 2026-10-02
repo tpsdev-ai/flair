@@ -230,7 +230,7 @@ export function register(program: Command): void {
         body.derivedFrom = String(opts.derivedFrom).split(",").map((x: string) => x.trim()).filter(Boolean);
       }
 
-      const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { agentId, agentIdSource: source });
+      const out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, { agentId, agentIdSource: source });
       if (out?.error) {
         console.error(`Error writing task summary: ${out.error}`);
         process.exit(1);

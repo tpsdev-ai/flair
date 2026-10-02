@@ -78,27 +78,33 @@ program
         console.error(`Agent '${agentId}' not found`);
         process.exit(1);
       }
-      console.error(`Error: could not read agent '${agentId}': ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`Error: could not read agent '${agentId}': ${err instanceof Error ? err.message : String(err)}. Check instance access and retry.`);
+      process.exit(1);
+    }
+    if (!agent || typeof agent !== "object" || Array.isArray(agent) || agent.id !== agentId) {
+      console.error(`Error: could not read agent '${agentId}': response did not contain the requested agent. Check the instance and retry.`);
       process.exit(1);
     }
 
-    // Fetch memories
-    const allMemories: any[] = await adminGet("/Memory/").catch(() => []);
-    const memories = Array.isArray(allMemories)
-      ? allMemories.filter((m: any) => m.agentId === agentId)
-      : [];
+    async function readCollection(path: string, name: string): Promise<any[]> {
+      try {
+        const rows = await adminGet(path);
+        if (!Array.isArray(rows)) throw new Error(`GET ${path} returned a non-array body`);
+        return rows;
+      } catch (err) {
+        console.error(`Error: could not read ${name}: ${err instanceof Error ? err.message : String(err)}. Check instance access and retry.`);
+        process.exit(1);
+      }
+    }
 
-    // Fetch souls
-    const allSouls: any[] = await adminGet("/Soul/").catch(() => []);
-    const souls = Array.isArray(allSouls)
-      ? allSouls.filter((s: any) => s.agentId === agentId)
-      : [];
+    const allMemories = await readCollection("/Memory/", "memories");
+    const memories = allMemories.filter((m: any) => m.agentId === agentId);
 
-    // Fetch grants
-    const allGrants: any[] = await adminGet("/MemoryGrant/").catch(() => []);
-    const grants = Array.isArray(allGrants)
-      ? allGrants.filter((g: any) => g.ownerId === agentId || g.granteeId === agentId)
-      : [];
+    const allSouls = await readCollection("/Soul/", "souls");
+    const souls = allSouls.filter((s: any) => s.agentId === agentId);
+
+    const allGrants = await readCollection("/MemoryGrant/", "grants");
+    const grants = allGrants.filter((g: any) => g.ownerId === agentId || g.granteeId === agentId);
 
     // Optionally include private key
     let privateKey: string | undefined;

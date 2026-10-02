@@ -65,7 +65,7 @@ export function register(program: Command): void {
       // wrote a record owned by X while signing as Y (the soul family's stale rung).
       const { agentId, source } = resolveSigningAgentId(opts, "soul set");
       const id = `${opts.agent}:${opts.key}`;
-      const out = await api("PUT", `/Soul/${encodeURIComponent(id)}`, {
+      const out = await api("PUT", `/Soul/${encodeRecordId(id)}`, {
         id,
         agentId: opts.agent,
         key: opts.key,

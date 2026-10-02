@@ -136,7 +136,7 @@ program
     let soulCount = 0;
     for (const soul of data.souls ?? []) {
       try {
-        await fetch(`${baseUrl}/Soul/${encodeURIComponent(soul.id)}`, {
+        await fetch(`${baseUrl}/Soul/${encodeRecordId(soul.id)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify(soul),

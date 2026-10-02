@@ -1,38 +1,33 @@
 /**
- * export-read-fail-closed-1970.test.ts — flair#1970 acceptance.
- *
- * `flair export <agent-id>` reads `/Agent/<id>` before anything else. A read
- * that FAILS (transport, 5xx, an unreadable body) is not "not found", and it is
- * not a success: it must refuse with a named remedy, exit non-zero and write
- * nothing. Only a definite 404 is "not found". The id also goes into the path
- * as one encoded segment.
- *
- * Spawns the built CLI (HOME-isolated) against a mock server, so it proves the
- * CLI's own behaviour, not a helper's.
+ * flair#1970: the built export CLI refuses failed reads before writing a file.
+ * A Bun preload replaces fetch inside the child, so the test exercises the
+ * command boundary without requiring a loopback socket.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 
 const CHILD_DEADLINE_MS = 20_000;
-// Per-case budget is written as a numeric literal at each case (the spawn-budget gate reads literals).
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
-// An id with a reserved character, so the request path proves the encoding.
+const PRELOAD = join(import.meta.dirname ?? __dirname, "..", "fixtures", "export-fetch-1970.cjs");
 const AGENT = "agent one/2";
+const URL = "http://example.test";
 
-function runCli(args: string[], env: Record<string, string>, cwd: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
+interface CliResult { stdout: string; stderr: string; code: number | null; paths: string[] }
+function runCli(args: string[], env: Record<string, string>, cwd: string): Promise<CliResult> {
   return new Promise((resolve, reject) => {
+    const logPath = join(cwd, "requests.log");
+    writeFileSync(logPath, "");
     const startedAt = Date.now();
-    const child = spawn("bun", [CLI_PATH, ...args], {
+    const child = spawn("bun", ["--preload", PRELOAD, CLI_PATH, ...args], {
       cwd,
-      env: { ...process.env, HOME: env.HOME, FLAIR_AGENT_ID: "", ...env },
+      env: { ...process.env, HOME: cwd, FLAIR_AGENT_ID: "", MOCK_PATH_LOG: logPath, MOCK_AGENT_ID: AGENT, ...env },
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 20_000, // literal so the spawn-budget gate sees a deadline (flair#1807)
+      timeout: 20_000, // literal for the spawn-budget gate
     });
     let stdout = "";
     let stderr = "";
@@ -43,67 +38,84 @@ function runCli(args: string[], env: Record<string, string>, cwd: string): Promi
         reject(new Error(childOverranDeadline("flair CLI", cliLeg(args), CHILD_DEADLINE_MS, { status: code, signal, elapsedMs: Date.now() - startedAt, stdout, stderr })));
         return;
       }
-      resolve({ stdout, stderr, code });
+      const paths = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+      resolve({ stdout, stderr, code, paths });
     });
   });
 }
 
-describe("flair export: a failed Agent read refuses; only 404 is 'not found' (#1970)", () => {
+describe("flair export: failed reads never create a complete-looking file (#1970)", () => {
   let scratch: string;
-  let server: Server;
-  let url: string;
-  let status = 500;
-  const paths: string[] = [];
-
-  beforeAll(async () => {
+  beforeAll(() => {
     ensureCliBuild();
     scratch = mkdtempSync(join(tmpdir(), "flair-export-1970-home-"));
-    await new Promise<void>((resolve) => {
-      server = createServer((req: IncomingMessage, res: ServerResponse) => {
-        paths.push(req.url ?? "");
-        res.writeHead(status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(status === 404 ? { error: "not found" } : { error: "boom" }));
-      });
-      server.listen(0, "127.0.0.1", () => {
-        const addr = server.address();
-        url = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
-        resolve();
-      });
-    });
   });
+  afterAll(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
 
-  afterAll(async () => {
-    await new Promise<void>((r) => server.close(() => r()));
-    rmSync(scratch, { recursive: true, force: true });
-  });
-
-  test("a 5xx Agent read refuses with the failure named — never 'not found'", async () => {
-    status = 500;
-    paths.length = 0;
-    const { stdout, stderr, code } = await runCli(
-      ["export", AGENT, "--url", url, "--admin-pass", "test-pass-1970"],
-      { HOME: scratch },
-      scratch,
+  test("a 5xx Agent read reports the failure and writes no file", async () => {
+    const output = join(scratch, "failed-agent-500.json");
+    const { stdout, stderr, code, paths } = await runCli(
+      ["export", AGENT, "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+      { MOCK_AGENT_STATUS: "500" }, scratch,
     );
     expect(code).not.toBe(0);
     expect(stdout + stderr).not.toContain("not found");
     expect(stderr).toContain("could not read agent");
-    // The path carried the id as ONE encoded segment.
-    expect(paths).toHaveLength(1);
-    expect(paths[0]).toBe(`/Agent/${encodeURIComponent(AGENT)}`);
+    expect(stderr).toContain("Check instance access and retry");
+    expect(paths).toEqual([`/Agent/${encodeURIComponent(AGENT)}`]);
+    expect(existsSync(output)).toBe(false);
   }, 25_000);
 
-  test("a 404 Agent read is 'not found' (a definite answer, still non-zero)", async () => {
-    status = 404;
-    paths.length = 0;
-    const { stdout, stderr, code } = await runCli(
-      ["export", AGENT, "--url", url, "--admin-pass", "test-pass-1970"],
-      { HOME: scratch },
-      scratch,
+  test("a 404 Agent read says not found and writes no file", async () => {
+    const output = join(scratch, "failed-agent-404.json");
+    const { stderr, code, paths } = await runCli(
+      ["export", AGENT, "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+      { MOCK_AGENT_STATUS: "404" }, scratch,
     );
     expect(code).not.toBe(0);
     expect(stderr).toContain("not found");
-    expect(paths).toHaveLength(1);
-    expect(paths[0]).toBe(`/Agent/${encodeURIComponent(AGENT)}`);
+    expect(paths).toEqual([`/Agent/${encodeURIComponent(AGENT)}`]);
+    expect(existsSync(output)).toBe(false);
   }, 25_000);
+
+  test("a 200 null Agent body reports an unreadable record and writes no file", async () => {
+    const output = join(scratch, "empty-agent.json");
+    const { stderr, code, paths } = await runCli(
+      ["export", AGENT, "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+      { MOCK_AGENT_STATUS: "200", MOCK_EMPTY_AGENT: "1" }, scratch,
+    );
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("could not read agent");
+    expect(paths).toEqual([`/Agent/${encodeURIComponent(AGENT)}`]);
+    expect(existsSync(output)).toBe(false);
+  }, 25_000);
+
+  test("successful reads write a complete export", async () => {
+    const output = join(scratch, "complete.json");
+    const { code, paths } = await runCli(
+      ["export", AGENT, "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+      { MOCK_AGENT_STATUS: "200" }, scratch,
+    );
+    expect(code).toBe(0);
+    expect(paths).toEqual([`/Agent/${encodeURIComponent(AGENT)}`, "/Memory/", "/Soul/", "/MemoryGrant/"]);
+    const data = JSON.parse(readFileSync(output, "utf8"));
+    expect(data.agent.id).toBe(AGENT);
+    expect(data.memories).toEqual([]);
+    expect(data.souls).toEqual([]);
+    expect(data.grants).toEqual([]);
+  }, 25_000);
+
+  for (const [name, path] of [["memories", "/Memory/"], ["souls", "/Soul/"], ["grants", "/MemoryGrant/"]] as const) {
+    test(`a failed ${name} read writes no file`, async () => {
+      const output = join(scratch, `failed-${name}.json`);
+      const { stderr, code, paths } = await runCli(
+        ["export", AGENT, "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+        { MOCK_AGENT_STATUS: "200", MOCK_FAILED_COLLECTION: path }, scratch,
+      );
+      expect(code).not.toBe(0);
+      expect(stderr).toContain(`could not read ${name}`);
+      expect(paths).toContain(path);
+      expect(existsSync(output)).toBe(false);
+    }, 25_000);
+  }
 });

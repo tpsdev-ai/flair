@@ -13,7 +13,7 @@ import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-pr
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
-import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -1808,9 +1808,10 @@ program
     // pre-#722 single unauthenticated read (hidden versions, "Pass --agent"
     // hint) — there's no agent to sign as, but remote agents may still have
     // heartbeated onto this instance and identities are worth showing.
+    const presenceUrl = requestUrl(baseUrl, "/Presence");
     async function fetchAndRenderFleetPresence(headers: Record<string, string>, canSign: boolean, indent: string): Promise<void> {
       try {
-        const presRes = await fetch(`${baseUrl}/Presence`, { headers, signal: AbortSignal.timeout(5000) });
+        const presRes = await fetch(presenceUrl, { headers, signal: AbortSignal.timeout(5000) });
         if (!presRes.ok) {
           // flair#1880: GET /Presence requires a verified reader by default, so
           // a keyless (unsigned) read now gets 401. Say so plainly instead of a
@@ -1882,7 +1883,7 @@ program
           const registered = renderAgentGateHeader(gate);
           if (!registered) continue;
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
-          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/Presence", keyPath) };
+          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(presenceUrl), keyPath) };
           await fetchAndRenderFleetPresence(headers, true, "      ");
         }
       }
@@ -1906,9 +1907,10 @@ program
     // iterates only the gate-passed agents and rolls the rest into one
     // aggregate skip line. The issue COUNT is unaffected either way — gate
     // findings are counted exactly once, at gate-resolution time (step 7a).
+    const healthDetailUrl = requestUrl(baseUrl, "/HealthDetail");
     async function fetchAndRenderMigrations(headers: Record<string, string>, indent: string): Promise<void> {
       try {
-        const migRes = await fetch(`${baseUrl}/HealthDetail`, { headers, signal: AbortSignal.timeout(5000) });
+        const migRes = await fetch(healthDetailUrl, { headers, signal: AbortSignal.timeout(5000) });
         if (!migRes.ok) {
           console.log(`${indent}${render.icons.warn} Could not fetch migration state (HTTP ${migRes.status})`);
           return;
@@ -1969,7 +1971,7 @@ program
         for (const gate of passedGates) {
           renderAgentGateHeader(gate);
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
-          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/HealthDetail", keyPath) };
+          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(healthDetailUrl), keyPath) };
           await fetchAndRenderMigrations(headers, "      ");
         }
         const skipped = agentGates.length - passedGates.length;

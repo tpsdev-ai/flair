@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { buildEd25519Auth, resolveKeyPath } from "../lib/auth-resolve.js";
+import { buildEd25519Auth, requestTarget, requestUrl, resolveKeyPath } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -99,10 +99,10 @@ export async function publishOrgEvent(params: PublishOrgEventParams): Promise<Pu
   }
 
   const id = `${params.agentId}-${randomUUID()}`;
-  // Sign the exact path that is sent (flair#1970): the id is one encoded segment,
-  // and the signature covers that same string.
+  // Sign the final request target, including any base URL path prefix.
   const path = `/OrgEvent/${encodeRecordId(id)}`;
-  const auth = buildEd25519Auth(params.agentId, "PUT", path, keyPath);
+  const url = requestUrl(params.baseUrl, path);
+  const auth = buildEd25519Auth(params.agentId, "PUT", requestTarget(url), keyPath);
 
   const body: Record<string, unknown> = {
     id,
@@ -116,7 +116,7 @@ export async function publishOrgEvent(params: PublishOrgEventParams): Promise<Pu
   if (params.targetIds && params.targetIds.length > 0) body.targetIds = params.targetIds;
   if (params.entities && params.entities.length > 0) body.entities = params.entities;
 
-  const res = await fetch(`${params.baseUrl}${path}`, {
+  const res = await fetch(url, {
     method: "PUT",
     headers: { "Content-Type": "application/json", Authorization: auth },
     body: JSON.stringify(body),

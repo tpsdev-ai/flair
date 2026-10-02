@@ -14,7 +14,7 @@
  */
 import { Command } from "commander";
 import * as render from "../render.js";
-import { resolveKeyPath, buildEd25519Auth } from "../lib/auth-resolve.js";
+import { resolveKeyPath, buildEd25519Auth, requestTarget, requestUrl } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type BridgeCli = {
@@ -339,8 +339,9 @@ export function register(program: Command): void {
         const headers: Record<string, string> = { "content-type": "application/json" };
         const keyPath: string | null = opts.key ?? resolveKeyPath(agentId);
         const path = `/Memory?${params.toString()}`;
-        if (keyPath) headers["authorization"] = buildEd25519Auth(agentId, "GET", path, keyPath);
-        const res = await fetch(`${baseUrl}${path}`, { headers });
+        const url = requestUrl(baseUrl, path);
+        if (keyPath) headers["authorization"] = buildEd25519Auth(agentId, "GET", requestTarget(url), keyPath);
+        const res = await fetch(url, { headers });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
           throw new Error(`GET /Memory → ${res.status}: ${text || res.statusText}`);
