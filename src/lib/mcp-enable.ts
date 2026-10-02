@@ -1431,7 +1431,8 @@ async function fetchOAuthMetadata(
 /** The MCP authorization server's token endpoint for `issuer` — the one
  *  derivation of "the MCP token endpoint of this instance", shared by target
  *  binding (`verifyTargetIssuer`) and public self-verification
- *  (`selfVerifyMcpMetadata`) so the two checks cannot disagree. */
+ *  (`selfVerifyMcpMetadata`) so both checks derive the expected token endpoint
+ *  from the same function. */
 function mcpTokenEndpoint(issuer: string): string {
   return `${issuer.replace(/\/+$/, "")}/oauth/mcp/token`;
 }
@@ -1466,10 +1467,11 @@ async function verifyTargetIssuer(
  * advertise CIMD support, is `ok: false` with a specific `detail`.
  *
  * flair#756: since CIMD is the only supported client-registration path now,
- * "the /mcp OAuth surface is properly enabled" means "and a CIMD client can
- * actually use it" — this single check is reused by `enable`'s own
- * self-verify step, `grant`/`revoke`'s workflow gate (src/cli.ts), and
- * `flair mcp status`, so all four commands agree on what "enabled" means.
+ * this checks the public metadata's issuer, MCP token endpoint, and CIMD
+ * advertisement; it does not exercise the token route or `/mcp`. The check
+ * is reused by `enable`'s self-verify step, `grant`/`revoke`'s workflow gate
+ * (src/cli.ts), and `flair mcp status`, so all four commands use the same
+ * public metadata criterion.
  */
 export async function selfVerifyMcpMetadata(
   issuer: string,
@@ -1594,10 +1596,9 @@ export async function selfVerifyMcpMetadata(
       tokenEndpoint: body.token_endpoint,
       cimdSupported: true,
       detail:
-        `${url} answered with token_endpoint=${JSON.stringify(body.token_endpoint)}, not the MCP authorization server's ` +
-        `${mcpTokenEndpoint(normalizedIssuer)} — the /mcp surface is NOT enabled on that instance. ` +
-        `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
-        `component declared in its config.yaml?`,
+        `Found token_endpoint=${JSON.stringify(body.token_endpoint)} in ${url}, not the MCP authorization server's ` +
+        `expected token_endpoint=${mcpTokenEndpoint(normalizedIssuer)}. This metadata cannot verify the MCP endpoint. ` +
+        `Check the public OAuth authorization-server metadata or proxy for ${normalizedIssuer}, then re-run \`flair mcp enable\`.`,
     };
   }
 
@@ -2412,12 +2413,11 @@ export interface McpStatusResult {
 }
 
 /**
- * Surfaces LIVE state (not a stale local marker): hits the same well-known
- * metadata endpoint `enable`'s self-verify step checks. A 200 with the
- * expected shape AND CIMD advertised means the surface is enabled and
- * usable by a CIMD client; anything else means disabled/unreachable/
- * misconfigured — `status` never guesses from local files alone (this is
- * the same "never report success on hope" posture as self-verify).
+ * Reports a live public-metadata check (not a stale local marker): hits the
+ * same well-known metadata endpoint `enable`'s self-verify step checks. An expected issuer,
+ * exact MCP token endpoint, and CIMD advertisement verify the public metadata;
+ * they do not prove that the token route or `/mcp` is usable. `status` reports
+ * the live metadata check's result rather than guessing from local files.
  */
 export async function mcpStatus(params: McpStatusParams, deps: McpStatusDeps = {}): Promise<McpStatusResult> {
   const verify = await selfVerifyMcpMetadata(params.instance, { fetchImpl: deps.fetchImpl });
