@@ -50,12 +50,14 @@
 // text, and the one-to-one test fails when an entry matches no finding or more
 // than one, or a finding matches more than one entry. So a second message with an exempted flag is
 // not covered by the first one's entry, and a fixed defect's entry has to go.
-import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { describe, expect, test, spyOn } from "bun:test";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import ts from "typescript";
 import { Command } from "commander";
 import { program } from "../../src/cli";
+import { printDeployNextSteps } from "../../src/commands/deploy";
 
 const REPO = join(import.meta.dir, "..", "..");
 const SRC_DIR = join(REPO, "src");
@@ -721,18 +723,53 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
   // flag in the same file must fail, whether it copies the original literal
   // exactly (the entry then matches two findings) or words it differently (a
   // finding no entry covers). The unmutated file is the control.
-  // flair#2124: the deploy next-steps example must name only flags `agent add`
-  // declares, and carry the positional agent id (the exemption that used to
-  // cover this line is gone, so the message-flags check owns it now).
-  test("flair#2124: the deploy next-steps example names only flags `agent add` declares", () => {
-    const line = readFileSync(join(REPO, "src/commands/deploy.ts"), "utf8")
-      .split("\n")
-      .find((l) => l.includes("flair agent add"));
+  // flair#2124: capture the same next-steps printer the deploy action calls.
+  // Execute its example through the real commander entry point with an owner-only
+  // password file; a refused loopback connection proves it reached the ops read
+  // after the remote credential guard, without requiring a Harper instance.
+  test("flair#2124: the emitted deploy example parses and supplies a remote credential", async () => {
+    const output: string[] = [];
+    const log = spyOn(console, "log").mockImplementation((line: unknown) => { output.push(String(line)); });
+    try {
+      printDeployNextSteps("http://127.0.0.1:2");
+    } finally {
+      log.mockRestore();
+    }
+    const line = output.find((l) => l.trim().startsWith("flair agent add "));
     expect(line).toBeTruthy();
-    expect(line!).toMatch(/flair agent add [^\s-]\S*\s+--target /);
+    const words = line!.trim().split(/\s+/);
+    expect(words.slice(0, 3)).toEqual(["flair", "agent", "add"]);
+    expect(words).toContain("my-agent");
+    expect(words).toContain("--target");
+    expect(words).toContain("--admin-pass-file");
     const accepted = registry.get("agent add");
     expect(accepted).toBeTruthy();
     for (const flag of line!.match(FLAG_TOKEN) ?? []) expect(accepted!.has(flag)).toBe(true);
+
+    const home = mkdtempSync(join(tmpdir(), "flair-deploy-next-steps-"));
+    const passwordFile = join(home, "admin-password");
+    const secret = "test-only-remote-admin-password";
+    try {
+      writeFileSync(passwordFile, secret + "\n", { mode: 0o600 });
+      chmodSync(passwordFile, 0o600);
+      const argv = words.slice(1).map((word) => word === "/path/to/admin-password" ? passwordFile : word);
+      expect(argv).not.toContain(secret);
+      const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
+      delete env.FLAIR_ADMIN_PASS;
+      delete env.FLAIR_OPS_TARGET;
+      const child = Bun.spawn(["bun", join(REPO, "src/cli.ts"), ...argv], {
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+      expect(exitCode).not.toBe(0); // the local ops port has no Harper server
+      expect(stderr).toContain("could not read Agent 'my-agent'");
+      expect(stderr).not.toContain("is required for agent add");
+      expect(stderr).not.toContain(secret);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   // A mutation run against the real sources: one bogus flag put back into one
