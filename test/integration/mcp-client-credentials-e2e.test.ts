@@ -109,6 +109,10 @@ const OAUTH_COMPONENT_BLOCK = `
       provider: 'generic'
       clientId: 'test-client-id'
       clientSecret: 'test-client-secret'
+      # A CONFIGURED provider needs a redirectUri since @harperfast/oauth 2.7.0
+      # (2.8.1 skips an unconfigured one first — HarperFast/oauth#259). Without
+      # it the plugin's load fails and none of the MCP routes mount.
+      redirectUri: '${ISSUER}/oauth'
       authorizationUrl: 'https://example.invalid/authorize'
       tokenUrl: 'https://example.invalid/token'
       userInfoUrl: 'https://example.invalid/userinfo'
@@ -222,7 +226,10 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
     expect(body.token_endpoint).toBe(tokenEndpoint);
     expect(body.grant_types_supported).toContain("client_credentials");
     expect(body.token_endpoint_auth_methods_supported).toContain("private_key_jwt");
-    expect(body.token_endpoint_auth_signing_alg_values_supported).toEqual(["EdDSA"]);
+    // @harperfast/oauth 2.8.1 advertises the assertion algorithms of BOTH
+    // enabled verification paths: the headless client_credentials path (EdDSA)
+    // and the interactive CIMD path (RS256, ES256), which is on by default.
+    expect(body.token_endpoint_auth_signing_alg_values_supported).toEqual(["RS256", "ES256", "EdDSA"]);
     expect(body.client_id_metadata_document_supported).toBe(true);
   }, 30_000);
 

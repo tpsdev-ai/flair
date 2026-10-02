@@ -193,7 +193,13 @@ describe("buildMcpOAuthConfigBlock", () => {
     expect(oauth.mcp.accessTokenTtl).toBe(REQUIRED_ACCESS_TOKEN_TTL);
     expect(oauth.mcp.accessTokenTtl).toBe(900);
     expect(oauth.mcp.clientIdMetadataDocuments.allowedHosts).toEqual(DEFAULT_CIMD_ALLOWED_HOSTS);
-    expect(oauth.mcp.signingKeyPem).toBe("${FLAIR_MCP_SIGNING_KEY_PEM}");
+    // flair#2194: the shipped block carries NO signingKeyPem. @harperfast/oauth
+    // 2.8.1 fails the plugin's load when a DECLARED signingKeyPem's whole-token
+    // placeholder is unresolved, so an unconditional pin made every MCP-on boot
+    // without a staged key degrade. The component self-generates (and persists)
+    // a key when the field is absent; `flair mcp enable` adds the pin reference
+    // to the config it manages so its provisioned key still pins.
+    expect("signingKeyPem" in oauth.mcp).toBe(false);
   });
 
   test("flair#1180: NO resource key is emitted — the component derives <issuer>/mcp", () => {
@@ -236,7 +242,9 @@ describe("buildMcpOAuthConfigBlock", () => {
   test("no literal secret material — every sensitive field is an ${ENV_VAR} placeholder", () => {
     const block = buildMcpOAuthConfigBlock({ idpProvider: "github" });
     const text = JSON.stringify(block);
-    expect(text).toContain("${FLAIR_MCP_SIGNING_KEY_PEM}");
+    // No secret material anywhere: the credentials are whole-token references,
+    // and the signing key is not emitted at all (flair#2194).
+    expect(text).toContain("${OAUTH_GITHUB_CLIENT_SECRET}");
     expect(text).not.toContain("BEGIN PRIVATE KEY");
   });
 
@@ -1800,6 +1808,7 @@ rest: true
     const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
     expect(doc["@harperfast/oauth"].mcp.enabled).toBe(ENV_REF);
   });
+
 
   test("disable writes literal false — decisively off regardless of environment", () => {
     writeFileSync(configPath, CONFIG_WITH_ENV_REF, "utf-8");

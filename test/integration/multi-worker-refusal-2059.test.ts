@@ -2,16 +2,35 @@ import { describe, test, beforeAll, afterAll, expect } from "bun:test";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { probeFlairHealth } from "../../src/lib/doctor-run.js";
 
-const priorOAuth = { flag: process.env.FLAIR_MCP_OAUTH, issuer: process.env.FLAIR_MCP_ISSUER };
+const priorOAuth = {
+  flag: process.env.FLAIR_MCP_OAUTH,
+  issuer: process.env.FLAIR_MCP_ISSUER,
+  clientId: process.env.OAUTH_GITHUB_CLIENT_ID,
+  clientSecret: process.env.OAUTH_GITHUB_CLIENT_SECRET,
+  redirectUri: process.env.OAUTH_GITHUB_REDIRECT_URI,
+};
 beforeAll(() => {
   process.env.FLAIR_MCP_OAUTH = "true";
   process.env.FLAIR_MCP_ISSUER = "https://multi-worker-2059.flair.test";
+  // @harperfast/oauth 2.8.1 SKIPS a provider with no credentials
+  // (HarperFast/oauth#259) and fails closed when the plugin ends up with none
+  // — it serves no well-known documents and mounts no authorization server. So
+  // MCP on requires a CONFIGURED provider: without these, the shipped github
+  // provider is skipped and /.well-known/oauth-protected-resource is 404.
+  process.env.OAUTH_GITHUB_CLIENT_ID = "multi-worker-2059-client";
+  process.env.OAUTH_GITHUB_CLIENT_SECRET = "multi-worker-2059-secret";
+  process.env.OAUTH_GITHUB_REDIRECT_URI = "https://multi-worker-2059.flair.test/oauth";
 });
 afterAll(() => {
-  if (priorOAuth.flag === undefined) delete process.env.FLAIR_MCP_OAUTH;
-  else process.env.FLAIR_MCP_OAUTH = priorOAuth.flag;
-  if (priorOAuth.issuer === undefined) delete process.env.FLAIR_MCP_ISSUER;
-  else process.env.FLAIR_MCP_ISSUER = priorOAuth.issuer;
+  const restore = (key: string, prior: string | undefined) => {
+    if (prior === undefined) delete process.env[key];
+    else process.env[key] = prior;
+  };
+  restore("FLAIR_MCP_OAUTH", priorOAuth.flag);
+  restore("FLAIR_MCP_ISSUER", priorOAuth.issuer);
+  restore("OAUTH_GITHUB_CLIENT_ID", priorOAuth.clientId);
+  restore("OAUTH_GITHUB_CLIENT_SECRET", priorOAuth.clientSecret);
+  restore("OAUTH_GITHUB_REDIRECT_URI", priorOAuth.redirectUri);
 });
 
 function basicHeader(harper: HarperInstance): string {

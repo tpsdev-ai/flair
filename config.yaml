@@ -69,4 +69,11 @@ authentication:
       allowedHosts:
         - claude.ai
         - claude.com
-    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}
+    # OPTIONAL RS256 pin. Omitted here on purpose: @harperfast/oauth 2.8.1
+    # refuses the plugin's load when `signingKeyPem` is DECLARED and its
+    # ${...} placeholder is unresolved (or resolves empty), so shipping the
+    # line unconditionally failed every boot that turned MCP on without the
+    # key staged. Absent, the component self-generates a key and persists it
+    # in oauth.harper_oauth_mcp_keys. To pin (e.g. a cluster sharing one
+    # externally-managed key), add the line below and stage the variable:
+    # signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}

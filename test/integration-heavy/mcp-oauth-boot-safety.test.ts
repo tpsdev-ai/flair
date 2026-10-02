@@ -27,6 +27,10 @@
  *      FAILS (truthy placeholder + unresolved issuer -> degraded boot, /mcp
  *      500). A red here is the dependency drift speaking — treat it as a
  *      positive control, not a flake.
+ *   2b. NO SIGNING KEY (flair#2194): the shipped config with FLAIR_MCP_OAUTH on
+ *      and NO signing key boots CLEAN — the block no longer declares
+ *      signingKeyPem, so @harperfast/oauth self-generates (and persists) a key
+ *      instead of refusing the load over an unresolved placeholder.
  *   3. MUTATION-PROVE (literal true): mcp.enabled: true + env unset -> boots
  *      DEGRADED. Proves test 2's clean-boot assertions CAN fire.
  *   4. GARBAGE VALUE (flair#1152 residual): FLAIR_MCP_OAUTH=maybe. Measured
@@ -248,6 +252,45 @@ describe("flair#1136/#1152 boot-safety: shipped config with env-referenced mcp.e
   );
 });
 
+// ─── 2b. BOOT-SAFETY: MCP on with NO staged signing key (flair#2194) ─────────
+
+describe("flair#2194 boot-safety: shipped config with MCP on and no signing key", () => {
+  test(
+    "FLAIR_MCP_OAUTH=true + issuer set + NO signing key boots CLEAN (the component self-generates and persists a key)",
+    async () => {
+      // The shape multi-worker-refusal-2059 boots (FLAIR_MCP_OAUTH + FLAIR_MCP_ISSUER,
+      // no signing key). The shipped block used to declare
+      // `signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}` unconditionally, and
+      // @harperfast/oauth 2.8.1 refuses the plugin's load when that placeholder
+      // is unresolved — so this boot DEGRADED (health 500). With the pin gone,
+      // the component self-generates a key, so the boot is clean.
+      clearMcpEnv();
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
+
+      const workDir = makeWorkDirWithShippedConfig("flair-no-signing-key-");
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+      });
+      instances.push(harper);
+
+      // Clean boot — the ops API answers 200 (a degraded boot answers 500).
+      const opsRes = await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) });
+      expect(opsRes.status).toBe(200);
+
+      // flair's /mcp is mounted and guarded (401 — not 404/disabled, not 500/degraded).
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
+      expect(mcpRes.status).toBe(401);
+
+      // The load did not stop on the signing key the way it did before the fix.
+      const log = harper.getLog?.() ?? "";
+      expect(log).not.toContain("mcp.signingKeyPem is the unresolved env placeholder");
+    },
+    120_000,
+  );
+});
+
 // ─── 3. MUTATION-PROVE: enabled:true + no env → DEGRADED ────────────────────
 
 describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
@@ -264,10 +307,11 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
       const workDir = makeWorkDirWithShippedConfig("flair-mutation-prove-literal-", () => mutated);
 
       // Harper boots but the plugin fails to load: with mcp.enabled literal
-      // true the block is ACTIVE, so the first unresolved placeholder it
-      // validates fails the load (measured on the pinned 2.8.1: the signing
-      // key, before the issuer). Harper catches the error and continues in a
-      // degraded state.
+      // true the block is ACTIVE and the unresolved issuer ("${FLAIR_MCP_ISSUER}"
+      // literal, env unset) is not a valid URL. Harper catches the error and
+      // continues in a degraded state. (The signing key is no longer declared
+      // by the shipped block — flair#2194 — so the issuer is the first
+      // unresolved placeholder it validates.)
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
@@ -287,11 +331,8 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
       });
       expect(mcpRes.status).toBe(500);
       const mcpBody = await mcpRes.text();
-      // The load error names the unresolved placeholder variable it stopped on.
-      // Which one is first moved with the pinned version (on 2.5.0 it was the
-      // issuer); the degraded boot it proves did not.
-      expect(mcpBody).toContain("mcp.signingKeyPem is the unresolved env placeholder");
-      expect(mcpBody).toContain("${FLAIR_MCP_SIGNING_KEY_PEM}");
+      expect(mcpBody).toContain("mcp.issuer must be an absolute http(s) origin");
+      expect(mcpBody).toContain("${FLAIR_MCP_ISSUER}");
     },
     120_000,
   );

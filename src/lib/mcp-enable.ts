@@ -504,7 +504,14 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         // resolution still runs cimd.js's full SSRF/document-validation
         // pipeline regardless of this list.
         clientIdMetadataDocuments: { allowedHosts: cimdAllowedHosts },
-        signingKeyPem: "${FLAIR_MCP_SIGNING_KEY_PEM}",
+        // NO `signingKeyPem` key by default (flair#2194): @harperfast/oauth
+        // 2.8.1 fails the plugin's load when the key is DECLARED and its
+        // whole-token placeholder is unresolved, so an unconditional pin made
+        // every MCP-on boot without a staged key degrade. Absent, the
+        // component self-generates a key and persists it in
+        // oauth.harper_oauth_mcp_keys. To pin, add
+        // `signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}` and stage the
+        // variable.
       },
     },
   };
