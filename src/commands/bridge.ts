@@ -14,8 +14,9 @@
  */
 import { Command } from "commander";
 import * as render from "../render.js";
-import { resolveKeyPath, buildEd25519Auth, readSecretFileSecure } from "../lib/auth-resolve.js";
+import { resolveKeyPath, buildEd25519Auth, readSecretFileSecure, requestTarget, requestUrl } from "../lib/auth-resolve.js";
 import type { BridgeOptionSpec } from "../bridges/types.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type BridgeCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -23,23 +24,6 @@ export type BridgeCli = {
 };
 
 let cli: BridgeCli;
-
-/**
- * Percent-encode a Memory id so it addresses exactly that record as ONE path
- * segment (flair#1970). REFUSES an id that is exactly `.` or `..`: percent-
- * encoding leaves those unchanged and URL normalization collapses `/Memory/.`
- * to `/Memory/` and `/Memory/..` to `/`, so the sent path would not be the id
- * (nor the signed path). Such an id cannot address its record.
- */
-function encodeRecordId(id: string): string {
-  if (id === "." || id === "..") {
-    throw new Error(
-      `record id ${JSON.stringify(id)} is a URL path dot-segment ("." or ".."); ` +
-        `it cannot be addressed as one path segment of /Memory/<id>. Use a different id.`,
-    );
-  }
-  return encodeURIComponent(id);
-}
 
 /** Bind shared CLI helpers. cli.ts calls this immediately before register(program). */
 export function bindCli(fns: BridgeCli): void {
@@ -517,8 +501,9 @@ export function register(program: Command): void {
         const headers: Record<string, string> = { "content-type": "application/json" };
         const keyPath: string | null = opts.key ?? resolveKeyPath(agentId);
         const path = `/Memory?${params.toString()}`;
-        if (keyPath) headers["authorization"] = buildEd25519Auth(agentId, "GET", path, keyPath);
-        const res = await fetch(`${baseUrl}${path}`, { headers });
+        const url = requestUrl(baseUrl, path);
+        if (keyPath) headers["authorization"] = buildEd25519Auth(agentId, "GET", requestTarget(url), keyPath);
+        const res = await fetch(url, { headers });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
           throw new Error(`GET /Memory → ${res.status}: ${text || res.statusText}`);

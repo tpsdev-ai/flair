@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { buildEd25519Auth, resolveKeyPath } from "../lib/auth-resolve.js";
+import { buildEd25519Auth, requestTarget, requestUrl, resolveKeyPath } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
 import { join } from "node:path";
 
@@ -175,10 +175,11 @@ program
         process.exit(2);
       }
       const baseUrl = resolveBaseUrl(opts);
+      const url = requestUrl(baseUrl, "/SemanticSearch");
       const headers: Record<string, string> = { "content-type": "application/json" };
       const keyPath = opts.key || resolveKeyPath(agentId);
       if (keyPath) {
-        headers["authorization"] = buildEd25519Auth(agentId, "POST", "/SemanticSearch", keyPath);
+        headers["authorization"] = buildEd25519Auth(agentId, "POST", requestTarget(url), keyPath);
       }
 
       // Build payload from CLI options. Server validates types.
@@ -198,7 +199,7 @@ program
       const minScore = Number.parseFloat(opts.minScore ?? "0");
       if (Number.isFinite(minScore) && minScore > 0) payload.minScore = minScore;
 
-      const res = await fetch(`${baseUrl}/SemanticSearch`, {
+      const res = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),

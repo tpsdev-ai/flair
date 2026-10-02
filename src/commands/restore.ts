@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 import * as render from "../render.js";
 import { existsSync, readFileSync } from "node:fs";
 
@@ -107,10 +108,10 @@ program
     if (mode === "replace") {
       console.log("\nDeleting existing data (replace mode)...");
       for (const memory of memories) {
-        if (memory.id) await adminDelete(`/Memory/${memory.id}`).catch((e) => console.warn(`  warn: ${e.message}`));
+        if (memory.id) await adminDelete(`/Memory/${encodeRecordId(String(memory.id))}`).catch((e) => console.warn(`  warn: ${e.message}`));
       }
       for (const soul of souls) {
-        if (soul.id) await adminDelete(`/Soul/${soul.id}`).catch((e) => console.warn(`  warn: ${e.message}`));
+        if (soul.id) await adminDelete(`/Soul/${encodeRecordId(String(soul.id))}`).catch((e) => console.warn(`  warn: ${e.message}`));
       }
     }
 
@@ -119,7 +120,7 @@ program
     let agentCount = 0;
     for (const agent of agents) {
       try {
-        await adminPut(`/Agent/${agent.id}`, agent);
+        await adminPut(`/Agent/${encodeRecordId(String(agent.id))}`, agent);
         agentCount++;
       } catch (err: any) {
         console.warn(`  warn: agent ${agent.id}: ${err.message}`);
@@ -131,7 +132,7 @@ program
     let soulCount = 0;
     for (const soul of souls) {
       try {
-        await adminPut(`/Soul/${soul.id}`, soul);
+        await adminPut(`/Soul/${encodeRecordId(String(soul.id))}`, soul);
         soulCount++;
       } catch (err: any) {
         console.warn(`  warn: soul ${soul.id}: ${err.message}`);
@@ -142,7 +143,7 @@ program
     let memoryCount = 0;
     for (const memory of memories) {
       try {
-        await adminPut(`/Memory/${memory.id}`, memory);
+        await adminPut(`/Memory/${encodeRecordId(String(memory.id))}`, memory);
         memoryCount++;
       } catch (err: any) {
         console.warn(`  warn: memory ${memory.id}: ${err.message}`);

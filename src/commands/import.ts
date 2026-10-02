@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import nacl from "tweetnacl";
@@ -135,7 +136,7 @@ program
     let soulCount = 0;
     for (const soul of data.souls ?? []) {
       try {
-        await fetch(`${baseUrl}/Soul/${encodeURIComponent(soul.id)}`, {
+        await fetch(`${baseUrl}/Soul/${encodeRecordId(soul.id)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify(soul),
@@ -147,7 +148,7 @@ program
     let memCount = 0;
     for (const mem of data.memories ?? []) {
       try {
-        await fetch(`${baseUrl}/Memory/${mem.id}`, {
+        await fetch(`${baseUrl}/Memory/${encodeRecordId(mem.id)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify(mem),

@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { buildEd25519Auth, resolveKeyPath } from "../lib/auth-resolve.js";
+import { buildEd25519Auth, requestTarget, requestUrl, resolveKeyPath } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
 
 export type AttentionCli = {
@@ -92,13 +92,14 @@ program
       }
 
       const baseUrl = resolveBaseUrl(opts);
+      const url = requestUrl(baseUrl, "/AttentionQuery");
       const headers: Record<string, string> = { "content-type": "application/json" };
       const keyPath = opts.key || resolveKeyPath(agentId);
       if (keyPath) {
-        headers["authorization"] = buildEd25519Auth(agentId, "POST", "/AttentionQuery", keyPath);
+        headers["authorization"] = buildEd25519Auth(agentId, "POST", requestTarget(url), keyPath);
       }
 
-      const res = await fetch(`${baseUrl}/AttentionQuery`, {
+      const res = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
