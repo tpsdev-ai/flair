@@ -25,6 +25,7 @@ export type MemoryCli = {
   addSharedCredentialOptions: (cmd: Command) => Command;
   addSharedIdentityOption: (cmd: Command) => Command;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveHttpPort: (opts: { port?: string | number }) => number;
   parseEntitiesOptionOrExit: (csv: string) => string[];
   ENTITIES_OPTION_DESCRIPTION: string;
 };
@@ -535,20 +536,14 @@ export function register(program: Command): void {
         return;
       }
 
-      // Delete in chunks (Harper accepts batches of hash_values).
       const ids = Array.from(allIds);
-      const chunkSize = 200;
       let deleted = 0;
-      for (let i = 0; i < ids.length; i += chunkSize) {
-        const batch = ids.slice(i, i + chunkSize);
-        const result = await ops({
-          operation: "delete",
-          database: "flair",
-          table: "Memory",
-          hash_values: batch,
-        }) as { message?: string };
-        const m = /(\d+)\s*of\s*\d+\s*records/.exec(result.message ?? "");
-        deleted += m ? Number(m[1]) : batch.length;
+      for (const id of ids) {
+        await api("DELETE", `/Memory/${encodeRecordId(id)}`, undefined, {
+          baseUrl: `http://127.0.0.1:${cli.resolveHttpPort(opts)}`, explicitAdminPass: adminPass,
+          adminUser: resolveAdminUser(undefined), agentId: null,
+        });
+        deleted++;
         process.stdout.write(`\r  Deleting ${deleted}/${ids.length} (${Math.round((deleted / ids.length) * 100)}%)`);
       }
       console.log(`\n\n✅ Deleted ${deleted} rows.`);

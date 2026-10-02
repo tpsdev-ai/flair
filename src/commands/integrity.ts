@@ -3,7 +3,7 @@
  *
  * Operator-invoked, one-shot: read the live Memory corpus over the operations
  * API, compare it to the out-of-store checkpoint, report, and (only on a
- * non-alerting scan) advance the checkpoint. Bounded — a couple of reads with
+ * non-alerting scan or `--accept`) advance the checkpoint. Bounded — a couple of reads with
  * explicit timeouts, no server-side job. `--json` for machines, human output
  * otherwise. A read failure reports UNKNOWN and never overwrites the checkpoint.
  *
@@ -73,23 +73,24 @@ async function readCorpus(
   };
 
   const memoryRows = await search("Memory", ["id", "durability"]);
-  const deletionRows = await search("MemoryDeletionHistory", ["memoryId", "durability", "at"]);
+  const deletionRows = await search("MemoryDeletionHistory", ["id", "memoryId", "durability", "at"]);
 
   const rows: MemoryRowLite[] = [];
   for (const r of memoryRows) {
-    if (r && typeof r.id === "string" && r.id.length > 0) {
-      rows.push({ id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard" });
-    }
+    if (!r || typeof r.id !== "string" || r.id.length === 0) throw new Error("operations API Memory search returned an invalid id");
+    rows.push({ id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard" });
   }
   const deletions: DeletionRecordLite[] = [];
   for (const d of deletionRows) {
-    if (d && typeof d.memoryId === "string" && d.memoryId.length > 0) {
-      deletions.push({
-        memoryId: d.memoryId,
-        durability: typeof d.durability === "string" ? d.durability : null,
-        at: typeof d.at === "string" ? d.at : "",
-      });
+    if (!d || typeof d.id !== "string" || !d.id || typeof d.memoryId !== "string" || !d.memoryId) {
+      throw new Error("operations API MemoryDeletionHistory search returned an invalid id");
     }
+    deletions.push({
+      id: d.id,
+      memoryId: d.memoryId,
+      durability: typeof d.durability === "string" ? d.durability : null,
+      at: typeof d.at === "string" ? d.at : "",
+    });
   }
   return { rows, deletions };
 }
@@ -101,7 +102,7 @@ function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
   lines.push(`  corpus: ${v.total} rows (permanent ${counts.permanent}, persistent ${counts.persistent}, standard ${counts.standard}, ephemeral ${counts.ephemeral})`);
   lines.push(`  checkpoint: ${checkpointPath}`);
   if (v.status === "unknown") {
-    lines.push(`  ⚠️  UNKNOWN — could not read the instance: ${v.reason}`);
+    lines.push(`  ⚠️  UNKNOWN — scan failed: ${v.reason}`);
     lines.push("  The checkpoint was not changed.");
     return lines.join("\n");
   }
@@ -110,17 +111,17 @@ function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
     return lines.join("\n");
   }
   if (v.attributedDeletes.length > 0) {
-    lines.push(`  ${v.attributedDeletes.length} deliberate delete(s) attributed (permanent/persistent):`);
+    lines.push(`  ${v.attributedDeletes.length} deliberate delete(s) attributed:`);
     for (const d of v.attributedDeletes.slice(0, 20)) lines.push(`    - ${d.id} (${d.tier}) at ${d.at}`);
     if (v.attributedDeletes.length > 20) lines.push(`    … ${v.attributedDeletes.length - 20} more`);
   }
   if (v.tierChanges.length > 0) {
-    lines.push(`  ${v.tierChanges.length} tier change(s) attributed:`);
+    lines.push(`  ${v.tierChanges.length} tier change(s) observed:`);
     for (const c of v.tierChanges.slice(0, 20)) lines.push(`    - ${c.id}: ${c.from} -> ${c.to}`);
     if (v.tierChanges.length > 20) lines.push(`    … ${v.tierChanges.length - 20} more`);
   }
   if (v.losses.length > 0) {
-    lines.push(`  ❌ ${v.losses.length} UNEXPLAINED durable row loss(es) — no deletion record:`);
+    lines.push(`  ❌ ${v.losses.length} UNEXPLAINED durable row loss(es) — no new deletion record:`);
     for (const l of v.losses) lines.push(`    - ${l.id} (${l.tier})`);
   }
   for (const [tier, delta] of Object.entries(v.unexplainedDecrease)) {
@@ -165,13 +166,13 @@ export function register(program: Command): void {
         if (read.kind === "unreadable") {
           verdict = unknownVerdict(`checkpoint unreadable: ${read.reason}`, scannedAt);
         } else if (read.kind === "absent") {
-          const cp = emptyCheckpoint(scannedAt, rows);
+          const cp = emptyCheckpoint(scannedAt, rows, deletions);
           writeCheckpoint(checkpointPath, cp);
           verdict = { ...compareScan({ checkpoint: cp, rows, deletions, scannedAt }), status: "baseline", checkpointWritten: true };
         } else {
           verdict = compareScan({ checkpoint: read.checkpoint, rows, deletions, scannedAt });
           if (verdict.status === "healthy" || opts.accept) {
-            writeCheckpoint(checkpointPath, emptyCheckpoint(scannedAt, rows));
+            writeCheckpoint(checkpointPath, emptyCheckpoint(scannedAt, rows, deletions));
             verdict.checkpointWritten = true;
           }
         }

@@ -1,19 +1,8 @@
 /**
- * memory-deletion-history.ts — the durable, attributable record of a Memory
- * row removed through a Flair path (flair#2213).
- *
- * The out-of-store integrity watcher (`flair integrity check`) can only tell a
- * deliberate delete from a silent, below-Flair loss if the deliberate one left
- * a record it can read. Everything that removes a Memory row through Flair —
- * `Memory.delete()` (REST/MCP) and `MemoryMaintenance`'s ephemeral-expiry sweep
- * — appends one `MemoryDeletionHistory` row in the SAME transaction as the
- * delete, so the record and the row die or survive together. A row removed
- * beneath Flair (a raw table delete by a storage-level rebuild, a rollback, or
- * the ops API) leaves no row here, so its disappearance stays UNATTRIBUTED.
- *
- * Append-only. No resource class and no `@export`: the watcher reads it
- * in-process, there is no direct route (the same shape as
- * OrgSkillAssignmentHistory).
+ * Memory.delete and MemoryMaintenance expiry append deletion history in the
+ * row delete's transaction. Memory hygiene and agent remove use Memory.delete.
+ * The watcher reads this table through the operations API.
+ * No resource class or @export: there is no direct route.
  */
 import { randomUUID } from "node:crypto";
 import { databases } from "harper";
@@ -26,7 +15,7 @@ export interface MemoryDeletionInput {
   memoryId: string;
   /** The deleted row's durability at deletion, when known. */
   durability?: string | null;
-  /** The deleting principal; null for an internal/maintenance delete. */
+  /** The deleting principal; null when no actor is supplied. */
   actor?: string | null;
   sourceClass: MemoryDeletionSourceClass;
   at?: string;

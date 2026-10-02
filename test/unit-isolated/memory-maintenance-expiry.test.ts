@@ -20,9 +20,7 @@ const AGENT = "agent-1";
 
 let memoryStore: Map<string, any>;
 let pointerStore: Map<string, any>;
-// flair#2213: MemoryMaintenance appends a MemoryDeletionHistory row in the
-// delete's transaction; the mock models the table so the sweep behaves as in
-// Harper (an unavailable table aborts the delete, which is the point).
+// This mock applies writes immediately; it does not model transaction rollback.
 let deletionStore: Map<string, any>;
 let failNextMemoryRead: boolean;
 
@@ -46,7 +44,7 @@ const databasesMock = {
       search: () => fromStore(),
       delete: async (id: string) => {
         memoryStore.delete(id);
-        return { ok: true };
+        return true;
       },
       update: async (id: string, data: any) => {
         memoryStore.set(id, { ...memoryStore.get(id), ...data });

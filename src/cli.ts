@@ -8370,6 +8370,7 @@ bindMemoryCli({
   addSharedCredentialOptions,
   addSharedIdentityOption,
   resolveOpsPort,
+  resolveHttpPort,
   parseEntitiesOptionOrExit,
   ENTITIES_OPTION_DESCRIPTION,
 });

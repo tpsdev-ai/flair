@@ -159,7 +159,7 @@ export class BaseMemory {
   }
   async delete(id: any, ctx?: any) {
     stageOrRun(ctx, () => harnessState.memoryStore.delete(typeof id === "string" ? id : id?.id));
-    return { ok: true };
+    return true;
   }
   search(query?: any) {
     harnessState.baseSearchCalls++;

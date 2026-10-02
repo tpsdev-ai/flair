@@ -402,17 +402,14 @@ type OrgSkillAssignment @table(database: "flair") {
   sourceClass: String!             # operator | internal
 }
 
-# MemoryDeletionHistory — one row per Memory row deleted through a Flair path
-# (Memory.delete and MemoryMaintenance's ephemeral expiry), appended in the
-# delete's transaction. The out-of-store integrity watcher reads it to attribute
-# a durable-tier row's disappearance to a deliberate delete; a row removed
-# beneath Flair (a raw table delete) leaves no row here, so its loss stays
-# UNATTRIBUTED. No @export and no resource class: there is no direct route.
+# Deletion history for Memory.delete (including CLI hygiene and agent remove)
+# and MemoryMaintenance expiry, appended in the row delete's transaction.
+# No @export and no resource class: there is no direct route.
 type MemoryDeletionHistory @table(database: "flair") {
   id: ID @primaryKey               # unique per deletion record (a memory id can be deleted and re-created)
   memoryId: String! @indexed
   durability: String               # the deleted row's durability at deletion, when known
-  actor: String                    # the deleting principal; null for an internal/maintenance delete
+  actor: String                    # the deleting principal; null when no actor is supplied
   sourceClass: String!             # agent | admin | internal
   at: String! @indexed             # ISO timestamp of the delete
 }

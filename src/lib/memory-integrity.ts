@@ -10,16 +10,16 @@
  * compares it to that checkpoint:
  *
  *   - a durable-tier id (permanent / persistent) that is GONE and has no
- *     deletion record is an UNEXPLAINED LOSS → alert, naming the id. It never
- *     clears itself: the checkpoint is not advanced while a loss is open.
- *   - a durable-tier id gone WITH a deletion record is an ATTRIBUTED delete.
- *   - an id whose durability changed is a TIER CHANGE (attributed).
+ *     new deletion record is an UNEXPLAINED LOSS → alert, naming the id. It never
+ *     clears itself: only `--accept` advances the checkpoint while a loss is open.
+ *   - a durable-tier id gone WITH a new deletion record is an ATTRIBUTED delete.
+ *   - an id whose durability changed is an observed TIER CHANGE.
  *   - a durable-tier count decrease not explained by those is also an alert
  *     (belt-and-braces against a count/id-set drift).
  *   - a scan that cannot read the instance reports UNKNOWN, never healthy, and
  *     never overwrites the checkpoint.
  *
- * Pure functions here; the CLI owns the instance read and the file I/O.
+ * This module compares scans and reads and writes checkpoints.
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -43,6 +43,7 @@ export interface IntegrityCheckpoint {
   byDurability: Record<Tier, number>;
   /** id -> durability at the checkpoint. */
   ids: Record<string, string>;
+  historyIds: string[];
 }
 
 export interface MemoryRowLite {
@@ -51,6 +52,7 @@ export interface MemoryRowLite {
 }
 
 export interface DeletionRecordLite {
+  id: string;
   memoryId: string;
   durability?: string | null;
   at: string;
@@ -77,7 +79,7 @@ export interface UnexplainedLoss {
 
 export interface IntegrityVerdict {
   status: IntegrityStatus;
-  /** For `unknown`: why the scan could not read the instance. */
+  /** For `unknown`: why the scan failed. */
   reason?: string;
   scannedAt: string;
   total: number;
@@ -108,13 +110,13 @@ export function tallyByDurability(rows: readonly MemoryRowLite[]): Record<Tier, 
   return counts;
 }
 
-export function emptyCheckpoint(scannedAt: string, rows: readonly MemoryRowLite[]): IntegrityCheckpoint {
-  const ids: Record<string, string> = {};
+export function emptyCheckpoint(scannedAt: string, rows: readonly MemoryRowLite[], deletions: readonly DeletionRecordLite[] = []): IntegrityCheckpoint {
+  const ids: Record<string, string> = Object.create(null);
   for (const row of rows) ids[row.id] = normalizeTier(row.durability);
-  return { version: 1, scannedAt, byDurability: tallyByDurability(rows), ids };
+  return { version: 1, scannedAt, byDurability: tallyByDurability(rows), ids, historyIds: deletions.map(d => d.id) };
 }
 
-/** A scan that could not read the instance — UNKNOWN, never healthy. */
+/** UNKNOWN, with no checkpoint write. */
 export function unknownVerdict(reason: string, scannedAt: string): IntegrityVerdict {
   return {
     status: "unknown",
@@ -132,8 +134,7 @@ export function unknownVerdict(reason: string, scannedAt: string): IntegrityVerd
 
 /**
  * Compare the live corpus (`rows`) with the checkpoint. `deletions` are the
- * deletion records the watcher could read; a durable id in `deletions` is a
- * deliberate delete, one missing from it is an unexplained loss.
+ * deletion records the watcher could read, excluding records seen at the checkpoint.
  */
 export function compareScan(opts: {
   checkpoint: IntegrityCheckpoint;
@@ -147,7 +148,9 @@ export function compareScan(opts: {
   const counts = tallyByDurability(rows);
 
   const deletedTiers = new Map<string, DeletionRecordLite>();
+  const seenHistory = new Set(checkpoint.historyIds);
   for (const d of deletions) {
+    if (seenHistory.has(d.id)) continue;
     // Latest record wins; a re-deleted id is still one deletion.
     const prev = deletedTiers.get(d.memoryId);
     if (!prev || d.at > prev.at) deletedTiers.set(d.memoryId, d);
@@ -224,9 +227,14 @@ export function readCheckpoint(path: string): CheckpointRead {
   }
   try {
     const parsed = JSON.parse(raw) as IntegrityCheckpoint;
-    if (parsed?.version !== 1 || typeof parsed.scannedAt !== "string" || typeof parsed.ids !== "object" || parsed.ids === null) {
+    if (parsed?.version !== 1 || typeof parsed.scannedAt !== "string" ||
+        typeof parsed.ids !== "object" || parsed.ids === null || Array.isArray(parsed.ids) ||
+        !Object.entries(parsed.ids).every(([id, tier]) => id.length > 0 && (ALL_TIERS as readonly unknown[]).includes(tier)) ||
+        !Array.isArray(parsed.historyIds) || !parsed.historyIds.every(id => typeof id === "string" && id.length > 0) ||
+        !parsed.byDurability || !ALL_TIERS.every(tier => Number.isSafeInteger(parsed.byDurability[tier]) && parsed.byDurability[tier] >= 0)) {
       return { kind: "unreadable", reason: "checkpoint is not a version-1 integrity checkpoint" };
     }
+    parsed.ids = Object.assign(Object.create(null), parsed.ids);
     return { kind: "ok", checkpoint: parsed };
   } catch (err) {
     return { kind: "unreadable", reason: `checkpoint is not valid JSON: ${err instanceof Error ? err.message : String(err)}` };

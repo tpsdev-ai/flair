@@ -95,18 +95,23 @@ export class MemoryMaintenance extends Resource {
               // A1'' item 2 (0c): the raw expiry delete runs in its OWN
               // transaction together with the pointer delete, so a failed
               // pointer delete aborts both and nothing is deleted.
-              await withOwnedTransaction(ctx, async (c) => {
-                await (databases as any).flair.Memory.delete(record.id, c);
+              const deleted = await withOwnedTransaction(ctx, async (c) => {
+                const stored = await (databases as any).flair.Memory.get(record.id, c);
+                if (!stored || stored.durability !== "ephemeral" || !stored.expiresAt || new Date(stored.expiresAt) >= now) return false;
+                const result = await (databases as any).flair.Memory.delete(record.id, c);
+                if (result !== true) throw new Error("Memory row delete was not confirmed");
                 await deletePointerRowOrThrow(record.id, c);
                 // The durable, attributable record of the expiry delete
                 // (flair#2213), in the same transaction.
                 await recordMemoryDeletion({
                   memoryId: record.id,
-                  durability: record.durability ?? null,
+                  durability: stored.durability ?? null,
                   actor: actorId ?? null,
                   sourceClass: callerIsAdmin ? "admin" : "agent",
                 }, c);
+                return true;
               });
+              if (!deleted) continue;
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
               noteMemoryDelete(record.id);

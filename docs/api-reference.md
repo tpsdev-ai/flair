@@ -485,7 +485,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **Asset** | memory.graphql | yes | Blob (`contentType`, `data`) owned by `agentId`, linked by `memoryId` |
 | **OrgSkillAssignment** | memory.graphql | yes | Org-scope skill assignment (`skillName`, `skillRef`, `priority`, server-stamped `writer` / `sourceClass`) |
 | **OrgSkillAssignmentHistory** | memory.graphql | no | One row per accepted OrgSkillAssignment resource write (`assignmentId`, `op`, `actor`, `sourceClass`, `previousHash`) |
-| **MemoryDeletionHistory** | memory.graphql | no | One row per Memory row deleted through a Flair path (`Memory.delete`, maintenance expiry), appended in the delete's transaction (`memoryId`, `durability`, `actor`, `sourceClass`, `at`); read by `flair integrity check` to attribute a deliberate delete |
+| **MemoryDeletionHistory** | memory.graphql | no | History of confirmed `Memory.delete` (including CLI hygiene and agent remove) and maintenance expiry deletes, appended in the delete's transaction (`memoryId`, `durability`, `actor`, `sourceClass`, `at`); read by `flair integrity check` to attribute a deliberate delete |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |

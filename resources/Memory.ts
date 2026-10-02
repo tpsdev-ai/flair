@@ -1867,24 +1867,28 @@ export class Memory extends (databases as any).flair.Memory {
     const deletionSourceClass: "agent" | "admin" | "internal" =
       auth.kind === "internal" ? "internal" : auth.isAdmin ? "admin" : "agent";
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
-      const d = await (databases as any).flair.Memory.delete(id, c);
       const deletedId = typeof id === "string" ? id : record?.id;
-      if (typeof deletedId === "string" && deletedId.length > 0) {
-        const pointerDenial = await deletePointerRow(deletedId, c);
-        if (pointerDenial) return pointerDenial;
-        // The durable, attributable record of this delete (flair#2213), in the
-        // SAME transaction — the integrity watcher reads it to tell a deliberate
-        // delete from a below-Flair loss.
-        await recordMemoryDeletion({
-          memoryId: deletedId,
-          durability: record?.durability ?? null,
-          actor: deletionActor,
-          sourceClass: deletionSourceClass,
-        }, c);
+      if (typeof deletedId !== "string" || !deletedId) return false;
+      const stored = await (databases as any).flair.Memory.get(deletedId, c);
+      if (!stored) return false;
+      if (auth.kind === "agent" && !auth.isAdmin &&
+          isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+        return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
       }
+      const d = await (databases as any).flair.Memory.delete(deletedId, c);
+      if (d !== true) throw new Error("Memory row delete was not confirmed");
+      const pointerDenial = await deletePointerRow(deletedId, c);
+      if (pointerDenial) return pointerDenial;
+      await recordMemoryDeletion({
+        memoryId: deletedId,
+        durability: stored.durability ?? null,
+        actor: deletionActor,
+        sourceClass: deletionSourceClass,
+      }, c);
       return d;
     });
     if (deleteResult instanceof Response) return deleteResult;
+    if (deleteResult === false) return false;
     // Use the RESOLVED deleted id (a by-record delete carries only `id`, so the
     // stored row's id is the fallback). An owned transaction has committed;
     // a request-owned write waits for the committed change feed instead.

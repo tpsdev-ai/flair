@@ -686,7 +686,10 @@ export function register(program: Command): void {
         console.log(`Deleting ${memoryCount} memories...`);
         for (const mem of (Array.isArray(memories) ? memories : [])) {
           if (!mem?.id) continue;
-          await opsPost({ operation: "delete", database: "flair", table: "Memory", ids: [mem.id] }).catch(() => {});
+          await api("DELETE", `/Memory/${encodeRecordId(mem.id)}`, undefined, {
+            baseUrl: `http://127.0.0.1:${resolveHttpPort(opts)}`,
+            explicitAdminPass: adminPass, adminUser, agentId: null,
+          });
         }
       }
 
