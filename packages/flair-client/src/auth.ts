@@ -15,8 +15,8 @@ import { readEnvOrUnset } from "./env-guard.js";
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
 /** Largest accepted key file. A key is a 32-byte raw seed or base64 PKCS8 DER;
- *  PEM is rejected by the parser. The cap keeps an oversized file from holding
- *  a hook binary past its process deadline. */
+ *  PEM is rejected by the parser. The cap bounds the bytes read, and the read
+ *  is asynchronous so a caller's own deadline can fire while it is pending. */
 export const KEY_FILE_MAX_BYTES = 64 * 1024;
 
 /**

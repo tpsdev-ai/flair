@@ -187,9 +187,9 @@ export class FlairClient {
     const lookup = inspectKeyLookup(this.agentId, this.keyPath);
     if (lookup.resolvedPath) {
       // Key file exists — failure to parse is a hard error.
-      // Silent fallback to unauthenticated would be a security risk. The read
-      // is asynchronous and size-capped (flair#2086), so a slow or oversized
-      // file cannot hold a hook binary past its process deadline.
+      // Silent fallback to unauthenticated would be a security risk. The cap
+      // bounds the bytes read, and the read is asynchronous so a caller's own
+      // deadline can fire while it is pending (flair#2086).
       this.privateKey = await loadPrivateKeyBounded(lookup.resolvedPath);
     }
     this.lastKeyLookup = {
