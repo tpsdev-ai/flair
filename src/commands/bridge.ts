@@ -257,7 +257,7 @@ export function register(program: Command): void {
     .option("--source <path>", "Source directory (for directory-based imports like markdown)")
     .option("--user <id>", "Foreign-system user id for bridges that import one user (e.g. mem0)")
     .option("--base-url <url>", "Base URL of the foreign API for API bridges (e.g. a self-hosted mem0)")
-    .option("--api-key-file <path>", "For API bridges with an apiKey option, read the key from a file that has no group/world permissions (chmod 600 recommended); or use the bridge's env var (e.g. MEM0_API_KEY).")
+    .option("--api-key-file <path>", "For API bridges with an apiKey option, read the key from a file that has no group/world permissions (chmod 600 recommended); or, if the bridge declares an environment variable, set that instead (e.g. MEM0_API_KEY).")
     .action(async (name: string, srcArg: string | undefined, opts) => {
       const agentId: string | undefined = opts.agent ?? process.env.FLAIR_AGENT_ID;
       const cwd: string = opts.cwd ?? srcArg ?? process.cwd();

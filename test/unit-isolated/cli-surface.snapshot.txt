@@ -2278,7 +2278,7 @@ flair bridge import
       description: Base URL of the foreign API for API bridges (e.g. a self-hosted mem0)
       attr: baseUrl
     --api-key-file <path>
-      description: For API bridges with an apiKey option, read the key from a file that has no group/world permissions (chmod 600 recommended); or use the bridge's env var (e.g. MEM0_API_KEY).
+      description: For API bridges with an apiKey option, read the key from a file that has no group/world permissions (chmod 600 recommended); or, if the bridge declares an environment variable, set that instead (e.g. MEM0_API_KEY).
       attr: apiKeyFile
 
 flair bridge export
@@ -5204,7 +5204,8 @@ Options:
                          self-hosted mem0)
   --api-key-file <path>  For API bridges with an apiKey option, read the key
                          from a file that has no group/world permissions (chmod
-                         600 recommended); or use the bridge's env var (e.g.
+                         600 recommended); or, if the bridge declares an
+                         environment variable, set that instead (e.g.
                          MEM0_API_KEY).
   -h, --help             display help for command
 
