@@ -11,9 +11,6 @@
 // Isolation:
 //   - HOME is a fresh temp dir, so the data dir, admin-pass, keys and any plist
 //     land there;
-//   - FLAIR_* / HARPER_* / HDB_* / FABRIC_* are stripped from the child's env,
-//     so nothing points it at another instance; FLAIR_MODELS_DIR is the sole
-//     exception, then set to its inherited value or the repo model directory;
 //   - ports are free ephemeral ports, asserted not to be 9925/9926;
 //   - PATH starts with a `launchctl` stub that answers "no such service", so on
 //     macOS init's read-only launchd checks never reach the real launchd domain
@@ -271,8 +268,6 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
     expect(existsSync(join(install.home, ".flair", "admin-pass"))).toBe(false);
 
-    // flair start WITHOUT a credential: the server starts, so this exits 0 with
-    // one warning and the marker stays; no skill row is written.
     const withoutCredential = runLocalService(install, "start");
     expect(withoutCredential.status, withoutCredential.stdout + withoutCredential.stderr).toBe(0);
     expect(withoutCredential.stderr).toContain("using-flair skill seed is still pending");

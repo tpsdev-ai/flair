@@ -11,7 +11,7 @@
 //     (operator authority is the request's auth class, not the stored owner);
 //   - `flair init` refuses an existing seed row written by anyone but the
 //     operator, and refuses when an Agent record holds the operator's id;
-//   - the operator's own rows still upgrade.
+//   - the operator's own row is replaced using an injected prior hash.
 //
 // HOME is a scratch directory; target URLs are checked for loopback and
 // nondefault ports before the CLI runs.
@@ -179,7 +179,7 @@ describe("flair#2141 S2 — the seed's fixed ids belong to the operator", () => 
 
   test("an agent cannot create the seed row through PUT, POST or PATCH /Memory, or POST /FeedMemories", async () => {
     expectReserved(await asAgent(AGENT, "PUT", ROW_PATH, skillBody(AGENT)), "PUT /Memory/<seed>");
-    expectReserved(await asAgent(AGENT, "POST", "/Memory", skillBody(AGENT)), "POST /Memory {id: seed}");
+    expectReserved(await asAgent(AGENT, "POST", "/Memory/", skillBody(AGENT)), "POST /Memory/ {id: seed}");
     expectReserved(await asAgent(AGENT, "PATCH", ROW_PATH, { content: "x" }), "PATCH /Memory/<seed>");
     expectReserved(
       await asAgent(AGENT, "POST", "/FeedMemories", { id: SEED_SKILL_ID, agentId: AGENT.id, content: "fed text" }),
@@ -229,8 +229,8 @@ describe("flair#2141 S2 — the seed's fixed ids belong to the operator", () => 
       expectReserved(await asAgent(shadow, "PATCH", ROW_PATH, { content: "patched" }), "PATCH as the same-name agent");
       expectReserved(await asAgent(shadow, "DELETE", ROW_PATH), "DELETE as the same-name agent");
       expectReserved(
-        await asAgent(shadow, "POST", "/Memory", { id: `seedres-new-${sfx}`, agentId: shadow.id, content: "replacement", supersedes: SEED_SKILL_ID }),
-        "POST /Memory {supersedes: seed} as the same-name agent",
+        await asAgent(shadow, "POST", "/Memory/", { id: `seedres-new-${sfx}`, agentId: shadow.id, content: "replacement", supersedes: SEED_SKILL_ID }),
+        "POST /Memory/ {supersedes: seed} as the same-name agent",
       );
       expectReserved(
         await asAgent(shadow, "POST", "/FeedMemories", { id: SEED_SKILL_ID, agentId: shadow.id, content: "fed text" }),
