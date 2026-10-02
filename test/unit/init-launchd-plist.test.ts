@@ -37,8 +37,10 @@ import {
   writeFileSync,
   existsSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   buildLaunchdPlist,
   registerInitLaunchdService,
@@ -48,6 +50,9 @@ import {
   type WriteInitLaunchdPlistOptions,
 } from "../../src/cli.ts";
 import { resolveHome } from "../../src/lib/home.ts";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
+
+const CLI_JS = join(__dirname, "..", "..", "dist", "cli.js");
 
 let tmp: string;
 let savedFlairPass: string | undefined;
@@ -359,30 +364,37 @@ describe("registerInitLaunchdService — symlink preflight (#2085)", () => {
 });
 
 describe("registerInitLaunchdService — rollback permissions (#2085)", () => {
-  test("restores a 0644 prior plist under umask 077 after validation refuses it", async () => {
+  test("restores a 01644 prior plist under umask 077 after validation refuses it", () => {
+    // Bun's chmod and fchmod drop the sticky bit; the published CLI runs on Node.
+    ensureCliBuild();
     const opts = baseOptions();
     const prior = plistFor(DATA_DIR).replace("start-flair-with-admin-pass.sh", "prior-launcher.sh");
     writeFileSync(opts.plistPath, prior);
-    chmodSync(opts.plistPath, 0o644);
     writePassFile(opts.adminPassPath!, "PLACEHOLDER-existing-pass");
 
-    const previousUmask = process.umask(0o077);
-    setLaunchdMigrationLintForTests(() => "injected validation refusal");
-    try {
-      const result = await registerInitLaunchdService({
-        dataDir: DATA_DIR,
-        port: 9926,
-        plistDir: tmp,
-        write: opts,
-      });
+    const script = `
+      import { chmodSync, statSync } from "node:fs";
+      import { registerInitLaunchdService, setLaunchdMigrationLintForTests } from ${JSON.stringify(pathToFileURL(CLI_JS).href)};
+      const [plistDir, dataDir, write] = [process.argv[1], process.argv[2], JSON.parse(process.argv[3])];
+      chmodSync(write.plistPath, 0o1644);
+      const before = statSync(write.plistPath).mode & 0o7777;
+      process.umask(0o077);
+      setLaunchdMigrationLintForTests(() => "injected validation refusal");
+      const result = await registerInitLaunchdService({ dataDir, port: 9926, plistDir, write });
+      const after = statSync(write.plistPath).mode & 0o7777;
+      process.stdout.write(JSON.stringify({ kind: result.kind, text: result.lines.map((line) => line.text).join("\\n"), before, after }));
+    `;
+    const child = spawnSync("node", ["--input-type=module", "-e", script, tmp, DATA_DIR, JSON.stringify(opts)], {
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
+    if (child.status !== 0) throw new Error(`node exited ${child.status}: ${child.stderr}`);
+    const result = JSON.parse(child.stdout);
 
-      expect(result.kind).toBe("skipped");
-      expect(result.lines.map((line) => line.text).join("\n")).toContain("the prior plist bytes and mode");
-      expect(readFileSync(opts.plistPath, "utf-8")).toBe(prior);
-      expect(statSync(opts.plistPath).mode & 0o777).toBe(0o644);
-    } finally {
-      setLaunchdMigrationLintForTests(null);
-      process.umask(previousUmask);
-    }
-  });
+    expect(result.before).toBe(0o1644);
+    expect(result.kind).toBe("skipped");
+    expect(result.text).toContain("the prior plist bytes and mode");
+    expect(readFileSync(opts.plistPath, "utf-8")).toBe(prior);
+    expect(result.after).toBe(0o1644);
+  }, 120_000);
 });

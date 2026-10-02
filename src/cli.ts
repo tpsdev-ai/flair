@@ -6644,7 +6644,7 @@ async function registerInitLaunchdService(input: {
       const putBack = putInitPlistBack(write.plistPath, priorNew);
       err(`⚠️  Launchd: not registered — ${refusal.why}. ${putBack.text}.`);
       if (!putBack.ok) {
-        err(`   Fix: remove ${write.plistPath} (launchd would load a plist it cannot validate); then ${refusal.fix}`);
+        err(`   Fix: remove ${write.plistPath} (its loadability is unverified and rollback failed); then ${refusal.fix}`);
         return { kind: "uncertain", lines };
       }
       err(`   Fix: ${refusal.fix}`);
@@ -7196,7 +7196,7 @@ function snapshotFile(path: string): FileSnapshot {
     try {
       const opened = fstatSync(fd);
       if (!opened.isFile()) return { kind: "unreadable", error: "not a regular file" };
-      return { kind: "present", bytes: readFileSync(fd), mode: opened.mode & 0o777 };
+      return { kind: "present", bytes: readFileSync(fd), mode: opened.mode & 0o7777 };
     } finally {
       closeSync(fd);
     }
