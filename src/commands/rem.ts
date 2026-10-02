@@ -945,8 +945,8 @@ export function register(program: Command): void {
         if (typeof row.archived === "number" || typeof row.expired === "number") {
           // #1503: `archived` counts validTo-expired and old-session rows the
           // pass soft-archived; `expired` counts ephemeral rows past their
-          // expiresAt that were deleted. Label each so "Expired: N, Archived: 0"
-          // cannot read as the same row counted on two axes.
+          // expiresAt. Label each so "Expired: N, Archived: 0" cannot read as
+          // the same row counted on two axes.
           console.log(`Archived:   ${row.archived ?? "—"} (validTo-expired + old sessions)`);
           console.log(`Expired:    ${row.expired ?? "—"} (ephemeral rows past expiresAt)`);
         }
