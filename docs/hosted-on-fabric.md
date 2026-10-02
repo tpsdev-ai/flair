@@ -69,7 +69,7 @@ It asks the target what it can do, rather than assuming from the hostname or the
 
 | The target… | What happens |
 |-------------|--------------|
-| supports Harper's env-secrets operations | the five vars are **sealed locally** and pushed over the ops API. No manual step, no re-run. |
+| supports Harper's env-secrets operations | the five vars are **sealed locally** and pushed over the ops API; the staged file goes unused. On Fabric, `enable` does not restart the instance — you restart it and re-run `flair mcp enable`. On a self-managed instance it restarts itself. |
 | does not have them (Harper older than 5.2) | the vars are staged to a `0600` file and you apply them yourself, then re-run with `--confirm-secrets-applied` |
 | is unreachable, refuses the probe, or answers unusably | same staged-file fallback, and the output says **which** of those happened |
 
@@ -83,32 +83,42 @@ The staging file is written in every case, so a fallback never strands you mid-r
 
 ### The `mcp.enabled` operator step (Fabric)
 
-MCP is **off by default**. The shipped component `config.yaml` contains
-`@harperfast/oauth` → `mcp` → `enabled: false`. Until [flair#1152](https://github.com/tpsdev-ai/flair/issues/1152)
-lands (interpolate from env — *ON HOLD*), you must flip this manually:
+MCP is **off by default**. The shipped component `config.yaml` contains the `@harperfast/oauth` block
+uncommented with `mcp.enabled: ${FLAIR_MCP_OAUTH}`, a whole-token environment reference
+([flair#1152](https://github.com/tpsdev-ai/flair/issues/1152)), so the on/off choice lives in the
+instance's environment and a re-packed deploy cannot revert it. There is no `config.yaml` edit and no
+re-deploy to make.
 
-1. In your deployed component's `config.yaml`, change:
-   ```yaml
-   '@harperfast/oauth':
-     mcp:
-       enabled: true     # was: false
-   ```
-2. Re-deploy the component so Harper picks up the new value.
-3. **Verify the `/mcp` surface is actually serving** (the flag alone does not
-   guarantee it — a secret that is stored but never decrypted fails at self-verify):
-   ```bash
-   # Check /mcp is reachable and returning MCP protocol (not a loopback proxy or 404)
-   curl -sf https://<cluster>.<org>.harperfabric.com/mcp
-   # Should return MCP JSON-RPC content; if you get HTML redirect or 404 the flag
-   # is not effective
-   ```
+**`flair mcp enable` never restarts a Fabric instance.** It provisions the secrets, then checks the MCP
+surface in this order:
 
-**⚠ SECURITY CAVEAT — the upgrade-reverts trap.** Any package update or fleet component
-update re-ships the literal `enabled: false` and silently darkens a live `/mcp` surface.
-You must **re-flip to `true` after every upgrade** and re-deploy. An updated component
-without this re-flip will appear healthy (`/Health` green) while its MCP tools are
-dark to every connected client. If you rely on MCP, add the re-flip to your upgrade
-runbook.
+1. **Target/issuer binding.** The target's *own* metadata at
+   `https://<instance>/.well-known/oauth-authorization-server` must name the verified issuer and advertise
+   the MCP token endpoint `/oauth/mcp/token`. A mismatch refuses the run.
+2. **Public-origin self-verify.** The same document is fetched from the public issuer and checked for the
+   MCP surface — the check `flair mcp status` uses.
+
+Then one of:
+
+- **Self-verify passes.** The run prints the paste block. If this run changed a secret value, restart the
+  instance so its process picks the new value up.
+- **It answers but does not pass** (HTTP 404, flair's own authorization server, or CIMD not advertised).
+  The step fails and says how to activate: apply the staged secrets, or restart after a push. Re-run
+  `flair mcp enable` with the same options plus `--confirm-secrets-applied`.
+- **The request fails** (DNS, connection, TLS, timeout). The step fails and says the public issuer could
+  not be reached, quoting the URL and the error. It gives no activation instruction; it asks you to check
+  that the host resolves, that this machine can reach it over HTTPS, and that the instance is running in
+  Fabric — then re-run with `--confirm-secrets-applied`.
+
+Once the instance has restarted with `FLAIR_MCP_OAUTH=true` in its environment, a re-run with
+`--confirm-secrets-applied` passes this step.
+
+**Verify the surface by hand:**
+```bash
+curl -sf https://<cluster>.<org>.harperfabric.com/.well-known/oauth-authorization-server
+```
+The MCP surface advertises `token_endpoint` `/oauth/mcp/token`; flair's own authorization server, which
+serves when the flag is off, advertises `/OAuthToken`.
 
 ---
 
