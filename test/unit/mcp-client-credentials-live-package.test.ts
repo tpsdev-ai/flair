@@ -1,6 +1,6 @@
 /**
  * Proves our production code interoperates with the REAL, PUBLISHED
- * @harperfast/oauth@2.2.0 package — not a mirror, not a guess. Deep-imports
+ * @harperfast/oauth@2.8.1 package — not a mirror, not a guess. Deep-imports
  * the plugin's own compiled modules directly from `node_modules` rather than
  * `import "@harperfast/oauth"`: the package's `exports` map only surfaces
  * `.` (the top-level plugin entry) and `./config`, but `clientAssertion.js`,
@@ -58,7 +58,7 @@ import { createServer, type Server } from "node:http";
 import { signClientAssertion, publicJwkFromPrivateKey, requestMcpAccessToken, buildTokenRequestForm } from "../../src/mcp-client-assertion";
 import { buildCimdDocument } from "../../resources/mcp-client-metadata-fields";
 
-// Deep imports of @harperfast/oauth@2.2.0's internals — see module header.
+// Deep imports of @harperfast/oauth@2.8.1's internals — see module header.
 import { verifyClientAssertion } from "../../node_modules/@harperfast/oauth/dist/lib/mcp/clientAssertion.js";
 import {
   resolveCimdClient,
@@ -96,11 +96,13 @@ describe("signClientAssertion vs the REAL published verifyClientAssertion", () =
   });
 
   test("the released verifier accepts the token-endpoint form and refuses the issuer form (#2103)", () => {
-    // The issuer audience and `typ: client-authentication+jwt` are merged
-    // upstream (HarperFast/oauth #245) but are not in this release, which is
-    // why the switch's default stays the token-endpoint form. When this test
-    // fails, inspect the pinned verifier: the issuer form may have become
-    // accepted, or its rejection reason may have changed.
+    // Measured on the pinned 2.8.1: the token-endpoint form is accepted, and
+    // the issuer form is still REFUSED — at the audience check, because this
+    // verifier call passes no issuer, so "client_assertion aud does not match
+    // an accepted audience". The 2.5.0 verifier had refused it on `typ`
+    // instead, which is why the switch's default stays the token-endpoint
+    // form. When this test fails, inspect the pinned verifier: the issuer form
+    // may have become accepted, or its rejection reason may have changed.
     const { privateKey } = generateKeyPairSync("ed25519");
     const jwk = publicJwkFromPrivateKey(privateKey);
     const tokenEndpointForm = signClientAssertion({ clientId: CLIENT_ID, tokenEndpoint: TOKEN_ENDPOINT, privateKey });
@@ -126,7 +128,7 @@ describe("signClientAssertion vs the REAL published verifyClientAssertion", () =
       jwks: [jwk],
     });
     expect(refused.valid).toBe(false);
-    if (!refused.valid) expect(refused.reason).toMatch(/typ/);
+    if (!refused.valid) expect(refused.reason).toMatch(/aud does not match an accepted audience/);
   });
 
   test("SECURITY: an assertion signed with the WRONG key is rejected by the real verifier", () => {

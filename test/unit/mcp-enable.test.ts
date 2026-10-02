@@ -182,6 +182,10 @@ describe("buildMcpOAuthConfigBlock", () => {
     expect(oauth.package).toBe("@harperfast/oauth");
     expect(oauth.providers.github.clientId).toBe("${OAUTH_GITHUB_CLIENT_ID}");
     expect(oauth.providers.github.clientSecret).toBe("${OAUTH_GITHUB_CLIENT_SECRET}");
+    // Since @harperfast/oauth 2.7.0 a configured provider needs a redirectUri
+    // (2.8.1 skips an unconfigured one before that check) — the shipped block
+    // carries the same whole-token reference shape.
+    expect(oauth.providers.github.redirectUri).toBe("${OAUTH_GITHUB_REDIRECT_URI}");
     // flair#1152: mcp.enabled is the WHOLE-TOKEN env reference — never a
     // literal boolean. The on/off choice lives in the environment, so a
     // re-packed deploy cannot revert it.

@@ -5,7 +5,7 @@
     "": {
       "name": "@tpsdev-ai/flair",
       "dependencies": {
-        "@harperfast/oauth": "2.8.0",
+        "@harperfast/oauth": "2.8.1",
         "@types/js-yaml": "4.0.9",
         "commander": "14.0.3",
         "harper": "5.2.8",
@@ -423,7 +423,7 @@
 
     "@harperfast/extended-iterable": ["@harperfast/extended-iterable@1.0.3", "", {}, "sha512-sSAYhQca3rDWtQUHSAPeO7axFIUJOI6hn1gjRC5APVE1a90tuyT8f5WIgRsFhhWA7htNkju2veB9eWL6YHi/Lw=="],
 
-    "@harperfast/oauth": ["@harperfast/oauth@2.8.0", "", { "dependencies": { "jsonwebtoken": "^9.0.2", "jwks-rsa": "^3.1.0" }, "peerDependencies": { "harper": ">=5.0.0" } }, "sha512-MIbocSsviTDrOvf+WBPQQbU/sHJEnhvBRd6BQYKwPJR/dVpyhgJ7cM546qqBLsDgiCezDeQB1J5FcOlVUN0ufQ=="],
+    "@harperfast/oauth": ["@harperfast/oauth@2.8.1", "", { "dependencies": { "jsonwebtoken": "^9.0.2", "jwks-rsa": "^3.1.0" }, "peerDependencies": { "harper": ">=5.0.0" } }, "sha512-YEfo3QZlgY6FeRUrg7/TUwcgJKccl75mhjc/bubyp/4J2CcKVkFvIGjcOe6VKlrdzeoR7vfN/UJoSjB6knkezg=="],
 
     "@harperfast/rocksdb-js": ["@harperfast/rocksdb-js@2.8.0", "", { "dependencies": { "@harperfast/extended-iterable": "1.0.3", "msgpackr": "2.0.6", "ordered-binary": "1.6.1" }, "optionalDependencies": { "@harperfast/rocksdb-js-darwin-arm64": "2.8.0", "@harperfast/rocksdb-js-darwin-x64": "2.8.0", "@harperfast/rocksdb-js-linux-arm64-glibc": "2.8.0", "@harperfast/rocksdb-js-linux-arm64-musl": "2.8.0", "@harperfast/rocksdb-js-linux-x64-glibc": "2.8.0", "@harperfast/rocksdb-js-linux-x64-musl": "2.8.0", "@harperfast/rocksdb-js-win32-arm64": "2.8.0", "@harperfast/rocksdb-js-win32-x64": "2.8.0" }, "bin": { "rocksdb-js": "./bin/rocksdb-js.mjs" } }, "sha512-czswCG+1KCRMYe6XQcsh5u28IQ6EbIx9eXPQd0kmjiLbtoMjiszYE92756bZJSbDykbR2OJLOazMZg7+qfFSJA=="],
 

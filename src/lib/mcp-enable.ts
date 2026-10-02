@@ -462,6 +462,12 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         [provider]: {
           clientId: `\${${envPrefix}_CLIENT_ID}`,
           clientSecret: `\${${envPrefix}_CLIENT_SECRET}`,
+          // Since @harperfast/oauth 2.7.0 a CONFIGURED provider (both
+          // credentials set) needs a redirectUri; 2.8.1 skips an UNCONFIGURED
+          // one before that check (HarperFast/oauth#259). Same whole-token
+          // reference shape as the credentials above — set to the instance's
+          // public origin plus /oauth; the component appends '/<provider>/callback'.
+          redirectUri: `\${${envPrefix}_REDIRECT_URI}`,
         },
       },
       mcp: {
