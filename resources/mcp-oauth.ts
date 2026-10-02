@@ -273,7 +273,9 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
   // Mount /mcp after the guard.
   srv.http(
     withMCPAuth(rateLimitedMcpHandler(handler), {
-      getConfig: () => mcpAuthConfig(),
+      getConfig: () => (deps.harper ?? harper).resources?.get("oauth")?.Resource?.mcpConfig?.enabled === true
+        ? mcpAuthConfig()
+        : undefined,
     }),
     { urlPath: "/mcp", after: MULTI_WORKER_GUARD_HTTP_NAME },
   );

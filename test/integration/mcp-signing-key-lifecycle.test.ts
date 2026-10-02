@@ -6,18 +6,9 @@
  * removed.
  *
  * ── The mint is the plugin's real one, over HTTP ───────────────────────────
- * A token is minted by POSTing an authorization_code grant to the live
- * component's /oauth/mcp/token, exactly as the plugin mints any access token
- * (mintTokenPair → MCPKeyStore.getSigningKey → signAccessToken). The client is
- * a stored (DCR) registration rather than a CIMD client, because CIMD
- * resolution enforces an unconditional SSRF gate (https-only, no loopback
- * exception — see mcp-client-credentials-e2e.test.ts), which an ephemeral
- * loopback instance can never satisfy. A stored client resolves through
- * MCPClientStore instead. The authorization code is seeded into
- * oauth.mcp_auth_codes (the same table /oauth/mcp/authorize writes), so the
- * exchange needs no IdP and no network. NOTHING seeds a signing key: the key
- * the token is signed with is the one the library generates and persists on
- * this first mint.
+ * The test seeds the fields needed for exchange, modeled on a stored client
+ * and a callback-generated code. The live /oauth/mcp/token endpoint mints the
+ * token without a seeded signing key.
  */
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
@@ -101,10 +92,6 @@ function pkcePair(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-/**
- * Seed a stored (DCR) public client + one authorization code, exactly the rows
- * /oauth/mcp/register and /oauth/mcp/authorize would write. No signing key.
- */
 async function seedClientAndCode(h: HarperInstance, code: string, challenge: string): Promise<void> {
   const clientRes = await adminOp(h, {
     operation: "insert",

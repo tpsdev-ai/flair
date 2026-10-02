@@ -1073,7 +1073,28 @@ describe("enableMcp — dry-run", () => {
 });
 
 describe("enableMcp — the issuer must be an http(s) origin", () => {
-  test.each(["https://flair.example.com/issuer", "https://flair.example.com/oauth", ""])(
+  test.each([ISSUER, `${ISSUER}/`, `${ISSUER}:8443`, "http://flair.example.com", "https://[2001:db8::1]:8443/"])(
+    "accepts canonical --issuer %s under --dry-run",
+    async (issuer) => {
+      const { fetchImpl, calls } = fullMockFetch();
+      const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), issuer, dryRun: true }, { fetchImpl });
+      expect(result.ok).toBe(true);
+      expect(calls).toHaveLength(0);
+    },
+  );
+  test.each([
+    "https://flair.example.com/issuer", "https://flair.example.com/oauth", "",
+    "https://flair.example.com/?", "https://flair.example.com/#",
+    "https://flair.example.com?", "https://flair.example.com#",
+    "https://flair.example.com/?x=1", "https://flair.example.com/#fragment",
+    "https://flair.example.com/a/..", "https://flair.example.com/.",
+    "https://flair.example.com/..", "https://flair.example.com/%2e",
+    "https://flair.example.com/a/%2e%2e", "https://flair.example.com//",
+    "https://flair.example.com/issuer/", "https://user:pass@flair.example.com",
+    "https:\\flair.example.com", " https://flair.example.com", "https://flair.example.com\n",
+    "ftp://flair.example.com", "flair.example.com", "https:///flair.example.com",
+    "https://FLAIR.example.com", "https://flair.example.com:443",
+  ])(
     "refuses --issuer %s before any write, with and without --dry-run",
     async (badIssuer) => {
       for (const dryRun of [true, false]) {

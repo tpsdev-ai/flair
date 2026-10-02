@@ -35,10 +35,9 @@
  *   2c. DECLARED PIN STILL FAILS (flair#2194): a config that DOES declare
  *      `signingKeyPem: ${VAR}` with the variable unset still degrades the boot,
  *      the load error naming the variable — the library's check is NOT loosened.
- *   2d. NO PROVIDER (flair#2194): MCP on with no provider configured boots
- *      clean but serves neither RFC 9728 protected-resource form and denies
- *      /mcp — the fail-closed shape, kept separate from the provider-configured
- *      200 in case 5.
+ *   2d. NO PROVIDER (flair#2194): no-provider boot returns 404 for both
+ *      protected-resource forms and 401 for an unauthenticated /mcp request.
+ *      A token minted with a provider returns 401 after provider removal.
  *   3. MUTATION-PROVE (literal true): mcp.enabled: true + env unset -> boots
  *      DEGRADED. Proves test 2's clean-boot assertions CAN fire.
  *   4. GARBAGE VALUE (flair#1152 residual): FLAIR_MCP_OAUTH=maybe. Measured
@@ -75,6 +74,7 @@ import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
 import { mcpOAuthEnabled } from "../../resources/mcp-oauth-flag.ts";
@@ -328,8 +328,82 @@ describe("flair#2194: a declared signingKeyPem with an unset variable still fail
 });
 
 describe("flair#2194: MCP on with NO provider configured — fail-closed discovery", () => {
+  test("a token minted with a provider returns 401 after provider removal and restart", async () => {
+    clearMcpEnv();
+    const issuer = "https://provider-removal.flair.test";
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = issuer;
+    process.env.OAUTH_GITHUB_CLIENT_ID = "provider-removal-client";
+    process.env.OAUTH_GITHUB_CLIENT_SECRET = "provider-removal-secret";
+    process.env.OAUTH_GITHUB_REDIRECT_URI = `${issuer}/oauth`;
+    const workDir = makeWorkDirWithShippedConfig("flair-provider-removal-");
+    let harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+    instances.push(harper);
+    const verifier = randomBytes(32).toString("base64url");
+    const clientId = "provider-removal-client";
+    const redirectUri = `${issuer}/callback`;
+    for (const [table, records] of [
+      ["harper_oauth_mcp_clients", [{
+        client_id: clientId, grant_types: JSON.stringify(["authorization_code"]),
+        response_types: JSON.stringify(["code"]), redirect_uris: JSON.stringify([redirectUri]),
+        token_endpoint_auth_method: "none",
+      }]],
+      ["mcp_auth_codes", [{
+        code: "provider-removal-code", client_id: clientId, user: "provider-removal-agent",
+        resource: `${issuer}/mcp`, code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+        code_challenge_method: "S256", redirect_uri: redirectUri, scope: "", client_auth_method: "none",
+      }]],
+    ] as const) {
+      const res = await fetch(harper.opsURL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64") },
+        body: JSON.stringify({ operation: "insert", database: "oauth", table, records }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(res.status).toBe(200);
+    }
+    const mintRes = await fetch(`${harper.httpURL}/oauth/mcp/token`, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "authorization_code", client_id: clientId,
+        code: "provider-removal-code", code_verifier: verifier, redirect_uri: redirectUri }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(mintRes.status).toBe(200);
+    const { access_token: token } = await mintRes.json() as { access_token: string };
+    expect(typeof token).toBe("string");
+    const postMcp = () => fetch(`${harper.httpURL}/mcp`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect((await postMcp()).status).toBe(200);
+    const installDir = harper.installDir;
+    await stopHarper(harper, { keepInstallDir: true });
+    delete process.env.OAUTH_GITHUB_CLIENT_ID;
+    delete process.env.OAUTH_GITHUB_CLIENT_SECRET;
+    delete process.env.OAUTH_GITHUB_REDIRECT_URI;
+    harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, installDir });
+    instances.push(harper);
+    expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
+    expect(harper.getLog?.() ?? "").toContain("OAuth provider 'github' not configured. Missing: clientId, clientSecret");
+    const kid = JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString("utf8")).kid;
+    const keyRes = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64") },
+      body: JSON.stringify({ operation: "search_by_value", database: "oauth", table: "harper_oauth_mcp_keys",
+        search_attribute: "kid", search_value: kid, get_attributes: ["kid", "public_key_pem"] }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(keyRes.status).toBe(200);
+    const keys = await keyRes.json() as { kid: string; public_key_pem: string }[];
+    expect(keys).toHaveLength(1);
+    expect(keys[0]!.kid).toBe(kid);
+    expect(keys[0]!.public_key_pem).toContain("BEGIN PUBLIC KEY");
+    expect((await postMcp()).status).toBe(401);
+  }, 300_000);
+
   test(
-    "no OAUTH_GITHUB_* set: boots clean, but both protected-resource forms 404 and /mcp denies (401)",
+    "no OAUTH_GITHUB_* set: boots clean, both protected-resource forms 404 and unauthenticated /mcp returns 401",
     async () => {
       clearMcpEnv();
       process.env.FLAIR_MCP_OAUTH = "true";

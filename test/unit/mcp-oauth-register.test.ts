@@ -57,6 +57,7 @@ function makeDeps() {
     // doesn't exercise the real config.yaml path. The guard is tested
     // explicitly in the "flair#1021 boot guard" describe block below.
     skipComponentGuard: true,
+    harper: { resources: { get: () => ({ Resource: { mcpConfig: { enabled: true } } }) } },
   };
 }
 

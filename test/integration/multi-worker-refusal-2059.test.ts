@@ -12,11 +12,7 @@ const priorOAuth = {
 beforeAll(() => {
   process.env.FLAIR_MCP_OAUTH = "true";
   process.env.FLAIR_MCP_ISSUER = "https://multi-worker-2059.flair.test";
-  // @harperfast/oauth 2.8.1 SKIPS a provider with no credentials
-  // (HarperFast/oauth#259) and fails closed when the plugin ends up with none
-  // — it serves no well-known documents and mounts no authorization server. So
-  // MCP on requires a CONFIGURED provider: without these, the shipped github
-  // provider is skipped and /.well-known/oauth-protected-resource is 404.
+  // This fixture configures a provider so protected-resource discovery is available.
   process.env.OAUTH_GITHUB_CLIENT_ID = "multi-worker-2059-client";
   process.env.OAUTH_GITHUB_CLIENT_SECRET = "multi-worker-2059-secret";
   process.env.OAUTH_GITHUB_REDIRECT_URI = "https://multi-worker-2059.flair.test/oauth";

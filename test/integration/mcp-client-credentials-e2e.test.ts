@@ -109,9 +109,8 @@ const OAUTH_COMPONENT_BLOCK = `
       provider: 'generic'
       clientId: 'test-client-id'
       clientSecret: 'test-client-secret'
-      # A CONFIGURED provider needs a redirectUri since @harperfast/oauth 2.7.0
-      # (2.8.1 skips an unconfigured one first — HarperFast/oauth#259). Without
-      # it the plugin's load fails and none of the MCP routes mount.
+      # Missing redirectUri prevents the OAuth component from loading; its
+      # OAuth endpoints are unavailable. Flair registers /mcp separately.
       redirectUri: '${ISSUER}/oauth'
       authorizationUrl: 'https://example.invalid/authorize'
       tokenUrl: 'https://example.invalid/token'
