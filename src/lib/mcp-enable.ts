@@ -965,11 +965,26 @@ export interface SecretsBundleParams {
   idpClientSecret: string;
 }
 
+export class IdpRedirectOriginError extends Error {
+  constructor(envPrefix: string) {
+    super(`Cannot stage ${envPrefix}_CLIENT_ID and ${envPrefix}_CLIENT_SECRET: ${envPrefix}_REDIRECT_URI requires a known HTTP(S) issuer origin.`);
+    this.name = "IdpRedirectOriginError";
+  }
+}
+
 /** The full set of env vars the restarted instance needs live. Contains
  *  secret VALUES — this is the one place they exist as a JS object; callers
  *  must never fold this into a CLI-printed / `EnableMcpResult` field. */
 export function buildSecretsBundle(params: SecretsBundleParams): Record<string, string> {
   const envPrefix = `OAUTH_${params.idpProvider.toUpperCase()}`;
+  let origin: string;
+  try {
+    const url = new URL(params.issuer);
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new IdpRedirectOriginError(envPrefix);
+    origin = url.origin;
+  } catch {
+    throw new IdpRedirectOriginError(envPrefix);
+  }
   return {
     // "true" is the ONLY value both readers of this flag accept (flair#1152,
     // measured against oauth 2.5.0): flair's strict mcpOAuthEnabled() takes
@@ -983,6 +998,7 @@ export function buildSecretsBundle(params: SecretsBundleParams): Record<string, 
     FLAIR_MCP_SIGNING_KEY_PEM: params.signingKeyPem,
     [`${envPrefix}_CLIENT_ID`]: params.idpClientId,
     [`${envPrefix}_CLIENT_SECRET`]: params.idpClientSecret,
+    [`${envPrefix}_REDIRECT_URI`]: `${origin}/oauth`,
   };
 }
 
@@ -2074,6 +2090,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     }
 
     // ── Secrets provisioning (shape-aware, never silent) ──────────────────────
+    currentStep = "secrets-provisioning";
     const signingKeyPem = readSigningKeyFile(keyResult.path);
     const bundle = buildSecretsBundle({
       issuer,
@@ -2082,7 +2099,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       idpClientId: params.idpClientId,
       idpClientSecret: params.idpClientSecret,
     });
-    currentStep = "secrets-provisioning";
     if (bundle.FLAIR_MCP_ISSUER !== issuer) {
       throw new Error(`the FLAIR_MCP_ISSUER being pushed does not equal the issuer checked (${issuer})`);
     }

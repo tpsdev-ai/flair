@@ -163,13 +163,9 @@ registered identities.
      same var accepts only "true"/"false" and deletes anything else, so `1`
      gives you a guarded `/mcp` with no authorization server behind it).
    - `FLAIR_MCP_ISSUER=https://your-public-origin` (or `FLAIR_PUBLIC_URL`).
-   - `OAUTH_GITHUB_REDIRECT_URI=https://your-public-origin/oauth` — this
-     instance's public origin plus `/oauth`; the component appends
-     `/github/callback`, so the GitHub OAuth app's callback URL is
-     `<origin>/oauth/github/callback`. A github provider with its client id
-     and secret set is only built with this; since @harperfast/oauth 2.7.0 an
-     absent or unresolved one fails the plugin's load (2.8.1 skips a provider
-     whose credentials are both unset before that check — HarperFast/oauth#259).
+   - `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET` and
+     `OAUTH_GITHUB_REDIRECT_URI=https://your-public-origin/oauth` — staged by
+     `flair mcp enable` using `--issuer` (default: `--instance`).
    - `FLAIR_MCP_JIT_PROVISION=1` — ONLY if you want unknown subjects
      auto-provisioned (default OFF; pre-provision Agent+Credential otherwise).
 

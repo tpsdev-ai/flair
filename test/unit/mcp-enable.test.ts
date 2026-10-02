@@ -277,9 +277,49 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
     expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toContain("BEGIN PRIVATE KEY");
     expect(bundle.OAUTH_GITHUB_CLIENT_ID).toBe("client-id-value");
     expect(bundle.OAUTH_GITHUB_CLIENT_SECRET).toBe("client-secret-value");
+    expect(bundle.OAUTH_GITHUB_REDIRECT_URI).toBe("https://flair.example.com/oauth");
     expect(bundle.FLAIR_MCP_DCR_TOKEN).toBeUndefined();
     expect(Object.keys(bundle)).not.toContain("FLAIR_MCP_DCR_TOKEN");
   });
+
+  test.each([
+    ["https://flair.example.com/", "https://flair.example.com/oauth"],
+    ["https://flair.example.com:8443///", "https://flair.example.com:8443/oauth"],
+    ["https://flair.example.com/issuer", "https://flair.example.com/oauth"],
+  ])("GitHub credentials include the redirect base for issuer %s", (issuer, redirectUri) => {
+    const bundle = buildSecretsBundle({
+      issuer,
+      signingKeyPem: "key",
+      idpProvider: "github",
+      idpClientId: "client-id-value",
+      idpClientSecret: "client-secret-value",
+    });
+    expect(bundle.OAUTH_GITHUB_CLIENT_ID).toBe("client-id-value");
+    expect(bundle.OAUTH_GITHUB_CLIENT_SECRET).toBe("client-secret-value");
+    expect(bundle.OAUTH_GITHUB_REDIRECT_URI).toBe(redirectUri);
+  });
+
+  test.each(["", "   ", "flair.example.com", "${FLAIR_MCP_ISSUER}", "file:///tmp/flair"])(
+    "refuses a GitHub bundle with an unknown HTTP(S) origin: %s",
+    (issuer) => {
+      let error: unknown;
+      try {
+        buildSecretsBundle({
+          issuer,
+          signingKeyPem: "key",
+          idpProvider: "github",
+          idpClientId: "client-id-value",
+          idpClientSecret: "client-secret-value",
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toMatchObject({
+        name: "IdpRedirectOriginError",
+        message: expect.stringContaining("OAUTH_GITHUB_REDIRECT_URI"),
+      });
+    },
+  );
 
   test("staging file is written 0600 and contains the values (this file IS meant to carry secret material)", () => {
     const path = join(dir, "secrets.env");
@@ -1039,6 +1079,18 @@ describe("enableMcp — dry-run", () => {
 });
 
 describe("enableMcp — the confirm-secrets-applied gate", () => {
+  test("unknown issuer origin refuses before staging GitHub credentials", async () => {
+    const { fetchImpl, calls } = fullMockFetch();
+    const paths = tempPaths();
+    const result = await enableMcp({ ...BASE_PARAMS, ...paths, issuer: "" }, { fetchImpl });
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("secrets-provisioning");
+    expect(result.steps.find((step) => step.step === "secrets-provisioning")?.detail)
+      .toContain("OAUTH_GITHUB_REDIRECT_URI");
+    expect(existsSync(paths.secretsStagingPath)).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
   function pushedSecretsFetch() {
     const { fetchImpl: baseFetch, calls } = fullMockFetch();
     const { publicKey } = generateRsaSigningKeyPair();
@@ -1083,7 +1135,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
       { fetchImpl, confirmPrompt: async (message) => { prompt = message; return false; } },
     );
     expect(result.ok).toBe(false);
-    expect(prompt).toBe(`Have you applied the 5 vars staged at ${join(dir, "secrets.env")} to ${ISSUER}'s environment?`);
+    expect(prompt).toBe(`Have you applied the 6 vars staged at ${join(dir, "secrets.env")} to ${ISSUER}'s environment?`);
   });
 
   test("pushed and read-back Fabric secrets, without confirmation: asks for a restart and never calls restart", async () => {
@@ -2008,7 +2060,11 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(result.steps.find((s) => s.step === "fabric-operator-deploy")?.detail)
       .toContain(`Issuer ${PUBLIC} matched the target's own OAuth authorization-server metadata at ${FABRIC}/.well-known/oauth-authorization-server`);
     expect(calls).toEqual(["target-metadata", "public-metadata"]);
-    expect(readFileSync(join(dir, "secrets.env"), "utf8")).toContain(`FLAIR_MCP_ISSUER=${PUBLIC}`);
+    const staged = readFileSync(join(dir, "secrets.env"), "utf8");
+    expect(staged).toContain(`FLAIR_MCP_ISSUER=${PUBLIC}`);
+    expect(staged).toContain(`OAUTH_GITHUB_CLIENT_ID=${BASE_PARAMS.idpClientId}`);
+    expect(staged).toContain(`OAUTH_GITHUB_CLIENT_SECRET=${BASE_PARAMS.idpClientSecret}`);
+    expect(staged).toContain(`OAUTH_GITHUB_REDIRECT_URI=${PUBLIC}/oauth`);
   });
 
   test("Fabric refuses target metadata redirected to valid public issuer metadata", async () => {

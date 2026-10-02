@@ -339,10 +339,9 @@ instance's admin password.
 
 Create a GitHub OAuth app whose callback URL is
 `https://flair.example.com/oauth/github/callback` (the command prints this URL
-too). The shipped `config.yaml` reads the app's `clientId`, `clientSecret` and
-`redirectUri` from the instance's environment as whole-token references, so the
-instance needs `OAUTH_GITHUB_REDIRECT_URI` set to its public origin plus
-`/oauth` — `https://flair.example.com/oauth`. Then run:
+too). The command stages `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET`
+and `OAUTH_GITHUB_REDIRECT_URI=<public-origin>/oauth` using `--issuer`
+(default: `--instance`). Then run:
 
 ```bash
 flair mcp enable \
