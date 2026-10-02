@@ -321,7 +321,7 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
  */
 function credentialTable(seed: Record<string, any>[] = []) {
   const rows = new Map<string, any>(
-    seed.map((r) => [String(r.id), { kind: "idp", status: "active", ...r }]),
+    seed.map((r) => [String(r.id), { kind: "idp", status: "active", createdAt: "2026-10-02T00:00:00.000Z", ...r }]),
   );
   const handle = (body: any): Response | null => {
     if (body?.operation === "search_by_conditions" && (body.table ?? "Credential") === "Credential") {
@@ -431,7 +431,7 @@ describe("provisionIdpIdentityMapping", () => {
     // The trailing search_by_conditions is the flair#1317 invariant read-back:
     // the function asks the STORE whether exactly one active credential now
     // maps the subject, rather than trusting the write it just issued.
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_conditions", "upsert", "search_by_conditions"]);
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions"]);
     const credRecord = calls[3].body.records[0];
     expect(credRecord.kind).toBe("idp");
     expect(credRecord.idpProvider).toBe("github");
@@ -497,7 +497,7 @@ describe("provisionIdpIdentityMapping", () => {
     ["not json rows", /did not answer with a record list/],
     [[null], /answered with a malformed Agent record \(entry 0\)/],
     [[{ name: "self" }], /answered with a malformed Agent record \(entry 0\)/],
-    [[{ id: "someone-else" }], /answered with a row that is not principal 'self'/],
+    [[{ id: "someone-else" }], /query-mismatch:id/],
   ];
 
   for (const [agentSearchBody, reason] of MALFORMED_AGENT_ANSWERS) {
@@ -563,7 +563,7 @@ describe("provisionIdpIdentityMapping", () => {
       existingPrincipal: true,
       existingCredentials: [
         { id: "cred_a", idpProvider: "mcp-oauth", principalId: "agt_a" },
-        { id: "cred_b", idpProvider: "okta", principalId: "agt_b" },
+        { id: "cred_b", idpProvider: "okta", principalId: "agt_a" },
       ],
     });
     const result = await provisionIdpIdentityMapping(
@@ -610,7 +610,7 @@ describe("provisionIdpIdentityMapping", () => {
       poisonReadBack: (rows) => {
         rows.set("cred_smuggled", {
           id: "cred_smuggled", kind: "idp", status: "active",
-          idpProvider: "smuggled", idpSubject: "octocat", principalId: "agt_other",
+          idpProvider: "smuggled", idpSubject: "octocat", principalId: "agt_other", createdAt: "2026-10-02T00:00:00.000Z",
         });
       },
     });
@@ -619,7 +619,7 @@ describe("provisionIdpIdentityMapping", () => {
         { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
         { fetchImpl },
       ),
-    ).rejects.toThrow(/uniqueness invariant does not hold.*2 active Credential/s);
+    ).rejects.toThrow(/ambiguous-prior-principals/);
   });
 
   test("flair#1317: the invariant error names the actor, the state and the remedy", async () => {

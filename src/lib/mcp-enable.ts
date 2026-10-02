@@ -1368,17 +1368,11 @@ export async function provisionIdpIdentityMapping(
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
 
   // Ensure the principal Agent exists.
+  const agentQuery = mappingReadQuery("Agent", { id: params.principal });
   const findRes = await fetchImpl(opsUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({
-      operation: "search_by_value",
-      database: "flair",
-      table: "Agent",
-      search_attribute: "id",
-      search_value: params.principal,
-      get_attributes: ["id"],
-    }),
+    headers: opsHeaders(authHeader),
+    body: JSON.stringify(agentQuery),
   });
   if (!findRes.ok) {
     const text = await findRes.text().catch(() => "");
@@ -1403,19 +1397,17 @@ export async function provisionIdpIdentityMapping(
     );
   }
   // flair#2115 — the principal is created only after a valid empty answer.
-  const foundAgents = await opsRecordList(findRes, opsUrl, "Agent", isAgentRow);
+  const foundAgents = await opsRecordList(findRes, opsUrl, agentQuery);
+  if (foundAgents.length === 0 && params.principalMustExist) {
+    throw new Error(principalMissingMessage(params.principal));
+  }
   let principalCreated = false;
-  if (!foundAgents.some((r) => r.id === params.principal)) {
-    if (params.principalMustExist) {
-      // flair#2115 — `link` maps an EXISTING principal. Creating one here would
-      // answer a typo'd id with success, so refuse by name with nothing written.
-      throw new Error(principalMissingMessage(params.principal));
-    }
-    if (foundAgents.length > 0) {
-      throw new Error(
-        `Identity mapping: the Agent read at ${opsUrl} answered with a row that is not principal '${params.principal}' — nothing was written.`,
-      );
-    }
+  const findCredentialsForSubject = (): Promise<any[]> =>
+    readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject);
+  const subjectCreds = await findCredentialsForSubject();
+  const activeCreds = subjectCreds.filter(isResolvableCredential);
+
+  if (foundAgents.length === 0) {
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1445,29 +1437,6 @@ export async function provisionIdpIdentityMapping(
     }
     principalCreated = true;
   }
-
-  // ── flair#1317: look SUBJECT-WIDE, not (provider, subject) ─────────────────
-  // The resolver's key is (kind, idpSubject); anything narrower here leaves
-  // credentials that dedup cannot see but resolution can.
-  // A read that FAILED, or answered with something that is not a record list,
-  // is not "no credential for this subject": this read decides which rows the
-  // batch below revokes, so it refuses rather than standing in for an empty
-  // table (flair#2115). `opsReadRows` is the one strict read on this surface.
-  const findCredentialsForSubject = async (): Promise<any[]> =>
-    opsReadRows(fetchImpl, opsUrl, authHeader, isCredentialRowFor("idpSubject", params.idpSubject), {
-      operation: "search_by_conditions",
-      database: "flair",
-      table: "Credential",
-      operator: "and",
-      conditions: [
-        { search_attribute: "kind", search_type: "equals", search_value: "idp" },
-        { search_attribute: "idpSubject", search_type: "equals", search_value: params.idpSubject },
-      ],
-      get_attributes: ["id", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"],
-    });
-
-  const subjectCreds = await findCredentialsForSubject();
-  const activeCreds = subjectCreds.filter(isResolvableCredential);
 
   // Survivor: an ACTIVE same-provider credential is re-pointed (the idempotent
   // re-run and the documented same-provider link). A revoked one is never
@@ -1532,16 +1501,9 @@ export async function provisionIdpIdentityMapping(
   // ≠1 active credential means the resolver's answer for this subject is
   // order-dependent, so this fails LOUDLY rather than returning a mapping the
   // operator would reasonably believe is deterministic.
-  const afterCreds = (await findCredentialsForSubject()).filter(isResolvableCredential);
-  if (afterCreds.length !== 1 || afterCreds[0]?.id !== credentialId) {
-    const seen = afterCreds.map((c) => `${c?.id} → ${c?.principalId} (provider '${c?.idpProvider}')`).join("; ") || "none";
-    throw new Error(
-      `Identity mapping: the uniqueness invariant does not hold after the write — subject '${params.idpSubject}' ` +
-        `has ${afterCreds.length} active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${credentialId}). ` +
-        `Runtime resolution for this subject would be iteration-order-dependent (flair#1317). ` +
-        `Inspect the Credential table for kind:"idp" idpSubject:"${params.idpSubject}" and revoke the rows that should not resolve.`,
-    );
-  }
+  await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, {
+    id: credentialId, principalId: params.principal, idpProvider: params.idpProvider, status: "active",
+  });
 
   return {
     principalCreated,
@@ -1630,37 +1592,47 @@ function opsHeaders(authHeader: string): Record<string, string> {
   return { "Content-Type": "application/json", Authorization: authHeader };
 }
 
-/**
- * POST one ops-API read and return its record list.
- *
- * A call that FAILED is never answered with `[]`, and a body that is not a
- * record list is not one either: these reads stand in front of a write, and a
- * table that could not be read is not an empty table (flair#2115). The caller
- * refuses.
- */
+type WrittenMapping = { id: string; principalId: string; idpProvider: string; status: "active" };
+
+type MappingReadQuery = {
+  operation: "search_by_value" | "search_by_conditions";
+  database: "flair";
+  table: "Agent" | "Credential";
+  search_attribute?: string;
+  search_value?: string;
+  operator?: "and";
+  conditions?: Array<{ search_attribute: string; search_type: "equals"; search_value: string }>;
+  get_attributes: string[];
+};
+
+function mappingReadQuery(table: MappingReadQuery["table"], equals: Record<string, string>): MappingReadQuery {
+  const fields = table === "Agent" ? ["id"] :
+    ["id", "kind", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"];
+  if (table === "Agent") {
+    return { operation: "search_by_value", database: "flair", table,
+      search_attribute: "id", search_value: equals.id, get_attributes: fields };
+  }
+  return { operation: "search_by_conditions", database: "flair", table, operator: "and",
+    conditions: Object.entries(equals).map(([search_attribute, search_value]) =>
+      ({ search_attribute, search_type: "equals", search_value })), get_attributes: fields };
+}
+
 async function opsReadRows(
   fetchImpl: typeof fetch,
   opsUrl: string,
   authHeader: string,
-  isRow: (row: any) => boolean,
-  body: Record<string, unknown>,
+  query: MappingReadQuery,
+  written?: WrittenMapping,
 ): Promise<any[]> {
-  const res = await fetchImpl(opsUrl, { method: "POST", headers: opsHeaders(authHeader), body: JSON.stringify(body) });
+  const res = await fetchImpl(opsUrl, { method: "POST", headers: opsHeaders(authHeader), body: JSON.stringify(query) });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Identity mapping: the ops API read at ${opsUrl} failed (HTTP ${res.status})${text ? `: ${text}` : ""}`);
   }
-  return opsRecordList(res, opsUrl, String(body.table), isRow);
+  return opsRecordList(res, opsUrl, query, written);
 }
 
-/** A successful read's body, refused unless it is a list whose every entry is
- *  a well-formed `table` row (flair#2115). */
-async function opsRecordList(
-  res: Response,
-  opsUrl: string,
-  table: string,
-  isRow: (row: any) => boolean,
-): Promise<any[]> {
+async function opsRecordList(res: Response, opsUrl: string, query: MappingReadQuery, written?: WrittenMapping): Promise<any[]> {
   const parsed = await res.json().catch(() => null);
   if (!Array.isArray(parsed)) {
     throw new Error(
@@ -1668,9 +1640,48 @@ async function opsRecordList(
         `verify that the target answers operations API requests there.`,
     );
   }
-  const bad = parsed.findIndex((row) => !isRow(row));
-  if (bad !== -1) {
-    throw new Error(`Identity mapping: the ops API read at ${opsUrl} answered with a malformed ${table} record (entry ${bad}).`);
+  const predicate = query.operation === "search_by_value"
+    ? [[query.search_attribute!, query.search_value!]]
+    : query.conditions!.map(c => [c.search_attribute, c.search_value]);
+  const ids = new Set<string>();
+  for (const [index, row] of parsed.entries()) {
+    const refuse = (reason: string): never => {
+      throw new Error(`Identity mapping: the ops API read at ${opsUrl} answered with a malformed ${query.table} record (entry ${index}): ${reason}.`);
+    };
+    if (row === null || typeof row !== "object" || Array.isArray(row)) refuse("invalid-row-shape");
+    if (!isNonEmptyString(row.id)) refuse("missing-or-invalid-id");
+    if (query.table === "Credential" &&
+        (!isNonEmptyString(row.principalId) || typeof row.idpProvider !== "string" ||
+         typeof row.idpSubject !== "string" || typeof row.createdAt !== "string" ||
+         (row.label != null && typeof row.label !== "string") ||
+         (row.status != null && typeof row.status !== "string"))) {
+      refuse("missing-or-invalid-credential-field");
+    }
+    for (const [field, value] of predicate) {
+      if (!query.get_attributes.includes(field)) refuse(`predicate-attribute-not-requested:${field}`);
+      if (!Object.hasOwn(row, field) || row[field] !== value) refuse(`query-mismatch:${field}`);
+    }
+    if (ids.has(row.id)) refuse("duplicate-row-id");
+    ids.add(row.id);
+  }
+  if (query.table === "Credential" && predicate.some(([field]) => field === "idpSubject")) {
+    const principals = [...new Set(parsed.filter(isResolvableCredential).map(row => row.principalId))];
+    if (principals.length > 1) {
+      throw new Error(`Identity mapping: ambiguous-prior-principals: ${principals.join(", ")} — refusing the subject read.`);
+    }
+  }
+  if (written) {
+    const active = parsed.filter(isResolvableCredential);
+    if (active.length !== 1 || Object.entries(written).some(([field, value]) => active[0][field] !== value)) {
+      const subject = predicate.find(([field]) => field === "idpSubject")?.[1];
+      const seen = active.map(c => `${c.id} → ${c.principalId} (provider '${c.idpProvider}')`).join("; ") || "none";
+      throw new Error(
+        `Identity mapping: post-write-mismatch — the uniqueness invariant does not hold after the write (flair#1317) — subject '${subject}' ` +
+          `has ${active.length} active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${written.id}) ` +
+          `for principal '${written.principalId}', provider '${written.idpProvider}', status 'active'. ` +
+          `Inspect the Credential table for kind:"idp" idpSubject:"${subject}" and revoke the rows that should not resolve.`,
+      );
+    }
   }
   return parsed;
 }
@@ -1679,65 +1690,23 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value !== "";
 }
 
-function isAgentRow(row: any): boolean {
-  return row !== null && typeof row === "object" && !Array.isArray(row) && isNonEmptyString(row.id);
-}
-
-/** A Credential(kind:"idp") row with the fields the mapping decisions read,
- *  whose `field` is the value the read searched for. */
-function isCredentialRowFor(field: "idpSubject" | "principalId", value: string): (row: any) => boolean {
-  return (row) =>
-    row !== null &&
-    typeof row === "object" &&
-    !Array.isArray(row) &&
-    isNonEmptyString(row.id) &&
-    isNonEmptyString(row.principalId) &&
-    typeof row.idpProvider === "string" &&
-    typeof row.idpSubject === "string" &&
-    (row.status == null || typeof row.status === "string") &&
-    row[field] === value;
-}
-
-/** A subject's Credential(kind:"idp") rows of every status, read with the
- *  resolver's own key (kind, idpSubject) — flair#1317's key, not the narrower
- *  one that left invisible duplicates. */
 async function readIdpCredentialsForSubject(
   fetchImpl: typeof fetch,
   opsUrl: string,
   authHeader: string,
   idpSubject: string,
+  written?: WrittenMapping,
 ): Promise<any[]> {
-  return opsReadRows(fetchImpl, opsUrl, authHeader, isCredentialRowFor("idpSubject", idpSubject), {
-    operation: "search_by_conditions",
-    database: "flair",
-    table: "Credential",
-    operator: "and",
-    conditions: [
-      { search_attribute: "kind", search_type: "equals", search_value: "idp" },
-      { search_attribute: "idpSubject", search_type: "equals", search_value: idpSubject },
-    ],
-    get_attributes: ["id", "principalId", "idpProvider", "idpSubject", "status", "createdAt"],
-  });
+  return opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Credential", { kind: "idp", idpSubject }), written);
 }
 
-/** A principal's Credential(kind:"idp") rows of every status. */
 async function readIdpCredentialsForPrincipal(
   fetchImpl: typeof fetch,
   opsUrl: string,
   authHeader: string,
   principal: string,
 ): Promise<any[]> {
-  return opsReadRows(fetchImpl, opsUrl, authHeader, isCredentialRowFor("principalId", principal), {
-    operation: "search_by_conditions",
-    database: "flair",
-    table: "Credential",
-    operator: "and",
-    conditions: [
-      { search_attribute: "kind", search_type: "equals", search_value: "idp" },
-      { search_attribute: "principalId", search_type: "equals", search_value: principal },
-    ],
-    get_attributes: ["id", "principalId", "idpProvider", "idpSubject", "status", "createdAt"],
-  });
+  return opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Credential", { kind: "idp", principalId: principal }));
 }
 
 /**
@@ -1753,15 +1722,8 @@ async function assertPrincipalExists(
   authHeader: string,
   principal: string,
 ): Promise<void> {
-  const rows = await opsReadRows(fetchImpl, opsUrl, authHeader, isAgentRow, {
-    operation: "search_by_value",
-    database: "flair",
-    table: "Agent",
-    search_attribute: "id",
-    search_value: principal,
-    get_attributes: ["id"],
-  });
-  if (!rows.some((r) => r.id === principal)) throw new Error(principalMissingMessage(principal));
+  const rows = await opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Agent", { id: principal }));
+  if (rows.length === 0) throw new Error(principalMissingMessage(principal));
 }
 
 /** The one refusal a missing principal gets, wherever it is checked. */
@@ -1959,7 +1921,7 @@ export async function unlinkPrincipalMapping(
 /**
  * `flair principal links` — the principal's current (active) IdP mappings.
  * A missing principal is refused by name and a failed read is refused too: an
- * empty list is reported only when the table was read and held no row.
+ * empty list is reported only after a valid read with no active mapping.
  */
 export async function listPrincipalMappings(
   params: ListPrincipalMappingsParams,

@@ -16,6 +16,7 @@ import {
   linkPrincipalMapping,
   unlinkPrincipalMapping,
   listPrincipalMappings,
+  provisionIdpIdentityMapping,
 } from "../../src/lib/mcp-enable.ts";
 
 /** A public-shaped origin, as `flair mcp enable --instance` requires. */
@@ -64,7 +65,7 @@ function mappingStub(opts: {
 }) {
   const principals = new Map<string, any>((opts.principals ?? ["alice"]).map((id) => [id, { id }]));
   const rows = new Map<string, any>(
-    (opts.credentials ?? []).map((c) => [String(c.id), { kind: "idp", status: "active", ...c }]),
+    (opts.credentials ?? []).map((c) => [String(c.id), { kind: "idp", status: "active", createdAt: "2026-10-02T00:00:00.000Z", ...c }]),
   );
   const calls: Call[] = [];
   let readsLeft = opts.failReads ?? 0;
@@ -172,8 +173,7 @@ describe("flair principal link (flair#2115)", () => {
         { fetchImpl: st.fetchImpl },
       ),
     ).rejects.toThrow(/ops API read at .* failed \(HTTP 500\)/);
-    // An unreadable Agent table is not an absent principal: no insert.
-    expect(st.calls.filter((c) => c.body.operation === "insert")).toEqual([]);
+    expect(st.writes()).toEqual([]);
   });
 
   test("refuses an orphaned credential that names a deleted principal, and writes nothing", async () => {
@@ -223,7 +223,7 @@ describe("flair principal link (flair#2115)", () => {
         { hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT },
         { fetchImpl: st.fetchImpl },
       ),
-    ).rejects.toThrow(/No principal 'alice'/);
+    ).rejects.toThrow(/query-mismatch:id/);
     expect(st.writes()).toEqual([]);
   });
 
@@ -389,7 +389,7 @@ describe("flair principal link (flair#2115)", () => {
     [[null], /answered with a malformed Agent record \(entry 0\)/],
     [[{ id: 7 }], /answered with a malformed Agent record \(entry 0\)/],
     [{ ok: true }, /did not answer with a record list/],
-    [[{ id: "someone-else" }], /No principal 'alice'/],
+    [[{ id: "someone-else" }], /query-mismatch:id/],
   ];
 
   for (const [body, reason] of MALFORMED_SECOND_AGENT_ANSWERS) {
@@ -561,7 +561,7 @@ describe("flair principal links (flair#2115)", () => {
     expect(st.writes()).toEqual([]);
   });
 
-  test("reports an empty list only when the read held no row", async () => {
+  test("reports an empty list after a valid read with no active mapping", async () => {
     const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["alice"] });
     const result = await listPrincipalMappings(
       { hostedOrigin: HOSTED, ...ADMIN, principal: "alice" },
@@ -632,4 +632,100 @@ describe("flair principal link|unlink|links — the target policy (flair#2115)",
     );
     expect(result.action).toBe("linked");
   });
+});
+
+
+describe("operations read predicates", () => {
+  const params = { hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT };
+  const provision = (fetchImpl: typeof fetch) => provisionIdpIdentityMapping(
+    { ...params, principalKind: "human" }, { fetchImpl });
+  const good = { id: "cred_prior", kind: "idp", principalId: "bob", idpProvider: "github",
+    idpSubject: "octocat", status: "active", createdAt: "2026-10-02T00:00:00.000Z" };
+  const agentAnswers = [
+    { name: "mixed", rows: [{ id: "alice" }, { id: "bob" }], reason: "query-mismatch:id" },
+    { name: "duplicate", rows: [{ id: "alice" }, { id: "alice" }], reason: "duplicate-row-id" },
+  ];
+  for (const stage of ["principal preflight", "provisioner Agent"] as const) {
+    for (const answer of agentAnswers) {
+      test(`${stage}: ${answer.name} answer refuses without writing`, async () => {
+        const st = mappingStub({ expectedUrl: HOSTED_OPS, agentBodyAt: { n: 1, body: answer.rows } });
+        const run = stage === "principal preflight"
+          ? linkPrincipalMapping(params, { fetchImpl: st.fetchImpl }) : provision(st.fetchImpl);
+        const result = await run.catch(error => error);
+        expect(st.writes()).toEqual([]);
+        expect(result).toBeInstanceOf(Error);
+        expect(result.message).toContain(answer.reason);
+      });
+    }
+  }
+  for (const stage of ["link subject", "unlink subject", "provisioner subject", "principal credentials"] as const) {
+    const row = stage === "principal credentials" || stage === "unlink subject"
+      ? { ...good, principalId: "alice" } : good;
+    const answers = [
+      { name: "missing-createdAt", rows: [Object.fromEntries(Object.entries(row).filter(([key]) => key !== "createdAt"))], reason: "missing-or-invalid-credential-field" },
+      { name: "invalid-createdAt", rows: [{ ...row, createdAt: 42 }], reason: "missing-or-invalid-credential-field" },
+      { name: "invalid-label", rows: [{ ...row, label: [] }], reason: "missing-or-invalid-credential-field" },
+      { name: "wrong-kind", rows: [{ ...row, kind: "api-key" }], reason: "query-mismatch:kind" },
+      { name: "missing-kind", rows: [Object.fromEntries(Object.entries(row).filter(([key]) => key !== "kind"))], reason: "query-mismatch:kind" },
+      { name: "mixed-kind", rows: [row, { ...row, id: "cred_extra", kind: "api-key" }], reason: "query-mismatch:kind" },
+      { name: "mixed-query", rows: [row, { ...row, id: "cred_extra", ...(stage === "principal credentials"
+          ? { principalId: "carl" } : { idpSubject: "unrelated" }) }], reason: stage === "principal credentials"
+          ? "query-mismatch:principalId" : "query-mismatch:idpSubject" },
+      { name: "duplicate", rows: [row, row], reason: "duplicate-row-id" },
+      { name: "multi-principal", rows: [row, { ...row, id: "cred_extra", principalId: "carl" }], reason:
+          stage === "principal credentials" ? "query-mismatch:principalId" : "ambiguous-prior-principals" },
+    ];
+    for (const answer of answers) {
+      test(`${stage}: ${answer.name} answer refuses without writing`, async () => {
+        const st = mappingStub({ expectedUrl: HOSTED_OPS, credBody: answer.rows,
+          principals: stage === "provisioner subject" ? [] : ["alice"] });
+        const run = stage === "link subject" ? linkPrincipalMapping({ ...params, replace: true }, { fetchImpl: st.fetchImpl })
+          : stage === "unlink subject" ? unlinkPrincipalMapping(params, { fetchImpl: st.fetchImpl })
+          : stage === "principal credentials" ? listPrincipalMappings(params, { fetchImpl: st.fetchImpl })
+          : provision(st.fetchImpl);
+        const result = await run.catch(error => error);
+        expect(st.writes()).toEqual([]);
+        expect(result).toBeInstanceOf(Error);
+        expect(result.message).toContain(answer.reason);
+      });
+    }
+  }
+  for (const fault of ["wrong-kind", "mixed-kind", "mixed-subject", "missing-kind", "duplicate", "multi-principal",
+                       "wrong-principal", "wrong-provider", "wrong-status", "missing-createdAt", "invalid-createdAt", "invalid-label"] as const) {
+    test(`post-write verification: ${fault} refuses and sends no further write`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS });
+      let reads = 0;
+      let writesAtRead = 0;
+      const fetchImpl = (async (url: any, init?: RequestInit) => {
+        const response = await st.fetchImpl(url, init);
+        const query = JSON.parse(String(init?.body));
+        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || ++reads !== 2) return response;
+        writesAtRead = st.writes().length;
+        const rows = await response.json() as any[];
+        const row = rows[0];
+        if (fault === "missing-createdAt") delete row.createdAt;
+        if (fault === "invalid-createdAt") row.createdAt = 42;
+        if (fault === "invalid-label") row.label = [];
+        if (fault === "wrong-kind") row.kind = "api-key";
+        if (fault === "missing-kind") delete row.kind;
+        if (fault === "wrong-principal") row.principalId = "carl";
+        if (fault === "wrong-provider") row.idpProvider = "gitlab";
+        if (fault === "wrong-status") row.status = "pending";
+        if (fault === "mixed-kind") rows.push({ ...row, id: "extra", kind: "api-key" });
+        if (fault === "mixed-subject") rows.push({ ...row, id: "extra", idpSubject: "unrelated" });
+        if (fault === "multi-principal") rows.push({ ...row, id: "extra", principalId: "carl" });
+        if (fault === "duplicate") rows.push({ ...row });
+        return Response.json(rows);
+      }) as typeof fetch;
+      const reason = fault === "duplicate" ? "duplicate-row-id"
+        : fault === "multi-principal" ? "ambiguous-prior-principals"
+        : fault === "mixed-subject" ? "query-mismatch:idpSubject"
+        : ["wrong-kind", "mixed-kind", "missing-kind"].includes(fault) ? "query-mismatch:kind"
+        : ["missing-createdAt", "invalid-createdAt", "invalid-label"].includes(fault) ? "missing-or-invalid-credential-field"
+        : "uniqueness invariant";
+      await expect(provision(fetchImpl)).rejects.toThrow(reason);
+      expect(writesAtRead).toBe(1);
+      expect(st.writes()).toHaveLength(writesAtRead);
+    });
+  }
 });
