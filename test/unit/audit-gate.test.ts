@@ -81,7 +81,7 @@ describe("the gate refuses to run bun-only", () => {
   }, 6_000);
 });
 
-// ─── Vendor-pinned entries cover exactly their installed nodes ───────────────
+// ─── Vendor-pinned entries cover their npm-audit-reported nodes ──────────────
 
 describe("vendor-pinned npm-install nodes", () => {
   const harperNode = "node_modules/harper/node_modules/fastify";

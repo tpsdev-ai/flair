@@ -264,7 +264,8 @@ export function runNpmAudit(prefix) {
  * its `url`); `nodes` is per-package, so every advisory for a package shares the
  * same paths. A package may appear both hoisted (`node_modules/<pkg>`) and under
  * harper (`node_modules/harper/node_modules/<pkg>`). The vendor-pinned check
- * below examines every node; one harper node cannot cover a hoisted copy.
+ * below examines every npm-audit-reported node; one harper node cannot cover
+ * a hoisted copy reported by npm audit.
  */
 export function flattenNpmAdvisories(npmJson) {
   const out = [];
@@ -421,7 +422,13 @@ function harperNodeRoot(node, pkg) {
   return node.slice(0, index + "node_modules/harper".length);
 }
 
-/** Refuse a vendor exception unless each installed node matches harper's pin. */
+/**
+ * For a vendor-pinned exception, reject any npm-audit-reported node path outside
+ * harper. When all reported paths are under harper, compare each installed version
+ * and any audit-reported version with harper's shrinkwrap pin. Empty node lists,
+ * unreadable required metadata, and version mismatches block the gate; errors
+ * name a node when one was reported.
+ */
 export function vendorPinnedNodeProblems(adv, npmPrefix) {
   const nodes = adv.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) {
