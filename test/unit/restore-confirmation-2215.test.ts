@@ -25,6 +25,10 @@ async function run(faults: Fault[] = [], backup: unknown = archive, flags: strin
       const archive = ${JSON.stringify(archive)};
       const faults = ${JSON.stringify(faults)};
       const calls = [];
+      const rows = new Map(Object.entries({ Agent: archive.agents, Soul: archive.souls, Memory: archive.memories })
+        .flatMap(([name, records]) => records.map(row => [name + "/" + row.id, row])));
+      const saveRows = () => writeFileSync(${JSON.stringify(join(dir, "rows.json"))}, JSON.stringify([...rows]));
+      saveRows();
       globalThis.fetch = async (url, options = {}) => {
         const path = new URL(String(url)).pathname;
         const method = options.method ?? "GET";
@@ -33,10 +37,13 @@ async function run(faults: Fault[] = [], backup: unknown = archive, flags: strin
         const fault = faults.find(f => f.path === path && f.method === method);
         if (fault?.error) throw new Error(fault.error);
         if (fault) return new Response(fault.raw ?? JSON.stringify("body" in fault ? fault.body : { error: "fixture failure" }), { status: fault.status ?? 200 });
-        if (method !== "GET") return new Response(null, { status: 204 });
         const [_, name, id] = path.split("/");
-        const rows = { Agent: archive.agents, Soul: archive.souls, Memory: archive.memories }[name];
-        return Response.json(rows.find(row => row.id === decodeURIComponent(id)));
+        const key = name + "/" + decodeURIComponent(id);
+        if (method === "DELETE") rows.delete(key);
+        if (method === "PUT") rows.set(key, JSON.parse(options.body));
+        saveRows();
+        if (method !== "GET") return new Response(null, { status: 204 });
+        return rows.has(key) ? Response.json(rows.get(key)) : new Response(null, { status: 404 });
       };
       bindCli({ resolveHttpPort: () => { throw new Error("unexpected port lookup"); } });
       const program = new Command();
@@ -52,7 +59,8 @@ async function run(faults: Fault[] = [], backup: unknown = archive, flags: strin
     ]);
     let calls: Array<{ method: string; path: string; auth: string; body: string }> = [];
     try { calls = JSON.parse(readFileSync(join(dir, "calls.json"), "utf8")); } catch {}
-    return { stdout, stderr, exitCode, calls };
+    const rows = new Map<string, unknown>(JSON.parse(readFileSync(join(dir, "rows.json"), "utf8")));
+    return { stdout, stderr, exitCode, calls, rows };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -76,7 +84,7 @@ describe("restore confirms archived IDs (#2215)", () => {
       { method: "PUT", path: "/Memory/m2", status: 500 },
       { method: "GET", path: memoryPath, status: 404 },
     ]);
-    refused(result, "flint", "connection lost", "kern:soul", "403", "m2", "500", "m/1?#%", "404");
+    refused(result, "flint", "unavailable", "kern:soul", "403", "m2", "500", "m/1?#%", "404");
     expect(result.calls.filter(call => call.method === "PUT")).toHaveLength(6);
     expect(result.calls.filter(call => call.method === "GET")).toHaveLength(6);
   });
@@ -119,10 +127,38 @@ describe("restore confirms archived IDs (#2215)", () => {
     expect(JSON.parse(result.calls.find(call => call.path === memoryPath)!.body)).toEqual(archive.memories[0]);
   });
 
-  test("replace refuses failed deletions before PUT", async () => {
-    const result = await run([{ method: "DELETE", path: memoryPath, status: 500 }], archive, ["--replace"]);
-    refused(result, "m/1?#%", "flint", "DELETE", "500");
-    expect(result.calls.every(call => call.method === "DELETE")).toBe(true);
+  test("replace restores an earlier deleted row after the second deletion fails", async () => {
+    const result = await run([{ method: "DELETE", path: "/Soul/kern%3Asoul", status: 500 }], archive, ["--replace"]);
+    expect(result.rows.get("Soul/flint:soul")).toEqual(archive.souls[0]);
+    refused(result, "kern:soul", "kern", "DELETE", "500");
+    expect(result.calls.slice(0, 2).map(({ method, path }) => ({ method, path }))).toEqual([
+      { method: "DELETE", path: "/Soul/flint%3Asoul" },
+      { method: "DELETE", path: "/Soul/kern%3Asoul" },
+    ]);
+    expect(result.calls.filter(call => call.method === "DELETE")).toHaveLength(4);
+    expect(result.calls.filter(call => call.method === "PUT")).toHaveLength(6);
+    expect(result.calls.filter(call => call.method === "GET")).toHaveLength(6);
+  });
+
+  for (const method of ["DELETE", "PUT", "GET"]) {
+    for (const kind of ["response", "throw"]) {
+      test(`${method} ${kind} diagnostics omit server secrets`, async () => {
+        const secret = "RESTORE_SECRET_SENTINEL_2221";
+        const fault = kind === "response" ? { status: 503, raw: secret } : { error: secret };
+        const result = await run([{ method, path: memoryPath, ...fault }], archive, ["--replace"]);
+        expect(result.stdout).not.toContain(secret);
+        expect(result.stderr).not.toContain(secret);
+        refused(result, "m/1?#%", "flint", method, kind === "response" ? "503" : "unavailable");
+      });
+    }
+  }
+
+  test("verification JSON errors omit response secrets and retain HTTP status", async () => {
+    const secret = "RESTORE_SECRET_SENTINEL_2221";
+    const result = await run([{ method: "GET", path: memoryPath, raw: secret }]);
+    refused(result, "m/1?#%", "flint", "GET", "200");
+    expect(result.stdout).not.toContain(secret);
+    expect(result.stderr).not.toContain(secret);
   });
 
   test("replace accepts already-absent rows then verifies all restored IDs", async () => {

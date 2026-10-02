@@ -34,7 +34,7 @@ program
   .command("restore <path>")
   .description("Import a Flair backup archive")
   .option("--merge", "Add/update records without deleting existing (default)")
-  .option("--replace", "Delete all existing data for backed-up agents first, then import")
+  .option("--replace", "Delete archived Soul and Memory IDs first, then import")
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
@@ -70,7 +70,6 @@ program
       { name: "Memory", rows: memories },
     ];
     const failures: string[] = [];
-    const message = (err: unknown): string => err instanceof Error ? err.message : String(err);
     function fail(): void {
       for (const failure of failures) console.error(`Error: ${failure}`);
       process.exitCode = 1;
@@ -89,8 +88,8 @@ program
         }
         try {
           encodeRecordId(row.id);
-        } catch (err) {
-          failures.push(`${name} ${row.id}: ${message(err)}`);
+        } catch {
+          failures.push(`${name} ${row.id}: invalid archived ID`);
         }
       }
     }
@@ -108,56 +107,43 @@ program
       return;
     }
 
-    async function adminPut(path: string, body: unknown): Promise<void> {
-      const res = await fetch(`${baseUrl}${path}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: auth },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`PUT ${path} failed (${res.status}): ${text}`);
-      }
-    }
-
-    async function adminDelete(path: string): Promise<void> {
-      const res = await fetch(`${baseUrl}${path}`, {
-        method: "DELETE",
-        headers: { Authorization: auth },
-        signal: AbortSignal.timeout(10_000),
-      });
-      // 404 is fine — already gone
-      if (!res.ok && res.status !== 404) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`DELETE ${path} failed (${res.status}): ${text}`);
+    async function adminWrite(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<number | undefined> {
+      try {
+        const res = await fetch(`${baseUrl}${path}`, {
+          method,
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: AbortSignal.timeout(10_000),
+        });
+        return res.status;
+      } catch {
+        return undefined;
       }
     }
 
     const label = (name: string, row: any): string =>
-      `${name} ${row.id}${name === "Agent" ? "" : ` (agent ${row.agentId})`}`;
+      `${name} ${row.id} (agent ${name === "Agent" ? row.id : row.agentId})`;
+    const diagnostic = (name: string, row: any, method: string, status: number | undefined): string =>
+      `${label(name, row)}: ${method} failed (HTTP ${status ?? "unavailable"})`;
 
     if (mode === "replace") {
       console.log("\nDeleting existing data (replace mode)...");
       for (const { name, rows } of collections.filter(({ name }) => name !== "Agent")) {
         for (const row of rows) {
-          try {
-            await adminDelete(`/${name}/${encodeRecordId(row.id)}`);
-          } catch (err) {
-            failures.push(`${label(name, row)}: DELETE failed: ${message(err)}`);
+          const status = await adminWrite("DELETE", `/${name}/${encodeRecordId(row.id)}`);
+          if (status === undefined || (status !== 404 && (status < 200 || status >= 300))) {
+            failures.push(diagnostic(name, row, "DELETE", status));
           }
         }
       }
-      if (failures.length) { fail(); return; }
     }
 
     for (const { name, rows } of collections) {
       console.log(`Restoring ${name} records...`);
       for (const row of rows) {
-        try {
-          await adminPut(`/${name}/${encodeRecordId(row.id)}`, row);
-        } catch (err) {
-          failures.push(`${label(name, row)}: PUT failed: ${message(err)}`);
+        const status = await adminWrite("PUT", `/${name}/${encodeRecordId(row.id)}`, row);
+        if (status === undefined || status < 200 || status >= 300) {
+          failures.push(diagnostic(name, row, "PUT", status));
         }
       }
     }
@@ -165,20 +151,22 @@ program
     for (const { name, rows } of collections) {
       for (const row of rows) {
         const path = `/${name}/${encodeRecordId(row.id)}`;
+        let status: number | undefined;
         try {
           const res = await fetch(`${baseUrl}${path}`, {
             headers: { Authorization: auth },
             signal: AbortSignal.timeout(10_000),
           });
-          if (!res.ok) throw new Error(`GET ${path} failed (${res.status}): ${await res.text()}`);
+          status = res.status;
+          if (!res.ok) throw new Error();
           const restored = await res.json();
           if (!restored || typeof restored !== "object" || Array.isArray(restored)
             || restored.id !== row.id
             || (name !== "Agent" && restored.agentId !== row.agentId)) {
-            throw new Error(`GET ${path} did not return the requested row and agent`);
+            throw new Error();
           }
-        } catch (err) {
-          failures.push(`${label(name, row)}: verification failed: ${message(err)}`);
+        } catch {
+          failures.push(`${diagnostic(name, row, "GET", status)}: verification failed`);
         }
       }
     }

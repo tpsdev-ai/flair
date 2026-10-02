@@ -2382,7 +2382,7 @@ flair restore
       description: Add/update records without deleting existing (default)
       attr: merge
     --replace
-      description: Delete all existing data for backed-up agents first, then import
+      description: Delete archived Soul and Memory IDs first, then import
       attr: replace
     --port <port>
       description: Harper HTTP port
@@ -5303,8 +5303,7 @@ Import a Flair backup archive
 
 Options:
   --merge              Add/update records without deleting existing (default)
-  --replace            Delete all existing data for backed-up agents first, then
-                       import
+  --replace            Delete archived Soul and Memory IDs first, then import
   --port <port>        Harper HTTP port
   --url <url>          Flair base URL (overrides --port)
   --admin-pass <pass>  Admin password (or set FLAIR_ADMIN_PASS env)
