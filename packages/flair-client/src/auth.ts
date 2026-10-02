@@ -6,22 +6,65 @@
  */
 
 import { randomUUID, sign as ed25519Sign, createPrivateKey, type KeyObject } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { open, constants as fsConstants } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { readEnvOrUnset } from "./env-guard.js";
 
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
-/** Resolve an Ed25519 private key from a file (base64 PKCS8 DER or raw 32-byte seed). */
-export function loadPrivateKey(path: string): KeyObject {
-  const raw = readFileSync(path);
+/** Largest accepted key file. A key is a 32-byte raw seed or base64 PKCS8 DER;
+ *  PEM is rejected by the parser. The cap bounds the bytes read, and the read
+ *  is asynchronous so a caller's own deadline can fire while it is pending. */
+export const KEY_FILE_MAX_BYTES = 64 * 1024;
+
+/**
+ * Read a key file with asynchronous file I/O and a size cap. The open is non-blocking (a
+ * FIFO at the path cannot stall it) and the opened descriptor is checked with
+ * fstat BEFORE any byte is read. At most KEY_FILE_MAX_BYTES + 1 bytes are ever
+ * read, so growth beyond the cap that is observed during reading is refused
+ * by the extra byte past it, never cut. A missing file throws the same ENOENT
+ * `readFileSync` threw. */
+async function readKeyFileBounded(path: string): Promise<Buffer> {
+  const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
+  try {
+    const st = await handle.stat();
+    if (!st.isFile()) throw new Error(`key file ${path} is not a regular file`);
+    if (st.size > KEY_FILE_MAX_BYTES) {
+      throw new Error(`key file ${path} is larger than ${KEY_FILE_MAX_BYTES} bytes`);
+    }
+    const buf = Buffer.alloc(KEY_FILE_MAX_BYTES + 1);
+    let got = 0;
+    while (got < buf.length) {
+      const { bytesRead } = await handle.read(buf, got, buf.length - got, got);
+      if (bytesRead === 0) break;
+      got += bytesRead;
+    }
+    if (got > KEY_FILE_MAX_BYTES) throw new Error(`key file ${path} is larger than ${KEY_FILE_MAX_BYTES} bytes`);
+    return buf.subarray(0, got);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+function parsePrivateKey(raw: Buffer): KeyObject {
   // Try as base64-encoded PKCS8 DER first
   const decoded = raw.length === 32 ? raw : Buffer.from(raw.toString("utf-8").trim(), "base64");
   const der = decoded.length === 32
     ? Buffer.concat([PKCS8_ED25519_PREFIX, decoded])
     : decoded;
   return createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+}
+
+/** Resolve an Ed25519 private key from a file (base64 PKCS8 DER or raw 32-byte seed). */
+export function loadPrivateKey(path: string): KeyObject {
+  return parsePrivateKey(readFileSync(path));
+}
+
+/** Asynchronously load an Ed25519 private key with a size cap for callers with their own deadline. */
+export async function loadPrivateKeyBounded(path: string): Promise<KeyObject> {
+  return parsePrivateKey(await readKeyFileBounded(path));
 }
 
 /** Injectable homes so tests can diverge `$HOME` / `os.homedir()` / passwd home. */
