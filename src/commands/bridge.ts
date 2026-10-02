@@ -14,7 +14,8 @@
  */
 import { Command } from "commander";
 import * as render from "../render.js";
-import { resolveKeyPath, buildEd25519Auth } from "../lib/auth-resolve.js";
+import { resolveKeyPath, buildEd25519Auth, readSecretFileSecure } from "../lib/auth-resolve.js";
+import type { BridgeOptionSpec } from "../bridges/types.js";
 
 export type BridgeCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -149,6 +150,9 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair base URL (overrides --port)")
     .option("--key <path>", "Ed25519 private key path (default: resolved from agent)")
     .option("--source <path>", "Source directory (for directory-based imports like markdown)")
+    .option("--user <id>", "Foreign-system user id for bridges that import one user (e.g. mem0)")
+    .option("--base-url <url>", "Base URL of the foreign API for API bridges (e.g. a self-hosted mem0)")
+    .option("--api-key-file <path>", "Read the bridge's API key from a file (chmod 600 enforced). Keeps the key out of argv — prefer this or the bridge's own env var (e.g. MEM0_API_KEY).")
     .action(async (name: string, srcArg: string | undefined, opts) => {
       const agentId: string | undefined = opts.agent ?? process.env.FLAIR_AGENT_ID;
       const cwd: string = opts.cwd ?? srcArg ?? process.cwd();
@@ -267,9 +271,23 @@ export function register(program: Command): void {
             console.error(`Bridge "${name}" is a code plugin without an import() function — can only export through it.`);
             process.exit(1);
           }
-          // Code-plugin options: pass through all --X flags as a single object.
-          // The plugin's declared `options` descriptor validates what it actually cares about.
+          // Code-plugin options: start from the parsed flags, then resolve the
+          // plugin's own declared `options` so its descriptor is its real CLI
+          // contract, not just documentation:
+          //   - an option no flag set falls back to the env var it names
+          //     (`BridgeOptionSpec.env`, e.g. MEM0_API_KEY);
+          //   - `--api-key-file` fills the bridge's `apiKey` option, read here so
+          //     the secret never appears in argv (0600 enforced by the reader).
           const pluginOpts: Record<string, unknown> = { ...opts };
+          const declaredOptions: Record<string, BridgeOptionSpec> = loaded.plugin.options ?? {};
+          for (const [key, spec] of Object.entries(declaredOptions)) {
+            if (pluginOpts[key] === undefined && spec.env && process.env[spec.env] !== undefined) {
+              pluginOpts[key] = process.env[spec.env];
+            }
+          }
+          if (typeof opts.apiKeyFile === "string" && opts.apiKeyFile.length > 0) {
+            pluginOpts.apiKey = readSecretFileSecure(opts.apiKeyFile, "--api-key-file");
+          }
           const source = loaded.plugin.import(pluginOpts, ctx);
           await runImport({
             bridgeName: target.name,

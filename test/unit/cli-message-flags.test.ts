@@ -148,34 +148,6 @@ const KNOWN_DEFECTS: Array<Exemption & { defect: string }> = [
     literal: "     flair agent add --remote ${…} --name my-agent",
     defect: "`flair deploy`'s next-steps example runs `flair agent add --remote`; `agent add` declares --target",
   },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--user",
-    context: "*",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (\"pass --user\"); `flair bridge import` declares no --user and commander rejects it as an unknown option",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--user",
-    context: "bridge import",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (the example); `flair bridge import` declares no --user",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--api-key",
-    context: "bridge import",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (the example); `flair bridge import` declares no --api-key",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--api-key",
-    context: "*",
-    literal: "pass --api-key <token> or set MEM0_API_KEY in the environment",
-    defect: "mem0 API-key hint; `flair bridge import` declares no --api-key",
-  },
 ];
 
 const EXEMPTIONS: Exemption[] = [...OTHER_COMMAND_REFERENCES, ...KNOWN_DEFECTS];

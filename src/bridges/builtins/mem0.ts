@@ -31,9 +31,9 @@
  *     from malformed responses — easier to express in TS.
  *
  * Usage:
- *   flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>
+ *   MEM0_API_KEY=<token> flair bridge import mem0 --user <id> --agent <flair-id>
+ *   flair bridge import mem0 --user <id> --api-key-file <path> --agent <flair-id>
  *   flair bridge import mem0 --user <id> --base-url https://mem0.example.com --agent <flair-id>
- *   MEM0_API_KEY=<key> flair bridge import mem0 --user <id> --agent <flair-id>
  */
 
 import type { BridgeContext, BridgeMemory, MemoryBridge } from "../types.js";
@@ -72,7 +72,7 @@ async function* importMem0(
       field: "user",
       expected: "Mem0 user_id string",
       got: "missing",
-      hint: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
+      hint: "pass --user <id>; example: MEM0_API_KEY=<token> flair bridge import mem0 --user <id> --agent <flair-id>",
     });
   }
 
@@ -84,7 +84,7 @@ async function* importMem0(
       field: "apiKey",
       expected: "Mem0 API token (cloud or self-hosted)",
       got: "missing",
-      hint: "pass --api-key <token> or set MEM0_API_KEY in the environment",
+      hint: "pass --api-key-file <path> or set MEM0_API_KEY; example: MEM0_API_KEY=<token> flair bridge import mem0 --user <id> --agent <flair-id>",
     });
   }
 

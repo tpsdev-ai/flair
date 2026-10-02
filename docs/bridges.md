@@ -73,6 +73,9 @@ Common runtime options for `import`:
 | `--port <port>` | Harper HTTP port |
 | `--url <url>` | Flair base URL (overrides `--port`) |
 | `--key <path>` | Ed25519 private key path (default: resolved from agent) |
+| `--user <id>` | Foreign-system user id, for bridges that import one user (e.g. mem0) |
+| `--base-url <url>` | Base URL of the foreign API, for API bridges (e.g. a self-hosted mem0) |
+| `--api-key-file <path>` | Read the bridge's API key from a file (chmod 600 enforced); the key never comes from a flag value |
 
 ## Your first import (worked example: agentic-stack)
 

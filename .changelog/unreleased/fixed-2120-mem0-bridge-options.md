@@ -1,0 +1,3 @@
+- **`flair bridge import` now declares `--user`, `--base-url` and `--api-key-file`.** The mem0 bridge's hint told operators to pass `--user` and `--api-key`, and the command declared neither — so `flair bridge import mem0 --user x` exited with `unknown option '--user'`. `--user` and a self-hosted `--base-url` are now accepted options, and the API key is read from the bridge's `MEM0_API_KEY` env var or from a `--api-key-file` the command reads owner-only, never from an argv value.
+
+  > **Heads-up:** the mem0 API key is no longer a flag value. Set `MEM0_API_KEY` or pass `--api-key-file <path>` (owner-only, mode 0600).
