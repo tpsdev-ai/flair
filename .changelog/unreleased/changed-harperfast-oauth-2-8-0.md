@@ -1,0 +1,1 @@
+- Updates `@harperfast/oauth` to 2.8.0. ChatGPT can now link through Client ID Metadata Documents, and client assertions presented at the token endpoint are verified or refused. Its 2.6–2.8 changelog lists the configuration checks that became strict.
