@@ -844,11 +844,10 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
   // sidecar" — the observed signature (flair#2130).
   writeDirectSidecar(sb, proc.pid);
   await waitForHttp(sb.httpURL, 60_000);
-  const serving = instancePid(sb.dataDir, sb.httpPort);
-  if (serving === null) throw new Error("direct-spawned Harper is up but the serving PID is unreadable");
-  expect(serving, "the direct spawn must own the serving PID").toBe(proc.pid);
+  const listenerPids = [...new Set(listeningPids(sb.httpPort))].sort((a, b) => a - b);
+  expect(listenerPids, "the HTTP port's listener PID set must be exactly the direct-spawned PID before doctor --fix").toEqual([proc.pid]);
   assertDirectSidecar(sb, proc.pid);
-  return serving;
+  return proc.pid;
 }
 
 /** A production-shaped flair#1454 sidecar for the fixture's direct spawn. */
@@ -880,7 +879,7 @@ function assertDirectSidecar(sb: Sandbox, spawnedPid: number): void {
     pidfilePid: readPidFile(sb.dataDir),
     sidecar,
     readStartTime: readProcessStartTimeMs,
-  }), "sidecar must verify against the live serving process before doctor --fix").toEqual({
+  }), "pidfile and sidecar must identify the spawned process with a matching start time before doctor --fix").toEqual({
     kind: "verified",
     pid: spawnedPid,
   });
