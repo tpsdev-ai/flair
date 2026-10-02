@@ -554,7 +554,8 @@ export function updateLocalConfigMcpEnabled(
     return {
       ok: false,
       detail: `local config.yaml not found (tried: ${candidates.join(", ")}). ` +
-        `Set mcp.enabled: ${targetLabel} in your component config.yaml manually, then restart.`,
+        `Set mcp.enabled: ${targetLabel} in your component config.yaml manually, ` +
+        (enabled ? "then re-run `flair mcp enable`." : "then restart."),
     };
   }
 
@@ -2285,11 +2286,10 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     currentStep = "local-config-update";
     const localConfigResult = updateLocalConfigMcpEnabled(true, params.localConfigPath);
     if (!localConfigResult.ok) {
-      // flair#2193: stop BEFORE the restart. The mcp.enabled update failed, so
-      // the target would restart against a config.yaml this run did not write —
-      // and the metadata checks below could still pass, reporting success for a
-      // change that never happened. Name the remedy and fail the step instead.
-      push(false, `${localConfigResult.detail} This command did not restart the instance. Set mcp.enabled: ${MCP_ENABLED_ENV_REFERENCE} in the local config.yaml, then re-run \`flair mcp enable\`.`);
+      // flair#2193: stop BEFORE the restart. The mcp.enabled update was not
+      // confirmed (the file may have changed), and the metadata checks below
+      // could still pass and report success.
+      push(false, `${localConfigResult.detail} This command did not restart the instance. Fix the cause above, then re-run \`flair mcp enable\`.`);
       return {
         ok: false,
         dryRun,
