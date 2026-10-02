@@ -28,18 +28,102 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: adk-flair-publish
-  cancel-in-progress: false
-
 jobs:
   publish:
     name: Build and publish adk-flair to PyPI
+    needs: resolve
     runs-on: ubuntu-latest
     environment: adk-flair-publish
+    concurrency:
+      group: adk-flair-publish-${{ needs.resolve.outputs.version }}
+      cancel-in-progress: false
     permissions:
       id-token: write   # mint the short-lived OIDC token for PyPI trusted publishing
       contents: read    # checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit is on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Commit ${GITHUB_SHA} is not an ancestor of origin/main. Tag a merged release commit."
+            exit 1
+          fi
+          echo "  ok ${GITHUB_SHA} is on main"
+
+      - name: Verify pyproject.toml version matches the tag
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd packages/adk-flair
+          PV="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$PV" != "$VERSION" ]; then
+            echo "::error::pyproject.toml version is $PV, expected $VERSION."
+            exit 1
+          fi
+          echo "  ok adk-flair @ $PV"
+
+      - name: Check whether the version is already on PyPI
+        id: pypi
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! STATUS="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --connect-timeout 10 --max-time 30 "https://pypi.org/pypi/adk-flair/$VERSION/json")"; then
+            echo "::error::PyPI lookup failed for adk-flair $VERSION."
+            exit 1
+          fi
+          case "$STATUS" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::adk-flair $VERSION is already on PyPI; skipping publication."
+              ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::PyPI lookup returned HTTP $STATUS for adk-flair $VERSION."; exit 1 ;;
+          esac
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: steps.pypi.outputs.published == 'false'
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        if: steps.pypi.outputs.published == 'false'
+        run: pip install build
+
+      - name: Build wheel and sdist
+        if: steps.pypi.outputs.published == 'false'
+        run: |
+          cd packages/adk-flair
+          python -m build
+
+      - name: Publish to PyPI via OIDC trusted publishing
+        if: steps.pypi.outputs.published == 'false'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: packages/adk-flair/dist
+
+      - name: Summary
+        if: steps.pypi.outputs.published == 'false'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          {
+            echo "### 🐍 adk-flair v$VERSION published to PyPI"
+            echo ""
+            echo "Package: [adk-flair](https://pypi.org/project/adk-flair/$VERSION/)"
+            echo "Install: \`pip install adk-flair==$VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Resolve version
         id: ver
@@ -64,58 +148,3 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
-
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-        with:
-          fetch-depth: 0
-
-      - name: Verify tagged commit is on main
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::Commit ${GITHUB_SHA} is not an ancestor of origin/main. Tag a merged release commit."
-            exit 1
-          fi
-          echo "  ok ${GITHUB_SHA} is on main"
-
-      - name: Verify pyproject.toml version matches the tag
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          set -euo pipefail
-          cd packages/adk-flair
-          PV="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
-          if [ "$PV" != "$VERSION" ]; then
-            echo "::error::pyproject.toml version is $PV, expected $VERSION."
-            exit 1
-          fi
-          echo "  ok adk-flair @ $PV"
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: "3.12"
-
-      - name: Install build tooling
-        run: pip install build
-
-      - name: Build wheel and sdist
-        run: |
-          cd packages/adk-flair
-          python -m build
-
-      - name: Publish to PyPI via OIDC trusted publishing
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
-        with:
-          packages-dir: packages/adk-flair/dist
-
-      - name: Summary
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          {
-            echo "### 🐍 adk-flair v$VERSION published to PyPI"
-            echo ""
-            echo "Package: [adk-flair](https://pypi.org/project/adk-flair/$VERSION/)"
-            echo "Install: \`pip install adk-flair==$VERSION\`"
-          } >> "$GITHUB_STEP_SUMMARY"

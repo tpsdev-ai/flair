@@ -100,8 +100,7 @@ git tag v0.11.0 && git push origin v0.11.0
 > When the release commit's tree carries
 > `packages/adk-flair/pyproject.toml` whose `[project].version` equals the version
 > being tagged, the auto-tagger ALSO creates `adk-flair-v<version>` from the same
-> commit. Both tags now trigger the PyPI workflow, so this can queue a duplicate
-> publish attempt.
+> commit. PyPI runs serialize per version and skip publication with a notice when that version already exists; lookup errors fail the run.
 >
 > The project version is read with Python's `tomllib` — the SAME reader
 > `.github/workflows/adk-flair-publish.yml` decides with — by handing the file to
