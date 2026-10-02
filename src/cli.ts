@@ -6528,10 +6528,9 @@ export interface InitLaunchdLine {
  *   - down:     replacing failed AND every restore failed — init exits 1;
  *   - uncertain: a job could not be shown unloaded — during the restore (so
  *               nothing further was started), or when retiring an idle legacy
- *               job (its plist is kept and the new plist put back) — or the
- *               replacement failed validation and the plist init wrote could
- *               not be put back (flair#2078, flair#2085); the state is reported
- *               as unknown — init exits 1.
+ *               job (its plist is kept and plist rollback attempted) — or
+ *               validation failed and plist rollback failed (flair#2078,
+ *               flair#2085); the state is reported as unknown — init exits 1.
  */
 export type InitLaunchdOutcome = {
   kind: "managed" | "direct" | "unverified" | "skipped" | "restored" | "refused" | "down" | "uncertain";
@@ -6548,8 +6547,8 @@ function initLaunchdExitCode(kind: string): number {
 }
 
 /**
- * Put the plist `flair init` wrote back as `prior` recorded it (flair#2040,
- * flair#2078): its prior bytes, or removed when there was none. Never throws:
+ * Restore the plist path to `prior` (flair#2040, flair#2078): its prior bytes,
+ * or absent when there was none. Never throws:
  * `ok` false means the put-back FAILED, and `text` says so with the error.
  */
 function putInitPlistBack(path: string, prior: FileSnapshot): { ok: boolean; text: string } {
@@ -6565,8 +6564,9 @@ function putInitPlistBack(path: string, prior: FileSnapshot): { ok: boolean; tex
 }
 
 /**
- * `flair init`'s launchd step (flair#2040): write this instance's plist, retire
- * a pre-flair#693 legacy registration, and report ONLY what was verified.
+ * `flair init`'s launchd step (flair#2040): may write or repoint this
+ * instance's plist, retire a pre-flair#693 legacy registration, and report ONLY
+ * what was verified.
  *
  * init starts Flair DIRECTLY and, since 9e3bd9ad, deliberately does not bounce
  * a running instance into launchd — so the ordinary outcome is "plist on disk,
@@ -6577,16 +6577,14 @@ function putInitPlistBack(path: string, prior: FileSnapshot): { ok: boolean; tex
  * The one path that stops something is retiring a LEGACY job that is the
  * process serving this instance: booting it out stops Flair. That path follows
  * the same rule as `doctor --fix`: preflight first (domain reachable, job
- * enabled), write + validate the replacement plist while the instance is still
+ * enabled), prepare + validate the replacement plist while the instance is still
  * up, and only then boot the legacy job out, load the replacement with
- * targeted commands and verify it; any failure after the boot-out restores the
- * legacy plist and job (or, failing that, starts Flair directly) and says so.
+ * targeted commands and verify it; any failure after the boot-out attempts to
+ * restore the legacy plist and job (or start Flair directly) and says so.
  * If the preflight fails, NOTHING is unloaded, removed or written; if the
  * validation fails — a lint that throws included (flair#2078) — no job is
- * unloaded; prior plist bytes and mode are restored, or a newly created plist
- * is removed. The non-legacy path (no owned legacy registration) validates
- * the plist it writes the same way and restores its prior bytes and mode on
- * failure (flair#2085).
+ * unloaded and plist rollback is attempted; failure returns `uncertain`. The
+ * non-legacy path uses the same rule (flair#2085).
  */
 async function registerInitLaunchdService(input: {
   dataDir: string;
@@ -6610,13 +6608,10 @@ async function registerInitLaunchdService(input: {
     // helper prints why. With no legacy plist it is a no-op.
     if (existsSync(legacyPath)) cleanupLegacyLaunchdPlist(dataDir, plistDir, realLaunchctlCommand, uid);
 
-    // flair#2085: there is no owned legacy job to retire here, but init still
-    // writes a plist launchd may load at the next login, so the rule the legacy
-    // hand-off above applies here too: validate the written plist (a lint that
-    // THROWS is a validation refusal). On failure, restore prior bytes and mode
-    // or remove a plist init created. No launchctl call that
-    // changes launchd's state is made on that path. A prior plist that cannot
-    // be safely snapshotted, including a symlink, is refused before writing.
+    // flair#2085: with no owned legacy job, the writer may write, repoint or
+    // leave the plist unchanged. Validate the target (a thrown lint refuses).
+    // On failure, attempt rollback; failure returns `uncertain`. No launchctl
+    // mutation occurs on this path. Refuse an unsafe snapshot before writing.
     const priorNew = snapshotFile(write.plistPath);
     if (priorNew.kind === "symlink") {
       err(`⚠️  Launchd: not registered — ${write.plistPath} is a symbolic link, so no plist was written.`);
@@ -6741,8 +6736,8 @@ async function registerInitLaunchdService(input: {
     return { kind: "skipped", lines };
   }
 
-  // The replacement is written and validated while the instance is still up
-  // (the writer proves the credential against it).
+  // The writer may write, repoint or leave the plist unchanged. Validate the
+  // target while the instance is up (the writer proves the credential).
   const outcome = await writeInitLaunchdPlist(write);
   if (outcome.kind === "refused") {
     return {
@@ -6756,9 +6751,9 @@ async function registerInitLaunchdService(input: {
   // Every failed validation is a refusal made before anything is unloaded: a
   // problem the checks REPORT, and — as in the start paths' migration — a lint
   // that THROWS (lintReplacementPlist) or a written plist that cannot be read
-  // back (flair#2078). Each restores the prior plist bytes and mode, or
-  // removes it when there was none: left beside the legacy plist, it would give
-  // launchd two jobs for one data directory at the next login.
+  // back (flair#2078). Each attempts plist rollback; failure returns
+  // `uncertain`. Left beside the legacy plist, it would give launchd two jobs
+  // for one data directory at the next login.
   const installing = `the plist init would install for ${write.label}`;
   let refusal: { why: string; fix: string } | null = null;
   try {
@@ -6796,9 +6791,9 @@ async function registerInitLaunchdService(input: {
     const cleanup = cleanupLegacyLaunchdPlist(dataDir, plistDir, realLaunchctlCommand, uid);
     if (cleanup.action === "unload-unconfirmed") {
       // flair#2040: the legacy job could not be shown unloaded, and the helper
-      // KEPT its plist. The replacement written above must not stay beside it
-      // (two plists for one data directory would give launchd two jobs), so it
-      // has its prior bytes and mode restored, and nothing is reported as registered.
+      // KEPT its plist. The replacement target must not stay beside it (two
+      // jobs for one data directory), so rollback is attempted; the result is
+      // uncertain even if rollback succeeds.
       const putBack = putInitPlistBack(write.plistPath, priorNew);
       err(
         `⚠️  Launchd: not re-registered — the legacy job ${LEGACY_LAUNCHD_LABEL} could not be shown unloaded ` +
