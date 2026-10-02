@@ -57,9 +57,9 @@ const DEFAULT_PORT = 19926;
 /**
  * Read the TCP port a stub reports in `path`.
  *
- * The stub writes the file with a plain `writeFileSync`, which creates the
- * file BEFORE it writes the content. A reader keyed on the file's EXISTENCE
- * alone can read it mid-write, get an empty string, and parse `Number("")` as
+ * The stub wrote the file with a plain `writeFileSync`, which created the
+ * file BEFORE it wrote the content. A reader keyed on the file's EXISTENCE
+ * alone could read it mid-write, get an empty string, and parse `Number("")` as
  * 0 — which is how this file failed in the darwin-gated lane on an unrelated
  * PR (`Expected to not contain: "0"`, flair#2130). Wait for a real port, and
  * fail loudly when none appears, instead of trusting the file's presence.
@@ -1005,7 +1005,7 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
 });
 
 describe("readStubPort — the stub's port handshake is not racy (flair#2130)", () => {
-  test("waits for a port written AFTER the file exists, never parsing an empty file as 0", async () => {
+  test("waits for a port written AFTER the file exists, never returns 0 for an empty file", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair914-port-"));
     try {
       const portFile = join(dir, "stub-port");
