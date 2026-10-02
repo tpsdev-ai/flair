@@ -695,6 +695,23 @@ describe("PreCompact pieces", () => {
     expect(redactSecrets(prose)).toBe(prose);
   });
 
+  test("redaction (flair#2086): PGP private-key blocks and more provider prefixes are replaced", () => {
+    const pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nAAAA\n-----END PGP PRIVATE KEY BLOCK-----";
+    expect(redactSecrets(`before\n${pgp}\nafter`).includes("PRIVATE KEY BLOCK")).toBe(false);
+    expect(redactSecrets(`before\n${pgp}\nafter`)).toContain(REDACTED);
+    // Boolean assertions keep a value out of a failure message.
+    for (const s of [
+      "sk_live_" + "a".repeat(24),
+      "rk_test_" + "b".repeat(24),
+      "hf_" + "c".repeat(24),
+      "gsk_" + "d".repeat(24),
+      "pypi-" + "e".repeat(24),
+    ]) {
+      expect(redactSecrets(`value ${s} end`).includes(s)).toBe(false);
+      expect(redactSecrets(`value ${s} end`)).toContain(REDACTED);
+    }
+  });
+
   test("redaction: an Authorization-style value is replaced WHOLE, whatever its characters, through the end of its line", () => {
     // Two values with no digit in them: a pattern that requires one misses both.
     expect(redactSecrets(`Bearer ${BEARER_VALUE}`)).toBe(`Bearer ${REDACTED}`);
