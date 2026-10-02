@@ -93,7 +93,7 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
       opsUrl = resolveOpsUrl(resolveOpsPort(opts));
     }
   } catch {
-    // Only an http(s) parse separates userinfo; other schemes keep it in the path.
+    // Show only a redacted http(s) URL: other schemes can keep credential-looking text in an opaque path.
     let shown = "<unparseable URL>";
     try { if (["http:", "https:"].includes(new URL(targetText).protocol)) shown = redactUrl(targetText); } catch { /* placeholder */ }
     console.error(`Error: invalid --instance target ${shown}. Pass a valid http(s) Flair instance URL and check its operations API address.`);
