@@ -2,7 +2,7 @@
  * skill-seed.ts — the `using-flair` seed: the decision, and its install-time
  * write (flair#2141 S2).
  *
- * A normal `flair init` writes both rows. Re-initializing an already-installed
+ * A normal `flair init` ensures both rows. Re-initializing an already-installed
  * default local instance with `flair init --skip-start` defers them to a later
  * `flair start` that has the admin credential (FLAIR_ADMIN_PASS or the
  * admin-pass file; without one that start warns and leaves the seed pending).

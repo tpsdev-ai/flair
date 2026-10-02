@@ -267,7 +267,7 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     // and the seed stays pending.
     const skipped = runLocalInit(install, ["--skip-start"]);
     expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
-    expect(skipped.stdout).toContain("re-initializing this already-installed default instance with --skip-start defers seeding");
+    expect(skipped.stdout).toContain("using-flair skill: pending until the next 'flair start' with the admin credential");
     expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
     expect(existsSync(join(install.home, ".flair", "admin-pass"))).toBe(false);
 

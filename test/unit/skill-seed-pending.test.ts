@@ -56,7 +56,7 @@ describe("local --skip-start seed handoff", () => {
         env: { ...process.env, HOME: home, FLAIR_TARGET: "", FLAIR_OPS_TARGET: "" },
       });
       expect(run.status, run.stdout + run.stderr).toBe(0);
-      expect(run.stdout).toContain("start this custom data-dir instance");
+      expect(run.stdout).toContain("using-flair skill: not seeded");
       expect(run.stdout).toContain(`flair init --data-dir '${dataDir}'`);
       expect(existsSync(skillSeedPendingPath(dataDir))).toBe(false);
     } finally {

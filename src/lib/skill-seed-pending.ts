@@ -1,7 +1,6 @@
 /** Local init may finish without starting Harper. Keep its skill seed pending
  * until a `flair start` with the admin credential completes it; a start
- * without that credential, or a refused seed, leaves it pending (a warning,
- * never a failure). */
+ * without that credential, or a refused seed, leaves it pending. */
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SkillSeedOutcome } from "./skill-seed.js";

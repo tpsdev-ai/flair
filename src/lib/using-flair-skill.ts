@@ -1,9 +1,9 @@
 /**
  * using-flair-skill.ts — the shipped `using-flair` skill text (flair#2141 S2).
  *
- * Normal `flair init` writes this text as one skill-tagged Memory row and an
- * org assignment. Re-initializing an already-installed default local instance
- * with `flair init --skip-start` defers that write to a later `flair start`
+ * Normal `flair init` ensures this skill's Memory row and org assignment.
+ * Re-initializing an already-installed default local instance
+ * with `flair init --skip-start` defers that to a later `flair start`
  * with the admin credential.
  * Re-runs preserve edited text. An eligible agent's bootstrap may list it when
  * the assignment wins same-name conflict resolution and fits the budget.
@@ -42,7 +42,7 @@ export const USING_FLAIR_SKILL_CONTENT = [
   "- `permanent` and `persistent` default to `shared`; `standard` and `ephemeral` default to `private`.",
   "",
   "### Provenance",
-  "- A row's provenance records the principal id the request authenticated as. Flair refuses a non-admin write whose `agentId` names another principal; an admin's write is not checked against `agentId`.",
+  "- Flair refuses a non-admin write whose `agentId` names another principal; an admin's write is not checked against `agentId`.",
   "",
   "### Identity and office records",
   "- Your identity and standing instructions live in Soul. A bootstrap carries them when it is asked for soul (`includeSoul`) and when they fit its token budget.",

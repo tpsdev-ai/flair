@@ -1130,11 +1130,11 @@ program
       if (opts.skipStart) {
         if (dataDir === defaultDataDir()) {
           markSkillSeedPending(dataDir);
-          console.log("using-flair skill: pending (re-initializing this already-installed default instance with --skip-start defers seeding to a later 'flair start' with the admin credential)");
+          console.log("using-flair skill: pending until the next 'flair start' with the admin credential");
         } else {
           console.log(
-            `using-flair skill: not seeded (start this custom data-dir instance, then run: ` +
-              `flair init --data-dir ${commandArg(dataDir)}; do not pass --skip-start)`,
+            `using-flair skill: not seeded (to seed it, run: ` +
+              `flair init --data-dir ${commandArg(dataDir)} without --skip-start)`,
           );
         }
         return;
