@@ -90,6 +90,10 @@ const seedAgentViaOpsApi = (
 ): Promise<void> => cli.seedAgentViaOpsApi(opsPortOrUrl, agentId, pubKeyB64url, adminUser, adminPass);
 const agentRecordIsAdmin = (record: any): boolean => cli.agentRecordIsAdmin(record);
 
+const INLINE_ADMIN_PASS_WARNING =
+  "warning: --admin-pass passed inline. Use FLAIR_ADMIN_PASS without typing its value into a recorded " +
+  "shell line (for example, read it from the admin-pass file).";
+
 interface StoredAgent {
   id: string;
   name?: string;
@@ -267,7 +271,7 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--ops-port <port>", "Harper operations API port")
-    .option("--target <url>", "Remote Flair REST URL; derives the ops API URL (port-1) to seed the Agent there (env: FLAIR_TARGET)")
+    .option("--target <url>", "Remote Flair REST URL; derives ops URL (HTTPS no port/:443 → Fabric ops :9925; HTTP no port/:80 → :19925; other ports 2–65535 → port-1; port 1 refused; env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL to seed the Agent on (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (id: string, opts) => {
       const httpPort = resolveHttpPort(opts);
@@ -402,10 +406,7 @@ export function register(program: Command): void {
       // fromEnv is true ONLY when the resolved value came from env (no inline override).
       const adminPassFromEnv = !opts.adminPass && (!!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD);
       if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
-        console.error(
-          "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
-          "to keep secrets out of shell history."
-        );
+        console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
       const mode = render.resolveOutputMode(opts);
@@ -533,10 +534,7 @@ export function register(program: Command): void {
       // fromEnv is true ONLY when the resolved value came from env (no inline override).
       const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
       if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
-        console.error(
-          "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
-          "to keep secrets out of shell history."
-        );
+        console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const adminUser = resolveAdminUser(opts.adminUser);

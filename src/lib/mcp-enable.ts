@@ -1145,12 +1145,11 @@ function identityMappingOpsUrl(target: IdentityMappingOpsTarget): { url: string;
     if (!u) {
       return refuse(`cannot read hostedOrigin ${showOpsTarget(hostedOrigin)} as a served origin`);
     }
-    u.port = String(HOSTED_OPS_PORT);
-    return { url: `${u.origin}/`, hosted: true };
+    return { url: resolveOpsUrl(u.origin), hosted: true };
   }
   if (opsPortOrUrl === undefined) return refuse("got neither opsPortOrUrl nor hostedOrigin");
   if (typeof opsPortOrUrl === "number" && Number.isInteger(opsPortOrUrl) && opsPortOrUrl >= 1 && opsPortOrUrl <= 65535) {
-    return { url: `http://127.0.0.1:${opsPortOrUrl}/`, hosted: false };
+    return { url: resolveOpsUrl(opsPortOrUrl), hosted: false };
   }
   if (typeof opsPortOrUrl === "string") {
     const u = canonicalHttpOrigin(opsPortOrUrl);
