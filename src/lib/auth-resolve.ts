@@ -450,7 +450,9 @@ export function describeKeyLoadFailure(keyPath: string, kind: KeyLoadFailureKind
  * Throws {@link KeyLoadError} if the key could not be loaded — a failure that
  * provably happened BEFORE any byte hit the network, so no caller need guess
  * whether the instance is reachable. A URL that cannot be built is refused
- * before signing or sending; exceptions thrown by `fetch` are transport errors.
+ * before signing or sending. `fetch` can fail before transport (for example,
+ * request construction can reject an invalid header) or during transport;
+ * failures are not classified here.
  */
 export async function authFetch(
   baseUrl: string,
