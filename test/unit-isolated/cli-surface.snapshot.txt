@@ -420,7 +420,7 @@ flair mcp list
       attr: json
 
 flair mcp enable
-  description: One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the docs/notes/mcp-oauth-model2.md checklist. Rejects local/private issuer origins.
+  description: One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the docs/notes/mcp-oauth-model2.md checklist. Rejects invalid issuer URLs, localhost/.localhost/.local hosts, IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.
   usage: [options]
   options:
     --instance <url>
@@ -472,7 +472,7 @@ flair mcp enable
       description: Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
       attr: confirmSecretsApplied
     --fabric
-      description: Use the Fabric branch and default to Fabric secrets staging
+      description: Use the Fabric branch and default to Fabric secrets staging; refused for loopback targets
       attr: fabric
     --dry-run
       description: Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
@@ -2965,7 +2965,10 @@ Commands:
   enable [options]         One-command hosted-shape enablement of the OAuth /mcp
                            surface for claude.ai — automates the
                            docs/notes/mcp-oauth-model2.md checklist. Rejects
-                           local/private issuer origins.
+                           invalid issuer URLs, localhost/.localhost/.local
+                           hosts, IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12,
+                           192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1,
+                           fc00::/7, fe80::/10; no DNS lookup.
   disable [options]        Flag off + restart = byte-identical boot (Model-2
                            contract) — removes the /mcp OAuth surface.
   status [options]         Surface the /mcp OAuth surface's live state: enabled?
@@ -3084,8 +3087,10 @@ Global Options:
 Usage: flair mcp enable [options]
 
 One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai —
-automates the docs/notes/mcp-oauth-model2.md checklist. Rejects local/private
-issuer origins.
+automates the docs/notes/mcp-oauth-model2.md checklist. Rejects invalid issuer
+URLs, localhost/.localhost/.local hosts, IPv4 0/8, 10/8, 127/8, 169.254/16,
+172.16/12, 192.168/16 (also IPv4-mapped IPv6), and IPv6 ::, ::1, fc00::/7,
+fe80::/10; no DNS lookup.
 
 Options:
   --instance <url>                                   Target flair instance to enable against (else FLAIR_URL)
@@ -3103,7 +3108,7 @@ Options:
   --admin-pass <pass>                                Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
   --admin-user <name>                                Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
-  --fabric                                           Use the Fabric branch and default to Fabric secrets staging
+  --fabric                                           Use the Fabric branch and default to Fabric secrets staging; refused for loopback targets
   --dry-run                                          Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
   --json                                             Print machine-readable JSON instead of a human summary
   -h, --help                                         display help for command

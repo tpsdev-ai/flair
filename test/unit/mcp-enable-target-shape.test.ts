@@ -52,6 +52,41 @@ function targetFetch(push = false) {
 }
 
 describe("enableMcp target URL and Fabric declaration", () => {
+  for (const instance of ["http://127.0.0.1:9926", "http://localhost:9926", "http://[::1]:9926"]) {
+    test.each([false, true])(`refuses --fabric with loopback ${instance} without CIMD (dryRun=%s)`, async (dryRun) => {
+      const f = fixture(instance);
+      const { calls, fetchImpl } = targetFetch();
+      let prompts = 0;
+      const result = await enableMcp({ ...f.params, fabric: true, dryRun }, {
+        fetchImpl, confirmPrompt: async () => { prompts++; return true; },
+      });
+      expect(result.failedStep).toBe("target-shape-check");
+      expect(result.refused?.message).toContain("--fabric cannot be used with a loopback target");
+      expect(calls).toEqual([]);
+      expect(prompts).toBe(0);
+      expect(readdirSync(f.dir)).toEqual(["config.yaml"]);
+      expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
+    });
+  }
+
+  for (const issuer of ["https://[fd00::1]", "https://[fe80::1]", "https://[::ffff:192.168.1.1]", "not a url"]) {
+    test.each([false, true])(`refuses issuer ${issuer} before side effects (dryRun=%s)`, async (dryRun) => {
+      const f = fixture(FABRIC);
+      const { calls, fetchImpl } = targetFetch();
+      let prompts = 0;
+      const result = await enableMcp({ ...f.params, issuer, dryRun }, {
+        fetchImpl, confirmPrompt: async () => { prompts++; return true; },
+      });
+      expect(result.failedStep).toBe("local-origin-check");
+      expect(result.refused).toMatchObject({ reason: issuer === "not a url" ? "invalid" : "local" });
+      if (issuer === "not a url") expect(result.refused?.message).not.toContain("local");
+      expect(calls).toEqual([]);
+      expect(prompts).toBe(0);
+      expect(readdirSync(f.dir)).toEqual(["config.yaml"]);
+      expect(readFileSync(f.params.localConfigPath, "utf8")).toBe(f.config);
+    });
+  }
+
   test.each([PUBLIC, "https://127.0.0.1.evil.example", "http://10.0.0.1", "http://machine.local"])(
     "refuses non-loopback %s even when its stub reports this machine", async (instance) => {
       const f = fixture(instance);
@@ -75,8 +110,10 @@ describe("enableMcp target URL and Fabric declaration", () => {
       const result = await enableMcp({ ...f.params, fabric, dryRun, cimdAllowedHosts: ["claude.ai"] }, {
         fetchImpl, confirmPrompt: async () => { prompts++; return true; },
       });
-      expect(result.failedStep).toBe("cimd-allowed-hosts");
-      expect(result.refused?.message).toContain("refused for a Fabric instance");
+      const loopbackFabric = instance === "http://127.0.0.1:9926";
+      expect(result.failedStep).toBe(loopbackFabric ? "target-shape-check" : "cimd-allowed-hosts");
+      expect(result.refused?.message).toContain(loopbackFabric
+        ? "--fabric cannot be used with a loopback target" : "refused for a Fabric instance");
       expect(calls).toEqual([]);
       expect(prompts).toBe(0);
       expect(readdirSync(f.dir)).toEqual(["config.yaml"]);

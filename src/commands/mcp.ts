@@ -42,6 +42,7 @@ import {
   disableMcp,
   mcpStatus,
   checkLocalOriginRefusal,
+  fabricLoopbackRefusal,
   selfVerifyMcpMetadata,
   cimdAllowedHostsFromFlag,
   claudeAiExcludedNote,
@@ -435,12 +436,7 @@ export async function revokeMcpClient(params: McpRevokeParams, deps: McpRevokeDe
 // ─── flair mcp enable / disable / status ────────────────────────────────────
 // flair#719 — the last piece of the paved-paths command family. Automates
 // docs/notes/mcp-oauth-model2.md's 8-step operator checklist into one
-// command, per the design record + K&S verdicts on #719's thread (see
-// src/lib/mcp-enable.ts's module header for the full binding design record,
-// including the scenario addendum: `enable` targets the HOSTED shape only —
-// it runs on the OPERATOR's machine, against a REMOTE instance, and refuses
-// honestly against a local-origin instance rather than walking eight steps
-// toward a connector that can never connect).
+// command.
 
 /** Simple y/N confirmation over readline — TTY-only, mirrors the existing
  *  restore-confirmation pattern (`flair snapshot restore`) above. */
@@ -454,7 +450,7 @@ async function confirmYesNo(question: string): Promise<boolean> {
   return /^y(es)?$/i.test(answer.trim());
 }
 
-/** Plain-text readline prompt (tests never exercise this — CLI-only). Used
+/** Plain-text readline prompt. Used
  *  for --idp-client-id/--idp-client-secret/--idp-subject when a flag is
  *  omitted and stdin is a TTY. */
 async function promptText(question: string): Promise<string> {
@@ -800,7 +796,9 @@ export function register(program: Command): void {
     .command("enable")
     .description(
       "One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the " +
-        "docs/notes/mcp-oauth-model2.md checklist. Rejects local/private issuer origins.",
+        "docs/notes/mcp-oauth-model2.md checklist. Rejects invalid issuer URLs, localhost/.localhost/.local hosts, " +
+        "IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), " +
+        "and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.",
     )
     .option("--instance <url>", "Target flair instance to enable against (else FLAIR_URL)")
     .option("--issuer <url>", "Public origin claude.ai will use (else --instance)")
@@ -826,7 +824,7 @@ export function register(program: Command): void {
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
-    .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging")
+    .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for loopback targets")
     .option("--dry-run", "Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
@@ -836,12 +834,15 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      // Local-origin refusal short-circuits before we ask for anything else —
-      // never walk the operator through IdP app creation for a connector that
-      // can never connect.
       const localCheck = checkLocalOriginRefusal(opts.issuer ?? instance);
       if (localCheck.refused) {
         console.error(`${render.icons.error} ${localCheck.message}`);
+        process.exit(1);
+      }
+
+      const fabricRefusal = fabricLoopbackRefusal(instance, Boolean(opts.fabric));
+      if (fabricRefusal) {
+        console.error(`${render.icons.error} ${fabricRefusal}`);
         process.exit(1);
       }
 

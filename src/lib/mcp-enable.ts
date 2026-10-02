@@ -164,43 +164,47 @@ export const REQUIRED_ACCESS_TOKEN_TTL = 900;
 
 // ─── Local-origin detection (scenario addendum, binding) ───────────────────
 
-const LOCAL_ORIGIN_REFUSAL =
-  "claude.ai connectors need a public HTTPS origin; the issuer is local. See the hosted-shape docs.";
+function isLocalIpv4(a: number, b: number): boolean {
+  return a === 0 || a === 10 || a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) || (a === 169 && b === 254);
+}
 
-/**
- * Is `url`'s host a local/private origin claude.ai's servers could never
- * dial into? Covers localhost, loopback, RFC1918 private ranges, link-local,
- * and `.local` mDNS. An unparseable URL is treated as local (refuse rather
- * than proceed against an origin we can't even parse).
- */
 export function isLocalOrigin(url: string): boolean {
   let hostname: string;
   try {
-    hostname = new URL(url).hostname.toLowerCase();
+    hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
   } catch {
-    return true;
+    return false;
   }
   if (hostname === "localhost" || hostname.endsWith(".localhost")) return true;
-  // WHATWG URL keeps IPv6 hosts bracketed in `.hostname` (e.g. "[::1]").
-  if (hostname === "::1" || hostname === "[::1]") return true;
   if (hostname.endsWith(".local")) return true;
-  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const a = Number(ipv4[1]);
-    const b = Number(ipv4[2]);
-    if (a === 127) return true; // loopback
-    if (a === 10) return true; // RFC1918
-    if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
-    if (a === 192 && b === 168) return true; // RFC1918
-    if (a === 169 && b === 254) return true; // link-local
-    if (a === 0) return true;
+  if (hostname.startsWith("[")) {
+    if (hostname === "[::]" || hostname === "[::1]") return true;
+    const first = parseInt(hostname.slice(1).split(":")[0] || "0", 16);
+    if ((first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80) return true;
+    const mapped = hostname.match(/^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/);
+    if (mapped) {
+      const high = parseInt(mapped[1], 16);
+      return isLocalIpv4(high >>> 8, high & 0xff);
+    }
+    return false;
   }
-  return false;
+  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return ipv4 !== null && isLocalIpv4(Number(ipv4[1]), Number(ipv4[2]));
 }
 
-/** Structural refusal check + the exact operator-facing message (scenario addendum). */
-export function checkLocalOriginRefusal(url: string): { refused: true; message: string } | { refused: false } {
-  if (isLocalOrigin(url)) return { refused: true, message: LOCAL_ORIGIN_REFUSAL };
+export function checkLocalOriginRefusal(url: string):
+  { refused: true; reason: "invalid" | "local"; message: string } | { refused: false } {
+  try {
+    if (!new URL(url).hostname) throw new Error("missing host");
+  } catch {
+    return { refused: true, reason: "invalid", message: "Issuer refused: invalid URL." };
+  }
+  if (isLocalOrigin(url)) return {
+    refused: true, reason: "local",
+    message: "Issuer refused: local hostname or loopback, unspecified, private or link-local IP literal.",
+  };
   return { refused: false };
 }
 
@@ -216,6 +220,10 @@ export function isFabricOrigin(url: string): boolean {
 
 export function isFabricTarget(instanceUrl: string, fabric = false): boolean {
   return fabric === true || isFabricOrigin(instanceUrl);
+}
+
+export function fabricLoopbackRefusal(instanceUrl: string, fabric = false): string | undefined {
+  if (fabric && isLoopbackUrl(instanceUrl)) return "--fabric cannot be used with a loopback target. Remove --fabric.";
 }
 
 export type SecretsMechanism = "fabric-env-secrets" | "env-file";
@@ -1873,7 +1881,7 @@ export interface EnableMcpDeps {
 export interface EnableMcpResult {
   ok: boolean;
   dryRun: boolean;
-  refused?: { message: string };
+  refused?: { message: string; reason?: "invalid" | "local" };
   steps: EnableStepResult[];
   failedStep?: EnableStepName;
   issuer?: string;
@@ -1925,9 +1933,16 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const localCheck = checkLocalOriginRefusal(issuer);
   if (localCheck.refused) {
     push(false, localCheck.message);
-    return { ok: false, dryRun, refused: { message: localCheck.message }, steps, failedStep: "local-origin-check" };
+    return { ok: false, dryRun, refused: { reason: localCheck.reason, message: localCheck.message }, steps, failedStep: "local-origin-check" };
   }
-  push(true, `${issuer} is a public-shaped origin`);
+  push(true, `${issuer}: URL parsed; hostname/IP-literal check passed (no DNS lookup)`);
+
+  const fabricRefusal = fabricLoopbackRefusal(params.instance, params.fabric);
+  if (fabricRefusal) {
+    currentStep = "target-shape-check";
+    push(false, fabricRefusal);
+    return { ok: false, dryRun, refused: { message: fabricRefusal }, steps, failedStep: "target-shape-check" };
+  }
 
   const idpProvider = params.idpProvider ?? "github";
   const principal = params.principal ?? "self";

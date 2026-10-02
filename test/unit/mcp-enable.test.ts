@@ -17,7 +17,6 @@
  * and self-verify/status confirm CIMD is actually advertised. Coverage:
  *   - the orchestration order (dry-run stops after the local/pure steps;
  *     the live path ends at self-verify — no DCR call after restart)
- *   - local-origin refusal (the exact addendum message, zero fetch calls)
  *   - dry-run (no remote calls and no file written: the signing-key step
  *     reports the key a real run would reuse or generate — flair#2113)
  *   - self-verify failure names the step to re-run, never reports success
@@ -98,7 +97,6 @@ describe("isLocalOrigin / checkLocalOriginRefusal", () => {
     "http://172.31.255.255:9926",
     "http://192.168.1.1:9926",
     "http://169.254.1.1:9926",
-    "not a url at all",
   ])("%s is local", (url) => {
     expect(isLocalOrigin(url)).toBe(true);
   });
@@ -112,11 +110,12 @@ describe("isLocalOrigin / checkLocalOriginRefusal", () => {
     expect(isLocalOrigin(url)).toBe(false);
   });
 
-  test("checkLocalOriginRefusal returns the exact addendum message for a local origin", () => {
+  test("checkLocalOriginRefusal names a local hostname", () => {
     const result = checkLocalOriginRefusal("http://localhost:9926");
     expect(result).toEqual({
       refused: true,
-      message: "claude.ai connectors need a public HTTPS origin; the issuer is local. See the hosted-shape docs.",
+      reason: "local",
+      message: "Issuer refused: local hostname or loopback, unspecified, private or link-local IP literal.",
     });
   });
 
@@ -1018,7 +1017,7 @@ describe("enableMcp — local-origin refusal", () => {
       { fetchImpl },
     );
     expect(result.ok).toBe(false);
-    expect(result.refused?.message).toContain("claude.ai connectors need a public HTTPS origin");
+    expect(result.refused?.message).toContain("Issuer refused: local hostname");
     expect(result.failedStep).toBe("local-origin-check");
     expect(calls).toHaveLength(0);
   });

@@ -277,7 +277,8 @@ for (const instance of [ISSUER, TARGET]) {
   test.each([false, true])(`--fabric refuses --cimd-allowed-hosts for ${instance} before writes (dryRun=%s)`, async (dryRun) => {
     const r = await runEnable(SHIPPED, ["--instance", instance, "--fabric", "--cimd-allowed-hosts", "claude.ai", ...(dryRun ? ["--dry-run"] : [])], true);
     expect(r.exit).toBe("process.exit(1)");
-    expect(r.err).toContain("refused for a Fabric instance");
+    expect(r.err).toContain(instance === TARGET
+      ? "--fabric cannot be used with a loopback target" : "refused for a Fabric instance");
     expect(r.out).toBe("");
     expect(r.configAfter).toBe(r.configBefore);
     expect(r.keyWritten).toBe(false);
