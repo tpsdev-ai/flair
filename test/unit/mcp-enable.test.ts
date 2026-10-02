@@ -1786,13 +1786,16 @@ rest: true
     const cwd = process.cwd();
     try {
       process.chdir(configDir);
-      const result = withHome(configDir, () => updateLocalConfigMcpEnabled(true));
-      const homeConfig = join(configDir, ".flair", "config.yaml");
-      expect(result.ok).toBe(false);
-      expect(result.detail).toBe(
-        `local config.yaml not found (tried: config.yaml, ${homeConfig}). ` +
-        `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${homeConfig}).`,
-      );
+      withHome(configDir, () => {
+        const homeConfig = join(resolveHome(), ".flair", "config.yaml");
+        expect(homeConfig).toBe(join(configDir, ".flair", "config.yaml"));
+        const result = updateLocalConfigMcpEnabled(true);
+        expect(result.ok).toBe(false);
+        expect(result.detail).toBe(
+          `local config.yaml not found (tried: config.yaml, ${homeConfig}). ` +
+          `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${homeConfig}).`,
+        );
+      });
     } finally {
       process.chdir(cwd);
     }
@@ -2203,11 +2206,18 @@ describe("enableMcp — standalone local config update (flair#1136)", () => {
   test.each(["explicit-path", "CLI-shaped"])("flair#2193: %s assembled failure detail preserves the caller's retry path and stops before restart", async (caller) => {
     const { fetchImpl, calls } = fullMockFetch();
     const explicitPath = join(dir, "absent-config.yaml");
-    const homeConfig = join(resolveHome(), ".flair", "config.yaml");
     const { localConfigPath, ...paths } = tempPaths();
+    const homeDir = mkdtempSync(join(dir, "home-"));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
     const cwd = process.cwd();
+    let homeConfig: string;
     let result: EnableMcpResult;
     try {
+      process.env.HOME = homeDir;
+      process.env.USERPROFILE = homeDir;
+      homeConfig = join(resolveHome(), ".flair", "config.yaml");
+      expect(homeConfig).toBe(join(homeDir, ".flair", "config.yaml"));
       if (caller === "CLI-shaped") {
         rmSync(localConfigPath);
         expect(existsSync(homeConfig)).toBe(false);
@@ -2218,6 +2228,10 @@ describe("enableMcp — standalone local config update (flair#1136)", () => {
         { fetchImpl },
       );
     } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevProfile;
       process.chdir(cwd);
     }
 
