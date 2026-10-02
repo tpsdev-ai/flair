@@ -24,7 +24,7 @@ Full setup walkthrough, subject/sessionId patterns, and security guidance are in
 
 1. **Base URL** — your Flair instance, e.g. `http://localhost:19926`
 2. **Agent ID** — the memory owner and, with Agent Private Key selected, signing identity. Workflows that share an Agent ID share memory ownership.
-3. **Agent Private Key** — that agent's Ed25519 private key, base64-encoded: `flair agent add <agent-id>` then `base64 < ~/.flair/keys/<agent-id>.key`. With Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories; administrator-role agents have broader authority.
+3. **Agent Private Key** — that agent's Ed25519 private key. Register a new agent with `flair agent add <agent-id>`, or use an existing agent's matching key; encode it with `base64 < ~/.flair/keys/<agent-id>.key`. With Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories; administrator-role agents have broader authority.
 
 The credential test reads `/Memory` with the selected auth mode and reports that mode on success.
 

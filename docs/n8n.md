@@ -42,10 +42,9 @@ In n8n: **Credentials → New → Flair API**. Fill in:
 | **Agent ID** | The memory owner and, with Agent Private Key selected, signing identity, e.g. `n8n-support`. Workflows that share an Agent ID share memory ownership. |
 | **Agent Private Key** | That agent's Ed25519 private key. |
 
-Mint a key once per agent identity you want a workflow to use:
+Register a new agent with `flair agent add n8n-support`, or use an existing agent's matching key:
 
 ```bash
-flair agent add n8n-support
 base64 < ~/.flair/keys/n8n-support.key
 ```
 
@@ -94,7 +93,7 @@ Patterns:
 
 With Agent Private Key selected, requests sign as the credential's Agent ID. Ordinary agents write their own memories and read their own plus other agents' non-private memories; administrator-role agents have broader authority.
 
-The deprecated **Admin Password** path uses Harper administrator Basic authentication, with access to other agents' private memories. It is used only while Agent Private Key is empty, and every execution that uses it logs a warning. To migrate a credential still using it, mint an agent key (step 3) and fill in Agent Private Key.
+The deprecated **Admin Password** path uses Harper administrator Basic authentication, with access to other agents' private memories. It is used only while Agent Private Key is empty, and every execution that uses it logs a warning. To migrate, set Agent Private Key (step 3).
 
 Treat the key as a secret.
 

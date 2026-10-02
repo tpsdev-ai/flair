@@ -24,7 +24,7 @@ export class FlairApi implements ICredentialType {
       default: '',
       required: true,
       description:
-        'The memory owner and, with Agent Private Key selected, signing identity. Mint its key with `flair agent add <agent-id>`. Workflows that share an agent id share memory ownership.',
+        'The memory owner and, with Agent Private Key selected, signing identity. Workflows that share an agent id share memory ownership.',
     },
     {
       displayName: 'Agent Private Key',
@@ -33,7 +33,7 @@ export class FlairApi implements ICredentialType {
       typeOptions: { password: true },
       default: '',
       description:
-        "The agent's Ed25519 private key, base64-encoded — mint it with `flair agent add <agent-id>`, then `base64 < ~/.flair/keys/<agent-id>.key` and paste the output. With Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories; administrator-role agents have broader authority.",
+        "Register a new agent with `flair agent add <agent-id>`, or use an existing agent's matching Ed25519 key; encode it with `base64 < ~/.flair/keys/<agent-id>.key` and paste the output. With Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories; administrator-role agents have broader authority.",
     },
     {
       displayName: 'Admin Password (deprecated)',

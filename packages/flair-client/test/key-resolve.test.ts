@@ -348,7 +348,7 @@ describe("loadPrivateKeyString — a key held as text (flair#1942)", () => {
     }
   });
 
-  test("refuses a PEM — key files are not PEM", () => {
+  test("refuses a PEM", () => {
     const { privateKey } = generateKeyPairSync("ed25519");
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
     const keyText = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer).toString("base64");

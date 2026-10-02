@@ -15,7 +15,6 @@ const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "he
 
 /** Decode an Ed25519 private key from the bytes of a key file (raw 32-byte seed, or base64 PKCS8 DER). */
 function decodePrivateKey(raw: Buffer): KeyObject {
-  // Try as base64-encoded PKCS8 DER first
   const decoded = raw.length === 32 ? raw : Buffer.from(raw.toString("utf-8").trim(), "base64");
   const der = decoded.length === 32
     ? Buffer.concat([PKCS8_ED25519_PREFIX, decoded])

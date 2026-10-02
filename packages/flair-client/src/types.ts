@@ -134,7 +134,7 @@ export interface BootstrapResult {
 export interface FlairClientConfig {
   /** Flair server URL. Default: http://localhost:19926 */
   url?: string;
-  /** Agent ID for authentication and data scoping. Falls back to FLAIR_AGENT_ID env var. */
+  /** Agent ID for authentication and data scoping. Uses FLAIR_AGENT_ID only when omitted. */
   agentId?: string;
   /** "basic" disables Ed25519 key resolution. Default: "auto". */
   authMode?: "auto" | "basic";

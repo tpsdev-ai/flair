@@ -142,7 +142,7 @@ export class FlairClient {
     // reads as UNSET, so the existing defaults apply instead of the literal
     // winning the `??`/`||` chain and poisoning the connection.
     this.url = (config.url ?? readEnvOrUnset("FLAIR_URL") ?? DEFAULT_URL).replace(/\/$/, "");
-    this.agentId = config.agentId || readEnvOrUnset("FLAIR_AGENT_ID") || "";
+    this.agentId = config.agentId === undefined ? readEnvOrUnset("FLAIR_AGENT_ID") || "" : config.agentId;
     this.authMode = config.authMode ?? "auto";
     this.keyPath = config.keyPath;
     if (config.privateKey !== undefined) {

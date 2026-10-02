@@ -80,7 +80,7 @@ function loggerStub(): { logger: any; warns: string[]; logs: string[] } {
   };
 }
 
-/** Assert this request was signed by `publicKey` as `agentId` — a real signature, not just a header. */
+/** Assert this request was signed by `publicKey` as `expectedAgentId`. */
 function expectAgentSignature(header: string | undefined, publicKey: KeyObject, request: SeenRequest, expectedAgentId: string): string {
   expect(header).toBeDefined();
   expect(header!.startsWith("TPS-Ed25519 ")).toBe(true);
@@ -279,12 +279,11 @@ describe("the deprecated admin password still works and warns (flair#1942)", () 
 });
 
 describe("credential key handling (flair#1942)", () => {
-  test("no node output, log line or error message carries the key", async () => {
+  test("write/search execute outputs, write/search/chat logs, and write/credential-test 401 errors omit the key", async () => {
     const { keyText } = newAgentKey();
     const credentials: FlairCredentials = { baseUrl: BASE_URL, agentId: "n8n-secret", agentPrivateKey: keyText };
 
-    // Success: the write node's output, the search node's payload, the
-    // chat-memory history and every log line carry only memory data.
+    // Check write/search execute outputs and write/search/chat logs for the key.
     reply = (request) =>
       request.method === "GET"
         ? { status: 200, body: [] }
@@ -306,7 +305,7 @@ describe("credential key handling (flair#1942)", () => {
       JSON.stringify([writeOut, searchOut, writeLog.logs, searchLog.logs, chatLog.logs]),
     ).not.toContain(keyText);
 
-    // Failure: the server refuses, and the error must not quote the credential.
+    // Check the write 401 error for the key.
     seen = [];
     reply = () => ({ status: 401, body: { error: "unauthorized" } });
     let message = "";
@@ -318,7 +317,7 @@ describe("credential key handling (flair#1942)", () => {
     expect(message.length).toBeGreaterThan(0);
     expect(message).not.toContain(keyText);
 
-    // The credential test's error path too.
+    // Check the credential-test 401 error for the key.
     const result = await (flairCredentialTest as any).call({}, { data: credentials });
     expect(result.status).toBe("Error");
     expect(result.message).not.toContain(keyText);
@@ -379,6 +378,35 @@ const entryPoints: Array<[string, (credentials: FlairCredentials, logger: any) =
 ];
 
 for (const [name, run] of entryPoints) {
+  for (const agentId of ["", " \t "]) {
+    for (const auth of ["key", "basic"] as const) {
+      test(`${name}: ${auth} refuses ${JSON.stringify(agentId)} Agent ID despite ambient identity`, async () => {
+        const savedAgentId = process.env.FLAIR_AGENT_ID;
+        const credentials: FlairCredentials = {
+          baseUrl: BASE_URL,
+          agentId,
+          ...(auth === "key" ? { agentPrivateKey: newAgentKey().keyText } : { adminPassword: "legacy-secret" }),
+        };
+        try {
+          process.env.FLAIR_AGENT_ID = "ambient-agent";
+          reply = () => ({ status: 200, body: [] });
+          const result = await (flairCredentialTest as any).call({}, { data: credentials });
+          expect(result.status).toBe("Error");
+          expect(result.message).toContain("Agent ID");
+          expect(result.message).not.toContain("Signed as agent ''");
+          expect(seen).toHaveLength(0);
+          await expect(run(credentials, loggerStub().logger)).rejects.toThrow(/Agent ID/);
+          expect(seen).toHaveLength(0);
+          await expect(makeClient(credentials)).rejects.toThrow(/Agent ID/);
+          expect(seen).toHaveLength(0);
+        } finally {
+          if (savedAgentId === undefined) delete process.env.FLAIR_AGENT_ID;
+          else process.env.FLAIR_AGENT_ID = savedAgentId;
+        }
+      }, 10_000);
+    }
+  }
+
   test(`${name}: whitespace-only key selects Basic like the credential test, despite a local key`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-n8n-basic-"));
     const savedKeyDir = process.env.FLAIR_KEY_DIR;

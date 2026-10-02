@@ -21,7 +21,6 @@ export interface FlairCredentials {
 export const importFlairClient = (): Promise<typeof import("@tpsdev-ai/flair-client")> =>
   (new Function("return import('@tpsdev-ai/flair-client')") as () => Promise<any>)();
 
-/** The credential text: the credential's fields, trimmed, as strings. */
 export function asFlairCredentials(data: ICredentialDataDecryptedObject): FlairCredentials {
   const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
   return {
@@ -71,14 +70,17 @@ export function warnDeprecatedAdminPassword(
 function assertKeyIsNotPem(key: string): void {
   if (key.includes("-----BEGIN")) {
     throw new Error(
-      "Flair API credential: the Agent Private Key field expects the key file's contents " +
-        "(base64), not a PEM block.",
+      "Flair API credential: the Agent Private Key field expects the key file's " +
+        "base64-encoded contents, not a PEM block.",
     );
   }
 }
 
 /** Build the Flair client for this credential, signing as the agent when it has a key. */
 export async function makeClient(credentials: FlairCredentials): Promise<FlairClient> {
+  if (!credentials.agentId.trim()) {
+    throw new Error("Flair API credential: Agent ID is required.");
+  }
   const mod = await importFlairClient();
   if (credentials.agentPrivateKey) {
     assertKeyIsNotPem(credentials.agentPrivateKey);
