@@ -484,7 +484,7 @@ describe("classifyNodeKeySeed", () => {
     expect(d.class).not.toBe("orphan-candidate");
     expect(d.class).not.toBe("keep");
     expect(d.reason).toBe(
-      "Instance rows unreadable; node-shaped seed left in place",
+      "Instance reference check unavailable; node-shaped seed left in place",
     );
   });
 });
@@ -513,7 +513,7 @@ describe("orphanInstanceSeedAdvisory (flair#1925)", () => {
   });
 
   it("Instance rows NOT read → an unreadable advisory", () => {
-    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: ["flair_1111aaaa"], instanceIds: null, keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [] })).toContain("Instance rows unreadable");
+    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: ["flair_1111aaaa"], instanceIds: null, keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [] })).toContain("Instance reference check unavailable");
   });
 });
 

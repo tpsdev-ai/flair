@@ -266,7 +266,7 @@ describe("makeReadInstanceIds — the Instance rows are read only for the target
       resolveHttpPort: () => 9926,
       resolveOpsPort: () => 9925,
       resolveAdminPass: () => pass ?? undefined,
-      probe: async () => { probes++; return { state: "read" as const, ids: [], agentIds: [] }; },
+      probe: async () => { probes++; return { state: "read" as const, ids: ["flair_1111aaaa"], agentIds: [] }; },
     });
     return { read, probes: () => probes };
   }
@@ -293,6 +293,7 @@ describe("makeReadInstanceIds — the Instance rows are read only for the target
   });
 
   it("the targeted local instance with a credential → the rows are read", async () => {
+    globalThis.fetch = (async () => Response.json({ federation: { instance: { id: "flair_1111aaaa" } } })) as typeof fetch;
     const b = build("http://127.0.0.1:9926");
     expect((await b.read()).state).toBe("read");
     expect(b.probes()).toBe(1);

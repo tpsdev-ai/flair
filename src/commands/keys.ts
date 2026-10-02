@@ -238,7 +238,7 @@ export function applyKeyPrune(
   return moved;
 }
 
-/** Read reference rows only through the target's derived local ops port. */
+/** Require the HTTP target's Instance id to match the sole ops Instance id. */
 export function makeReadInstanceIds(deps: {
   baseUrl: string;
   port?: string | number;
@@ -282,10 +282,36 @@ export function makeReadInstanceIds(deps: {
     if (!pass?.trim()) {
       return { state: "unreadable", reason: `no local admin credential at ${defaultAdminPassPath()} to read the Instance rows with` };
     }
-    return probe({
+    const credentials = { user: resolveAdminUser(undefined), pass };
+    let targetId: string;
+    try {
+      const response = await fetch(new URL("/HealthDetail", target).href, {
+        method: "GET",
+        headers: { Authorization: `Basic ${Buffer.from(`${credentials.user}:${pass}`).toString("base64")}` },
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const instance = (await response.json())?.federation?.instance;
+      if (instance?.multiple || instance?.unreadable || typeof instance?.id !== "string" || !instance.id.trim()) {
+        throw new Error("HealthDetail returned no single Instance id");
+      }
+      targetId = instance.id;
+    } catch (err: unknown) {
+      return { state: "unreadable", reason: `target identity unreadable (${err instanceof Error ? err.message : String(err)})` };
+    }
+    const read = await probe({
       opsUrl: `http://127.0.0.1:${opsPort}`,
-      credentials: { user: resolveAdminUser(undefined), pass },
+      credentials,
     });
+    if (read.state === "unreadable") return read;
+    if (read.ids.length !== 1) {
+      return { state: "unreadable", reason: "ops identity unreadable: expected a single Instance id" };
+    }
+    if (read.ids[0] !== targetId) {
+      return { state: "unreadable", reason: "target/ops Instance id mismatch" };
+    }
+    return read;
   };
 }
 
@@ -346,7 +372,7 @@ export function register(program: Command): void {
       }
       if (result.orphanRead?.state === "unreadable") {
         console.log(
-          `  ${render.icons.warn} ${render.wrap(render.c.yellow, `Instance rows could not be read (${result.orphanRead.reason}) — no orphan candidates determined.`)}`,
+          `  ${render.icons.warn} ${render.wrap(render.c.yellow, `Instance reference check unavailable (${result.orphanRead.reason}) — no orphan candidates determined.`)}`,
         );
       }
 

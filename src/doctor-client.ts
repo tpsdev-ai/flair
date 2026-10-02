@@ -2186,14 +2186,7 @@ export function resolveCollisionSafeName(existingNames: Iterable<string>, filena
 
 export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan-candidate" | "unidentified" | "ignored";
 
-/**
- * The reason classifyKeyFile reports an unparseable `.key` file with. "I could not parse this"
- * and "this is a stale agent key" are different findings, and only the second
- * is safe to act on: `~/.flair/keys/<id>.key` is a namespace shared by two
- * writers, and an AES-256-GCM keystore blob is unparseable AS A SEED while
- * being a live federation key (flair#1026). An unidentified file is reported
- * for a human and left exactly where it is.
- */
+/** An unparseable keystore blob may be a live federation key (flair#1026). */
 const UNIDENTIFIED_SEED_REASON =
   "not a parseable Ed25519 private key seed — may be a keystore blob or another format; " +
   "left in place, inspect it before removing anything (flair#1026)";
@@ -2246,7 +2239,7 @@ export function classifyKeyFile(
   };
 }
 
-/** Report node-shaped seeds against the checked target tables; never authorize removal. */
+/** Report node-shaped seeds using rows bound by HTTP/ops Instance id; never authorize removal. */
 export function classifyNodeKeySeed(
   id: string,
   instanceIds: readonly string[] | null,
@@ -2257,18 +2250,18 @@ export function classifyNodeKeySeed(
   if (instanceIds === null || agentIds === null) {
     return {
       class: "unidentified",
-      reason: `${instanceIds === null ? "Instance" : "Agent"} rows unreadable${unreadableReason ? ` (${unreadableReason})` : ""}; node-shaped seed left in place`,
+      reason: `${instanceIds === null ? "Instance" : "Agent"} reference check unavailable${unreadableReason ? ` (${unreadableReason})` : ""}; node-shaped seed left in place`,
     };
   }
   if (agentIds.includes(id)) {
-    return { class: "unidentified", reason: `id '${id}' is registered in the checked Agent table on ${baseUrl}; left in place` };
+    return { class: "unidentified", reason: `id '${id}' is registered in the Agent table on ${baseUrl} (HTTP/ops Instance id matched); left in place` };
   }
   if (instanceIds.includes(id)) {
-    return { class: "keep", reason: `id '${id}' is named by an Instance row in the checked target table on ${baseUrl}; kept` };
+    return { class: "keep", reason: `id '${id}' is named by the Instance row on ${baseUrl} (HTTP/ops Instance id matched); kept` };
   }
   return {
     class: "orphan-candidate",
-    reason: `id '${id}' is absent from the checked Instance and Agent tables on ${baseUrl}; ownership cannot be proven; not removed (see #2200)`,
+    reason: `id '${id}' is absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched); ownership cannot be proven; not removed (see #2200)`,
   };
 }
 
@@ -2283,11 +2276,11 @@ export function orphanInstanceSeedAdvisory(input: {
   const { nodeKeyIds, instanceIds, agentIds, keysDir, baseUrl } = input;
   if (nodeKeyIds.length === 0) return null;
   if (instanceIds === null || agentIds == null) {
-    return `${instanceIds === null ? "Instance" : "Agent"} rows unreadable (${input.unreadableReason ?? "read unavailable"}); node-shaped seeds in ${keysDir} remain unidentified`;
+    return `${instanceIds === null ? "Instance" : "Agent"} reference check unavailable (${input.unreadableReason ?? "read unavailable"}); node-shaped seeds in ${keysDir} remain unidentified`;
   }
   const candidates = nodeKeyIds.filter((id) => classifyNodeKeySeed(id, instanceIds, baseUrl, agentIds).class === "orphan-candidate").length;
   if (candidates === 0) return null;
-  return `${candidates} orphan candidate(s) in ${keysDir}, absent from the checked Instance and Agent tables on ${baseUrl}; ownership cannot be proven; not removed (see #2200)`;
+  return `${candidates} orphan candidate(s) in ${keysDir}, absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched); ownership cannot be proven; not removed (see #2200)`;
 }
 
 // ── Node-scoped federation keys vs agent signing keys (flair#1193) ─────────

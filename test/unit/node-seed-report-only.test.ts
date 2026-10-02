@@ -27,6 +27,7 @@ test("--apply moves no node-shaped seed when two targets share a keys directory"
   console.log = (...args) => { lines.push(args.join(" ")); };
   for (const [index, port] of [19926, 29926].entries()) {
     globalThis.fetch = (async (_input, init) => {
+      if (String(_input).endsWith("/HealthDetail")) return Response.json({ federation: { instance: { id: ids[index] } } });
       const body = JSON.parse(String(init?.body));
       return Response.json(body.sql.includes("flair.Instance") ? [{ id: ids[index] }] : []);
     }) as typeof fetch;
@@ -94,7 +95,7 @@ test.each(["ops mismatch", "missing credential", "empty credential"])("doctor re
     probe: async () => { reads++; return { state: "read", ids: [], agentIds: [] }; },
   });
   expect(reads).toBe(0);
-  expect(advisory).toContain("Instance rows unreadable");
+  expect(advisory).toContain("Instance reference check unavailable");
   expect(advisory).toContain(failure === "ops mismatch" ? "ops port" : "admin credential");
   expect(advisory).not.toContain("flair keys prune");
 });
@@ -116,14 +117,15 @@ test("doctor excludes a registered Agent without .pub and reports only the other
   const requests: string[] = [];
   globalThis.fetch = (async (url, init) => {
     requests.push(String(url));
-    return Response.json(JSON.parse(String(init?.body)).sql.includes("flair.Instance") ? [] : [{ id: "flair_deadbeef" }]);
+    if (String(url).endsWith("/HealthDetail")) return Response.json({ federation: { instance: { id: "flair_2222bbbb" } } });
+    return Response.json(JSON.parse(String(init?.body)).sql.includes("flair.Instance") ? [{ id: "flair_2222bbbb" }] : [{ id: "flair_deadbeef" }]);
   }) as typeof fetch;
   const advisory = await readNodeSeedAdvisory({
     nodeKeyIds: ["flair_deadbeef", "flair_1111aaaa"], keysDir: "/fixture/keys",
     baseUrl: "http://127.0.0.1:29926", port: 29926,
     resolveHttpPort: () => 29926, resolveOpsPort: () => 29925, resolveAdminPass: () => "pw",
   });
-  expect(requests).toEqual(["http://127.0.0.1:29925/", "http://127.0.0.1:29925/"]);
+  expect(requests).toEqual(["http://127.0.0.1:29926/HealthDetail", "http://127.0.0.1:29925/", "http://127.0.0.1:29925/"]);
   expect(advisory).toContain("1 orphan candidate(s)");
   expect(advisory).toContain("#2200");
   expect(advisory).not.toContain("flair keys prune");
