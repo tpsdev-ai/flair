@@ -468,7 +468,7 @@ export async function authFetch(
   }
   const headers: Record<string, string> = { Authorization: auth };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  return fetch(url, {
+  return fetch(url.href, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -500,7 +500,7 @@ export async function sendJsonRequest(
   authHeader: string | undefined,
   isLocal: boolean,
 ): Promise<any> {
-  const res = await fetch(url, {
+  const res = await fetch(url.href, {
     method,
     headers: {
       "content-type": "application/json",
