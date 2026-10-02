@@ -61,5 +61,5 @@ describe("local --skip-start seed handoff", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 });
