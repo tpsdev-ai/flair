@@ -4630,6 +4630,7 @@ bindInitCli({
   waitForHealth,
   writeDaemonSidecar,
   registerInitLaunchdService,
+  initLaunchdExitCode,
   MQTT_DISABLED_CONFIG,
   STARTUP_TIMEOUT_MS,
 });
@@ -6515,13 +6516,24 @@ export interface InitLaunchdLine {
  *               nothing further was started), or when retiring an idle legacy
  *               job (its plist is kept and the new plist put back) — or the
  *               replacement failed validation and the plist init wrote could
- *               not be put back (flair#2078); the state is reported as unknown
- *               — init exits 1.
+ *               not be put back (flair#2078, flair#2085); the state is reported
+ *               as unknown — init exits 1.
  */
 export type InitLaunchdOutcome = {
   kind: "managed" | "direct" | "unverified" | "skipped" | "restored" | "refused" | "down" | "uncertain";
   lines: InitLaunchdLine[];
 };
+
+/**
+ * The exit code `flair init` uses for its launchd step's outcome (flair#2040):
+ * 1 when the outcome is refused, down or uncertain — the states that mean no
+ * working launchd registration was left — and 0 otherwise. `flair init`'s
+ * command and the command-level tests' driver both read it here, so the test
+ * asserts this rule rather than a copy of it (flair#2085).
+ */
+function initLaunchdExitCode(kind: string): number {
+  return kind === "refused" || kind === "down" || kind === "uncertain" ? 1 : 0;
+}
 
 /**
  * Put the plist `flair init` wrote back as `prior` recorded it (flair#2040,
@@ -6559,7 +6571,9 @@ function putInitPlistBack(path: string, prior: FileSnapshot): { ok: boolean; tex
  * legacy plist and job (or, failing that, starts Flair directly) and says so.
  * If the preflight fails, NOTHING is unloaded, removed or written; if the
  * validation fails — a lint that throws included (flair#2078) — nothing is
- * unloaded or removed, and the plist init wrote is put back as it was.
+ * unloaded or removed, and the plist init wrote is put back as it was. The
+ * non-legacy path (no owned legacy registration) validates the plist it writes
+ * the same way and puts it back on failure (flair#2085).
  */
 async function registerInitLaunchdService(input: {
   dataDir: string;
@@ -6582,8 +6596,50 @@ async function registerInitLaunchdService(input: {
     // A foreign or unattributable legacy plist is left alone (flair#966); the
     // helper prints why. With no legacy plist it is a no-op.
     if (existsSync(legacyPath)) cleanupLegacyLaunchdPlist(dataDir, plistDir, realLaunchctlCommand, uid);
+
+    // flair#2085: there is no owned legacy job to retire here, but init still
+    // writes a plist launchd may load at the next login, so the rule the legacy
+    // hand-off above applies is applied here too: validate the written plist (a
+    // lint that THROWS is a validation refusal), and on any failure put it back
+    // as it was — or remove it when init created it. No launchctl call that
+    // changes launchd's state is made on that path. A prior plist that cannot
+    // be read would leave nothing to put back, so it is refused before writing.
+    const priorNew = snapshotFile(write.plistPath);
+    const unreadableNew = unreadableSnapshot([[write.plistPath, priorNew]]);
+    if (unreadableNew) {
+      err(`⚠️  Launchd: not registered — ${unreadableNew} exists but could not be read, so it could not be put back. No plist was written.`);
+      return { kind: "skipped", lines };
+    }
+
     const outcome = await writeInitLaunchdPlist(write);
     if (outcome.kind === "refused") return { kind: "refused", lines: [{ stream: "err", text: `Error: ${outcome.detail}` }] };
+
+    const installing = `the plist init would install for ${write.label}`;
+    let refusal: { why: string; fix: string } | null = null;
+    try {
+      const problem = validateLaunchdPlistContent(readFileSync(write.plistPath, "utf-8"), (content) =>
+        lintReplacementPlist(content, launchdMigrationLintForTests ?? lintLaunchdPlistContent, (failure) =>
+          `${installing} could not be validated (${failure})`),
+      );
+      if (problem !== null) {
+        refusal = { why: `${installing} cannot be loaded (${problem})`, fix: "npm install -g @tpsdev-ai/flair && flair init" };
+      }
+    } catch (e: any) {
+      refusal = isLaunchdValidationRefusal(e)
+        ? { why: e.message, fix: `make sure the temporary directory (${tmpdir()}) exists and is writable, and re-run 'flair init'.` }
+        : { why: `${installing} could not be validated (${e?.message ?? String(e)})`, fix: "resolve the error above, and re-run 'flair init'." };
+    }
+    if (refusal !== null) {
+      const putBack = putInitPlistBack(write.plistPath, priorNew);
+      err(`⚠️  Launchd: not registered — ${refusal.why}. ${putBack.text}.`);
+      if (!putBack.ok) {
+        err(`   Fix: remove ${write.plistPath} (launchd would load a plist it cannot validate); then ${refusal.fix}`);
+        return { kind: "uncertain", lines };
+      }
+      err(`   Fix: ${refusal.fix}`);
+      return { kind: "skipped", lines };
+    }
+
     return reportInitLaunchd(dataDir, port, write, outcome, lines);
   }
 
@@ -8583,6 +8639,7 @@ export {
   observeLaunchdLoadability,
   repairLaunchdManagement,
   registerInitLaunchdService,
+  initLaunchdExitCode,
   startFlairProcess,
 };
 
