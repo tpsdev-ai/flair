@@ -536,8 +536,7 @@ function resolveLocalConfigPath(explicitPath?: string): { configPath: string | n
  * to the reference). `enabled: false` writes literal `false` — decisively off
  * regardless of environment.
  *
- * Looks for config.yaml at `explicitPath`, then `./config.yaml`, then
- * `~/.flair/config.yaml`.
+ * Uses `explicitPath` alone if given; otherwise `./config.yaml`, then `~/.flair/config.yaml`.
  */
 export function updateLocalConfigMcpEnabled(
   enabled: boolean,
@@ -2292,7 +2291,10 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       // flair#2193: stop BEFORE the restart. The mcp.enabled update was not
       // confirmed (the file may have changed), and the metadata checks below
       // could still pass and report success.
-      push(false, `${localConfigResult.detail} This command did not restart the instance. Fix the cause above, then re-run \`flair mcp enable\`.`);
+      const retry = params.localConfigPath
+        ? "retry the call with the same explicit path"
+        : "re-run `flair mcp enable`";
+      push(false, `${localConfigResult.detail} This command did not restart the instance. Fix the cause above, then ${retry}.`);
       return {
         ok: false,
         dryRun,

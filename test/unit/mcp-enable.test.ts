@@ -33,7 +33,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import yaml from "js-yaml";
-import { withHome } from "../../src/lib/home.ts";
+import { resolveHome, withHome } from "../../src/lib/home.ts";
 
 import {
   isLocalOrigin,
@@ -2200,14 +2200,26 @@ describe("enableMcp — standalone local config update (flair#1136)", () => {
 
   // ─── flair#2193: a failed local config update must stop before the restart ──
 
-  test("flair#2193: a failed local config update stops before the restart, says to fix the cause and re-run, and is not a success", async () => {
+  test.each(["explicit-path", "CLI-shaped"])("flair#2193: %s assembled failure detail preserves the caller's retry path and stops before restart", async (caller) => {
     const { fetchImpl, calls } = fullMockFetch();
-    // Point localConfigPath at a file that is not there, so
-    // updateLocalConfigMcpEnabled fails before the restart.
-    const result = await enableMcp(
-      { ...BASE_PARAMS, ...tempPaths(), localConfigPath: join(dir, "absent-config.yaml"), confirmSecretsApplied: true },
-      { fetchImpl },
-    );
+    const explicitPath = join(dir, "absent-config.yaml");
+    const homeConfig = join(resolveHome(), ".flair", "config.yaml");
+    const { localConfigPath, ...paths } = tempPaths();
+    const cwd = process.cwd();
+    let result: EnableMcpResult;
+    try {
+      if (caller === "CLI-shaped") {
+        rmSync(localConfigPath);
+        expect(existsSync(homeConfig)).toBe(false);
+        process.chdir(dir);
+      }
+      result = await enableMcp(
+        { ...BASE_PARAMS, ...paths, ...(caller === "explicit-path" ? { localConfigPath: explicitPath } : {}), confirmSecretsApplied: true },
+        { fetchImpl },
+      );
+    } finally {
+      process.chdir(cwd);
+    }
 
     // No success result (the CLI exits non-zero on ok:false).
     expect(result.ok).toBe(false);
@@ -2217,8 +2229,12 @@ describe("enableMcp — standalone local config update (flair#1136)", () => {
     expect(calls).not.toContain("ops:restart");
     expect(calls).not.toContain("ops:system_information");
     const failed = result.steps.find((s) => s.step === "local-config-update" && !s.ok);
-    expect(failed?.detail).toContain("did not restart the instance");
-    expect(failed?.detail).toContain("Fix the cause above, then re-run `flair mcp enable`.");
-    expect(failed?.detail).not.toContain("then restart");
+    expect(failed?.detail).toBe(caller === "explicit-path"
+      ? `local config.yaml not found (tried: ${explicitPath}). ` +
+        `Place your component config.yaml at ${explicitPath}, then re-run with the same explicit path. ` +
+        "This command did not restart the instance. Fix the cause above, then retry the call with the same explicit path."
+      : `local config.yaml not found (tried: config.yaml, ${homeConfig}). ` +
+        `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${homeConfig}). ` +
+        "This command did not restart the instance. Fix the cause above, then re-run `flair mcp enable`.");
   });
 });
