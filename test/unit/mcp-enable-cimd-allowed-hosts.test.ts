@@ -259,7 +259,7 @@ describe("enableMcp, non-Fabric target — the clientIdMetadataDocuments.allowed
     const p = paths();
     const before = readFileSync(p.localConfigPath, "utf-8");
     const { fetchImpl, foreign } = mockFetch("flair.example.com");
-    const result = await enableMcp({ ...BASE, ...p, confirmSecretsApplied: true }, { fetchImpl });
+    const result = await enableMcp({ ...BASE, ...p, confirmSecretsApplied: true }, { fetchImpl, ...targetRunsFrom(dir) });
 
     expect(result.ok).toBe(true);
     expect(foreign).toEqual([]);

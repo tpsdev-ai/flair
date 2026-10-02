@@ -789,6 +789,7 @@ export function register(program: Command): void {
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
+    .option("--fabric", "Declare the target a Harper Fabric instance reached through a custom domain (not *.harperfabric.com), so it takes the Fabric branch instead of the refused local-restart branch")
     .option("--dry-run", "Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
@@ -866,6 +867,7 @@ export function register(program: Command): void {
           cimdAllowedHosts: cimdFlag.hosts,
           dryRun,
           confirmSecretsApplied: Boolean(opts.confirmSecretsApplied),
+          fabric: Boolean(opts.fabric),
         },
         { confirmPrompt: dryRun ? undefined : confirmYesNo },
       );

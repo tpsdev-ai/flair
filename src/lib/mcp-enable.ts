@@ -798,6 +798,50 @@ export async function checkTargetRunsFromConfig(
 }
 
 /**
+ * flair#2189: ask the target's own ops API whether it runs on THIS machine.
+ *
+ * This is the first condition `checkTargetRunsFromConfig` applies — the
+ * `--cimd-allowed-hosts` preflight — factored out so `enableMcp` can use it to
+ * decide the standalone (restart) branch, which edits THIS machine's
+ * component config.yaml and restarts the instance there. It reports
+ * `ok: false` for any target whose `system_information` answers without a
+ * hostname, answers a hostname that is not this machine's, or cannot be
+ * reached at all: unknown is never "local".
+ */
+export async function targetReportsThisMachine(
+  instance: string,
+  adminUser: string,
+  adminPass: string,
+  deps: { fetchImpl?: typeof fetch; localHostname?: () => string } = {},
+): Promise<{ ok: boolean; detail: string }> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const localHost = (deps.localHostname ?? osHostname)();
+  const opsUrl = resolveOpsUrl(instance);
+  let data: any;
+  try {
+    const res = await fetchImpl(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicAuthHeader(adminUser, adminPass) },
+      body: JSON.stringify({ operation: "system_information", attributes: ["system"] }),
+    });
+    if (!res.ok) {
+      return { ok: false, detail: `the target's ops API at ${opsUrl} answered system_information with HTTP ${res.status}` };
+    }
+    data = await res.json();
+  } catch (err: any) {
+    return { ok: false, detail: `could not ask the target's ops API at ${opsUrl} for system_information: ${err?.message ?? err}` };
+  }
+  const targetHost = data?.system?.hostname;
+  if (typeof targetHost !== "string" || targetHost === "") {
+    return { ok: false, detail: `the target's system_information did not report its hostname` };
+  }
+  if (targetHost.toLowerCase() !== localHost.toLowerCase()) {
+    return { ok: false, detail: `the target reports host ${JSON.stringify(targetHost)}, and this machine is ${JSON.stringify(localHost)}` };
+  }
+  return { ok: true, detail: `the target's system_information reports this machine's hostname (${JSON.stringify(targetHost)})` };
+}
+
+/**
  * Replace the value of `@harperfast/oauth` → `mcp` → `clientIdMetadataDocuments`
  * → `allowedHosts` in `raw` with a block sequence of `hosts`, touching no line
  * outside the list's own lines (comments between its items go with it).
@@ -1699,6 +1743,7 @@ export async function captureBootDiscriminator(
 
 export type EnableStepName =
   | "local-origin-check"
+  | "target-shape-check"
   | "cimd-allowed-hosts"
   | "signing-key"
   | "config-block"
@@ -1754,6 +1799,10 @@ export interface EnableMcpParams {
    *  environment. Required (or an interactive `prompt` confirmation) before
    *  `enable` calls restart — never assumed. */
   confirmSecretsApplied?: boolean;
+  /** flair#2189: declare the target a Harper Fabric instance reached through a
+   *  hostname outside `*.harperfabric.com` (a custom domain). Selects the
+   *  Fabric (operator-deploy) branch, which never restarts the instance. */
+  fabric?: boolean;
   /** Path to the local component config.yaml for standalone-local installs.
    *  When set, enable flips mcp.enabled to true before restarting.
    *  When unset, enable tries common locations (./config.yaml,
@@ -1842,6 +1891,12 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const principal = params.principal ?? "self";
   const principalKind = params.principalKind ?? "human";
 
+  // flair#2189: which branch this target takes. `--fabric` (or a
+  // *.harperfabric.com host) selects the Fabric branch; anything else must be
+  // the instance on this machine to take the standalone (restart) branch.
+  const fabricDeclared = params.fabric === true;
+  const isFabricTarget = fabricDeclared || isFabricOrigin(params.instance);
+
   try {
     // ── --cimd-allowed-hosts (flair#2113) ─────────────────────────────────────
     // Before any step with a side effect: the hosts are validated, a Fabric
@@ -1898,6 +1953,36 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
           `${change} (the local-config-update step, before the restart, writes it unless the file already holds that exact list, ` +
             `then reads it back; a run that stops before that step does not write it); ${target.detail}`,
         );
+      }
+    }
+
+    // ── Target-shape refusal (flair#2189) ─────────────────────────────────────
+    // The standalone branch edits THIS machine's component config.yaml and
+    // restarts the instance there, so it is only right for a target that runs
+    // on this machine — the code's existing local recognition, the first
+    // condition `checkTargetRunsFromConfig` applies (the `--cimd-allowed-hosts`
+    // preflight): the target's ops API `system_information` reports this
+    // machine's hostname. A target that is neither a `*.harperfabric.com` host
+    // nor that local instance — a Fabric instance reached through a custom
+    // domain, say — must not fall into the standalone branch. `--fabric`
+    // declares such a target a Fabric instance and takes the Fabric branch.
+    // Skipped under --dry-run, which writes nothing and makes no remote call,
+    // and after --cimd-allowed-hosts has had its say (its own refusal names the
+    // flag).
+    if (!dryRun && !isFabricTarget) {
+      const here = await targetReportsThisMachine(params.instance, params.adminUser, params.adminPass, {
+        fetchImpl: deps.fetchImpl,
+        localHostname: deps.localHostname,
+      });
+      if (!here.ok) {
+        currentStep = "target-shape-check";
+        const message =
+          `${params.instance} cannot be shown to be the instance on this machine (${here.detail}). The standalone branch ` +
+          `edits this machine's component config.yaml and restarts the instance there, so it is refused for a target that does not ` +
+          `run on this machine. If it is a Harper Fabric instance reached through a custom domain (not *.harperfabric.com), re-run ` +
+          `with --fabric: that declares the target a Fabric instance and takes the Fabric (operator-deploy) branch.`;
+        push(false, message);
+        return { ok: false, dryRun, refused: { message }, steps, failedStep: "target-shape-check" };
       }
     }
 
@@ -2107,7 +2192,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     //   - Fabric: `enable` does not restart the instance; the operator applies
     //     the environment and restarts. Report the requirement LOUDLY — never
     //     report success with /mcp still dark.
-    const isFabric = isFabricOrigin(params.instance);
+    const isFabric = isFabricTarget;
 
     if (isFabric) {
       // ── Fabric: operator-deploy requirement ──────────────────────────────
