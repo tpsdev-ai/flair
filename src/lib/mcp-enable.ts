@@ -2415,7 +2415,8 @@ export interface McpStatusResult {
 /**
  * Reports a live public-metadata check (not a stale local marker): hits the
  * same well-known metadata endpoint `enable`'s self-verify step checks. An expected issuer,
- * exact MCP token endpoint, and CIMD advertisement verify the public metadata;
+ * exact MCP token endpoint, CIMD advertisement and, when present, a string
+ * `registration_endpoint` verify the public metadata;
  * they do not prove that the token route or `/mcp` is usable. `status` reports
  * the live metadata check's result rather than guessing from local files.
  */
