@@ -187,7 +187,8 @@ describe("flair bridge import mem0: the hinted credential form is the accepted f
     expect(requestCount).toBe(before); // the bridge refused before any fetch
   }, 25_000);
 
-  it("a group/world-readable key file is refused with a named remedy, before any fetch", async () => {
+  // POSIX permission bits only: chmod 0644 sets no group/world bits on Windows.
+  it.skipIf(process.platform === "win32")("a group/world-readable key file is refused with a named remedy, before any fetch", async () => {
     const before = requestCount;
     const res = await runCli(
       ["bridge", "import", "mem0", "--user", "u1", "--api-key-file", keyFile0644, "--base-url", mockUrl, "--agent", "a1", "--url", FLAIR_URL, "--dry-run"],
