@@ -725,9 +725,9 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
   // finding no entry covers). The unmutated file is the control.
   // flair#2124: capture the same next-steps printer the deploy action calls.
   // Execute its example through the real commander entry point with an owner-only
-  // password file; a refused loopback connection proves it reached the ops read
-  // after the remote credential guard, without requiring a Harper instance.
-  test("flair#2124: the emitted deploy example parses and supplies a remote credential", async () => {
+  // password file; the asserted "could not read Agent" result proves execution
+  // reached the Agent read path after the remote credential guard.
+  test("flair#2124: the emitted deploy example reaches the Agent read path", async () => {
     const output: string[] = [];
     const log = spyOn(console, "log").mockImplementation((line: unknown) => { output.push(String(line)); });
     try {
@@ -764,7 +764,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
         stderr: "pipe",
       });
       const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
-      expect(exitCode).not.toBe(0); // the local ops port has no Harper server
+      expect(exitCode).not.toBe(0);
       expect(stderr).toContain("could not read Agent 'my-agent'");
       expect(stderr).not.toContain("is required for agent add");
       expect(stderr).not.toContain(secret);

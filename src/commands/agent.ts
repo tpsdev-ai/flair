@@ -266,7 +266,7 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--ops-port <port>", "Harper operations API port")
-    .option("--target <url>", "Remote Flair REST URL; derives ops URL (HTTPS :443 → :9925, other explicit ports → port-1; env: FLAIR_TARGET)")
+    .option("--target <url>", "Remote Flair REST URL; derives ops URL (HTTPS no port/:443 → Fabric ops :9925; HTTP no port/:80 → :19925; other ports 2–65535 → port-1; port 1 refused; env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL to seed the Agent on (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (id: string, opts) => {
       const httpPort = resolveHttpPort(opts);

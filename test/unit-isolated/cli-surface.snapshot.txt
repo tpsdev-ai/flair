@@ -138,7 +138,7 @@ flair agent add
       description: Harper operations API port
       attr: opsPort
     --target <url>
-      description: Remote Flair REST URL; derives ops URL (HTTPS :443 → :9925, other explicit ports → port-1; env: FLAIR_TARGET)
+      description: Remote Flair REST URL; derives ops URL (HTTPS no port/:443 → Fabric ops :9925; HTTP no port/:80 → :19925; other ports 2–65535 → port-1; port 1 refused; env: FLAIR_TARGET)
       attr: target
     --ops-target <url>
       description: Explicit ops API URL to seed the Agent on (env: FLAIR_OPS_TARGET; bypasses port derivation)
@@ -2745,9 +2745,10 @@ Options:
                             FLAIR_ADMIN_USER; default: admin)
   --keys-dir <dir>          Directory for Ed25519 keys
   --ops-port <port>         Harper operations API port
-  --target <url>            Remote Flair REST URL; derives ops URL (HTTPS :443 →
-                            :9925, other explicit ports → port-1; env:
-                            FLAIR_TARGET)
+  --target <url>            Remote Flair REST URL; derives ops URL (HTTPS no
+                            port/:443 → Fabric ops :9925; HTTP no port/:80 →
+                            :19925; other ports 2–65535 → port-1; port 1
+                            refused; env: FLAIR_TARGET)
   --ops-target <url>        Explicit ops API URL to seed the Agent on (env:
                             FLAIR_OPS_TARGET; bypasses port derivation)
   -h, --help                display help for command
