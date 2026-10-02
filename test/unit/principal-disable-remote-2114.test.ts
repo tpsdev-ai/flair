@@ -216,6 +216,17 @@ describe("principal disable/enable remote instance (#2114)", () => {
     expect(result.stderr).not.toContain("topsecret");
   }, 25_000);
 
+  test.each([
+    `user:pass@${REMOTE_HOST}:19926/?token=topsecret`,
+    `user:pass@${REMOTE_HOST}:19926/?token=topsecret&next=a://b`,
+  ])("a scheme-less target with userinfo is refused without printing either secret: %s", async (instance) => {
+    const result = await runCli(["principal", "disable", "alice", "--instance", instance, "--admin-pass", "other"], { HOME: scratch });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("invalid --instance target");
+    expect(result.stderr).not.toContain("pass");
+    expect(result.stderr).not.toContain("topsecret");
+  }, 25_000);
+
   test("unreachable target never prints the raw fetch error or query token", async () => {
     const result = await runCli(["principal", "disable", "alice", "--instance", "http://127.77.21.13/?token=topsecret", "--admin-pass", "pass"], { HOME: scratch });
     expect(result.code).not.toBe(0);

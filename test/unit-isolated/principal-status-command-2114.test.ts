@@ -146,6 +146,18 @@ describe("principal state command, socket-free", () => {
     expect(result.errors).not.toContain("http://%bad/path-secret");
   });
 
+  test.each([
+    "user:pass@flair.example.com/?token=topsecret",
+    "user:pass@flair.example.com/?token=topsecret&next=a://b",
+  ])("scheme-less target with userinfo is refused without printing either secret: %s", async (instance) => {
+    const result = await invoke("disable", ["--instance", instance, "--admin-pass", "other"], ok);
+    expect(result.exited).toBe(true);
+    expect(result.calls).toHaveLength(0);
+    expect(result.errors).toContain("invalid --instance target");
+    expect(result.errors).not.toContain("pass");
+    expect(result.errors).not.toContain("topsecret");
+  });
+
   test("fetch error prints only its code and redacts the target query", async () => {
     const result = await invoke("disable", ["--instance", "https://flair.example.com/?token=topsecret", "--admin-pass", "pass"], () => {
       const err = new Error("raw fetch topsecret user:pass");

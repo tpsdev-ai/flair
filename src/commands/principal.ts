@@ -74,10 +74,11 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
   }
 
   const remote = Boolean(instance);
+  const targetText = instance && !instance.includes("://") ? `https://${instance}` : (instance ?? "");
   let opsUrl: string;
   try {
     if (remote) {
-      const target = new URL(instance!.includes("://") ? instance! : `https://${instance}`);
+      const target = new URL(targetText);
       if (!(["http:", "https:"].includes(target.protocol) && target.hostname && !target.username && !target.password)) {
         throw new Error("invalid target");
       }
@@ -91,7 +92,10 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
       opsUrl = resolveOpsUrl(resolveOpsPort(opts));
     }
   } catch {
-    console.error(`Error: invalid --instance target ${redactUrl(instance ?? "")}. Pass a valid http(s) Flair instance URL and check its operations API address.`);
+    // Only an http(s) parse separates userinfo; other schemes keep it in the path.
+    let shown = "<unparseable URL>";
+    try { if (["http:", "https:"].includes(new URL(targetText).protocol)) shown = redactUrl(targetText); } catch { /* placeholder */ }
+    console.error(`Error: invalid --instance target ${shown}. Pass a valid http(s) Flair instance URL and check its operations API address.`);
     process.exit(1);
   }
 
