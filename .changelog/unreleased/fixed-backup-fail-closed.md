@@ -1,0 +1,1 @@
+- **`flair backup` rejects failed reads and invalid rows before publishing an archive.** Closes #2214.
