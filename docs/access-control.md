@@ -278,8 +278,11 @@ flair principal enable alice
 ```
 
 For a principal on a remote instance, pass the instance URL and its admin
-password explicitly. These commands use the same `--instance` / `FLAIR_URL`
-target and credential rules as `flair mcp enable`:
+password explicitly. These commands share two precedence and credential rules
+with `flair mcp enable`: an explicit `--instance` wins over `FLAIR_URL`, and a
+remote operation requires an explicit `--admin-pass`. Their complete target
+rules are not equivalent: the principal commands accept an explicit loopback
+`--instance`, while `flair mcp enable` refuses local origins.
 
 ```bash
 flair principal disable alice \
@@ -295,8 +298,10 @@ remote example. A success line appears only after the operations API names
 `alice` in its update result and a read-back confirms the requested status.
 
 - On the local path it sends an `update` to the operations API at `127.0.0.1`
-  on the machine it runs on (port from `--ops-port`, `FLAIR_OPS_PORT` or the
-  local Flair config).
+  on the machine it runs on. The port precedence is a valid explicit
+  `--ops-port`, then `FLAIR_OPS_PORT`, then `opsPort` in the local Flair config,
+  then one less than the resolved HTTP port. An invalid explicit `--ops-port`
+  is refused with a remedy; it never falls through to a lower-precedence port.
 - With `--instance` (or `FLAIR_URL`) it sends the same `update` to the ops API
   derived from that served instance URL, using the `flair mcp enable` hosted
   operations port convention. A remote target requires an explicit
@@ -305,7 +310,8 @@ remote example. A success line appears only after the operations API names
   `FLAIR_TARGET` and `FLAIR_OPS_TARGET` do not select a principal target.
   Redirects, unconfirmed results, and requests that fail or time out are
   refused with a non-zero exit. Diagnostics omit URL userinfo, query values,
-  and response bodies.
+  and response bodies; an unparseable target is printed only as
+  `<unparseable URL>`.
 - Disable sets the principal's `status` to `deactivated`; enable sets it to
   `active`. Both update its `updatedAt` and nothing else: the principal's
   memories and its login mapping stay. Harper can accept an update for an id

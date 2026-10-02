@@ -2,8 +2,9 @@
  * principal.ts — `flair principal` command group (flair#1632 / epic #1618).
  *
  * Extracted from src/cli.ts with ZERO behavior change. Owns the `principal`
- * commander registration and its `add` / `list` / `show` / `disable` /
- * `promote` handlers (1.0 identity management; Principal extends Agent).
+ * commander registration and its `add` / `list` / `show` / `enable` /
+ * `disable` / `promote` handlers (1.0 identity management; Principal extends
+ * Agent).
  *
  * SECURITY: multi-tenant / ownership scoping, admin-role checks, and the
  * ops-API trust-tier writes are moved verbatim. No auth, scope, or

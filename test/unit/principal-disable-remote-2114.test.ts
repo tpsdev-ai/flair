@@ -198,13 +198,14 @@ describe("principal disable/enable remote instance (#2114)", () => {
     expect(sink.seen).toHaveLength(0);
   }, 25_000);
 
-  test("invalid target reports a target-specific remedy and redacts userinfo/query", async () => {
-    const result = await runCli(["principal", "disable", "alice", "--instance", "http://user:pass@%bad/?token=topsecret", "--admin-pass", "pass"], { HOME: scratch });
+  test("unparseable target reports a target-specific remedy without printing supplied URL text", async () => {
+    const result = await runCli(["principal", "disable", "alice", "--instance", "http://%bad/path-secret", "--admin-pass", "pass"], { HOME: scratch });
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("invalid --instance target");
     expect(result.stderr).toContain("operations API address");
-    expect(result.stderr).not.toContain("user:pass");
-    expect(result.stderr).not.toContain("topsecret");
+    expect(result.stderr).toContain("<unparseable URL>");
+    expect(result.stderr).not.toContain("path-secret");
+    expect(result.stderr).not.toContain("http://%bad/path-secret");
   }, 25_000);
 
   test("a parseable URL containing userinfo is refused without printing either secret", async () => {

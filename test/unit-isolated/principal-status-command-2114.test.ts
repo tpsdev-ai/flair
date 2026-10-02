@@ -135,14 +135,15 @@ describe("principal state command, socket-free", () => {
     expect(result.logs).not.toContain("deactivated");
   });
 
-  test("invalid target has a target remedy and no URL secrets", async () => {
-    const result = await invoke("disable", ["--instance", "http://user:pass@%bad/?token=topsecret", "--admin-pass", "pass"], ok);
+  test("unparseable target prints a fixed placeholder and none of the supplied URL text", async () => {
+    const result = await invoke("disable", ["--instance", "http://%bad/path-secret", "--admin-pass", "pass"], ok);
     expect(result.exited).toBe(true);
     expect(result.calls).toHaveLength(0);
     expect(result.errors).toContain("invalid --instance target");
     expect(result.errors).toContain("operations API address");
-    expect(result.errors).not.toContain("user:pass");
-    expect(result.errors).not.toContain("topsecret");
+    expect(result.errors).toContain("<unparseable URL>");
+    expect(result.errors).not.toContain("path-secret");
+    expect(result.errors).not.toContain("http://%bad/path-secret");
   });
 
   test("fetch error prints only its code and redacts the target query", async () => {
