@@ -99,12 +99,12 @@ export function resolveInitAdminPasswordSource(
     return "reuse-existing";
   }
 
-  if (!adminPassFileExists && !persisted && !reset) {
-    return "generate-new";
+  if (explicit && !reset) {
+    return "re-persist";
   }
 
-  if (persisted && explicit && !reset) {
-    return "re-persist";
+  if (!adminPassFileExists && !persisted && !reset) {
+    return "generate-new";
   }
 
   // Rotate is production credential rotation. The ONLY way in is the

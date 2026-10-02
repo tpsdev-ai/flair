@@ -10,3 +10,6 @@
   The detector now reads the `hdb_user/` store with Harper's own engine (and
   keeps the LMDB paths for older directories); an unreadable system store is
   refused rather than read as "no user".
+
+  Fresh local `flair init` saves an explicit admin credential to
+  `~/.flair/admin-pass` (0600) on every platform.

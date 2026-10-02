@@ -49,7 +49,7 @@ First run does six things:
 5. Wires every MCP client it detects — Claude Code, Cursor, Codex CLI, Gemini CLI — to `npx -y @tpsdev-ai/flair-mcp`, then smoke-tests it. `--no-mcp` skips this.
 6. Opens a short **soul wizard** so your agent knows who it is.
 
-It also generates a Harper admin password and writes it to `~/.flair/admin-pass` (mode 0600). The CLI prints that **path**, never the value — read the file when a command needs the password, and prefer `--admin-pass-file ~/.flair/admin-pass` over pasting it into a command line.
+It also saves the supplied or generated Harper admin password to `~/.flair/admin-pass` (mode 0600). Read the file when a command needs the password, and prefer `--admin-pass-file ~/.flair/admin-pass` over pasting it into a command line.
 
 The soul wizard offers a few shapes:
 

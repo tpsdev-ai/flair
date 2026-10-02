@@ -13,7 +13,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
@@ -129,6 +129,40 @@ beforeAll(() => {
 afterAll(() => {
   try { stopHarper(); } catch { /* best effort */ }
   if (root) rmSync(root, { recursive: true, force: true });
+});
+
+describe.skipIf(process.platform !== "linux")("fresh explicit credentials on a real Harper install", () => {
+  for (const source of ["inline", "file", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD"] as const) {
+    test(`${source}: persists 0600 and doctor reports no admin-pass desync`, async () => {
+      stopHarper();
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+      mkdirSync(home, { recursive: true });
+      const password = "fixture-fresh-explicit-password";
+      const args = ["--data-dir", dataDir, "--port", String(httpPort), "--ops-port", String(opsPort), ...SKIP_EXTRAS];
+      const env: Record<string, string> = {};
+      if (source === "inline") args.push("--admin-pass", password);
+      else if (source === "file") {
+        const input = join(home, "input-pass");
+        writeFileSync(input, password + "\n", { mode: 0o600 });
+        args.push("--admin-pass-file", input);
+      } else env[source] = password;
+      const result = await runInit(args, env);
+      expect(result.code, result.out).toBe(0);
+      expect(readFileSync(adminPassPath, "utf8")).toBe(password + "\n");
+      expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
+      expect(detectPersistedAdminUser(dataDir)).toBe(true);
+      symlinkSync(dataDir, join(home, ".flair", "data"));
+      const doctor = spawnSync(process.execPath, [CLI, "doctor", "--port", String(httpPort)], {
+        cwd: REPO_ROOT, env: initEnv(), encoding: "utf8", timeout: 30_000,
+      });
+      expect(doctor.error).toBeUndefined();
+      expect(doctor.signal).toBeNull();
+      expect(doctor.stdout).toContain("Flair Doctor");
+      expect(doctor.stdout).not.toContain("admin-pass file missing");
+      expect(doctor.stdout).not.toContain("not assessing the admin-pass desync");
+    }, 180_000);
+  }
 });
 
 describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
