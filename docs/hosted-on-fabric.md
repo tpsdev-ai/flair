@@ -63,7 +63,7 @@ On Fabric / managed deploys, environment variables are provisioned through Harpe
 
 ### How `flair mcp enable` delivers its secrets
 
-`flair mcp enable` needs five variables live in the target's process before it restarts — including `FLAIR_MCP_OAUTH` and the RS256 signing key, both read from `process.env` only and therefore impossible to deliver via `set_configuration`.
+`flair mcp enable` needs five variables live in the target's process before it restarts — including `FLAIR_MCP_OAUTH`, which is read from `process.env` only and therefore impossible to deliver via `set_configuration`.
 
 It asks the target what it can do, rather than assuming from the hostname or the version:
 

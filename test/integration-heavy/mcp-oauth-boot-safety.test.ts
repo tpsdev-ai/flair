@@ -31,6 +31,13 @@
  *      and NO signing key boots CLEAN — the block no longer declares
  *      signingKeyPem, so @harperfast/oauth self-generates (and persists) a key
  *      instead of refusing the load over an unresolved placeholder.
+ *   2c. DECLARED PIN STILL FAILS (flair#2194): a config that DOES declare
+ *      `signingKeyPem: ${VAR}` with the variable unset still degrades the boot,
+ *      the load error naming the variable — the library's check is NOT loosened.
+ *   2d. NO PROVIDER (flair#2194): MCP on with no provider configured boots
+ *      clean but serves neither RFC 9728 protected-resource form and denies
+ *      /mcp — the fail-closed shape, kept separate from the provider-configured
+ *      200 in case 5.
  *   3. MUTATION-PROVE (literal true): mcp.enabled: true + env unset -> boots
  *      DEGRADED. Proves test 2's clean-boot assertions CAN fire.
  *   4. GARBAGE VALUE (flair#1152 residual): FLAIR_MCP_OAUTH=maybe. Measured
@@ -291,6 +298,61 @@ describe("flair#2194 boot-safety: shipped config with MCP on and no signing key"
   );
 });
 
+// ─── 2c/2d. DECLARED PIN FAILS / NO PROVIDER (flair#2194) ────────────────────
+
+describe("flair#2194: a declared signingKeyPem with an unset variable still fails the boot loudly", () => {
+  test(
+    "mcp.signingKeyPem declared with `${FLAIR_MCP_SIGNING_KEY_PEM}` unset: the plugin load is refused, naming the variable",
+    async () => {
+      clearMcpEnv();
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
+      const workDir = makeWorkDirWithShippedConfig("flair-declared-pin-", (shipped) =>
+        shipped.replace("    enabled: ${FLAIR_MCP_OAUTH}", "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}"),
+      );
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      instances.push(harper);
+
+      // The library's hard check is intact: a DECLARED, unresolved pin degrades the boot.
+      const healthRes = await fetch(`${harper.httpURL}/health`, { signal: AbortSignal.timeout(10_000) });
+      expect(healthRes.status).toBe(500);
+      // The plugin's load error names the variable, in the instance's own log.
+      const log = harper.getLog?.() ?? "";
+      expect(log).toContain("mcp.signingKeyPem is the unresolved env placeholder");
+      expect(log).toContain("${FLAIR_MCP_SIGNING_KEY_PEM}");
+    },
+    120_000,
+  );
+});
+
+describe("flair#2194: MCP on with NO provider configured — fail-closed discovery", () => {
+  test(
+    "no OAUTH_GITHUB_* set: boots clean, but both protected-resource forms 404 and /mcp denies (401)",
+    async () => {
+      clearMcpEnv();
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
+      const workDir = makeWorkDirWithShippedConfig("flair-no-provider-");
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      instances.push(harper);
+
+      const opsRes = await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) });
+      expect(opsRes.status).toBe(200);
+
+      // @harperfast/oauth 2.8.1 skips the uncredentialed github provider, so the
+      // plugin ends with none and clears its MCP config: no discovery documents.
+      for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"]) {
+        const res = await fetch(`${harper.httpURL}${path}`, { signal: AbortSignal.timeout(10_000) });
+        expect(res.status).toBe(404);
+      }
+      // /mcp is still mounted by flair and denies the unauthenticated request.
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
+      expect(mcpRes.status).toBe(401);
+    },
+    120_000,
+  );
+});
+
 // ─── 3. MUTATION-PROVE: enabled:true + no env → DEGRADED ────────────────────
 
 describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
@@ -370,15 +432,8 @@ describe("flair#1152 garbage value: FLAIR_MCP_OAUTH=maybe", () => {
       // an assertion below flips — re-derive the whole table before shipping
       // that change.
       clearMcpEnv();
-      const { generateKeyPairSync } = await import("node:crypto");
-      const { privateKey } = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: "spki", format: "pem" },
-        privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      });
       process.env.FLAIR_MCP_OAUTH = "maybe";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = privateKey;
       process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
       process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
       process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
@@ -451,15 +506,8 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
       // (and it is what buildSecretsBundle stages). With "1" this test fails:
       // /mcp is guarded (flair on) but the AS metadata 404s (component off).
       clearMcpEnv();
-      const { generateKeyPairSync } = await import("node:crypto");
-      const { privateKey } = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: "spki", format: "pem" },
-        privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      });
       process.env.FLAIR_MCP_OAUTH = "true";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = privateKey;
       process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
       process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
       process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
@@ -520,7 +568,7 @@ describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
     async () => {
       // The exact state a regression re-staging '1' in buildSecretsBundle
       // (src/lib/mcp-enable.ts) would deploy: the FULL enablement env —
-      // issuer, signing key, IdP credentials — with the flag spelled "1".
+      // issuer, IdP credentials — with the flag spelled "1".
       // flair's strict reader (resources/mcp-oauth-flag.ts) accepts 1/true/
       // yes/on; the component's coerceConfigBoolean accepts ONLY "true"/
       // "false" and DELETES anything else, so its disabled default applies.
@@ -529,15 +577,8 @@ describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
       // Fail-closed (no unauthenticated data path), but broken; case 5 pins
       // the one spelling that works, this pins the divergence itself.
       clearMcpEnv();
-      const { generateKeyPairSync } = await import("node:crypto");
-      const { privateKey } = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: "spki", format: "pem" },
-        privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      });
       process.env.FLAIR_MCP_OAUTH = "1";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = privateKey;
       process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
       process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
       process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";

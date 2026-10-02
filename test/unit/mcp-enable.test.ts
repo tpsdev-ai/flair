@@ -18,8 +18,7 @@
  *   - the orchestration order (dry-run stops after the local/pure steps;
  *     the live path ends at self-verify — no DCR call after restart)
  *   - local-origin refusal (the exact addendum message, zero fetch calls)
- *   - dry-run (no remote calls and no file written: the signing-key step
- *     reports the key a real run would reuse or generate — flair#2113)
+ *   - dry-run (no remote calls and no file written)
  *   - self-verify failure names the step to re-run, never reports success
  *     on hope — including the new CIMD-not-advertised failure mode
  *   - disable symmetry (flag-off confirmation gate, then restart only)
@@ -31,6 +30,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 import yaml from "js-yaml";
 
@@ -39,8 +39,6 @@ import {
   checkLocalOriginRefusal,
   isFabricOrigin,
   selectSecretsMechanism,
-  generateRsaSigningKeyPair,
-  ensureSigningKeyFile,
   buildMcpOAuthConfigBlock,
   idpCallbackUrl,
   buildSecretsBundle,
@@ -144,34 +142,6 @@ describe("isFabricOrigin / selectSecretsMechanism", () => {
   });
 });
 
-// ─── RS256 keypair (Sherlock: generateKeyPairSync, not a PRNG shortcut) ─────
-
-describe("generateRsaSigningKeyPair / ensureSigningKeyFile", () => {
-  test("produces a real RSA keypair via crypto.generateKeyPairSync (PEM-shaped, 2048-bit)", () => {
-    const { publicKey, privateKey } = generateRsaSigningKeyPair();
-    expect(privateKey).toContain("BEGIN PRIVATE KEY");
-    expect(publicKey).toContain("BEGIN PUBLIC KEY");
-  });
-
-  test("generates + writes a 0600 file on first call", () => {
-    const path = join(dir, "signing-key.pem");
-    const result = ensureSigningKeyFile(path);
-    expect(result.reused).toBe(false);
-    expect(existsSync(path)).toBe(true);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(readFileSync(path, "utf-8")).toContain("BEGIN PRIVATE KEY");
-  });
-
-  test("reuses an existing key file instead of rotating it (idempotent)", () => {
-    const path = join(dir, "signing-key.pem");
-    const first = ensureSigningKeyFile(path);
-    const firstContent = readFileSync(path, "utf-8");
-    const second = ensureSigningKeyFile(path);
-    expect(second.reused).toBe(true);
-    expect(readFileSync(path, "utf-8")).toBe(firstContent);
-  });
-});
-
 // ─── config block (Sherlock: accessTokenTtl must be explicit 900; flair#756:
 // DCR must be explicitly disabled, CIMD allowedHosts must be set) ───────────
 
@@ -268,10 +238,9 @@ describe("idpCallbackUrl", () => {
 // ─── secrets bundle + staging file ───────────────────────────────────────────
 
 describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () => {
-  test("bundle includes the flag, issuer, signing key, and IdP creds — no DCR token field", () => {
+  test("bundle includes the flag, issuer, and IdP creds — no signing key, no DCR token field", () => {
     const bundle = buildSecretsBundle({
       issuer: ISSUER,
-      signingKeyPem: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----",
       idpProvider: "github",
       idpClientId: "client-id-value",
       idpClientSecret: "client-secret-value",
@@ -282,7 +251,7 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
     // authorization server behind it.
     expect(bundle.FLAIR_MCP_OAUTH).toBe("true");
     expect(bundle.FLAIR_MCP_ISSUER).toBe(ISSUER);
-    expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toContain("BEGIN PRIVATE KEY");
+    expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toBeUndefined();
     expect(bundle.OAUTH_GITHUB_CLIENT_ID).toBe("client-id-value");
     expect(bundle.OAUTH_GITHUB_CLIENT_SECRET).toBe("client-secret-value");
     expect(bundle.OAUTH_GITHUB_REDIRECT_URI).toBe("https://flair.example.com/oauth");
@@ -297,7 +266,6 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
   ])("GitHub credentials include the redirect base for issuer %s", (issuer, redirectUri) => {
     const bundle = buildSecretsBundle({
       issuer,
-      signingKeyPem: "key",
       idpProvider: "github",
       idpClientId: "client-id-value",
       idpClientSecret: "client-secret-value",
@@ -314,7 +282,6 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
       try {
         buildSecretsBundle({
           issuer,
-          signingKeyPem: "key",
           idpProvider: "github",
           idpClientId: "client-id-value",
           idpClientSecret: "client-secret-value",
@@ -1016,7 +983,6 @@ const BASE_PARAMS = {
 
 function tempPaths() {
   return {
-    signingKeyFilePath: join(dir, "signing-key.pem"),
     secretsStagingPath: join(dir, "secrets.env"),
     localConfigPath: join(dir, "config.yaml"),
   };
@@ -1037,7 +1003,7 @@ describe("enableMcp — local-origin refusal", () => {
 });
 
 describe("enableMcp — dry-run", () => {
-  test("writes no file: reports where a signing key would be generated, and stops before any remote call", async () => {
+  test("writes no file, generates no signing key, and stops before any remote call", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const paths = tempPaths();
     const listingBefore = readdirSync(dir).sort();
@@ -1047,30 +1013,11 @@ describe("enableMcp — dry-run", () => {
     expect(result.ok).toBe(true);
     expect(result.dryRun).toBe(true);
     expect(calls).toHaveLength(0);
-    // flair#2113 review: --dry-run no longer creates the key.
-    expect(existsSync(paths.signingKeyFilePath)).toBe(false);
     expect(readdirSync(dir).sort()).toEqual(listingBefore);
     expect(readFileSync(paths.localConfigPath, "utf-8")).toBe(configBefore);
-    const keyStep = result.steps.find((s) => s.step === "signing-key");
-    expect(keyStep?.ok).toBe(true);
-    expect(keyStep?.detail).toContain(`no signing key at ${paths.signingKeyFilePath}; a run without --dry-run generates one there`);
-    expect(result.signingKeyFilePath).toBe(paths.signingKeyFilePath);
     expect(result.issuer).toBe(ISSUER);
     expect(result.resource).toBe(`${ISSUER}/mcp`);
     expect(result.callbackUrl).toBe(`${ISSUER}/oauth/github/callback`);
-  });
-
-  test("an existing signing key is reported as reused and left byte-identical", async () => {
-    const { fetchImpl, calls } = fullMockFetch();
-    const paths = tempPaths();
-    writeFileSync(paths.signingKeyFilePath, "EXISTING-KEY-BYTES", { mode: 0o600 });
-    const result = await enableMcp({ ...BASE_PARAMS, ...paths, dryRun: true }, { fetchImpl });
-
-    expect(result.ok).toBe(true);
-    expect(calls).toHaveLength(0);
-    expect(readFileSync(paths.signingKeyFilePath, "utf-8")).toBe("EXISTING-KEY-BYTES");
-    const keyStep = result.steps.find((s) => s.step === "signing-key");
-    expect(keyStep?.detail).toContain(`signing key found at ${paths.signingKeyFilePath}; a run without --dry-run reuses it`);
   });
 
   test("still fails at idp-credentials when required values are missing, even in dry-run", async () => {
@@ -1101,7 +1048,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
 
   function pushedSecretsFetch() {
     const { fetchImpl: baseFetch, calls } = fullMockFetch();
-    const { publicKey } = generateRsaSigningKeyPair();
+    const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
     const setNames: string[] = [];
     const readBackNames: string[] = [];
     const fetchImpl = (async (url: any, init?: RequestInit) => {
@@ -1143,7 +1090,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
       { fetchImpl, confirmPrompt: async (message) => { prompt = message; return false; } },
     );
     expect(result.ok).toBe(false);
-    expect(prompt).toBe(`Have you applied the 6 vars staged at ${join(dir, "secrets.env")} to ${ISSUER}'s environment?`);
+    expect(prompt).toBe(`Have you applied the 5 vars staged at ${join(dir, "secrets.env")} to ${ISSUER}'s environment?`);
   });
 
   test("pushed and read-back Fabric secrets, without confirmation: asks for a restart and never calls restart", async () => {
@@ -1239,7 +1186,6 @@ describe("enableMcp — full happy path", () => {
     expect(result.steps.every((s) => s.ok)).toBe(true);
     expect(result.steps.map((s) => s.step)).toEqual([
       "local-origin-check",
-      "signing-key",
       "config-block",
       "idp-credentials",
       "secrets-provisioning",
@@ -1937,7 +1883,6 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
         idpSubject: "octocat",
         adminUser: "admin",
         adminPass: "pw",
-        signingKeyFilePath: join(dir, "signing-key.pem"),
         secretsStagingPath: join(dir, "secrets.env"),
         confirmSecretsApplied: true,
       },
@@ -1972,7 +1917,6 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     idpSubject: "octocat",
     adminUser: "admin",
     adminPass: "pw",
-    signingKeyFilePath: join(dir, "signing-key.pem"),
     secretsStagingPath: join(dir, "secrets.env"),
     confirmSecretsApplied: true,
   });
@@ -2142,7 +2086,7 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
   });
 
   test("Fabric first run after an env-secrets push: matching target metadata still needs public activation", async () => {
-    const { publicKey } = generateRsaSigningKeyPair();
+    const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
     let metadataReads = 0;
     const { fetchImpl } = fabricFetch(
       async () => ++metadataReads === 1
@@ -2210,7 +2154,6 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
         idpSubject: "octocat",
         adminUser: "admin",
         adminPass: "pw",
-        signingKeyFilePath: join(dir, "signing-key.pem"),
         secretsStagingPath: join(dir, "secrets.env"),
         confirmSecretsApplied: true,
       },

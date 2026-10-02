@@ -354,8 +354,6 @@ flair mcp enable \
 When it finishes, it prints each step it ran, marked ✓ or ✗. The steps that
 act:
 
-- `signing-key` creates `~/.flair/mcp-signing-key.pem` (or the
-  `--signing-key-file` path), or reuses the file if it exists.
 - `idp-credentials` checks that the OAuth app's client id and secret are
   present; in a terminal, the command prompts for them before the steps run.
 - `secrets-provisioning` always stages the secrets the instance needs in a local
