@@ -40,8 +40,8 @@ export interface UnitStep {
 //   - `root unit tests`, the one long step: 252–327 s (280 s locally);
 //   - every other step at most 33 s (a CLI-spawning isolated test); in that
 //     set the median is 1–2 s.
-// The budget is 1.5× the slowest measured lane (510 s), so a runner no more
-// than half again as slow as the worst observed still finishes; the old 510 s
+// The budget is whole-lane headroom: about 1.53× the slowest measured lane
+// (510 s), still subject to each step's own limit below; the old 510 s
 // budget was under that worst lane and killed whichever late step was running
 // on a busy runner (flair#2224: `flair-mcp` on #2220, `adk-flair-js` on main).
 // unit-runner.test.ts pins the job limit and re-checks the arithmetic, so a
@@ -57,8 +57,8 @@ export const CI_JOB_LIMIT_MS = 15 * 60_000;
 /** Reserved for the job's own steps outside the lane: 53 s measured, 67 s spare. */
 export const CI_OUTSIDE_LANE_MS = 120_000;
 /**
- * Keep-going's whole-lane budget: 900 − 120 = 780 s, 1.5× the slowest measured
- * lane (510 s). A step still running when it runs out is killed and every later
+ * Keep-going's whole-lane budget: 900 − 120 = 780 s, about 1.53× the slowest
+ * measured lane (510 s). A step still running when it runs out is killed and every later
  * step is reported as not run, so the summary and both guards are expected to
  * print before the job limit however many steps hang, provided the job's steps
  * outside the lane stay within the reserve above (an observed margin, not a
