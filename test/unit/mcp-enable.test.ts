@@ -674,6 +674,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     ["a bare host name", { opsPortOrUrl: "flair.example.com" }, "opsPortOrUrl <unparseable value> names"],
     ["host:port with no scheme", { opsPortOrUrl: "127.0.0.1:19925" }, "opsPortOrUrl <unparseable value> names"],
     ["a non-http scheme", { opsPortOrUrl: "ftp://ops.example.com:21" }, "opsPortOrUrl ftp://ops.example.com names"],
+    ["a parsed ops URL without a hostname", { opsPortOrUrl: "file:///tmp" }, "opsPortOrUrl <unparseable value> names"],
     ["a URL with a path", { opsPortOrUrl: "http://127.0.0.1:19925/ops" }, "opsPortOrUrl http://127.0.0.1:19925 names"],
     ["a URL with a query", { opsPortOrUrl: "http://127.0.0.1:19925/?a=1" }, "opsPortOrUrl http://127.0.0.1:19925 names"],
     ["port 0", { opsPortOrUrl: 0 }, "opsPortOrUrl <unparseable value> names"],
@@ -684,6 +685,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     ["neither form", {}, "got neither opsPortOrUrl nor hostedOrigin"],
     ["an unparseable hostedOrigin", { hostedOrigin: "::::not a url::::" }, "hostedOrigin <unparseable value> as a served origin"],
     ["a non-http hostedOrigin", { hostedOrigin: "ftp://flair.example.com" }, "hostedOrigin ftp://flair.example.com as a served origin"],
+    ["a parsed hostedOrigin without a hostname", { hostedOrigin: "file:///tmp" }, "hostedOrigin <unparseable value> as a served origin"],
     ["a bare hostedOrigin", { hostedOrigin: "flair.example.com" }, "hostedOrigin <unparseable value> as a served origin"],
     ["a hostedOrigin with a path", { hostedOrigin: "https://flair.example.com/path" }, "hostedOrigin https://flair.example.com as a served origin"],
     ["a hostedOrigin with a query", { hostedOrigin: "https://flair.example.com/?x=1" }, "hostedOrigin https://flair.example.com as a served origin"],
@@ -733,7 +735,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     "https://ops.example.com/?",
     "https://ops.example.com/#",
   ] as const).flatMap((value) => (["opsPortOrUrl", "hostedOrigin"] as const).map((field) => [value, field] as const)))(
-    "rejects noncanonical URL %p as %s without echoing caller text",
+    "rejects noncanonical URL %p as %s without including its raw value or credentials",
     async (value, field) => {
       const attempted: string[] = [];
       const fetchImpl = (async (url: any) => {
@@ -753,14 +755,18 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     },
   );
 
-  test("a 404 from an address the caller named does not say `flair mcp enable` derived it", async () => {
+  test("a 404 from a caller-named ops URL gives a neutral hint, not a served-origin diagnosis", async () => {
     const { fetchImpl } = mockOpsFetch({ failFind: true, failFindStatus: 404 });
     const err = await provisionIdpIdentityMapping(
       { opsPortOrUrl: "https://ops.example.com:8443", ...MAPPING },
       { fetchImpl },
     ).then(() => null, (e: Error) => e);
     expect(err).toBeInstanceOf(Error);
-    expect(err!.message).toContain("https://ops.example.com:8443/ is the served origin rather than the ops API");
+    expect(err!.message).toContain("failed (HTTP 404)");
+    expect(err!.message).toContain("opsPortOrUrl names this address; verify that the ops API answers requests at https://ops.example.com:8443/");
+    expect(err!.message).not.toContain("served origin rather than the ops API");
+    expect(err!.message).not.toContain('REST component owns "/"');
+    expect(err!.message).not.toContain("DIFFERENT port");
     expect(err!.message).not.toContain("flair mcp enable");
   });
 

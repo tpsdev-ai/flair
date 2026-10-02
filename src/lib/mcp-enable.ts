@@ -1127,9 +1127,10 @@ const IDENTITY_MAPPING_TARGET_FORMS =
   `hostedOrigin as the same canonical http:// or https:// origin form, whose host is used at port ${HOSTED_OPS_PORT}. ` +
   `The string must exactly equal its parsed URL origin or that origin followed by /. No request was sent.`;
 
-/** Build a refused target's display only from parsed URL components. Never
- *  include caller text: userinfo, paths and even malformed text are untrusted.
- *  A URL without a hostname gets the same placeholder as an unparseable one. */
+/** Show only the parsed protocol, hostname and port of a refused target. The
+ *  display is built without interpolating the raw input, and excludes its
+ *  userinfo, path, query and fragment. Parsed components can match input text.
+ *  Use the placeholder for a non-string, a parse error or an empty hostname. */
 function showOpsTarget(value: unknown): string {
   if (typeof value !== "string") return "<unparseable value>";
   try {
@@ -1158,7 +1159,8 @@ function canonicalHttpOrigin(value: unknown): URL | null {
   return null;
 }
 
-/** Resolve the ops target, or throw naming the value and the accepted forms. */
+/** Resolve the ops target, or throw naming the field, its safe display and the
+ *  accepted forms. */
 function identityMappingOpsUrl(target: IdentityMappingOpsTarget): { url: string; hosted: boolean } {
   const { opsPortOrUrl, hostedOrigin } = target as { opsPortOrUrl?: unknown; hostedOrigin?: unknown };
   const refuse = (what: string): never => {
@@ -1292,18 +1294,15 @@ export async function provisionIdpIdentityMapping(
     // identity is absent — and saying "failed to look up principal 'x'" sends
     // the reader to look at principals, which is where an evening goes.
     //
-    // 404 in particular almost always means the request reached the SERVED
-    // origin instead of the ops API: the flair REST component owns `/` there and
-    // answers 404. Say that, and, when the address came from `hostedOrigin`
-    // (`enable`'s path), say where it came from: `enable` has no option to point
-    // its ops calls elsewhere (flair#2116: this hint used to name an --ops-url
-    // flag that does not exist).
+    // For `hostedOrigin`, retain the served-origin diagnosis and explain that
+    // `enable` derived the address: it has no option to point its ops calls
+    // elsewhere (flair#2116). A 404 at a caller-named opsPortOrUrl does not
+    // establish which service answered, so give that path a neutral hint.
     const hint =
       findRes.status === 404
-        ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port.` +
-          (target.hosted
-            ? ` \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
-            : "")
+        ? target.hosted
+          ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
+          : ` — opsPortOrUrl names this address; verify that the ops API answers requests at ${opsUrl}.`
         : "";
     throw new Error(
       `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
