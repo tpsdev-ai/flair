@@ -89,6 +89,10 @@ const seedAgentViaOpsApi = (
 ): Promise<void> => cli.seedAgentViaOpsApi(opsPortOrUrl, agentId, pubKeyB64url, adminUser, adminPass);
 const agentRecordIsAdmin = (record: any): boolean => cli.agentRecordIsAdmin(record);
 
+const INLINE_ADMIN_PASS_WARNING =
+  "warning: --admin-pass passed inline. Use FLAIR_ADMIN_PASS without typing its value into a recorded " +
+  "shell line (for example, read it from the admin-pass file).";
+
 interface StoredAgent {
   id: string;
   name?: string;
@@ -401,10 +405,7 @@ export function register(program: Command): void {
       // fromEnv is true ONLY when the resolved value came from env (no inline override).
       const adminPassFromEnv = !opts.adminPass && (!!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD);
       if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
-        console.error(
-          "warning: --admin-pass passed inline. Consider the FLAIR_ADMIN_PASS env " +
-          "to keep secrets out of shell history."
-        );
+        console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
       const mode = render.resolveOutputMode(opts);
@@ -532,10 +533,7 @@ export function register(program: Command): void {
       // fromEnv is true ONLY when the resolved value came from env (no inline override).
       const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
       if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
-        console.error(
-          "warning: --admin-pass passed inline. Consider the FLAIR_ADMIN_PASS env " +
-          "to keep secrets out of shell history."
-        );
+        console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const adminUser = resolveAdminUser(opts.adminUser);

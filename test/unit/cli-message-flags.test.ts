@@ -723,25 +723,52 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
   // flag in the same file must fail, whether it copies the original literal
   // exactly (the entry then matches two findings) or words it differently (a
   // finding no entry covers). The unmutated file is the control.
+  test("flair#2123: both inline-admin-password warnings give the history-safe remedy", async () => {
+    const home = mkdtempSync(join(tmpdir(), "flair-inline-password-warning-"));
+    const warning =
+      "warning: --admin-pass passed inline. Use FLAIR_ADMIN_PASS without typing its value into a recorded " +
+      "shell line (for example, read it from the admin-pass file).";
+    const rows = [
+      ["agent", "list", "--admin-pass", "test-only-inline-pass", "--port", "2"],
+      ["agent", "rotate-key", "warning-test", "--admin-pass", "test-only-inline-pass", "--ops-port", "1", "--keys-dir", join(home, "keys")],
+    ];
+    try {
+      for (const argv of rows) {
+        const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
+        for (const key of ["FLAIR_ADMIN_PASS", "FLAIR_OPS_TARGET", "FLAIR_TARGET", "HDB_ADMIN_PASSWORD"]) delete env[key];
+        const child = Bun.spawn(["bun", join(REPO, "src/cli.ts"), ...argv], {
+          timeout: 20_000,
+          env,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+        expect(exitCode).not.toBe(0);
+        expect(stderr.split(warning)).toHaveLength(2);
+        expect(stderr).not.toContain("the FLAIR_ADMIN_PASS env to keep secrets out of shell history");
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   // flair#2124: capture the same next-steps printer the deploy action calls.
-  // Execute its example through the real commander entry point with an owner-only
-  // password file; the asserted "could not read Agent" result proves execution
-  // reached the Agent read path after the remote credential guard.
+  // Execute its example through a POSIX shell and the real commander entry point
+  // with an owner-only password file. The URL includes shell metacharacters and
+  // an embedded quote; reaching the Agent read path proves --target stayed one
+  // value through shell parsing and passed the remote credential guard.
   test("flair#2124: the emitted deploy example reaches the Agent read path", async () => {
+    const target = "http://127.0.0.1:2/path?owner=O'Brien&mode=deploy";
     const output: string[] = [];
     const log = spyOn(console, "log").mockImplementation((line: unknown) => { output.push(String(line)); });
     try {
-      printDeployNextSteps("http://127.0.0.1:2");
+      printDeployNextSteps(target);
     } finally {
       log.mockRestore();
     }
     const line = output.find((l) => l.trim().startsWith("flair agent add "));
     expect(line).toBeTruthy();
-    const words = line!.trim().split(/\s+/);
-    expect(words.slice(0, 3)).toEqual(["flair", "agent", "add"]);
-    expect(words).toContain("my-agent");
-    expect(words).toContain("--target");
-    expect(words).toContain("--admin-pass-file");
+    expect(line).toContain(`--target 'http://127.0.0.1:2/path?owner=O'\\''Brien&mode=deploy'`);
     const accepted = registry.get("agent add");
     expect(accepted).toBeTruthy();
     for (const flag of line!.match(FLAG_TOKEN) ?? []) expect(accepted!.has(flag)).toBe(true);
@@ -752,12 +779,14 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
     try {
       writeFileSync(passwordFile, secret + "\n", { mode: 0o600 });
       chmodSync(passwordFile, 0o600);
-      const argv = words.slice(1).map((word) => word === "/path/to/admin-password" ? passwordFile : word);
-      expect(argv).not.toContain(secret);
+      const shellCommand = line!.trim()
+        .replace(/^flair\b/, `bun '${join(REPO, "src/cli.ts").replace(/'/g, `'\\''`)}'`)
+        .replace("/path/to/admin-password", `'${passwordFile.replace(/'/g, `'\\''`)}'`);
+      expect(shellCommand).not.toContain(secret);
       const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
       delete env.FLAIR_ADMIN_PASS;
       delete env.FLAIR_OPS_TARGET;
-      const child = Bun.spawn(["bun", join(REPO, "src/cli.ts"), ...argv], {
+      const child = Bun.spawn(["/bin/sh", "-c", shellCommand], {
         timeout: 20_000,
         env,
         stdout: "pipe",
@@ -767,6 +796,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       expect(exitCode).not.toBe(0);
       expect(stderr).toContain("could not read Agent 'my-agent'");
       expect(stderr).not.toContain("is required for agent add");
+      expect(stderr).not.toContain("command not found");
       expect(stderr).not.toContain(secret);
     } finally {
       rmSync(home, { recursive: true, force: true });
