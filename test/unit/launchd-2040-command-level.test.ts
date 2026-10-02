@@ -638,11 +638,11 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
       const plistBytes = passFilePlist(fx.label);
       writeFileSync(fx.plistPath, plistBytes);
       const pid = await startDirectStub({ STUB_HOLD_ON_SIGTERM: "1" });
-      const run = await drive("repair", { dataDir: fx.dataDir, port: fx.port }, {}, 20_000);
+      const run = await drive("repair", { dataDir: fx.dataDir, port: fx.port }, {}, 90_000);
       expect(run.result.kind).toBe("failed");
       expect(run.result.detail).toContain(`waiting for direct Harper process ${pid}`);
-      expect(run.result.detail).toContain("to exit after SIGTERM; it is still alive");
-      expect(run.result.remedy.join(" ")).toContain("after it exits, run flair doctor --fix");
+      expect(run.result.detail).toContain("not observed to exit before the deadline");
+      expect(run.result.remedy.join(" ")).toContain("run flair doctor --fix after resolving the stop failure");
       expect(signals()).toBe(`SIGTERM ${pid}\n`);
       expect(hdbPid()).toBeNull();
       expect(alive(pid)).toBe(true);
@@ -651,7 +651,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
       expect(mutatingCalls()).toEqual([]);
       expect(readFileSync(fx.plistPath, "utf-8")).toBe(plistBytes);
     },
-    30_000,
+    100_000,
   );
 
   test.skipIf(!isDarwin)(
