@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=133 options=587
+# commands=133 options=590
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -2268,6 +2268,15 @@ flair bridge import
     --source <path>
       description: Source directory (for directory-based imports like markdown)
       attr: source
+    --user <id>
+      description: Foreign-system user id for bridges that import one user (e.g. mem0)
+      attr: user
+    --base-url <url>
+      description: Base URL of the foreign API for API bridges (e.g. a self-hosted mem0)
+      attr: baseUrl
+    --api-key-file <path>
+      description: For API bridges with an apiKey option, read the key from a file that has no group/world permissions (chmod 600 recommended); or, if the bridge declares an environment variable, set that instead (e.g. MEM0_API_KEY).
+      attr: apiKeyFile
 
 flair bridge export
   description: Export memories from Flair to a foreign system via a bridge (Shape A YAML / built-in)
@@ -5175,19 +5184,29 @@ Import memories from a foreign system into Flair via a bridge (Shape A YAML /
 built-in)
 
 Options:
-  --agent <id>     Default agent ID for memories that don't carry one (or set
-                   FLAIR_AGENT_ID)
-  --cwd <dir>      Filesystem root the descriptor's relative paths resolve
-                   against (default: cwd)
-  --dry-run        Validate + count, don't write to Flair
-  --port <port>    Harper HTTP port
-  --url <url>      Flair base URL (overrides --port)
-  --key <path>     Ed25519 private key path (default: resolved from agent)
-  --source <path>  Source directory (for directory-based imports like markdown)
-  -h, --help       display help for command
+  --agent <id>           Default agent ID for memories that don't carry one (or
+                         set FLAIR_AGENT_ID)
+  --cwd <dir>            Filesystem root the descriptor's relative paths resolve
+                         against (default: cwd)
+  --dry-run              Validate + count, don't write to Flair
+  --port <port>          Harper HTTP port
+  --url <url>            Flair base URL (overrides --port)
+  --key <path>           Ed25519 private key path (default: resolved from agent)
+  --source <path>        Source directory (for directory-based imports like
+                         markdown)
+  --user <id>            Foreign-system user id for bridges that import one user
+                         (e.g. mem0)
+  --base-url <url>       Base URL of the foreign API for API bridges (e.g. a
+                         self-hosted mem0)
+  --api-key-file <path>  For API bridges with an apiKey option, read the key
+                         from a file that has no group/world permissions (chmod
+                         600 recommended); or, if the bridge declares an
+                         environment variable, set that instead (e.g.
+                         MEM0_API_KEY).
+  -h, --help             display help for command
 
 Global Options:
-  -v, --version    output the version number
+  -v, --version          output the version number
 
 ----- flair bridge export -----
 Usage: flair bridge export [options] <name> <dst>
