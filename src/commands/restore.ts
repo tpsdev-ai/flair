@@ -1,7 +1,6 @@
 /**
  * restore.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair restore`.
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
@@ -64,7 +63,38 @@ program
       process.exit(1);
     }
 
-    const { agents = [], memories = [], souls = [] } = backup;
+    const { agents, memories, souls } = backup;
+    const collections = [
+      { name: "Agent", rows: agents },
+      { name: "Soul", rows: souls },
+      { name: "Memory", rows: memories },
+    ];
+    const failures: string[] = [];
+    const message = (err: unknown): string => err instanceof Error ? err.message : String(err);
+    function fail(): void {
+      for (const failure of failures) console.error(`Error: ${failure}`);
+      process.exitCode = 1;
+    }
+    for (const { name, rows } of collections) {
+      if (!Array.isArray(rows)) {
+        failures.push(`${name}: archive collection is not an array`);
+        continue;
+      }
+      for (const [index, row] of rows.entries()) {
+        if (!row || typeof row !== "object" || Array.isArray(row)
+          || typeof row.id !== "string" || !row.id
+          || (name !== "Agent" && (typeof row.agentId !== "string" || !row.agentId))) {
+          failures.push(`${name} row ${index} (${row?.id ?? "missing ID"}): invalid archived row`);
+          continue;
+        }
+        try {
+          encodeRecordId(row.id);
+        } catch (err) {
+          failures.push(`${name} ${row.id}: ${message(err)}`);
+        }
+      }
+    }
+    if (failures.length) { fail(); return; }
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
     console.log(`Restoring from: ${backupPath}`);
@@ -104,51 +134,58 @@ program
       }
     }
 
-    // Replace mode: delete existing data for these agents first
+    const label = (name: string, row: any): string =>
+      `${name} ${row.id}${name === "Agent" ? "" : ` (agent ${row.agentId})`}`;
+
     if (mode === "replace") {
       console.log("\nDeleting existing data (replace mode)...");
-      for (const memory of memories) {
-        if (memory.id) await adminDelete(`/Memory/${encodeRecordId(String(memory.id))}`).catch((e) => console.warn(`  warn: ${e.message}`));
+      for (const { name, rows } of collections.filter(({ name }) => name !== "Agent")) {
+        for (const row of rows) {
+          try {
+            await adminDelete(`/${name}/${encodeRecordId(row.id)}`);
+          } catch (err) {
+            failures.push(`${label(name, row)}: DELETE failed: ${message(err)}`);
+          }
+        }
       }
-      for (const soul of souls) {
-        if (soul.id) await adminDelete(`/Soul/${encodeRecordId(String(soul.id))}`).catch((e) => console.warn(`  warn: ${e.message}`));
+      if (failures.length) { fail(); return; }
+    }
+
+    for (const { name, rows } of collections) {
+      console.log(`Restoring ${name} records...`);
+      for (const row of rows) {
+        try {
+          await adminPut(`/${name}/${encodeRecordId(row.id)}`, row);
+        } catch (err) {
+          failures.push(`${label(name, row)}: PUT failed: ${message(err)}`);
+        }
       }
     }
 
-    // Restore agents
-    console.log("\nRestoring agents...");
-    let agentCount = 0;
-    for (const agent of agents) {
-      try {
-        await adminPut(`/Agent/${encodeRecordId(String(agent.id))}`, agent);
-        agentCount++;
-      } catch (err: any) {
-        console.warn(`  warn: agent ${agent.id}: ${err.message}`);
+    for (const { name, rows } of collections) {
+      for (const row of rows) {
+        const path = `/${name}/${encodeRecordId(row.id)}`;
+        try {
+          const res = await fetch(`${baseUrl}${path}`, {
+            headers: { Authorization: auth },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!res.ok) throw new Error(`GET ${path} failed (${res.status}): ${await res.text()}`);
+          const restored = await res.json();
+          if (!restored || typeof restored !== "object" || Array.isArray(restored)
+            || restored.id !== row.id
+            || (name !== "Agent" && restored.agentId !== row.agentId)) {
+            throw new Error(`GET ${path} did not return the requested row and agent`);
+          }
+        } catch (err) {
+          failures.push(`${label(name, row)}: verification failed: ${message(err)}`);
+        }
       }
     }
-
-    // Restore souls before memories: refuseLearnedSoulWrite matches Memory text.
-    console.log("Restoring souls...");
-    let soulCount = 0;
-    for (const soul of souls) {
-      try {
-        await adminPut(`/Soul/${encodeRecordId(String(soul.id))}`, soul);
-        soulCount++;
-      } catch (err: any) {
-        console.warn(`  warn: soul ${soul.id}: ${err.message}`);
-      }
-    }
-
-    console.log("Restoring memories...");
-    let memoryCount = 0;
-    for (const memory of memories) {
-      try {
-        await adminPut(`/Memory/${encodeRecordId(String(memory.id))}`, memory);
-        memoryCount++;
-      } catch (err: any) {
-        console.warn(`  warn: memory ${memory.id}: ${err.message}`);
-      }
-    }
+    if (failures.length) { fail(); return; }
+    const agentCount = agents.length;
+    const memoryCount = memories.length;
+    const soulCount = souls.length;
 
     console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, "Restore complete")}`);
     console.log(render.kv("Agents restored", `${render.wrap(render.c.bold, String(agentCount))}${render.wrap(render.c.dim, `/${agents.length}`)}`));
