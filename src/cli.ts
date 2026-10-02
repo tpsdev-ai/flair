@@ -18,6 +18,7 @@ import {
   readdirSync,
   statSync,
   lstatSync,
+  fstatSync,
   realpathSync,
   unlinkSync,
   chownSync,
@@ -6503,9 +6504,9 @@ export interface InitLaunchdLine {
  * The outcome of `flair init`'s launchd step (flair#2040):
  *   - managed:  launchd runs this instance's job, verified (pid = serving pid);
  *   - direct:   the plist is on disk and Flair runs directly, NOT under launchd;
- *   - skipped:  a legacy job would have had to be replaced and the preflight or
- *               the replacement's validation failed — nothing was unloaded or
- *               removed, and a plist init wrote was put back as it was;
+ *   - skipped:  a preflight or plist validation refused registration. No job
+ *               was unloaded; if init wrote a plist, its prior bytes and mode
+ *               were restored (or the new plist was removed);
  *   - restored: replacing a serving legacy job failed after it was unloaded;
  *               the prior service was brought back (details in the lines);
  *   - unverified: launchd runs the job but the serving process could not be
@@ -6526,10 +6527,8 @@ export type InitLaunchdOutcome = {
 
 /**
  * The exit code `flair init` uses for its launchd step's outcome (flair#2040):
- * 1 when the outcome is refused, down or uncertain — the states that mean no
- * working launchd registration was left — and 0 otherwise. `flair init`'s
- * command and the command-level tests' driver both read it here, so the test
- * asserts this rule rather than a copy of it (flair#2085).
+ * 1 for the refused, down and uncertain failure outcomes; 0 otherwise.
+ * A refusal may leave an existing launchd registration serving normally.
  */
 function initLaunchdExitCode(kind: string): number {
   return kind === "refused" || kind === "down" || kind === "uncertain" ? 1 : 0;
@@ -6548,7 +6547,7 @@ function putInitPlistBack(path: string, prior: FileSnapshot): { ok: boolean; tex
   }
   return {
     ok: true,
-    text: prior.kind === "absent" ? `the new plist ${path} was removed again` : `the plist at ${path} was put back as it was`,
+    text: prior.kind === "absent" ? `the new plist ${path} was removed again` : `the prior plist bytes and mode at ${path} were restored`,
   };
 }
 
@@ -6571,9 +6570,9 @@ function putInitPlistBack(path: string, prior: FileSnapshot): { ok: boolean; tex
  * legacy plist and job (or, failing that, starts Flair directly) and says so.
  * If the preflight fails, NOTHING is unloaded, removed or written; if the
  * validation fails — a lint that throws included (flair#2078) — nothing is
- * unloaded or removed, and the plist init wrote is put back as it was. The
+ * unloaded or removed, and prior plist bytes and mode are restored. The
  * non-legacy path (no owned legacy registration) validates the plist it writes
- * the same way and puts it back on failure (flair#2085).
+ * the same way and restores its prior bytes and mode on failure (flair#2085).
  */
 async function registerInitLaunchdService(input: {
   dataDir: string;
@@ -6599,15 +6598,20 @@ async function registerInitLaunchdService(input: {
 
     // flair#2085: there is no owned legacy job to retire here, but init still
     // writes a plist launchd may load at the next login, so the rule the legacy
-    // hand-off above applies is applied here too: validate the written plist (a
-    // lint that THROWS is a validation refusal), and on any failure put it back
-    // as it was — or remove it when init created it. No launchctl call that
+    // hand-off above applies here too: validate the written plist (a lint that
+    // THROWS is a validation refusal). On failure, restore prior bytes and mode
+    // or remove a plist init created. No launchctl call that
     // changes launchd's state is made on that path. A prior plist that cannot
-    // be read would leave nothing to put back, so it is refused before writing.
+    // be safely snapshotted, including a symlink, is refused before writing.
     const priorNew = snapshotFile(write.plistPath);
+    if (priorNew.kind === "symlink") {
+      err(`⚠️  Launchd: not registered — ${write.plistPath} is a symbolic link, so no plist was written.`);
+      err(`   Fix: move or remove the symbolic link at ${write.plistPath}, then re-run 'flair init'.`);
+      return { kind: "skipped", lines };
+    }
     const unreadableNew = unreadableSnapshot([[write.plistPath, priorNew]]);
     if (unreadableNew) {
-      err(`⚠️  Launchd: not registered — ${unreadableNew} exists but could not be read, so it could not be put back. No plist was written.`);
+      err(`⚠️  Launchd: not registered — ${unreadableNew} could not be safely snapshotted, so it could not be put back. No plist was written.`);
       return { kind: "skipped", lines };
     }
 
@@ -6712,9 +6716,14 @@ async function registerInitLaunchdService(input: {
   // cannot be read cannot be put back: refuse before anything is written.
   const priorNew = snapshotFile(write.plistPath);
   const priorLegacy = snapshotFile(legacyPath);
+  if (priorNew.kind === "symlink") {
+    err(`⚠️  Launchd: not re-registered — ${write.plistPath} is a symbolic link, so no new plist was written. ${keptLegacy}.`);
+    err(`   Fix: move or remove the symbolic link at ${write.plistPath}, then re-run 'flair init'.`);
+    return { kind: "skipped", lines };
+  }
   const unreadable = unreadableSnapshot([[write.plistPath, priorNew], [legacyPath, priorLegacy]]);
   if (unreadable) {
-    err(`⚠️  Launchd: not re-registered — ${unreadable} exists but could not be read, so it could not be put back. ${keptLegacy}.`);
+    err(`⚠️  Launchd: not re-registered — ${unreadable} could not be safely snapshotted, so it could not be put back. ${keptLegacy}.`);
     return { kind: "skipped", lines };
   }
 
@@ -6733,7 +6742,7 @@ async function registerInitLaunchdService(input: {
   // Every failed validation is a refusal made before anything is unloaded: a
   // problem the checks REPORT, and — as in the start paths' migration — a lint
   // that THROWS (lintReplacementPlist) or a written plist that cannot be read
-  // back (flair#2078). Each puts the plist just written back as it was, or
+  // back (flair#2078). Each restores the prior plist bytes and mode, or
   // removes it when there was none: left beside the legacy plist, it would give
   // launchd two jobs for one data directory at the next login.
   const installing = `the plist init would install for ${write.label}`;
@@ -6775,7 +6784,7 @@ async function registerInitLaunchdService(input: {
       // flair#2040: the legacy job could not be shown unloaded, and the helper
       // KEPT its plist. The replacement written above must not stay beside it
       // (two plists for one data directory would give launchd two jobs), so it
-      // is put back as it was, and nothing is reported as registered.
+      // has its prior bytes and mode restored, and nothing is reported as registered.
       const putBack = putInitPlistBack(write.plistPath, priorNew);
       err(
         `⚠️  Launchd: not re-registered — the legacy job ${LEGACY_LAUNCHD_LABEL} could not be shown unloaded ` +
@@ -7152,10 +7161,9 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
 
 /**
  * A file's state, taken before a repair rewrites it (flair#2040). "absent"
- * ONLY when the read failed with ENOENT; any other failure is "unreadable",
- * which the callers refuse on BEFORE they stop anything — a snapshot that
- * could not be taken cannot be put back, and must never be mistaken for
- * "there was no file".
+ * ONLY when lstat reports ENOENT. A symlink (including a dangling one) is
+ * recorded without following it; init refuses it before writing. Other
+ * failures are "unreadable". Neither can be put back as a regular file.
  *
  * `bytes` is the RAW buffer, never a decoded string: a corrupt plist is a
  * repairable case, and decoding invalid UTF-8 replaces those bytes, so a
@@ -7164,14 +7172,30 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
 type FileSnapshot =
   | { kind: "absent" }
   | { kind: "present"; bytes: Buffer; mode: number }
+  | { kind: "symlink" }
   | { kind: "unreadable"; error: string };
 
 function snapshotFile(path: string): FileSnapshot {
+  let stat;
   try {
-    const bytes = readFileSync(path);
-    return { kind: "present", bytes, mode: statSync(path).mode & 0o777 };
+    stat = lstatSync(path);
   } catch (err: any) {
     if (err?.code === "ENOENT") return { kind: "absent" };
+    return { kind: "unreadable", error: `${err?.code ?? "error"}: ${err?.message ?? err}` };
+  }
+  if (stat.isSymbolicLink()) return { kind: "symlink" };
+  try {
+    // O_NOFOLLOW also rejects a link substituted after lstat. Read and stat
+    // the same opened file, so a replacement cannot mix bytes with old mode.
+    const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      const opened = fstatSync(fd);
+      if (!opened.isFile()) return { kind: "unreadable", error: "not a regular file" };
+      return { kind: "present", bytes: readFileSync(fd), mode: opened.mode & 0o777 };
+    } finally {
+      closeSync(fd);
+    }
+  } catch (err: any) {
     return { kind: "unreadable", error: `${err?.code ?? "error"}: ${err?.message ?? err}` };
   }
 }
@@ -7179,18 +7203,21 @@ function snapshotFile(path: string): FileSnapshot {
 /** The first snapshot that could not be taken, as "<path> (<error>)", or null. */
 function unreadableSnapshot(entries: Array<[string, FileSnapshot | null]>): string | null {
   for (const [path, snap] of entries) {
-    if (snap && snap.kind === "unreadable") return `${path} (${snap.error})`;
+    if (snap?.kind === "symlink") return `${path} (symbolic link)`;
+    if (snap?.kind === "unreadable") return `${path} (${snap.error})`;
   }
   return null;
 }
 
 /**
  * Put a file back as `snapshot` recorded it: rewritten byte-for-byte (the raw
- * buffer) when it was present, removed ONLY when it was proven absent. An
- * unreadable snapshot is never "restored" — that would delete or clobber a
- * file whose bytes were never known.
+ * buffer) when it was present, removed ONLY when it was proven absent. A
+ * symlink or unreadable snapshot is never "restored" as a regular file.
  */
 function restoreFile(path: string, snapshot: FileSnapshot): void {
+  if (snapshot.kind === "symlink") {
+    throw new Error(`not restoring ${path}: its prior state was a symbolic link`);
+  }
   if (snapshot.kind === "unreadable") {
     throw new Error(`not restoring ${path}: its prior contents could not be read (${snapshot.error})`);
   }
@@ -7276,7 +7303,7 @@ async function prepareLaunchdRepair(
       kind: "refused",
       reason: "unreadable-prior-state",
       detail:
-        `refusing to repair launchd management: ${unreadable} exists but could not be read, so a failed hand-off ` +
+        `refusing to repair launchd management: ${unreadable} could not be safely snapshotted, so a failed hand-off ` +
         `could not put it back. ${untouched}`,
       plistPath: resolvedPlistPath,
     };

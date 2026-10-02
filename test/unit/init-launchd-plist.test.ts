@@ -28,9 +28,12 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  lstatSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
   existsSync,
 } from "node:fs";
@@ -38,6 +41,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildLaunchdPlist,
+  registerInitLaunchdService,
   writeInitLaunchdPlist,
   type LaunchdPlistOptions,
   type WriteInitLaunchdPlistOptions,
@@ -303,5 +307,52 @@ describe("writeInitLaunchdPlist — re-points an adopted plist at this CLI's tre
     expect(result.kind).toBe("not-repointed");
     if (result.kind === "not-repointed") expect(result.detail).toContain("separately managed");
     expect(readFileSync(opts.plistPath, "utf-8")).toBe(before);
+  });
+});
+
+describe("registerInitLaunchdService — symlink preflight (#2085)", () => {
+  async function runWithPlistPath(path: string) {
+    return registerInitLaunchdService({
+      dataDir: DATA_DIR,
+      port: 9926,
+      plistDir: tmp,
+      write: baseOptions({ plistPath: path }),
+    });
+  }
+
+  test("refuses an existing plist symlink without replacing it or changing its target", async () => {
+    const path = baseOptions().plistPath;
+    const target = join(tmp, "prior.xml");
+    const prior = plistFor(DATA_DIR);
+    writeFileSync(target, prior, { mode: 0o600 });
+    symlinkSync(target, path);
+
+    const result = await runWithPlistPath(path);
+
+    expect(result.kind).toBe("skipped");
+    const message = result.lines.map((line) => line.text).join("\n");
+    expect(message).toContain(`${path} is a symbolic link`);
+    expect(message).toContain(`Fix: move or remove the symbolic link at ${path}`);
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(path)).toBe(target);
+    expect(readFileSync(target, "utf-8")).toBe(prior);
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  test("refuses a dangling plist symlink as present and leaves it intact", async () => {
+    const path = baseOptions().plistPath;
+    const target = join(tmp, "missing.xml");
+    symlinkSync(target, path);
+    expect(existsSync(path)).toBe(false);
+
+    const result = await runWithPlistPath(path);
+
+    expect(result.kind).toBe("skipped");
+    const message = result.lines.map((line) => line.text).join("\n");
+    expect(message).toContain(`${path} is a symbolic link`);
+    expect(message).toContain(`Fix: move or remove the symbolic link at ${path}`);
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(path)).toBe(target);
+    expect(existsSync(target)).toBe(false);
   });
 });

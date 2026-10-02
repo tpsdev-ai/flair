@@ -260,8 +260,8 @@ function setupFixture(port: number): Fixture {
       `  console.log("SERVING_AT_RETURN " + ok);`,
       `}`,
       `console.log("RESULT " + JSON.stringify(r));`,
-      // Exit with the code `flair init` itself uses for this outcome (flair#2085):
-      // the test then asserts a real CLI exit code, not just the returned object.
+      // Driver exit follows the shared launchd outcome mapping. g4 below runs
+      // the real init command to check its own exit call.
       `process.exit(what === "init" ? initLaunchdExitCode(r.kind) : 0);`,
     ].join("\n"),
   );
@@ -274,6 +274,21 @@ function setupFixture(port: number): Fixture {
       `import { runCli, setLaunchdMigrationLintForTests } from "./src/cli.ts";`,
       `const [lintThrows] = process.argv.splice(2, 1);`,
       `setLaunchdMigrationLintForTests(() => { throw new Error(lintThrows); });`,
+      `await runCli();`,
+    ].join("\n"),
+  );
+  // Run init through its command action while injecting the same lint failure
+  // as the driver. This reaches src/commands/init.ts's own process.exit call.
+  writeFileSync(
+    join(probe, "init-cli.ts"),
+    [
+      `import { chmodSync } from "node:fs";`,
+      `import { runCli, setLaunchdMigrationLintForTests } from "./src/cli.ts";`,
+      `const [lintThrows, lockDir] = process.argv.splice(2, 2);`,
+      `setLaunchdMigrationLintForTests(() => {`,
+      `  chmodSync(lockDir, 0o555);`,
+      `  throw new Error(lintThrows);`,
+      `});`,
       `await runCli();`,
     ].join("\n"),
   );
@@ -421,6 +436,24 @@ async function flairStart(
   const proc = Bun.spawn([process.execPath, ...entry, "start", "--port", String(fx.port)], {
     cwd: fx.probe,
     env: { ...childEnv(), ...(opts.envOverride ?? {}) },
+    timeout: 60_000,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  return { stdout, stderr, exitCode };
+}
+
+/** `flair init` command action with a thrown lint and a failed put-back. */
+async function flairInitWithFailedPutBack(lintThrows: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const proc = Bun.spawn([
+    process.execPath, join(fx.probe, "init-cli.ts"), lintThrows, fx.agentsDir,
+    "init", "--no-mcp", "--skip-soul", "--data-dir", fx.dataDir, "--port", String(fx.port),
+  ], {
+    cwd: fx.probe,
+    env: childEnv(),
     timeout: 60_000,
     stdout: "pipe",
     stderr: "pipe",
@@ -1328,7 +1361,7 @@ describe("flair#2040 r5 — init: an idle legacy job that cannot be shown unload
 
       expect(result).toMatchObject({ kind: "uncertain" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
-      expect(text).toContain(`the plist at ${fx.plistPath} was put back as it was`);
+      expect(text).toContain(`the prior plist bytes and mode at ${fx.plistPath} were restored`);
       expect(readFileSync(fx.plistPath, "utf-8")).toBe(priorBytes);
       expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(legacyBytes);
       expect(mutatingCalls().filter((l) => l.startsWith("bootstrap"))).toEqual([]);
@@ -2067,7 +2100,7 @@ describe("flair#2078 — init: a lint that throws puts back the plist init wrote
 
       await explainOnFailure(run, async () => {
         const text = expectRefusedUntouched(run.result, before, LINT_THROWS);
-        expect(text).toContain(`the plist at ${fx.plistPath} was put back as it was`);
+        expect(text).toContain(`the prior plist bytes and mode at ${fx.plistPath} were restored`);
       });
     },
     60_000,
@@ -2104,7 +2137,7 @@ describe("flair#2078 — init: a lint that throws puts back the plist init wrote
       await explainOnFailure(run, async () => {
         const text = expectRefusedUntouched(run.result, before, "ENOENT");
         expect(text).toContain("mkdtemp");
-        expect(text).toContain(`the plist at ${fx.plistPath} was put back as it was`);
+        expect(text).toContain(`the prior plist bytes and mode at ${fx.plistPath} were restored`);
       });
     },
     60_000,
@@ -2117,34 +2150,30 @@ describe("flair#2078 — init: a lint that throws puts back the plist init wrote
       const before = agentsDirState();
       expect(Object.keys(before)).toEqual([`${LEGACY_LAUNCHD_LABEL}.plist`]);
 
-      let run: Awaited<ReturnType<typeof drive>>;
+      let run: Awaited<ReturnType<typeof flairInitWithFailedPutBack>>;
       try {
-        run = await drive("init", { ...initInput(), lintThrows: LINT_THROWS, lockDirBeforeThrow: fx.agentsDir });
+        run = await flairInitWithFailedPutBack(LINT_THROWS);
       } finally {
         chmodSync(fx.agentsDir, 0o755);
       }
 
-      await explainOnFailure(run, async () => {
-        expect(run.result).toMatchObject({ kind: "uncertain" }); // whole result printed on failure
-        // A real CLI exit code (flair#2085): the driver exits with the code init
-        // uses for this outcome, so an uncertain launchd step is non-zero.
-        expect(run.exitCode).toBe(1);
-        const text = run.result.lines.map((l: any) => l.text).join("\n");
-        expect(text).toContain(`could not be validated (the lint failed: ${LINT_THROWS})`);
-        expect(text).toContain(`putting ${fx.plistPath} back FAILED`);
-        expect(text).toContain("EACCES");
-        expect(text).not.toContain("✓");
-        // Reported honestly: the new plist IS still there, beside the legacy one.
-        // Compare file names and modes (and bytes), as the restore cases do.
-        const after = agentsDirState();
-        expect(Object.keys(after).sort()).toEqual([`${LEGACY_LAUNCHD_LABEL}.plist`, `${fx.label}.plist`].sort());
-        expect(after[`${LEGACY_LAUNCHD_LABEL}.plist`]).toBe(before[`${LEGACY_LAUNCHD_LABEL}.plist`]);
-        expect(after[`${fx.label}.plist`].split(" ")[0]).toBe("644");
-        expect(existsSync(fx.plistPath)).toBe(true);
-        expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(legacy);
-        expect(mutatingCalls()).toEqual([]);
-        expect(existsSync(join(fx.state, "loaded", LEGACY_LAUNCHD_LABEL))).toBe(true);
-      });
+      // The validation and failed put-back lines prove this command reached the
+      // uncertain launchd outcome. Its exit status comes from init.ts itself.
+      expect(run.stderr).toContain(`could not be validated (the lint failed: ${LINT_THROWS})`);
+      expect(run.stderr).toContain(`putting ${fx.plistPath} back FAILED`);
+      expect(run.stderr).toContain("EACCES");
+      expect(run.stderr).not.toContain("✓");
+      expect(run.exitCode).toBe(1);
+      const after = agentsDirState();
+      expect(Object.keys(after).sort()).toEqual([`${LEGACY_LAUNCHD_LABEL}.plist`, `${fx.label}.plist`].sort());
+      expect(after[`${LEGACY_LAUNCHD_LABEL}.plist`]).toBe(before[`${LEGACY_LAUNCHD_LABEL}.plist`]);
+      expect(after[`${fx.label}.plist`].split(" ")[0]).toBe("644");
+      expect(existsSync(fx.plistPath)).toBe(true);
+      expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(legacy);
+      expect(mutatingCalls()).toEqual([]);
+      expect(existsSync(join(fx.state, "loaded", LEGACY_LAUNCHD_LABEL))).toBe(true);
+      expect(stubStarts().length).toBe(1);
+      expect(await healthy()).toBe(true);
     },
     60_000,
   );
@@ -2191,7 +2220,7 @@ describe("flair#2085 — init validates the plist it writes when there is no leg
         expect(run.exitCode).toBe(0);
         const text = run.result.lines.map((l: any) => l.text).join("\n");
         expect(text).toContain(`the plist init would install for ${fx.label} could not be validated (the lint failed: ${LINT_THROWS}`);
-        expect(text).toContain(`the plist at ${fx.plistPath} was put back as it was`);
+        expect(text).toContain(`the prior plist bytes and mode at ${fx.plistPath} were restored`);
         expect(text).not.toContain("✓");
         expect(text).not.toContain("Launchd service registered");
         expect(readFileSync(fx.plistPath, "utf-8")).toBe(prior);
