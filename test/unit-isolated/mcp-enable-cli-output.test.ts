@@ -212,7 +212,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.configAfter).toBe(r.configBefore);
     expect(r.out).toContain("the file already held this list, so the allowed-hosts write was skipped");
     // The cimd-allowed-hosts step's own sentence, which the config-block step points to.
-    expect(r.out).toMatch(/writes it unless the file already holds that exact list\W+then reads it back\W+a run that stops before that step does not write it/);
+    expect(r.out).toContain("writes it unless the file already holds that exact list, then reads it back; a run that stops before that step does not write it");
     expect(r.out).toContain("The OAuth metadata check passed.");
     expect(r.out).toContain(
       'claude.ai is not in the mcp.clientIdMetadataDocuments.allowedHosts list this run ensured and read back (["flair.example.com"])',
