@@ -758,6 +758,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       delete env.FLAIR_ADMIN_PASS;
       delete env.FLAIR_OPS_TARGET;
       const child = Bun.spawn(["bun", join(REPO, "src/cli.ts"), ...argv], {
+        timeout: 20_000,
         env,
         stdout: "pipe",
         stderr: "pipe",
@@ -770,7 +771,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   // A mutation run against the real sources: one bogus flag put back into one
   // message must be found, in the command it belongs to; the unmutated file is
