@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=132 options=583
+# commands=135 options=597
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -516,7 +516,7 @@ flair principal
   description: Manage principals (humans and agents)
   usage: [options] [command]
   options: (none)
-  subcommands: add, list, show, disable, promote
+  subcommands: add, list, show, disable, promote, link, unlink, links
 
 flair principal add
   description: Create a new principal
@@ -621,6 +621,71 @@ flair principal promote
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
+
+flair principal link
+  description: Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step `flair mcp enable` runs, and nothing else. Targets a REMOTE instance with a public HTTPS origin; refuses honestly against a local-origin instance.
+  usage: [options] <principal>
+  arguments:
+    principal (required)
+  options:
+    --idp-subject <login>
+      description: The login the identity provider reports for this person (GitHub: the username)
+      attr: idpSubject
+    --idp-provider <name>
+      description: Upstream IdP provider
+      attr: idpProvider
+      default: "github"
+    --instance <url>
+      description: Remote flair instance holding the mapping (else FLAIR_URL)
+      attr: instance
+    --replace
+      description: Move a subject that is already mapped to a different principal
+      attr: replace
+    --admin-pass <pass>
+      description: Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)
+      attr: adminPass
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+
+flair principal unlink
+  description: Remove one IdP login's mapping to a principal on an already-enabled instance (revokes the mapping; the principal and its memories stay). Targets a REMOTE instance; refuses against a local-origin one.
+  usage: [options] <principal>
+  arguments:
+    principal (required)
+  options:
+    --idp-subject <login>
+      description: The login the identity provider reports for this person (GitHub: the username)
+      attr: idpSubject
+    --idp-provider <name>
+      description: Upstream IdP provider the mapping carries
+      attr: idpProvider
+      default: "github"
+    --instance <url>
+      description: Remote flair instance holding the mapping (else FLAIR_URL)
+      attr: instance
+    --admin-pass <pass>
+      description: Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)
+      attr: adminPass
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+
+flair principal links
+  description: List a principal's current IdP mappings on an already-enabled instance. Targets a REMOTE instance with a public HTTPS origin; refuses honestly against a local-origin instance.
+  usage: [options] <principal>
+  arguments:
+    principal (required)
+  options:
+    --instance <url>
+      description: Remote flair instance holding the mapping (else FLAIR_URL)
+      attr: instance
+    --admin-pass <pass>
+      description: Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance)
+      attr: adminPass
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
 
 flair idp
   description: Manage enterprise IdP configurations (XAA)
@@ -3166,6 +3231,21 @@ Commands:
                                  preserves data)
   promote [options] <id> <tier>  Change a principal's trust tier (endorsed,
                                  corroborated, unverified)
+  link [options] <principal>     Map one IdP login to an existing principal on
+                                 an already-enabled instance — the
+                                 identity-mapping step `flair mcp enable` runs,
+                                 and nothing else. Targets a REMOTE instance
+                                 with a public HTTPS origin; refuses honestly
+                                 against a local-origin instance.
+  unlink [options] <principal>   Remove one IdP login's mapping to a principal
+                                 on an already-enabled instance (revokes the
+                                 mapping; the principal and its memories stay).
+                                 Targets a REMOTE instance; refuses against a
+                                 local-origin one.
+  links [options] <principal>    List a principal's current IdP mappings on an
+                                 already-enabled instance. Targets a REMOTE
+                                 instance with a public HTTPS origin; refuses
+                                 honestly against a local-origin instance.
   help [command]                 display help for command
 
 ----- flair principal add -----
@@ -3245,6 +3325,79 @@ Options:
   --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
                        default: admin)
   --ops-port <port>    Harper operations API port
+  -h, --help           display help for command
+
+Global Options:
+  -v, --version        output the version number
+
+----- flair principal link -----
+Usage: flair principal link [options] <principal>
+
+Map one IdP login to an existing principal on an already-enabled instance — the
+identity-mapping step `flair mcp enable` runs, and nothing else. Targets a
+REMOTE instance with a public HTTPS origin; refuses honestly against a
+local-origin instance.
+
+Options:
+  --idp-subject <login>  The login the identity provider reports for this person
+                         (GitHub: the username)
+  --idp-provider <name>  Upstream IdP provider (default: "github")
+  --instance <url>       Remote flair instance holding the mapping (else
+                         FLAIR_URL)
+  --replace              Move a subject that is already mapped to a different
+                         principal
+  --admin-pass <pass>    Admin password for the TARGET instance (required —
+                         FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this
+                         machine's local credentials and are never sent to a
+                         remote instance)
+  --admin-user <name>    Admin username for Basic auth (env: FLAIR_ADMIN_USER;
+                         default: admin)
+  -h, --help             display help for command
+
+Global Options:
+  -v, --version          output the version number
+
+----- flair principal unlink -----
+Usage: flair principal unlink [options] <principal>
+
+Remove one IdP login's mapping to a principal on an already-enabled instance
+(revokes the mapping; the principal and its memories stay). Targets a REMOTE
+instance; refuses against a local-origin one.
+
+Options:
+  --idp-subject <login>  The login the identity provider reports for this person
+                         (GitHub: the username)
+  --idp-provider <name>  Upstream IdP provider the mapping carries (default:
+                         "github")
+  --instance <url>       Remote flair instance holding the mapping (else
+                         FLAIR_URL)
+  --admin-pass <pass>    Admin password for the TARGET instance (required —
+                         FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this
+                         machine's local credentials and are never sent to a
+                         remote instance)
+  --admin-user <name>    Admin username for Basic auth (env: FLAIR_ADMIN_USER;
+                         default: admin)
+  -h, --help             display help for command
+
+Global Options:
+  -v, --version          output the version number
+
+----- flair principal links -----
+Usage: flair principal links [options] <principal>
+
+List a principal's current IdP mappings on an already-enabled instance. Targets
+a REMOTE instance with a public HTTPS origin; refuses honestly against a
+local-origin instance.
+
+Options:
+  --instance <url>     Remote flair instance holding the mapping (else
+                       FLAIR_URL)
+  --admin-pass <pass>  Admin password for the TARGET instance (required —
+                       FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this
+                       machine's local credentials and are never sent to a
+                       remote instance)
+  --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
+                       default: admin)
   -h, --help           display help for command
 
 Global Options:

@@ -90,6 +90,29 @@ read-back described under [One mapping per login](#one-mapping-per-login)
 passed. The command stops before restarting the instance, reports the
 `secrets-provisioning` step as not applied, and exits non-zero.
 
+### Add or remove one person
+
+`flair principal link` does only the mapping step, on an instance that is
+already enabled:
+
+```bash
+flair principal link alice --instance https://flair.example.com \
+  --idp-subject alice --admin-pass "$TARGET_ADMIN_PASS"
+```
+
+The principal must already exist: a missing one is refused by name. A subject
+already mapped to that principal is reported with nothing written; a subject
+mapped to a different principal is refused unless `--replace` moves it, which
+prints the principal it left and any credential the move superseded.
+`--instance`, the local-origin refusal and the `--admin-pass` rule are the ones
+`flair mcp enable` applies: a public-shaped origin (else `FLAIR_URL`) whose host
+answers the operations API on port 9925. <!-- docs-freshness-allow: hosted operations API port, not the data port -->
+
+`flair principal unlink <principal> --idp-subject <login>` revokes that mapping
+(the row stays, `revoked`, and stops resolving), and `flair principal links
+<principal>` lists the principal's current mappings. Both take the same
+`--instance` and `--admin-pass`.
+
 ### One mapping per login
 
 `flair mcp enable` and the resolver both count a login's `idp` credential unless
