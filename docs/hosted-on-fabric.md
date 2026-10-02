@@ -69,15 +69,15 @@ It asks the target what it can do, rather than assuming from the hostname or the
 
 | The target… | What happens |
 |-------------|--------------|
-| returns a usable env-secrets public key | `enable` attempts a sealed push over the ops API. If the push fails, it reports a staged-file fallback. After confirmation, an already active surface can pass without a restart or re-run; restart if this run changed a secret value. If the surface is inactive, restart a `*.harperfabric.com` target after a successful push, or apply the staged values and restart, then re-run with `--confirm-secrets-applied`. The non-Fabric branch triggers a restart after local configuration succeeds. |
+| returns a usable env-secrets public key | `enable` attempts a sealed push over the ops API. If the push fails, it reports a staged-file fallback. After confirmation, an already active surface can pass without a restart or re-run; restart if this run changed a secret value. If the surface is inactive, restart a `*.harperfabric.com` target after a successful push, or apply the staged values and restart, then re-run with `--confirm-secrets-applied`. |
 | reports no env-secrets public-key operation | the vars are staged to a `0600` file and you apply them yourself, then re-run with `--confirm-secrets-applied` |
 | is unreachable, refuses the probe, or answers unusably | same staged-file fallback, and the output says **which** of those happened |
 
 For an automated push, values are encrypted **before leaving your machine** — AES-256-GCM on the value, RSA-OAEP(SHA-256) wrapping the key, addressed to a public key fetched from the target. Plaintext does not appear in the push request body, and the command's output names variables without showing their values.
 
-The staging file is written in every case, so a fallback never strands you mid-run. When the push succeeds it simply goes unused.
+At secrets provisioning, `enable` stages the file before any probe or push; dry runs stop earlier. A successful push leaves it unused.
 
-> **What the probe does not promise.** It returns a public key for a possible push; it does not prove the push succeeds or that the target process loads the values. `enable` checks the target's MCP token endpoint and public metadata before reporting success. Flair also serves OAuth metadata when the MCP flag is off: the target check distinguishes Flair's `/OAuthToken` from the MCP `/oauth/mcp/token`. An already active surface can pass these checks before newly pushed values are loaded; restart if this run changed a secret value.
+> **What the probe does not promise.** When successful, it returns a public key for a possible push; it does not prove the push succeeds or that the target process loads the values. `enable` checks the target's MCP token endpoint and public metadata before reporting success. Flair also serves OAuth metadata when the MCP flag is off: the target check distinguishes Flair's `/OAuthToken` from the MCP `/oauth/mcp/token`. An already active surface can pass these checks before newly pushed values are loaded; restart if this run changed a secret value.
 
 `--secrets-mechanism <fabric-env-secrets|env-file>` remains an explicit override and skips the probe entirely.
 
