@@ -99,6 +99,14 @@ const PASSWORD_VALUE = "hunter2" + "-Correct-Horse-42";
 // Authorization values with no digit: a pattern that requires one lets them through.
 const BEARER_VALUE = "abcdefgh" + "ijklmnop";
 const BASIC_VALUE = "dXNlcjpw" + "YXNz";
+const PGP_PRIVATE_KEY_BLOCK = "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----\nAAAA\n-----END PGP PRIVATE KEY BLOCK-----";
+const NEW_PROVIDER_SHAPES = [
+  "sk_live_" + "a".repeat(24),
+  "rk_test_" + "b".repeat(24),
+  "hf_" + "c".repeat(24),
+  "gsk_" + "d".repeat(24),
+  "pypi-" + "e".repeat(24),
+];
 // Every line break the quoted display splits on, "\r\n" counted as one break.
 const LINE_BREAKS: ReadonlyArray<readonly [string, string]> = [
   ["LF", "\n"],
@@ -696,19 +704,12 @@ describe("PreCompact pieces", () => {
   });
 
   test("redaction (flair#2086): PGP private-key blocks and more provider prefixes are replaced", () => {
-    const pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nAAAA\n-----END PGP PRIVATE KEY BLOCK-----";
-    expect(redactSecrets(`before\n${pgp}\nafter`).includes("PRIVATE KEY BLOCK")).toBe(false);
-    expect(redactSecrets(`before\n${pgp}\nafter`)).toContain(REDACTED);
+    expect(redactSecrets(`before\n${PGP_PRIVATE_KEY_BLOCK}\nafter`).includes("PRIVATE KEY BLOCK")).toBe(false);
+    expect(redactSecrets(`before\n${PGP_PRIVATE_KEY_BLOCK}\nafter`).includes(REDACTED)).toBe(true);
     // Boolean assertions keep a value out of a failure message.
-    for (const s of [
-      "sk_live_" + "a".repeat(24),
-      "rk_test_" + "b".repeat(24),
-      "hf_" + "c".repeat(24),
-      "gsk_" + "d".repeat(24),
-      "pypi-" + "e".repeat(24),
-    ]) {
+    for (const s of NEW_PROVIDER_SHAPES) {
       expect(redactSecrets(`value ${s} end`).includes(s)).toBe(false);
-      expect(redactSecrets(`value ${s} end`)).toContain(REDACTED);
+      expect(redactSecrets(`value ${s} end`).includes(REDACTED)).toBe(true);
     }
   });
 

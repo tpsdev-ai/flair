@@ -14,14 +14,13 @@ import { readEnvOrUnset } from "./env-guard.js";
 
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
-/** Largest key file read. A key is a 32-byte seed or a short PEM/base64 DER,
- *  so this is generous; it exists so a hook binary's process deadline can fire
- *  and a slow or oversized file cannot hold the process. */
+/** Largest accepted key file. A key is a 32-byte raw seed or base64 PKCS8 DER;
+ *  PEM is rejected by the parser. The cap keeps an oversized file from holding
+ *  a hook binary past its process deadline. */
 export const KEY_FILE_MAX_BYTES = 64 * 1024;
 
 /**
- * Read a key file asynchronously and bounded. Every step is asynchronous, so a
- * process-level deadline can fire between them; the open is non-blocking (a
+ * Read a key file with asynchronous file I/O and a size cap. The open is non-blocking (a
  * FIFO at the path cannot stall it) and the opened descriptor is checked with
  * fstat BEFORE any byte is read. At most KEY_FILE_MAX_BYTES + 1 bytes are ever
  * read, so a file that grew after the check is refused too, never cut. A

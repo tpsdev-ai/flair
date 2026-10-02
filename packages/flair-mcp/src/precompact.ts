@@ -273,11 +273,15 @@ const AUTHORIZATION_PATTERNS: readonly RegExp[] = [
  *
  * Best effort by design: a secret with no recognizable shape (a bare
  * password in prose, a random string with no prefix) is NOT recognized. THE
- * TRADE (flair#2086): each pattern matches its prefix or credential-shaped
- * name wherever it starts a word, so text that merely looks like one (a short
- * `hf_…` identifier, a variable named `token`) is redacted too — over-
- * redaction is preferred to leaving a real secret in the record, and the
- * record is bounded and private regardless.
+ * TRADE (flair#2086): token-prefix patterns start at a word boundary and
+ * require their pattern-specific minimum suffix length. The new Stripe
+ * [sr]k_(live|test)_ form needs 16+ letters or digits, hf_ and gsk_ need
+ * 20+, and pypi- needs 16+ letters, digits, underscores or hyphens. The
+ * credential-name pattern needs a name followed by : or = and a nonempty
+ * value; a bare `token` is untouched.
+ * Text that satisfies these shapes can be redacted even when it is not a
+ * secret. That over-redaction is preferred to leaving a matching secret in
+ * the record, which is bounded and private regardless.
  */
 const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // PEM private key blocks (RSA/EC/OPENSSH/ENCRYPTED/…) and the PGP

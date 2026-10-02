@@ -3,9 +3,10 @@
  *
  * FlairClient reads the agent's key file asynchronously and with a size cap;
  * the published loadPrivateKey export remains synchronous. A FIFO cannot
- * stall it (the open is non-blocking and the descriptor is refused as
- * non-regular BEFORE a byte is read), and an oversized file is refused before
- * it is read. Failure messages name the path and the cap, never the file's
+ * stall loadPrivateKeyBounded (the open is non-blocking and the descriptor is refused as
+ * non-regular BEFORE a byte is read). A file already oversized at fstat is
+ * refused before reading; growth during reading is detected by one extra
+ * byte. Oversized-file errors name the path and cap, never the file's
  * contents.
  */
 import { afterEach, describe, expect, test } from "bun:test";
