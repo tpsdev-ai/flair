@@ -166,6 +166,16 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
   console.log(`✅ Principal '${id}' ${status === "active" ? "activated" : "deactivated"}`);
 }
 
+/** Both state verbs accept the same target and admin credentials. */
+function registerPrincipalStatusCommand(command: Command, status: "active" | "deactivated"): void {
+  command
+    .option("--admin-pass <pass>", "Admin password; required explicitly for a remote --instance")
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
+    .option("--ops-port <port>", "Harper operations API port (local target)")
+    .option("--instance <url>", "Remote Flair instance (else FLAIR_URL); its ops API is derived as in mcp enable")
+    .action(async (id: string, opts) => setPrincipalStatus(id, status, opts));
+}
+
 // ─── flair principal ─────────────────────────────────────────────────────────
 // 1.0 identity management. The Principal model extends Agent — this is the
 // preferred CLI surface for managing identities going forward.
@@ -428,19 +438,14 @@ export function register(program: Command): void {
       }
     });
 
-  for (const [verb, status, description] of [
-    ["disable", "deactivated", "Deactivate a principal (revokes access, preserves data)"],
-    ["enable", "active", "Reactivate a principal"],
-  ] as const) {
-    principal
-      .command(`${verb} <id>`)
-      .description(description)
-      .option("--admin-pass <pass>", "Admin password; required explicitly for a remote --instance")
-      .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
-      .option("--ops-port <port>", "Harper operations API port (local target)")
-      .option("--instance <url>", "Remote Flair instance (else FLAIR_URL); its ops API is derived as in mcp enable")
-      .action(async (id: string, opts) => setPrincipalStatus(id, status, opts));
-  }
+  registerPrincipalStatusCommand(
+    principal.command("disable <id>").description("Deactivate a principal (revokes access, preserves data)"),
+    "deactivated",
+  );
+  registerPrincipalStatusCommand(
+    principal.command("enable <id>").description("Reactivate a principal"),
+    "active",
+  );
 
   principal
     .command("promote <id> <tier>")

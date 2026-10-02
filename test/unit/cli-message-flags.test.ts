@@ -792,7 +792,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       file: "src/lib/mcp-enable.ts",
       from: "Environment, then re-run with --confirm-secrets-applied.",
       to: "Environment, then re-run with --confirm-secrets-applied-now.",
-      expected: "--confirm-secrets-applied-now → 8 commands in reach",
+      expected: "--confirm-secrets-applied-now → 15 commands in reach",
     },
   ];
   for (const row of mutationRows) {
