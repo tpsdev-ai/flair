@@ -115,7 +115,7 @@ describe("isLocalOrigin / checkLocalOriginRefusal", () => {
     expect(result).toEqual({
       refused: true,
       reason: "local",
-      message: "Issuer refused: local hostname or loopback, unspecified, private or link-local IP literal.",
+      message: "Issuer refused: local hostname or loopback, unspecified, reserved 0.0.0.0/8, private or link-local IP literal.",
     });
   });
 
