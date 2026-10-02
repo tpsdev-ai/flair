@@ -269,19 +269,33 @@ A connection acts as its principal:
 
 ### Revoking access
 
-Deactivate the principal, on the Flair host, with `FLAIR_ADMIN_PASS` set or
-`--admin-pass`:
+Deactivate a principal with `FLAIR_ADMIN_PASS` set or `--admin-pass`:
 
 ```bash
 flair principal disable alice
 ```
 
+For a principal on a remote instance, pass the target and its admin password
+explicitly:
+
+```bash
+flair principal disable alice \
+  --target https://flair.example.com \
+  --admin-pass <the target's admin password>
+```
+
 When the operations API accepts the update, it prints
 `✅ Principal 'alice' deactivated`.
 
-- It sends an `update` to the operations API at `127.0.0.1` on the machine it
-  runs on (port from `--ops-port`, `FLAIR_OPS_PORT` or the local Flair config).
-  It has no option for a remote instance.
+- On the local path it sends an `update` to the operations API at `127.0.0.1`
+  on the machine it runs on (port from `--ops-port`, `FLAIR_OPS_PORT` or the
+  local Flair config).
+- With `--target` it sends the same `update` to the ops API derived from that
+  REST URL, or to an explicit `--ops-target`. A remote target requires an
+  explicit `--admin-pass`: `FLAIR_ADMIN_PASS` and `~/.flair/admin-pass` are
+  this machine's local credentials and are never sent to another instance. A
+  remote request that cannot reach the target, or that the target rejects,
+  prints the failure and exits non-zero.
 - The update sets the principal's `status` to `deactivated`, and its
   `updatedAt`, and nothing else: the principal's memories and its login mapping
   stay. The operations API of Harper 5.2.8, the version Flair pins, also accepts

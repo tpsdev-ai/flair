@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=132 options=581
+# commands=132 options=583
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -590,14 +590,20 @@ flair principal disable
     id (required)
   options:
     --admin-pass <pass>
-      description: Admin password
+      description: Admin password (or set FLAIR_ADMIN_PASS for a local target; required explicitly for --target/--ops-target)
       attr: adminPass
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
     --ops-port <port>
-      description: Harper operations API port
+      description: Harper operations API port (local target)
       attr: opsPort
+    --target <url>
+      description: Remote Flair REST URL; derives the ops API URL to disable the principal there (env: FLAIR_TARGET)
+      attr: target
+    --ops-target <url>
+      description: Explicit ops API URL to disable on (env: FLAIR_OPS_TARGET; bypasses port derivation)
+      attr: opsTarget
 
 flair principal promote
   description: Change a principal's trust tier (endorsed, corroborated, unverified)
@@ -3204,10 +3210,15 @@ Usage: flair principal disable [options] <id>
 Deactivate a principal (revokes access, preserves data)
 
 Options:
-  --admin-pass <pass>  Admin password
+  --admin-pass <pass>  Admin password (or set FLAIR_ADMIN_PASS for a local
+                       target; required explicitly for --target/--ops-target)
   --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
                        default: admin)
-  --ops-port <port>    Harper operations API port
+  --ops-port <port>    Harper operations API port (local target)
+  --target <url>       Remote Flair REST URL; derives the ops API URL to disable
+                       the principal there (env: FLAIR_TARGET)
+  --ops-target <url>   Explicit ops API URL to disable on (env:
+                       FLAIR_OPS_TARGET; bypasses port derivation)
   -h, --help           display help for command
 
 Global Options:

@@ -37,6 +37,7 @@ export type PrincipalCli = {
   pubKeyPath: (agentId: string, keysDir: string) => string;
   relativeTime: (iso: string | null | undefined) => string;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
 };
 
 let cli: PrincipalCli;
@@ -54,6 +55,8 @@ const pubKeyPath = (agentId: string, keysDir: string): string => cli.pubKeyPath(
 const relativeTime = (iso: string | null | undefined): string => cli.relativeTime(iso);
 const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | number }): number =>
   cli.resolveOpsPort(opts);
+const resolveEffectiveOpsUrl = (opts: { target?: string; opsTarget?: string }): string | undefined =>
+  cli.resolveEffectiveOpsUrl(opts);
 
 // ─── flair principal ─────────────────────────────────────────────────────────
 // 1.0 identity management. The Principal model extends Agent — this is the
@@ -320,30 +323,76 @@ export function register(program: Command): void {
   principal
     .command("disable <id>")
     .description("Deactivate a principal (revokes access, preserves data)")
-    .option("--admin-pass <pass>", "Admin password")
+    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS for a local target; required explicitly for --target/--ops-target)")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
-    .option("--ops-port <port>", "Harper operations API port")
+    .option("--ops-port <port>", "Harper operations API port (local target)")
+    .option("--target <url>", "Remote Flair REST URL; derives the ops API URL to disable the principal there (env: FLAIR_TARGET)")
+    .option("--ops-target <url>", "Explicit ops API URL to disable on (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (id: string, opts) => {
-      const opsPort = resolveOpsPort(opts);
-      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-      if (!adminPass) {
-        console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
-        process.exit(1);
+      const remoteOpsUrl = resolveEffectiveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget });
+      const isRemote = remoteOpsUrl !== undefined;
+
+      let opsUrl: string;
+      let adminPass: string;
+      if (remoteOpsUrl !== undefined) {
+        opsUrl = `${remoteOpsUrl.replace(/\/$/, "")}/`;
+        // A remote target uses ONLY an explicit --admin-pass. FLAIR_ADMIN_PASS
+        // and ~/.flair/admin-pass are THIS machine's local credentials, and
+        // sending them to another instance is how a local secret ends up on
+        // someone else's Harper (the same rule `flair mcp enable` applies).
+        adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true) ?? "";
+        if (!adminPass) {
+          console.error(
+            "Error: --admin-pass <pass> is required for a remote target (--target/--ops-target). " +
+              "FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used: they are THIS machine's " +
+              "local admin credentials, and sending them to another instance is how a local secret ends up on " +
+              "someone else's Harper. Pass the target's own admin password explicitly.",
+          );
+          process.exit(1);
+        }
+      } else {
+        const opsPort = resolveOpsPort(opts);
+        opsUrl = `http://127.0.0.1:${opsPort}/`;
+        adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+        if (!adminPass) {
+          console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+          process.exit(1);
+        }
       }
 
       const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
-      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: auth },
-        body: JSON.stringify({
-          operation: "update",
-          database: "flair",
-          table: "Agent",
-          records: [{ id, status: "deactivated", updatedAt: new Date().toISOString() }],
-        }),
-      });
+      let res: Response;
+      try {
+        res = await fetch(opsUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({
+            operation: "update",
+            database: "flair",
+            table: "Agent",
+            records: [{ id, status: "deactivated", updatedAt: new Date().toISOString() }],
+          }),
+        });
+      } catch (err) {
+        // Local behaviour is unchanged: the error still propagates. A remote
+        // target names the failure and the remedy instead of a bare stack.
+        if (!isRemote) throw err;
+        console.error(
+          `Error: could not reach the operations API at ${opsUrl} — ${err instanceof Error ? err.message : String(err)}. ` +
+            "Check that --target/--ops-target points at the target's operations API and that the target instance is reachable.",
+        );
+        process.exit(1);
+      }
+
       if (!res.ok) {
         const text = await res.text().catch(() => "");
+        if (isRemote) {
+          console.error(`Error: the operations API at ${opsUrl} refused the update (HTTP ${res.status})${text ? `: ${text}` : ""}.`);
+          if (res.status === 401 || res.status === 403) {
+            console.error("  Check --admin-pass (and --admin-user) against the target instance's admin user.");
+          }
+          process.exit(1);
+        }
         console.error(`Error: ${res.status} ${text}`);
         process.exit(1);
       }
