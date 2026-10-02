@@ -639,6 +639,27 @@ export async function probeInstanceIdentity(
 }
 
 /**
+ * The ids of this instance's Instance rows, plus the reason when they could not
+ * be read — the read `flair keys prune` (orphan instance seeds, flair#1925) and
+ * `flair doctor` (the orphan advisory) decide on.
+ *
+ * A failed read is `unreadable`, NEVER an empty id list: `[]` is the answer a
+ * SUCCESSFUL read of zero rows gives, and a caller that pruned every
+ * node-shaped seed on the strength of a read it never made would delete live
+ * federation keys. A read that did not happen licenses nothing.
+ */
+export async function probeInstanceIds(
+  endpoint: OpsEndpoint,
+): Promise<{ state: "read"; ids: string[] } | { state: "unreadable"; reason: string }> {
+  try {
+    const rows = await readInstanceRows(endpoint);
+    return { state: "read", ids: rows.map((r) => r.id) };
+  } catch (err: unknown) {
+    return { state: "unreadable", reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * What a prune prints when it is about to delete rows (flair#1883 round 3).
  *
  * A peer PINS this instance's identity when it pairs: it is handed `{ id,

@@ -37,6 +37,12 @@ const BASE_URL = "http://127.0.0.1:19926";
 const CLI_SOURCE = join(__dirname, "..", "..", "src", "cli.ts");
 const realFetch = globalThis.fetch;
 
+// The Instance-row read the orphan check decides on (flair#1925). Every call in
+// this file states what it established — a read that did not happen is
+// `unreadable`, and NOTHING is then offered as orphan.
+const noInstanceRead = async () => ({ state: "unreadable" as const, reason: "test: Instance rows were not read" });
+const instanceRows = (ids: string[]) => async () => ({ state: "read" as const, ids });
+
 let keysDir: string;
 
 beforeEach(() => {
@@ -78,7 +84,7 @@ describe("classifyKeysDir — fresh/empty key dir (acceptance: finds nothing)", 
     let called = false;
     globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
     const nonExistent = join(keysDir, "does-not-exist");
-    const res = await classifyKeysDir(nonExistent, BASE_URL);
+    const res = await classifyKeysDir(nonExistent, BASE_URL, noInstanceRead);
     expect(res.aborted).toBe(false);
     expect(res.entries).toEqual([]);
     expect(called).toBe(false);
@@ -87,7 +93,7 @@ describe("classifyKeysDir — fresh/empty key dir (acceptance: finds nothing)", 
   it("an existing but empty keysDir → not aborted, zero entries, no network call", async () => {
     let called = false;
     globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
-    const res = await classifyKeysDir(keysDir, BASE_URL);
+    const res = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(res.aborted).toBe(false);
     expect(res.entries).toEqual([]);
     expect(called).toBe(false);
@@ -98,7 +104,7 @@ describe("classifyKeysDir — fresh/empty key dir (acceptance: finds nothing)", 
     globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
     writeFileSync(join(keysDir, "README.md"), "not a key\n");
     mkdirSync(join(keysDir, "some-subdir"));
-    const res = await classifyKeysDir(keysDir, BASE_URL);
+    const res = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(res.aborted).toBe(false);
     expect(res.entries.every((e) => e.class === "ignored")).toBe(true);
     expect(called).toBe(false);
@@ -106,7 +112,7 @@ describe("classifyKeysDir — fresh/empty key dir (acceptance: finds nothing)", 
 
   it("skips its own .pruned archive directory rather than treating it as a candidate", async () => {
     mkdirSync(join(keysDir, PRUNED_DIR_NAME, "2026-01-01"), { recursive: true });
-    const res = await classifyKeysDir(keysDir, BASE_URL);
+    const res = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(res.entries).toHaveLength(1);
     expect(res.entries[0].class).toBe("ignored");
     expect(res.entries[0].name).toBe(PRUNED_DIR_NAME);
@@ -120,7 +126,7 @@ describe("classifyKeysDir — N unregistered + M registered", () => {
     writeSeedKey(keysDir, "agent-registered");
     globalThis.fetch = mockRegistrationFetch(new Set(["agent-registered"]));
 
-    const res = await classifyKeysDir(keysDir, BASE_URL);
+    const res = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(res.aborted).toBe(false);
 
     const stale = res.entries.filter((e) => e.class === "stale");
@@ -146,7 +152,7 @@ describe("classifyKeysDir — unidentifiable files classified distinctly from un
     let called = false;
     globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
 
-    const res = await classifyKeysDir(keysDir, BASE_URL);
+    const res = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(res.aborted).toBe(false);
     expect(res.entries).toHaveLength(1);
     expect(res.entries[0].class).toBe("unidentified");
@@ -159,7 +165,7 @@ describe("classifyKeysDir — unidentifiable files classified distinctly from un
     writeSeedKey(keysDir, "agent-stale");
     globalThis.fetch = mockRegistrationFetch(new Set());
 
-    const res = await classifyKeysDir(keysDir, BASE_URL);
+    const res = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     const byClass = Object.fromEntries(res.entries.map((e) => [e.name, e.class]));
     expect(byClass["garbage.key"]).toBe("unidentified");
     expect(byClass["agent-stale.key"]).toBe("stale");
@@ -168,19 +174,94 @@ describe("classifyKeysDir — unidentifiable files classified distinctly from un
   // flair#1026 — the live collision: FileKeyStore writes a 60-byte AES-256-GCM
   // blob (12-byte IV + 16-byte tag + 32-byte ciphertext) to the same
   // `<id>.key` path. That length is what makes the plaintext loader fall
-  // through. It must classify as unidentified, never invalid / prunable.
-  it("a 60-byte keystore-shaped blob → unidentified, never a network call", async () => {
+  // through, so it must never classify as invalid / prunable. With the Instance
+  // rows READ and the id named by none of them it is an orphan (below, the
+  // flair#1925 case); with the rows NOT read it stays unidentified. Neither is
+  // "invalid", and neither is a network call.
+  it("a 60-byte keystore-shaped blob with the Instance rows NOT read → unidentified, never a network call", async () => {
     const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
     writeFileSync(join(keysDir, "flair_deadbeef.key"), blob);
     let called = false;
     globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
 
-    const res = await classifyKeysDir(keysDir, BASE_URL);
+    const res = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(res.aborted).toBe(false);
     expect(res.entries).toHaveLength(1);
     expect(res.entries[0].class).toBe("unidentified");
     expect(res.entries[0].class).not.toBe("invalid");
+    // The read did not happen, so the orphan class was NOT offered.
+    expect(res.entries[0].class).not.toBe("orphan");
+    expect(res.orphanRead?.state).toBe("unreadable");
     expect(called).toBe(false);
+  });
+});
+
+describe("classifyKeysDir — orphan instance seeds (flair#1925)", () => {
+  /** Write a 60-byte AES-256-GCM keystore blob at a node-shaped id. */
+  function writeNodeSeed(dir: string, id: string): void {
+    writeFileSync(join(dir, `${id}.key`), Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff)));
+  }
+
+  it("an orphan and a LIVE id side by side → only the orphan is offered for removal", async () => {
+    writeNodeSeed(keysDir, "flair_1111aaaa"); // no Instance row names it
+    writeNodeSeed(keysDir, "flair_2222bbbb"); // an Instance row names it
+    globalThis.fetch = mockRegistrationFetch(new Set());
+
+    const res = await classifyKeysDir(keysDir, BASE_URL, instanceRows(["flair_2222bbbb"]));
+    expect(res.aborted).toBe(false);
+
+    const byName = Object.fromEntries(res.entries.map((e) => [e.name, e.class]));
+    expect(byName["flair_1111aaaa.key"]).toBe("orphan");
+    expect(byName["flair_2222bbbb.key"]).toBe("keep");
+
+    // Only the orphan is prunable — applyKeyPrune moves it and nothing else.
+    const moved = applyKeyPrune(keysDir, res.entries, "2026-10-02");
+    expect(moved.map((m) => m.name)).toEqual(["flair_1111aaaa.key"]);
+    expect(existsSync(join(keysDir, "flair_1111aaaa.key"))).toBe(false);
+    expect(existsSync(join(keysDir, "flair_2222bbbb.key"))).toBe(true);
+  });
+
+  it("Instance rows NOT read → nothing is offered as orphan, and the result says why", async () => {
+    writeNodeSeed(keysDir, "flair_1111aaaa");
+    globalThis.fetch = mockRegistrationFetch(new Set());
+
+    const res = await classifyKeysDir(keysDir, BASE_URL, async () => ({
+      state: "unreadable" as const,
+      reason: "no local admin credential",
+    }));
+    expect(res.entries.map((e) => e.class)).toEqual(["unidentified"]);
+    expect(res.orphanRead).toEqual({ state: "unreadable", reason: "no local admin credential" });
+    expect(applyKeyPrune(keysDir, res.entries, "2026-10-02")).toEqual([]);
+    expect(existsSync(join(keysDir, "flair_1111aaaa.key"))).toBe(true);
+  });
+
+  it("the Instance rows are read once, and only when a node-shaped seed is present", async () => {
+    writeSeedKey(keysDir, "agent-plain");
+    globalThis.fetch = mockRegistrationFetch(new Set(["agent-plain"]));
+    let reads = 0;
+    const reader = async () => { reads++; return { state: "read" as const, ids: [] }; };
+
+    const noNode = await classifyKeysDir(keysDir, BASE_URL, reader);
+    expect(reads).toBe(0);
+    expect(noNode.orphanRead).toBeNull();
+
+    writeNodeSeed(keysDir, "flair_1111aaaa");
+    await classifyKeysDir(keysDir, BASE_URL, reader);
+    expect(reads).toBe(1);
+  });
+
+  it("a node-shaped id WITH a sibling .pub stays an agent key (never an orphan)", async () => {
+    const kp = nacl.sign.keyPair();
+    writeFileSync(join(keysDir, "flair_deadbeef.key"), Buffer.from(kp.secretKey.slice(0, 32)));
+    writeFileSync(join(keysDir, "flair_deadbeef.pub"), Buffer.from(kp.publicKey));
+    globalThis.fetch = mockRegistrationFetch(new Set(["flair_deadbeef"]));
+
+    const res = await classifyKeysDir(keysDir, BASE_URL, instanceRows([]));
+    const byName = Object.fromEntries(res.entries.map((e) => [e.name, e.class]));
+    expect(byName["flair_deadbeef.key"]).toBe("keep");
+    expect(byName["flair_deadbeef.pub"]).toBe("ignored");
+    expect(res.entries.find((e) => e.name === "flair_deadbeef.key")?.reason).toContain("registered");
+    expect(res.orphanRead).toBeNull();
   });
 });
 
@@ -190,7 +271,7 @@ describe("classifyKeysDir — unreachable instance aborts the whole run", () => 
     writeSeedKey(keysDir, "agent-b");
     globalThis.fetch = (async () => { throw new Error("ECONNREFUSED"); }) as typeof fetch;
 
-    const res = await classifyKeysDir(keysDir, BASE_URL);
+    const res = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(res.aborted).toBe(true);
     expect(res.entries).toEqual([]);
     expect(res.abortReason).toBeDefined();
@@ -213,7 +294,7 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
     writeFileSync(join(keysDir, "garbage.key"), "not-a-real-ed25519-seed-at-all");
     globalThis.fetch = mockRegistrationFetch(new Set(["agent-registered"]));
 
-    const classified = await classifyKeysDir(keysDir, BASE_URL);
+    const classified = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(classified.aborted).toBe(false);
 
     const moved = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
@@ -238,10 +319,10 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
     expect(existsSync(join(archiveDir, "agent-registered.key"))).toBe(false);
   });
 
-  it("a 60-byte keystore-shaped blob is never moved by --apply", async () => {
+  it("a keystore blob whose id an Instance row names is never moved by --apply (a LIVE federation key)", async () => {
     const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
     writeFileSync(join(keysDir, "flair_deadbeef.key"), blob);
-    const classified = await classifyKeysDir(keysDir, BASE_URL);
+    const classified = await classifyKeysDir(keysDir, BASE_URL, instanceRows(["flair_deadbeef"]));
     const moved = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
     expect(moved).toEqual([]);
     expect(existsSync(join(keysDir, "flair_deadbeef.key"))).toBe(true);
@@ -251,7 +332,7 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
   it("moving nothing (all keys registered) is a no-op — returns an empty list, no .pruned dir created", async () => {
     writeSeedKey(keysDir, "agent-registered");
     globalThis.fetch = mockRegistrationFetch(new Set(["agent-registered"]));
-    const classified = await classifyKeysDir(keysDir, BASE_URL);
+    const classified = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     const moved = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
     expect(moved).toEqual([]);
     expect(existsSync(join(keysDir, PRUNED_DIR_NAME))).toBe(false);
@@ -261,14 +342,14 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
   it("a second prune on a same-named leftover the same day gets a numeric-suffixed archive name, never overwrites", async () => {
     writeSeedKey(keysDir, "agent-stray");
     globalThis.fetch = mockRegistrationFetch(new Set());
-    const first = await classifyKeysDir(keysDir, BASE_URL);
+    const first = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     const firstMoved = applyKeyPrune(keysDir, first.entries, "2026-07-18");
     expect(firstMoved).toHaveLength(1);
 
     // A fresh key happens to reuse the same agent id / filename (e.g. a
     // second run after `flair agent add agent-stray` was retried).
     writeSeedKey(keysDir, "agent-stray");
-    const second = await classifyKeysDir(keysDir, BASE_URL);
+    const second = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     const secondMoved = applyKeyPrune(keysDir, second.entries, "2026-07-18");
     expect(secondMoved).toHaveLength(1);
     expect(secondMoved[0].movedTo).toContain("agent-stray.key.2");
@@ -362,7 +443,10 @@ describe("flair keys prune — subprocess acceptance checks", () => {
 
   // flair#1026 prune-guard: the CLI must *report* an unparseable file as
   // unidentified and must not treat an unidentified-only dir as empty.
-  // No network call is made (port 1 would abort if one were), so exit 0.
+  // flair#1925: a NODE-shaped file's orphan status needs the Instance rows,
+  // which this isolated HOME has no admin credential to read — the run says so
+  // and offers nothing as orphan. No request is sent (there is nothing to send
+  // it with), so exit 0.
   test("unparseable .key is reported unidentified, not 'no key files found', and not pruned", { timeout: 30_000 }, () => {
     const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
     writeFileSync(join(subKeysDir, "flair_deadbeef.key"), blob);
@@ -376,6 +460,9 @@ describe("flair keys prune — subprocess acceptance checks", () => {
     expect(dry.stdout).toContain("left in place");
     expect(dry.stdout).not.toContain("No key files found");
     expect(dry.stdout).not.toMatch(/flair_deadbeef\.key — invalid/);
+    // The orphan class was NOT offered, and the output says why.
+    expect(dry.stdout).toContain("orphan instance seeds were not determined");
+    expect(dry.stdout).not.toContain("— orphan:");
     expect(existsSync(join(subKeysDir, "flair_deadbeef.key"))).toBe(true);
 
     const applied = runCLI(

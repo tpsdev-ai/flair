@@ -4660,6 +4660,7 @@ bindKeysCli({
   checkAgentRegistered,
   probeFlairReachable,
   resolveBaseUrl,
+  resolveOpsPort,
 });
 registerKeys(program);
 
