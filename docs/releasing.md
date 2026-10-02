@@ -30,10 +30,10 @@ There is no "fix the stage in place" — you reject it and re-cut the next patch
                                                                   latest moves
 ```
 
-The `vX.Y.Z` tag triggers the release. This replaces the old "run
-`release.sh --publish` from a laptop logged into npm" flow. Nothing publishes without
-a human 2FA approval, and every package ships with a provenance attestation (public
-repo → verifiable build origin).
+One `vX.Y.Z` tag starts npm staging and the `adk-flair` PyPI workflow.
+PyPI requires the matching `packages/adk-flair/pyproject.toml` version and approval
+in the `adk-flair-publish` environment. `adk-flair-vX.Y.Z` remains available for
+Python-only releases; `workflow_dispatch` remains the manual fallback.
 
 ## Cutting a release
 
@@ -100,8 +100,8 @@ git tag v0.11.0 && git push origin v0.11.0
 > When the release commit's tree carries
 > `packages/adk-flair/pyproject.toml` whose `[project].version` equals the version
 > being tagged, the auto-tagger ALSO creates `adk-flair-v<version>` from the same
-> commit — so the PyPI publish run then needs only the environment gate its owner
-> keeps or drops (no hand-pushed `adk-flair-v` tag).
+> commit. Both tags now trigger the PyPI workflow, so this can queue a duplicate
+> publish attempt.
 >
 > The project version is read with Python's `tomllib` — the SAME reader
 > `.github/workflows/adk-flair-publish.yml` decides with — by handing the file to
@@ -385,6 +385,12 @@ reviewers** — the human gate is the npm staging approval, not a GitHub deploym
 review. Because the release is triggered by a tag push, its deployment policy must allow
 **`v*` tags** (Settings → Environments → `release` → Deployment branches and tags →
 Selected branches and tags → add tag rule `v*`).
+
+### GitHub `adk-flair-publish` environment
+
+Repository admin: add the tag rule `v*` under Settings → Environments →
+`adk-flair-publish` → Deployment branches and tags → Selected branches and tags.
+Keep `adk-flair-v*` and the required reviewer. No tag-creation ruleset change is needed.
 
 ### Required status checks (ruleset)
 

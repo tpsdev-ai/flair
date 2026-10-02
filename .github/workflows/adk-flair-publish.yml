@@ -1,22 +1,22 @@
 name: adk-flair — PyPI publish (OIDC trusted publishing)
 
-# Tokenless PyPI publish for the adk-flair Python package. Triggered by pushing
-# an adk-flair-v* tag. Authenticates to PyPI via OIDC trusted publishing — no
-# PyPI token lives anywhere. The tag push triggers this workflow; a maintainer
-# cuts the tag after the release PR merges to main.
+# Publish adk-flair to PyPI via OIDC trusted publishing.
+# One v* tag starts npm staging and this PyPI workflow after the release PR merges.
+# adk-flair-v* remains available for Python-only releases.
 #
 # Cut a release:
-#   git tag adk-flair-v0.1.0 && git push origin adk-flair-v0.1.0
+#   git tag v0.59.0 && git push origin v0.59.0
 #
 # One-time PyPI setup (pypi.org): add a Trusted Publisher pointing at
 #   owner=tpsdev-ai, repo=flair, workflow=adk-flair-publish.yml
 #   environment=adk-flair-publish
-# The `adk-flair-publish` GitHub environment must permit `adk-flair-v*` tag
-# deploys.
+# Admin: add v* to the `adk-flair-publish` environment's deployment tag policy;
+# keep adk-flair-v* and its required reviewer.
 
 on:
   push:
     tags:
+      - "v*"
       - "adk-flair-v*"
   workflow_dispatch:
     inputs:
@@ -52,7 +52,11 @@ jobs:
           if [ "$EVENT" = "workflow_dispatch" ]; then
             VERSION="$INPUT_VERSION"
           else
-            VERSION="${REF_NAME#adk-flair-v}"
+            case "$REF_NAME" in
+              adk-flair-v*) VERSION="${REF_NAME#adk-flair-v}" ;;
+              v*) VERSION="${REF_NAME#v}" ;;
+              *) echo "::error::Unexpected release tag '$REF_NAME'."; exit 1 ;;
+            esac
           fi
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
             echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.1.0 or 0.1.0-rc.1)."
@@ -83,7 +87,7 @@ jobs:
           cd packages/adk-flair
           PV="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
           if [ "$PV" != "$VERSION" ]; then
-            echo "::error::pyproject.toml version is $PV, expected $VERSION (tag adk-flair-v$VERSION)."
+            echo "::error::pyproject.toml version is $PV, expected $VERSION."
             exit 1
           fi
           echo "  ok adk-flair @ $PV"
