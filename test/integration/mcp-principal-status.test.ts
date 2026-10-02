@@ -65,7 +65,7 @@ async function expectOk(res: Response, what: string): Promise<void> {
 async function mintToken(sub: string): Promise<string> {
   const key = await importPKCS8(privateKeyPem, "RS256");
   return new SignJWT({ client_id: "principal-status-client", scope: "openid" })
-    .setProtectedHeader({ alg: "RS256", kid: KID })
+    .setProtectedHeader({ alg: "RS256", kid: KID, typ: "at+jwt" })
     .setIssuer(ISSUER)
     .setAudience(RESOURCE)
     .setSubject(sub)

@@ -49,7 +49,7 @@ async function adminOp(op: Record<string, any>): Promise<Response> {
 async function signToken(opts: { audience: string; issuer: string }): Promise<string> {
   const key = await importPKCS8(privateKeyPem, "RS256");
   return new SignJWT({ client_id: "igmt-client", scope: "openid" })
-    .setProtectedHeader({ alg: "RS256", kid: KID })
+    .setProtectedHeader({ alg: "RS256", kid: KID, typ: "at+jwt" })
     .setIssuer(opts.issuer)
     .setAudience(opts.audience)
     .setSubject("igmt-agent")
