@@ -4,7 +4,8 @@ name: adk-flair — PyPI publish (OIDC trusted publishing)
 # One v* tag starts npm staging and this PyPI workflow after the release PR merges.
 # adk-flair-v* remains available for Python-only releases.
 #
-# Cut a release:
+# Cut a release — checked, tag-absent fallback (docs/releasing.md):
+#   git ls-remote --tags origin v0.59.0  # must print nothing
 #   git tag v0.59.0 && git push origin v0.59.0
 #
 # One-time PyPI setup (pypi.org): add a Trusted Publisher pointing at
@@ -21,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Fallback only: version to publish (an adk-flair-v* tag must already exist on a merged commit)"
+        description: "Fallback: version to publish from the selected ref"
         required: true
         type: string
 
@@ -68,48 +69,61 @@ jobs:
           fi
           echo "  ok adk-flair @ $PV"
 
-      - name: Check whether the version is already on PyPI
-        id: pypi
-        env:
-          VERSION: ${{ needs.resolve.outputs.version }}
-        run: |
-          set -euo pipefail
-          if ! STATUS="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --connect-timeout 10 --max-time 30 "https://pypi.org/pypi/adk-flair/$VERSION/json")"; then
-            echo "::error::PyPI lookup failed for adk-flair $VERSION."
-            exit 1
-          fi
-          case "$STATUS" in
-            200)
-              echo "published=true" >> "$GITHUB_OUTPUT"
-              echo "::notice::adk-flair $VERSION is already on PyPI; skipping publication."
-              ;;
-            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::PyPI lookup returned HTTP $STATUS for adk-flair $VERSION."; exit 1 ;;
-          esac
-
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        if: steps.pypi.outputs.published == 'false'
         with:
           python-version: "3.12"
 
       - name: Install build tooling
-        if: steps.pypi.outputs.published == 'false'
         run: pip install build
 
       - name: Build wheel and sdist
-        if: steps.pypi.outputs.published == 'false'
         run: |
           cd packages/adk-flair
           python -m build
 
       - name: Publish to PyPI via OIDC trusted publishing
-        if: steps.pypi.outputs.published == 'false'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: packages/adk-flair/dist
+          skip-existing: true
+
+      - name: Verify wheel and sdist on PyPI
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          RELEASE_JSON="$RUNNER_TEMP/adk-flair-pypi.json"
+          if ! curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+            --output "$RELEASE_JSON" "https://pypi.org/pypi/adk-flair/$VERSION/json"; then
+            echo "::error::PyPI lookup failed for adk-flair $VERSION."
+            exit 1
+          fi
+          python3 - "$RELEASE_JSON" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          dist = Path("packages/adk-flair/dist")
+          wheels = list(dist.glob("*.whl"))
+          sdists = list(dist.glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              sys.exit("::error::Expected one locally built wheel and one sdist.")
+          try:
+              release = json.loads(Path(sys.argv[1]).read_text())
+              published = {file["filename"]: file["digests"]["sha256"] for file in release["urls"]}
+          except (OSError, ValueError, KeyError, TypeError) as error:
+              sys.exit(f"::error::Invalid PyPI file list: {error}")
+          for artifact in wheels + sdists:
+              if artifact.name not in published:
+                  sys.exit(f"::error::Missing PyPI file: {artifact.name}")
+              digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+              if published[artifact.name] != digest:
+                  sys.exit(f"::error::SHA256 mismatch for PyPI file: {artifact.name}")
+              print(f"Verified {artifact.name}: {digest}")
+          PY
 
       - name: Summary
-        if: steps.pypi.outputs.published == 'false'
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |

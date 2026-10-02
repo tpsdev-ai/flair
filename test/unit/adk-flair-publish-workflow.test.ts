@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ interface Step {
   if?: string;
   "continue-on-error"?: boolean;
   env?: Record<string, string>;
+  with?: Record<string, unknown>;
 }
 
 const root = join(import.meta.dir, "..", "..");
@@ -22,7 +24,8 @@ const workflow = yaml.load(readFileSync(join(root, ".github/workflows/adk-flair-
 };
 const job = workflow.jobs.publish;
 const resolve = workflow.jobs.resolve.steps.find(step => step.id === "ver")!;
-const lookup = job.steps.find(step => step.id === "pypi")!;
+const verify = job.steps.find(step => step.name === "Verify wheel and sdist on PyPI")!;
+const ancestry = job.steps.find(step => step.name === "Verify tagged commit is on main")!;
 const guard = job.steps.find(step => step.name === "Verify pyproject.toml version matches the tag")!;
 
 function runVersion(ref: string, projectVersion: string, input?: string) {
@@ -61,44 +64,104 @@ describe("adk-flair publishing", () => {
     expect(workflow.jobs.resolve.outputs.version).toBe("${{ steps.ver.outputs.version }}");
     expect(resolve.if).toBeUndefined();
     expect(resolve["continue-on-error"]).toBeUndefined();
-    for (const step of [lookup, guard, job.steps.find(step => step.name === "Verify tagged commit is on main")!]) {
+    for (const step of [guard, ancestry]) {
       expect(step.run).toBeTruthy();
       expect(step.if).toBeUndefined();
       expect(step["continue-on-error"]).toBeUndefined();
       expect(job.steps.indexOf(step)).toBeLessThan(publishIndex);
     }
     expect(job.concurrency).toEqual({ group: "adk-flair-publish-${{ needs.resolve.outputs.version }}", "cancel-in-progress": false });
-    expect(lookup.env?.VERSION).toBe("${{ needs.resolve.outputs.version }}");
-    for (const step of job.steps.slice(job.steps.indexOf(lookup) + 1)) {
-      expect(step.if).toBe("steps.pypi.outputs.published == 'false'");
+    expect(verify.env?.VERSION).toBe("${{ needs.resolve.outputs.version }}");
+    expect(job.steps[publishIndex].uses).toBe("pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33");
+    expect(job.steps[publishIndex].with).toEqual({ "packages-dir": "packages/adk-flair/dist", "skip-existing": true });
+    expect(job.steps.findIndex(step => step.name === "Build wheel and sdist")).toBeLessThan(publishIndex);
+    expect(job.steps.indexOf(verify)).toBeGreaterThan(publishIndex);
+    expect(job.steps.findIndex(step => step.name === "Summary")).toBeGreaterThan(job.steps.indexOf(verify));
+    for (const step of job.steps) {
+      expect(step.if).toBeUndefined();
+      expect(step["continue-on-error"]).toBeUndefined();
     }
   });
 
-  for (const [name, http, exit, expectedStatus, published] of [
-    ["published", "200", "0", 0, "true"],
-    ["not published", "404", "0", 0, "false"],
-    ["transport error", "000", "7", 1, ""],
-    ["transport error despite HTTP 200", "200", "28", 1, ""],
-    ["server error", "500", "0", 1, ""],
-    ["rate limit", "429", "0", 1, ""],
-    ["unexpected response", "invalid", "0", 1, ""],
-  ] as const) {
-    test(`PyPI lookup: ${name}`, () => {
-      const cwd = tempDir("flair-adk-pypi-");
-      const output = join(cwd, "output");
-      const args = join(cwd, "args");
-      writeFileSync(output, "");
-      writeFileSync(join(cwd, "curl"), '#!/bin/bash\nprintf "%s\\n" "$@" > "$LOOKUP_ARGS"\nprintf "%s" "$LOOKUP_HTTP"\nexit "$LOOKUP_EXIT"\n', { mode: 0o755 });
-      const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", lookup.run!], {
-        cwd, encoding: "utf8",
-        env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, VERSION: "0.59.0", GITHUB_OUTPUT: output, LOOKUP_ARGS: args, LOOKUP_HTTP: http, LOOKUP_EXIT: exit },
+  for (const mode of ["accepted", "rejected", "fetch failure"] as const) {
+    test(`ancestry guard: ${mode}`, () => {
+      const cwd = tempDir("flair-adk-ancestry-");
+      const origin = join(cwd, "origin");
+      const checkout = join(cwd, "checkout");
+      mkdirSync(origin);
+      mkdirSync(checkout);
+      function git(args: string[], dir: string, input?: string) {
+        const result = spawnSync("git", args, { cwd: dir, input, encoding: "utf8" });
+        if (result.status !== 0) throw new Error(result.stderr);
+        return result.stdout.trim();
+      }
+      git(["init", "--bare", "-q"], origin);
+      const tree = git(["hash-object", "-t", "tree", "-w", "--stdin"], origin, "");
+      function commit(dir: string, message: string, parent?: string) {
+        return git(["hash-object", "-t", "commit", "-w", "--stdin"], dir,
+          `tree ${tree}\n${parent ? `parent ${parent}\n` : ""}author Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\n${message}\n`);
+      }
+      const accepted = commit(origin, "accepted");
+      const main = commit(origin, "main", accepted);
+      git(["update-ref", "refs/heads/main", main], origin);
+      git(["init", "-q"], checkout);
+      git(["remote", "add", "origin", mode === "fetch failure" ? join(cwd, "absent") : origin], checkout);
+      const rejected = commit(checkout, "rejected");
+      const sha = mode === "rejected" ? rejected : accepted;
+      const result = spawnSync("bash", ["-c", ancestry.run!], {
+        cwd: checkout, encoding: "utf8", env: { ...process.env, GITHUB_SHA: sha },
       });
       const text = result.stdout + result.stderr;
-      expect(result.status, text).toBe(expectedStatus);
-      expect(readFileSync(args, "utf8")).toContain("https://pypi.org/pypi/adk-flair/0.59.0/json\n");
-      expect(readFileSync(output, "utf8")).toBe(published ? `published=${published}\n` : "");
-      if (published === "true") expect(text).toContain("::notice::adk-flair 0.59.0 is already on PyPI; skipping publication.");
-      if (expectedStatus !== 0) expect(text).toContain("::error::PyPI lookup");
+      if (mode === "fetch failure") expect(result.status, text).not.toBe(0);
+      else expect(result.status, text).toBe(mode === "accepted" ? 0 : 1);
+      if (mode === "accepted") expect(text).toContain(`ok ${sha} is on main`);
+      if (mode === "rejected") expect(text).toContain(`Commit ${sha} is not an ancestor of origin/main`);
+      if (mode === "fetch failure") expect(text).not.toContain(" is on main");
+    });
+  }
+
+  for (const scenario of ["complete", "missing wheel", "missing sdist", "wheel mismatch", "sdist mismatch", "lookup error", "HTTP error", "invalid JSON"] as const) {
+    test(`PyPI verification: ${scenario}`, () => {
+      const cwd = tempDir("flair-adk-pypi-");
+      const dist = join(cwd, "packages/adk-flair/dist");
+      mkdirSync(dist, { recursive: true });
+      const names = ["adk_flair-0.59.0-py3-none-any.whl", "adk_flair-0.59.0.tar.gz"];
+      const files = names.map(filename => {
+        const data = `built ${filename}`;
+        writeFileSync(join(dist, filename), data);
+        return { filename, digests: { sha256: createHash("sha256").update(data).digest("hex") } };
+      });
+      const affected = scenario.includes("sdist") ? names[1] : names[0];
+      const urls = files.filter(file => !scenario.startsWith("missing") || file.filename !== affected)
+        .map(file => scenario.endsWith("mismatch") && file.filename === affected ? { ...file, digests: { sha256: "0".repeat(64) } } : file);
+      const args = join(cwd, "args");
+      writeFileSync(join(cwd, "curl"), `#!/bin/bash
+printf "%s\\n" "$@" > "$LOOKUP_ARGS"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then printf "%s" "$LOOKUP_BODY" > "$2"; shift; fi
+  shift
+done
+exit "$LOOKUP_EXIT"
+`, { mode: 0o755 });
+      const result = spawnSync("bash", ["-c", verify.run!], {
+        cwd, encoding: "utf8",
+        env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, VERSION: "0.59.0", RUNNER_TEMP: cwd, LOOKUP_ARGS: args,
+          LOOKUP_BODY: scenario === "invalid JSON" ? "invalid" : JSON.stringify({ urls }),
+          LOOKUP_EXIT: scenario === "lookup error" ? "7" : scenario === "HTTP error" ? "22" : "0" },
+      });
+      const text = result.stdout + result.stderr;
+      expect(result.status, text).toBe(scenario === "complete" ? 0 : 1);
+      const request = readFileSync(args, "utf8");
+      expect(request).toContain("https://pypi.org/pypi/adk-flair/0.59.0/json\n");
+      expect(request).toContain("--fail\n");
+      expect(request).toContain("--max-time\n30\n");
+      if (scenario === "complete") {
+        for (const file of files) expect(text).toContain(`Verified ${file.filename}: ${file.digests.sha256}`);
+      }
+      if (scenario.startsWith("missing")) expect(text).toContain(`Missing PyPI file: ${affected}`);
+      if (scenario.endsWith("mismatch")) expect(text).toContain(`SHA256 mismatch for PyPI file: ${affected}`);
+      if (scenario.endsWith("error")) expect(text).toContain("::error::PyPI lookup failed");
+      if (scenario === "invalid JSON") expect(text).toContain("::error::Invalid PyPI file list");
     });
   }
 
