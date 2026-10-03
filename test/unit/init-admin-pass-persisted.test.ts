@@ -10,14 +10,16 @@
  */
 import { describe, test, expect, afterEach } from "bun:test";
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, lstatSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   resolveInitAdminPasswordSource,
   resolveInitAdminPasswordRefuseReason,
   detectPersistedAdminUser,
+  countRocksAdminUsers,
   initAdminPassRefusalMessage,
   adminPassDesyncFinding,
   callOpsSocket,
@@ -166,6 +168,23 @@ describe("detectPersistedAdminUser — Harper's own user-record paths", () => {
     dirs.push(dir);
     makeHarper5SystemDb(dir, ["admin"]);
     expect(detectPersistedAdminUser(dir)).toBe(true);
+  });
+
+  test("Harper 5: countRocksAdminUsers writes nothing to the system tree", () => {
+    const dir = makeTmpDir();
+    dirs.push(dir);
+    makeHarper5SystemDb(dir, ["admin"]);
+    const systemDir = join(dir, "database", "system");
+    const fingerprint = (name = "."): unknown[] => {
+      const path = join(systemDir, name);
+      const stat = lstatSync(path, { bigint: true });
+      return [name, stat.size, stat.mtimeNs, stat.isDirectory()
+        ? readdirSync(path).sort().map(child => fingerprint(join(name, child)))
+        : createHash("sha256").update(readFileSync(path)).digest("hex")];
+    };
+    const before = fingerprint();
+    expect(countRocksAdminUsers(systemDir)).toBe(1);
+    expect(fingerprint()).toEqual(before);
   });
 
   test("Harper 5: an empty hdb_user/ store (mount wrote the table, no user) is NOT a persisted user", () => {
