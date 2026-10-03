@@ -234,7 +234,7 @@ flair keys
   subcommands: prune
 
 flair keys prune
-  description: Move stale/unregistered keys to <keysDir>/.pruned/<date>/; report node-shaped orphan candidates — dry-run by default
+  description: Move stale/unregistered agent keys to <keysDir>/.pruned/<date>/; node-shaped files without .pub stay report-only — dry-run by default
   usage: [options]
   options:
     --apply
@@ -2944,15 +2944,16 @@ Global Options:
   -v, --version    output the version number
 
 Commands:
-  prune [options]  Move stale/unregistered keys to <keysDir>/.pruned/<date>/;
-                   report node-shaped orphan candidates — dry-run by default
+  prune [options]  Move stale/unregistered agent keys to
+                   <keysDir>/.pruned/<date>/; node-shaped files without .pub
+                   stay report-only — dry-run by default
   help [command]   display help for command
 
 ----- flair keys prune -----
 Usage: flair keys prune [options]
 
-Move stale/unregistered keys to <keysDir>/.pruned/<date>/; report node-shaped
-orphan candidates — dry-run by default
+Move stale/unregistered agent keys to <keysDir>/.pruned/<date>/; node-shaped
+files without .pub stay report-only — dry-run by default
 
 Options:
   --apply           Actually move prunable keys (default: dry-run, prints what
