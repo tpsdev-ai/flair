@@ -112,7 +112,7 @@ function mappingStub(opts: {
     }
     if (body.operation === "insert" && body.table === "Agent") {
       if (opts.failWrites) return new Response("nope", { status: 500 });
-      write(body.records ?? []);
+      for (const row of body.records ?? []) principals.set(row.id, { ...row });
       return Response.json({ message: "inserted" });
     }
     if ((body.operation === "upsert" || body.operation === "update") && body.table === "Credential") {
@@ -888,14 +888,72 @@ describe("legacy Credential mapping reads", () => {
 
 // ─── flair#2222 — a change between preflight and write refuses ───────────────
 //
-// Harper's operations API offers no compare-and-set and no cross-request
-// transaction on this path (see the module comment in src/lib/mcp-enable.ts),
-// so the strongest bound is a snapshot of what the preflight validated, re-read
-// immediately before the write. These tests inject the change AFTER the preflight
-// read answers (so the preflight itself is consistent) and require the write to
-// refuse and leave the store untouched.
+// Re-read Agent presence and canonicalized fields of principal-bearing IdP rows
+// before each write; a detected change refuses the pending write.
 
 describe("flair#2222 — the pre-write re-validation bound", () => {
+  const provisionParams = { hostedOrigin: HOSTED, ...ADMIN, principal: "self", principalKind: "human" as const, ...SUBJECT };
+
+  test("the missing-Agent path checks before both writes and accepts its own insert", async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: [] });
+    const result = await provisionIdpIdentityMapping(provisionParams, { fetchImpl: st.fetchImpl });
+    expect(result.principalCreated).toBe(true);
+    expect(st.calls.map(c => `${c.body.operation}:${c.body.table}`)).toEqual([
+      "search_by_value:Agent", "search_by_conditions:Credential",
+      "search_by_value:Agent", "search_by_conditions:Credential", "insert:Agent",
+      "search_by_value:Agent", "search_by_conditions:Credential", "upsert:Credential",
+      "search_by_conditions:Credential",
+    ]);
+    expect(st.principals.get("self")).toMatchObject({ id: "self", admin: false });
+    expect(st.rows.get(result.credentialId)).toMatchObject({ principalId: "self", status: "active" });
+  });
+
+  for (const change of ["repoint", "add", "remove-agent"] as const) {
+    test(`the missing-Agent path refuses ${change} after insert without a Credential write or rollback`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["bob", "carl"], credentials: [
+        { id: "cred_c1", principalId: "bob", ...SUBJECT },
+      ] });
+      const fetchImpl = (async (url: any, init?: RequestInit) => {
+        const response = await st.fetchImpl(url, init);
+        const op = JSON.parse(String(init?.body));
+        if (op.operation === "insert" && op.table === "Agent") {
+          if (change === "repoint") st.rows.get("cred_c1")!.principalId = "carl";
+          if (change === "add") st.rows.set("cred_c2", { ...st.rows.get("cred_c1"), id: "cred_c2", principalId: "carl" });
+          if (change === "remove-agent") st.principals.delete("self");
+        }
+        return response;
+      }) as typeof fetch;
+      const error = await provisionIdpIdentityMapping(provisionParams, { fetchImpl }).catch(e => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain("mapping-changed-underneath");
+      expect(error.message).toContain("Agent 'self' was created; no rollback was attempted");
+      expect(error.message).not.toContain("Nothing was written");
+      expect(st.writes().map(c => `${c.body.operation}:${c.body.table}`)).toEqual(["insert:Agent"]);
+      expect(st.principals.has("self")).toBe(change !== "remove-agent");
+      expect(st.rows.get("cred_c1")).toMatchObject({ principalId: change === "repoint" ? "carl" : "bob", status: "active" });
+      expect(st.rows.has("cred_c2")).toBe(change === "add");
+    });
+  }
+
+  test("the missing-Agent path refuses a change before insert without either write", async () => {
+    const st = raceStub({ principals: [], mutate: s => { s.principals.set("self", { id: "self" }); } });
+    await expect(provisionIdpIdentityMapping(provisionParams, { fetchImpl: st.fetchImpl })).rejects.toThrow("mapping-changed-underneath");
+    expect(st.writes()).toEqual([]);
+  });
+
+  test("lastUsedAt changes and principal-less legacy rows do not refuse a mapping write", async () => {
+    const st = raceStub({ principals: ["self"], credentials: [
+      { id: "cred_c1", principalId: "self", ...SUBJECT },
+    ], mutate: s => {
+      s.rows.get("cred_c1")!.lastUsedAt = "2026-10-03T00:00:00.000Z";
+      s.rows.set("cred_legacy", { id: "cred_legacy", kind: "idp", ...SUBJECT });
+    } });
+    const result = await provisionIdpIdentityMapping(provisionParams, { fetchImpl: st.fetchImpl });
+    expect(result.credentialId).toBe("cred_c1");
+    expect(st.writes()).toHaveLength(1);
+    expect(st.rows.has("cred_legacy")).toBe(true);
+  });
+
   /** A stub whose store is changed ONCE, after the first subject read answers. */
   function raceStub(opts: {
     principals?: string[];

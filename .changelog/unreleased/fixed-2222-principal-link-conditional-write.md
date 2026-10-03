@@ -1,8 +1,9 @@
-- **`flair principal link`/`unlink` and the shared provisioner re-validate the mapping immediately before writing, refusing a concurrent change (flair#2222).**
+- **`flair principal link`/`unlink` and the shared provisioner re-read validated mapping fields before each write, refusing detected changes (flair#2222).**
 
-  Harper's operations API exposes no compare-and-set and no cross-request
-  transaction on this path, so the strongest bound it admits is used: the
-  principal Agent's presence and the subject's Credential rows are re-read
-  right before the write, and any difference refuses with
-  `mapping-changed-underneath` and writes nothing. The interval between that
-  re-read and the write is the remaining window; no atomicity is claimed.
+  The checks compare Agent presence and `id`, `kind`, `principalId`,
+  `idpProvider`, `idpSubject`, `status`, `label` and `createdAt` of
+  principal-bearing IdP rows for the subject. `lastUsedAt` is not compared.
+  A detected change refuses the pending write with `mapping-changed-underneath`.
+  An Agent already inserted is retained; rollback could delete a concurrently
+  adopted principal. No Credential write follows the refusal.
+  The interval between the final read and write remains; no atomicity is claimed.

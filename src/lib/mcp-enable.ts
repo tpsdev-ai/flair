@@ -1388,14 +1388,11 @@ export async function provisionIdpIdentityMapping(
     readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject);
   const subjectCreds = await findCredentialsForSubject();
   const activeCreds = subjectCreds.filter(isResolvableCredential);
-  // flair#2222 — the state this preflight validated (Agent presence + the
-  // subject's rows), re-read immediately before the write. See
-  // assertMappingUnchanged for why this is the strongest bound this surface
-  // can express.
+  // flair#2222 — retain Agent presence and the compared principal-bearing IdP fields.
   const preflight = mappingPreflight(params.principal, params.idpSubject, foundAgents.length > 0, subjectCreds);
-  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight);
 
   if (foundAgents.length === 0) {
+    await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight);
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1424,6 +1421,7 @@ export async function provisionIdpIdentityMapping(
       throw new Error(`Identity mapping: failed to create principal '${params.principal}' (HTTP ${insertRes.status}): ${text}`);
     }
     principalCreated = true;
+    preflight.principalPresent = true;
   }
 
   // Survivor: an ACTIVE same-provider credential is re-pointed (the idempotent
@@ -1441,6 +1439,7 @@ export async function provisionIdpIdentityMapping(
   // ops-API operation is the strongest atomicity this surface can express, and
   // ordering the survivor first means even a partially-applied batch can never
   // leave the subject with ZERO resolvable credentials (the fail-open denial).
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight, principalCreated);
   const upsertRes = await fetchImpl(opsUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1726,36 +1725,24 @@ function principalMissingMessage(principal: string): string {
 
 // ─── flair#2222 — the pre-write re-validation bound ───────────────────────────
 //
-// Harper's operations API offers no compare-and-set and no cross-request
-// transaction on the path this code uses:
-//   - the write operations accept only `{operation, database, table, records}`
-//     (node_modules/harper/validation/insertValidator.ts), with no
-//     version/if/condition field, and `insertUpdateValidate` reads none
-//     (node_modules/harper/dataLayer/harperBridge/bridgeUtility/insertUpdateValidate.js);
-//   - every ops request runs in its OWN transaction scope, created and committed
-//     inside `processLocalTransaction` (node_modules/harper/server/serverHelpers/serverUtilities.ts),
-//     so a read and a later write cannot share one;
-//   - the REST layer's only conditional header is `If-None-Match`, for caches
-//     (node_modules/harper/server/REST.ts), and records are stamped with
-//     `__updatedtime__` unconditionally on write (node_modules/harper/resources/Table.ts),
-//     so there is no server-enforced version precondition to name in a write.
-//
-// So the strongest bound expressible here: snapshot exactly what the preflight
-// validated and re-read it immediately before the write; any difference refuses
-// the write. The window left is the interval between this re-read and the write
-// (one request on the wire), not the whole preflight. No atomicity is claimed.
+// These separate ops requests offer no compare-and-set or shared transaction.
+// Harper 5.2.8 accepts unknown fields (validation/validationWrapper.ts:93-94);
+// processLocalTransaction dispatches with ambient user context, preserving an
+// existing transaction (server/serverHelpers/serverUtilities.ts:120-136).
+// Re-read Agent presence and the canonicalized principal-bearing IdP fields
+// before each write. lastUsedAt is not compared. The read/write race remains.
 
-/** What a preflight validated: the principal Agent's presence and the subject's rows. */
+/** Agent presence and selected fields of principal-bearing IdP rows for the subject. */
 interface MappingPreflight {
   principal: string;
   idpSubject: string;
-  /** True when the preflight's Agent read found the principal row. */
+  /** Expected presence, including an Agent inserted by this command. */
   principalPresent: boolean;
-  /** The subject's Credential rows, canonicalized, exactly as the preflight read them. */
+  /** canonicalSubjectRows' selected fields; principal-less rows were skipped. */
   subjectRows: string;
 }
 
-/** A stable, comparable image of the subject's Credential rows. */
+/** Canonicalize id, kind, principalId, idpProvider, idpSubject, status, label and createdAt. */
 function canonicalSubjectRows(rows: any[]): string {
   return JSON.stringify(
     rows
@@ -1778,11 +1765,12 @@ function mappingPreflight(principal: string, idpSubject: string, principalPresen
 }
 
 /** The one refusal a changed-underneath mapping gets, wherever it is checked. */
-function mappingChangedMessage(principal: string, idpSubject: string): string {
+function mappingChangedMessage(principal: string, idpSubject: string, principalCreated = false): string {
   return (
-    `Identity mapping: mapping-changed-underneath — the Agent or Credential rows for principal '${principal}' ` +
+    `Identity mapping: mapping-changed-underneath — the Agent presence or compared IdP mapping fields for principal '${principal}' ` +
     `and IdP subject '${idpSubject}' changed on the target between this command's validation and its write. ` +
-    `Nothing was written. Re-run the command.`
+    (principalCreated ? `Agent '${principal}' was created; no rollback was attempted. No Credential write was made. ` : `Nothing was written. `) +
+    `Re-run the command.`
   );
 }
 
@@ -1799,14 +1787,15 @@ async function assertMappingUnchanged(
   opsUrl: string,
   authHeader: string,
   preflight: MappingPreflight,
+  principalCreated = false,
 ): Promise<void> {
   const agents = await opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Agent", { id: preflight.principal }));
   if ((agents.length > 0) !== preflight.principalPresent) {
-    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject));
+    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject, principalCreated));
   }
   const rows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, preflight.idpSubject);
   if (canonicalSubjectRows(rows) !== preflight.subjectRows) {
-    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject));
+    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject, principalCreated));
   }
 }
 

@@ -1,18 +1,7 @@
 // ─── flair#2222 — a concurrent change between preflight and write refuses ────
 //
-// `flair principal link` / `unlink` (and the shared provisioner) read the Agent
-// and Credential rows, validate them, and then write. A concurrent writer can
-// change those rows in between, so the write used to land on state nobody
-// validated.
-//
-// Harper's operations API has no compare-and-set and no cross-request
-// transaction on the path this code uses (see the module comment in
-// src/lib/mcp-enable.ts for the exact source lines), so the bound is a snapshot
-// of what the preflight validated, re-read immediately before the write. This
-// suite drives that bound against a REAL Harper: it injects the concurrent
-// change through the instance's own ops API after the preflight read answers,
-// then requires the command to refuse with a named error and leave the store
-// untouched.
+// Re-read Agent presence and canonicalized fields of principal-bearing IdP rows
+// before each write; a detected change refuses the pending write.
 //
 // Every command talks only to this test's own ephemeral instance: the numeric
 // ops port it was started on, checked before the first call.
@@ -73,18 +62,15 @@ function rowFor(rows: any[], id: string): any {
   return row;
 }
 
-/**
- * A fetch that lets one real request through, then injects a concurrent change
- * through the SAME instance's ops API, so the next read the command makes sees
- * state it did not validate. The mutation runs after the first subject read
- * answers, i.e. between the preflight and the write.
- */
-function racingFetch(inject: () => Promise<void>): typeof fetch {
+/** Inject through this instance's ops API after the first subject read or Agent insert. */
+function racingFetch(inject: () => Promise<void>, afterAgentInsert = false): typeof fetch {
   let injected = false;
   return (async (url: any, init?: any) => {
     const res = await fetch(url, init);
     const body = JSON.parse(String(init?.body ?? "{}"));
-    if (!injected && body.operation === "search_by_conditions" && body.table === "Credential") {
+    if (!injected && (afterAgentInsert
+      ? body.operation === "insert" && body.table === "Agent"
+      : body.operation === "search_by_conditions" && body.table === "Credential")) {
       injected = true;
       await inject();
     }
@@ -201,4 +187,45 @@ describe("flair#2222 — principal link/unlink refuse a concurrent change (real 
     expect(rows.filter((r) => r.status !== "revoked").length, "both active rows survive; nothing was superseded by the refused write").toBe(2);
     expect(rowFor(rows, credentialId)).toMatchObject({ principalId: PRINCIPAL, status: "active" });
   }, 120_000);
+
+  for (const change of ["repoint", "add"] as const) {
+    test(`missing-Agent provisioner refuses ${change} after insert without a Credential write`, async () => {
+      const credentialId = await seedMapping(OTHER);
+      const principal = `race-new-${change}-${sfx}`;
+      const writes: string[] = [];
+      const inner = racingFetch(async () => {
+        await adminOp(change === "repoint"
+          ? { operation: "update", database: "flair", table: "Credential", records: [{ id: credentialId, principalId: THIRD }] }
+          : { operation: "insert", database: "flair", table: "Credential", records: [{ id: `cred_after_insert_${sfx}`, kind: "idp", principalId: THIRD, idpProvider: "okta", idpSubject: SUBJECT, status: "active", createdAt: new Date().toISOString() }] });
+      }, true);
+      const fetchImpl = (async (url: any, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        if (["insert", "upsert", "update", "delete"].includes(body.operation)) writes.push(`${body.operation}:${body.table}`);
+        return inner(url, init);
+      }) as typeof fetch;
+      const err = await provisionIdpIdentityMapping(
+        { ...mappingParams, opsPortOrUrl: opsPort, principal, principalKind: "human" }, { fetchImpl },
+      ).then(() => null, (e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).toContain("mapping-changed-underneath");
+      expect(err!.message).toContain(`Agent '${principal}' was created; no rollback was attempted`);
+      expect(err!.message).not.toContain("Nothing was written");
+      expect(writes).toEqual(["insert:Agent"]);
+      const agents = await adminOp({ operation: "search_by_value", database: "flair", table: "Agent", search_attribute: "id", search_value: principal, get_attributes: ["id", "admin"] });
+      expect(agents).toEqual([{ id: principal, admin: false }]);
+      const rows = await subjectCreds();
+      expect(rowFor(rows, credentialId)).toMatchObject({ principalId: change === "repoint" ? THIRD : OTHER, status: "active" });
+      expect(rows.filter(r => r.status !== "revoked")).toHaveLength(change === "repoint" ? 1 : 2);
+    }, 120_000);
+  }
+
+  test("missing-Agent provisioner accepts its own insert when the mapping is unchanged", async () => {
+    const credentialId = await seedMapping(OTHER);
+    const principal = `race-new-unchanged-${sfx}`;
+    const result = await provisionIdpIdentityMapping({ ...mappingParams, opsPortOrUrl: opsPort, principal, principalKind: "human" });
+    expect(result.principalCreated).toBe(true);
+    expect(result.credentialId).toBe(credentialId);
+    expect(rowFor(await subjectCreds(), credentialId)).toMatchObject({ principalId: principal, status: "active" });
+  }, 120_000);
+
 });

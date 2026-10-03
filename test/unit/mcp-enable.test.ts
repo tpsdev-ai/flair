@@ -378,16 +378,18 @@ function mockOpsFetch(opts: {
   const creds = credentialTable(
     seed.map((c) => ({ idpProvider: "github", idpSubject: "octocat", principalId: "self", ...c })),
   );
+  let principalPresent = opts.existingPrincipal ?? false;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push({ url: String(url), body });
     if (body.operation === "search_by_value" && body.table === "Agent") {
       if (opts.failFind) return new Response("boom", { status: opts.failFindStatus ?? 500 });
       if ("agentSearchBody" in opts) return new Response(JSON.stringify(opts.agentSearchBody), { status: 200 });
-      return new Response(JSON.stringify(opts.existingPrincipal ? [{ id: body.search_value }] : []), { status: 200 });
+      return new Response(JSON.stringify(principalPresent ? [{ id: body.search_value }] : []), { status: 200 });
     }
     if (body.operation === "insert" && body.table === "Agent") {
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
+      principalPresent = true;
       return new Response(JSON.stringify({ message: "inserted" }), { status: 200 });
     }
     if (body.operation === "upsert" && body.table === "Credential" && opts.failUpsert) {
@@ -428,7 +430,7 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions"]);
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
     const credRecord = calls.find((c) => c.body.operation === "upsert")!.body.records[0];
     expect(credRecord.kind).toBe("idp");
     expect(credRecord.idpProvider).toBe("github");
@@ -682,14 +684,18 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   test("a local URL string with a non-default port: every request goes to exactly that port, and nothing else is contacted", async () => {
     const creds = credentialTable();
     const received: { host: string; operation: string }[] = [];
+    let principalPresent = false;
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       async fetch(req) {
         const body: any = await req.json().catch(() => ({}));
         received.push({ host: req.headers.get("host") ?? "", operation: body.operation });
-        if (body.operation === "search_by_value") return Response.json([]);
-        if (body.operation === "insert") return Response.json({ message: "inserted" });
+        if (body.operation === "search_by_value") return Response.json(principalPresent ? [{ id: body.search_value }] : []);
+        if (body.operation === "insert") {
+          principalPresent = true;
+          return Response.json({ message: "inserted" });
+        }
         return creds.handle(body) ?? new Response("unexpected operation", { status: 400 });
       },
     });
@@ -707,9 +713,9 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
 
       const result = await provisionIdpIdentityMapping({ opsPortOrUrl: origin, ...MAPPING }, { fetchImpl });
 
-      expect(attempted).toEqual(Array(7).fill(`${origin}/`));
+      expect(attempted).toEqual(Array(9).fill(`${origin}/`));
       expect(received.map((r) => r.operation)).toEqual([
-        "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions",
+        "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions",
       ]);
       expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
       expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
