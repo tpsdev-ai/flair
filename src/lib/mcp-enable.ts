@@ -1388,6 +1388,12 @@ export async function provisionIdpIdentityMapping(
     readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject);
   const subjectCreds = await findCredentialsForSubject();
   const activeCreds = subjectCreds.filter(isResolvableCredential);
+  // flair#2222 — the state this preflight validated (Agent presence + the
+  // subject's rows), re-read immediately before the write. See
+  // assertMappingUnchanged for why this is the strongest bound this surface
+  // can express.
+  const preflight = mappingPreflight(params.principal, params.idpSubject, foundAgents.length > 0, subjectCreds);
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight);
 
   if (foundAgents.length === 0) {
     const insertRes = await fetchImpl(opsUrl, {
@@ -1718,6 +1724,92 @@ function principalMissingMessage(principal: string): string {
   );
 }
 
+// ─── flair#2222 — the pre-write re-validation bound ───────────────────────────
+//
+// Harper's operations API offers no compare-and-set and no cross-request
+// transaction on the path this code uses:
+//   - the write operations accept only `{operation, database, table, records}`
+//     (node_modules/harper/validation/insertValidator.ts), with no
+//     version/if/condition field, and `insertUpdateValidate` reads none
+//     (node_modules/harper/dataLayer/harperBridge/bridgeUtility/insertUpdateValidate.js);
+//   - every ops request runs in its OWN transaction scope, created and committed
+//     inside `processLocalTransaction` (node_modules/harper/server/serverHelpers/serverUtilities.ts),
+//     so a read and a later write cannot share one;
+//   - the REST layer's only conditional header is `If-None-Match`, for caches
+//     (node_modules/harper/server/REST.ts), and records are stamped with
+//     `__updatedtime__` unconditionally on write (node_modules/harper/resources/Table.ts),
+//     so there is no server-enforced version precondition to name in a write.
+//
+// So the strongest bound expressible here: snapshot exactly what the preflight
+// validated and re-read it immediately before the write; any difference refuses
+// the write. The window left is the interval between this re-read and the write
+// (one request on the wire), not the whole preflight. No atomicity is claimed.
+
+/** What a preflight validated: the principal Agent's presence and the subject's rows. */
+interface MappingPreflight {
+  principal: string;
+  idpSubject: string;
+  /** True when the preflight's Agent read found the principal row. */
+  principalPresent: boolean;
+  /** The subject's Credential rows, canonicalized, exactly as the preflight read them. */
+  subjectRows: string;
+}
+
+/** A stable, comparable image of the subject's Credential rows. */
+function canonicalSubjectRows(rows: any[]): string {
+  return JSON.stringify(
+    rows
+      .map((r) => ({
+        id: String(r?.id),
+        kind: r?.kind ?? null,
+        principalId: r?.principalId ?? null,
+        idpProvider: r?.idpProvider ?? null,
+        idpSubject: r?.idpSubject ?? null,
+        status: r?.status ?? null,
+        label: r?.label ?? null,
+        createdAt: r?.createdAt ?? null,
+      }))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  );
+}
+
+function mappingPreflight(principal: string, idpSubject: string, principalPresent: boolean, subjectRows: any[]): MappingPreflight {
+  return { principal, idpSubject, principalPresent, subjectRows: canonicalSubjectRows(subjectRows) };
+}
+
+/** The one refusal a changed-underneath mapping gets, wherever it is checked. */
+function mappingChangedMessage(principal: string, idpSubject: string): string {
+  return (
+    `Identity mapping: mapping-changed-underneath — the Agent or Credential rows for principal '${principal}' ` +
+    `and IdP subject '${idpSubject}' changed on the target between this command's validation and its write. ` +
+    `Nothing was written. Re-run the command.`
+  );
+}
+
+/**
+ * Re-read the state a preflight validated and refuse if it moved.
+ *
+ * A failed read propagates: an unreadable table is not an unchanged one, and
+ * this stands in front of a write. Called immediately before each write in
+ * `provisionIdpIdentityMapping`, `linkPrincipalMapping` and
+ * `unlinkPrincipalMapping`.
+ */
+async function assertMappingUnchanged(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  preflight: MappingPreflight,
+): Promise<void> {
+  const agents = await opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Agent", { id: preflight.principal }));
+  if ((agents.length > 0) !== preflight.principalPresent) {
+    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject));
+  }
+  const rows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, preflight.idpSubject);
+  if (canonicalSubjectRows(rows) !== preflight.subjectRows) {
+    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject));
+  }
+}
+
 /**
  * flair#2115 — `flair principal link|unlink|links` carry the target instance's
  * admin credential to its operations API, so the target they accept is narrower
@@ -1768,9 +1860,8 @@ export async function linkPrincipalMapping(
   // Refuse a missing requested principal before either mapping branch.
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
-  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true)).filter(
-    isResolvableCredential,
-  );
+  const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
+  const active = subjectRows.filter(isResolvableCredential);
   const elsewhere = active.filter((c) => c?.principalId !== params.principal);
   if (elsewhere.length > 0 && !params.replace) {
     const current = [...new Set(elsewhere.map((c) => String(c?.principalId)))].join(", ");
@@ -1793,6 +1884,11 @@ export async function linkPrincipalMapping(
     };
   }
   const previousPrincipal = elsewhere.length > 0 ? String(elsewhere[0]?.principalId) : undefined;
+
+  // flair#2222 — the write is the shared provisioner's; re-validate the state
+  // this preflight acted on so a concurrent change refuses here, not after the
+  // provisioner has already re-read and moved on.
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, mappingPreflight(params.principal, params.idpSubject, true, subjectRows));
 
   const mapping = await provisionIdpIdentityMapping(
     {
@@ -1846,9 +1942,8 @@ export async function unlinkPrincipalMapping(
 
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
-  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true)).filter(
-    isResolvableCredential,
-  );
+  const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
+  const active = subjectRows.filter(isResolvableCredential);
   const mine = active.filter((c) => c?.principalId === params.principal);
   if (mine.length === 0) {
     const elsewhere = [...new Set(active.map((c) => String(c?.principalId)))].join(", ");
@@ -1865,6 +1960,9 @@ export async function unlinkPrincipalMapping(
         `--idp-provider ${providers[0]}.`,
     );
   }
+
+  // flair#2222 — re-validate the state this preflight acted on before revoking.
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, mappingPreflight(params.principal, params.idpSubject, true, subjectRows));
 
   const ids = mine.map((c) => String(c?.id));
   const unconfirmedMessage = (unconfirmed: string[]) =>

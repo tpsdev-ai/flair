@@ -484,7 +484,9 @@ describe("flair principal unlink (flair#2115)", () => {
   }
 
   test("unlink exits nonzero without Unlinked when readback fails", async () => {
-    const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials, failCredReadAt: 2 });
+    // Read 3 is the subject readback; reads 1-2 are the preflight and the
+    // flair#2222 pre-write guard.
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials, failCredReadAt: 3 });
     const result = await invokeUnlink(st.fetchImpl);
     expect(result.exitCode).toBe(1);
     expect(result.logs).not.toContain("Unlinked");
@@ -500,7 +502,7 @@ describe("flair principal unlink (flair#2115)", () => {
     expect(result.logs).toContain("cred_c1, cred_c2");
     expect(result.errors).toBe("");
     expect(st.calls.map(c => c.body.operation)).toEqual([
-      "search_by_value", "search_by_conditions", "update", "search_by_conditions",
+      "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "update", "search_by_conditions",
     ]);
     expect([...st.rows.values()].every(row => row.status === "revoked")).toBe(true);
   });
@@ -770,12 +772,13 @@ describe("operations read predicates", () => {
                        "wrong-principal", "wrong-provider", "wrong-status", "invalid-label"] as const) {
     test(`post-write verification: ${fault} refuses and sends no further write`, async () => {
       const st = mappingStub({ expectedUrl: HOSTED_OPS });
-      let reads = 0;
       let writesAtRead = 0;
       const fetchImpl = (async (url: any, init?: RequestInit) => {
         const response = await st.fetchImpl(url, init);
         const query = JSON.parse(String(init?.body));
-        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || ++reads !== 2) return response;
+        // The invariant read-back is the first Credential read AFTER the write;
+        // the preflight and the flair#2222 pre-write guard both see no write yet.
+        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || st.writes().length === 0) return response;
         writesAtRead = st.writes().length;
         const rows = await response.json() as any[];
         const row = rows[0];
@@ -847,11 +850,11 @@ describe("legacy Credential mapping reads", () => {
   for (const createdAt of [undefined, 42]) {
     test(`post-write read accepts createdAt ${String(createdAt)}`, async () => {
       const st = mappingStub({ expectedUrl: HOSTED_OPS });
-      let reads = 0;
       const fetchImpl = (async (url: any, init?: RequestInit) => {
         const response = await st.fetchImpl(url, init);
         const query = JSON.parse(String(init?.body));
-        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || ++reads !== 2) return response;
+        // The invariant read-back is the first Credential read after the write.
+        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || st.writes().length === 0) return response;
         const rows = await response.json() as any[];
         rows[0].createdAt = createdAt;
         return Response.json(rows);
@@ -881,4 +884,89 @@ describe("legacy Credential mapping reads", () => {
       expect(st.writes()).toEqual([]);
     });
   }
+});
+
+// ─── flair#2222 — a change between preflight and write refuses ───────────────
+//
+// Harper's operations API offers no compare-and-set and no cross-request
+// transaction on this path (see the module comment in src/lib/mcp-enable.ts),
+// so the strongest bound is a snapshot of what the preflight validated, re-read
+// immediately before the write. These tests inject the change AFTER the preflight
+// read answers (so the preflight itself is consistent) and require the write to
+// refuse and leave the store untouched.
+
+describe("flair#2222 — the pre-write re-validation bound", () => {
+  /** A stub whose store is changed ONCE, after the first subject read answers. */
+  function raceStub(opts: {
+    principals?: string[];
+    credentials?: Array<Record<string, any>>;
+    mutate: (st: ReturnType<typeof mappingStub>) => void;
+  }) {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: opts.principals, credentials: opts.credentials });
+    let injected = false;
+    const inner = st.fetchImpl;
+    const fetchImpl = (async (url: any, init?: any) => {
+      const res = await inner(url, init);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (!injected && body.operation === "search_by_conditions" && body.table === "Credential") {
+        injected = true;
+        opts.mutate(st);
+      }
+      return res;
+    }) as unknown as typeof fetch;
+    return { ...st, fetchImpl };
+  }
+
+  test("link refuses when the Credential row moved after the preflight", async () => {
+    const st = raceStub({
+      principals: ["alice", "bob", "carl"],
+      credentials: [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", principalId: "bob", status: "active" }],
+      mutate: (s) => { s.rows.get("cred_c1")!.principalId = "carl"; },
+    });
+    await expect(
+      linkPrincipalMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT, replace: true }, { fetchImpl: st.fetchImpl }),
+    ).rejects.toThrow(/mapping-changed-underneath/);
+    expect(st.writes()).toEqual([]);
+    expect(st.rows.get("cred_c1")!.principalId, "the row nobody validated is untouched").toBe("carl");
+  });
+
+  test("unlink refuses when the Credential row moved after the preflight", async () => {
+    const st = raceStub({
+      principals: ["alice", "bob"],
+      credentials: [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", principalId: "alice", status: "active" }],
+      mutate: (s) => { s.rows.get("cred_c1")!.principalId = "bob"; },
+    });
+    await expect(
+      unlinkPrincipalMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT }, { fetchImpl: st.fetchImpl }),
+    ).rejects.toThrow(/mapping-changed-underneath/);
+    expect(st.writes()).toEqual([]);
+    expect(st.rows.get("cred_c1")!.status).toBe("active");
+  });
+
+  test("the provisioner refuses when a concurrent link adds a subject row after the preflight", async () => {
+    const st = raceStub({
+      principals: ["self", "carl"],
+      credentials: [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", principalId: "self", status: "active" }],
+      mutate: (s) => {
+        s.rows.set("cred_c2", { id: "cred_c2", kind: "idp", status: "active", idpProvider: "okta", idpSubject: "octocat", principalId: "carl", createdAt: "2026-10-02T00:00:00.000Z" });
+      },
+    });
+    await expect(
+      provisionIdpIdentityMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "self", principalKind: "human", ...SUBJECT }, { fetchImpl: st.fetchImpl }),
+    ).rejects.toThrow(/mapping-changed-underneath/);
+    expect(st.writes()).toEqual([]);
+    expect([...st.rows.values()].filter((r) => r.status !== "revoked").length, "both rows survive").toBe(2);
+  });
+
+  test("the provisioner refuses when the principal Agent is removed after the preflight", async () => {
+    const st = raceStub({
+      principals: ["self"],
+      credentials: [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", principalId: "self", status: "active" }],
+      mutate: (s) => { s.principals.delete("self"); },
+    });
+    await expect(
+      provisionIdpIdentityMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "self", principalKind: "human", ...SUBJECT }, { fetchImpl: st.fetchImpl }),
+    ).rejects.toThrow(/mapping-changed-underneath/);
+    expect(st.writes()).toEqual([]);
+  });
 });

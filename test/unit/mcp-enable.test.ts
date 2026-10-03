@@ -428,8 +428,8 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions"]);
-    const credRecord = calls[3].body.records[0];
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions"]);
+    const credRecord = calls.find((c) => c.body.operation === "upsert")!.body.records[0];
     expect(credRecord.kind).toBe("idp");
     expect(credRecord.idpProvider).toBe("github");
     expect(credRecord.idpSubject).toBe("octocat");
@@ -447,7 +447,7 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.credentialId).toBe("cred_existing");
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
   });
 
   // ─── flair#2115 — the pre-write read (the step `flair principal link` reuses) ──
@@ -523,7 +523,7 @@ describe("provisionIdpIdentityMapping", () => {
       { fetchImpl },
     );
     const searches = calls.filter((c) => c.body.operation === "search_by_conditions");
-    expect(searches.length).toBe(2); // the dedup lookup + the invariant read-back
+    expect(searches.length).toBe(3); // the dedup lookup, the pre-write guard, the invariant read-back
     for (const s of searches) {
       const attrs = s.body.conditions.map((c: any) => c.search_attribute).sort();
       expect(attrs).toEqual(["idpSubject", "kind"]);
@@ -707,9 +707,9 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
 
       const result = await provisionIdpIdentityMapping({ opsPortOrUrl: origin, ...MAPPING }, { fetchImpl });
 
-      expect(attempted).toEqual(Array(5).fill(`${origin}/`));
+      expect(attempted).toEqual(Array(7).fill(`${origin}/`));
       expect(received.map((r) => r.operation)).toEqual([
-        "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions",
+        "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions",
       ]);
       expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
       expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
@@ -726,7 +726,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   ] as const)("opsPortOrUrl %p is used as given: %s", async (opsPortOrUrl, expected) => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
     await provisionIdpIdentityMapping({ opsPortOrUrl, ...MAPPING }, { fetchImpl });
-    expect(calls.length).toBe(4);
+    expect(calls.length).toBe(6);
     expect(calls.every((c) => c.url === expected)).toBe(true);
   });
 
@@ -737,7 +737,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   ])("hostedOrigin %p resolves to its host at the hosted ops port", async (hostedOrigin, expected) => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
     await provisionIdpIdentityMapping({ hostedOrigin, ...MAPPING }, { fetchImpl });
-    expect(calls.length).toBe(4);
+    expect(calls.length).toBe(6);
     expect(calls.every((c) => c.url === expected)).toBe(true);
   });
 
@@ -851,7 +851,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     }) as typeof fetch;
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true }, { fetchImpl });
     expect(result.ok).toBe(true);
-    expect(mappingUrls.length).toBe(4);
+    expect(mappingUrls.length).toBe(6);
     expect(mappingUrls.every((u) => u === `http://127.0.0.1:${HOSTED_OPS_PORT}/`)).toBe(true);
   });
 });
