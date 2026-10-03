@@ -128,6 +128,10 @@ export interface BootstrapResult {
   memoryCount: number;
   soulCount: number;
   tokenEstimate: number;
+  /** flair#1182/#2067 — resolved caller identity and read scope. Present on a
+   *  live server; a caller that needs it (the action-recall refresh) treats an
+   *  absent scope as "no cache". */
+  scope?: { agentId?: string; isAdmin?: boolean; reads?: string };
 }
 
 /** Client configuration. */

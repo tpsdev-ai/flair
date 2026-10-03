@@ -90,6 +90,8 @@ import {
   type ContinuityClient,
 } from "./continuity.js";
 import { fetchPreCompactRecord, formatPreCompactContext, resolvePreCompactLookup } from "./precompact.js";
+import { canonicalUrl, DEFAULT_FLAIR_URL } from "./action-recall.js";
+import { refreshActionRecallCache, type ActionRecallRefreshClient } from "./action-recall-refresh.js";
 
 /** Claude Code SessionStart additionalContext hard limit (chars). */
 const MAX_CHARS = 10_000;
@@ -169,7 +171,35 @@ interface BootstrapClient extends Partial<PresencePoster> {
     maxTokens?: number;
     channel?: string;
     subjects?: string[];
-  }): Promise<{ context?: string } | undefined>;
+  }): Promise<{ context?: string; scope?: { agentId?: string; isAdmin?: boolean } } | undefined>;
+}
+
+/** Injectable pieces for the action-recall refresh (flair#2067 slice 2),
+ *  off by default so existing tests and installs are unchanged. */
+export interface SessionStartDeps {
+  makeRecallClient?: (agentId: string) => ActionRecallRefreshClient;
+  now?: number;
+  actionRecallRoot?: string;
+}
+
+/** Whether the action-recall refresh runs on this SessionStart. Opt-in: the
+ *  installer sets FLAIR_ACTION_RECALL=1 on the SessionStart entry. */
+export function actionRecallEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = readEnvOrUnset("FLAIR_ACTION_RECALL", env);
+  return value != null && value !== "" && value !== "0";
+}
+
+/** Recall-path client: the SAME identity as the bootstrap client, but with an
+ *  EMPTY admin pair so flair-client's FLAIR_ADMIN_USER/PASSWORD Basic fallback
+ *  can never turn this read into an admin read. */
+function defaultRecallClientFactory(agentId: string): ActionRecallRefreshClient {
+  return new FlairClient({
+    agentId,
+    url: readEnvOrUnset("FLAIR_URL"),
+    keyPath: readEnvOrUnset("FLAIR_KEY_PATH"),
+    adminUser: "",
+    adminPassword: "",
+  });
 }
 
 /**
@@ -311,6 +341,7 @@ function hookOutput(context: string): string {
 export async function runHook(
   rawInput: string,
   makeClient: (agentId: string) => BootstrapClient = defaultClientFactory,
+  deps: SessionStartDeps = {},
 ): Promise<string> {
   // flair#1250: drop any unsubstituted `${...}` interpolation literal from the
   // env before the client is built, so flair-client's own process.env fallback
@@ -392,6 +423,7 @@ export async function runHook(
       : Promise.resolve(null);
 
   let context = "";
+  let bootstrapScope: { agentId?: string; isAdmin?: boolean } | undefined;
   try {
     const res = await withTimeout(
       Promise.resolve(
@@ -404,6 +436,7 @@ export async function runHook(
       resolveTimeoutMs(),
     );
     context = res && res.context ? String(res.context) : "";
+    bootstrapScope = res?.scope;
   } catch (err) {
     context = ""; // flair unreachable / auth error / timeout → no bootstrap context
     // flair#1943: keeping stderr open cannot reveal an error never written to
@@ -417,6 +450,26 @@ export async function runHook(
   const resumeHint = await resumeHintDone;
   const precompactBlock = await precompactDone;
   await presenceDone;
+
+  // Action-recall refresh (flair#2067 slice 2): opt-in, runs AFTER bootstrap
+  // with the agent's own non-admin scope, through the recall client whose
+  // admin pair is empty. Bounded internally (3 s); a failure leaves the
+  // previous cache or none, and never changes this hook's output.
+  if (actionRecallEnabled()) {
+    const session = typeof input.session_id === "string" ? input.session_id : "";
+    const recallUrl = canonicalUrl(readEnvOrUnset("FLAIR_URL") ?? DEFAULT_FLAIR_URL);
+    if (bootstrapScope && session && recallUrl) {
+      const recallClient = (deps.makeRecallClient ?? defaultRecallClientFactory)(agentId);
+      await refreshActionRecallCache(recallClient, {
+        agentId,
+        url: recallUrl,
+        session,
+        bootstrapResult: { scope: bootstrapScope },
+        now: deps.now,
+        root: deps.actionRecallRoot,
+      }).catch(() => ({ ok: false }));
+    }
+  }
 
   // Combine: the pre-compaction record FIRST (bounded, so the MAX_CHARS cut
   // below can only shorten what follows it), then the bootstrap context, then

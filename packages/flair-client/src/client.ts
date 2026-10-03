@@ -86,6 +86,37 @@ function assertBasicAuthTransportAllowed(target: string, base: string): void {
  * present, else link the two signals by hand — honouring an already-aborted
  * input and forwarding the abort reason.
  */
+/**
+ * Read a fetch response body, refusing to buffer more than `maxBytes`.
+ * Opt-in (flair#2067): only callers that pass `maxResponseBytes` take this
+ * path; everyone else keeps `res.text()`. A body that exceeds the cap throws
+ * after cancelling the stream, so the caller sees an error rather than a
+ * truncated parse.
+ */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<string> {
+  if (!(maxBytes > 0) || !res.body) return await res.text();
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let total = 0;
+  let out = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`flair-client: response body exceeds ${maxBytes} bytes`);
+      }
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+  } finally {
+    reader.releaseLock?.();
+  }
+  return out;
+}
+
 function anySignal(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
   const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
   if (typeof any === "function") return { signal: any.call(AbortSignal, [a, b]), cleanup: () => {} };
@@ -242,7 +273,7 @@ export class FlairClient {
     method: string,
     path: string,
     body?: unknown,
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; maxResponseBytes?: number } = {},
   ): Promise<T> {
     if (!path.startsWith("/")) {
       throw new Error('flair-client: a request path must start with "/"');
@@ -296,7 +327,9 @@ export class FlairClient {
         const text = await res.text().catch(() => "");
         throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);
       }
-      const text = await res.text();
+      const text = opts.maxResponseBytes
+        ? await readBodyCapped(res, opts.maxResponseBytes)
+        : await res.text();
       return text ? JSON.parse(text) : ({} as T);
     } finally {
       // Remove any listeners on the caller's long-lived signal on EVERY path —
