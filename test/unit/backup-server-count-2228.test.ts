@@ -252,6 +252,96 @@ describe("backup verifies received rows against an independent server count (fla
     expect(result.requests.rest).not.toContain("/Memory/?agentId=flint");
   });
 
+  for (const table of ["Memory", "Soul"] as const) {
+    const stored = table === "Memory" ? memories : souls;
+    const orphan = { id: "orphan-row", agentId: "missing-agent", ...(table === "Memory"
+      ? { content: "orphan content" } : { key: "identity", value: "orphan soul" }) };
+    const ops = {
+      [`describe_table:${table}`]: { body: { record_count: stored.length + 1 } },
+      [`search_by_value:${table}:*`]: { body: [...stored, orphan] },
+    };
+    const path = `/${table}/?agentId=missing-agent`;
+    const collection = table === "Memory" ? "memories" : "souls";
+
+    test(`${table}: unfiltered backup includes rows whose owner has no Agent row`, async () => {
+      const result = await runBackup({ ops, rest: { [path]: { body: [orphan] } } });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(result.output, "utf-8"))[collection]).toEqual([...stored, orphan]);
+      expect(result.requests.rest.filter(p => p === path)).toHaveLength(1);
+    });
+
+    test(`${table}: an empty Agent table still backs up orphan-owner rows with one read per owner`, async () => {
+      const rows = [orphan, { ...orphan, id: "closed-private-orphan", visibility: "private", validTo: "closed" }];
+      const result = await runBackup({ ops: {
+        ...ops,
+        "describe_table:Agent": { body: { record_count: 0 } },
+        "search_by_value:Agent:*": { body: [] },
+        [`describe_table:${table}`]: { body: { record_count: rows.length } },
+        [`search_by_value:${table}:*`]: { body: rows },
+        [`describe_table:${table === "Memory" ? "Soul" : "Memory"}`]: { body: { record_count: 0 } },
+        [`search_by_value:${table === "Memory" ? "Soul" : "Memory"}:*`]: { body: [] },
+      }, rest: { "/Agent/": { body: [] }, [path]: { body: rows } } });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(result.output, "utf-8"))[collection]).toEqual(rows);
+      expect(result.requests.rest.filter(p => p === path)).toHaveLength(1);
+    });
+
+    test(`${table}: refusal reports orphan rows rather than orphan owner cardinality`, async () => {
+      const rows = [orphan, { ...orphan, id: "another-orphan" }];
+      const result = await runBackup({ ops: {
+        [`describe_table:${table}`]: { body: { record_count: stored.length + rows.length } },
+        [`search_by_value:${table}:*`]: { body: [...stored, ...rows] },
+      }, rest: { [path]: { body: [orphan] } } });
+      expectNoPublication(result);
+      expect(result.stderr).toContain("2 rows have no Agent owner");
+    });
+
+    test(`${table}: a short orphan-owner read refuses publication and names the orphan count`, async () => {
+      const result = await runBackup({ ops, rest: { [path]: { body: [] } } });
+      expectNoPublication(result);
+      expect(result.stderr).toContain(`${table} for agent missing-agent: server reports 1 rows, backup read 0`);
+      expect(result.stderr).toContain("1 rows have no Agent owner");
+    });
+
+    test(`${table}: an unavailable orphan-owner read refuses publication`, async () => {
+      const result = await runBackup({ ops, rest: { [path]: { status: 503, body: {} } } });
+      expectNoPublication(result);
+      expect(result.stderr).toContain(table);
+      expect(result.stderr).toContain("1 rows have no Agent owner");
+      expect(result.stderr).toContain("retry");
+    });
+
+    test(`${table}: rows without a usable owner refuse publication with a repair remedy`, async () => {
+      const result = await runBackup({ ops: {
+        ...ops, [`search_by_value:${table}:*`]: { body: [...stored, { id: orphan.id }] },
+      } });
+      expectNoPublication(result);
+      expect(result.stderr).toContain(table);
+      expect(result.stderr).toContain("1 rows have no Agent owner");
+      expect(result.stderr).toContain("repair");
+    });
+
+    test(`${table}: filtered backup does not read orphan owners`, async () => {
+      const result = await runBackup({ ops, filter: "kern" });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(result.output, "utf-8"))[collection]).toEqual(stored.filter(r => r.agentId === "kern"));
+      expect(result.requests.rest).not.toContain(path);
+    });
+
+    test(`${table}: received whole-table count is checked independently after owner reads`, async () => {
+      const result = await runBackup({ ops: {
+        [`describe_table:${table}`]: [
+          { body: { record_count: stored.length } },
+          { body: { record_count: stored.length } },
+          { body: { record_count: stored.length + 1 } },
+        ],
+      } });
+      expectNoPublication(result);
+      expect(result.stderr).toContain(`${table}: server reports ${stored.length + 1} rows, backup read ${stored.length}`);
+      expect(result.stderr).toContain("0 rows have no Agent owner");
+    });
+  }
+
   test("private and closed Memory rows remain in the expected subset", async () => {
     const result = await runBackup({ rest: { "/Memory/?agentId=flint": { body: memories.filter(m => m.agentId === "flint").map(m => ({ ...m, visibility: "private", validTo: "closed" })) } } });
     expect(result.exitCode).toBe(0);

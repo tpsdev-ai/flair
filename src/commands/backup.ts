@@ -227,21 +227,46 @@ addSharedCredentialOptions(
     }
     const agents = filterIds ? allAgents.filter(a => filterIds.includes(a.id)) : allAgents;
 
-    log(`Fetching memories for ${agents.length} agent(s)...`);
-    const memories: Row[] = [];
-    for (const agent of agents) {
-      const rows = await adminGet("Memory", agent.id);
-      verifyRows("Memory", rows, inventories.Memory, agent.id);
-      memories.push(...rows);
+    async function readOwnedRows(table: "Memory" | "Soul"): Promise<Row[]> {
+      const owners = new Set(agents.map(agent => agent.id));
+      const orphanOwners = [...inventories[table].values()].filter(owner => typeof owner !== "string" || !ids.Agent.has(owner));
+      const orphanCount = orphanOwners.length;
+      if (!filterIds) {
+        for (const owner of orphanOwners) {
+          if (typeof owner !== "string" || !owner.trim()) {
+            throw new Error(`${table}: backup refused; ${orphanCount} rows have no Agent owner; repair missing or invalid agentId values and retry`);
+          }
+          owners.add(owner);
+        }
+      }
+      const received: Row[] = [];
+      for (const owner of owners) {
+        try {
+          const rows = await adminGet(table, owner);
+          verifyRows(table, rows, inventories[table], owner);
+          received.push(...rows);
+        } catch (error) {
+          if (!filterIds && orphanCount) {
+            throw new Error(`${error instanceof Error ? error.message : String(error)}; ${orphanCount} rows have no Agent owner; repair the unreadable owner rows or pause writers and retry`);
+          }
+          throw error;
+        }
+      }
+      if (!filterIds) {
+        const expected = await rowCount(table);
+        if (received.length !== expected) {
+          throw new Error(`${table}: server reports ${expected} rows, backup read ${received.length}; ${orphanCount} rows have no Agent owner; pause writers and maintenance, then retry`);
+        }
+        verifyRows(table, received, inventories[table]);
+      }
+      return received;
     }
 
+    log("Fetching memories...");
+    const memories = await readOwnedRows("Memory");
+
     log("Fetching souls...");
-    const souls: Row[] = [];
-    for (const agent of agents) {
-      const rows = await adminGet("Soul", agent.id);
-      verifyRows("Soul", rows, inventories.Soul, agent.id);
-      souls.push(...rows);
-    }
+    const souls = await readOwnedRows("Soul");
 
     for (const table of ["Agent", "Memory", "Soul"] as const) {
       const after = await inventory(table);

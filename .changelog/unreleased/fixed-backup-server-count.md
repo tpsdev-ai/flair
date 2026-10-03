@@ -1,6 +1,7 @@
-- **`flair backup` compares collection IDs with inventories whose cardinality matches exact storage counts.** Closes #2228.
+- **Unfiltered `flair backup` includes Memory/Soul rows whose owner has no Agent row and checks received totals against exact whole-table storage counts.** Closes #2228.
 
-  Count or ID mismatches and unavailable counts refuse publication. Explicit
+  Count or ID mismatches, unreadable rows and invalid owner IDs refuse publication;
+  orphan-owner refusals report the row count. Filtered backups check selected owners.
   `--port` pairs with its derived ops port unless an ops target overrides it.
   HTTP failure messages omit response bodies.
 
