@@ -838,8 +838,8 @@ program
       const alreadyInstalled = harperConfigPath(dataDir) !== null;
       const willStart = !opts.skipStart;
 
-      // An already-installed instance with --skip-start neither installs nor
-      // starts: it is left as it was.
+      // An already-installed instance with --skip-start is not installed
+      // over or started.
       if (!alreadyInstalled || willStart) {
         const bin = harperBin();
         if (!bin) {

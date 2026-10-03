@@ -4,9 +4,10 @@
 // empty data directory nothing existed for a later `flair start` and anything
 // deferred to first start (the #2165 pending using-flair seed) never happened.
 // It now installs and configures without starting: on an empty data directory
-// the installation exists, nothing is running, first-start work is queued, and
-// the next `flair start` starts the instance and performs that work. On an
-// already-installed instance it leaves the instance as it was.
+// the installation exists, nothing is running, and on the default instance the
+// first-start work is queued for the next `flair start`, which starts the
+// instance and performs it. On an already-installed instance it starts nothing
+// and leaves the installation unchanged.
 //
 // The built CLI runs under Node (Harper's native modules need it). Isolation:
 //   - HOME is a fresh temp dir, so the default data dir, admin-pass, keys and
@@ -266,7 +267,7 @@ describe("flair#2197 — init --skip-start installs and configures without start
     expect(assignments[0]).toMatchObject({ id: SEED_ASSIGNMENT_ID, skillName: "using-flair", skillRef: SEED_SKILL_ID });
   }, 300_000);
 
-  test("an already-installed instance: --skip-start leaves it as it was", async () => {
+  test("an already-installed instance: --skip-start starts nothing and leaves Harper's config unchanged", async () => {
     const install = await newInstall();
 
     // Establish the instance the ordinary way: install + start + seed.
