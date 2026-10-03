@@ -123,6 +123,12 @@ export const OWNER_GUARD_EXEMPT: Readonly<Record<string, string>> = Object.freez
   // writes stamp `authorId` from the authenticated principal; direct resource
   // reads permit admins and trusted internal callers.
   MemoryHostSource: "REST writes refused; application writes stamp authorId; direct reads limited to admins and trusted internal callers",
+  // flair#2139 S1: append-only instruction history. Every REST mutation verb is
+  // refused to every principal at the resource (resources/InstructionVersion.ts),
+  // and the only writer is the in-process append helper, so there is no
+  // owner-scoped write for this guard to bound; reads are default-deny by
+  // subjectType.
+  InstructionVersion: "append-only; every REST write verb is refused, so the in-process write path is the only application writer",
 });
 
 /** The verbs that can mutate a record, and therefore need the rule applied. */

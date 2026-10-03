@@ -414,3 +414,37 @@ type OrgSkillAssignmentHistory @table(database: "flair") {
   previousHash: String             # sha256 of the stored row before the write; null on create
   at: String!
 }
+
+# InstructionVersion — the append-only version history for instruction subjects
+# (soul and, in a later slice, skill), one row per accepted write
+# (resources/instruction-version-record.ts's recordVersion). The shape is
+# frozen by flair#2139 slice 1. The application writes rows only through the
+# in-process helper; the resource class denies every REST mutation verb to every
+# principal, so this is a read-only table over HTTP. Reads default-deny by subjectType: slice
+# 1 authorizes `soul` only, under Soul's verified-agent rule.
+#
+# The administrator operations API (raw upsert/delete) is an explicit deferred
+# exception: it is not audited by this table, so a version row written that way
+# carries no provenance here. See docs/api-reference.md.
+type InstructionVersion @table(database: "flair") @export {
+  id: ID @primaryKey              # encodes subjectType + subjectId + version
+  subjectType: String! @indexed   # soul | skill
+  subjectId: String! @indexed     # canonical subject (soul: agentId:key)
+  agentId: String! @indexed       # owner
+  key: String                     # Soul key
+  version: BigInt!                # positive per-subject sequence
+  kind: String!                   # create | update | delete
+  rowId: ID!                      # affected physical row
+  valueHash: String               # sha256 of the value bytes; null on delete
+  previousVersionHash: String     # preceding record digest; null on the first record
+  recordHash: String!             # record digest over every other field
+  soulSnapshot: String            # serialized Soul state including its value
+  memoryId: ID                    # skill-version Memory reference
+  visibility: String              # retained skill read-scope metadata
+  actorKind: String!              # operator | agent | internal | instance
+  actorId: String                 # verified identity; null for unattributed internal calls
+  sourceClass: String!            # operator | internal | agent | federation | seed
+  createdAt: String!              # server ISO timestamp
+  guarded: Boolean!               # whether expectedVersion was compared
+  expectedVersion: ID             # the compared head; null on an unguarded write
+}
