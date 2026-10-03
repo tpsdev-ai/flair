@@ -300,7 +300,7 @@ describe("skill writer refusal boundaries", () => {
     expect(explicit.status, explicit.text).toBe(409);
     expect(await memoryRow(next)).toEqual(before);
     expect(await memoryRow(fresh)).toBeNull();
-    await ops({ operation: "upsert", database: "flair", table: "MemoryHostSource", records: [{ memoryId: next, hostSource: "file:///skill.md", authorId: A.id, memoryInstanceToken: before.instanceToken }] });
+    await ops({ operation: "upsert", database: "flair", table: "MemoryHostSource", records: [{ memoryId: next, hostSource: "file:///skill.md", authorId: A.id, memoryInstanceToken: before.instanceToken, receivedAt: new Date().toISOString() }] });
     const deleted = await call(A, "DELETE", memPath(id));
     expect(deleted.status, deleted.text).toBeLessThan(300);
     expect((await memoryRow(next)).validTo).toBeString();
