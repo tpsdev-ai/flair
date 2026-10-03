@@ -90,8 +90,8 @@ const CROSS_NODE_BOUND_MS = 60_000;
 const support = await probeReplicationSupport();
 if (!support.supported) {
   console.log(
-    `[flair#2208] GATING the cross-node convergence test: this Harper build does not implement ` +
-      `multi-node replication (Harper Pro feature), so two replicated nodes cannot be started. ` +
+    `[flair#2208] GATING the cross-node convergence test: could not confirm replication support, ` +
+      `so two replicated nodes are not started. ` +
       `Observed: ${support.error}`,
   );
 }
@@ -237,7 +237,6 @@ describe(
         const tokenB = await mint(pair.b, "code-node-b", pkceB.verifier);
         expect(await postMcp(pair.b, tokenB), "node-b verifies its own token").toBe(200);
 
-        expect(jwtKid(tokenA), "both nodes sign with the shared replicated key").toBe(jwtKid(tokenB));
 
         // Cross-verification, MEASURED: poll the peer until it accepts the
         // token minted elsewhere, and report the observed convergence time.
@@ -250,6 +249,11 @@ describe(
           what: `node-b's token never verified on node-a within ${CROSS_NODE_BOUND_MS}ms`,
         });
         console.log(`[flair#2208] measured MCP-token convergence: node-a→node-b ${abMs}ms, node-b→node-a ${baMs}ms`);
+        // Two nodes minting before convergence may each create a key — that is
+        // the open #2208 question — so kids are compared only after both waits.
+        expect(jwtKid(tokenA)).toBeDefined();
+        expect(jwtKid(tokenB)).toBeDefined();
+        expect(jwtKid(tokenA), "both nodes sign with the shared replicated key").toBe(jwtKid(tokenB));
         expect(abMs).toBeLessThanOrEqual(CROSS_NODE_BOUND_MS);
         expect(baMs).toBeLessThanOrEqual(CROSS_NODE_BOUND_MS);
       },

@@ -31,8 +31,8 @@
  * Everything is HOME-isolated and ephemeral, via test/helpers/harper-lifecycle:
  * ROOTPATH/HOME are fresh temp dirs, HTTP/ops ports are OS-assigned, and
  * teardown kills only the PIDs `startHarper` started (stopHarper). It never
- * touches production (localhost:9925/9926, ~/.flair). `assertOwnedInstance`
- * re-checks each instance is the loopback temp instance before any HTTP call.
+ * touches production (localhost:9925/9926, ~/.flair). Callers invoke
+ * `assertOwnedInstance` to check an instance is the loopback temp instance.
  * Every wait here is bounded by an explicit timeout.
  *
  * Fixtures use neutral names (node-a/node-b, host-a/host-b) — never a real
@@ -187,7 +187,7 @@ export function assertOwnedInstance(inst: HarperInstance, label: string): void {
 
 /**
  * Poll `predicate` every `intervalMs` until it returns true or `timeoutMs`
- * elapses (hard upper bound, independent of the predicate). Throws a named
+ * elapses (checked between predicate calls; one predicate call may run past the deadline). Throws a named
  * error on timeout. Returns the elapsed milliseconds on success.
  */
 export async function waitUntil(
