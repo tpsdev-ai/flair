@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
+import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { NON_CANONICAL_TARGETS, UNSPECIFIED_TARGETS } from "../helpers/mcp-enable-target-shapes.ts";
-import { enableMcp, generateRsaSigningKeyPair, type SecretsMechanism } from "../../src/lib/mcp-enable.ts";
+import { enableMcp, type SecretsMechanism } from "../../src/lib/mcp-enable.ts";
 
 const PUBLIC = "https://mcp.acme.example";
 const FABRIC = "https://acme.harperfabric.com";
@@ -23,13 +24,13 @@ function fixture(instance = PUBLIC) {
     params: {
       instance, issuer: PUBLIC, adminUser: "admin", adminPass: "pw",
       idpClientId: "client", idpClientSecret: "secret", idpSubject: "octocat",
-      localConfigPath, signingKeyFilePath: join(dir, "key.pem"), secretsStagingPath: join(dir, "secrets.env"),
+      localConfigPath, secretsStagingPath: join(dir, "secrets.env"),
     },
   };
 }
 
 function targetFetch(push = false) {
-  const publicKey = push ? generateRsaSigningKeyPair().publicKey : undefined;
+  const publicKey = push ? generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } }).publicKey : undefined;
   const calls: string[] = [];
   const credentials = new Map<string, any>();
   const fetchImpl = (async (url: any, init?: RequestInit) => {

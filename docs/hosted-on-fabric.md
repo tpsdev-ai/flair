@@ -63,7 +63,7 @@ On Fabric / managed deploys, Harper's secrets mechanism can provision environmen
 
 ### How `flair mcp enable` delivers its secrets
 
-`flair mcp enable` provisions five variables for the target's process, including `FLAIR_MCP_OAUTH` and the RS256 signing key. Those two are read from `process.env` only, so `set_configuration` cannot deliver them.
+`flair mcp enable` provisions five variables for the target's process, including `FLAIR_MCP_OAUTH`, which is read from `process.env` only, so `set_configuration` cannot deliver it.
 
 Use `--fabric` for a non-loopback custom-domain Fabric target.
 
@@ -98,8 +98,8 @@ surface in this order:
    `<instance-url>/.well-known/oauth-authorization-server` must name the verified issuer and advertise
    the MCP token endpoint `/oauth/mcp/token`. A mismatch refuses the run.
 2. **Public-origin self-verify.** Metadata at the same path is fetched from the public issuer. The check
-   requires a matching issuer, a string `token_endpoint` other than Flair's `/OAuthToken`, and advertised
-   CIMD support. It does not require the public token endpoint to equal `/oauth/mcp/token`. `flair mcp status`
+   requires a matching issuer, the issuer's `/oauth/mcp/token` endpoint, and advertised
+   CIMD support. `flair mcp status`
    uses this check.
 
 Then one of:

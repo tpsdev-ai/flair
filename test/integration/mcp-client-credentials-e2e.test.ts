@@ -109,6 +109,9 @@ const OAUTH_COMPONENT_BLOCK = `
       provider: 'generic'
       clientId: 'test-client-id'
       clientSecret: 'test-client-secret'
+      # Missing redirectUri prevents the OAuth component from loading; its
+      # OAuth endpoints are unavailable. Flair registers /mcp separately.
+      redirectUri: '${ISSUER}/oauth'
       authorizationUrl: 'https://example.invalid/authorize'
       tokenUrl: 'https://example.invalid/token'
       userInfoUrl: 'https://example.invalid/userinfo'
@@ -129,6 +132,8 @@ let harper: HarperInstance;
 let clientId: string;
 let tokenEndpoint: string;
 let agentPrivateKey: KeyObject;
+const ENV_KEYS = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER"] as const;
+let originalEnv: Record<(typeof ENV_KEYS)[number], string | undefined> | undefined;
 
 function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -145,7 +150,7 @@ async function adminOp(op: Record<string, any>): Promise<Response> {
   });
 }
 
-describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 component", () => {
+describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth component", () => {
   beforeAll(async () => {
     // Capture the real config.yaml checksum BEFORE anything touches it.
     configChecksum = sha256(CONFIG_PATH);
@@ -175,6 +180,7 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
     );
     writeFileSync(join(tempDir, "config.yaml"), replaced);
 
+    originalEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]])) as Record<(typeof ENV_KEYS)[number], string | undefined>;
     process.env.FLAIR_MCP_OAUTH = "1";
     process.env.FLAIR_MCP_ISSUER = ISSUER;
 
@@ -198,6 +204,13 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
   }, 180_000);
 
   afterAll(async () => {
+    if (originalEnv) {
+      for (const k of ENV_KEYS) {
+        const value = originalEnv[k];
+        if (value === undefined) delete process.env[k];
+        else process.env[k] = value;
+      }
+    }
     if (harper) await stopHarper(harper);
     if (tempDir) {
       // rm -rf of the hard-linked temp tree (repo + node_modules, tens of
@@ -205,8 +218,6 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
       // timeout as the dependency tree grows — mirror beforeAll's 180s budget.
       await rm(tempDir, { recursive: true, force: true, maxRetries: 4 });
     }
-    delete process.env.FLAIR_MCP_OAUTH;
-    delete process.env.FLAIR_MCP_ISSUER;
   }, 180_000);
 
   test("the repository's config.yaml is never mutated during this test run", () => {
@@ -222,7 +233,12 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
     expect(body.token_endpoint).toBe(tokenEndpoint);
     expect(body.grant_types_supported).toContain("client_credentials");
     expect(body.token_endpoint_auth_methods_supported).toContain("private_key_jwt");
-    expect(body.token_endpoint_auth_signing_alg_values_supported).toEqual(["EdDSA"]);
+    // @harperfast/oauth 2.8.1 advertises the assertion algorithms of BOTH
+    // enabled verification paths: the headless client_credentials path (EdDSA)
+    // and the interactive CIMD path (RS256, ES256). The interactive path is
+    // active here because this test enables headless client_credentials, whose
+    // advertisement steers interactive clients too.
+    expect(body.token_endpoint_auth_signing_alg_values_supported).toEqual(["RS256", "ES256", "EdDSA"]);
     expect(body.client_id_metadata_document_supported).toBe(true);
   }, 30_000);
 

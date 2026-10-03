@@ -1,6 +1,13 @@
 // MCP OAuth route registration.
 
 import { mock, describe, it, expect, beforeEach } from "bun:test";
+import type * as Harper from "../../node_modules/harper/dist/index.js";
+
+type HarperRegistryMock = {
+  [K in keyof Pick<typeof Harper, "server">]: {
+    [R in keyof Pick<typeof Harper.server, "resources">]: Pick<typeof Harper.server.resources, "get">;
+  };
+};
 
 // Suppress the module-level auto-registration on import — we call
 // registerMcpOAuthRoute() directly with injected deps.
@@ -57,6 +64,9 @@ function makeDeps() {
     // doesn't exercise the real config.yaml path. The guard is tested
     // explicitly in the "flair#1021 boot guard" describe block below.
     skipComponentGuard: true,
+    harper: { server: { resources: { get: () => ({
+      Resource: { mcpConfig: { enabled: true } }, path: "oauth", exportTypes: {}, hasSubPaths: false, relativeURL: "",
+    }) } } } satisfies HarperRegistryMock,
   };
 }
 

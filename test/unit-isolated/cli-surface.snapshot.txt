@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=138 options=614
+# commands=138 options=613
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -459,9 +459,6 @@ flair mcp enable
     --cimd-allowed-hosts <hosts>
       description: Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused with --fabric or a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
       attr: cimdAllowedHosts
-    --signing-key-file <path>
-      description: RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)
-      attr: signingKeyFile
     --admin-pass <pass>
       description: Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
       attr: adminPass
@@ -475,7 +472,7 @@ flair mcp enable
       description: Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host
       attr: fabric
     --dry-run
-      description: Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config; report the signing key path. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run
+      description: Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run
       attr: dryRun
     --json
       description: Print machine-readable JSON instead of a human summary
@@ -3235,12 +3232,11 @@ Options:
   --secrets-mechanism <fabric-env-secrets|env-file>  Override the shape-aware secrets mechanism (else selected from --instance and --fabric)
   --secrets-path <path>                              Override the secrets staging file path
   --cimd-allowed-hosts <hosts>                       Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds that exact list, then read back, before the restart. Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. Always refused with --fabric or a *.harperfabric.com instance. Without it the list is not changed (shipped: claude.ai,claude.com)
-  --signing-key-file <path>                          RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)
   --admin-pass <pass>                                Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
   --admin-user <name>                                Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
   --fabric                                           Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host
-  --dry-run                                          Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config; report the signing key path. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run
+  --dry-run                                          Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run
   --json                                             Print machine-readable JSON instead of a human summary
   -h, --help                                         display help for command
 
