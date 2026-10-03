@@ -5,8 +5,8 @@
  * Harper reads a trailing `.<declared attribute>` on a by-id Memory request as a
  * property selector. A Memory id ending in `.content` may therefore be read as
  * the base id's record instead of itself, so it is refused at every client write
- * path: POST/PUT/PATCH on the Memory resource and the memory feed return the
- * named 400 below, and the bridge importer refuses it before the write.
+ * path: POST/PUT/PATCH/DELETE on the Memory resource and the memory feed return
+ * the named 400 below, and the bridge importer refuses it before the write.
  *
  * The decision is the pure `endsWithContentSelectorSuffix`
  * (src/lib/memory-id-policy.ts), so it is unit-tested without a Harper instance.

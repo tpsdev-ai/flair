@@ -8,7 +8,7 @@
  *
  * This file pins the shipped rule against a live instance:
  *   - every client write path refuses an id ending in `.content` by name
- *     (POST/PUT/PATCH on Memory, the memory feed, the bridge importer);
+ *     (POST/PUT/PATCH/DELETE on Memory, the memory feed, the bridge importer);
  *   - the middleware refuses an id segment carrying an encoded `/` before a
  *     declared suffix, rather than rewriting it to a different record;
  *   - the ordinary `/Memory/<id>.content` selector still works.
@@ -82,6 +82,7 @@ const author = mkAgent("mcs-author");
 const reader = mkAgent("mcs-reader");
 
 const BASE = "mcs-base";
+const DEL_BASE = "mcs-del-base";
 const SLASH = "mcs-slash";
 const SLASH_BASE = `${SLASH}/base`;
 
@@ -91,6 +92,7 @@ beforeAll(async () => {
   await seedAgent(harper, author);
   await seedAgent(harper, reader);
   await insertRow(harper, BASE, "BASE BODY");
+  await insertRow(harper, DEL_BASE, "DEL BASE BODY");
   await insertRow(harper, SLASH_BASE, "SLASH BASE BODY");
 }, 240_000);
 
@@ -150,6 +152,17 @@ describe("flair#2199 — every client write path refuses an id ending in `.conte
       expect(body.error).toBe("memory_id_content_suffix");
     }, 30_000);
   }
+
+  it("DELETE of a `.content` address → 400 memory_id_content_suffix and the base record is not deleted", async () => {
+    const res = await authSend(harper, author, "DELETE", `/Memory/${DEL_BASE}.content`);
+    const body = await res.json();
+    console.log("DELETE .content:", res.status, JSON.stringify(body).slice(0, 160));
+    expect(res.status).toBe(400);
+    expect(body.error).toBe("memory_id_content_suffix");
+    const after = await authSend(harper, author, "GET", `/Memory/${DEL_BASE}`);
+    expect(after.status).toBe(200);
+    expect((await after.json()).id).toBe(DEL_BASE);
+  }, 30_000);
 
   it("a POST with an id that does not end in `.content` still succeeds (control)", async () => {
     const res = await authSend(harper, author, "POST", "/Memory", { id: "mcs-ok", agentId: author.id, content: "ok" });

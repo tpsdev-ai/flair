@@ -2016,6 +2016,10 @@ export class Memory extends (databases as any).flair.Memory {
       "Memory", [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], ctx, auth,
     );
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(
+      [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)],
+    );
+    if (contentSuffixDenial) return contentSuffixDenial;
     // Read stored ownership, not the read-scoped get() response. Enforce here
     // as well as middleware so MCP/in-process callers have the same policy.
     const record = await super.get(id);
