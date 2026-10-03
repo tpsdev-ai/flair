@@ -140,6 +140,15 @@ type Memory @table(database: "flair") {
                                # that producer is a follow-up); additive/nullable, existing rows carry no
                                # entities, readers tolerate absent (same pattern as Presence.activityUpdatedAt).
                                # See docs/entity-vocabulary.md.
+  skillSubjectId: String @indexed  # flair#2139 S2: the STABLE logical subject of a skill-tagged Memory row.
+                               # A skill is a Memory tagged `skill`; an update SUPERSEDES (a new physical
+                               # row) rather than overwriting, so the subject must outlive any single
+                               # physical row for the version chain to survive replacement. This column
+                               # is SERVER-OWNED and nullable: derived on a skill's first physical write
+                               # from that row's id, or adopted from an explicit `supersedes` predecessor;
+                               # every successor inherits it, and it is never derived from a name, content
+                               # hash, client metadata or a successor's fresh id. Nullable/additive —
+                               # non-skill rows and pre-existing skill rows read back null.
 }
 
 # Explicit entity-to-entity relationships with temporal validity.
