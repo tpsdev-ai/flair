@@ -1408,6 +1408,7 @@ export async function provisionIdpIdentityMapping(
             kind: params.principalKind,
             type: params.principalKind,
             status: "active",
+            publicKey: `idp:${params.idpProvider}:${params.idpSubject}`,
             admin: false,
             defaultTrustTier: "endorsed",
             createdAt: now,

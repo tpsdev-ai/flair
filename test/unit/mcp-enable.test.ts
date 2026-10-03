@@ -33,6 +33,8 @@ import { tmpdir, hostname as osHostname } from "node:os";
 import { join } from "node:path";
 import yaml from "js-yaml";
 import { resolveHome, withHome } from "../../src/lib/home.ts";
+import { agentInsertSchemaError } from "../helpers/agent-insert-schema.ts";
+import { importEd25519Key } from "../../resources/ed25519-auth.ts";
 
 import {
   isLocalOrigin,
@@ -388,6 +390,8 @@ function mockOpsFetch(opts: {
       return new Response(JSON.stringify(principalPresent ? [{ id: body.search_value }] : []), { status: 200 });
     }
     if (body.operation === "insert" && body.table === "Agent") {
+      const error = agentInsertSchemaError(body.records ?? []);
+      if (error) return error;
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
       principalPresent = true;
       return new Response(JSON.stringify({ message: "inserted" }), { status: 200 });
@@ -419,6 +423,27 @@ function mockOpsFetch(opts: {
 }
 
 describe("provisionIdpIdentityMapping", () => {
+  for (const field of ["name", "publicKey", "createdAt"]) {
+    test(`ops fake rejects an Agent insert missing ${field}`, async () => {
+      const { fetchImpl } = mockOpsFetch();
+      const record: Record<string, unknown> = {
+        id: "self", name: "self", publicKey: "idp:github:octocat", createdAt: "2026-10-02T00:00:00.000Z",
+      };
+      delete record[field];
+      const response = await fetchImpl(ISSUER, {
+        method: "POST",
+        body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [record] }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: `Property ${field} is required` });
+      const found = await fetchImpl(ISSUER, {
+        method: "POST",
+        body: JSON.stringify({ operation: "search_by_value", table: "Agent", search_value: "self" }),
+      });
+      expect(await found.json()).toEqual([]);
+    });
+  }
+
   test("creates the principal when missing and a fresh credential", async () => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: false, existingCredential: null });
     const result = await provisionIdpIdentityMapping(
@@ -431,6 +456,9 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
     expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+    const agentRecord = calls.find((c) => c.body.operation === "insert")!.body.records[0];
+    expect(agentRecord.publicKey).toBe("idp:github:octocat");
+    await expect(importEd25519Key(agentRecord.publicKey)).rejects.toThrow();
     const credRecord = calls.find((c) => c.body.operation === "upsert")!.body.records[0];
     expect(credRecord.kind).toBe("idp");
     expect(credRecord.idpProvider).toBe("github");
@@ -693,6 +721,8 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
         received.push({ host: req.headers.get("host") ?? "", operation: body.operation });
         if (body.operation === "search_by_value") return Response.json(principalPresent ? [{ id: body.search_value }] : []);
         if (body.operation === "insert") {
+          const error = agentInsertSchemaError(body.records ?? []);
+          if (error) return error;
           principalPresent = true;
           return Response.json({ message: "inserted" });
         }

@@ -10,6 +10,7 @@
  */
 import { describe, test, expect } from "bun:test";
 import { Command } from "commander";
+import { agentInsertSchemaError } from "../helpers/agent-insert-schema.ts";
 import { register } from "../../src/commands/principal.ts";
 import {
   linkPrincipalMapping,
@@ -111,6 +112,8 @@ function mappingStub(opts: {
       return Response.json(hits);
     }
     if (body.operation === "insert" && body.table === "Agent") {
+      const error = agentInsertSchemaError(body.records ?? []);
+      if (error) return error;
       if (opts.failWrites) return new Response("nope", { status: 500 });
       for (const row of body.records ?? []) principals.set(row.id, { ...row });
       return Response.json({ message: "inserted" });
@@ -132,6 +135,23 @@ function mappingStub(opts: {
 }
 
 const SUBJECT = { idpSubject: "octocat", idpProvider: "github" };
+
+for (const field of ["name", "publicKey", "createdAt"]) {
+  test(`mapping fake rejects an Agent insert missing ${field}`, async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: [] });
+    const record: Record<string, unknown> = {
+      id: "self", name: "self", publicKey: "idp:github:octocat", createdAt: "2026-10-02T00:00:00.000Z",
+    };
+    delete record[field];
+    const response = await st.fetchImpl(HOSTED_OPS, {
+      method: "POST",
+      body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [record] }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: `Property ${field} is required` });
+    expect(st.principals.has("self")).toBe(false);
+  });
+}
 
 describe("flair principal link (flair#2115)", () => {
   test("maps the subject and prints the mapping", async () => {
@@ -904,7 +924,7 @@ describe("flair#2222 — the pre-write re-validation bound", () => {
       "search_by_value:Agent", "search_by_conditions:Credential", "upsert:Credential",
       "search_by_conditions:Credential",
     ]);
-    expect(st.principals.get("self")).toMatchObject({ id: "self", admin: false });
+    expect(st.principals.get("self")).toMatchObject({ id: "self", admin: false, publicKey: "idp:github:octocat" });
     expect(st.rows.get(result.credentialId)).toMatchObject({ principalId: "self", status: "active" });
   });
 
