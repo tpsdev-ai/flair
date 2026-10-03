@@ -194,17 +194,20 @@ instead (see below).
   `client_id` before it sends the person to the identity provider; the person
   continues from there.
 - **Public clients with PKCE.** The document of an app that signs people in
-  must declare `token_endpoint_auth_method: none`, or leave the field out. Any
-  other value is refused with `invalid_client`. Every authorization request must
-  carry a PKCE `code_challenge` with method `S256`. With the shipped
-  `config.yaml`, the server's metadata advertises `none`, `client_secret_basic`
-  and `client_secret_post` as token endpoint auth methods (the last two apply
-  only to registered clients) and does not advertise `private_key_jwt`. Setting
+  may declare its token endpoint auth method. With the shipped `config.yaml` it
+  must be `token_endpoint_auth_method: none`, or the field left out; any other
+  value is refused with `invalid_client`. Every authorization request must
+  carry a PKCE `code_challenge` with method `S256`. With MCP enabled and a
+  provider configured, the shipped server advertises `none`,
+  `client_secret_basic` and `client_secret_post` as token endpoint auth methods (the last two apply only to registered clients)
+  and does not advertise `private_key_jwt`. Setting
   `mcp.clientCredentials.enabled: true`, which turns on the headless grant,
   changes the metadata: it then also lists `private_key_jwt`, the
-  `client_credentials` grant type and `EdDSA` as the assertion signing
-  algorithm. The document of an app that signs people in is still refused
-  unless it declares `none` or leaves the field out.
+  `client_credentials` grant type and `RS256`, `ES256` and `EdDSA` as the
+  assertion signing algorithms. Setting
+  `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true` also lists
+  `private_key_jwt` and those three algorithms. With either setting, a document
+  may declare `private_key_jwt` (with usable keys) instead of `none`.
 
 ### Changing the list
 
@@ -245,19 +248,31 @@ an upgrade replaces that file, run the command again or edit the file.
 
 ### ChatGPT
 
-ChatGPT's published metadata document, `https://chatgpt.com/oauth/client.json`,
-declares `token_endpoint_auth_method: private_key_jwt`. The `@harperfast/oauth`
-version Flair pins, 2.5.0, accepts only `none` in the metadata document of an
-app that signs people in, so ChatGPT's CIMD client is refused on 2.5.0 even with
-`chatgpt.com` on the list. A sign-in that presents that document gets HTTP 400,
-error `invalid_client`, and the description
-`token_endpoint_auth_method 'private_key_jwt' is not supported for interactive CIMD clients; use 'none'`.
-Stored registrations are a separate path (see [2. Which apps](#2-which-apps)),
-and registration of new clients is off.
+With MCP enabled and a provider configured, admitting ChatGPT's CIMD client
+requires `chatgpt.com` in `mcp.clientIdMetadataDocuments.allowedHosts` and
+`mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true`. ChatGPT's assertion
+uses the token-endpoint URL as its audience, so the pinned `@harperfast/oauth`
+2.9.0 also requires this exception in the deployed `config.yaml`:
 
-> **Upstream:** verification of `private_key_jwt` for interactive clients is in
-> progress upstream in
-> [HarperFast/oauth#245](https://github.com/HarperFast/oauth/pull/245).
+```yaml
+'@harperfast/oauth':
+  mcp:
+    clientIdMetadataDocuments:
+      allowedHosts:
+        - claude.ai
+        - claude.com
+        - chatgpt.com
+      privateKeyJwt:
+        enabled: true
+        tokenEndpointAudience:
+          clientIds:
+            - https://chatgpt.com/oauth/client.json
+          expiresAt: '2026-11-01T00:00:00Z'
+```
+
+Use the exact client ID and an operator-chosen future ISO 8601 `expiresAt`;
+the exception stops accepting the token-endpoint audience at that expiry.
+Restart Flair after editing the configuration.
 
 ## 3. What they can touch
 
@@ -323,8 +338,9 @@ flair principal enable alice \
 ```
 
 Set `TARGET_ADMIN_PASS` to that instance's admin password before running the
-remote example. A success line appears only after the operations API names
-`alice` in its update result and a read-back confirms the requested status.
+remote example. A success line appears only after the command reads `alice`,
+the operations API names it in the update result, and a read-back shows the
+requested status; the line reports that read-back status.
 
 - On the local path it sends an `update` to the operations API at `127.0.0.1`
   on the machine it runs on. The port precedence is a valid explicit
@@ -339,14 +355,15 @@ remote example. A success line appears only after the operations API names
   `FLAIR_TARGET` and `FLAIR_OPS_TARGET` do not select a principal target.
   Redirects, unconfirmed results, and requests that fail or time out are
   refused with a non-zero exit. Diagnostics omit URL userinfo, query values,
-  and response bodies; an unparseable target is printed only as
+  and unexpected response values; an unparseable target is printed only as
   `<unparseable URL>`.
 - Disable sets the principal's `status` to `deactivated`; enable sets it to
   `active`. Both update its `updatedAt` and nothing else: the principal's
   memories and its login mapping stay. Harper can accept an update for an id
-  that has no record; this command
-  refuses success unless the result names the id and a read-back finds the row
-  in the requested state.
+  that has no record, so the command reads the principal first and refuses
+  `no principal <id>` before any update when no row exists; a read that fails
+  or returns an unreadable body is refused as unverified rather than as
+  missing.
 - Flair reads the principal's status on every `tools/call` for a known tool, and
   refuses those calls for a deactivated principal, including calls that carry a
   token issued before the change:
@@ -399,7 +416,9 @@ instance's admin password.
 
 Create a GitHub OAuth app whose callback URL is
 `https://flair.example.com/oauth/github/callback` (the command prints this URL
-too). Then run:
+too). The command stages `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET`
+and `OAUTH_GITHUB_REDIRECT_URI=<public-origin>/oauth` using `--issuer`
+(default: `--instance`). Then run:
 
 ```bash
 flair mcp enable \
@@ -412,8 +431,6 @@ flair mcp enable \
 When it finishes, it prints each step it ran, marked ✓ or ✗. The steps that
 act:
 
-- `signing-key` creates `~/.flair/mcp-signing-key.pem` (or the
-  `--signing-key-file` path), or reuses the file if it exists.
 - `idp-credentials` checks that the OAuth app's client id and secret are
   present; in a terminal, the command prompts for them before the steps run.
 - `secrets-provisioning` always stages the secrets the instance needs in a local
@@ -501,7 +518,6 @@ shares her connector's memories.
 
 **How to choose:** use one principal when both apps should see the same private
 memories. Keep two when you want to revoke or audit them separately.
-ChatGPT's CIMD client cannot be the second app yet; see [ChatGPT](#chatgpt).
 
 **Check:** `bootstrap` in each app returns the `agentId` you chose.
 **Revoke:** `flair principal disable` for the principal you want to stop.

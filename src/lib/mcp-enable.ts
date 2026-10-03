@@ -56,8 +56,6 @@
  *   - Sherlock: `accessTokenTtl` is explicitly 900 in the written config
  *     block, never left at the plugin's 1h default (see
  *     `buildMcpOAuthConfigBlock`).
- *   - Sherlock: the RS256 keypair comes from `crypto.generateKeyPairSync`
- *     (see `generateRsaSigningKeyPair`), never a PRNG shortcut.
  *   - Sherlock (the #741 lesson): self-verification is the exit criterion.
  *     On failure, the result names which step to re-run — never reports
  *     success on hope (see `EnableMcpResult.failedStep`). flair#756 extends
@@ -82,8 +80,8 @@
  *     ops paths" the design addendum names, not a new mechanism invented for
  *     this slice.
  *   - `FLAIR_MCP_OAUTH` (resources/mcp-oauth-flag.ts) is read from
- *     `process.env` ONLY — never YAML config — so it (and the OAuth secrets:
- *     the signing key PEM, the IdP client secret) cannot be set via
+ *     `process.env` ONLY — never YAML config — so it (and the OAuth secrets —
+ *     the IdP client secret) cannot be set via
  *     `set_configuration`. Those are delivered through the shape-aware
  *     secrets-provisioning step below (a 0600 staging file the operator
  *     applies via Fabric Studio's environment panel, or their own
@@ -93,7 +91,7 @@
  *     the flag-OFF byte-identical boot with the new config.yaml block inert.
  *   - `@harperfast/oauth`'s config field names (`mcp.issuer`, `mcp.resource`,
  *     `mcp.accessTokenTtl`, `mcp.dynamicClientRegistration.enabled`,
- *     `mcp.clientIdMetadataDocuments.allowedHosts`, `mcp.signingKeyPem`) are
+ *     `mcp.clientIdMetadataDocuments.allowedHosts`) are
  *     confirmed against the installed 2.2.0 package's source
  *     (dist/types.d.ts:38-229, dist/lib/mcp/{dcr,cimd,keyStore,token}.js).
  *   - The self-verification target, `${issuer}/.well-known/oauth-
@@ -146,7 +144,7 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync, realpath
 import { hostname as osHostname } from "node:os";
 
 import { join, dirname, resolve } from "node:path";
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
 import { writeConfirmed } from "./instance-identity-row.js";
@@ -207,6 +205,22 @@ export function checkLocalOriginRefusal(url: string):
     message: "Issuer refused: local hostname or loopback, unspecified, reserved 0.0.0.0/8, private or link-local IP literal.",
   };
   return { refused: false };
+}
+
+export function issuerOriginRefusal(issuer: string): string | null {
+  let valid = false;
+  try {
+    if (/^https?:\/\/[^/?#\\\s]+\/?$/.test(issuer)) {
+      valid = issuer.replace(/\/$/, "") === new URL(issuer).origin;
+    }
+  } catch {
+    valid = false;
+  }
+  if (valid) return null;
+  return (
+    `--issuer must be an absolute http(s) origin with no path (got: ${JSON.stringify(issuer)}); ` +
+    `set it to the instance's public origin, e.g. https://flair.example.com. Nothing was changed.`
+  );
 }
 
 /**
@@ -437,49 +451,6 @@ export function claudeAiExcludedNote(written: readonly string[] | undefined): st
   );
 }
 
-// ─── RS256 signing keypair ───────────────────────────────────────────────────
-
-export interface RsaKeyPairPem {
-  publicKey: string;
-  privateKey: string;
-}
-
-/** RS256 signing keypair for `mcp.signingKeyPem` — `crypto.generateKeyPairSync`,
- *  never a PRNG shortcut (Sherlock's Model-2 requirement 2 implementation note). */
-export function generateRsaSigningKeyPair(): RsaKeyPairPem {
-  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  return { publicKey, privateKey };
-}
-
-export function defaultSigningKeyFilePath(): string {
-  return join(resolveHome(), ".flair", "mcp-signing-key.pem");
-}
-
-/** Write the RS256 private key PEM to a 0600 file (idempotent — reuses an
- *  existing file rather than silently rotating the signing key). */
-export function ensureSigningKeyFile(filePath?: string, deps: { generate?: () => RsaKeyPairPem } = {}): { path: string; reused: boolean } {
-  const path = filePath ?? defaultSigningKeyFilePath();
-  if (existsSync(path)) {
-    return { path, reused: true };
-  }
-  const generate = deps.generate ?? generateRsaSigningKeyPair;
-  const { privateKey } = generate();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, privateKey, { mode: 0o600 });
-  chmodSync(path, 0o600);
-  return { path, reused: false };
-}
-
-/** Read back a signing key file's PEM contents (used to fold it into the
- *  secrets bundle — never logged, never returned in an `EnableMcpResult`). */
-export function readSigningKeyFile(path: string): string {
-  return readFileSync(path, "utf-8");
-}
-
 // ─── @harperfast/oauth config block ──────────────────────────────────────────
 
 export interface McpOAuthConfigBlockParams {
@@ -523,6 +494,12 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         [provider]: {
           clientId: `\${${envPrefix}_CLIENT_ID}`,
           clientSecret: `\${${envPrefix}_CLIENT_SECRET}`,
+          // Since @harperfast/oauth 2.7.0 a CONFIGURED provider (both
+          // credentials set) needs a redirectUri; 2.8.1 skips an UNCONFIGURED
+          // one before that check (HarperFast/oauth#259). Same whole-token
+          // reference shape as the credentials above — set to the instance's
+          // public origin plus /oauth; the component appends '/<provider>/callback'.
+          redirectUri: `\${${envPrefix}_REDIRECT_URI}`,
         },
       },
       mcp: {
@@ -559,7 +536,8 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         // resolution still runs cimd.js's full SSRF/document-validation
         // pipeline regardless of this list.
         clientIdMetadataDocuments: { allowedHosts: cimdAllowedHosts },
-        signingKeyPem: "${FLAIR_MCP_SIGNING_KEY_PEM}",
+        // Without signingKeyPem, minting reuses a persisted key or generates
+        // and persists one if oauth.harper_oauth_mcp_keys is empty.
       },
     },
   };
@@ -1017,10 +995,16 @@ export function idpCallbackUrl(issuer: string, idpProvider: string): string {
 
 export interface SecretsBundleParams {
   issuer: string;
-  signingKeyPem: string;
   idpProvider: string;
   idpClientId: string;
   idpClientSecret: string;
+}
+
+export class IdpRedirectOriginError extends Error {
+  constructor(envPrefix: string) {
+    super(`Cannot stage ${envPrefix}_CLIENT_ID and ${envPrefix}_CLIENT_SECRET: ${envPrefix}_REDIRECT_URI requires a known HTTP(S) issuer origin.`);
+    this.name = "IdpRedirectOriginError";
+  }
 }
 
 /** The full set of env vars the restarted instance needs live. Contains
@@ -1028,6 +1012,14 @@ export interface SecretsBundleParams {
  *  must never fold this into a CLI-printed / `EnableMcpResult` field. */
 export function buildSecretsBundle(params: SecretsBundleParams): Record<string, string> {
   const envPrefix = `OAUTH_${params.idpProvider.toUpperCase()}`;
+  let origin: string;
+  try {
+    const url = new URL(params.issuer);
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new IdpRedirectOriginError(envPrefix);
+    origin = url.origin;
+  } catch {
+    throw new IdpRedirectOriginError(envPrefix);
+  }
   return {
     // "true" is the ONLY value both readers of this flag accept (flair#1152,
     // measured against oauth 2.5.0): flair's strict mcpOAuthEnabled() takes
@@ -1038,9 +1030,9 @@ export function buildSecretsBundle(params: SecretsBundleParams): Record<string, 
     // 401s, no AS is advertised). Keep this "true".
     FLAIR_MCP_OAUTH: "true",
     FLAIR_MCP_ISSUER: params.issuer.replace(/\/+$/, ""),
-    FLAIR_MCP_SIGNING_KEY_PEM: params.signingKeyPem,
     [`${envPrefix}_CLIENT_ID`]: params.idpClientId,
     [`${envPrefix}_CLIENT_SECRET`]: params.idpClientSecret,
+    [`${envPrefix}_REDIRECT_URI`]: `${origin}/oauth`,
   };
 }
 
@@ -2410,8 +2402,8 @@ export async function captureBootDiscriminator(
 export type EnableStepName =
   | "local-origin-check"
   | "target-shape-check"
+  | "issuer-origin-check"
   | "cimd-allowed-hosts"
-  | "signing-key"
   | "config-block"
   | "idp-credentials"
   | "secrets-provisioning"
@@ -2444,7 +2436,6 @@ export interface EnableMcpParams {
   principalKind?: "human" | "agent";
   adminUser: string;
   adminPass: string;
-  signingKeyFilePath?: string;
   secretsMechanism?: SecretsMechanism;
   secretsStagingPath?: string;
   /** flair#2113: lowercase bare hostnames ensured as
@@ -2474,7 +2465,6 @@ export interface EnableMcpParams {
 export interface EnableMcpDeps {
   fetchImpl?: typeof fetch;
   now?: () => string;
-  generateRsaKeyPair?: () => RsaKeyPairPem;
   /** Interactive confirmation (CLI wires readline; tests inject a stub).
    *  Only consulted when `confirmSecretsApplied` is not already true and
    *  this is not a dry run. */
@@ -2500,7 +2490,6 @@ export interface EnableMcpResult {
   pasteBlock?: string;
   secretsMechanism?: SecretsMechanism;
   secretsPath?: string;
-  signingKeyFilePath?: string;
   callbackUrl?: string;
   /** flair#2113: set only when this run wrote `--cimd-allowed-hosts` to
    *  `cimdAllowedHostsConfigPath` (or found it already there) — the list read
@@ -2562,7 +2551,8 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
 
   // ── Local-origin refusal (scenario addendum, binding) ─────────────────────
   currentStep = "local-origin-check";
-  const issuer = (params.issuer ?? params.instance).replace(/\/+$/, "");
+  const rawIssuer = params.issuer ?? params.instance;
+  const issuer = rawIssuer.replace(/\/$/, "");
   const localCheck = checkLocalOriginRefusal(issuer);
   if (localCheck.refused) {
     push(false, localCheck.message);
@@ -2577,6 +2567,14 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const fabricTarget = isFabricTarget(params.instance, params.fabric);
 
   try {
+    // ── Issuer origin (flair#2194) ────────────────────────────────────────────
+    currentStep = "issuer-origin-check";
+    const issuerIssue = issuerOriginRefusal(rawIssuer);
+    if (issuerIssue) {
+      push(false, issuerIssue);
+      return { ok: false, dryRun, refused: { message: issuerIssue }, steps, failedStep: "issuer-origin-check" };
+    }
+    push(true, `issuer ${issuer} is an absolute http(s) origin`);
     if (!dryRun && !fabricTarget && !isLoopbackUrl(params.instance)) {
       currentStep = "target-shape-check";
       const message =
@@ -2637,25 +2635,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       }
     }
 
-    // ── RS256 signing keypair ─────────────────────────────────────────────────
-    currentStep = "signing-key";
-    // flair#2113 review: --dry-run writes no file, so it reports the key a real
-    // run would reuse or generate instead of creating one. Same path and same
-    // existence test as ensureSigningKeyFile.
-    let keyResult: { path: string; reused: boolean };
-    if (dryRun) {
-      const keyPath = params.signingKeyFilePath ?? defaultSigningKeyFilePath();
-      keyResult = { path: keyPath, reused: existsSync(keyPath) };
-      push(true,
-        keyResult.reused
-          ? `signing key found at ${keyPath}; a run without --dry-run reuses it`
-          : `no signing key at ${keyPath}; a run without --dry-run generates one there (0600). --dry-run did not create it`,
-      );
-    } else {
-      keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
-      push(true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
-    }
-
     // ── @harperfast/oauth config (flair#1136: shipped in config.yaml) ──────
     // The block ships uncommented with mcp.enabled: ${FLAIR_MCP_OAUTH}
     // (flair#1152), so the environment turns it on. This step writes nothing;
@@ -2690,8 +2669,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
 
     if (dryRun) {
       // Dry-run stops here. Under --dry-run nothing above wrote a file or made
-      // a remote call (the signing-key step only reports the key path), and
-      // nothing below this line runs.
+      // a remote call, and nothing below this line runs.
       return {
         ok: true,
         dryRun: true,
@@ -2699,20 +2677,17 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         issuer,
         resource: `${issuer}/mcp`,
         callbackUrl,
-        signingKeyFilePath: keyResult.path,
       };
     }
 
     // ── Secrets provisioning (shape-aware, never silent) ──────────────────────
-    const signingKeyPem = readSigningKeyFile(keyResult.path);
+    currentStep = "secrets-provisioning";
     const bundle = buildSecretsBundle({
       issuer,
-      signingKeyPem,
       idpProvider,
       idpClientId: params.idpClientId,
       idpClientSecret: params.idpClientSecret,
     });
-    currentStep = "secrets-provisioning";
     if (bundle.FLAIR_MCP_ISSUER !== issuer) {
       throw new Error(`the FLAIR_MCP_ISSUER being pushed does not equal the issuer checked (${issuer})`);
     }
@@ -2851,7 +2826,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
       if (!binding.ok) {
         push(false, binding.detail);
-        return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "issuer-target-binding", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, signingKeyFilePath: keyResult.path, callbackUrl };
+        return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "issuer-target-binding", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, callbackUrl };
       }
       currentStep = "fabric-operator-deploy";
       // The target's metadata names the issuer. Now check the public origin.
@@ -2873,7 +2848,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
           pasteBlock: buildClaudePasteBlock(resource),
           secretsMechanism: secretsResult.mechanism,
           secretsPath: secretsResult.path,
-          signingKeyFilePath: keyResult.path,
           callbackUrl,
         };
       }
@@ -2906,7 +2880,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         resource: `${issuer}/mcp`,
         secretsMechanism: secretsResult.mechanism,
         secretsPath: secretsResult.path,
-        signingKeyFilePath: keyResult.path,
         callbackUrl,
       };
     }
@@ -2931,7 +2904,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         resource: `${issuer}/mcp`,
         secretsMechanism: secretsResult.mechanism,
         secretsPath: secretsResult.path,
-        signingKeyFilePath: keyResult.path,
         callbackUrl,
       };
     }
@@ -2958,7 +2930,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
           resource: `${issuer}/mcp`,
           secretsMechanism: secretsResult.mechanism,
           secretsPath: secretsResult.path,
-          signingKeyFilePath: keyResult.path,
           callbackUrl,
         };
       }
@@ -2998,7 +2969,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
     if (!binding.ok) {
       push(false, binding.detail);
-      return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "self-verify", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, signingKeyFilePath: keyResult.path, callbackUrl, cimdAllowedHosts: writtenCimd?.hosts, cimdAllowedHostsConfigPath: writtenCimd?.path };
+      return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "self-verify", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, callbackUrl, cimdAllowedHosts: writtenCimd?.hosts, cimdAllowedHostsConfigPath: writtenCimd?.path };
     }
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {
@@ -3026,7 +2997,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       pasteBlock: buildClaudePasteBlock(resource),
       secretsMechanism: secretsResult.mechanism,
       secretsPath: secretsResult.path,
-      signingKeyFilePath: keyResult.path,
       callbackUrl,
       cimdAllowedHosts: writtenCimd?.hosts,
       cimdAllowedHostsConfigPath: writtenCimd?.path,
@@ -3043,8 +3013,8 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // Two results for one step, and the ✓ instructs several minutes of manual
     // work in a web UI that the ✗ makes pointless. Read in order, you do the
     // work first.
-    // No `?? "signing-key"` fallback: currentStep is initialised to the first
-    // step, so there is no undefined case to invent a name for. A fallback here
+    // No fallback step NAME: currentStep is initialised to the first step, so
+    // there is no undefined case to invent a name for. A fallback here
     // would attribute a throw to a step chosen for being a plausible default —
     // the same misattribution this handler exists to prevent, one layer down.
     push(false, `unexpected error: ${err?.message ?? err}`);
