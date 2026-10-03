@@ -18,6 +18,13 @@
 //   - teardown kills only the pid in this data dir's hdb.pid when lsof finds
 //     no listener or identifies that pid on this test's port;
 //   - the CLI runs under Node, so the Harper it starts runs under Node too.
+//
+// Readiness (flair#2240). The CLI's `init`/`start` returns once Harper answers
+// its HTTP health endpoint, but the operations API is a separate listener that
+// can still be coming up at that moment — the re-init case in CI got
+// ConnectionRefused on it. Every `waitForInstance()` below waits for BOTH the
+// health endpoint and a real ops request before the test issues an ops call, the
+// same two-port wait `startHarper()` in test/helpers/harper-lifecycle.ts performs.
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -35,6 +42,15 @@ const ROOT = resolve(import.meta.dirname, "..", "..");
 const CLI = join(ROOT, "dist", "cli.js");
 const ADMIN_USER = "admin";
 const ADMIN_PASS = `seed-local-${randomUUID()}`;
+
+// Measured on a 2-vCPU host (2026-10-03): the CLI's `init` reaches HTTP health
+// in ~12 s idle and ~24 s under four CPU hogs. The readiness deadline below is
+// ~5x the loaded figure, and every `waitForInstance` logs or reports the figure
+// it saw, so a slow runner is not mistaken for a regression. The teardown
+// deadline covers SIGTERM plus the 15 s exit wait inside `stopInstall`, which
+// Bun's default 5 s hook timeout would cut short (flair#2240).
+const INSTANCE_READY_TIMEOUT_MS = 120_000;
+const TEARDOWN_TIMEOUT_MS = 60_000;
 
 interface Install {
   home: string;
@@ -107,6 +123,7 @@ function nodeBin(): string {
 }
 
 function runLocalInit(install: Install, extraArgs: string[]) {
+  const startedAt = Date.now();
   const res = spawnSync(
     nodeBin(),
     [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), "--admin-pass", ADMIN_PASS,
@@ -119,10 +136,11 @@ function runLocalInit(install: Install, extraArgs: string[]) {
       env: childEnv(install.home, launchctlStub(install.home)),
     },
   );
-  return { status: res.status, signal: res.signal, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  return { status: res.status, signal: res.signal, stdout: res.stdout ?? "", stderr: res.stderr ?? "", startedAt };
 }
 
 function runLocalService(install: Install, command: "start" | "stop", extraEnv: Record<string, string> = {}) {
+  const startedAt = Date.now();
   const res = spawnSync(nodeBin(), [CLI, command, "--port", String(install.httpPort)], {
     cwd: ROOT,
     encoding: "utf8",
@@ -130,7 +148,57 @@ function runLocalService(install: Install, command: "start" | "stop", extraEnv: 
     killSignal: "SIGKILL",
     env: { ...childEnv(install.home, launchctlStub(install.home)), ...extraEnv },
   });
-  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "", startedAt };
+}
+
+/**
+ * Wait until this test's instance is actually serving: its HTTP `/Health`
+ * endpoint answers 2xx or 401 AND its operations API answers a real request.
+ *
+ * The CLI's `init`/`start` returns once HTTP health is up, but the operations
+ * API is a separate listener; a fetch issued right after it returns can get
+ * ConnectionRefused (flair#2240). Both listeners must answer before the test
+ * proceeds. `startedAt` is when the run expected to start the instance was
+ * launched; the timeout reports the measured startup so the next failure can be
+ * told apart from a regression.
+ */
+async function waitForInstance(install: Install, startedAt: number): Promise<number> {
+  const healthURL = `http://127.0.0.1:${install.httpPort}/Health`;
+  const opsURL = `http://127.0.0.1:${install.opsPort}/`;
+  const deadline = Date.now() + INSTANCE_READY_TIMEOUT_MS;
+  let last = "no attempt yet";
+  while (Date.now() < deadline) {
+    try {
+      const health = await fetch(healthURL, {
+        headers: { Authorization: basic() },
+        signal: AbortSignal.timeout(2_000),
+      });
+      // 2xx = healthy; 401 = Harper up, credentials wrong — still serving.
+      if (health.ok || health.status === 401) {
+        const res = await fetch(opsURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: basic() },
+          body: JSON.stringify({ operation: "search_by_id", database: "flair", table: "Memory", ids: ["__readiness_probe__"], get_attributes: ["id"] }),
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (res.status === 200) {
+          const elapsed = Date.now() - startedAt;
+          console.log(`[2141-local-init] instance ready (health + ops answered) after ${elapsed}ms`);
+          return elapsed;
+        }
+        last = `ops answered HTTP ${res.status}`;
+      } else {
+        last = `health HTTP ${health.status}`;
+      }
+    } catch (err: any) {
+      last = err?.message ?? String(err);
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(
+    `the instance (http ${install.httpPort}, ops ${install.opsPort}) was not serving within ` +
+    `${INSTANCE_READY_TIMEOUT_MS}ms (measured startup ${Date.now() - startedAt}ms); last: ${last}`,
+  );
 }
 
 const basic = () => "Basic " + Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString("base64");
@@ -225,7 +293,7 @@ async function stopInstall(install: Install): Promise<void> {
 
 afterEach(async () => {
   while (installs.length > 0) await stopInstall(installs.pop() as Install);
-});
+}, TEARDOWN_TIMEOUT_MS);
 
 describe("flair#2141 S2 — two fresh local init paths and one installed-instance --skip-start handoff", () => {
   test("with an agent registered (init's agent path)", async () => {
@@ -234,6 +302,7 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     const run = runLocalInit(install, ["--agent-id", `fli-init-${Date.now().toString(36)}`]);
     expect(run.status, `init failed (signal ${run.signal}):\n${run.stdout.slice(-1500)}\n${run.stderr.slice(-1500)}`).toBe(0);
     expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
+    await waitForInstance(install, run.startedAt);
     await expectSeeded(install);
   }, 330_000);
 
@@ -243,6 +312,7 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     const run = runLocalInit(install, []);
     expect(run.status, `init failed (signal ${run.signal}):\n${run.stdout.slice(-1500)}\n${run.stderr.slice(-1500)}`).toBe(0);
     expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
+    await waitForInstance(install, run.startedAt);
     await expectSeeded(install);
   }, 330_000);
 
@@ -254,6 +324,7 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     // a normal init, then clear the seed so the deferred seed is observable.
     const initial = runLocalInit(install, []);
     expect(initial.status, initial.stdout + initial.stderr).toBe(0);
+    await waitForInstance(install, initial.startedAt);
     await ops(install, { operation: "delete", database: "flair", table: "Memory", ids: [SEED_SKILL_ID] });
     await ops(install, { operation: "delete", database: "flair", table: "OrgSkillAssignment", ids: [SEED_ASSIGNMENT_ID] });
     const firstStop = runLocalService(install, "stop");
@@ -272,6 +343,7 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     expect(withoutCredential.stderr).toContain("using-flair skill seed is still pending");
     expect(withoutCredential.stderr).toContain("FLAIR_ADMIN_PASS");
     expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
+    await waitForInstance(install, withoutCredential.startedAt);
     expect((await seedRows(install)).row).toBeNull();
 
     // flair start WITH FLAIR_ADMIN_PASS completes the seed and removes the marker.
@@ -281,6 +353,7 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     expect(withCredential.status, withCredential.stdout + withCredential.stderr).toBe(0);
     expect(withCredential.stdout).toContain("using-flair skill: seeded the using-flair skill");
     expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(false);
+    await waitForInstance(install, withCredential.startedAt);
     await expectSeeded(install);
   }, 900_000);
 });
