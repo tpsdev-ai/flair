@@ -43,7 +43,7 @@ flair init --target https://<cluster>.<org>.harperfabric.com \
 
 ### Operations endpoint
 
-Portless HTTPS targets derive the ops endpoint at `:9925`.
+Portless HTTPS targets derive the ops endpoint at `:9925`. <!-- docs-freshness-allow: Fabric ops API port (FABRIC_OPS_PORT), not legacy data port -->
 
 Set `FLAIR_OPS_TARGET` to override the derived endpoint, including for `flair backup`.
 
