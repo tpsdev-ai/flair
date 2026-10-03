@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CACHE_VERSION,
+  CACHE_MAX_BYTES,
   MAX_HITS,
   STALE_MS,
   buildExcerpt,
@@ -311,6 +312,24 @@ describe("cache read integrity", () => {
       const dir = writeCache(root, [entry()]);
       const binding = await readBinding(dir, { url: URL, principal: AGENT, session: SESSION });
       expect(await readGeneration(dir, binding!, now + STALE_MS + 1)).toBeNull(); // expired
+      rmSync(root, { recursive: true, force: true });
+    }
+    {
+      const root = scratch();
+      const dir = writeCache(root, [entry()]);
+      const binding = await readBinding(dir, { url: URL, principal: AGENT, session: SESSION });
+      // An oversized generation file is refused on its size alone.
+      writeFileSync(generationPath(dir, INSTANCE, "gen-1"), "x".repeat(CACHE_MAX_BYTES + 1), { mode: 0o600 });
+      expect(await readGeneration(dir, binding!, now)).toBeNull();
+      rmSync(root, { recursive: true, force: true });
+    }
+    {
+      const root = scratch();
+      const dir = writeCache(root, [entry()]);
+      const binding = await readBinding(dir, { url: URL, principal: AGENT, session: SESSION });
+      // A generation whose own instance binding disagrees with the binding file is refused.
+      writeFileSync(generationPath(dir, INSTANCE, "gen-1"), encodeEnvelope(payload([entry()], { instance: "other-instance" })), { mode: 0o600 });
+      expect(await readGeneration(dir, binding!, now)).toBeNull();
       rmSync(root, { recursive: true, force: true });
     }
     {
