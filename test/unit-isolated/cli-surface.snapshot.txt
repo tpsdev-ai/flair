@@ -283,7 +283,7 @@ flair hook install
       description: Wire the Claude Code PreToolUse action-recall hook instead (flair#2067)
       attr: actionRecall
     --capture
-      description: Wire the Claude Code PostToolUse + Stop learning-capture hooks instead (flair#2068)
+      description: Wire the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks instead (flair#2068)
       attr: capture
 
 flair hook uninstall
@@ -304,7 +304,7 @@ flair hook uninstall
       description: Remove the Claude Code PreToolUse action-recall hook instead (flair#2067)
       attr: actionRecall
     --capture
-      description: Remove the Claude Code PostToolUse + Stop learning-capture hooks instead (flair#2068)
+      description: Remove the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks instead (flair#2068)
       attr: capture
 
 flair hook status
@@ -319,7 +319,7 @@ flair hook status
       description: Also report the Claude Code PreToolUse action-recall hook (flair#2067)
       attr: actionRecall
     --capture
-      description: Also report the Claude Code PostToolUse + Stop learning-capture hooks (flair#2068)
+      description: Also report the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks (flair#2068)
       attr: capture
 
 flair mcp
@@ -3024,8 +3024,8 @@ Options:
                     Stop — flair#1257; installing them IS the opt-in)
   --action-recall   Wire the Claude Code PreToolUse action-recall hook instead
                     (flair#2067)
-  --capture         Wire the Claude Code PostToolUse + Stop learning-capture
-                    hooks instead (flair#2068)
+  --capture         Wire the Claude Code PostToolUseFailure + PostToolUse + Stop
+                    learning-capture hooks instead (flair#2068)
   -h, --help        display help for command
 
 Global Options:
@@ -3044,8 +3044,8 @@ Options:
                     Stop — flair#1257)
   --action-recall   Remove the Claude Code PreToolUse action-recall hook instead
                     (flair#2067)
-  --capture         Remove the Claude Code PostToolUse + Stop learning-capture
-                    hooks instead (flair#2068)
+  --capture         Remove the Claude Code PostToolUseFailure + PostToolUse +
+                    Stop learning-capture hooks instead (flair#2068)
   -h, --help        display help for command
 
 Global Options:
@@ -3061,8 +3061,8 @@ Options:
   --harness <name>  Target harness (claude-code, codex) (default: "claude-code")
   --action-recall   Also report the Claude Code PreToolUse action-recall hook
                     (flair#2067)
-  --capture         Also report the Claude Code PostToolUse + Stop
-                    learning-capture hooks (flair#2068)
+  --capture         Also report the Claude Code PostToolUseFailure + PostToolUse
+                    + Stop learning-capture hooks (flair#2068)
   -h, --help        display help for command
 
 Global Options:

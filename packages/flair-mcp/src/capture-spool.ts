@@ -19,9 +19,10 @@
  *   <dir>/<agentId>.spool.json    staged candidates (bounded)
  *   <dir>/<agentId>.pending.json  failed commands awaiting a fix (bounded)
  *   <dir>/<agentId>.flush.stamp   last background-flush time (cooldown)
+ *   <dir>/<agentId>.lock          held across each spool/pending read-modify-write
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -31,6 +32,7 @@ import {
   CAPTURE_VERSION,
   buildCaptureMemoryRow,
   planPostToolUse,
+  planPostToolUseFailure,
   planStop,
   type CaptureCandidate,
   type CaptureHookInput,
@@ -57,6 +59,12 @@ export const CAPTURE_FLUSH_COOLDOWN_MS = 1000;
 
 /** The largest hook payload read from stdin; a larger one is not captured. */
 export const CAPTURE_STDIN_MAX_BYTES = 1 * 1024 * 1024;
+
+/** How long a hook waits for the per-agent lock before it captures nothing. */
+export const CAPTURE_LOCK_WAIT_MS = 200;
+
+/** A lock file older than this was left by a process that died holding it. */
+export const CAPTURE_LOCK_STALE_MS = 5000;
 
 // ── paths ───────────────────────────────────────────────────────────────────
 
@@ -85,6 +93,10 @@ export function flushStampPath(dir: string, agentId: string): string {
   return join(dir, `${agentId}.flush.stamp`);
 }
 
+export function lockPath(dir: string, agentId: string): string {
+  return join(dir, `${agentId}.lock`);
+}
+
 /** 0700 for the directory, 0600 for the file (re-asserted on an existing
  *  file — writeFileSync's mode only applies on create). */
 function writePrivate(path: string, data: string): void {
@@ -101,6 +113,50 @@ function atomicWritePrivate(path: string, data: string): void {
 function ensureCaptureDir(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
+}
+
+const LOCK_BUSY: unique symbol = Symbol("capture-lock-busy");
+const sleepCell = new Int32Array(new SharedArrayBuffer(4));
+
+/** Run `fn` holding the per-agent lock (an exclusively created file), or
+ *  return LOCK_BUSY when it is not free within CAPTURE_LOCK_WAIT_MS. */
+function withCaptureLock<T>(dir: string, agentId: string, fn: () => T): T | typeof LOCK_BUSY {
+  ensureCaptureDir(dir);
+  const path = lockPath(dir, agentId);
+  const deadline = Date.now() + CAPTURE_LOCK_WAIT_MS;
+  for (;;) {
+    let fd: number | null = null;
+    try {
+      fd = openSync(path, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    if (fd !== null) {
+      closeSync(fd);
+      try {
+        return fn();
+      } finally {
+        try { unlinkSync(path); } catch {}
+      }
+    }
+    try {
+      if (Date.now() - statSync(path).mtimeMs > CAPTURE_LOCK_STALE_MS) unlinkSync(path);
+    } catch {
+      // Released meanwhile.
+    }
+    if (Date.now() >= deadline) return LOCK_BUSY;
+    Atomics.wait(sleepCell, 0, 0, 2);
+  }
+}
+
+/** `fn` under the lock; "refused" when the lock is busy or `fn` throws. */
+function underLock<T extends string>(dir: string, agentId: string, fn: () => T): T | "refused" {
+  try {
+    const result = withCaptureLock(dir, agentId, fn);
+    return result === LOCK_BUSY ? "refused" : result;
+  } catch {
+    return "refused";
+  }
 }
 
 // ── spool records ───────────────────────────────────────────────────────────
@@ -158,23 +214,22 @@ function trimRecords(records: CaptureSpoolRecord[]): CaptureSpoolRecord[] {
  * (nothing writable). The spool stays within its record and byte bounds.
  */
 export function appendRecord(dir: string, agentId: string, candidate: CaptureCandidate): "appended" | "deduplicated" | "refused" {
-  try {
-    ensureCaptureDir(dir);
-    const records = readSpool(dir, agentId);
-    if (records.some((r) => r.dedupKey === candidate.dedupKey)) return "deduplicated";
-    records.push({
-      v: CAPTURE_VERSION,
-      agentId,
-      kind: candidate.kind,
-      content: candidate.content,
-      dedupKey: candidate.dedupKey,
-      provenance: candidate.provenance,
-    });
-    atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, trimRecords(records)));
-    return "appended";
-  } catch {
-    return "refused";
-  }
+  return underLock(dir, agentId, () => appendRecordLocked(dir, agentId, candidate));
+}
+
+function appendRecordLocked(dir: string, agentId: string, candidate: CaptureCandidate): "appended" | "deduplicated" {
+  const records = readSpool(dir, agentId);
+  if (records.some((r) => r.dedupKey === candidate.dedupKey)) return "deduplicated";
+  records.push({
+    v: CAPTURE_VERSION,
+    agentId,
+    kind: candidate.kind,
+    content: candidate.content,
+    dedupKey: candidate.dedupKey,
+    provenance: candidate.provenance,
+  });
+  atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, trimRecords(records)));
+  return "appended";
 }
 
 // ── pending errors ──────────────────────────────────────────────────────────
@@ -194,13 +249,9 @@ function readPending(dir: string, agentId: string): PendingError[] {
   }
 }
 
-function writePending(dir: string, agentId: string, pending: PendingError[]): void {
-  try {
-    ensureCaptureDir(dir);
-    atomicWritePrivate(pendingPath(dir, agentId), `${JSON.stringify({ v: CAPTURE_VERSION, pending: pending.slice(-CAPTURE_PENDING_MAX) })}\n`);
-  } catch {
-    // Fail-open: capture is an aid, never a gate.
-  }
+/** Caller holds the lock. */
+function writePendingLocked(dir: string, agentId: string, pending: PendingError[]): void {
+  atomicWritePrivate(pendingPath(dir, agentId), `${JSON.stringify({ v: CAPTURE_VERSION, pending: pending.slice(-CAPTURE_PENDING_MAX) })}\n`);
 }
 
 // ── the hot path (append only, never a network call) ────────────────────────
@@ -253,20 +304,31 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
     return { captured: result !== "refused", reason: result };
   }
 
+  if (input.hook_event_name === "PostToolUseFailure") {
+    const error = planPostToolUseFailure(input, capturedAt);
+    if (!error) return { captured: false, reason: "not-capturable" };
+    const result = underLock(dir, agentId, () => {
+      writePendingLocked(dir, agentId, [...readPending(dir, agentId), error]);
+      return "error-recorded" as const;
+    });
+    return { captured: false, reason: result };
+  }
+
   if (input.hook_event_name === "PostToolUse") {
-    const pending = readPending(dir, agentId);
-    const plan = planPostToolUse(input, pending, capturedAt);
-    if (plan.action === "record-error") {
-      writePending(dir, agentId, [...pending, plan.error]);
-      return { captured: false, reason: "error-recorded" };
+    // Most successful calls resolve nothing: decide that without the lock.
+    if (planPostToolUse(input, readPending(dir, agentId), capturedAt).action !== "candidate") {
+      return { captured: false, reason: "not-capturable" };
     }
-    if (plan.action === "candidate") {
-      writePending(dir, agentId, pending.filter((_, i) => i !== plan.resolved));
-      const result = appendRecord(dir, agentId, plan.candidate);
-      if (result === "appended") deps.kickFlush?.(agentId, dir);
-      return { captured: result !== "refused", reason: result };
-    }
-    return { captured: false, reason: "not-capturable" };
+    const result = underLock(dir, agentId, () => {
+      const pending = readPending(dir, agentId);
+      const plan = planPostToolUse(input, pending, capturedAt);
+      if (plan.action !== "candidate") return "not-capturable" as const;
+      const appended = appendRecordLocked(dir, agentId, plan.candidate);
+      writePendingLocked(dir, agentId, pending.filter((_, i) => i !== plan.resolved));
+      return appended;
+    });
+    if (result === "appended") deps.kickFlush?.(agentId, dir);
+    return { captured: result === "appended" || result === "deduplicated", reason: result };
   }
 
   return { captured: false, reason: "not-capturable" };
@@ -328,12 +390,11 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   try {
     client = await makeClient(agentId);
   } catch (error) {
-    warn(`flush skipped (${error instanceof Error ? error.message : String(error)}).slice(0,200)`);
+    warn(`flush skipped (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`);
     return { flushed: 0, remaining: records.length, reason: "write-failed" };
   }
 
-  const kept: CaptureSpoolRecord[] = [];
-  let flushed = 0;
+  const written = new Set<string>();
   for (const record of records) {
     const row = buildCaptureMemoryRow(
       { kind: record.kind, content: record.content, dedupKey: record.dedupKey, provenance: record.provenance },
@@ -342,22 +403,27 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
     );
     try {
       await client.request("PUT", memoryPutPath(row.id), row);
-      flushed++;
+      written.add(record.dedupKey);
     } catch (error) {
-      kept.push(record);
       warn(`capture write skipped (${error instanceof Error ? error.message : String(error)})`);
     }
   }
-  try {
-    if (kept.length === 0) {
-      if (existsSync(spoolPath(dir, agentId))) atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, []));
-    } else {
-      atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, kept));
+  let remaining = records.length;
+  if (written.size > 0) {
+    // Re-read under the lock and drop only what was written, so a record
+    // appended while the writes were in flight is kept.
+    try {
+      const kept = withCaptureLock(dir, agentId, () => {
+        const current = readSpool(dir, agentId).filter((r) => !written.has(r.dedupKey));
+        atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, current));
+        return current.length;
+      });
+      if (kept !== LOCK_BUSY) remaining = kept;
+    } catch {
+      // Leaving the file as-is only re-attempts the same records next time.
     }
-  } catch {
-    // Leaving the file as-is only re-attempts the same records next time.
   }
-  return { flushed, remaining: kept.length, reason: flushed > 0 ? "flushed" : "write-failed" };
+  return { flushed: written.size, remaining, reason: written.size > 0 ? "flushed" : "write-failed" };
 }
 
 // ── flush cooldown ──────────────────────────────────────────────────────────

@@ -2,8 +2,8 @@
 /**
  * Flair capture hook for Claude Code (flair#2068) — the hot path.
  *
- * Registered (opt-in) for the `PostToolUse` and `Stop` events via `flair hook
- * install --capture`. On every fire it reads the hook payload, plans at most
+ * Registered (opt-in) for the `PostToolUseFailure`, `PostToolUse` and `Stop`
+ * events via `flair hook install --capture`. On every fire it reads the hook payload, plans at most
  * ONE candidate memory (a failed command paired with its fix, or a decision
  * stated in the turn's final text) and appends it to a local spool — then
  * returns. It makes NO network call on the hot path: a detached background
@@ -72,9 +72,8 @@ function readStdin(maxBytes: number = CAPTURE_STDIN_MAX_BYTES, deadlineMs = 2000
  *  version-matched published package (the installer records its spec in
  *  FLAIR_CAPTURE_FLUSH_SPEC), which carries flair-client — so the hot-path
  *  copy stays dependency-free. With no spec the spool simply waits. */
-function kickBackgroundFlush(): void {
+export function kickBackgroundFlush(env: NodeJS.ProcessEnv = process.env): void {
   try {
-    const env = process.env;
     const agentId = env.FLAIR_AGENT_ID;
     if (!agentId) return;
     // Probe-only switch (see capture-runtime.ts): the certification run must

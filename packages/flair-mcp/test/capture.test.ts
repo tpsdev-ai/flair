@@ -7,21 +7,24 @@
  * pinned inside it on every test; the real ~/.flair is never touched.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  CAPTURE_BOUND_CHARS,
   buildCaptureMemoryRow,
   captureRecordId,
   extractDecision,
   planPostToolUse,
+  planPostToolUseFailure,
   planStop,
   type PendingError,
 } from "../src/capture.ts";
 import {
   appendRecord,
   flushStampPath,
+  lockPath,
   pendingPath,
   readSpool,
   resolveCaptureDir,
@@ -44,27 +47,52 @@ afterEach(() => {
 });
 
 const SECRET = `ghp_${"a".repeat(24)}`;
+const BEARER = "Authorization: Bearer abcdefghijklmnopqrstuvwx123";
 const env = () => ({ FLAIR_AGENT_ID: "agent-a", FLAIR_CAPTURE_DIR: dir });
 
-function failedBash(command: string, stderr = "Error: boom") {
+// Payload shapes as Claude Code 2.1.287 builds them: a failed call arrives as
+// PostToolUseFailure with `error`, a successful one as PostToolUse.
+function failedBash(command: string, error = "Exit code 1\nError: boom", extra: Record<string, unknown> = {}) {
   return JSON.stringify({
-    hook_event_name: "PostToolUse",
     session_id: "s1",
+    transcript_path: "/home/u/.claude/projects/p/s1.jsonl",
     cwd: "/repo",
+    hook_event_name: "PostToolUseFailure",
     tool_name: "Bash",
-    tool_input: { command },
-    tool_response: { exit_code: 1, stderr },
+    tool_input: { command, description: "run" },
+    tool_use_id: "toolu_01",
+    error,
+    is_interrupt: false,
+    duration_ms: 12,
+    ...extra,
   });
 }
-function okBash(command: string) {
+function okBash(command: string, stderr = "") {
   return JSON.stringify({
+    session_id: "s1",
+    transcript_path: "/home/u/.claude/projects/p/s1.jsonl",
+    cwd: "/repo",
     hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+    tool_input: { command, description: "run" },
+    tool_use_id: "toolu_02",
+    tool_response: { stdout: "ok", stderr, interrupted: false, isImage: false },
+    duration_ms: 9,
+  });
+}
+function okWrite(filePath: string) {
+  return JSON.stringify({
     session_id: "s1",
     cwd: "/repo",
-    tool_name: "Bash",
-    tool_input: { command },
-    tool_response: { exit_code: 0 },
+    hook_event_name: "PostToolUse",
+    tool_name: "Write",
+    tool_input: { file_path: filePath, content: "fixed" },
+    tool_use_id: "toolu_03",
+    tool_response: { type: "update", filePath, content: "fixed" },
   });
+}
+function recordingClient(rows: unknown[]): CaptureClient {
+  return { request: async (_method, _path, body) => { rows.push(body); return {}; } };
 }
 function stop(text: string) {
   return JSON.stringify({ hook_event_name: "Stop", session_id: "s1", last_assistant_message: text });
@@ -80,10 +108,9 @@ describe("capture planning", () => {
 
   test("a failed command records a pending error, and its later fix yields one candidate", () => {
     const t = new Date().toISOString();
-    const failed = planPostToolUse(JSON.parse(failedBash("bun test foo")) as never, [], t);
-    expect(failed.action).toBe("record-error");
-    if (failed.action !== "record-error") throw new Error("expected a pending error");
-    const pending: PendingError[] = [failed.error];
+    const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo")) as never, t);
+    if (!failed) throw new Error("expected a pending error");
+    const pending: PendingError[] = [failed];
     const fixed = planPostToolUse(JSON.parse(okBash("bun test foo")) as never, pending, t);
     expect(fixed.action).toBe("candidate");
     if (fixed.action !== "candidate") throw new Error("expected a candidate");
@@ -93,20 +120,83 @@ describe("capture planning", () => {
     expect(fixed.resolved).toBe(0);
   });
 
+  test("an interrupted call, a non-Bash failure and an empty error are not pending errors", () => {
+    const t = new Date().toISOString();
+    expect(planPostToolUseFailure(JSON.parse(failedBash("bun test foo", "Interrupted by user", { is_interrupt: true })) as never, t)).toBeNull();
+    expect(planPostToolUseFailure({ ...JSON.parse(failedBash("x")), tool_name: "Write" } as never, t)).toBeNull();
+    expect(planPostToolUseFailure(JSON.parse(failedBash("bun test foo", "  ")) as never, t)).toBeNull();
+  });
+
+  test("a successful PostToolUse with stderr output is not a failure", () => {
+    expect(runCapture(okBash("git push origin main", "To github.com:o/r.git\n   abc..def  main -> main"), { env: env(), dir }).reason).toBe("not-capturable");
+    expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
+  });
+
   test("an unrelated successful command does not pair with a pending error", () => {
     const t = new Date().toISOString();
-    const failed = planPostToolUse(JSON.parse(failedBash("bun test foo")) as never, [], t);
-    if (failed.action !== "record-error") throw new Error("expected a pending error");
-    const other = planPostToolUse(JSON.parse(okBash("git status")) as never, [failed.error], t);
+    const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo")) as never, t);
+    if (!failed) throw new Error("expected a pending error");
+    const other = planPostToolUse(JSON.parse(okBash("git status")) as never, [failed], t);
     expect(other.action).toBe("none");
+  });
+
+  test("the error excerpt keeps the bounded tail, where the cause usually is", () => {
+    const t = new Date().toISOString();
+    const long = `${"progress line\n".repeat(200)}fatal: the real cause`;
+    const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo", long)) as never, t);
+    if (!failed) throw new Error("expected a pending error");
+    expect(failed.error).toEndWith("fatal: the real cause");
+    expect(failed.error.startsWith("…")).toBe(true);
+    expect(failed.error.length).toBe(CAPTURE_BOUND_CHARS + 1);
   });
 
   test("a secret-shaped string is redacted before it is ever stored", () => {
     const t = new Date().toISOString();
-    const failed = planPostToolUse(JSON.parse(failedBash(`deploy --token ${SECRET}`)) as never, [], t);
-    if (failed.action !== "record-error") throw new Error("expected a pending error");
-    expect(failed.error.command).not.toContain(SECRET);
-    expect(failed.error.command).toContain("[redacted]");
+    const failed = planPostToolUseFailure(JSON.parse(failedBash(`deploy --token ${SECRET}`)) as never, t);
+    if (!failed) throw new Error("expected a pending error");
+    expect(failed.command).not.toContain(SECRET);
+    expect(failed.command).toContain("[redacted]");
+  });
+});
+
+describe("capture redaction, end to end (pending file, spool file, flushed row)", () => {
+  async function flushRows(): Promise<string> {
+    const rows: unknown[] = [];
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => recordingClient(rows) });
+    expect(result.flushed).toBe(1);
+    return JSON.stringify(rows);
+  }
+
+  for (const [label, error] of [
+    ["a ghp_ token", `Exit code 1\nremote: invalid credentials for ${SECRET}`],
+    ["an Authorization: Bearer line", `Exit code 22\n> GET /api\n> ${BEARER}\n< HTTP/1.1 401`],
+  ] as const) {
+    test(`${label} in the failure error never reaches disk or Flair`, async () => {
+      const secret = label === "a ghp_ token" ? SECRET : "abcdefghijklmnopqrstuvwx123";
+      expect(runCapture(failedBash("curl api", error), { env: env(), dir }).reason).toBe("error-recorded");
+      const pending = readFileSync(pendingPath(dir, "agent-a"), "utf-8");
+      expect(pending).not.toContain(secret);
+      expect(pending).toContain("[redacted]");
+      expect(runCapture(okBash("curl api"), { env: env(), dir }).reason).toBe("appended");
+      const spool = readFileSync(spoolPath(dir, "agent-a"), "utf-8");
+      expect(spool).not.toContain(secret);
+      expect(spool).toContain("[redacted]");
+      const flushed = await flushRows();
+      expect(flushed).not.toContain(secret);
+      expect(flushed).toContain("[redacted]");
+    });
+  }
+
+  test("a secret in an Edit/Write file_path used as the fix never reaches disk or Flair", async () => {
+    const path = `/repo/${SECRET}/config.json`;
+    expect(runCapture(failedBash(`cat ${path}`, `cat: ${path}: No such file or directory`), { env: env(), dir }).reason).toBe("error-recorded");
+    const pending = readFileSync(pendingPath(dir, "agent-a"), "utf-8");
+    expect(runCapture(okWrite(path), { env: env(), dir }).reason).toBe("appended");
+    const spool = readFileSync(spoolPath(dir, "agent-a"), "utf-8");
+    expect(spool).toContain("Fixed by: /repo/[redacted]/config.json");
+    for (const text of [pending, spool, await flushRows()]) {
+      expect(text).not.toContain(SECRET);
+    }
   });
 });
 
@@ -160,6 +250,54 @@ describe("capture spool", () => {
     const failing: CaptureClient = { request: async () => { throw new Error("Flair down"); } };
     const result = await runCaptureFlush({ env: env(), dir, makeClient: () => failing });
     expect(result.flushed).toBe(0);
+    expect(result.remaining).toBe(1);
+    expect(readSpool(dir, "agent-a").length).toBe(1);
+  });
+
+  test("a record appended while the flush awaits Flair is kept, not overwritten", async () => {
+    runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
+    let appendedMidFlush = false;
+    const client: CaptureClient = {
+      request: async () => {
+        if (!appendedMidFlush) {
+          appendedMidFlush = true;
+          expect(runCapture(stop("Decision: we will use host-b for search."), { env: env(), dir }).reason).toBe("appended");
+        }
+        return {};
+      },
+    };
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
+    expect(result.flushed).toBe(1);
+    expect(result.remaining).toBe(1);
+    const left = readSpool(dir, "agent-a");
+    expect(left.length).toBe(1);
+    expect(left[0]!.content).toContain("host-b");
+  });
+
+  test("every spool and pending write waits for the per-agent lock", () => {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath(dir, "agent-a"), "held");
+    expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("refused");
+    expect(runCapture(failedBash("bun test foo"), { env: env(), dir }).reason).toBe("refused");
+    expect(existsSync(spoolPath(dir, "agent-a"))).toBe(false);
+    expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
+    // A lock left by a process that died holding it is broken.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockPath(dir, "agent-a"), old, old);
+    expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("appended");
+    expect(existsSync(lockPath(dir, "agent-a"))).toBe(false);
+  });
+
+  test("the flush's rewrite waits for the lock and leaves the spool intact without it", async () => {
+    runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
+    const client: CaptureClient = {
+      request: async () => {
+        writeFileSync(lockPath(dir, "agent-a"), "held");
+        return {};
+      },
+    };
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
+    expect(result.flushed).toBe(1);
     expect(result.remaining).toBe(1);
     expect(readSpool(dir, "agent-a").length).toBe(1);
   });

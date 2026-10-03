@@ -118,6 +118,22 @@ export function probeCaptureRuntime(runtime: ActionRecallRuntime, agentId = "fla
     });
     const after = JSON.parse(readFileSync(join(dir, `${agentId}.spool.json`), "utf-8")) as { records?: unknown[] };
     if ((after.records ?? []).length !== 0) return failure;
+    // A failed Bash call (PostToolUseFailure) and its later success
+    // (PostToolUse) must stage one redacted candidate.
+    const toolInput = { command: `probe-${nonce} run` };
+    for (const event of [
+      { hook_event_name: "PostToolUseFailure", session_id: "probe", tool_name: "Bash", tool_input: toolInput, error: `Error: token ${secret} rejected` },
+      { hook_event_name: "PostToolUse", session_id: "probe", tool_name: "Bash", tool_input: toolInput, tool_response: { stdout: "" } },
+    ]) {
+      execFileSync("/bin/sh", ["-c", installedCommand], {
+        input: JSON.stringify(event), encoding: "utf8", timeout: 2000, maxBuffer: 8192, cwd: home, env, stdio: ["pipe", "ignore", "ignore"],
+      });
+    }
+    const paired = JSON.parse(readFileSync(join(dir, `${agentId}.spool.json`), "utf-8")) as { records?: Array<{ content?: unknown }> };
+    const pairedRecords = Array.isArray(paired.records) ? paired.records : [];
+    if (pairedRecords.length !== 1) return failure;
+    const pairedContent = typeof pairedRecords[0]?.content === "string" ? (pairedRecords[0]!.content as string) : "";
+    if (!pairedContent.includes(nonce) || pairedContent.includes(secret) || !pairedContent.includes("[redacted]")) return failure;
     return null;
   } catch {
     return failure;

@@ -403,10 +403,10 @@ export function isFlairContinuityCommand(command: string): boolean {
   );
 }
 
-// ── the capture PostToolUse/Stop hook (flair#2068) ─────────────────────────
+// ── the capture PostToolUseFailure/PostToolUse/Stop hook (flair#2068) ──────
 //
 // Runs the provisioned absolute runtime + artifact paths (same Flair-owned
-// provisioning as the action-recall hook). One binary serves both events; the
+// provisioning as the action-recall hook). One binary serves all three events; the
 // payload's hook_event_name tells it which fired. Unlike the SessionStart and
 // action-recall hooks it emits NOTHING to the harness, so the wrapper discards
 // both streams and absorbs failure (`>/dev/null 2>/dev/null || true`).
@@ -418,9 +418,19 @@ export const CAPTURE_HOOK_MARKER = "capture-hook.js";
  *  the tools whose failure/fix or file edit the capture core pairs. */
 export const CAPTURE_POST_TOOL_USE_MATCHER = "Write|Edit|NotebookEdit|Bash";
 
-/** The two hook events the capture hook registers under. */
-export const CAPTURE_HOOK_EVENTS = ["PostToolUse", "Stop"] as const;
+/** The PostToolUseFailure matcher: only a failed Bash call is captured. */
+export const CAPTURE_POST_TOOL_USE_FAILURE_MATCHER = "Bash";
+
+/** The hook events the capture hook registers under. */
+export const CAPTURE_HOOK_EVENTS = ["PostToolUseFailure", "PostToolUse", "Stop"] as const;
 export type CaptureHookEvent = (typeof CAPTURE_HOOK_EVENTS)[number];
+
+/** The matcher each capture event's group carries (Stop has none). */
+export const CAPTURE_HOOK_MATCHERS: Record<CaptureHookEvent, string | null> = {
+  PostToolUseFailure: CAPTURE_POST_TOOL_USE_FAILURE_MATCHER,
+  PostToolUse: CAPTURE_POST_TOOL_USE_MATCHER,
+  Stop: null,
+};
 
 /** The pinned spec the background flush resolves through npx, so the flush
  *  runs the published package and its flair-client dependency rather than the
@@ -430,7 +440,7 @@ export function captureFlushSpec(): string {
 }
 
 /**
- * Build the exact `command` string registered for BOTH capture hook events.
+ * Build the exact `command` string registered for every capture hook event.
  * Same strict value allow-list as the other builders — throws rather than
  * emitting a quoted approximation.
  */

@@ -59,6 +59,21 @@ function run(payload: unknown): Promise<{ status: number | null; signal: string 
   });
 }
 
+/** A failed Bash call, in the PostToolUseFailure shape Claude Code 2.1.287 builds. */
+function failure(command: string): Record<string, unknown> {
+  return {
+    session_id: "s1",
+    cwd: home,
+    hook_event_name: "PostToolUseFailure",
+    tool_name: "Bash",
+    tool_input: { command },
+    tool_use_id: "toolu_01",
+    error: "Exit code 1\nError: boom",
+    is_interrupt: false,
+    duration_ms: 12,
+  };
+}
+
 function records(): unknown[] {
   try {
     return (JSON.parse(readFileSync(spoolPath(dir, "agent-a"), "utf-8")) as { records?: unknown[] }).records ?? [];
@@ -77,27 +92,31 @@ describe("capture entry point (spawned)", () => {
   });
 
   test("an error-then-fix sequence stages exactly one candidate and no output", async () => {
-    const failed = await run({
-      hook_event_name: "PostToolUse",
-      session_id: "s1",
-      tool_name: "Bash",
-      tool_input: { command: "bun test foo" },
-      tool_response: { exit_code: 1, stderr: "Error: boom" },
-    });
+    const failed = await run(failure("bun test foo"));
     expect(failed.status).toBe(0);
     expect(failed.stdout).toBe("");
     expect(JSON.parse(readFileSync(pendingPath(dir, "agent-a"), "utf-8")).pending.length).toBe(1);
 
     const fixed = await run({
-      hook_event_name: "PostToolUse",
       session_id: "s1",
+      cwd: home,
+      hook_event_name: "PostToolUse",
       tool_name: "Bash",
       tool_input: { command: "bun test foo" },
-      tool_response: { exit_code: 0 },
+      tool_use_id: "toolu_02",
+      tool_response: { stdout: "1 pass", stderr: "", interrupted: false, isImage: false },
     });
     expect(fixed.status).toBe(0);
     expect(fixed.stdout).toBe("");
     expect(records().length).toBe(1);
+  });
+
+  test("concurrent failure hooks each keep their pending error", async () => {
+    const commands = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"].map((name) => `${name} run`);
+    const results = await Promise.all(commands.map((command) => run(failure(command))));
+    for (const res of results) expect(res.status).toBe(0);
+    const pending = JSON.parse(readFileSync(pendingPath(dir, "agent-a"), "utf-8")).pending as Array<{ command: string }>;
+    expect(pending.map((p) => p.command).sort()).toEqual([...commands].sort());
   });
 
   test("a malformed payload exits 0 and writes nothing", async () => {

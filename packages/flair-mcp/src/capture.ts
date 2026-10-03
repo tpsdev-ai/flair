@@ -1,13 +1,14 @@
 /**
  * Capture-at-the-point-of-learning core (flair#2068).
  *
- * The Claude Code `PostToolUse` + `Stop` hook pair shares ONE pure module: it
- * turns a hook payload into at most one *candidate memory* (or, for a failed
- * command, a pending error to pair with its later fix), with the whole decision
- * made here so the hot path is a thin, testable shell.
+ * The Claude Code `PostToolUseFailure` + `PostToolUse` + `Stop` hooks share ONE
+ * pure module: it turns a hook payload into at most one *candidate memory* (or,
+ * for a failed command, a pending error to pair with its later fix), with the
+ * whole decision made here so the hot path is a thin, testable shell.
  *
  * WHAT IT CAPTURES
- *   - A failed Bash command, and later the call that fixes it, become ONE
+ *   - A failed Bash command (a `PostToolUseFailure` event), and the later
+ *     successful call (a `PostToolUse` event) that fixes it, become ONE
  *     candidate memory (deduplicated, bounded).
  *   - A turn whose final assistant text states a decision or correction becomes
  *     ONE candidate memory. A turn with none produces nothing.
@@ -57,15 +58,20 @@ export interface CaptureHookInput {
   cwd?: unknown;
   tool_name?: unknown;
   tool_input?: unknown;
-  tool_response?: unknown;
+  /** PostToolUseFailure payloads: the failure text, and whether the user
+   *  interrupted the call. */
+  error?: unknown;
+  is_interrupt?: unknown;
   /** Stop payloads: the final assistant message text, when the harness
    *  provides it. */
   last_assistant_message?: unknown;
   [key: string]: unknown;
 }
 
+export type CaptureHookName = "PostToolUseFailure" | "PostToolUse" | "Stop";
+
 export interface CaptureProvenance {
-  hook: "PostToolUse" | "Stop";
+  hook: CaptureHookName;
   tool?: string;
   sessionId?: string;
   cwd?: string;
@@ -95,7 +101,6 @@ export interface PendingError {
 }
 
 export type PostToolUseAction =
-  | { action: "record-error"; error: PendingError }
   | { action: "candidate"; candidate: CaptureCandidate; resolved: number }
   | { action: "none" };
 
@@ -109,6 +114,13 @@ export function hardBoundCapture(text: string, max: number = CAPTURE_BOUND_CHARS
 /** Redact credential shapes, then collapse whitespace and hard-bound. */
 export function cleanCaptureText(text: string, max: number = CAPTURE_BOUND_CHARS): string {
   return hardBoundCapture(redactSecrets(text).replace(/\s+/g, " ").trim(), max);
+}
+
+/** As cleanCaptureText, but keeps the TAIL: the cause of a failure is usually
+ *  at the end of its output. */
+export function cleanCaptureTail(text: string, max: number = CAPTURE_BOUND_CHARS): string {
+  const cleaned = cleanCaptureText(text, Number.POSITIVE_INFINITY);
+  return cleaned.length <= max ? cleaned : `…${cleaned.slice(-max)}`;
 }
 
 /** A stable short hash of arbitrary text — the dedup identity primitive. */
@@ -152,36 +164,11 @@ export function referencedPath(text: string): string | null {
   return match ? match[1]! : null;
 }
 
-/**
- * A bounded, redacted error excerpt from a tool response, or null when the
- * response does not read as a failure. Failure signals, in order: an explicit
- * `is_error === true`, a non-zero numeric exit code, `interrupted === true`, a
- * non-empty `stderr`, or a response string carrying an error word. A response
- * the harness gave no failure signal for is NOT a failure.
- */
-export function bashFailureExcerpt(toolResponse: unknown): string | null {
-  if (typeof toolResponse === "string") {
-    const trimmed = toolResponse.trim();
-    if (!trimmed) return null;
-    if (!/\b(error|failed|failure|fatal|exception|not found|denied)\b/i.test(trimmed)) return null;
-    return cleanCaptureText(trimmed);
-  }
-  if (typeof toolResponse !== "object" || toolResponse === null || Array.isArray(toolResponse)) return null;
-  const record = toolResponse as Record<string, unknown>;
-  if (record.is_error === true || record.isError === true || record.interrupted === true) {
-    const text = asNonEmptyString(record.stderr) ?? asNonEmptyString(record.error) ?? asNonEmptyString(record.stdout) ?? "command failed";
-    return cleanCaptureText(text);
-  }
-  const code = record.exit_code ?? record.exitCode;
-  if (typeof code === "number" && code !== 0) {
-    const text = asNonEmptyString(record.stderr) ?? asNonEmptyString(record.error) ?? `exit code ${code}`;
-    return cleanCaptureText(text);
-  }
-  const stderr = asNonEmptyString(record.stderr);
-  if (stderr) return cleanCaptureText(stderr);
-  const error = asNonEmptyString(record.error);
-  if (error) return cleanCaptureText(error);
-  return null;
+/** The bounded, redacted tail of a PostToolUseFailure `error`, or null when
+ *  there is none. */
+export function failureExcerpt(error: unknown): string | null {
+  const text = asNonEmptyString(error);
+  return text ? cleanCaptureTail(text) : null;
 }
 
 function toolInputRecord(input: CaptureHookInput): Record<string, unknown> {
@@ -190,7 +177,7 @@ function toolInputRecord(input: CaptureHookInput): Record<string, unknown> {
     : {};
 }
 
-function provenanceFor(input: CaptureHookInput, hook: "PostToolUse" | "Stop", capturedAt: string, tool?: string): CaptureProvenance {
+function provenanceFor(input: CaptureHookInput, hook: CaptureHookName, capturedAt: string, tool?: string): CaptureProvenance {
   const sessionId = asNonEmptyString(input.session_id) ?? undefined;
   const cwd = asNonEmptyString(input.cwd) ?? undefined;
   return { hook, ...(tool ? { tool } : {}), ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), capturedAt };
@@ -213,7 +200,7 @@ function fixSummary(tool: string, toolInput: Record<string, unknown>): string | 
 /** Does a successful call resolve one of the pending errors? */
 function resolvingIndex(tool: string, toolInput: Record<string, unknown>, pending: PendingError[]): number {
   if (tool === "Bash") {
-    const command = asNonEmptyString(toolInput.command);
+    const command = fixSummary(tool, toolInput);
     if (!command) return -1;
     const signature = commandSignature(command);
     for (let i = 0; i < pending.length; i++) {
@@ -247,43 +234,34 @@ function errorFixCandidate(error: PendingError, tool: string, toolInput: Record<
 }
 
 /**
- * Plan the PostToolUse half. A failed Bash command records a pending error; a
- * later successful call that resolves one turns it into a single candidate.
+ * Plan the PostToolUseFailure half: a failed Bash call becomes a pending error.
+ * A call the user interrupted is not a failure to learn from.
+ */
+export function planPostToolUseFailure(input: CaptureHookInput, capturedAt: string): PendingError | null {
+  if (input.tool_name !== "Bash" || input.is_interrupt === true) return null;
+  const raw = asNonEmptyString(toolInputRecord(input).command);
+  const error = failureExcerpt(input.error);
+  if (!raw || !error) return null;
+  const command = cleanCaptureText(raw);
+  const signature = commandSignature(command);
+  if (!signature) return null;
+  return {
+    signature,
+    command,
+    error,
+    provenance: provenanceFor(input, "PostToolUseFailure", capturedAt, "Bash"),
+  };
+}
+
+/**
+ * Plan the PostToolUse half: a successful call that resolves a pending error
+ * turns it into a single candidate.
  */
 export function planPostToolUse(input: CaptureHookInput, pending: PendingError[], capturedAt: string): PostToolUseAction {
   const tool = input.tool_name;
   if (typeof tool !== "string") return { action: "none" };
   const toolInput = toolInputRecord(input);
-
-  if (tool === "Bash") {
-    const command = asNonEmptyString(toolInput.command);
-    const failure = bashFailureExcerpt(input.tool_response);
-    if (command && failure) {
-      const signature = commandSignature(command);
-      if (!signature) return { action: "none" };
-      return {
-        action: "record-error",
-        error: {
-          signature,
-          command: cleanCaptureText(command),
-          error: failure,
-          provenance: provenanceFor(input, "PostToolUse", capturedAt, "Bash"),
-        },
-      };
-    }
-    if (!failure) {
-      const index = resolvingIndex(tool, toolInput, pending);
-      if (index >= 0) {
-        const candidate = errorFixCandidate(pending[index]!, tool, toolInput, capturedAt);
-        if (candidate) return { action: "candidate", candidate, resolved: index };
-      }
-    }
-    return { action: "none" };
-  }
-
-  if (tool === "Write" || tool === "Edit" || tool === "NotebookEdit") {
-    // A file mutation "succeeds" unless the harness marked it failed.
-    if (bashFailureExcerpt(input.tool_response) !== null) return { action: "none" };
+  if (tool === "Bash" || tool === "Write" || tool === "Edit" || tool === "NotebookEdit") {
     const index = resolvingIndex(tool, toolInput, pending);
     if (index >= 0) {
       const candidate = errorFixCandidate(pending[index]!, tool, toolInput, capturedAt);
@@ -346,7 +324,7 @@ export interface CaptureMemoryRow {
   tags: string[];
   meta: {
     source: "claude-code-capture";
-    hook: "PostToolUse" | "Stop";
+    hook: CaptureHookName;
     dedupKey: string;
     capturedAt: string;
     tool?: string;

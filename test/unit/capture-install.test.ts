@@ -20,7 +20,12 @@ import {
   hookSettingsPath,
   type ActionRecallRuntime,
 } from "../../src/hook-install.ts";
-import { CAPTURE_HOOK_MARKER, CAPTURE_POST_TOOL_USE_MATCHER, parseCaptureCommand } from "../../src/doctor-client.ts";
+import {
+  CAPTURE_HOOK_MARKER,
+  CAPTURE_POST_TOOL_USE_FAILURE_MATCHER,
+  CAPTURE_POST_TOOL_USE_MATCHER,
+  parseCaptureCommand,
+} from "../../src/doctor-client.ts";
 import { captureInstallRoot } from "../../src/lib/capture-runtime.ts";
 import { flairCliVersion } from "../../src/lib/mcp-spec.ts";
 import { createCaptureRuntime } from "../helpers/capture-runtime.ts";
@@ -52,16 +57,19 @@ describe("flair hook install --capture", () => {
     const path = hookSettingsPath(home, "claude-code");
     const result = install({ dryRun: true });
     expect(result.ok).toBe(true);
+    expect(result.actions?.PostToolUseFailure).toBe("add");
     expect(result.actions?.PostToolUse).toBe("add");
     expect(result.actions?.Stop).toBe("add");
     expect(existsSync(path)).toBe(false);
     expect(existsSync(captureInstallRoot(home))).toBe(false);
   });
 
-  it("wires a PostToolUse group with the matcher and a Stop group, then uninstall removes both", () => {
+  it("wires PostToolUseFailure and PostToolUse groups with their matchers and a Stop group, then uninstall removes all three", () => {
     const first = install();
     expect(first.ok).toBe(true);
     const config = settings();
+    expect(config.hooks.PostToolUseFailure[0].matcher).toBe(CAPTURE_POST_TOOL_USE_FAILURE_MATCHER);
+    expect(config.hooks.PostToolUseFailure[0].hooks[0].command).toBe(config.hooks.PostToolUse[0].hooks[0].command);
     expect(config.hooks.PostToolUse[0].matcher).toBe(CAPTURE_POST_TOOL_USE_MATCHER);
     expect(config.hooks.Stop[0].hooks[0].command).toContain(CAPTURE_HOOK_MARKER);
     const command = config.hooks.PostToolUse[0].hooks[0].command as string;
@@ -80,6 +88,7 @@ describe("flair hook install --capture", () => {
     const removed = uninstallCaptureHooks({ homeDir: home, harness: "claude-code" });
     expect(removed.ok).toBe(true);
     const after = settings();
+    expect(after.hooks?.PostToolUseFailure ?? []).toEqual([]);
     expect(after.hooks?.PostToolUse ?? []).toEqual([]);
     expect(after.hooks?.Stop ?? []).toEqual([]);
     expect(existsSync(captureInstallRoot(home))).toBe(false);
@@ -95,6 +104,7 @@ describe("flair hook install --capture", () => {
     install();
     const again = install();
     expect(again.ok).toBe(true);
+    expect(again.actions?.PostToolUseFailure).toBe("noop");
     expect(again.actions?.PostToolUse).toBe("noop");
     expect(again.actions?.Stop).toBe("noop");
     const preview = install({ dryRun: true });
@@ -158,5 +168,25 @@ describe("flair hook install --capture", () => {
     const observed = captureHookStatus(home, "claude-code");
     expect(observed.installed).toBe(false);
     expect(observed.state).toBe("partial");
+  });
+
+  it("status reports an install without PostToolUseFailure as partial, and install repairs it", () => {
+    install();
+    const config = settings();
+    delete config.hooks.PostToolUseFailure;
+    writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+    expect(captureHookStatus(home, "claude-code").state).toBe("partial");
+    const repaired = install();
+    expect(repaired.actions?.PostToolUseFailure).toBe("add");
+    expect(repaired.actions?.PostToolUse).toBe("noop");
+    expect(captureHookStatus(home, "claude-code").installed).toBe(true);
+  });
+
+  it("status reports a drifted PostToolUseFailure matcher as stale", () => {
+    install();
+    const config = settings();
+    config.hooks.PostToolUseFailure[0].matcher = "Write";
+    writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+    expect(captureHookStatus(home, "claude-code").state).toBe("stale");
   });
 });

@@ -73,7 +73,7 @@ import {
   parseCaptureCommand,
   isFlairCaptureCommand,
   CAPTURE_HOOK_EVENTS,
-  CAPTURE_POST_TOOL_USE_MATCHER,
+  CAPTURE_HOOK_MATCHERS,
   type CaptureHookEvent,
   checkContinuityCaptureHooks,
   computeContinuityHookInstall,
@@ -1621,11 +1621,11 @@ export function continuityHookStatus(homeDir: string, harness: Harness): Continu
 
 // ── capture hooks (flair#2068) ───────────────────────────────────────────────
 //
-// The PostToolUse + Stop pair that captures at the point of learning: a failed
-// command paired with its later fix, and decisions stated in a turn's final
-// text, staged in a bounded local spool and flushed in the background through
-// Flair's normal write path. Claude Code only (the matcher is Claude tool
-// names). INSTALLING THE PAIR IS THE OPT-IN, so absence renders as "not
+// The PostToolUseFailure + PostToolUse + Stop hooks that capture at the point
+// of learning: a failed command paired with its later fix, and decisions stated
+// in a turn's final text, staged in a bounded local spool and flushed in the
+// background through Flair's normal write path. Claude Code only (the matchers
+// are Claude tool names). INSTALLING THE HOOKS IS THE OPT-IN, so absence renders as "not
 // enabled", never a failure. The command and provisioning reuse the
 // action-recall runtime machinery (flair#2067) — a second descriptor, not a
 // second mechanism.
@@ -1653,6 +1653,14 @@ export interface CaptureStatus {
   runtimeFailure?: string;
 }
 
+function noCaptureActions(): Record<CaptureHookEvent, HookDeltaAction> {
+  return Object.fromEntries(CAPTURE_HOOK_EVENTS.map((event) => [event, "noop"])) as Record<CaptureHookEvent, HookDeltaAction>;
+}
+
+function describeCaptureActions(actions: Record<CaptureHookEvent, HookDeltaAction | "remove">): string {
+  return CAPTURE_HOOK_EVENTS.map((event) => `${event}: ${actions[event]}`).join(", ");
+}
+
 function findCaptureEntry(config: any, event: CaptureHookEvent): { group: any; hookIndex: number; groupIndex: number } | null {
   const groups = config?.hooks?.[event];
   if (!Array.isArray(groups)) return null;
@@ -1672,30 +1680,30 @@ interface CaptureDelta {
   actions: Record<CaptureHookEvent, HookDeltaAction>;
 }
 
-/** Pure merge of the capture pair into a parsed settings object. */
+/** Pure merge of the capture hooks into a parsed settings object. */
 export function computeCaptureHookInstall(config: any, runtime: ActionRecallRuntime, agentId: string, flairUrl: string): CaptureDelta {
   const command = buildCaptureHookCommand(runtime.bunPath, runtime.artifactPath, agentId, flairUrl, captureFlushSpec());
   const newConfig = deepClone(config ?? {});
   newConfig.hooks = newConfig.hooks && typeof newConfig.hooks === "object" && !Array.isArray(newConfig.hooks) ? newConfig.hooks : {};
-  const actions = { PostToolUse: "noop", Stop: "noop" } as Record<CaptureHookEvent, HookDeltaAction>;
+  const actions = noCaptureActions();
   let changed = false;
   for (const event of CAPTURE_HOOK_EVENTS) {
     const existing = findCaptureEntry(newConfig, event);
-    const wantMatcher = event === "PostToolUse";
+    const wantMatcher = CAPTURE_HOOK_MATCHERS[event];
     if (existing) {
       const hook = existing.group.hooks[existing.hookIndex];
-      const matcherCurrent = !wantMatcher || existing.group.matcher === CAPTURE_POST_TOOL_USE_MATCHER;
+      const matcherCurrent = wantMatcher === null || existing.group.matcher === wantMatcher;
       if (hook.type !== "command" || hook.command !== command || !matcherCurrent) {
         hook.command = command;
         hook.type = "command";
-        if (wantMatcher) existing.group.matcher = CAPTURE_POST_TOOL_USE_MATCHER;
+        if (wantMatcher !== null) existing.group.matcher = wantMatcher;
         actions[event] = "update";
         changed = true;
       }
     } else {
       newConfig.hooks[event] = Array.isArray(newConfig.hooks[event]) ? newConfig.hooks[event] : [];
       const group: any = { hooks: [{ type: "command", command }] };
-      if (wantMatcher) group.matcher = CAPTURE_POST_TOOL_USE_MATCHER;
+      if (wantMatcher !== null) group.matcher = wantMatcher;
       newConfig.hooks[event].push(group);
       actions[event] = "add";
       changed = true;
@@ -1704,10 +1712,10 @@ export function computeCaptureHookInstall(config: any, runtime: ActionRecallRunt
   return { changed, newConfig, actions };
 }
 
-/** Pure removal of the capture pair. */
+/** Pure removal of the capture hooks. */
 export function computeCaptureHookRemoval(config: any): CaptureDelta {
   const newConfig = deepClone(config ?? {});
-  const actions = { PostToolUse: "noop", Stop: "noop" } as Record<CaptureHookEvent, HookDeltaAction>;
+  const actions = noCaptureActions();
   for (const event of CAPTURE_HOOK_EVENTS) {
     const existing = findCaptureEntry(newConfig, event);
     if (!existing) continue;
@@ -1717,7 +1725,7 @@ export function computeCaptureHookRemoval(config: any): CaptureDelta {
     if (groups.length === 0) delete newConfig.hooks[event];
     actions[event] = "remove";
   }
-  return { changed: actions.PostToolUse !== "noop" || actions.Stop !== "noop", newConfig, actions };
+  return { changed: CAPTURE_HOOK_EVENTS.some((event) => actions[event] !== "noop"), newConfig, actions };
 }
 
 /** Reproduce + re-probe a wired capture command, or a reason it is not one. */
@@ -1733,7 +1741,7 @@ function captureCommandFailure(command: unknown): string | null {
   }
 }
 
-/** Install (or repair) the capture PostToolUse + Stop pair. */
+/** Install (or repair) the capture hooks. */
 export function installCaptureHooks(opts: CaptureInstallOptions): CaptureMutationResult {
   const { homeDir, harness, agentId, flairUrl, runtime } = opts;
   const dryRun = !!opts.dryRun;
@@ -1742,7 +1750,7 @@ export function installCaptureHooks(opts: CaptureInstallOptions): CaptureMutatio
   if (harness !== "claude-code") {
     return {
       ok: false, path, harness, dryRun,
-      message: `capture is Claude Code only — ${harness} has no PostToolUse/Stop matcher Flair can capture from`, backupPath: null, actions: null,
+      message: `capture is Claude Code only — ${harness} has no PostToolUseFailure/PostToolUse/Stop matcher Flair can capture from`, backupPath: null, actions: null,
     };
   }
   for (const [label, value] of [["agent id", agentId], ["Flair URL", flairUrl]] as const) {
@@ -1773,7 +1781,7 @@ export function installCaptureHooks(opts: CaptureInstallOptions): CaptureMutatio
     }
     const delta = computeCaptureHookInstall(read.parsed ?? {}, planned, agentId, flairUrl);
     const message = delta.changed
-      ? `would wire the capture hooks (PostToolUse: ${delta.actions.PostToolUse}, Stop: ${delta.actions.Stop}) in ${path} (dry run — nothing written)`
+      ? `would wire the capture hooks (${describeCaptureActions(delta.actions)}) in ${path} (dry run — nothing written)`
       : `capture hooks already current in ${path} — no changes`;
     return { ok: true, path, harness, dryRun, message, backupPath: null, actions: delta.actions };
   }
@@ -1805,7 +1813,7 @@ export function installCaptureHooks(opts: CaptureInstallOptions): CaptureMutatio
 
   const backupPath = result.backupPath ?? null;
   if (result.status === "written") {
-    return { ok: true, path, harness, dryRun, message: `wired the capture hooks (PostToolUse: ${actions!.PostToolUse}, Stop: ${actions!.Stop}) in ${path}`, backupPath, actions };
+    return { ok: true, path, harness, dryRun, message: `wired the capture hooks (${describeCaptureActions(actions!)}) in ${path}`, backupPath, actions };
   }
   if (result.status === "noop") {
     return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
@@ -1816,7 +1824,7 @@ export function installCaptureHooks(opts: CaptureInstallOptions): CaptureMutatio
   return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
 }
 
-/** Symmetric removal of the capture pair + its provisioned runtime. */
+/** Symmetric removal of the capture hooks + their provisioned runtime. */
 export function uninstallCaptureHooks(opts: UninstallHookOptions): CaptureMutationResult {
   const { homeDir, harness } = opts;
   const dryRun = !!opts.dryRun;
@@ -1827,14 +1835,14 @@ export function uninstallCaptureHooks(opts: UninstallHookOptions): CaptureMutati
   }
   if (!existsSync(path)) {
     if (!dryRun) rmSync(captureInstallRoot(homeDir), { recursive: true, force: true });
-    return { ok: true, path, harness, dryRun, message: `no capture hooks found in ${path} — nothing to remove`, backupPath: null, actions: { PostToolUse: "noop", Stop: "noop" } };
+    return { ok: true, path, harness, dryRun, message: `no capture hooks found in ${path} — nothing to remove`, backupPath: null, actions: noCaptureActions() };
   }
   if (dryRun) {
     const read = readSettingsFile(path);
     if (read.parseError) return { ok: false, path, harness, dryRun, message: read.parseError, backupPath: null, actions: null };
     const delta = computeCaptureHookRemoval(read.parsed ?? {});
     const message = delta.changed
-      ? `would remove the capture hooks (PostToolUse: ${delta.actions.PostToolUse}, Stop: ${delta.actions.Stop}) from ${path} (dry run — nothing written)`
+      ? `would remove the capture hooks (${describeCaptureActions(delta.actions)}) from ${path} (dry run — nothing written)`
       : `no capture hooks found in ${path} — nothing to remove (dry run)`;
     return { ok: true, path, harness, dryRun, message, backupPath: null, actions: delta.actions };
   }
@@ -1881,10 +1889,13 @@ export function captureHookStatus(homeDir: string, harness: Harness): CaptureSta
   const presentCount = entries.filter(Boolean).length;
   if (presentCount === 0) return { path, harness, installed: false, state: "absent" };
   if (presentCount < CAPTURE_HOOK_EVENTS.length) return { path, harness, installed: false, state: "partial" };
-  const postToolUse = entries[0]!;
-  const command = postToolUse.group.hooks[postToolUse.hookIndex]?.command;
+  const first = entries[0]!;
+  const command = first.group.hooks[first.hookIndex]?.command;
   const runtimeFailure = captureCommandFailure(command);
-  const matcherOk = postToolUse.group.matcher === CAPTURE_POST_TOOL_USE_MATCHER;
+  const matcherOk = CAPTURE_HOOK_EVENTS.every((event, i) => {
+    const want = CAPTURE_HOOK_MATCHERS[event];
+    return want === null || entries[i]!.group.matcher === want;
+  });
   if (runtimeFailure || !matcherOk) {
     return { path, harness, installed: false, state: "stale", ...(runtimeFailure ? { runtimeFailure } : {}) };
   }

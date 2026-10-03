@@ -96,7 +96,7 @@ This is a prompt-driven CLI setup: Claude must choose to run these commands. For
 | `flair-continuity-capture` | `PostToolUse` and `Stop` | Journals the agent's working state into the ephemeral memory tier, so the next session start can point at it with a one-line resume hint. | `flair hook install --continuity` |
 | `flair-prompt-recall` | `UserPromptSubmit` | Searches memory with each prompt and adds the relevant memories as context before the model answers. | By hand, below |
 | `flair-action-recall` | `PreToolUse` | Matches the pending Bash command against the agent's own triggered lessons and adds the matching ones as context on the next model request. | `flair hook install --action-recall` |
-| `flair-capture` | `PostToolUse` and `Stop` | Captures a failed command and its later fix, and decisions stated in a turn, as candidate memories staged locally and flushed in the background. | `flair hook install --capture` |
+| `flair-capture` | `PostToolUseFailure`, `PostToolUse` and `Stop` | Captures a failed command and its later fix, and decisions stated in a turn, as candidate memories staged locally and flushed in the background. | `flair hook install --capture` |
 | `flair-precompact` | `PreCompact` | Saves a bounded continuity record just before a compaction, for `flair-session-start` to show first afterwards. | By hand, [below](#continuity-across-compaction-flair-precompact-optional) |
 
 ### Per-prompt recall (`flair-prompt-recall`)
@@ -168,13 +168,13 @@ The hot path reads a per-session cache of the agent's own lessons under `~/.flai
 
 ### Learning capture (`flair-capture`)
 
-`flair hook install --capture` copies the version-matched hook and its runtime modules to `~/.flair/hooks/capture/<version>-<content hash>/` and probes that installed command. It wires two Claude Code events: `PostToolUse` (matching `Write|Edit|NotebookEdit|Bash`) and `Stop`. A turn that states a decision or a correction becomes one memory; a turn with none captures nothing.
+`flair hook install --capture` copies the version-matched hook and its runtime modules to `~/.flair/hooks/capture/<version>-<content hash>/` and probes that installed command. It wires three Claude Code events: `PostToolUseFailure` (matching `Bash`), `PostToolUse` (matching `Write|Edit|NotebookEdit|Bash`) and `Stop`. A turn that states a decision or a correction becomes one memory; a turn with none captures nothing.
 
-**The hot path stays off the critical path.** On every fire the hook plans at most one candidate — a failed `Bash` command paired with the call that later fixes it, or one decision sentence from the turn's final text — redacts it, appends it to a bounded, private spool under `~/.flair/capture/`, and returns. It makes no network call. A detached background flush drains the spool through Flair's normal write path; when Flair is unreachable the spool waits, bounded, and the agent never blocks. The hook's own work is single-digit milliseconds; the launcher and Bun start-up happen before it runs.
+**The hot path stays off the critical path.** On every fire the hook plans at most one candidate — a failed `Bash` call (not one the user interrupted) paired with the successful call that later fixes it, or one decision sentence from the turn's final text — redacts it, appends it to a bounded, private spool under `~/.flair/capture/`, and returns. It makes no network call. A detached background flush drains the spool through Flair's normal write path; when Flair is unreachable the spool waits, bounded, and the agent never blocks. In `scripts/capture-latency.mjs` the hook's own work measured under 2 ms at p95; the launcher and Bun start-up happen before it runs.
 
 Redaction happens before anything is stored: a credential-shaped string — a prefixed token, an `Authorization` value, a `name=value` secret, a private key block, `user:password@` in a URL — is replaced with `[redacted]`, so it never reaches the spool or Flair. This is pattern matching and best effort; a secret with no recognizable shape is stored as written.
 
-Install probes the copied command; status probes a detected entry and reports `partial` when only one of the two events is wired. Uninstall removes both entries and the provisioned directory. Absence is informational: installing the pair is the opt-in. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first.
+Install probes the copied command; status probes a detected entry and reports `partial` when only some of the three events are wired. Uninstall removes all three entries and the provisioned directory. Absence is informational: installing the hooks is the opt-in. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first.
 
 ## Multiple Projects
 

@@ -2,22 +2,25 @@
 /**
  * Capture hot-path latency gate (flair#2068).
  *
- * The brief's budget: capture is never on the agent's critical path — the hook
- * appends to a local spool and RETURNS, and its own work is single-digit
- * milliseconds. Process start-up (the launcher and Bun) happens before the
- * hook runs and is outside that budget, exactly as documented for the other
- * hooks.
+ * Process start-up (the launcher and Bun) happens before the hook runs and is
+ * reported for context, not gated, as for the other hooks.
  *
- * So this measures two things and gates only the first:
- *   - "append": the hook's own work — planning + the bounded spool write,
- *     timed in-process with a monotonic timer.
- *   - "command": the full installed `sh -c '… bun <artifact>'` invocation
- *     (launcher + runtime + append), reported for context.
+ * Gated, timed in-process with a monotonic timer against a spool already at
+ * its record cap, each run asserted to have done its work:
+ *   - "stop": a Stop decision appended, including the real background-flush
+ *     kick (slot claim + detached spawn).
+ *   - "failure": a PostToolUseFailure recorded as a pending error.
+ *   - "fix": the PostToolUse that pairs with it, appended, including the kick.
+ *   - "pair": failure + fix.
+ *   - "kick": the flush kick alone.
+ * The kick's `npx` is a stub on PATH that logs and exits, so the spawn is real,
+ * nothing is fetched, and every kick is checked to have spawned. The flush
+ * stamp is removed before each timed run so every kick claims the slot.
  *
  * Usage: node scripts/capture-latency.mjs [--runs 200]
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,10 +28,11 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(HERE);
 const ARTIFACT = join(ROOT, "packages", "flair-mcp", "dist", "capture-hook.js");
-const SOURCE = join(ROOT, "packages", "flair-mcp", "src", "capture-spool.ts");
+const SPOOL_SOURCE = join(ROOT, "packages", "flair-mcp", "src", "capture-spool.ts");
+const HOOK_SOURCE = join(ROOT, "packages", "flair-mcp", "src", "capture-hook.ts");
 const BUN = process.env.FLAIR_BUN_PATH || join(process.env.HOME || "", ".bun", "bin", "bun");
 
-const APPEND_BUDGET_MS = 10;
+const BUDGET_MS = 10;
 
 // A neutral, non-default agent id for the measurement only.
 const AGENT = "agent-2068";
@@ -44,45 +48,98 @@ function summarize(name, samples) {
   const p50 = percentile(sorted, 50);
   const p95 = percentile(sorted, 95);
   console.log(`${name}: n=${samples.length} p50=${p50.toFixed(3)}ms p95=${p95.toFixed(3)}ms min=${sorted[0].toFixed(3)} max=${sorted[sorted.length - 1].toFixed(3)}`);
-  return { p50, p95, min: sorted[0], max: sorted[sorted.length - 1] };
+  return { p50, p95 };
 }
 
-/** The hook's own work, timed in-process over N Stop payloads. */
-function measureAppend(runs, dir) {
+/** The hook's own work, timed in-process. Throws if any run did not do it. */
+function measureInProcess(runs, home, stubBin) {
+  const dir = join(home, "inproc");
   const program = `
-    import { runCapture } from ${JSON.stringify(SOURCE)};
+    import { appendRecord, flushStampPath, readSpool, runCapture, spoolPath, CAPTURE_SPOOL_MAX_RECORDS } from ${JSON.stringify(SPOOL_SOURCE)};
+    import { kickBackgroundFlush } from ${JSON.stringify(HOOK_SOURCE)};
+    import { readFileSync, rmSync, statSync } from "node:fs";
     import { performance } from "node:perf_hooks";
     const dir = ${JSON.stringify(dir)};
-    const payload = JSON.stringify({ hook_event_name: "Stop", session_id: "lat", last_assistant_message: "Decision: prefer host-a for embeddings." });
-    const samples = [];
-    for (let i = 0; i < ${runs}; i++) {
-      const start = performance.now();
-      runCapture(payload + " " + i, { env: { FLAIR_AGENT_ID: ${JSON.stringify(AGENT)}, FLAIR_CAPTURE_DIR: dir }, dir, kickFlush: () => {} });
-      samples.push(performance.now() - start);
+    const agent = ${JSON.stringify(AGENT)};
+    const spawns = ${JSON.stringify(join(home, "spawns.log"))};
+    const env = { FLAIR_AGENT_ID: agent, FLAIR_CAPTURE_DIR: dir, FLAIR_CAPTURE_FLUSH_SPEC: "@tpsdev-ai/flair-mcp@0.0.0-latency", PATH: ${JSON.stringify(stubBin)} + ":/usr/bin:/bin", FLAIR_LATENCY_SPAWNS: spawns };
+    for (let i = 0; i < CAPTURE_SPOOL_MAX_RECORDS; i++) {
+      appendRecord(dir, agent, { kind: "decision", content: "x".repeat(380) + i, dedupKey: "fill" + i, provenance: { hook: "Stop", sessionId: "lat", cwd: "/repo/" + "d".repeat(40), capturedAt: new Date().toISOString() } });
     }
-    process.stdout.write(JSON.stringify(samples));
+    const deps = { env, dir, kickFlush: () => kickBackgroundFlush(env) };
+    const resetSlot = () => rmSync(flushStampPath(dir, agent), { force: true });
+    const expectReason = (what, got, want) => { if (got !== want) throw new Error(what + " returned " + got + ", expected " + want); };
+    const out = { stop: [], failure: [], fix: [], pair: [], kick: [] };
+    const tail = "progress\\n".repeat(400) + "fatal: cause";
+    for (let i = 0; i < ${runs}; i++) {
+      const stop = JSON.stringify({ session_id: "lat", cwd: "/repo", hook_event_name: "Stop", last_assistant_message: "Decision: prefer host-" + i + " for embeddings." });
+      const command = "bun test case-" + i;
+      const failure = JSON.stringify({ session_id: "lat", cwd: "/repo", hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: { command }, tool_use_id: "toolu_f" + i, error: "Exit code 1\\n" + tail, is_interrupt: false, duration_ms: 5 });
+      const fix = JSON.stringify({ session_id: "lat", cwd: "/repo", hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command }, tool_use_id: "toolu_s" + i, tool_response: { stdout: "1 pass", stderr: "", interrupted: false, isImage: false } });
+
+      resetSlot();
+      let t = performance.now();
+      expectReason("stop", runCapture(stop, deps).reason, "appended");
+      out.stop.push(performance.now() - t);
+
+      t = performance.now();
+      expectReason("failure", runCapture(failure, deps).reason, "error-recorded");
+      const failureMs = performance.now() - t;
+      out.failure.push(failureMs);
+
+      resetSlot();
+      t = performance.now();
+      expectReason("fix", runCapture(fix, deps).reason, "appended");
+      const fixMs = performance.now() - t;
+      out.fix.push(fixMs);
+      out.pair.push(failureMs + fixMs);
+
+      resetSlot();
+      t = performance.now();
+      kickBackgroundFlush(env);
+      out.kick.push(performance.now() - t);
+      if (!statSync(flushStampPath(dir, agent)).isFile()) throw new Error("kick did not claim the flush slot");
+    }
+    // Three kicks per run (stop, fix, kick): every one must have spawned.
+    const want = ${runs} * 3;
+    const count = () => { try { return readFileSync(spawns, "utf8").split("\\n").filter(Boolean).length; } catch { return 0; } };
+    const deadline = Date.now() + 10_000;
+    while (count() < want && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    if (count() < want) throw new Error("only " + count() + " of " + want + " kicks spawned");
+    out.spawned = count();
+    const spool = readSpool(dir, agent);
+    out.spoolRecords = spool.length;
+    out.spoolBytes = statSync(spoolPath(dir, agent)).size;
+    process.stdout.write(JSON.stringify(out));
   `;
-  const out = execFileSync(BUN, ["-e", program], { encoding: "utf8", env: { ...process.env, HOME: dir } });
+  const out = execFileSync(BUN, ["-e", program], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, PATH: `${stubBin}:${process.env.PATH ?? ""}` },
+    maxBuffer: 64 * 1024 * 1024,
+  });
   return JSON.parse(out);
 }
 
 /** The full installed command, timed with the shell's own resolution. */
-function measureCommand(runs, dir) {
+function measureCommand(runs, home) {
+  const dir = join(home, ".flair", "capture");
   const command = `sh -c 'FLAIR_AGENT_ID=${AGENT} ${BUN} ${ARTIFACT} >/dev/null 2>/dev/null || true'`;
-  const payload = JSON.stringify({ hook_event_name: "Stop", session_id: "lat", last_assistant_message: "Decision: prefer host-a for embeddings." });
   const samples = [];
   for (let i = 0; i < runs; i++) {
+    const payload = JSON.stringify({ session_id: "lat", hook_event_name: "Stop", last_assistant_message: `Decision: prefer host-${i} for search.` });
     const start = performance.now();
     const result = spawnSync("sh", ["-c", command], {
-      input: payload + " " + i,
+      input: payload,
       encoding: "utf8",
-      env: { ...process.env, HOME: dir, FLAIR_CAPTURE_DIR: join(dir, ".flair", "capture"), FLAIR_CAPTURE_NO_FLUSH: "1" },
+      env: { ...process.env, HOME: home, FLAIR_CAPTURE_DIR: dir, FLAIR_CAPTURE_NO_FLUSH: "1" },
       timeout: 10_000,
     });
+    samples.push(performance.now() - start);
     if (result.status !== 0 || result.stdout !== "" || result.stderr !== "") {
       throw new Error(`command run failed: status=${result.status} stdout=${JSON.stringify(result.stdout)} stderr=${JSON.stringify(result.stderr)}`);
     }
-    samples.push(performance.now() - start);
+    const spool = JSON.parse(readFileSync(join(dir, `${AGENT}.spool.json`), "utf8"));
+    if (!spool.records.some((r) => r.content.includes(`host-${i} `))) throw new Error(`command run ${i} did not append`);
   }
   return samples;
 }
@@ -96,11 +153,29 @@ async function main() {
   console.log(`bun:      ${BUN}\n`);
   try {
     mkdirSync(join(home, ".flair", "capture"), { recursive: true, mode: 0o700 });
-    const append = summarize("append (hook work)", measureAppend(runs, join(home, "inproc")));
-    summarize("command (launcher + runtime + append)", measureCommand(runs, home));
-    const ok = append.p95 <= APPEND_BUDGET_MS;
-    console.log(`\nappend p95 <= ${APPEND_BUDGET_MS} ms: ${ok ? "PASS" : "FAIL"}`);
-    process.exit(ok ? 0 : 1);
+    const stubBin = join(home, "bin");
+    mkdirSync(stubBin, { recursive: true });
+    writeFileSync(join(stubBin, "npx"), '#!/bin/sh\necho "$$" >> "$FLAIR_LATENCY_SPAWNS"\n');
+    chmodSync(join(stubBin, "npx"), 0o755);
+
+    const measured = measureInProcess(runs, home, stubBin);
+    console.log(`spool during measurement: ${measured.spoolRecords} records, ${measured.spoolBytes} bytes; flush spawns observed: ${measured.spawned}\n`);
+    const gated = {
+      "stop (append + kick)": summarize("stop (append + kick)", measured.stop),
+      "failure (pending write)": summarize("failure (pending write)", measured.failure),
+      "fix (pair + append + kick)": summarize("fix (pair + append + kick)", measured.fix),
+      "pair (failure + fix)": summarize("pair (failure + fix)", measured.pair),
+      "kick (slot claim + spawn)": summarize("kick (slot claim + spawn)", measured.kick),
+    };
+    summarize("command (launcher + runtime + append), not gated", measureCommand(runs, home));
+    let ok = true;
+    console.log("");
+    for (const [name, { p95 }] of Object.entries(gated)) {
+      const pass = p95 <= BUDGET_MS;
+      ok &&= pass;
+      console.log(`${name} p95 <= ${BUDGET_MS} ms: ${pass ? "PASS" : "FAIL"}`);
+    }
+    process.exitCode = ok ? 0 : 1;
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

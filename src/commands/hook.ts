@@ -105,7 +105,7 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair URL to wire (else FLAIR_TARGET/FLAIR_URL, else this harness's MCP wiring, else the local default)")
     .option("--continuity", "Wire the continuity capture hooks instead (PostToolUse + Stop — flair#1257; installing them IS the opt-in)")
     .option("--action-recall", "Wire the Claude Code PreToolUse action-recall hook instead (flair#2067)")
-    .option("--capture", "Wire the Claude Code PostToolUse + Stop learning-capture hooks instead (flair#2068)")
+    .option("--capture", "Wire the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks instead (flair#2068)")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
@@ -207,7 +207,7 @@ export function register(program: Command): void {
     .option("--dry-run", "Print the exact JSON delta without writing")
     .option("--continuity", "Remove the continuity capture hooks instead (PostToolUse + Stop — flair#1257)")
     .option("--action-recall", "Remove the Claude Code PreToolUse action-recall hook instead (flair#2067)")
-    .option("--capture", "Remove the Claude Code PostToolUse + Stop learning-capture hooks instead (flair#2068)")
+    .option("--capture", "Remove the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks instead (flair#2068)")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
@@ -269,7 +269,7 @@ export function register(program: Command): void {
     .description("Show whether the SessionStart hook is wired, its shape, and which Flair instance it targets")
     .option("--harness <name>", `Target harness (${SUPPORTED_HARNESSES.join(", ")})`, "claude-code")
     .option("--action-recall", "Also report the Claude Code PreToolUse action-recall hook (flair#2067)")
-    .option("--capture", "Also report the Claude Code PostToolUse + Stop learning-capture hooks (flair#2068)")
+    .option("--capture", "Also report the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks (flair#2068)")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
@@ -333,7 +333,7 @@ export function register(program: Command): void {
         }
         const capture = captureHookStatus(home, harness);
         if (capture.installed) {
-          console.log(`  ${render.icons.ok} capture: PostToolUse + Stop wired`);
+          console.log(`  ${render.icons.ok} capture: PostToolUseFailure + PostToolUse + Stop wired`);
         } else if (capture.runtimeFailure) {
           process.exitCode = 1;
           console.log(`  ${render.icons.warn} ${capture.runtimeFailure}`);
