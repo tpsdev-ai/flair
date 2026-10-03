@@ -510,7 +510,8 @@ export function runUnitSteps(
   // ever touching the real one (flair#1853 round 3).
   const before = snapshotClientConfigs(guardHome);
   // The temp-dir leak guard's `before` snapshot (flair#1889).
-  const tempBefore = flairTempNames();
+  const guardTempDir = laneTempRoot ?? callerTempRoot;
+  const tempBefore = flairTempNames(guardTempDir);
 
   // Both guards run ONCE, at the END (flair#2030). Collecting their failures in
   // the same list as step failures is what lets keep-going report them in one
@@ -530,12 +531,12 @@ export function runUnitSteps(
         detail: `a real client config changed during the lane: ${changed.join(", ")} (flair#1853)`,
       });
     }
-    const leaked = newFlairTempNames(tempBefore, flairTempNames());
-    if (reportTempDirLeaks(leaked)) {
+    const leaked = newFlairTempNames(tempBefore, flairTempNames(guardTempDir));
+    if (reportTempDirLeaks(leaked, guardTempDir)) {
       guardFailures.push({
         kind: "guard",
         name: "temp-dir leak guard",
-        detail: `the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${tmpdir()} (flair#1889)`,
+        detail: `the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${guardTempDir} (flair#1889)`,
       });
     }
   };

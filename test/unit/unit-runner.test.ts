@@ -336,20 +336,19 @@ describe("shared unit lane", () => {
   test("the temp-dir leak guard fails the lane, and keep-going names it, even when every step passed (flair#1889, flair#2030)", () => {
     for (const keepGoing of [false, true]) {
       const home = fixture();
-      // The leak lands in THIS process's temp dir, the one the guard watches.
-      const leak = join(tmpdir(), `flair-unit-runner-leak-${process.pid}-${keepGoing ? "keep-going" : "fail-fast"}`);
-      fixtures.push(leak); // removed after the test, so the lane running this file sees no leak
+      // The leak lands in the step's own TMPDIR, the dir the guard watches.
+      const leakName = `flair-unit-runner-leak-${process.pid}-${keepGoing ? "keep-going" : "fail-fast"}`;
+      fixtures.push(join(process.env.TMPDIR ?? tmpdir(), leakName)); // removed when a nested lane reused the caller's root
       const { result: code, errors } = captureErrors(() => runUnitSteps(
-        [{ name: "succeeds but leaves a flair-* temp dir", cwd: home, args: ["-e", `require("node:fs").mkdirSync(${JSON.stringify(leak)})`], files: [] }],
+        [{ name: "succeeds but leaves a flair-* temp dir", cwd: home, args: ["-e", `require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, ${JSON.stringify(leakName)}))`], files: [] }],
         process.execPath,
         home,
         { keepGoing },
       ));
       // The step itself succeeded; only the guard can fail the lane.
-      expect(existsSync(leak)).toBe(true);
       expect(code).toBe(1);
       expect(errors).toContain("Temp-dir leak guard FAILED");
-      expect(errors).toContain(basename(leak));
+      expect(errors).toContain(leakName);
       if (keepGoing) {
         expect(errors).toContain("ran 1 step, 0 failed");
         expect(errors).toContain("Guard failures:\n  - temp-dir leak guard: the unit lane left 1 new flair-* directory");
@@ -468,6 +467,25 @@ describe("shared unit lane", () => {
     expect(errors).toContain(childTmpdir);
     expect(readdirSync(base).filter((name) => name.startsWith("f"))).toEqual([]);
     expect(process.env.TMPDIR).toBe(savedTmpdir);
+  });
+
+  test("the leak guard still watches the lane's root after a test replaced process.env (flair#2137)", () => {
+    const base = fixture();
+    const home = fixture();
+    const script = `const fs = require("node:fs"), path = require("node:path"); fs.mkdirSync(path.join(process.env.TMPDIR, "flair-2137-replaced"));`;
+    const originalEnv = process.env;
+    process.env = { ...originalEnv, FLAIR_UNIT_TEMP_BASE: base };
+    try {
+      const { result: code, errors } = captureErrors(() => runUnitSteps(
+        [{ name: "leaks after env replacement", cwd: base, args: ["-e", script], files: [] }],
+        process.execPath,
+        home,
+      ));
+      expect(code).toBe(1);
+      expect(errors).toContain("flair-2137-replaced");
+    } finally {
+      process.env = originalEnv;
+    }
   });
 
   test("a short temp base with no leak passes and still removes its root (flair#2137)", () => {
