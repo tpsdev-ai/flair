@@ -1,17 +1,6 @@
 /**
  * expired-by-agent.ts — group validTo-expired, unarchived memories by owning
  * agent for the `flair status` warning (flair#2231).
- *
- * The REM nightly maintenance that archives an expired row is scoped to one
- * agent (`agentId`), so an instance-wide expired count can stay non-zero
- * forever for an agent whose rows no nightly driver on this host archives.
- * The warning names the agents whose rows are waiting and flags the ones no
- * driver will archive, keeping the named list bounded so a large fleet cannot
- * flood the output.
- *
- * Pure: no I/O and no Harper. The caller passes the per-agent counts from the
- * one existing Memory scan and the local nightly driver's facts (the installed
- * signal status and doctor already read).
  */
 
 /** Named agents in the warning before the remainder is folded into a count. */
@@ -21,7 +10,7 @@ export const EXPIRED_BY_AGENT_NAMED_MAX = 5;
 export interface NightlyDriverFacts {
   /** Unit files present on this host. null = the probe could not tell (it failed). */
   installed: boolean | null;
-  /** The agent the installed driver runs as — the `--agent` it was enabled for. */
+  /** The agent named by the scheduler file. */
   agent: string | null;
   /** Whether `agent` is known: a present but unreadable unit is UNKNOWN, not "no driver". */
   agentKnown: boolean;
@@ -30,8 +19,7 @@ export interface NightlyDriverFacts {
 export interface ExpiredAgentEntry {
   agentId: string;
   count: number;
-  /** true = the local nightly driver archives this agent's rows; false = no
-   *  driver will; null = a driver is installed but its agent could not be read. */
+  /** Whether local scheduler files name this agent; null = unknown. */
   nightlyDriverInstalled: boolean | null;
 }
 
@@ -77,12 +65,12 @@ export function summarizeExpiredByAgent(
  */
 export function expiredByAgentWarningLines(b: ExpiredByAgent): string {
   if (b.agents.length === 0) return "";
-  const lines: string[] = ["    grouped by agent — each agent's own nightly run archives its rows:\n"];
+  const lines: string[] = ["    grouped by agent:\n"];
   for (const a of b.agents) {
     const state = a.nightlyDriverInstalled === true
-      ? "nightly driver installed"
+      ? "nightly scheduler file matches"
       : a.nightlyDriverInstalled === false
-        ? "NO nightly driver installed"
+        ? "NO matching nightly scheduler file"
         : "nightly driver state unknown";
     lines.push(`      ${a.agentId || "(no agent id)"}: ${a.count} — ${state}\n`);
   }

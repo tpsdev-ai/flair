@@ -66,11 +66,11 @@ describe("summarizeExpiredByAgent (flair#2231)", () => {
     expect(expiredByAgentWarningLines(b)).toBe("");
   });
 
-  test("warning text says each agent's own nightly run archives its rows", () => {
+  test("warning text groups by agent", () => {
     const b = summarizeExpiredByAgent([["alice", 3], ["bob", 2]], driverFor("alice"));
     const text = expiredByAgentWarningLines(b);
-    expect(text).toContain("each agent's own nightly run archives its rows");
-    expect(text).toContain("alice: 3 — nightly driver installed");
-    expect(text).toContain("bob: 2 — NO nightly driver installed");
+    expect(text).toContain("grouped by agent:");
+    expect(text).toContain("alice: 3 — nightly scheduler file matches");
+    expect(text).toContain("bob: 2 — NO matching nightly scheduler file");
   });
 });

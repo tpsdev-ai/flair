@@ -1,6 +1,6 @@
 /**
  * flair#2231: the `flair status` expired-validTo warning groups the count by
- * agent and flags agents the local nightly driver will not archive.
+ * agent and matches local scheduler files to agents.
  *
  * Real HealthDetail aggregation -> real Commander status actions; all runtime
  * I/O is mocked (no Harper, HOME files, network or service manager). Run in its
@@ -12,12 +12,15 @@ const NOW = Date.parse("2026-10-03T12:00:00Z");
 const HOME = "/fixture/flair-2231";
 const LOG = HOME + "/.flair/logs/rem-nightly.jsonl";
 const TIMER = HOME + "/.config/systemd/user/flair-rem-nightly.timer";
+const SERVICE = HOME + "/.config/systemd/user/flair-rem-nightly.service";
 let installed = true;
-/** Unit-file text the driver-agent read sees for TIMER; null = unreadable. */
+let statError: string | null = null;
+let readError: string | null = null;
+let serviceText: string | null = null;
 let unitText: string | null = null;
 let rows: Array<Record<string, unknown>> = [];
 
-function absent(): never { throw new Error("fixture path absent"); }
+function absent(code = "ENOENT"): never { throw Object.assign(new Error(code), { code }); }
 
 mock.module("node:os", () => ({
   homedir: () => HOME,
@@ -29,12 +32,18 @@ mock.module("node:fs", () => ({
   readFileSync: absent,
   promises: {
     stat: async (path: string) => {
+      if (path === TIMER && statError) return absent(statError);
       if (path === TIMER && installed) return { size: unitText ? Buffer.byteLength(unitText) : 0 };
       if (path === LOG) return { size: 0 };
       return absent();
     },
     open: async () => absent(),
-    readFile: async (path: string) => (path === TIMER && unitText !== null ? unitText : absent()),
+    readFile: async (path: string) => {
+      if ((path === TIMER || path === SERVICE) && readError) return absent(readError);
+      if (path === TIMER && unitText !== null) return unitText;
+      if (path === SERVICE && serviceText !== null) return serviceText;
+      return absent();
+    },
     readdir: async () => absent(),
   },
 }));
@@ -111,6 +120,9 @@ function mem(id: string, agentId: string | undefined, validTo: string): Record<s
 
 beforeEach(() => {
   installed = true;
+  statError = null;
+  readError = null;
+  serviceText = "Environment=FLAIR_AGENT_ID=agent-a\n";
   unitText = "Description=Flair REM nightly timer (agent-a)\n";
   rows = [mem("a1", "agent-a", "2000-01-01T00:00:00Z"), mem("a2", "agent-a", "2000-01-01T00:00:00Z")];
   setSystemTime(NOW);
@@ -166,12 +178,12 @@ test("two agents: status names both counts and flags the one with no nightly dri
   });
   const warning = expiryWarning(detail);
   expect(warning).toStartWith("5 memories have expired validTo but aren't archived\n");
-  expect(warning).toContain("each agent's own nightly run archives its rows");
-  expect(warning).toContain("agent-b: 3 — NO nightly driver installed");
-  expect(warning).toContain("agent-a: 2 — nightly driver installed");
+  expect(warning).toContain("grouped by agent:");
+  expect(warning).toContain("agent-b: 3 — NO matching nightly scheduler file");
+  expect(warning).toContain("agent-a: 2 — nightly scheduler file matches");
 
   for (const args of [[], ["--agent", "agent-a"], ["deep"]]) {
-    expect(await statusOutput(detail, args)).toContain("agent-b: 3 — NO nightly driver installed");
+    expect(await statusOutput(detail, args)).toContain("agent-b: 3 — NO matching nightly scheduler file");
   }
   const parsed = JSON.parse(await statusOutput(detail, ["--json"])) as Record<string, any>;
   expect(parsed.memories.expiredByAgent).toEqual(detail.memories.expiredByAgent);
@@ -186,12 +198,15 @@ test("no driver installed: every listed agent is flagged", async () => {
     { agentId: "agent-a", count: 2, nightlyDriverInstalled: false },
     { agentId: "agent-b", count: 1, nightlyDriverInstalled: false },
   ]);
-  expect(expiryWarning(detail)).toContain("agent-a: 2 — NO nightly driver installed");
+  expect(expiryWarning(detail)).toContain("agent-a: 2 — NO matching nightly scheduler file");
 });
 
 test("installed but unreadable unit: UNKNOWN, never 'no driver'", async () => {
   installed = true;
-  unitText = null; // read fails
+  statError = null;
+  readError = null;
+  serviceText = "Environment=FLAIR_AGENT_ID=agent-a\n";
+  readError = "EACCES";
   const detail = await new HealthDetail().get();
   expect(detail.memories.expiredByAgent.agents).toEqual([
     { agentId: "agent-a", count: 2, nightlyDriverInstalled: null },
@@ -199,6 +214,7 @@ test("installed but unreadable unit: UNKNOWN, never 'no driver'", async () => {
   const warning = expiryWarning(detail);
   expect(warning).toContain("agent-a: 2 — nightly driver state unknown");
   expect(warning).not.toContain("NO nightly driver installed");
+  expect(expiryWarning(detail)).not.toContain("NO matching nightly scheduler file");
 });
 
 test("large fleet: output names a bounded set plus a remainder count", async () => {
@@ -219,4 +235,43 @@ test("zero expired rows: no breakdown and no expiry warning", async () => {
   expect(detail.memories.expired).toBe(0);
   expect(detail.memories.expiredByAgent).toBeUndefined();
   expect(JSON.stringify(detail.warnings)).not.toContain("expired validTo");
+});
+
+for (const code of ["EACCES", "EPERM", "ENOTDIR", "ELOOP"]) {
+  test(`scheduler stat ${code}: UNKNOWN with path and code`, async () => {
+    statError = code;
+    const detail = await new HealthDetail().get();
+    expect(detail.memories.expiredByAgent.agents[0].nightlyDriverInstalled).toBeNull();
+    expect(expiryWarning(detail)).toContain("nightly driver state unknown");
+    expect(expiryWarning(detail)).not.toContain("NO nightly driver installed");
+    expect(expiryWarning(detail)).not.toContain("NO matching nightly scheduler file");
+    expect(detail.rem.nightlyEnabled).toBeNull();
+    expect(JSON.stringify(detail.warnings)).toContain(TIMER);
+    expect(JSON.stringify(detail.warnings)).toContain(code);
+  });
+  test(`scheduler read ${code}: UNKNOWN with path and code`, async () => {
+    readError = code;
+    const detail = await new HealthDetail().get();
+    expect(detail.memories.expiredByAgent.agents[0].nightlyDriverInstalled).toBeNull();
+    expect(expiryWarning(detail)).not.toContain("NO nightly driver installed");
+    expect(expiryWarning(detail)).not.toContain("NO matching nightly scheduler file");
+    expect(JSON.stringify(detail.warnings)).toContain(SERVICE);
+    expect(JSON.stringify(detail.warnings)).toContain(code);
+  });
+}
+
+test("divergent timer and service use the service agent", async () => {
+  serviceText = "Environment=FLAIR_AGENT_ID=agent-b\n";
+  rows.push(mem("b1", "agent-b", "2000-01-01T00:00:00Z"));
+  const detail = await new HealthDetail().get();
+  expect(detail.memories.expiredByAgent.agents).toEqual([
+    { agentId: "agent-a", count: 2, nightlyDriverInstalled: false },
+    { agentId: "agent-b", count: 1, nightlyDriverInstalled: true },
+  ]);
+});
+
+test("missing service does not trust the timer description", async () => {
+  serviceText = null;
+  const detail = await new HealthDetail().get();
+  expect(detail.memories.expiredByAgent.agents[0].nightlyDriverInstalled).toBeNull();
 });

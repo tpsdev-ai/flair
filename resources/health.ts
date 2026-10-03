@@ -548,11 +548,8 @@ export class HealthDetail extends Resource {
 
     // ── REM ──
     let nightlyRunFailed = false;
-    // The local REM nightly driver's state (flair#2231): whether it is installed
-    // and the agent it runs as — read from the same scheduler files the REM
-    // block below locates for its installed/active check.
     let nightlyProbeOk = false;
-    let nightlyInstalled = false;
+    let nightlyInstalled: boolean | null = false;
     let nightlyDriverAgent: string | null = null;
     let nightlyDriverAgentKnown = false;
     try {
@@ -604,38 +601,44 @@ export class HealthDetail extends Resource {
       let nightlyEnabled: boolean | null = null;
       const plat = platform();
       if (plat === "darwin" || plat === "linux") {
-        nightlyInstalled = plat === "darwin"
-          ? await exists(join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist"))
-          : await exists(join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer"));
-        if (nightlyInstalled) {
+        const schedulerPath = plat === "darwin"
+          ? join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist")
+          : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer");
+        const probeError = (path: string, error: unknown): void => {
+          const code = (error as NodeJS.ErrnoException)?.code ?? "UNKNOWN";
+          warnings.push({ level: "warn", message: `REM nightly driver state unknown: ${path} (${code})` });
+        };
+        try {
+          await fsp.stat(schedulerPath);
+          nightlyInstalled = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+            nightlyInstalled = false;
+          } else {
+            nightlyInstalled = null;
+            probeError(schedulerPath, error);
+          }
+        }
+        if (nightlyInstalled === true) {
           try {
             const { queryActiveStateAsync } = await import("../src/rem/scheduler.js");
             nightlyEnabled = await queryActiveStateAsync(plat);
           } catch {
             nightlyEnabled = null;
           }
-        } else {
-          nightlyEnabled = false;
-        }
-        if (nightlyInstalled) {
-          // The nightly driver runs AS one agent — the unit file bakes the agent
-          // in at enable time (`flair rem nightly enable --agent <id>`). Read it
-          // from the very same scheduler file the installed-check above located,
-          // so the expired-rows warning can tell whose rows its own nightly will
-          // archive from whose it will not (flair#2231). An installed-but-
-          // unreadable unit is UNKNOWN, never "no driver".
-          const unitPaths = plat === "darwin"
-            ? [join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist")]
-            : [join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer"),
-               join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.service")];
-          for (const unitPath of unitPaths) {
-            let unitText: string;
-            try { unitText = await fsp.readFile(unitPath, "utf-8"); } catch { continue; }
-            const m = unitText.match(/FLAIR_AGENT_ID=([A-Za-z0-9._-]+)/)
-              ?? unitText.match(/<key>FLAIR_AGENT_ID<\/key>\s*<string>([^<]+)<\/string>/)
-              ?? unitText.match(/Flair REM nightly (?:timer|cycle) \(([^)]+)\)/);
-            if (m) { nightlyDriverAgent = m[1].trim(); nightlyDriverAgentKnown = true; break; }
+          const unitPath = plat === "darwin" ? schedulerPath
+            : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.service");
+          try {
+            const unitText = await fsp.readFile(unitPath, "utf-8");
+            const m = plat === "darwin"
+              ? unitText.match(/<key>FLAIR_AGENT_ID<\/key>\s*<string>([^<]+)<\/string>/)
+              : unitText.match(/FLAIR_AGENT_ID=([A-Za-z0-9._-]+)/);
+            if (m) { nightlyDriverAgent = m[1].trim(); nightlyDriverAgentKnown = true; }
+          } catch (error) {
+            probeError(unitPath, error);
           }
+        } else if (nightlyInstalled === false) {
+          nightlyEnabled = false;
         }
       }
       nightlyProbeOk = true;
@@ -701,7 +704,7 @@ export class HealthDetail extends Resource {
 
     // Build this after REM discovery, including its unavailable-state fallback.
     // Health does not read the scheduler's next-run time. The existing audit
-    // row does carry status; do not expose raw errors through HealthDetail.
+    // row does carry status.
     if (stats.memories?.expired > 0) {
       const nightlyHint = stats.rem?.nightlyEnabled === true
         ? nightlyRunFailed

@@ -17,7 +17,7 @@ let memoryReadError = false;
 let rows: Array<Record<string, unknown>> = [];
 const originalTransaction = (globalThis as any).transaction;
 
-function absent(): never { throw new Error("fixture path absent"); }
+function absent(): never { throw Object.assign(new Error("fixture path absent"), { code: "ENOENT" }); }
 
 mock.module("node:os", () => ({
   homedir: () => HOME,
