@@ -1,7 +1,4 @@
-- **Skill writes now append version records and keep history.** A skill update
-  supersedes (a fresh Memory row, the predecessor closed) instead of
-  overwriting, and a stable `skillSubjectId` carries the chain across physical
-  rows. A create and a feed ingest append a version too.
+- **Skill writes now append version records and keep history.**
 
   A skill delete is now a logical delete: the retained payload is closed, not
   removed, and a tombstone version is appended. Read authority is unchanged from

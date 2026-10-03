@@ -1,8 +1,6 @@
 /**
  * skill-version-write.ts — the transactional skill version writer (flair#2139
- * S2). A skill is a Memory tagged "skill"; an update SUPERSEDES (a fresh
- * physical row) instead of overwriting in place, and every change appends an
- * InstructionVersion row.
+ * S2).
  *
  * Atomicity is mandatory (spec): inside the append helper's per-subject lock and
  * its ONE owned transaction, this module re-reads the subject's current live
@@ -19,6 +17,7 @@
  */
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { recordVersion, type RecordVersionOutcome } from "./instruction-version-record.js";
 import { SKILL_TAG, enforceSkillDurability } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
@@ -89,6 +88,16 @@ export function rowIsSkill(row: Record<string, any> | null | undefined): boolean
   return !!row && Array.isArray(row.tags) && row.tags.includes(SKILL_TAG);
 }
 
+export function skillPayloadUnchanged(base: Record<string, any>, head: Record<string, any>): boolean {
+  const bookkeeping = new Set([
+    "embedding", "embeddingModel", "contentHash", "updatedAt", "instanceToken",
+    "provenance", "skillSubjectId", "_safetyFlags", "_skillScan",
+    "retrievalCount", "lastRetrieved",
+  ]);
+  return Object.entries(base).every(([key, value]) =>
+    bookkeeping.has(key) || isDeepStrictEqual(value, head[key]));
+}
+
 /**
  * Resolve the current live head of a skill subject under the caller's lock.
  * `subjectId` is the stable `skillSubjectId`; `addressedId` is the physical row
@@ -132,7 +141,6 @@ export interface SkillSuccessorPlan {
   kind: "create" | "update";
   /** The resolved live predecessor row being superseded (null on a first create). */
   predecessor: Record<string, any> | null;
-  /** The full successor row, with a fresh physical id and `supersedes` set. */
   successor: Record<string, any>;
   /** The patch that closes the predecessor (e.g. `validTo`). */
   closePatch: Record<string, unknown>;

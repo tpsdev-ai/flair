@@ -26,7 +26,7 @@ import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./mem
 import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, SKILL_TAG } from "./skill-write.js";
-import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import { skillWriteSource } from "./skill-write-policy.js";
 import {
@@ -760,10 +760,7 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
 
 /**
  * flair#2139 S2 — write a skill create/update atomically through the
- * transactional writer. `successorId` is the ACTUAL successor id (the write's
- * addressable result); for a default same-id update a fresh id is generated and
- * the subject's live head is superseded. The returned response names the
- * successor id, which the MCP/client update paths surface to the caller.
+ * transactional writer.
  */
 async function writeSkillCreateOrUpdate(
   args: {
@@ -776,9 +773,10 @@ async function writeSkillCreateOrUpdate(
     pointer: { row: any } | null;
     /** A reserved seed id: version the write IN PLACE (same physical id). */
     inPlaceId?: string | null;
+    reembedding?: boolean;
   },
 ): Promise<any> {
-  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId } = args;
+  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding } = args;
   // #1741 skill-write credential class: an admin AGENT key is an agent, not an
   // operator — it keeps own-skill writes plus the explicit write-grant
   // allowance, and cannot bypass the owner check for another agent's skill.
@@ -790,13 +788,13 @@ async function writeSkillCreateOrUpdate(
   }
   const now = new Date().toISOString();
   const explicitSuccessor = !!(explicitPredecessor && typeof content.supersedes === "string" && content.supersedes.length > 0);
-  const successorId = inPlaceId
+  let successorId = inPlaceId
     ? inPlaceId
     : explicitSuccessor || !storedRow
       ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
       : `${content.agentId}-${randomUUID()}`;
   const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
-  const addressedId = explicitPredecessor ? String(explicitPredecessor.id) : storedRow ? String(storedRow.id) : null;
+  const addressedId = storedRow ? String(storedRow.id) : explicitPredecessor ? String(explicitPredecessor.id) : null;
   const captured: { row: Record<string, any> | null } = { row: null };
   const outcome = await runSkillVersionWrite({
     ctx,
@@ -804,17 +802,24 @@ async function writeSkillCreateOrUpdate(
     agentId: String(content.agentId),
     head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
     plan: (head) => {
-      const liveHead = inPlaceId ? head : (explicitSuccessor ? explicitPredecessor : head);
+      const reembedInPlace = method === "put" && reembedding && head &&
+        head.id === storedRow?.id && skillPayloadUnchanged(content, head);
+      if (reembedInPlace) successorId = String(head.id);
+      const liveHead = inPlaceId || reembedInPlace ? head : (explicitSuccessor ? explicitPredecessor : head);
       const successor = buildSkillSuccessorRow({
         base: content, predecessorRow: liveHead, successorId, subjectId,
         // An in-place (reserved seed) write keeps the same physical id, so it
         // sets no `supersedes` and closes no row.
-        supersedes: inPlaceId || !liveHead ? null : String(liveHead.id), now,
+        supersedes: reembedInPlace ? head.supersedes ?? null : inPlaceId || !liveHead ? null : String(liveHead.id), now,
       });
+      if (reembedInPlace) {
+        successor.instanceToken = typeof head.instanceToken === "string" && head.instanceToken.length > 0
+          ? head.instanceToken : content.instanceToken;
+      }
       captured.row = successor;
       const value = typeof successor.content === "string" ? successor.content : null;
       const visibility = skillVersionVisibility(successor);
-      if (inPlaceId) {
+      if (inPlaceId || reembedInPlace) {
         return liveHead
           ? { kind: "update", predecessor: null, successor, closePatch: {}, value, visibility }
           : { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
@@ -1553,6 +1558,7 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async put(content: any) {
+    const reembedding = content?.embedding === null && content?.embeddingModel === null;
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
@@ -1980,6 +1986,7 @@ export class Memory extends (databases as any).flair.Memory {
         }
         return await writeSkillCreateOrUpdate({
           ctx, auth, content, storedRow: preExisting, explicitPredecessor: skillPredecessor, method: "put", pointer,
+          reembedding,
           inPlaceId: reservedId != null ? String(reservedId) : null,
         });
       }
