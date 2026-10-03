@@ -33,7 +33,7 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
-add("Memory", ["writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#2"],
+add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#2"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the raw put (flair#1542).");

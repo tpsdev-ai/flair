@@ -427,3 +427,29 @@ type OrgSkillAssignmentHistory @table(database: "flair") {
   previousHash: String             # sha256 of the stored row before the write; null on create
   at: String!
 }
+
+# InstructionVersion — single-row Soul resource write history; Soul collection deletes are refused.
+# REST mutation verbs are refused; reads authorize soul subjects only.
+# The administrator operations API is an unaudited exception.
+type InstructionVersion @table(database: "flair") @export {
+  id: ID @primaryKey              # encodes subjectType + subjectId + version
+  subjectType: String! @indexed   # soul | skill
+  subjectId: String! @indexed     # canonical subject (soul: agentId:key)
+  agentId: String! @indexed       # owner
+  key: String                     # Soul key
+  version: BigInt!                # positive per-subject sequence
+  kind: String!                   # create | update | delete
+  rowId: ID!                      # affected physical row
+  valueHash: String               # sha256 of the value bytes; null on delete
+  previousVersionHash: String     # preceding record digest; null on the first record
+  recordHash: String!             # record digest over every other field
+  soulSnapshot: String            # serialized Soul state including its value
+  memoryId: ID                    # skill-version Memory reference
+  visibility: String              # retained skill read-scope metadata
+  actorKind: String!              # operator | agent | internal | instance
+  actorId: String                 # verified identity; null for unattributed internal calls
+  sourceClass: String!            # operator | internal | agent | federation | seed
+  createdAt: String!              # server ISO timestamp
+  guarded: Boolean!               # whether expectedVersion was compared
+  expectedVersion: ID             # the compared head; null on an unguarded write
+}

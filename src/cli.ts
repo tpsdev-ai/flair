@@ -758,13 +758,21 @@ export function writeFileAtomic(path: string, content: string | Uint8Array, mode
   }
 }
 
-/**
- * Write the admin password to `path` with mode 0600 from creation (flair#1573
- * slice a). The secret is written to a temp file in the same dir (0600) and
- * renamed into place, so it is never briefly world-readable.
- */
 export function writeAdminPassFile(path: string, content: string): void {
-  writeFileAtomic(path, content, 0o600);
+  let target: ReturnType<typeof lstatSync> | undefined;
+  try {
+    target = lstatSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (target) {
+    if (target.isSymbolicLink()) throw new Error(`Refusing to write admin password at ${path}: symbolic link`);
+    if (!target.isFile()) throw new Error(`Refusing to write admin password at ${path}: not a regular file`);
+    if (typeof process.getuid === "function" && target.uid !== process.getuid()) {
+      throw new Error(`Refusing to write admin password at ${path}: owned by another user`);
+    }
+  }
+  writeFileAtomic(path, content, 0o600, { exactMode: true });
 }
 
 /**

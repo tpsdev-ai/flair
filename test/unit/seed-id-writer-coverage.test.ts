@@ -33,7 +33,7 @@ const add = (file: string, sites: string[], reason: string) => {
 
 // ── GUARDED ──
 add("Memory", [
-  "writer:(databases as any).flair.Memory.post#1",
+  "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
   "writer:(databases as any).flair.Memory.put#2",
   "writer:super.put#1",
   "writer:super.patch#1",

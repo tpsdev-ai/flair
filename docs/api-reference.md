@@ -393,6 +393,14 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 
 > The host pointer (`hostSource`) is **not** a Memory attribute — it lives in its own `MemoryHostSource` table (below). There is no `hostSource` / `hostSourceVisibility` field on `Memory`.
 
+#### Durability tiers (#2217)
+
+- permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+- persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+- standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+- ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+- No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
+
 #### Memory host pointer (`MemoryHostSource`, #1940 A1'-A5)
 
 The pointer is a host-object pointer — versioned JSON `{ v: 1, host, kind, id, url? }` — that records which host object the writer claims as the memory’s source. **Supported writes store host pointers only in `MemoryHostSource`. For non-admin `Memory.get`, `Memory.search`, and `SemanticSearch` results, the gated projection removes inline pointer fields and renders a pointer only from a bound `MemoryHostSource` row.**
@@ -435,7 +443,7 @@ A `hostSource`, like a client-supplied `createdAt`, is a writer claim attributed
 | `priority` | String | `critical` \| `high` \| `standard` \| `low` |
 | `metadata` | String | JSON (skill governance, etc.) |
 | `provenance` | String | Operator/internal author + `sourceClass` |
-| `durability` | String | Default `permanent` |
+| `durability` | String | POST defaults to `permanent`; PUT supplies no default |
 | `createdAt` / `updatedAt` | String | |
 | `originatorInstanceId` | String | Server-stamped write-time instance id; not client-writable through a resource write |
 
@@ -486,6 +494,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **OrgSkillAssignment** | memory.graphql | yes | Org-scope skill assignment (`skillName`, `skillRef`, `priority`, server-stamped `writer` / `sourceClass`) |
 | **OrgSkillAssignmentHistory** | memory.graphql | no | One row per accepted OrgSkillAssignment resource write (`assignmentId`, `op`, `actor`, `sourceClass`, `previousHash`) |
 | **MemoryDeletionHistory** | memory.graphql | no | History of confirmed `Memory.delete` (including CLI hygiene and agent remove) and maintenance expiry deletes, appended in the delete's transaction (`memoryId`, `memoryInstanceToken`, `durability`, `actor`, `sourceClass`, `at`); read by `flair integrity check` for history-backed attributions |
+| **InstructionVersion** | memory.graphql | yes (read only) | History for single-row Soul resource writes. Soul collection deletes and InstructionVersion REST writes are refused. Reads authorize `soul` subjects under Soul's verified-agent rule. |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |
@@ -498,6 +507,8 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **OAuthSingleUse** | oauth.graphql | no | A claim to redeem an authorization code or rotate a refresh token, keyed by its SHA-256 |
 
 `flair integrity check` reports missing checkpointed durable Memory IDs or replacements with differing nonempty tokens without matching new deletion history. A row created and lost entirely between scans is not observed.
+
+`InstructionVersion` rows are appended by Flair's in-process write path. The administrator operations API (`upsert` / `delete` under admin auth) can also write version rows, and that path is not audited by this table — a documented, deferred exception.
 
 ---
 

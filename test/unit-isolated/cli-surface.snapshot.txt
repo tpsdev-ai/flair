@@ -1927,7 +1927,7 @@ flair memory add
       description: memory content (alias for positional arg)
       attr: content
     --durability <d>
-      description: permanent|persistent|standard|ephemeral (default standard). Also decides the default visibility when --visibility is omitted: permanent/persistent -> shared, standard/ephemeral -> private
+      description: permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them. (default standard). Also decides the default visibility when --visibility is omitted: permanent/persistent -> shared, standard/ephemeral -> private
       attr: durability
     --tags <csv>
       attr: tags
@@ -2147,7 +2147,7 @@ flair search
       attr: minScore
       default: "0"
     --durability <level>
-      description: Filter to permanent|persistent|standard|ephemeral (client-side)
+      description: Filter results by durability (permanent/persistent/standard/ephemeral; comma-separated; client-side). No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
       attr: durability
     --source <name>
       description: Filter by source/agentId (client-side)
@@ -2253,7 +2253,7 @@ flair soul set
       attr: value
       mandatory: true
     --durability <d>
-      description: permanent|persistent|standard|ephemeral (default permanent — soul entries are identity, not working memory)
+      description: Stored Soul label (permanent/persistent/standard/ephemeral). Soul has no expiresAt/validTo and is not scanned by MemoryMaintenance. PUT supplies no default; omitted durability is unset.
       attr: durability
     --url <url>
       description: Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)
@@ -4994,7 +4994,22 @@ Options:
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --content <text>          memory content (alias for positional arg)
-  --durability <d>          permanent|persistent|standard|ephemeral (default
+  --durability <d>          permanent — routine maintenance never reaps or
+                            age-archives it (an expired validTo archives an
+                            eligible row; an acquired expiresAt never reaps it);
+                            it never decays; bootstrap considers the
+                            bootstrapping agent's own permanent memories before
+                            recent rows, subject to scope, expiry/closure and
+                            the token budget. persistent — routine maintenance
+                            never reaps or age-archives it (an expired validTo
+                            archives an eligible row; an acquired expiresAt
+                            never reaps it). standard — routine maintenance
+                            archives it once its validTo passes or, as a session
+                            note, after 30 days. ephemeral — routine maintenance
+                            reaps it once its TTL (24h by default) passes. No
+                            tier adds a flush, fsync, backup or replica
+                            acknowledgement: an explicit delete (owner or admin)
+                            or a store failure can end any of them. (default
                             standard). Also decides the default visibility when
                             --visibility is omitted: permanent/persistent ->
                             shared, standard/ephemeral -> private
@@ -5170,8 +5185,12 @@ Options:
                              precision as of flair#623 — opt-in only) (default:
                              "raw")
   --min-score <n>            Drop results below this score (0..1) (default: "0")
-  --durability <level>       Filter to permanent|persistent|standard|ephemeral
-                             (client-side)
+  --durability <level>       Filter results by durability
+                             (permanent/persistent/standard/ephemeral;
+                             comma-separated; client-side). No tier adds a
+                             flush, fsync, backup or replica acknowledgement: an
+                             explicit delete (owner or admin) or a store failure
+                             can end any of them.
   --source <name>            Filter by source/agentId (client-side)
   --explain                  Show score breakdown (raw, composite, durability,
                              age, usage) per hit — also added to --json output
@@ -5289,9 +5308,11 @@ Options:
   --agent <id>
   --key <key>
   --value <value>
-  --durability <d>          permanent|persistent|standard|ephemeral (default
-                            permanent — soul entries are identity, not working
-                            memory)
+  --durability <d>          Stored Soul label
+                            (permanent/persistent/standard/ephemeral). Soul has
+                            no expiresAt/validTo and is not scanned by
+                            MemoryMaintenance. PUT supplies no default; omitted
+                            durability is unset.
   --url <url>               Flair base URL (overrides the URL resolved from
                             config; env: FLAIR_URL)
   --json                    Emit raw JSON response (also: pipe +
