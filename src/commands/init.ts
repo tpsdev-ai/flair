@@ -314,7 +314,7 @@ program
   .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
-  .option("--skip-start", "Skip Harper startup (assume already running)")
+  .option("--skip-start", "Install and configure without starting Harper")
   .option("--skip-soul", "Skip interactive personality setup")
   .option("--client <client>", "Client(s) to wire: claude-code, codex, gemini, cursor, antigravity, pi (native extension), all, or none")
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
@@ -803,26 +803,44 @@ program
     // ops 401 is a separate before-and-after read of the operations port,
     // not this HTTP observation (flair#1749).
     let skippedOwnStart = false;
-    if (!opts.skipStart) {
-      if (alreadyRunning) {
-        console.log(`Harper already running on port ${httpPort} — skipping start`);
-        // One read of the HTTP port that answered /health. When that read
-        // includes a ROOTPATH other than this init's, stop before
-        // waitForHealth, which would send Authorization. An unreadable
-        // directory is not treated as foreign. This is not the
-        // before-and-after check used for an operations-port 401. A
-        // different directory does not prove the passwords differ, and
-        // this init does not signal the process.
-        const httpListener = readOccupiedListener(httpPort);
-        const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
-        if (notice) {
-          console.error(notice);
-          process.exit(1);
-        }
-        skippedOwnStart = true;
-      }
 
-      if (!alreadyRunning) {
+    if (alreadyRunning && !opts.skipStart) {
+      console.log(`Harper already running on port ${httpPort} — skipping start`);
+      // One read of the HTTP port that answered /health. When that read
+      // includes a ROOTPATH other than this init's, stop before
+      // waitForHealth, which would send Authorization. An unreadable
+      // directory is not treated as foreign. This is not the
+      // before-and-after check used for an operations-port 401. A
+      // different directory does not prove the passwords differ, and
+      // this init does not signal the process.
+      const httpListener = readOccupiedListener(httpPort);
+      const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
+      if (notice) {
+        console.error(notice);
+        process.exit(1);
+      }
+      skippedOwnStart = true;
+    }
+
+    // flair#2197: `--skip-start` INSTALLS AND CONFIGURES WITHOUT STARTING.
+    // The install below therefore runs whether or not --skip-start was given;
+    // only the start half (spawn, health wait, service registration) stays
+    // under `!opts.skipStart`.
+    if (!alreadyRunning) {
+      // Detect whether Harper has already been installed in this data dir.
+      // Harper's config is created during install — its presence means
+      // install already ran. Re-running install against an existing data dir
+      // crashes in Harper v5 beta.6+ (checkForExistingInstall queries the
+      // database before the env is initialized). Goes through
+      // harperConfigPath so an install predating Harper's config-file rename
+      // (harperdb-config.yaml) is still recognised as installed rather than
+      // re-installed over.
+      const alreadyInstalled = harperConfigPath(dataDir) !== null;
+      const willStart = !opts.skipStart;
+
+      // An already-installed instance with --skip-start neither installs nor
+      // starts: it is left as it was.
+      if (!alreadyInstalled || willStart) {
         const bin = harperBin();
         if (!bin) {
           throw new Error(
@@ -835,16 +853,6 @@ program
         }
 
         mkdirSync(dataDir, { recursive: true });
-
-        // Detect whether Harper has already been installed in this data dir.
-        // Harper's config is created during install — its presence means
-        // install already ran. Re-running install against an existing data dir
-        // crashes in Harper v5 beta.6+ (checkForExistingInstall queries the
-        // database before the env is initialized). Goes through
-        // harperConfigPath so an install predating Harper's config-file rename
-        // (harperdb-config.yaml) is still recognised as installed rather than
-        // re-installed over.
-        const alreadyInstalled = harperConfigPath(dataDir) !== null;
 
         const opsSocket = join(dataDir, "operations-server");
         // authorizeLocal: false (flair#654) — a credential-less loopback ops-API
@@ -935,15 +943,19 @@ program
         // Start Harper with flair loaded as a component (the "." arg).
         // ROOTPATH in env points to the data dir; authorizeLocal and thread
         // count are set via HARPER_SET_CONFIG — no need for dev mode.
-        console.log(`Starting Harper on port ${httpPort}...`);
-        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
-        proc.unref();
-        // flair#1454: write the identity sidecar immediately after spawn so
-        // `flair stop` and `flair status` can classify this daemon's state
-        // without lsof. Same call as startFlairProcess() uses.
-        if (proc.pid) writeDaemonSidecar(dataDir, proc.pid, httpPort);
+        if (willStart) {
+          console.log(`Starting Harper on port ${httpPort}...`);
+          const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
+          proc.unref();
+          // flair#1454: write the identity sidecar immediately after spawn so
+          // `flair stop` and `flair status` can classify this daemon's state
+          // without lsof. Same call as startFlairProcess() uses.
+          if (proc.pid) writeDaemonSidecar(dataDir, proc.pid, httpPort);
+        }
       }
+    }
 
+    if (!opts.skipStart) {
       console.log("Waiting for Harper health check...");
       await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
       console.log("Harper is healthy ✓");
