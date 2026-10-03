@@ -47,11 +47,8 @@
  * The audit row's `slice` field tells readers which steps populated which
  * counts: `slice: "1"` rows have `archived`/`expired` undefined; `slice:
  * "2-maintenance"` rows populate them but distillation didn't run this cycle
- * (dry-run skip); `slice: "2"` rows had distillation attempted — check
- * `candidates` for staged ids on success, `errors` for a `distillation:`
- * entry on failure (maintenance results still stand either way), and `skips`
- * for a deliberate non-execution that is not a failure (no generative backend,
- * idle ADK, mid-cycle operator pause). Preflight pause returns `paused`.
+ * (dry-run skip); `slice: "2"` rows reached the non-dry-run distillation phase.
+ * An idle ADK skip can contain no `/ReflectMemories` attempt.
  *
  * Pure dependency injection so the runner is unit-testable without Harper.
  * The CLI wires the real `apiCall` + `pkgVersion`; tests pass stubs.

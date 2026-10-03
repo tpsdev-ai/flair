@@ -610,7 +610,7 @@ export class HealthDetail extends Resource {
       nightlyRunFailed = lastNightlyRec?.status === "failed";
       const lastNightlyAt = lastNightlyRec ? (lastNightlyRec.at ?? lastNightlyRec.ts ?? lastNightlyRec.timestamp ?? null) : null;
 
-      // Newest distillation observed in this server's local nightly log tail.
+      // Newest distillation from a completed cycle with no errors or skips, observed in the server-local log tail.
       let lastDistilledAt: string | null = null;
       const completeDistillation = (rec: any): boolean => rec?.status === "completed"
         && !rec.errors?.length && !rec.skips?.length && !rec.distill?.aborted

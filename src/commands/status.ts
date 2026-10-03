@@ -328,7 +328,7 @@ export async function discoverLocalFlairPort(originalUrl: string): Promise<numbe
 }
 
 
-/** Freshness of the newest distillation observed in the server-local log tail. */
+/** Freshness of the newest distillation from a completed cycle with no errors or skips, observed in the server-local log tail. */
 export const DISTILL_STALE_AFTER_MS = 2 * 24 * 3600 * 1000;
 
 export interface DistillStaleness {

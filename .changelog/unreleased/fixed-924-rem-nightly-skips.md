@@ -3,8 +3,9 @@
   pauses and idle ADK distillation are skips; preflight pause remains `paused` with no skips.
   Summaries print skips and errors; errors set exit 1. Agent-identity dedup failure remains #809.
 
-  `Last distilled` is the newest distillation observed in the server's local nightly log tail;
-  remote CLI logs are local to the CLI and are not observed there. Status shows zero pending
+  `Last distilled` is the newest distillation from a completed cycle with no errors or skips,
+  observed in the server-local log tail; remote CLI logs are local to the CLI and are not
+  observed there. Status shows zero pending
   beside it. Empty gathers, malformed responses and failed cycles do not stamp `distilledAt`.
   Maintenance counts are labelled (`Archived`: validTo-expired + old sessions;
   `Expired`: ephemeral rows past `expiresAt`).
