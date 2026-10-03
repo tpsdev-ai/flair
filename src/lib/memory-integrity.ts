@@ -119,7 +119,12 @@ export function emptyCheckpoint(scannedAt: string, rows: readonly MemoryRowLite[
     ids[row.id] = normalizeTier(row.durability);
     instanceTokens[row.id] = typeof row.instanceToken === "string" && row.instanceToken.length > 0 ? row.instanceToken : null;
   }
-  return { version: 2, scannedAt, byDurability: tallyByDurability(rows), ids, instanceTokens, historyIds: deletions.map(d => d.id) };
+  // A record for a live incarnation stays unseen for the next scan.
+  const historyIds = deletions
+    .filter(d => !(typeof d.memoryInstanceToken === "string" && d.memoryInstanceToken.length > 0 &&
+      Object.hasOwn(instanceTokens, d.memoryId) && instanceTokens[d.memoryId] === d.memoryInstanceToken))
+    .map(d => d.id);
+  return { version: 2, scannedAt, byDurability: tallyByDurability(rows), ids, instanceTokens, historyIds };
 }
 
 /** UNKNOWN, with no checkpoint write. */

@@ -12,7 +12,7 @@ test("a missing checkpointed token is replaced and never advances, even with --a
   const originalWrite = process.stdout.write;
   const path = join(tempDir("flair-integrity-token-loss-"), "checkpoint.json");
   const seen = { id: "seen", memoryId: "m", memoryInstanceToken: "old", at: "deleted" };
-  const checkpoint = JSON.stringify(emptyCheckpoint("baseline", [{ id: "m", durability: "permanent", instanceToken: "old" }], [seen]));
+  const checkpoint = JSON.stringify({ ...emptyCheckpoint("baseline", [{ id: "m", durability: "permanent", instanceToken: "old" }]), historyIds: [seen.id] });
   try {
     bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
     process.exit = ((code: number) => { throw new Error(`exit:${code}`); }) as typeof process.exit;
