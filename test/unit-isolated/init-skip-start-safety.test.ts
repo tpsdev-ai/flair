@@ -94,6 +94,66 @@ describe("local init skip-start safety through the built CLI", () => {
     }, 30_000);
   }
 
+  test("--agent with --skip-start refuses --reset-admin-pass without requests or writes", () => {
+    const f = fixture(true);
+    const result = runInit(f, ["--skip-start", "--agent", "canary", "--reset-admin-pass"]);
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toContain("Cannot rotate the admin password: Harper is not running and --skip-start was set");
+    expect(requests(f)).toEqual([]);
+    expect(existsSync(join(f.home, ".flair", "keys"))).toBe(false);
+    expect(existsSync(join(f.home, ".flair", "admin-pass"))).toBe(false);
+  }, 30_000);
+
+  test("--agent with --skip-start installs an empty data directory without starting or requests", () => {
+    const f = fixture();
+    const actions = join(f.home, "actions.json");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
+    ));
+    Object.assign(env, { HOME: f.home, USERPROFILE: f.home, NO_COLOR: "1", FLAIR_ADMIN_PASS: PASSWORD });
+    const script = `
+      import { mock } from "bun:test";
+      import * as childProcess from "node:child_process";
+      import { EventEmitter } from "node:events";
+      import { appendFileSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      const actions = [];
+      mock.module("node:child_process", () => ({ ...childProcess, spawn: (command, args, options) => {
+        actions.push(args[1]);
+        writeFileSync(${JSON.stringify(actions)}, JSON.stringify(actions));
+        const proc = new EventEmitter();
+        proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter();
+        proc.unref = () => {}; proc.kill = () => {};
+        if (args[1] !== "install") throw new Error("unexpected spawn");
+        writeFileSync(join(options.env.ROOTPATH, "harper-config.yaml"), "rootPath: " + options.env.ROOTPATH + "\\n");
+        queueMicrotask(() => proc.emit("exit", 0));
+        return proc;
+      } }));
+      const init = await import(${JSON.stringify(pathToFileURL(join(ROOT, "dist/commands/init.js")).href)});
+      const bindCli = init.bindCli;
+      mock.module(${JSON.stringify(pathToFileURL(join(ROOT, "dist/commands/init.js")).href)}, () => ({ ...init, bindCli: fns => bindCli({ ...fns,
+        harperBin: () => "fixture-harper.js",
+      }) }));
+      globalThis.fetch = async (url, options = {}) => {
+        appendFileSync(${JSON.stringify(f.log)}, JSON.stringify({ url: String(url), authorization: new Headers(options.headers).get("Authorization") }) + "\\n");
+        throw new Error("fixture stopped");
+      };
+      const { program } = await import(${JSON.stringify(CLI)});
+      await program.parseAsync(${JSON.stringify(["init", "--port", String(HTTP_PORT), "--ops-port", String(OPS_PORT),
+        "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", "--skip-start", "--agent", "canary"])}, { from: "user" });
+    `;
+    const result = spawnSync("bun", ["--eval", script], { cwd: f.home, env, encoding: "utf8", timeout: 20_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(actions, "utf8"))).toEqual(["install"]);
+    expect(existsSync(join(f.dataDir, "harper-config.yaml"))).toBe(true);
+    expect(result.stdout).toContain('Agent registration deferred. After flair start, run flair init --agent "canary"');
+    expect(result.stdout).toContain("no agent registered");
+    expect(readFileSync(join(f.home, ".flair", "keys", "canary.key")).length).toBe(32);
+    expect(requests(f)).toEqual([]);
+  }, 30_000);
+
   for (const skip of [true]) {
     for (const listener of ["unknown", "foreign", "local"] as const) {
       test(`empty directory, occupied port, ${listener} attribution, skip-start=${skip}: no credentials or success`, () => {

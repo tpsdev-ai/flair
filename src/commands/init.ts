@@ -332,7 +332,7 @@ program
   .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
-  .option("--skip-start", "Configure local Harper without starting; defer agent registration")
+  .option("--skip-start", "Do not start Harper; with --agent, defer registration (ignored with --target/--ops-target)")
   .option("--skip-soul", "Skip interactive personality setup")
   .option("--client <client>", "Client(s) to wire: claude-code, codex, gemini, cursor, antigravity, pi (native extension), all, or none")
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
