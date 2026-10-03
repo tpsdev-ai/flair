@@ -55,8 +55,9 @@ Notes on each step:
 2. **Configure the Flair credential**:
    - Settings → Credentials → New → Flair API
    - Base URL: `http://127.0.0.1:19926` (or your Flair host)
-   - Agent ID: any agent who should *own* the imported memories (e.g., `flint`, `pulse`, `archive`)
-   - Admin Password: contents of `~/.flair/admin-pass`
+   - Agent ID: the agent who should *own* the imported memories (e.g., `flint`, `pulse`, `archive`)
+   - Agent Private Key: register a new agent with `flair agent add flint`, or use the existing agent's matching Ed25519 key; encode it with `base64 < ~/.flair/keys/flint.key`
+   - With Agent Private Key empty, the deprecated **Admin Password** selects Harper administrator Basic authentication and warns on each node execution.
 
 3. **Import this workflow**:
    - Workflows → Import from File → select `workflow.json` from this dir

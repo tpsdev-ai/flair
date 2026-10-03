@@ -20,6 +20,8 @@ import {
 } from "../lib/init-admin-pass.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { seedUsingFlairSkill } from "../lib/skill-seed.js";
+import { clearSkillSeedPending, markSkillSeedPending } from "../lib/skill-seed-pending.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
 import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
@@ -33,6 +35,7 @@ import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
 import {
+  commandArg,
   foreignOccupiedListenerDetail,
   staleHarperBeforeAuthNotice,
   type OccupiedHarperListener,
@@ -213,6 +216,26 @@ function seedAgentViaOpsApi(...args: any[]): any {
 
 function seedFederationInstanceViaOpsApi(...args: any[]): any {
   return cli.seedFederationInstanceViaOpsApi(...args);
+}
+
+/**
+ * flair#2141 S2 — seed the org-wide `using-flair` skill on an instance, as the
+ * operator. Idempotent (fixed row ids, read by primary key). A refusal names
+ * what failed and how to fix it, and FAILS this run: init never reports success
+ * after a seed it could not complete.
+ */
+async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, adminPass: string): Promise<void> {
+  const outcome = await seedUsingFlairSkill({
+    baseUrl,
+    user: adminUser,
+    pass: adminPass,
+    notify: (line) => console.log(line),
+  });
+  if (outcome.kind === "refused") {
+    console.error(`Error: the using-flair skill seed was refused — ${outcome.message}`);
+    process.exit(1);
+  }
+  console.log(`using-flair skill: ${outcome.message}`);
 }
 
 function readOccupiedListener(port: number): OccupiedHarperListener {
@@ -435,6 +458,10 @@ program
       } else {
         console.log("No --agent-id provided -- skipping agent registration");
       }
+
+      // flair#2141 S2 — seed the org-wide using-flair skill on the remote
+      // instance, as the operator. Idempotent; a refusal fails this run.
+      await seedUsingFlairSkillViaRest(baseUrl, adminUser, flairAdminPass);
 
       // Reconcile the federation Instance identity row if --remote (hub role).
       // flair#1883: this used to INSERT a row with a fresh random id on every
@@ -1097,6 +1124,28 @@ program
     // means an explicit loopback also persists, so a widening can be reversed.
     persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost, httpBind.host);
 
+    // flair#2141 S2 — seed the org-wide using-flair skill on this instance, as
+    // the operator. Re-initializing an already-installed default local instance
+    // with `flair init --skip-start` defers seeding to a later `flair start`
+    // with the admin credential; that command has no `--data-dir` flag.
+    // (Remote init, `--target`, seeds with or
+    // without `--skip-start`.) A refusal fails this run rather than reporting a
+    // successful init without the skill, so both local paths call it before
+    // they print their success summary.
+    const seedUsingFlairSkillOnInstall = async (): Promise<void> => {
+      if (opts.skipStart) {
+        if (dataDir === defaultDataDir()) {
+          markSkillSeedPending(dataDir);
+          console.log("using-flair skill: pending");
+        } else {
+          console.log("using-flair skill: not seeded");
+        }
+        return;
+      }
+      await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);
+      clearSkillSeedPending(dataDir);
+    };
+
     if (agentId) {
       // Generate or reuse keypair
       mkdirSync(keysDir, { recursive: true });
@@ -1193,6 +1242,9 @@ program
         // An unrun check must not look like a pass.
         console.log(`${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditCheck.detail})`);
       }
+
+      // flair#2141 S2 — seed the using-flair skill before init reports success.
+      await seedUsingFlairSkillOnInstall();
 
       // Output — admin password printed once, never written to disk
       console.log("\n✅ Flair initialized successfully");
@@ -1540,6 +1592,8 @@ program
       }
     } else {
       const httpUrl = `http://127.0.0.1:${httpPort}`;
+      // flair#2141 S2 — seed the using-flair skill before init reports success.
+      await seedUsingFlairSkillOnInstall();
       console.log("\n✅ Flair initialized (no agent registered)");
       console.log(`   Flair URL:   ${httpUrl}`);
       

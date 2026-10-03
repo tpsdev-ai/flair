@@ -9,10 +9,11 @@ describe("FlairApi credential", () => {
     expect(cred.displayName).toBe("Flair API");
   });
 
-  test("declares the three required properties", () => {
+  test("declares baseUrl, agentId, the agent key and the deprecated admin password", () => {
     const names = cred.properties.map((p) => p.name);
     expect(names).toContain("baseUrl");
     expect(names).toContain("agentId");
+    expect(names).toContain("agentPrivateKey");
     expect(names).toContain("adminPassword");
   });
 
@@ -33,35 +34,27 @@ describe("FlairApi credential", () => {
     expect(String(baseUrl.description)).toContain(":19926");
   });
 
-  test("adminPassword is masked (password type)", () => {
-    const pw = cred.properties.find((p) => p.name === "adminPassword")!;
-    expect((pw as any).typeOptions?.password).toBe(true);
-    expect(pw.required).toBe(true);
-  });
-
-  test("agentId is required (memory ownership scope)", () => {
+  test("agentId is required", () => {
     const agentId = cred.properties.find((p) => p.name === "agentId")!;
     expect(agentId.required).toBe(true);
   });
 
-  test("authenticates via n8n's native HTTP Basic auth", () => {
-    // Uses n8n's built-in auth.username / auth.password under
-    // IAuthenticateGeneric — n8n handles base64 internally. Avoids
-    // relying on Buffer being in n8n's expression sandbox (it isn't
-    // always, see commit fixing 2026-05-11 incident).
-    expect(cred.authenticate.type).toBe("generic");
-    const auth = (cred.authenticate.properties as any).auth;
-    expect(auth).toBeDefined();
-    expect(auth.username).toBe("admin");
-    expect(auth.password).toContain("$credentials.adminPassword");
-    // No header-based Authorization — n8n constructs it from auth.{username,password}
-    expect((cred.authenticate.properties as any).headers).toBeUndefined();
+  test("agentPrivateKey is a masked secret and not required (legacy credentials have none)", () => {
+    const key = cred.properties.find((p) => p.name === "agentPrivateKey")!;
+    expect((key as any).typeOptions?.password).toBe(true);
+    expect(key.required).toBeUndefined();
   });
 
-  test("test request hits /Memory (auth-required) on the configured baseUrl", () => {
-    // /Health is unauthenticated and would silently pass with bad creds —
-    // /Memory returns 401 without a valid Authorization header.
-    expect(cred.test.request.url).toBe("/Memory");
-    expect(cred.test.request.baseURL).toContain("$credentials.baseUrl");
+  test("adminPassword is a masked secret named deprecated, and not required", () => {
+    const admin = cred.properties.find((p) => p.name === "adminPassword")!;
+    expect((admin as any).typeOptions?.password).toBe(true);
+    expect(admin.displayName.toLowerCase()).toContain("deprecated");
+    expect(admin.required).toBeUndefined();
+  });
+
+  test("uses the node credential test instead of declarative Basic auth", () => {
+    // The old credential test used Basic; the node test generates Ed25519 signatures.
+    expect((cred as any).authenticate).toBeUndefined();
+    expect((cred as any).test).toBeUndefined();
   });
 });

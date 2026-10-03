@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, envKeyNames, readEnvValue } from "../../src/component-env.js";
 import { OAUTH_METADATA_PATH, publishedEntryNames, resolveDeployPublicUrl, stageDeployRoot, verifyPublicIssuer } from "../../src/deploy.js";
+import { UNSPECIFIED_TARGETS } from "../helpers/mcp-enable-target-shapes.ts";
 
 const require_ = createRequire(import.meta.url);
 
@@ -114,6 +115,9 @@ async function packedEnvText(dir: string): Promise<string | null> {
 }
 
 describe("resolveDeployPublicUrl", () => {
+  test.each(UNSPECIFIED_TARGETS)("supplies no unspecified destination %s", (url) => {
+    expect(resolveDeployPublicUrl(url)).toBeNull();
+  });
   test("a Fabric target is the value to advertise", () => {
     expect(resolveDeployPublicUrl("https://cluster.org.harperfabric.com")).toBe("https://cluster.org.harperfabric.com");
     expect(resolveDeployPublicUrl("https://flair.example.com/")).toBe("https://flair.example.com");
@@ -265,6 +269,12 @@ describe("stageDeployRoot — what harper actually uploads", () => {
 
 describe("verifyPublicIssuer", () => {
   const BASE = "https://flair.example.com";
+
+  test.each(UNSPECIFIED_TARGETS)("refuses unspecified advertised issuer %s", async (issuer) => {
+    await expect(verifyPublicIssuer({
+      baseUrl: BASE, timeoutMs: 0, fetchImpl: fakeFetch(() => json({ issuer })),
+    })).rejects.toThrow("FLAIR_PUBLIC_URL");
+  });
 
   function fakeFetch(handler: (url: string) => Response | Promise<Response>): typeof fetch {
     return (async (input: any) => handler(String(input))) as unknown as typeof fetch;
