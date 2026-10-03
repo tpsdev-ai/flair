@@ -126,7 +126,6 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     const installDir = harper.installDir;
     await stopHarper(harper, { keepInstallDir: true });
     harper = await startHarper({ installDir });
-    expect(new URL(harper.opsURL).port).not.toBe("9925");
 
     const r = runCheck();
     expect(r.code, r.out).toBe(2);

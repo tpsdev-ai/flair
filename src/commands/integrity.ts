@@ -2,14 +2,14 @@
  * integrity.ts — `flair integrity check` (flair#2213).
  *
  * Operator-invoked, one-shot: compare the live Memory corpus over the operations
- * API with the checkpoint. Two reads with
- * explicit timeouts, no server-side job. `--json` for machines, human output
+ * API with the checkpoint. `--json` for machines, human output
  * otherwise. A read failure reports UNKNOWN and never overwrites the checkpoint.
  *
  * Command group lives here (flair#2213), bound via bindIntegrityCli() the same
  * way the other extracted command groups are.
  */
 import { Command } from "commander";
+import { readExactTableCount } from "../lib/ops-table-count.js";
 import { resolveHome } from "../lib/home.js";
 import {
   compareScan,
@@ -48,26 +48,44 @@ async function readCorpus(
   opsPort: number | string,
   auth: string,
 ): Promise<{ rows: MemoryRowLite[]; deletions: DeletionRecordLite[] }> {
-  const search = async (table: string, attributes: string[]): Promise<any[]> => {
+  const opsPost = async (body: Record<string, unknown>, context: string): Promise<unknown> => {
     const res = await fetch(opsUrl(opsPort), {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
-      body: JSON.stringify({
-        operation: "search_by_value",
-        database: "flair",
-        table,
-        search_attribute: "id",
-        search_value: "*",
-        get_attributes: attributes,
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(OPS_TIMEOUT_MS),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`operations API ${table} search failed (${res.status}): ${text.slice(0, 300)}`);
+      throw new Error(`operations API ${context} failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    const body = await res.json();
+    return res.json();
+  };
+  const search = async (table: string, attributes: string[]): Promise<any[]> => {
+    const expected = await readExactTableCount(opsPost, table);
+    const body = await opsPost({
+      operation: "search_by_value",
+      database: "flair",
+      table,
+      search_attribute: "id",
+      search_value: "*",
+      get_attributes: attributes,
+    }, `${table} search`);
     if (!Array.isArray(body)) throw new Error(`operations API ${table} search returned a non-array body`);
+    const ids = new Set<string>();
+    for (const row of body) {
+      if (!row || typeof row.id !== "string" || !row.id.trim() || ids.has(row.id)) {
+        throw new Error(`operations API ${table} search returned an invalid or duplicate id`);
+      }
+      ids.add(row.id);
+    }
+    if (ids.size !== expected) {
+      throw new Error(`${table}: server reports ${expected} rows, integrity read ${ids.size}; retry integrity check when writes are paused`);
+    }
+    const after = await readExactTableCount(opsPost, table);
+    if (after !== expected) {
+      throw new Error(`${table}: source count changed from ${expected} to ${after}; integrity read ${ids.size}; retry integrity check when writes are paused`);
+    }
     return body;
   };
 

@@ -23,8 +23,9 @@ test("a missing checkpointed token is replaced and never advances, even with --a
           let output = "";
           process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
           globalThis.fetch = (async (_url: any, init: any) => {
-            const { table } = JSON.parse(init.body);
-            return new Response(JSON.stringify(table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken }] : deletions));
+            const { operation, table } = JSON.parse(init.body);
+            const rows = table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken }] : deletions;
+            return new Response(JSON.stringify(operation === "describe_table" ? { record_count: rows.length } : rows));
           }) as typeof fetch;
           const program = new Command();
           register(program);
@@ -58,7 +59,7 @@ test("a dangling checkpoint symlink reports UNKNOWN and stays untouched even wit
   try {
     bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
     process.exit = ((code: number) => { throw new Error(`exit:${code}`); }) as typeof process.exit;
-    globalThis.fetch = (async () => new Response("[]")) as unknown as typeof fetch;
+    globalThis.fetch = (async (_url: any, init: any) => new Response(JSON.stringify(JSON.parse(init.body).operation === "describe_table" ? { record_count: 0 } : []))) as typeof fetch;
     for (const accept of [false, true]) {
       let output = "";
       process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
@@ -93,8 +94,9 @@ test("a legacy row's first token is healthy and adopted into the next checkpoint
     let output = "";
     process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
     globalThis.fetch = (async (_url: any, init: any) => {
-      const { table } = JSON.parse(init.body);
-      return new Response(JSON.stringify(table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken: "first-token" }] : []));
+      const { operation, table } = JSON.parse(init.body);
+      const rows = table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken: "first-token" }] : [];
+      return new Response(JSON.stringify(operation === "describe_table" ? { record_count: rows.length } : rows));
     }) as typeof fetch;
     const program = new Command();
     register(program);
@@ -125,8 +127,9 @@ test("malformed successful Memory responses are UNKNOWN and never advance even w
       let output = "";
       process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
       globalThis.fetch = (async (_url: any, init: any) => {
-        const { table } = JSON.parse(init.body);
-        return new Response(JSON.stringify(table === "Memory" ? [row] : []));
+        const { operation, table } = JSON.parse(init.body);
+        const rows = table === "Memory" ? [row] : [];
+        return new Response(JSON.stringify(operation === "describe_table" ? { record_count: rows.length } : rows));
       }) as typeof fetch;
       const program = new Command();
       register(program);
@@ -184,9 +187,11 @@ test("the command reads incarnation fields and reports missing or replaced named
           process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
           console.log = (value) => { output += String(value); };
           globalThis.fetch = (async (_url: any, init: any) => {
-            const { table, get_attributes } = JSON.parse(init.body);
+            const { operation, table, get_attributes } = JSON.parse(init.body);
+            const rows = table === "Memory" ? (replaced ? [{ id: "m", durability: "persistent", instanceToken: "new" }] : []) : [{ id: "d", memoryId: "m", memoryInstanceToken, at: "deleted" }];
+            if (operation === "describe_table") return new Response(JSON.stringify({ record_count: rows.length }));
             expect(get_attributes).toContain(table === "Memory" ? "instanceToken" : "memoryInstanceToken");
-            return new Response(JSON.stringify(table === "Memory" ? (replaced ? [{ id: "m", durability: "persistent", instanceToken: "new" }] : []) : [{ id: "d", memoryId: "m", memoryInstanceToken, at: "deleted" }]));
+            return new Response(JSON.stringify(rows));
           }) as typeof fetch;
           const program = new Command();
           register(program);
