@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
@@ -16,6 +16,34 @@ import {
   type ServiceManagerTripwire,
 } from "../test/helpers/fake-launchctl.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
+
+/** The short, canonical temp base darwin unit steps run under (flair#2137). */
+export const DARWIN_TEMP_BASE = "/private/tmp";
+
+/**
+ * The base for the lane's own short temp root, or `undefined` to keep using the
+ * OS temp dir as-is (flair#2137).
+ *
+ * On darwin the OS temp dir is the per-user `/var/folders/<xx>/<id>/T/`: 49
+ * bytes, and `/var` is a symlink to `/private/var`. A scratch HOME beneath it
+ * pushes `flair init`'s operations-socket path past its 103-byte limit, so a
+ * handful of unit tests fail on macOS by design; and a guard watching the
+ * unresolved path misses a resolved entry (flair#2136). `/private/tmp` is short
+ * and already canonical.
+ *
+ * Everywhere else the OS temp dir is already short and canonical, so the lane
+ * keeps using it unchanged (`undefined`).
+ *
+ * `FLAIR_UNIT_TEMP_BASE`, when set nonblank, overrides the platform default.
+ *
+ * Pure — platform and environment in, base out — so the darwin branch is
+ * unit-testable on any host.
+ */
+export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined {
+  const override = env.FLAIR_UNIT_TEMP_BASE?.trim();
+  if (override) return override;
+  return platform === "darwin" ? DARWIN_TEMP_BASE : undefined;
+}
 
 export interface UnitStep {
   name: string;
@@ -432,6 +460,16 @@ export function runUnitSteps(
   options: UnitLaneOptions = {},
 ): number {
   const { keepGoing = false, limits, createSandbox = createSandboxHome } = options;
+  // flair#2137: on darwin, run the whole lane under a short, canonical temp root
+  // and point the temp-dir leak guard at it. Setting TMPDIR in THIS process is
+  // what makes createSandboxHome, the tripwire and every child resolve the same
+  // root through `os.tmpdir()`; `finish` restores it and removes the root.
+  const tempBase = unitTempBase(process.platform, process.env);
+  const laneTempRoot = tempBase === undefined
+    ? undefined
+    : realpathSync(mkdtempSync(join(tempBase, "flair-unit-lane-")));
+  const previousTmpdir = process.env.TMPDIR;
+  if (laneTempRoot !== undefined) process.env.TMPDIR = laneTempRoot;
   const laneBudgetMs = limits?.laneBudgetMs;
   const deadline = laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
   const budgetRanOut = `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
@@ -445,6 +483,11 @@ export function runUnitSteps(
   const ownsTripwire = options.tripwire === undefined;
   const finish = (code: number): number => {
     if (ownsTripwire) tripwire.cleanup();
+    if (laneTempRoot !== undefined) {
+      if (previousTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmpdir;
+      rmSync(laneTempRoot, { recursive: true, force: true });
+    }
     return code;
   };
   // Read the tripwire log after a step. A nonempty log is a step failure naming

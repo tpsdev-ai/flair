@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createSandboxHome } from "../helpers/sandbox-home.ts";
 import {
   CI_JOB_LIMIT_MS,
   CI_OUTSIDE_LANE_MS,
+  DARWIN_TEMP_BASE,
   KEEP_GOING_LANE_BUDGET_MS,
   KEEP_GOING_LIMITS,
   ROOT_STEP_TIMEOUT_MS,
@@ -15,6 +16,7 @@ import {
   runUnitSteps,
   unitEnvironment,
   unitPlan,
+  unitTempBase,
 } from "../../scripts/test-unit.ts";
 
 const root = join(import.meta.dir, "../..");
@@ -418,5 +420,76 @@ describe("shared unit lane", () => {
     ));
     expect(code).toBe(0);
     expect(logs).toMatch(/quick step: \d+ s/);
+  });
+
+  test("the darwin temp base is /private/tmp; other platforms keep the OS temp dir (flair#2137)", () => {
+    expect(DARWIN_TEMP_BASE).toBe("/private/tmp");
+    expect(unitTempBase("darwin", {})).toBe(DARWIN_TEMP_BASE);
+    expect(unitTempBase("linux", {})).toBeUndefined();
+    expect(unitTempBase("win32", {})).toBeUndefined();
+    // An explicit base overrides the platform default (the lane's own seam).
+    expect(unitTempBase("linux", { FLAIR_UNIT_TEMP_BASE: "/short" })).toBe("/short");
+    expect(unitTempBase("darwin", { FLAIR_UNIT_TEMP_BASE: " /short " })).toBe("/short");
+  });
+
+  test("a short temp base runs every step under a fresh lane root, and the leak guard watches it (flair#2137)", () => {
+    const base = fixture();
+    const home = fixture();
+    const seen = join(base, "child-tmpdir.txt");
+    // The step records its TMPDIR, then leaves a flair-* dir in it.
+    const script =
+      `const fs = require("node:fs"), path = require("node:path");` +
+      `fs.writeFileSync(${JSON.stringify(seen)}, process.env.TMPDIR || "");` +
+      `fs.mkdirSync(path.join(process.env.TMPDIR, "flair-2137-leak"));`;
+    const savedTmpdir = process.env.TMPDIR;
+    const savedBase = process.env.FLAIR_UNIT_TEMP_BASE;
+    const { result: code, errors } = (() => {
+      process.env.FLAIR_UNIT_TEMP_BASE = base;
+      try {
+        return captureErrors(() => runUnitSteps(
+          [{ name: "leaks into its TMPDIR", cwd: base, args: ["-e", script], files: [] }],
+          process.execPath,
+          home,
+        ));
+      } finally {
+        if (savedBase === undefined) delete process.env.FLAIR_UNIT_TEMP_BASE;
+        else process.env.FLAIR_UNIT_TEMP_BASE = savedBase;
+      }
+    })();
+    const childTmpdir = readFileSync(seen, "utf8").trim();
+    // The step ran under a fresh, symlink-resolved mkdtemp directly under the base...
+    expect(dirname(childTmpdir)).toBe(realpathSync(base));
+    expect(basename(childTmpdir).startsWith("flair-unit-lane-")).toBe(true);
+    // ...the step itself succeeded, so only the leak it left in its TMPDIR fails the lane...
+    expect(code).toBe(1);
+    expect(errors).toContain("Temp-dir leak guard FAILED");
+    expect(errors).toContain("flair-2137-leak");
+    expect(errors).toContain(childTmpdir);
+    // ...and the lane removed its own root and restored the ambient TMPDIR.
+    expect(readdirSync(base).filter((name) => name.startsWith("flair-unit-lane-"))).toEqual([]);
+    expect(process.env.TMPDIR).toBe(savedTmpdir);
+  });
+
+  test("a short temp base with no leak passes and still removes its root (flair#2137)", () => {
+    const base = fixture();
+    const home = fixture();
+    const savedTmpdir = process.env.TMPDIR;
+    const savedBase = process.env.FLAIR_UNIT_TEMP_BASE;
+    const code = (() => {
+      process.env.FLAIR_UNIT_TEMP_BASE = base;
+      try {
+        return runUnitSteps(
+          [{ name: "clean step", cwd: base, args: ["-e", "process.exit(0)"], files: [] }],
+          process.execPath,
+          home,
+        );
+      } finally {
+        if (savedBase === undefined) delete process.env.FLAIR_UNIT_TEMP_BASE;
+        else process.env.FLAIR_UNIT_TEMP_BASE = savedBase;
+      }
+    })();
+    expect(code).toBe(0);
+    expect(readdirSync(base).filter((name) => name.startsWith("flair-unit-lane-"))).toEqual([]);
+    expect(process.env.TMPDIR).toBe(savedTmpdir);
   });
 });
