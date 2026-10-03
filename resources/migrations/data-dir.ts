@@ -74,9 +74,10 @@
  *      instead of the environment leaves candidate 4 empty — this covers
  *      that case without guessing.
  *
- * The probe never creates a candidate: it creates only `.migrations`
- * non-recursively inside an existing directory and refuses symlinks at
- * either path. The first usable candidate wins.
+ * The probe creates only `.migrations` non-recursively inside an existing
+ * candidate. It refuses symlinks present at the probe at either path.
+ * Node offers no openat-style handle; a swap after the check is not prevented.
+ * The first usable candidate wins.
  *
  * If NO candidate is usable, `resolveWritableMigrationDataDir` returns
  * `dataDir: null` WITH the per-candidate reasons, and the boot path turns

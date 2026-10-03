@@ -103,7 +103,11 @@ export function acquireMigrationLock(deps: Partial<LockDeps> & { lockPath: strin
     return { acquired: false, reason: "already held in-process (another async caller in this process holds it)" };
   }
 
-  mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  try {
+    mkdirSync(dirname(lockPath), { mode: 0o700 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
 
   if (existsSync(lockPath)) {
     const holder = readHolder(lockPath);

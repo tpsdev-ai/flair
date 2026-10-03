@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
 import { acquireMigrationLock, _resetInProcessLockForTests, DEFAULT_STALE_MS } from "../../resources/migrations/lock.ts";
 
 let testRoot: string;
@@ -24,6 +25,15 @@ afterEach(() => {
 });
 
 describe("acquireMigrationLock — basic acquire/release", () => {
+  it("fails with ENOENT when the candidate is removed after the probe", () => {
+    expect(probeMigrationDataDir(testRoot).ok).toBe(true);
+    rmSync(testRoot, { recursive: true });
+    let error: unknown;
+    try { acquireMigrationLock({ lockPath }); } catch (err) { error = err; }
+    expect((error as NodeJS.ErrnoException)?.code).toBe("ENOENT");
+    expect(existsSync(testRoot)).toBe(false);
+  });
+
   it("acquires when no lock file exists, writing pid/hostname/startedAt", () => {
     const result = acquireMigrationLock({ lockPath });
     expect(result.acquired).toBe(true);

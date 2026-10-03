@@ -175,14 +175,11 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     expect(raw).not.toContain("synthetic row");
   });
 
-  test("a risk-scoped (schema+metadata) snapshot was created at 0700 under <dataDir>/.migrations/snapshots/, then pruned to the retention policy", async () => {
+  test("a risk-scoped (schema+metadata) snapshot was created at 0700 under <dataDir>/.migrations/snapshots/", async () => {
     const snapshotRoot = join(harper.installDir, ".migrations", "snapshots");
     expect(existsSync(snapshotRoot)).toBe(true);
 
     const entries = readdirSync(snapshotRoot).filter((e) => e.startsWith(SYNTHETIC_MIGRATION_ID));
-    // Retention (keep-last-3 / 30-day) auto-prunes on success — with exactly
-    // one successful cycle here, the one snapshot this run created should
-    // still exist (it's both the most recent AND well under 30 days old).
     expect(entries.length).toBeGreaterThanOrEqual(1);
 
     const dir = join(snapshotRoot, entries[0]);
@@ -194,8 +191,6 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     expect(manifest.scope).toBe("schema+metadata");
     expect(manifest.migrationId).toBe(SYNTHETIC_MIGRATION_ID);
 
-    // schema+metadata scope: a schema.json sits alongside the manifest —
-    // never a data dump of the seeded rows' content.
     const schemaPath = join(dir, "schema.json");
     if (existsSync(schemaPath)) {
       const schemaText = await Bun.file(schemaPath).text();
