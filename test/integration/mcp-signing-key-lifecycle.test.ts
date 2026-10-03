@@ -23,6 +23,7 @@ const CLIENT_ID = "lifecycle-dcr-client";
 const REDIRECT_URI = `${ISSUER}/callback`;
 
 const ENV_KEYS = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_MCP_SIGNING_KEY_PEM", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
+let originalEnv: Record<(typeof ENV_KEYS)[number], string | undefined> | undefined;
 
 let pinPrivatePem: string;
 let pinPublicPem: string;
@@ -46,7 +47,13 @@ afterAll(async () => {
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
-  for (const k of ENV_KEYS) delete process.env[k];
+  if (originalEnv) {
+    for (const k of ENV_KEYS) {
+      const value = originalEnv[k];
+      if (value === undefined) delete process.env[k];
+      else process.env[k] = value;
+    }
+  }
 });
 
 /** A temp app dir carrying the shipped config (or a mutated copy) + node_modules/dist symlinks. */
@@ -62,6 +69,7 @@ function makeWorkDir(prefix: string, mutate?: (shipped: string) => string): stri
 
 /** MCP on, issuer + a CONFIGURED github provider, and (optionally) a staged pin. */
 function setEnableEnv(pin?: string): void {
+  originalEnv ??= Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]])) as Record<(typeof ENV_KEYS)[number], string | undefined>;
   process.env.FLAIR_MCP_OAUTH = "true";
   process.env.FLAIR_MCP_ISSUER = ISSUER;
   process.env.OAUTH_GITHUB_CLIENT_ID = "lifecycle-client-id";
