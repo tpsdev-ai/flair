@@ -5,8 +5,9 @@
  * The live behaviour (a real ephemeral Harper, an ops-API delete beneath Flair,
  * a restart) is in test/integration/memory-integrity-watcher.test.ts.
  */
-import { describe, test, expect, afterEach } from "bun:test";
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { describe, test, expect, afterEach, spyOn } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -44,10 +45,34 @@ describe("checkpoint file I/O", () => {
     expect(existsSync(path)).toBe(true);
     expect(statSync(path).mode & 0o777).toBe(0o600);
     // No temp file left behind.
-    expect(existsSync(`${path}.tmp`)).toBe(false);
+    expect(readdirSync(d).filter(name => name.startsWith("integrity-checkpoint.json.tmp-"))).toEqual([]);
     const read = readCheckpoint(path);
     expect(read.kind).toBe("ok");
     if (read.kind === "ok") expect(read.checkpoint).toEqual(cp);
+  });
+
+  test("failure after temp creation cleans up and preserves the prior checkpoint", () => {
+    const d = tmp();
+    const path = join(d, "integrity-checkpoint.json");
+    const prior = baseCheckpoint([["m1", "permanent"]]);
+    writeCheckpoint(path, prior);
+    const original = readFileSync(path, "utf8");
+    let createdTemp = "";
+    const failure = spyOn(fs, "chmodSync").mockImplementation((tempPath) => {
+      createdTemp = String(tempPath);
+      expect(createdTemp.startsWith(`${path}.tmp-${process.pid}-`)).toBe(true);
+      expect(existsSync(createdTemp)).toBe(true);
+      throw new Error("injected chmod failure");
+    });
+    try {
+      expect(() => writeCheckpoint(path, baseCheckpoint([["m2", "persistent"]]))).toThrow("injected chmod failure");
+      expect(createdTemp).not.toBe("");
+      expect(readdirSync(d).filter(name => name.startsWith("integrity-checkpoint.json.tmp-"))).toEqual([]);
+      expect(readFileSync(path, "utf8")).toBe(original);
+      expect(readCheckpoint(path)).toEqual({ kind: "ok", checkpoint: prior });
+    } finally {
+      failure.mockRestore();
+    }
   });
 
   test("a missing file is `absent`; a corrupt file is `unreadable` (never absent)", () => {
@@ -92,7 +117,7 @@ describe("compareScan", () => {
     expect(v.unexplainedDecrease).toEqual({});
   });
 
-  test("a durable id gone WITH a deletion record is attributed, not alerted", () => {
+  test("a durable id gone with new history matching its nonempty checkpointed token is attributed", () => {
     const v = compareScan({
       checkpoint: cp,
       rows: rowsOf([["s1", "persistent"], ["std1", "standard"], ["e1", "ephemeral"]]),
@@ -116,7 +141,7 @@ describe("compareScan", () => {
     expect(v.tierChanges).toEqual([{ id: "p1", from: "permanent", to: "standard" }]);
   });
 
-  test("an equal-size replacement (one durable removed, one added) is caught by the id set", () => {
+  test("an equal-size replacement with a different ID is caught by the id set", () => {
     const v = compareScan({
       checkpoint: cp,
       rows: rowsOf([["p1-new", "permanent"], ["s1", "persistent"], ["std1", "standard"], ["e1", "ephemeral"]]),
@@ -144,7 +169,7 @@ describe("compareScan", () => {
     // drop (3 -> 1) exceeds what the id diff explains.
     const inconsistent: IntegrityCheckpoint = {
       version: 2,
-      instanceTokens: { p1: null, s1: null, std1: null, e1: null },
+      instanceTokens: Object.fromEntries(rowsOf([["p1", "permanent"], ["s1", "persistent"], ["std1", "standard"], ["e1", "ephemeral"]]).map(row => [row.id, row.instanceToken])),
       historyIds: [],
       scannedAt: "2026-10-02T00:00:00.000Z",
       byDurability: { permanent: 3, persistent: 1, standard: 1, ephemeral: 1 },
@@ -181,6 +206,27 @@ describe("checkpoint regressions", () => {
     const cp = emptyCheckpoint("before", rows);
     expect(compareScan({ checkpoint: cp, rows: [], deletions: [], scannedAt: "missing" }).status).toBe("alert");
     expect(compareScan({ checkpoint: cp, rows, deletions: [], scannedAt: "returned" }).status).toBe("healthy");
+  });
+
+  test("raw delete and same-ID recreate between scans is a named replaced loss", () => {
+    const cp = emptyCheckpoint("before", [{ id: "m", durability: "permanent", instanceToken: "old" }]);
+    const rows = [{ id: "m", durability: "permanent", instanceToken: "new" }];
+    const verdict = compareScan({ checkpoint: cp, rows, deletions: [], scannedAt: "after" });
+    expect(verdict.status).toBe("alert");
+    expect(verdict.losses).toEqual([{ id: "m", tier: "permanent", reason: "replaced" }]);
+    expect(verdict.unexplainedDecrease).toEqual({});
+  });
+
+  test("recorded delete and same-ID recreate explains the checkpointed incarnation", () => {
+    const cp = emptyCheckpoint("before", [{ id: "m", durability: "permanent", instanceToken: "old" }]);
+    const rows = [{ id: "m", durability: "permanent", instanceToken: "new" }];
+    for (const token of ["old", "new"]) {
+      const deletions = [{ id: "d", memoryId: "m", memoryInstanceToken: token, at: "deleted" }];
+      const verdict = compareScan({ checkpoint: cp, rows, deletions, scannedAt: "after" });
+      expect(verdict.status).toBe(token === "old" ? "healthy" : "alert");
+      expect(verdict.attributedDeletes).toEqual(token === "old" ? [{ id: "m", tier: "permanent", at: "deleted" }] : []);
+      expect(verdict.losses).toEqual(token === "old" ? [] : [{ id: "m", tier: "permanent", reason: "replaced" }]);
+    }
   });
 
   test("a delete of another incarnation cannot explain a missing checkpointed row", () => {
@@ -222,7 +268,7 @@ describe("checkpoint regressions", () => {
     expect(compareScan({ checkpoint: cp, rows: [], deletions: [old, fresh], scannedAt: "2026-10-03" }).status).toBe("healthy");
   });
 
-  test("__proto__ survives checkpoint I/O and an equal-size replacement alerts", () => {
+  test("__proto__ survives checkpoint I/O and a replacement with a different ID alerts", () => {
     const cp = emptyCheckpoint("now", rowsOf([["__proto__", "permanent"]]));
     const path = join(tmp(), "checkpoint.json");
     writeCheckpoint(path, cp);

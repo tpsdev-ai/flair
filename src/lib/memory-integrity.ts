@@ -9,9 +9,9 @@
  * written atomically). `flair integrity check` scans the live corpus and
  * compares it to that checkpoint:
  *
- *   - a durable-tier id (permanent / persistent) that is GONE and has no
+ *   - a durable-tier id (permanent / persistent) that is missing or replaced and has no
  *     new matching deletion record is an UNEXPLAINED LOSS → alert, naming the id.
- *     A reappearing row can make the next scan healthy; `--accept` re-baselines a loss.
+ *     A row returning with its checkpointed token can make the next scan healthy; `--accept` re-baselines a loss.
  *   - a durable-tier id gone WITH a new matching deletion record is history-backed.
  *   - an id whose durability changed is an observed TIER CHANGE.
  *   - a durable-tier count decrease beyond the id-set diff is also an alert.
@@ -77,6 +77,7 @@ export interface TierChange {
 export interface UnexplainedLoss {
   id: string;
   tier: string;
+  reason?: "replaced";
 }
 
 export interface IntegrityVerdict {
@@ -90,7 +91,7 @@ export interface IntegrityVerdict {
   attributedDeletes: AttributedDeletion[];
   /** Ids whose durability changed since the checkpoint. */
   tierChanges: TierChange[];
-  /** Durable ids gone without a matching new history record. */
+  /** Missing or replaced durable ids without matching new history. */
   losses: UnexplainedLoss[];
   /** Durable count decreases beyond the id-set diff, tier -> delta. */
   unexplainedDecrease: Record<string, number>;
@@ -148,8 +149,8 @@ export function compareScan(opts: {
   scannedAt: string;
 }): IntegrityVerdict {
   const { checkpoint, rows, deletions, scannedAt } = opts;
-  const current = new Map<string, string>();
-  for (const row of rows) current.set(row.id, normalizeTier(row.durability));
+  const current = new Map<string, MemoryRowLite>();
+  for (const row of rows) current.set(row.id, row);
   const counts = tallyByDurability(rows);
 
   const deletedTiers = new Map<string, DeletionRecordLite>();
@@ -167,17 +168,20 @@ export function compareScan(opts: {
   const losses: UnexplainedLoss[] = [];
 
   for (const [id, cpTier] of Object.entries(checkpoint.ids)) {
-    const curTier = current.get(id);
-    if (curTier === undefined) {
+    const curRow = current.get(id);
+    const curToken = typeof curRow?.instanceToken === "string" && curRow.instanceToken.length > 0 ? curRow.instanceToken : null;
+    const replaced = curRow !== undefined && curToken !== checkpoint.instanceTokens[id];
+    if (curRow === undefined || replaced) {
       const record = deletedTiers.get(id);
       if (record) {
         attributedDeletes.push({ id, tier: cpTier, at: record.at });
       } else if (isDurableTier(cpTier)) {
-        losses.push({ id, tier: cpTier });
+        losses.push({ id, tier: cpTier, ...(replaced ? { reason: "replaced" as const } : {}) });
       }
-      // A missing non-durable id without a record is out of the monitored set.
+      // Non-durable losses without a record are out of the monitored set.
       continue;
     }
+    const curTier = normalizeTier(curRow.durability);
     if (curTier !== cpTier) tierChanges.push({ id, from: cpTier, to: curTier });
   }
 

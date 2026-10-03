@@ -497,6 +497,8 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **IdJagReplay** | oauth.graphql | no | Used ID-JAG `jti` values |
 | **OAuthSingleUse** | oauth.graphql | no | A claim to redeem an authorization code or rotate a refresh token, keyed by its SHA-256 |
 
+`flair integrity check` reports missing or replaced checkpointed durable Memory IDs without matching new deletion history. A row created and lost entirely between scans is not observed.
+
 ---
 
 ## See also

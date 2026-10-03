@@ -788,13 +788,13 @@ flair revoke
       attr: adminUser
 
 flair integrity
-  description: Data-integrity tools: detect unexplained loss of durable Memory rows
+  description: Detect missing or replaced checkpointed durable Memory IDs
   usage: [options] [command]
   options: (none)
   subcommands: check
 
 flair integrity check
-  description: Scan the live Memory corpus against the out-of-store checkpoint and report
+  description: Report missing or replaced checkpointed durable IDs; rows created and lost entirely between scans are not observed
   usage: [options]
   options:
     --json
@@ -2678,7 +2678,7 @@ Commands:
   idp                                       Manage enterprise IdP configurations (XAA)
   grant [options] <from-agent> <to-agent>   Grant an agent read access to another agent's memories
   revoke [options] <from-agent> <to-agent>  Revoke a memory grant between two agents
-  integrity                                 Data-integrity tools: detect unexplained loss of durable Memory rows
+  integrity                                 Detect missing or replaced checkpointed durable Memory IDs
   federation                                Manage federation (hub-and-spoke sync)
   rem                                       Memory hygiene and reflection
   status [options]                          Show Flair instance status, memory stats, and agent info
@@ -3460,7 +3460,7 @@ Global Options:
 ----- flair integrity -----
 Usage: flair integrity [options] [command]
 
-Data-integrity tools: detect unexplained loss of durable Memory rows
+Detect missing or replaced checkpointed durable Memory IDs
 
 Options:
   -h, --help       display help for command
@@ -3469,14 +3469,15 @@ Global Options:
   -v, --version    output the version number
 
 Commands:
-  check [options]  Scan the live Memory corpus against the out-of-store
-                   checkpoint and report
+  check [options]  Report missing or replaced checkpointed durable IDs; rows
+                   created and lost entirely between scans are not observed
   help [command]   display help for command
 
 ----- flair integrity check -----
 Usage: flair integrity check [options]
 
-Scan the live Memory corpus against the out-of-store checkpoint and report
+Report missing or replaced checkpointed durable IDs; rows created and lost
+entirely between scans are not observed
 
 Options:
   --json               Print the verdict as JSON

@@ -4,9 +4,9 @@
  *
  * Checkpoint a corpus, remove a permanent row BENEATH Flair (an ops-API delete
  * that leaves no deletion record) and restart, then scan: the watcher must alert
- * naming the id. A legitimate DELETE through Flair is attributed, not alerted. A
+ * naming the id. A new deletion record matching a nonempty checkpointed token is attributed. A
  * scan that cannot reach the instance reports UNKNOWN and leaves the checkpoint
- * alone. An equal-size replacement (one durable row removed, one added) is caught
+ * alone. An equal-size replacement with a different ID is caught
  * by the ID set even though the count is unchanged.
  *
  * Throwaway HOME + data dir, ephemeral ports (never 9925/9926).
@@ -137,7 +137,7 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect(readFileSync(checkpointPath(), "utf-8")).toBe(before);
   }, 120_000);
 
-  test("a legitimate DELETE through Flair is attributed, not alerted as loss", async () => {
+  test("a DELETE with new history matching the checkpointed token is attributed", async () => {
     // Re-baseline, then delete a durable row through Flair's own DELETE route.
     rmSync(checkpointPath(), { force: true });
     await opsInsertMemory("itg-legit-perm", "permanent");
@@ -163,7 +163,7 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect(readFileSync(checkpointPath(), "utf-8")).toBe(before);
   }, 150_000);
 
-  test("an equal-size replacement is caught by the ID set (a count alone would miss it)", async () => {
+  test("an equal-size replacement with a different ID is caught by the ID set", async () => {
     rmSync(checkpointPath(), { force: true });
     await opsInsertMemory("itg-swap-old", "permanent");
     expect(runCheck().json?.status).toBe("baseline");

@@ -123,7 +123,7 @@ function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
   }
   if (v.losses.length > 0) {
     lines.push(`  ❌ ${v.losses.length} UNEXPLAINED durable row loss(es) — no new matching deletion record:`);
-    for (const l of v.losses) lines.push(`    - ${l.id} (${l.tier})`);
+    for (const l of v.losses) lines.push(`    - ${l.id} (${l.tier}${l.reason ? `, ${l.reason}` : ""})`);
   }
   for (const [tier, delta] of Object.entries(v.unexplainedDecrease)) {
     lines.push(`  ❌ unexplained ${tier} decrease of ${delta} not accounted for by the id set`);
@@ -136,11 +136,11 @@ function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
 export function register(program: Command): void {
   const integrity = program
     .command("integrity")
-    .description("Data-integrity tools: detect unexplained loss of durable Memory rows");
+    .description("Detect missing or replaced checkpointed durable Memory IDs");
 
   integrity
     .command("check")
-    .description("Scan the live Memory corpus against the out-of-store checkpoint and report")
+    .description("Report missing or replaced checkpointed durable IDs; rows created and lost entirely between scans are not observed")
     .option("--json", "Print the verdict as JSON")
     .option("--accept", "Advance the checkpoint even when a loss is open (re-baseline; deliberate)")
     .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)")

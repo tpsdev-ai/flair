@@ -60,7 +60,7 @@ test("UNKNOWN human output reports unavailable corpus counts", async () => {
   }
 });
 
-test("the command reads incarnation fields and reports a named loss without count drift", async () => {
+test("the command reads incarnation fields and reports missing or replaced named losses without count drift", async () => {
   const originalFetch = globalThis.fetch;
   const originalExit = process.exit;
   const originalWrite = process.stdout.write;
@@ -71,32 +71,35 @@ test("the command reads incarnation fields and reports a named loss without coun
   try {
     bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
     process.exit = ((code: number) => { throw new Error(`exit:${code}`); }) as typeof process.exit;
-    for (const memoryInstanceToken of ["2026-10-01", instanceToken]) {
-      for (const json of [true, false]) {
-        writeFileSync(path, checkpoint);
-        let output = "";
-        process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
-        console.log = (value) => { output += String(value); };
-        globalThis.fetch = (async (_url: any, init: any) => {
-          const { table, get_attributes } = JSON.parse(init.body);
-          expect(get_attributes).toContain(table === "Memory" ? "instanceToken" : "memoryInstanceToken");
-          return new Response(JSON.stringify(table === "Memory" ? [] : [{ id: "d", memoryId: "m", memoryInstanceToken, at: "deleted" }]));
-        }) as typeof fetch;
-        const program = new Command();
-        register(program);
-        const healthy = memoryInstanceToken === instanceToken;
-        await expect(program.parseAsync(["integrity", "check", ...(json ? ["--json"] : []), "--checkpoint", path, "--admin-pass", "secret"], { from: "user" })).rejects.toThrow(`exit:${healthy ? 0 : 2}`);
-        if (json) {
-          const verdict = JSON.parse(output);
-          expect(verdict.status).toBe(healthy ? "healthy" : "alert");
-          expect(verdict.losses).toEqual(healthy ? [] : [{ id: "m", tier: "permanent" }]);
-          expect(verdict.unexplainedDecrease).toEqual({});
-        } else {
-          expect(output).toContain(healthy ? "history-backed attribution(s)" : "UNEXPLAINED durable row loss(es)");
-          expect(output).not.toContain("not accounted for by the id set");
-          expect(output).not.toContain("deliberate delete");
+    for (const replaced of [false, true]) {
+      for (const memoryInstanceToken of ["2026-10-01", instanceToken]) {
+        for (const json of [true, false]) {
+          writeFileSync(path, checkpoint);
+          let output = "";
+          process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
+          console.log = (value) => { output += String(value); };
+          globalThis.fetch = (async (_url: any, init: any) => {
+            const { table, get_attributes } = JSON.parse(init.body);
+            expect(get_attributes).toContain(table === "Memory" ? "instanceToken" : "memoryInstanceToken");
+            return new Response(JSON.stringify(table === "Memory" ? (replaced ? [{ id: "m", durability: "permanent", instanceToken: "new" }] : []) : [{ id: "d", memoryId: "m", memoryInstanceToken, at: "deleted" }]));
+          }) as typeof fetch;
+          const program = new Command();
+          register(program);
+          const healthy = memoryInstanceToken === instanceToken;
+          await expect(program.parseAsync(["integrity", "check", ...(json ? ["--json"] : []), "--checkpoint", path, "--admin-pass", "secret"], { from: "user" })).rejects.toThrow(`exit:${healthy ? 0 : 2}`);
+          if (json) {
+            const verdict = JSON.parse(output);
+            expect(verdict.status).toBe(healthy ? "healthy" : "alert");
+            expect(verdict.losses).toEqual(healthy ? [] : [{ id: "m", tier: "permanent", ...(replaced ? { reason: "replaced" } : {}) }]);
+            expect(verdict.unexplainedDecrease).toEqual({});
+          } else {
+            expect(output).toContain(healthy ? "history-backed attribution(s)" : "UNEXPLAINED durable row loss(es)");
+            if (replaced && !healthy) expect(output).toContain("m (permanent, replaced)");
+            expect(output).not.toContain("not accounted for by the id set");
+            expect(output).not.toContain("deliberate delete");
+          }
+          if (!healthy) expect(readFileSync(path, "utf8")).toBe(checkpoint);
         }
-        if (!healthy) expect(readFileSync(path, "utf8")).toBe(checkpoint);
       }
     }
   } finally {
