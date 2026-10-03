@@ -218,7 +218,7 @@ function appendRemedy(lines: string[], listener: OccupiedHarperListener): void {
 }
 
 /** Quote a path that would split on the shell. Numbers and plain paths stay bare. */
-function commandArg(value: string): string {
+export function commandArg(value: string): string {
   if (/^[A-Za-z0-9_./:@+-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
