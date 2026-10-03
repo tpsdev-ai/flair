@@ -83,6 +83,25 @@ async function validatePublication(content: any): Promise<Response | null> {
   return null;
 }
 
+const ADDRESS_FROZEN = () =>
+  CONFLICT(
+    "integration_directory_withdraw_before_address_change",
+    "withdraw the published contact (set directoryPublishedAt to null) before changing its address",
+  );
+
+/**
+ * True when `stored` is published and this write would change its effective
+ * email or platform. `replaces` is true for a full-row `put`, where an omitted
+ * field is removed; otherwise an omitted field keeps its stored value.
+ */
+function changesPublishedAddress(content: any, stored: any, replaces: boolean): boolean {
+  if (!stored || !isValidPublicationStamp(stored[DIRECTORY_STAMP_FIELD])) return false;
+  return ["email", "platform"].some((field) => {
+    const next = hasField(content, field) ? content[field] : replaces ? undefined : stored[field];
+    return next !== stored[field];
+  });
+}
+
 /**
  * Decide the publication stamp this write should carry:
  *   - a server-stamped ISO time for a publication,
@@ -95,31 +114,19 @@ async function resolvePublicationStamp(
   self: any,
   content: any,
   stored: any,
+  replaces: boolean,
 ): Promise<{ denial?: Response; stamp?: string | null }> {
   if (hasField(content, DIRECTORY_STAMP_FIELD)) {
     const denial = await requireOperator(self, "publication and withdrawal are operator-only");
     if (denial) return { denial };
     if (content[DIRECTORY_STAMP_FIELD] === null) return { stamp: null };
+    if (changesPublishedAddress(content, stored, replaces)) return { denial: ADDRESS_FROZEN() };
     const invalid = await validatePublication(content);
     if (invalid) return { denial: invalid };
     return { stamp: new Date().toISOString() };
   }
 
-  // No publication field in the body. A published row's address is frozen:
-  // changing it requires an explicit withdrawal first (and then a republication).
-  if (stored && isValidPublicationStamp(stored[DIRECTORY_STAMP_FIELD])) {
-    const changesAddress =
-      (hasField(content, "email") && content.email !== stored.email) ||
-      (hasField(content, "platform") && content.platform !== stored.platform);
-    if (changesAddress) {
-      return {
-        denial: CONFLICT(
-          "integration_directory_withdraw_before_address_change",
-          "withdraw the published contact (set directoryPublishedAt to null) before changing its address",
-        ),
-      };
-    }
-  }
+  if (changesPublishedAddress(content, stored, replaces)) return { denial: ADDRESS_FROZEN() };
   return {};
 }
 
@@ -189,7 +196,7 @@ export class Integration extends (databases as any).flair.Integration {
       });
     }
     return withOwnedTransaction((this as any).getContext?.(), async () => {
-      const pub = await resolvePublicationStamp(this, content, null);
+      const pub = await resolvePublicationStamp(this, content, null, true);
       if (pub.denial) return pub.denial;
       const now = new Date().toISOString();
       const record: any = { ...content, createdAt: typeof content?.createdAt === "string" ? content.createdAt : now, updatedAt: now };
@@ -212,7 +219,7 @@ export class Integration extends (databases as any).flair.Integration {
       const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
       if (stored.denial) return stored.denial;
       if (!stored.row) return NOT_FOUND();
-      const pub = await resolvePublicationStamp(this, content, stored.row);
+      const pub = await resolvePublicationStamp(this, content, stored.row, false);
       if (pub.denial) return pub.denial;
       const changes: any = { ...content, updatedAt: new Date().toISOString() };
       if (pub.stamp !== undefined) changes[DIRECTORY_STAMP_FIELD] = pub.stamp;
@@ -237,7 +244,7 @@ export class Integration extends (databases as any).flair.Integration {
       if (ownerDenial) return ownerDenial;
       const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
       if (stored.denial) return stored.denial;
-      const pub = await resolvePublicationStamp(this, content, stored.row);
+      const pub = await resolvePublicationStamp(this, content, stored.row, true);
       if (pub.denial) return pub.denial;
       const now = new Date().toISOString();
       const record: any = {

@@ -1,6 +1,6 @@
 /**
- * peer-status.ts — the ONE `Peer.status` vocabulary, shared by the federation
- * CLI rendering and the team-directory resolver (flair#2141 S3a).
+ * peer-status.ts — the ONE `Peer.status` vocabulary, used by the federation
+ * CLI rendering (flair#2141 S3a).
  *
  * `Peer.status` (schemas/federation.graphql) is a federation MEMBERSHIP state,
  * not a heartbeat:
@@ -13,8 +13,7 @@
  * `active` is an `Instance.status` value and is deliberately NOT a Peer status:
  * the federation status table used to render `active` green beside the real
  * membership words, which read as "this peer is a member" for a word that never
- * appears on a Peer row. One list, imported by both the CLI and the resolver,
- * is what keeps schema, CLI and resolver from drifting apart again.
+ * appears on a Peer row.
  *
  * Deliberately dependency-free (no `harper`, no `resource`): `src/` must not
  * import `resources/`, and `resources/` may import `src/lib/` (the same seam

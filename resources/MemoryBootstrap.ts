@@ -1792,8 +1792,8 @@ export class BootstrapMemories extends Resource {
       // never absent, so "empty" is distinguishable from "unsupported").
       agentId,
       ...(taskRetrievalHint ? { taskRetrievalHint } : {}),
-      // flair#2141 S3a — fixed, budgeted team-directory discovery hint, always
-      // present (measured in scaffoldTokens). See memory-bootstrap-lib.ts.
+      // flair#2141 S3a — fixed, budgeted team-directory discovery hint. This field
+      // is always present; the team section line only when a roster exists.
       directoryHint: directoryHint(),
       scope: scopeInfo,
       soul: soulMap,

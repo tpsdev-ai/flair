@@ -278,6 +278,20 @@ describe("Integration directory publication — non-operator refusals", () => {
     expect(integrationStore.get("int-1").email).toBe("a@example.test");
   });
 
+  it("a full-row put that omits email or platform on a published row is refused (409)", async () => {
+    for (const omitted of ["email", "platform"]) {
+      seedPublished();
+      const body: any = { id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test" };
+      delete body[omitted];
+      const i = makeIntegration(agentCtx("agent-a"), "int-1");
+      const res = await (i as any).put(body);
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(409);
+      expect(integrationStore.get("int-1").email).toBe("a@example.test");
+      expect(integrationStore.get("int-1").platform).toBe("tps-mail");
+    }
+  });
+
   it("an owner cannot delete a published entry (403); a withdrawal is the routine hide", async () => {
     seedPublished();
     const i = makeIntegration(agentCtx("agent-a"), "int-1");
@@ -334,6 +348,16 @@ describe("Integration directory publication — operator publication", () => {
     expect(integrationStore.get("int-1").directoryPublishedAt).toBeNull();
   });
 
+  it("an operator republish with a new email on a published row is refused (409)", async () => {
+    seedPublished();
+    const i = makeIntegration(operatorCtx(), "int-1");
+    const res = await (i as any).put({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "new@example.test", directoryPublishedAt: "x" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(409);
+    expect(integrationStore.get("int-1").email).toBe("a@example.test");
+    expect(integrationStore.get("int-1").directoryPublishedAt).toBe("2026-09-01T00:00:00.000Z");
+  });
+
   it("allows an address change once the entry is withdrawn", async () => {
     seedPublished({ directoryPublishedAt: null });
     const i = makeIntegration(operatorCtx(), "int-1");
@@ -341,5 +365,53 @@ describe("Integration directory publication — operator publication", () => {
     expect(res instanceof Response).toBe(false);
     expect(integrationStore.get("int-1").email).toBe("new@example.test");
     expect(integrationStore.get("int-1").directoryPublishedAt).toBeNull();
+  });
+});
+
+describe("Integration directory publication — patch", () => {
+  it("a runtime agent cannot publish by patch (403)", async () => {
+    seedPublished({ directoryPublishedAt: null });
+    const i = makeIntegration(agentCtx("agent-a"), "int-1");
+    const res = await (i as any).patch({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test", directoryPublishedAt: "2026-10-01T00:00:00.000Z" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(integrationStore.get("int-1").directoryPublishedAt).toBeNull();
+  });
+
+  it("a runtime agent cannot withdraw by patch (403)", async () => {
+    seedPublished();
+    const i = makeIntegration(agentCtx("agent-a"), "int-1");
+    const res = await (i as any).patch({ id: "int-1", directoryPublishedAt: null });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(integrationStore.get("int-1").directoryPublishedAt).toBe("2026-09-01T00:00:00.000Z");
+  });
+
+  it("a patch that changes a published address is refused (409)", async () => {
+    seedPublished();
+    const i = makeIntegration(agentCtx("agent-a"), "int-1");
+    const res = await (i as any).patch({ id: "int-1", email: "new@example.test" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(409);
+    expect(integrationStore.get("int-1").email).toBe("a@example.test");
+  });
+
+  it("an operator withdraws by patch", async () => {
+    seedPublished();
+    const i = makeIntegration(operatorCtx(), "int-1");
+    const res = await (i as any).patch({ id: "int-1", directoryPublishedAt: null });
+    expect(res instanceof Response).toBe(false);
+    expect(integrationStore.get("int-1").directoryPublishedAt).toBeNull();
+    expect(integrationStore.get("int-1").email).toBe("a@example.test");
+  });
+
+  it("an operator publishes by patch with a server-stamped time", async () => {
+    seedPublished({ directoryPublishedAt: null });
+    const i = makeIntegration(operatorCtx(), "int-1");
+    const res = await (i as any).patch({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test", directoryPublishedAt: "1999-01-01T00:00:00.000Z" });
+    expect(res instanceof Response).toBe(false);
+    const stamp = integrationStore.get("int-1").directoryPublishedAt;
+    expect(stamp).not.toBe("1999-01-01T00:00:00.000Z");
+    expect(Number.isFinite(Date.parse(stamp))).toBe(true);
   });
 });

@@ -30,13 +30,12 @@
  * published one.
  *
  * ─── Caps (fixed, applied before anything is returned) ──────────────────────
- *   50 entries per response, one channel per agent, 256 UTF-8 bytes per
- *   returned string, 64 KiB serialized response.
+ *   50 entries per response, one channel per agent, 256 UTF-8 bytes for
+ *   agentId, name and email, 64 KiB serialized response.
  *
- * Scope note: this slice is LOCAL only. Federation membership (the hub and its
- * directly paired non-relay spokes) and its `Peer.status` vocabulary land in
- * S3b/S3c; `isPeerMemberStatus` (src/lib/peer-status.ts) is the ONE shared
- * vocabulary those slices and the CLI rendering use.
+ * Scope note: this slice is LOCAL only and reads no Peer rows, so it does not
+ * call `isPeerMemberStatus` (src/lib/peer-status.ts); federation membership
+ * lands in S3b/S3c.
  */
 
 import { databases } from "harper";
@@ -118,6 +117,15 @@ export function isValidPublicationStamp(value: unknown): value is string {
   return Number.isFinite(Date.parse(value));
 }
 
+/** Cut `value` to at most `max` UTF-8 bytes without splitting a code point. */
+export function cutToUtf8Bytes(value: string, max: number): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= max) return value;
+  let end = max;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
 /** The display label for an agent row: its name, else its id. */
 export function agentDisplayName(agent: { id?: unknown; name?: unknown }): string {
   if (typeof agent.name === "string" && agent.name !== "") return agent.name;
@@ -183,7 +191,7 @@ async function collectEntries(): Promise<TeamDirectoryEntry[] | Response> {
       if (utf8Bytes(r.email) > TEAM_DIRECTORY_MAX_STRING_BYTES) continue;
       const entry: TeamDirectoryEntry = {
         agentId: r.agentId,
-        name: agentDisplayName(owner),
+        name: cutToUtf8Bytes(agentDisplayName(owner), TEAM_DIRECTORY_MAX_STRING_BYTES),
         platform: r.platform,
         email: r.email,
         publishedAt: r.directoryPublishedAt,

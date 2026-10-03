@@ -9,7 +9,7 @@
  *   - filtering before pagination (active agent-kind principals, matching
  *     contact owner, tps-mail platform, valid publication stamps, tombstones
  *     excluded, one channel per agent);
- *   - the caps (50 entries, 256 UTF-8 bytes/string, 64 KiB response);
+ *   - the caps (50 entries, 256 UTF-8 bytes for agentId/name/email, 64 KiB response);
  *   - pagination;
  *   - unavailable storage is a 503, never an empty success;
  *   - the shared Peer.status vocabulary matches schemas/federation.graphql and
@@ -229,6 +229,15 @@ describe("caps and pagination", () => {
     });
     const res = (await resolveTeamDirectory(agentCtx("reader"))) as any;
     expect(res.entries.map((e: any) => e.agentId)).toEqual(["agent-a"]);
+  });
+
+  it("cuts a long multibyte name to the 256-byte string cap on a code-point boundary", async () => {
+    addAgent("reader");
+    addAgent("agent-a", { name: "é".repeat(200) }); // 400 UTF-8 bytes
+    addContact("c1", { agentId: "agent-a", email: "a@example.test", directoryPublishedAt: "2026-10-01T00:00:00.000Z" });
+    const res = (await resolveTeamDirectory(agentCtx("reader"))) as any;
+    expect(res.entries[0].name).toBe("é".repeat(128));
+    expect(utf8Bytes(res.entries[0].name)).toBe(TEAM_DIRECTORY_MAX_STRING_BYTES);
   });
 
   it("keeps the serialized response under the 64 KiB cap", async () => {
