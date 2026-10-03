@@ -428,9 +428,6 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
-    // The trailing search_by_conditions is the flair#1317 invariant read-back:
-    // the function asks the STORE whether exactly one active credential now
-    // maps the subject, rather than trusting the write it just issued.
     expect(ops).toEqual(["search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions"]);
     const credRecord = calls[3].body.records[0];
     expect(credRecord.kind).toBe("idp");
@@ -633,7 +630,7 @@ describe("provisionIdpIdentityMapping", () => {
     ).catch((e) => e as Error);
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain("octocat");           // which subject
-    expect(err.message).toContain("0 active");           // what state
+    expect(err.message).toContain("0 resolvable (principal-bearing) active");           // what state
     expect(err.message).toContain("flair#1317");         // why it matters
     expect(err.message).toMatch(/revoke the rows/);      // what to do
   });

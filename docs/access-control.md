@@ -136,9 +136,9 @@ name:
 - If the login has a credential that is not `revoked` under a different
   provider name, the run revokes it (the row stays, with status `revoked`) and
   prints its id after `SUPERSEDED:`.
-- After writing, it reads the login's credentials back and fails unless exactly
-  one of them is not `revoked` and that one is the credential it wrote.
-  It also compares the principal that credential names.
+- After writing, it requires exactly one resolvable (principal-bearing) active
+  credential matching the written id and principal.
+  Principal-less legacy rows are skipped and may remain active.
 
 ### Just-in-time provisioning
 

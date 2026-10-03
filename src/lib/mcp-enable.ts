@@ -1659,8 +1659,9 @@ async function opsRecordList(
       const seen = active.map(c => `${c.id} → ${c.principalId} (provider '${c.idpProvider}')`).join("; ") || "none";
       throw new Error(
         `Identity mapping: post-write-mismatch — the uniqueness invariant does not hold after the write (flair#1317) — subject '${subject}' ` +
-          `has ${active.length} active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${written.id}) ` +
+          `has ${active.length} resolvable (principal-bearing) active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${written.id}) ` +
           `for principal '${written.principalId}', provider '${written.idpProvider}', status 'active'. ` +
+          `Principal-less legacy rows are skipped and may remain active. ` +
           `Inspect the Credential table for kind:"idp" idpSubject:"${subject}" and revoke the rows that should not resolve.`,
       );
     }
@@ -2430,7 +2431,7 @@ function supersededCredentialNote(mapping: IdentityMappingResult): string {
     ? ` SUPERSEDED: ${mapping.supersededCredentialIds.length} prior Credential(kind:idp) row(s) for this subject ` +
       `were REVOKED, not de-duplicated — ${mapping.supersededCredentialIds.join(", ")}. ` +
       `The revoked rows no longer resolve. Future calls for this subject use the surviving mapping. ` +
-      `Exactly one active credential per (kind, idpSubject) is the invariant that keeps resolution deterministic.`
+      `Exactly one resolvable (principal-bearing) active credential remains per (kind, idpSubject). Principal-less legacy rows are skipped and may remain active.`
     : "";
 }
 

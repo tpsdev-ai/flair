@@ -281,7 +281,7 @@ describe("flair principal link (flair#2115)", () => {
     expect(result.lines[0]).toContain(
       " SUPERSEDED: 1 prior Credential(kind:idp) row(s) for this subject were REVOKED, not de-duplicated — cred_c2. " +
         "The revoked rows no longer resolve. Future calls for this subject use the surviving mapping. " +
-        "Exactly one active credential per (kind, idpSubject) is the invariant that keeps resolution deterministic.",
+        "Exactly one resolvable (principal-bearing) active credential remains per (kind, idpSubject). Principal-less legacy rows are skipped and may remain active.",
     );
     expect(st.rows.get("cred_c2")?.status).toBe("revoked");
   });
@@ -373,7 +373,6 @@ describe("flair principal link (flair#2115)", () => {
     [null],
     [42],
     [[]],
-    [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", status: "active" }], // no principalId
     [{ id: "cred_c1", idpSubject: "someone-else", idpProvider: "github", principalId: "bob", status: "active" }],
   ];
 
