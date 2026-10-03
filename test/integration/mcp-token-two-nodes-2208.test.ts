@@ -10,7 +10,9 @@
  * What this file asserts:
  *
  *   1. CROSS-NODE CONVERGENCE (gated). Boots two real ephemeral Harpers through
- *      test/helpers/replicated-nodes, makes node B a replication peer of node A,
+ *      test/helpers/replicated-nodes (the replicated path has not run on any build
+ *      available here; only node B carries a best-effort replication route, to
+ *      node A's ops port, and that port and the one-sided config are unverified),
  *      mints an MCP token on each node (the component's real token endpoint, no
  *      seeded key), and measures how long the peer takes to verify it. The
  *      observed convergence time is PRINTED, never assumed immediate. Bounded:
@@ -23,15 +25,14 @@
  *      (`server.replication.replicateOperation` rejects with
  *      `Replication not implemented.`). `probeReplicationSupport()` measures
  *      that on the real build at collection time; when unsupported the test is
- *      registered with `describe.skipIf` and the reason (the exact error) is
+ *      registered with `test.skipIf` and the reason (the exact error) is
  *      logged — an explicit skip, never a silent pass.
  *
  *   2. KEY ISOLATION / FALSE-PASS GUARD (always runs). Boots two independent
  *      nodes with DIFFERENT pinned signing keys and proves a token minted on
  *      node A is accepted by A (200) and REJECTED by B (401). This is the
  *      mutation the gated test would catch: cross-node verification can only
- *      pass when the peers share the same key material, so a green cross-node
- *      run is not a vacuous pass.
+ *      pass when the peers share the same key material.
  *
  * Fixtures use neutral names (node-a/node-b, host-a/host-b).
  */
@@ -312,9 +313,6 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
       const pkceB = pkcePair();
       await seedClientAndCode(nodeB, "code-node-b", pkceB.challenge);
       const tokenB = await mint(nodeB, "code-node-b", pkceB.verifier);
-      // Both nodes have minted, so each has now persisted its own pinned key.
-      // The 401s below are therefore a key MISMATCH, not an empty key store
-      // (a node only persists a key on first mint).
 
       expect(await postMcp(nodeA, tokenA), "node-a accepts its own token").toBe(200);
       expect(await postMcp(nodeB, tokenB), "node-b accepts its own token").toBe(200);

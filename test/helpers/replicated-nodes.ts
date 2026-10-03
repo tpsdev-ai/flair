@@ -22,8 +22,10 @@
  * is a stub that rejects with `Replication not implemented.` (dist/server/Server.js),
  * and `replication_routes` is declared but consumed nowhere. `probeReplicationSupport`
  * measures exactly that, on the real build, so a test can GATE explicitly rather
- * than pass silently. On a replication-capable build the same harness boots the
- * pair and the cross-node test measures convergence.
+ * than pass silently. The replicated path has not run on any build available
+ * here. Only node B carries a `replication:` block, routed to node A's ops port;
+ * the route config is best-effort, and that port and the one-sided config are
+ * unverified.
  *
  * ── Safety ────────────────────────────────────────────────────────────────
  * Everything is HOME-isolated and ephemeral, via test/helpers/harper-lifecycle:
@@ -134,7 +136,7 @@ export interface ReplicatedPair {
 }
 
 /**
- * Boot two ephemeral Harpers and make node B a replication peer of node A.
+ * Boot two ephemeral Harpers; node B gets a best-effort replication route to node A.
  *
  * Node A boots first (plain), then node B boots with a `replication:` block
  * whose route points at A's ops port. Both carry this worktree's flair and
