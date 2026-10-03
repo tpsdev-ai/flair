@@ -38,8 +38,8 @@
  *   - Step 6 (dedup-cluster stat, flair-quality Slice 1c): calls
  *     `/MemoryDedupStats` after distillation. `dryRun` skips it (persisting
  *     the stat file is a side effect); failure (e.g. the caller isn't admin
- *     — the resource is admin-gated) is recorded in `errors` and does not
- *     fail the cycle. See resources/MemoryDedupStats.ts for the server-side
+ *     — the resource is admin-gated) is recorded in `errors` and fails
+ *     the cycle (#809). See resources/MemoryDedupStats.ts for the server-side
  *     computation and resources/dedup-cluster.ts for the stat's canonical
  *     storage location (NOT this log — see those files' module docs for why).
  *   - Step 7 shipped in slice-1 PR-1 (was step 6 before this PR).
@@ -51,7 +51,7 @@
  * `candidates` for staged ids on success, `errors` for a `distillation:`
  * entry on failure (maintenance results still stand either way), and `skips`
  * for a deliberate non-execution that is not a failure (no generative backend,
- * idle ADK, operator pause).
+ * idle ADK, mid-cycle operator pause). Preflight pause returns `paused`.
  *
  * Pure dependency injection so the runner is unit-testable without Harper.
  * The CLI wires the real `apiCall` + `pkgVersion`; tests pass stubs.
@@ -323,22 +323,9 @@ export interface RunnerLogRow {
   pendingCandidates?: number;
   durationMs: number;
   errors: string[];
-  /**
-   * flair#924 defect 1 / #1503: deliberate, expected non-executions of a
-   * stage, kept apart from `errors` because they are correct outcomes, not
-   * failures. A skip never fails the run or the launchd exit code. The known
-   * skips are distillation with no generative backend configured, an idle ADK
-   * agent with no active tags (the cross-user-bleed guard), and an operator
-   * pause that stops the cycle mid-run; real failures stay in `errors`.
-   */
+  /** Deliberate stage skips; errors alone fail the run. */
   skips: string[];
-  /**
-   * #1503: `runAt` for a cycle whose distillation stage actually executed (a
-   * /ReflectMemories call succeeded); absent when this cycle skipped or failed
-   * distillation. resources/health.ts surfaces the newest one from the log as
-   * `rem.lastDistilledAt`, which `flair status` renders beside the pending
-   * count so "zero pending" cannot read as healthy when distillation is stale.
-   */
+  /** `runAt` for a cycle with generation and no errors or skips. */
   distilledAt?: string;
   /** Slice-2 fields, written as empty placeholders so log readers don't break. */
   archived?: number;
@@ -455,22 +442,24 @@ function describeApiError(err: unknown): string {
   return message;
 }
 
-/** True when /ReflectMemories (or the pause check) refused because the operator aborted. */
-export function isRemAbortedFailure(err: unknown): boolean {
-  const text = describeApiError(err);
-  return text.includes("rem_aborted") || text.includes("REM distillation aborted");
+function structuredApiError(err: unknown): string | null {
+  const message = typeof err === "string" ? err : (err as { message?: unknown })?.message;
+  if (typeof message !== "string") return null;
+  try {
+    const body = JSON.parse(message);
+    return body && typeof body.error === "string" ? body.error : null;
+  } catch { return null; }
 }
 
-/**
- * True when /ReflectMemories refused because no generative backend is
- * configured (the server's 503 body names it: "No generative backend
- * configured. See the models configuration docs."). This is a configuration
- * state, not a failure to react to: the runner records it as a skip (#924
- * defect 1 / #1503) so an install without a model stops reporting the nightly
- * run — and `flair doctor`'s driver check — as failed every night.
- */
+/** The server's structured pause response. */
+export function isRemAbortedFailure(err: unknown): boolean {
+  return (err as { status?: unknown })?.status === 503 && structuredApiError(err) === "rem_aborted";
+}
+
+/** A missing generative backend alone no longer fails the run (#924). */
 export function isNoBackendConfigured(err: unknown): boolean {
-  return describeApiError(err).includes("No generative backend configured");
+  return (err as { status?: unknown })?.status === 503
+    && structuredApiError(err) === "No generative backend configured. See the models configuration docs.";
 }
 
 /**
@@ -810,9 +799,6 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   // #1515: aggregate gather stats from every /ReflectMemories call this cycle.
   let distill: RunnerLogRow["distill"];
   let distillAborted = false;
-  // flair#1503: true once any /ReflectMemories call succeeded this cycle; the
-  // audit row's `distilledAt` is written from it so log readers can measure
-  // distillation staleness.
   let distillRan = false;
 
   const collectStagedIds = (obj: Record<string, unknown>): string[] =>
@@ -821,7 +807,15 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
       .filter((id): id is string => typeof id === "string");
 
   const noteGather = (obj: Record<string, unknown>, maxMemories: number): void => {
-    distillRan = true;
+    if (!Array.isArray(obj.candidates) || obj.count !== obj.candidates.length
+      || typeof obj.model !== "string" || !obj.model.trim()
+      || !obj.candidates.every((c: unknown) => c && typeof c === "object" && typeof (c as { id?: unknown }).id === "string" && (c as { id: string }).id.length > 0)
+      || !Number.isInteger(obj.gathered) || (obj.gathered as number) < 0
+      || !Number.isInteger(obj.unreflected) || (obj.unreflected as number) < (obj.gathered as number)
+      || (obj.gathered === 0 && obj.candidates.length > 0)) {
+      throw new Error("unexpected /ReflectMemories response shape");
+    }
+    distillRan ||= (obj.gathered as number) > 0;
     const gathered = typeof obj.gathered === "number" ? obj.gathered : 0;
     const unreflected = typeof obj.unreflected === "number" ? obj.unreflected : 0;
     if (!distill) {
@@ -878,29 +872,27 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           });
           const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
           if (obj.error) {
-            if (isNoBackendConfigured(obj.error)) {
-              pushSkipOnce(NO_BACKEND_SKIP);
-              break;
-            }
-            errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
-            if (isRemAbortedFailure(obj.error)) {
+            if (obj.error === "rem_aborted") {
+              pushSkipOnce("distillation: aborted by operator (rem_aborted)");
               distillAborted = true;
               break;
             }
+            errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
           } else {
-            staged.push(...collectStagedIds(obj));
             noteGather(obj, maxMemories);
+            staged.push(...collectStagedIds(obj));
           }
         } catch (err: any) {
-          if (isNoBackendConfigured(err?.message ?? err)) {
+          if (isNoBackendConfigured(err)) {
             pushSkipOnce(NO_BACKEND_SKIP);
             break;
           }
-          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
-          if (isRemAbortedFailure(err?.message ?? err)) {
+          if (isRemAbortedFailure(err)) {
+            pushSkipOnce("distillation: aborted by operator (rem_aborted)");
             distillAborted = true;
             break;
           }
+          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
         }
       }
       // `candidates` is defined (even if empty) whenever distillation was
@@ -927,18 +919,13 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         });
         const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
         if (obj.error) {
-          // Defensive: a 200 response shouldn't carry { error }, since
-          // MemoryReflect signals failure via HTTP status (503/502) — apiCall
-          // implementations throw for those. Handled the same way regardless.
-          if (isNoBackendConfigured(obj.error)) {
-            pushSkipOnce(NO_BACKEND_SKIP);
-          } else {
-            errors.push(`distillation: ${describeApiError(obj.error)}`);
-            if (isRemAbortedFailure(obj.error)) distillAborted = true;
-          }
+          if (obj.error === "rem_aborted") {
+            pushSkipOnce("distillation: aborted by operator (rem_aborted)");
+            distillAborted = true;
+          } else errors.push(`distillation: ${describeApiError(obj.error)}`);
         } else {
-          candidates = collectStagedIds(obj);
           noteGather(obj, maxMemories);
+          candidates = collectStagedIds(obj);
         }
       } catch (err: any) {
         // Distillation failure is recorded, not fatal — maintenance already
@@ -946,11 +933,13 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         // 3). Zero partial candidates is guaranteed server-side (all-or-
         // nothing staging in /ReflectMemories). rem_aborted IS fatal to the
         // rest of this cycle (no auto-promote / dedup).
-        if (isNoBackendConfigured(err?.message ?? err)) {
+        if (isNoBackendConfigured(err)) {
           pushSkipOnce(NO_BACKEND_SKIP);
         } else {
-          errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
-          if (isRemAbortedFailure(err?.message ?? err)) distillAborted = true;
+          if (isRemAbortedFailure(err)) {
+            pushSkipOnce("distillation: aborted by operator (rem_aborted)");
+            distillAborted = true;
+          } else errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
         }
       }
     }
@@ -1005,30 +994,28 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           });
           const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
           if (obj.error) {
-            if (isNoBackendConfigured(obj.error)) {
-              pushSkipOnce(NO_BACKEND_SKIP);
-              break;
-            }
-            errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
-            if (isRemAbortedFailure(obj.error)) {
+            if (obj.error === "rem_aborted") {
+              pushSkipOnce("distillation: aborted by operator (rem_aborted)");
               distillAborted = true;
               break;
             }
+            errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
           } else {
-            candidates.push(...collectStagedIds(obj));
             noteGather(obj, maxMemories);
+            candidates.push(...collectStagedIds(obj));
             distilled++;
           }
         } catch (err: any) {
-          if (isNoBackendConfigured(err?.message ?? err)) {
+          if (isNoBackendConfigured(err)) {
             pushSkipOnce(NO_BACKEND_SKIP);
             break;
           }
-          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
-          if (isRemAbortedFailure(err?.message ?? err)) {
+          if (isRemAbortedFailure(err)) {
+            pushSkipOnce("distillation: aborted by operator (rem_aborted)");
             distillAborted = true;
             break;
           }
+          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
         }
       }
       continuitySessions = distilled;
@@ -1124,16 +1111,6 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   const row: RunnerLogRow = {
     ...baseRow,
     slice: sliceLabel,
-    // flair#924 (defect 1): a run whose recorded `errors[]` is non-empty must
-    // NOT report success. Deliberate skips — distillation with no generative
-    // backend, an idle ADK agent with no active tags, an operator pause — are
-    // recorded in `skips[]` and leave the run "completed" (exit 0); a real
-    // failure (a per-tag distill error, the dedup stat, snapshot, maintenance)
-    // is pushed into `errors` and fails the run. Before this, a
-    // distillation-disabled cycle held a populated `Errors:` block while the
-    // one signal a service manager acts on disagreed with the reported status.
-    // A populated errors[] can never coexist with "completed" again
-    // (regression-tested in rem-runner.test.ts).
     status: errors.length > 0 ? "failed" : opts.dryRun ? "dry-run" : "completed",
     dryRun: opts.dryRun || undefined,
     snapshotPath,
@@ -1150,7 +1127,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     durationMs: Date.now() - startedMs,
     errors,
     skips,
-    distilledAt: distillRan ? baseRow.runAt : undefined,
+    distilledAt: distillRan && !distillAborted && errors.length === 0 && skips.length === 0 ? baseRow.runAt : undefined,
     // `consolidated` remains undefined — this runner has no consolidation
     // step; it's reserved for a future slice that adds one.
   };

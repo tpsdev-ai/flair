@@ -1,13 +1,3 @@
-/**
- * rem-nightly-skips-924.test.ts — the `flair rem nightly run-once` exit-code
- * contract (flair#924 defect 1 / #1503).
- *
- * `summarizeNightlyOutcome` is the summary's exit decision, extracted from the
- * action callback so it can be pinned without spawning api() (the repo's
- * convention for the rem subcommands — see cli-rem-rapid.test.ts). A populated
- * `errors[]` is exit 1; a deliberate skip is listed but does not fail the run,
- * so the nightly job stops reporting a valid no-model install as DEGRADED.
- */
 import { describe, test, expect } from "bun:test";
 import { summarizeNightlyOutcome } from "../../src/commands/rem.ts";
 
@@ -42,4 +32,10 @@ describe("summarizeNightlyOutcome (flair#924 defect 1 / #1503)", () => {
     expect(out.exitCode).toBe(0);
     expect(out.lines).toEqual([]);
   });
+});
+
+test("mixed outcomes print both blocks and exit 1", () => {
+  const out = summarizeNightlyOutcome({ errors: ["dedup: forbidden"], skips: ["distillation skipped"] });
+  expect(out.exitCode).toBe(1);
+  expect(out.lines).toEqual(["Errors:", "  - dedup: forbidden", "Skips:", "  - distillation skipped"]);
 });

@@ -1,10 +1,10 @@
-- **REM nightly records a deliberate non-execution as a skip, not an error, so its exit code stays 0.**
-  A cycle whose distillation cannot run — no generative backend configured, an idle ADK agent, or an
-  operator pause — now completes with the reason under `Skips:`; `flair doctor` no longer reports the
-  REM nightly driver DEGRADED every night, and a real failure still reports `Errors:` and exits 1
-  (flair#924, #1503).
+- **REM nightly: a missing generative backend alone no longer fails the run** (#924, #1503).
+  The no-backend skip requires the exact structured no-backend error and HTTP 503. In-flight `rem_aborted`
+  pauses and idle ADK distillation are skips; preflight pause remains `paused` with no skips.
+  Summaries print skips and errors; errors set exit 1. Agent-identity dedup failure remains #809.
 
-  `flair status` shows `Last distilled` beside the pending-candidate count, so zero pending next to a
-  distillation that has not run in nights is not rendered as a healthy zero. The run-once summary also
-  labels the maintenance counts it already reported (`Archived:` validTo-expired and old sessions;
-  `Expired:` ephemeral rows past `expiresAt`) (flair#1503).
+  `Last distilled` is the newest distillation observed in the server's local nightly log tail;
+  remote CLI logs are local to the CLI and are not observed there. Status shows zero pending
+  beside it. Empty gathers, malformed responses and failed cycles do not stamp `distilledAt`.
+  Maintenance counts are labelled (`Archived`: validTo-expired + old sessions;
+  `Expired`: ephemeral rows past `expiresAt`).

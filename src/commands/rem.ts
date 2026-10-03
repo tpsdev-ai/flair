@@ -181,15 +181,7 @@ export function describeReflectError(message: string): { kind: "no-backend" | "d
   return { kind: "other", text: message };
 }
 
-/**
- * flair#924 defect 1 / #1503: the run-once summary's exit decision, extracted
- * from the action callback so the contract is unit-testable without spawning
- * api() (the repo's convention for the rem subcommands). A populated `errors[]`
- * is a failed run (exit 1); deliberate `skips[]` — a stage that could not run
- * by configuration, an idle ADK agent, an operator pause — are listed apart
- * from errors and do not set the exit code. A skips-only run exits 0, so the
- * nightly job stops reporting a valid no-model install as a failed run.
- */
+/** Print skips and errors; errors alone set exit 1. */
 export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[] }): {
   lines: string[];
   exitCode: 0 | 1;
@@ -198,13 +190,12 @@ export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[]
   if (row.errors.length > 0) {
     lines.push("Errors:");
     for (const e of row.errors) lines.push(`  - ${e}`);
-    return { lines, exitCode: 1 };
   }
   if (row.skips.length > 0) {
     lines.push("Skips:");
     for (const s of row.skips) lines.push(`  - ${s}`);
   }
-  return { lines, exitCode: 0 };
+  return { lines, exitCode: row.errors.length > 0 ? 1 : 0 };
 }
 
 const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");

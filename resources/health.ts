@@ -610,21 +610,18 @@ export class HealthDetail extends Resource {
       nightlyRunFailed = lastNightlyRec?.status === "failed";
       const lastNightlyAt = lastNightlyRec ? (lastNightlyRec.at ?? lastNightlyRec.ts ?? lastNightlyRec.timestamp ?? null) : null;
 
-      // flair#1503: the newest cycle whose distillation actually executed. The
-      // nightly row records `distilledAt` when a /ReflectMemories call
-      // succeeded; older rows are recognised by a `distill` object that isn't
-      // marked aborted. `flair status` renders this beside the pending count so
-      // zero pending next to a distillation that has not run in N nights is not
-      // read as a healthy zero.
+      // Newest distillation observed in this server's local nightly log tail.
       let lastDistilledAt: string | null = null;
+      const completeDistillation = (rec: any): boolean => rec?.status === "completed"
+        && !rec.errors?.length && !rec.skips?.length && !rec.distill?.aborted
+        && typeof rec.distilledAt === "string" && Number.isFinite(Date.parse(rec.distilledAt))
+        && Number.isInteger(rec.distill?.gathered) && rec.distill.gathered > 0;
+      const lastDistillationIncomplete = !!lastNightlyRec && !completeDistillation(lastNightlyRec);
       for (let i = nightlyRecords.length - 1; i >= 0; i--) {
         const rec = nightlyRecords[i];
-        if (!rec || typeof rec !== "object") continue;
-        if (typeof rec.distilledAt === "string") { lastDistilledAt = rec.distilledAt; break; }
-        const d = rec.distill;
-        if (d && typeof d === "object" && (d as { aborted?: unknown }).aborted !== true) {
-          const at = rec.runAt ?? rec.at ?? rec.ts ?? rec.timestamp;
-          if (typeof at === "string") { lastDistilledAt = at; break; }
+        if (completeDistillation(rec)) {
+          lastDistilledAt = rec.distilledAt;
+          break;
         }
       }
 
@@ -655,6 +652,7 @@ export class HealthDetail extends Resource {
           nightlyEnabled,
           lastNightlyAt,
           lastDistilledAt,
+          lastDistillationIncomplete,
           pendingCandidates,
         };
         if (nightlyEnabled && lastNightlyAt && nowMs - new Date(lastNightlyAt).getTime() > 48 * 3600 * 1000) {

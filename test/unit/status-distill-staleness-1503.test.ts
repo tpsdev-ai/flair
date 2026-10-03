@@ -1,12 +1,3 @@
-/**
- * status-distill-staleness-1503.test.ts — `flair status` must not render a
- * stale zero as a healthy zero (flair#1503, sharpened by the #924 comment).
- *
- * The pure decision + text helpers are pinned here without Harper, matching
- * `formatBm25StatusLine` (flair#2032). resources/health.ts supplies
- * `lastDistilledAt` from the nightly log; these two functions decide how the
- * status surfaces read it beside the pending-candidate count.
- */
 import { describe, test, expect } from "bun:test";
 import {
   distillationStaleness,
@@ -35,16 +26,16 @@ describe("distillationStaleness (flair#1503)", () => {
       NOW,
     );
     expect(ds.stale).toBe(true);
-    expect(distillStalenessLine(ds, relative)).toContain("distillation has not run recently");
+    expect(distillStalenessLine(ds, relative)).toContain("no recent complete distillation observed");
   });
 
-  test("zero pending and distillation that never ran is stale — never a healthy zero", () => {
+  test("zero pending with no observed distillation is stale", () => {
     const ds = distillationStaleness(
       { nightlyEnabled: true, pendingCandidates: 0, lastDistilledAt: null },
       NOW,
     );
     expect(ds.stale).toBe(true);
-    expect(distillStalenessLine(ds, relative)).toBe("never — distillation has not run recently");
+    expect(distillStalenessLine(ds, relative)).toBe("not observed (server-local log tail) — no recent complete distillation observed");
   });
 
   test("pending work is never flagged as a stale zero", () => {
@@ -84,6 +75,14 @@ describe("distillationStaleness (flair#1503)", () => {
       { nightlyEnabled: true, pendingCandidates: 0, lastDistilledAt: days(0) },
       NOW,
     );
-    expect(distillStalenessLine(fresh, relative)).toBe("0 days ago");
+    expect(distillStalenessLine(fresh, relative)).toBe("0 days ago (server-local log tail)");
   });
+});
+
+test("an incomplete latest cycle cannot make zero pending fresh", () => {
+  const ds = distillationStaleness({
+    nightlyEnabled: true, pendingCandidates: 0, lastDistilledAt: days(0), lastDistillationIncomplete: true,
+  }, NOW);
+  expect(ds.stale).toBe(true);
+  expect(distillStalenessLine(ds, relative)).toContain("no recent complete distillation observed");
 });
