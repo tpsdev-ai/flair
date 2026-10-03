@@ -228,8 +228,8 @@ export default function (pi: ExtensionAPI) {
         Type.String({ 
           enum: ["permanent", "persistent", "standard", "ephemeral"] as const,
           description:
-            "permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row unless an ephemeral TTL has also expired; reaping takes precedence); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.\n" +
-            "persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row unless an ephemeral TTL has also expired; reaping takes precedence).\n" +
+            "permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.\n" +
+            "persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).\n" +
             "standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.\n" +
             "ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.\n" +
             "No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.",

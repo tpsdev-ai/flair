@@ -5,8 +5,8 @@ import { join } from "node:path";
 const REPO = join(import.meta.dir, "../..");
 
 const CANONICAL_TIERS: readonly string[] = [
-  "permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row unless an ephemeral TTL has also expired; reaping takes precedence); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.",
-  "persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row unless an ephemeral TTL has also expired; reaping takes precedence).",
+  "permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.",
+  "persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).",
   "standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.",
   "ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.",
 ];
@@ -41,6 +41,7 @@ const SURFACES: readonly string[] = [
   "docs/bridges.md",
   "docs/rem.md",
   "docs/quickstart.md",
+  "docs/claude-code.md",
 ];
 
 /**
@@ -62,6 +63,7 @@ const FORBIDDEN: readonly RegExp[] = [
   /permanent(?:ly)? stor(?:e|ed|age)/i,
   /inviolable/i,
   /never-forget/i,
+  /survives indefinitely|forever/i,
 ];
 
 /** Collapse all whitespace so a wrapped/multi-line statement still matches. */
@@ -112,7 +114,7 @@ describe("flair#2217 — durability documentation contract", () => {
     for (const file of SURFACES) {
       const text = read(file);
       if (text === null) {
-        failures.push(`${file}: MISSING FILE`);
+        failures.push(`${file}: MISSING FILE (run node scripts/vendor-tool-descriptors.mjs for vendored artifacts)`);
         continue;
       }
       for (const line of missingCanonical(text)) {
@@ -172,10 +174,15 @@ describe("flair#2217 — durability documentation contract", () => {
       })));
     `]));
     expect(help).toHaveLength(3);
-    for (const text of help.slice(0, 2)) {
+    for (const text of help.slice(0, 1)) {
       expect(missingCanonical(text)).toEqual([]);
       expect(forbiddenHits(text)).toEqual([]);
     }
+    expect(squash(help[1])).toContain(
+      "Filter results by durability (permanent/persistent/standard/ephemeral; comma-separated; client-side). " + CANONICAL_CAVEAT,
+    );
+    expect(help[1]).not.toContain("routine maintenance");
+    expect(forbiddenHits(help[1])).toEqual([]);
     expect(squash(help[2])).toContain(
       "Stored Soul label (permanent/persistent/standard/ephemeral). Soul has no expiresAt/validTo and is not scanned by MemoryMaintenance. PUT supplies no default; omitted durability is unset.",
     );
@@ -199,6 +206,9 @@ print(ast.get_docstring(methods[0]) or "")
     const overPromise =
       "| **Tiered durability** | `permanent` (retained until explicitly deleted by its owner or an admin) / `persistent` / `standard` (default) / `ephemeral` (24h TTL). |";
     expect(forbiddenHits(overPromise)).not.toEqual([]);
+    for (const claim of ["persistent — survives indefinitely", "permanent — retained forever"]) {
+      expect(forbiddenHits(claim)).not.toEqual([]);
+    }
     // And a compliant line is not flagged.
     expect(forbiddenHits(`- ${CANONICAL_TIERS[0]}`)).toEqual([]);
     expect(missingCanonical(CANONICAL.join("\n"))).toEqual([]);
