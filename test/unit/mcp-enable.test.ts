@@ -17,8 +17,8 @@
  * and self-verify/status confirm CIMD is actually advertised. Coverage:
  *   - the orchestration order (dry-run stops after the local/pure steps;
  *     the live path ends at self-verify — no DCR call after restart)
- *   - dry-run (no remote calls and no file written: the signing-key step
- *     reports the key a real run would reuse or generate — flair#2113)
+ *   - local-origin refusal (the exact addendum message, zero fetch calls)
+ *   - dry-run (no remote calls and no file written)
  *   - self-verify failure names the step to re-run, never reports success
  *     on hope — including the new CIMD-not-advertised failure mode
  *   - disable symmetry (flag-off confirmation gate, then restart only)
@@ -30,17 +30,18 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir, hostname as osHostname } from "node:os";
+import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 import yaml from "js-yaml";
 import { resolveHome, withHome } from "../../src/lib/home.ts";
+import { agentInsertSchemaError } from "../helpers/agent-insert-schema.ts";
+import { importEd25519Key } from "../../resources/ed25519-auth.ts";
 
 import {
   isLocalOrigin,
   checkLocalOriginRefusal,
   isFabricOrigin,
   selectSecretsMechanism,
-  generateRsaSigningKeyPair,
-  ensureSigningKeyFile,
   buildMcpOAuthConfigBlock,
   idpCallbackUrl,
   buildSecretsBundle,
@@ -144,34 +145,6 @@ describe("isFabricOrigin / selectSecretsMechanism", () => {
   });
 });
 
-// ─── RS256 keypair (Sherlock: generateKeyPairSync, not a PRNG shortcut) ─────
-
-describe("generateRsaSigningKeyPair / ensureSigningKeyFile", () => {
-  test("produces a real RSA keypair via crypto.generateKeyPairSync (PEM-shaped, 2048-bit)", () => {
-    const { publicKey, privateKey } = generateRsaSigningKeyPair();
-    expect(privateKey).toContain("BEGIN PRIVATE KEY");
-    expect(publicKey).toContain("BEGIN PUBLIC KEY");
-  });
-
-  test("generates + writes a 0600 file on first call", () => {
-    const path = join(dir, "signing-key.pem");
-    const result = ensureSigningKeyFile(path);
-    expect(result.reused).toBe(false);
-    expect(existsSync(path)).toBe(true);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(readFileSync(path, "utf-8")).toContain("BEGIN PRIVATE KEY");
-  });
-
-  test("reuses an existing key file instead of rotating it (idempotent)", () => {
-    const path = join(dir, "signing-key.pem");
-    const first = ensureSigningKeyFile(path);
-    const firstContent = readFileSync(path, "utf-8");
-    const second = ensureSigningKeyFile(path);
-    expect(second.reused).toBe(true);
-    expect(readFileSync(path, "utf-8")).toBe(firstContent);
-  });
-});
-
 // ─── config block (Sherlock: accessTokenTtl must be explicit 900; flair#756:
 // DCR must be explicitly disabled, CIMD allowedHosts must be set) ───────────
 
@@ -182,6 +155,10 @@ describe("buildMcpOAuthConfigBlock", () => {
     expect(oauth.package).toBe("@harperfast/oauth");
     expect(oauth.providers.github.clientId).toBe("${OAUTH_GITHUB_CLIENT_ID}");
     expect(oauth.providers.github.clientSecret).toBe("${OAUTH_GITHUB_CLIENT_SECRET}");
+    // Since @harperfast/oauth 2.7.0 a configured provider needs a redirectUri
+    // (2.8.1 skips an unconfigured one before that check) — the shipped block
+    // carries the same whole-token reference shape.
+    expect(oauth.providers.github.redirectUri).toBe("${OAUTH_GITHUB_REDIRECT_URI}");
     // flair#1152: mcp.enabled is the WHOLE-TOKEN env reference — never a
     // literal boolean. The on/off choice lives in the environment, so a
     // re-packed deploy cannot revert it.
@@ -189,7 +166,7 @@ describe("buildMcpOAuthConfigBlock", () => {
     expect(oauth.mcp.accessTokenTtl).toBe(REQUIRED_ACCESS_TOKEN_TTL);
     expect(oauth.mcp.accessTokenTtl).toBe(900);
     expect(oauth.mcp.clientIdMetadataDocuments.allowedHosts).toEqual(DEFAULT_CIMD_ALLOWED_HOSTS);
-    expect(oauth.mcp.signingKeyPem).toBe("${FLAIR_MCP_SIGNING_KEY_PEM}");
+    expect("signingKeyPem" in oauth.mcp).toBe(false);
   });
 
   test("flair#1180: NO resource key is emitted — the component derives <issuer>/mcp", () => {
@@ -232,7 +209,9 @@ describe("buildMcpOAuthConfigBlock", () => {
   test("no literal secret material — every sensitive field is an ${ENV_VAR} placeholder", () => {
     const block = buildMcpOAuthConfigBlock({ idpProvider: "github" });
     const text = JSON.stringify(block);
-    expect(text).toContain("${FLAIR_MCP_SIGNING_KEY_PEM}");
+    // No secret material anywhere: the credentials are whole-token references,
+    // and the signing key is not emitted at all (flair#2194).
+    expect(text).toContain("${OAUTH_GITHUB_CLIENT_SECRET}");
     expect(text).not.toContain("BEGIN PRIVATE KEY");
   });
 
@@ -256,10 +235,9 @@ describe("idpCallbackUrl", () => {
 // ─── secrets bundle + staging file ───────────────────────────────────────────
 
 describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () => {
-  test("bundle includes the flag, issuer, signing key, and IdP creds — no DCR token field", () => {
+  test("bundle includes the flag, issuer, and IdP creds — no signing key, no DCR token field", () => {
     const bundle = buildSecretsBundle({
       issuer: ISSUER,
-      signingKeyPem: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----",
       idpProvider: "github",
       idpClientId: "client-id-value",
       idpClientSecret: "client-secret-value",
@@ -270,12 +248,50 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
     // authorization server behind it.
     expect(bundle.FLAIR_MCP_OAUTH).toBe("true");
     expect(bundle.FLAIR_MCP_ISSUER).toBe(ISSUER);
-    expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toContain("BEGIN PRIVATE KEY");
+    expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toBeUndefined();
     expect(bundle.OAUTH_GITHUB_CLIENT_ID).toBe("client-id-value");
     expect(bundle.OAUTH_GITHUB_CLIENT_SECRET).toBe("client-secret-value");
+    expect(bundle.OAUTH_GITHUB_REDIRECT_URI).toBe("https://flair.example.com/oauth");
     expect(bundle.FLAIR_MCP_DCR_TOKEN).toBeUndefined();
     expect(Object.keys(bundle)).not.toContain("FLAIR_MCP_DCR_TOKEN");
   });
+
+  test.each([
+    ["https://flair.example.com/", "https://flair.example.com/oauth"],
+    ["https://flair.example.com:8443///", "https://flair.example.com:8443/oauth"],
+    ["https://flair.example.com/issuer", "https://flair.example.com/oauth"],
+  ])("GitHub credentials include the redirect base for issuer %s", (issuer, redirectUri) => {
+    const bundle = buildSecretsBundle({
+      issuer,
+      idpProvider: "github",
+      idpClientId: "client-id-value",
+      idpClientSecret: "client-secret-value",
+    });
+    expect(bundle.OAUTH_GITHUB_CLIENT_ID).toBe("client-id-value");
+    expect(bundle.OAUTH_GITHUB_CLIENT_SECRET).toBe("client-secret-value");
+    expect(bundle.OAUTH_GITHUB_REDIRECT_URI).toBe(redirectUri);
+  });
+
+  test.each(["", "   ", "flair.example.com", "${FLAIR_MCP_ISSUER}", "file:///tmp/flair"])(
+    "refuses a GitHub bundle with an unknown HTTP(S) origin: %s",
+    (issuer) => {
+      let error: unknown;
+      try {
+        buildSecretsBundle({
+          issuer,
+          idpProvider: "github",
+          idpClientId: "client-id-value",
+          idpClientSecret: "client-secret-value",
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toMatchObject({
+        name: "IdpRedirectOriginError",
+        message: expect.stringContaining("OAUTH_GITHUB_REDIRECT_URI"),
+      });
+    },
+  );
 
   test("staging file is written 0600 and contains the values (this file IS meant to carry secret material)", () => {
     const path = join(dir, "secrets.env");
@@ -378,16 +394,20 @@ function mockOpsFetch(opts: {
   const creds = credentialTable(
     seed.map((c) => ({ idpProvider: "github", idpSubject: "octocat", principalId: "self", ...c })),
   );
+  let principalPresent = opts.existingPrincipal ?? false;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push({ url: String(url), body });
     if (body.operation === "search_by_value" && body.table === "Agent") {
       if (opts.failFind) return new Response("boom", { status: opts.failFindStatus ?? 500 });
       if ("agentSearchBody" in opts) return new Response(JSON.stringify(opts.agentSearchBody), { status: 200 });
-      return new Response(JSON.stringify(opts.existingPrincipal ? [{ id: body.search_value }] : []), { status: 200 });
+      return new Response(JSON.stringify(principalPresent ? [{ id: body.search_value }] : []), { status: 200 });
     }
     if (body.operation === "insert" && body.table === "Agent") {
+      const error = agentInsertSchemaError(body.records ?? []);
+      if (error) return error;
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
+      principalPresent = true;
       return new Response(JSON.stringify({ message: "inserted" }), { status: 200 });
     }
     if (body.operation === "upsert" && body.table === "Credential" && opts.failUpsert) {
@@ -417,6 +437,27 @@ function mockOpsFetch(opts: {
 }
 
 describe("provisionIdpIdentityMapping", () => {
+  for (const field of ["name", "publicKey", "createdAt"]) {
+    test(`ops fake rejects an Agent insert missing ${field}`, async () => {
+      const { fetchImpl } = mockOpsFetch();
+      const record: Record<string, unknown> = {
+        id: "self", name: "self", publicKey: "idp:github:octocat", createdAt: "2026-10-02T00:00:00.000Z",
+      };
+      delete record[field];
+      const response = await fetchImpl(ISSUER, {
+        method: "POST",
+        body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [record] }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: `Property ${field} is required` });
+      const found = await fetchImpl(ISSUER, {
+        method: "POST",
+        body: JSON.stringify({ operation: "search_by_value", table: "Agent", search_value: "self" }),
+      });
+      expect(await found.json()).toEqual([]);
+    });
+  }
+
   test("creates the principal when missing and a fresh credential", async () => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: false, existingCredential: null });
     const result = await provisionIdpIdentityMapping(
@@ -428,8 +469,11 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions"]);
-    const credRecord = calls[3].body.records[0];
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+    const agentRecord = calls.find((c) => c.body.operation === "insert")!.body.records[0];
+    expect(agentRecord.publicKey).toBe("idp:github:octocat");
+    await expect(importEd25519Key(agentRecord.publicKey)).rejects.toThrow();
+    const credRecord = calls.find((c) => c.body.operation === "upsert")!.body.records[0];
     expect(credRecord.kind).toBe("idp");
     expect(credRecord.idpProvider).toBe("github");
     expect(credRecord.idpSubject).toBe("octocat");
@@ -447,7 +491,7 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.credentialId).toBe("cred_existing");
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
   });
 
   // ─── flair#2115 — the pre-write read (the step `flair principal link` reuses) ──
@@ -523,7 +567,7 @@ describe("provisionIdpIdentityMapping", () => {
       { fetchImpl },
     );
     const searches = calls.filter((c) => c.body.operation === "search_by_conditions");
-    expect(searches.length).toBe(2); // the dedup lookup + the invariant read-back
+    expect(searches.length).toBe(3); // the dedup lookup, the pre-write guard, the invariant read-back
     for (const s of searches) {
       const attrs = s.body.conditions.map((c: any) => c.search_attribute).sort();
       expect(attrs).toEqual(["idpSubject", "kind"]);
@@ -682,14 +726,20 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   test("a local URL string with a non-default port: every request goes to exactly that port, and nothing else is contacted", async () => {
     const creds = credentialTable();
     const received: { host: string; operation: string }[] = [];
+    let principalPresent = false;
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       async fetch(req) {
         const body: any = await req.json().catch(() => ({}));
         received.push({ host: req.headers.get("host") ?? "", operation: body.operation });
-        if (body.operation === "search_by_value") return Response.json([]);
-        if (body.operation === "insert") return Response.json({ message: "inserted" });
+        if (body.operation === "search_by_value") return Response.json(principalPresent ? [{ id: body.search_value }] : []);
+        if (body.operation === "insert") {
+          const error = agentInsertSchemaError(body.records ?? []);
+          if (error) return error;
+          principalPresent = true;
+          return Response.json({ message: "inserted" });
+        }
         return creds.handle(body) ?? new Response("unexpected operation", { status: 400 });
       },
     });
@@ -707,9 +757,9 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
 
       const result = await provisionIdpIdentityMapping({ opsPortOrUrl: origin, ...MAPPING }, { fetchImpl });
 
-      expect(attempted).toEqual(Array(5).fill(`${origin}/`));
+      expect(attempted).toEqual(Array(9).fill(`${origin}/`));
       expect(received.map((r) => r.operation)).toEqual([
-        "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions",
+        "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions",
       ]);
       expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
       expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
@@ -726,7 +776,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   ] as const)("opsPortOrUrl %p is used as given: %s", async (opsPortOrUrl, expected) => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
     await provisionIdpIdentityMapping({ opsPortOrUrl, ...MAPPING }, { fetchImpl });
-    expect(calls.length).toBe(4);
+    expect(calls.length).toBe(6);
     expect(calls.every((c) => c.url === expected)).toBe(true);
   });
 
@@ -737,7 +787,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   ])("hostedOrigin %p resolves to its host at the hosted ops port", async (hostedOrigin, expected) => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
     await provisionIdpIdentityMapping({ hostedOrigin, ...MAPPING }, { fetchImpl });
-    expect(calls.length).toBe(4);
+    expect(calls.length).toBe(6);
     expect(calls.every((c) => c.url === expected)).toBe(true);
   });
 
@@ -851,7 +901,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     }) as typeof fetch;
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true }, { fetchImpl });
     expect(result.ok).toBe(true);
-    expect(mappingUrls.length).toBe(4);
+    expect(mappingUrls.length).toBe(6);
     expect(mappingUrls.every((u) => u === `http://127.0.0.1:${HOSTED_OPS_PORT}/`)).toBe(true);
   });
 });
@@ -1075,7 +1125,6 @@ const BASE_PARAMS = {
 
 function tempPaths() {
   return {
-    signingKeyFilePath: join(dir, "signing-key.pem"),
     secretsStagingPath: join(dir, "secrets.env"),
     localConfigPath: join(dir, "config.yaml"),
   };
@@ -1096,7 +1145,7 @@ describe("enableMcp — local-origin refusal", () => {
 });
 
 describe("enableMcp — dry-run", () => {
-  test("writes no file: reports where a signing key would be generated, and stops before any remote call", async () => {
+  test("writes no file, generates no signing key, and stops before any remote call", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const paths = tempPaths();
     const listingBefore = readdirSync(dir).sort();
@@ -1106,30 +1155,11 @@ describe("enableMcp — dry-run", () => {
     expect(result.ok).toBe(true);
     expect(result.dryRun).toBe(true);
     expect(calls).toHaveLength(0);
-    // flair#2113 review: --dry-run no longer creates the key.
-    expect(existsSync(paths.signingKeyFilePath)).toBe(false);
     expect(readdirSync(dir).sort()).toEqual(listingBefore);
     expect(readFileSync(paths.localConfigPath, "utf-8")).toBe(configBefore);
-    const keyStep = result.steps.find((s) => s.step === "signing-key");
-    expect(keyStep?.ok).toBe(true);
-    expect(keyStep?.detail).toContain(`no signing key at ${paths.signingKeyFilePath}; a run without --dry-run generates one there`);
-    expect(result.signingKeyFilePath).toBe(paths.signingKeyFilePath);
     expect(result.issuer).toBe(ISSUER);
     expect(result.resource).toBe(`${ISSUER}/mcp`);
     expect(result.callbackUrl).toBe(`${ISSUER}/oauth/github/callback`);
-  });
-
-  test("an existing signing key is reported as reused and left byte-identical", async () => {
-    const { fetchImpl, calls } = fullMockFetch();
-    const paths = tempPaths();
-    writeFileSync(paths.signingKeyFilePath, "EXISTING-KEY-BYTES", { mode: 0o600 });
-    const result = await enableMcp({ ...BASE_PARAMS, ...paths, dryRun: true }, { fetchImpl });
-
-    expect(result.ok).toBe(true);
-    expect(calls).toHaveLength(0);
-    expect(readFileSync(paths.signingKeyFilePath, "utf-8")).toBe("EXISTING-KEY-BYTES");
-    const keyStep = result.steps.find((s) => s.step === "signing-key");
-    expect(keyStep?.detail).toContain(`signing key found at ${paths.signingKeyFilePath}; a run without --dry-run reuses it`);
   });
 
   test("still fails at idp-credentials when required values are missing, even in dry-run", async () => {
@@ -1145,10 +1175,56 @@ describe("enableMcp — dry-run", () => {
   });
 });
 
+describe("enableMcp — the issuer must be an http(s) origin", () => {
+  test.each([ISSUER, `${ISSUER}/`, `${ISSUER}:8443`, "http://flair.example.com", "https://[2001:db8::1]:8443/"])(
+    "accepts canonical --issuer %s under --dry-run",
+    async (issuer) => {
+      const { fetchImpl, calls } = fullMockFetch();
+      const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), issuer, dryRun: true }, { fetchImpl });
+      expect(result.ok).toBe(true);
+      expect(calls).toHaveLength(0);
+    },
+  );
+  test.each([
+    "https://flair.example.com/issuer", "https://flair.example.com/oauth", "",
+    "https://flair.example.com/?", "https://flair.example.com/#",
+    "https://flair.example.com?", "https://flair.example.com#",
+    "https://flair.example.com/?x=1", "https://flair.example.com/#fragment",
+    "https://flair.example.com/a/..", "https://flair.example.com/.",
+    "https://flair.example.com/..", "https://flair.example.com/%2e",
+    "https://flair.example.com/a/%2e%2e", "https://flair.example.com//",
+    "https://flair.example.com/issuer/", "https://user:pass@flair.example.com",
+    "https:\\flair.example.com", " https://flair.example.com", "https://flair.example.com\n",
+    "ftp://flair.example.com", "flair.example.com", "https:///flair.example.com",
+    "https://FLAIR.example.com", "https://flair.example.com:443",
+  ])(
+    "refuses --issuer %s before any write, with and without --dry-run",
+    async (badIssuer) => {
+      for (const dryRun of [true, false]) {
+        const { fetchImpl, calls } = fullMockFetch();
+        const paths = tempPaths();
+        const listingBefore = readdirSync(dir).sort();
+        const configBefore = readFileSync(paths.localConfigPath, "utf-8");
+        const result = await enableMcp(
+          { ...BASE_PARAMS, ...paths, issuer: badIssuer, confirmSecretsApplied: true, dryRun },
+          { fetchImpl },
+        );
+        expect(result.ok).toBe(false);
+        expect(result.failedStep).toBe(["", "flair.example.com"].includes(badIssuer) ? "local-origin-check" : "issuer-origin-check");
+        expect(result.refused?.message).toContain(["", "flair.example.com"].includes(badIssuer) ? "Issuer refused: invalid URL." : "must be an absolute http(s) origin");
+        expect(calls).toHaveLength(0);
+        expect(existsSync(paths.secretsStagingPath)).toBe(false);
+        expect(readdirSync(dir).sort()).toEqual(listingBefore);
+        expect(readFileSync(paths.localConfigPath, "utf-8")).toBe(configBefore);
+      }
+    },
+  );
+});
+
 describe("enableMcp — the confirm-secrets-applied gate", () => {
   function pushedSecretsFetch() {
     const { fetchImpl: baseFetch, calls } = fullMockFetch();
-    const { publicKey } = generateRsaSigningKeyPair();
+    const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
     const setNames: string[] = [];
     const readBackNames: string[] = [];
     const fetchImpl = (async (url: any, init?: RequestInit) => {
@@ -1300,7 +1376,7 @@ describe("enableMcp — full happy path", () => {
     expect(result.steps.every((s) => s.ok)).toBe(true);
     expect(result.steps.map((s) => s.step)).toEqual([
       "local-origin-check",
-      "signing-key",
+      "issuer-origin-check",
       "config-block",
       "idp-credentials",
       "secrets-provisioning",
@@ -1870,6 +1946,7 @@ rest: true
     expect(doc["@harperfast/oauth"].mcp.enabled).toBe(ENV_REF);
   });
 
+
   test("disable writes literal false — decisively off regardless of environment", () => {
     writeFileSync(configPath, CONFIG_WITH_ENV_REF, "utf-8");
     const result = updateLocalConfigMcpEnabled(false, configPath);
@@ -2007,7 +2084,6 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
         idpSubject: "octocat",
         adminUser: "admin",
         adminPass: "pw",
-        signingKeyFilePath: join(dir, "signing-key.pem"),
         secretsStagingPath: join(dir, "secrets.env"),
         confirmSecretsApplied: true,
       },
@@ -2042,7 +2118,6 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     idpSubject: "octocat",
     adminUser: "admin",
     adminPass: "pw",
-    signingKeyFilePath: join(dir, "signing-key.pem"),
     secretsStagingPath: join(dir, "secrets.env"),
     confirmSecretsApplied: true,
   });
@@ -2139,7 +2214,11 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(result.steps.find((s) => s.step === "fabric-operator-deploy")?.detail)
       .toContain(`Issuer ${PUBLIC} matched the target's own OAuth authorization-server metadata at ${FABRIC}/.well-known/oauth-authorization-server`);
     expect(calls).toEqual(["target-metadata", "public-metadata"]);
-    expect(readFileSync(join(dir, "secrets.env"), "utf8")).toContain(`FLAIR_MCP_ISSUER=${PUBLIC}`);
+    const staged = readFileSync(join(dir, "secrets.env"), "utf8");
+    expect(staged).toContain(`FLAIR_MCP_ISSUER=${PUBLIC}`);
+    expect(staged).toContain(`OAUTH_GITHUB_CLIENT_ID=${BASE_PARAMS.idpClientId}`);
+    expect(staged).toContain(`OAUTH_GITHUB_CLIENT_SECRET=${BASE_PARAMS.idpClientSecret}`);
+    expect(staged).toContain(`OAUTH_GITHUB_REDIRECT_URI=${PUBLIC}/oauth`);
   });
 
   test("Fabric refuses target metadata redirected to valid public issuer metadata", async () => {
@@ -2208,7 +2287,7 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
   });
 
   test("Fabric first run after an env-secrets push: matching target metadata still needs public activation", async () => {
-    const { publicKey } = generateRsaSigningKeyPair();
+    const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
     let metadataReads = 0;
     const { fetchImpl } = fabricFetch(
       async () => ++metadataReads === 1
@@ -2276,7 +2355,6 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
         idpSubject: "octocat",
         adminUser: "admin",
         adminPass: "pw",
-        signingKeyFilePath: join(dir, "signing-key.pem"),
         secretsStagingPath: join(dir, "secrets.env"),
         confirmSecretsApplied: true,
       },

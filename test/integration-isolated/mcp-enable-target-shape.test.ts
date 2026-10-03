@@ -1,17 +1,18 @@
 import { expect, test } from "bun:test";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
+import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tempDir } from "../helpers/temp-dir.ts";
-import { enableMcp, generateRsaSigningKeyPair } from "../../src/lib/mcp-enable.ts";
+import { enableMcp } from "../../src/lib/mcp-enable.ts";
 
 const ISSUER = "https://mcp.acme.example";
 
 async function stub(push = false) {
   const calls: string[] = [];
   const credentials = new Map<string, any>();
-  const publicKey = push ? generateRsaSigningKeyPair().publicKey : undefined;
+  const publicKey = push ? generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } }).publicKey : undefined;
   let pid = 100;
   const server = createServer(async (req: IncomingMessage, res) => {
     let raw = "";
@@ -51,7 +52,7 @@ function fixture(instance: string) {
   return { dir, config, params: {
     instance, issuer: ISSUER, adminUser: "admin", adminPass: "pw",
     idpClientId: "client", idpClientSecret: "secret", idpSubject: "octocat",
-    localConfigPath, signingKeyFilePath: join(dir, "key.pem"), secretsStagingPath: join(dir, "secrets.env"),
+    localConfigPath, secretsStagingPath: join(dir, "secrets.env"),
   } };
 }
 

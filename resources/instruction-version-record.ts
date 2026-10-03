@@ -6,6 +6,7 @@ import { databases } from "harper";
 import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
+import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
 
@@ -124,6 +125,25 @@ export function soulSubjectId(agentId: string, key: string): string {
   return `${agentId}:${key}`;
 }
 
+/** The subject type of a skill-tagged Memory row's version chain (flair#2139 S2). */
+export const SKILL_SUBJECT_TYPE = "skill";
+
+/** A retained skill read-scope reference: the owner and the effective visibility. */
+export interface InstructionReadRef {
+  agentId?: unknown;
+  visibility?: unknown;
+}
+
+/**
+ * Skill references require a nonempty owner and explicit private/shared visibility.
+ */
+export function skillRefReadable(ref: InstructionReadRef | null | undefined, readerId: string): boolean {
+  if (!ref || typeof ref !== "object") return false;
+  if (typeof ref.agentId !== "string" || ref.agentId.length === 0) return false;
+  if (ref.visibility !== PRIVATE_VISIBILITY && ref.visibility !== SHARED_VISIBILITY) return false;
+  return ref.agentId === readerId || ref.visibility === SHARED_VISIBILITY;
+}
+
 /** A version row carries the expectedVersion it compared iff it is guarded; otherwise null. */
 export function expectedVersionOf(input: RecordVersionInput): string | null {
   return input.expectedVersion ?? null;
@@ -154,12 +174,11 @@ function isTableLike(table: unknown): boolean {
 }
 
 /**
- * The subject's current head, or null when it has no history yet. Read through
- * the raw table handle: this runs inside the caller's append transaction and
- * has already dropped the thread's cached read snapshot (withKeyLock), so it
- * sees the last committed head under the subject lock.
+ * The subject's current head, or null when it has no history yet.
+ * The append caller reads under its subject lock and transaction after resetting
+ * the cached read snapshot; the read resource uses the same raw handle without a lock.
  */
-async function readHead(subjectType: string, subjectId: string, shared: any): Promise<Record<string, any> | null> {
+export async function readHead(subjectType: string, subjectId: string, shared?: any): Promise<Record<string, any> | null> {
   const table = (databases as any).flair?.InstructionVersion;
   if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
   for await (const row of table.search({
