@@ -332,7 +332,7 @@ program
   .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
-  .option("--skip-start", "Install and configure local Harper without starting (omit --agent)")
+  .option("--skip-start", "Configure local Harper without starting; defer agent registration")
   .option("--skip-soul", "Skip interactive personality setup")
   .option("--client <client>", "Client(s) to wire: claude-code, codex, gemini, cursor, antigravity, pi (native extension), all, or none")
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
@@ -564,11 +564,6 @@ program
     }
 
     // ── Local init (full one-command setup) ──
-    if (opts.skipStart && agentId) {
-      console.error("Error: --skip-start cannot be combined with --agent or --agent-id: agent registration and verification require a running instance.");
-      console.error("Remedy: omit --agent/--agent-id for installation only, then rerun flair init --agent <id> without --skip-start (keep your instance flags).");
-      process.exit(1);
-    }
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     // Resolve ONCE, here: the operator means "relative to my shell's cwd", but
     // Harper is spawned with cwd = the flair package directory, so a raw
@@ -662,7 +657,7 @@ program
       process.exit(1);
     }
     let alreadyRunning = false;
-    if (opts.skipStart) {
+    if (opts.skipStart && !agentId) {
       let healthStatus: number | undefined;
       try {
         const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
@@ -698,7 +693,7 @@ program
       if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
         refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
       }
-    } else {
+    } else if (!opts.skipStart) {
       try {
         const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
         if (res.status > 0) alreadyRunning = true;
@@ -1238,84 +1233,88 @@ program
         console.log(`Keypair written: ${privPath} ✓`);
       }
 
-      // Seed agent via operations API. Unlike the pre-auth observation,
-      // which is one read, a 401 names a pid only when the read before the
-      // insert and the read after the rejection are the same sole PID. The
-      // HTTP port's holder is not an input and is not assumed to have caused
-      // the rejection. Several holders, or a holder that changed during the
-      // request, stay unattributed. Init started Harper itself → no listener,
-      // and that 401 keeps the credential hint.
-      console.log(`Seeding agent '${agentId}' via operations API...`);
-      const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
-      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
-      console.log(`Agent '${agentId}' registered ✓`);
-
-      // Verify Ed25519 auth
-      console.log("Verifying Ed25519 auth...");
       const httpUrl = `http://127.0.0.1:${httpPort}`;
-      const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${encodeRecordId(agentId)}`);
-      if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
-      console.log("Ed25519 auth verified ✓");
+      if (!opts.skipStart) {
+        // Seed agent via operations API. Unlike the pre-auth observation,
+        // which is one read, a 401 names a pid only when the read before the
+        // insert and the read after the rejection are the same sole PID. The
+        // HTTP port's holder is not an input and is not assumed to have caused
+        // the rejection. Several holders, or a holder that changed during the
+        // request, stay unattributed. Init started Harper itself → no listener,
+        // and that 401 keeps the credential hint.
+        console.log(`Seeding agent '${agentId}' via operations API...`);
+        const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
+        await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
+        console.log(`Agent '${agentId}' registered ✓`);
 
-      // Verify semantic search ACTUALLY works (real embed→paraphrase-search
-      // round-trip). A clean-VM dogfood found semantic search dead out of the box
-      // (sudo/root-owned install can't write the embeddings models symlink →
-      // EACCES) while init reported success. Never report a clean init when
-      // recall-by-meaning is broken. Skipped paths (no key yet) are non-fatal.
-      console.log("Verifying semantic search...");
-      const embedCheck = await verifySemanticSearch(httpUrl, agentId, keysDir);
-      if (embedCheck.state === "ok") {
-        console.log(`Semantic search operational ✓ ${render.wrap(render.c.dim, `(paraphrase recall verified, score ${embedCheck.score.toFixed(2)})`)}`);
-      } else if (embedCheck.state === "degraded") {
-        // LOUD — embeddings not loaded. Same message class as `flair doctor`.
-        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search DEGRADED")} — embeddings not loaded; recall-by-meaning will NOT work.`);
-        console.log(`   ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
-        console.log(`   ${render.wrap(render.c.dim, "Common cause: the embeddings component lacks write access (sudo/root global installs).")}`);
-        console.log(`   ${render.wrap(render.c.dim, "Fix: install without sudo (see README Quick Start), then:")} flair restart && flair doctor`);
-      } else if (embedCheck.state === "failed") {
-        // flair#1501: the instance rejected the probe's signature. init just
-        // registered this agent, so this is a genuine auth defect, not a
-        // missing identity — surface it loudly with the signer named.
-        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search probe rejected")} — ${embedCheck.detail}.`);
-        console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
-      } else {
-        console.log(`${render.icons.warn} Semantic search not verified ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
-      }
+        // Verify Ed25519 auth
+        console.log("Verifying Ed25519 auth...");
+        const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${encodeRecordId(agentId)}`);
+        if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
+        console.log("Ed25519 auth verified ✓");
 
-      // Verify the audit log ACTUALLY records (flair#970) — a positive
-      // control, not a flag read: `describe_table` reports `audit: true` on
-      // nodes whose audit trail is empty (base-copy elision, harper#2212).
-      // Same surface as the semantic-search check above.
-      console.log("Verifying audit log...");
-      const auditCheck = await verifyAuditLog(httpUrl, agentId, keysDir, `http://127.0.0.1:${opsPort}`, adminUser, adminPass);
-      if (auditCheck.state === "ok") {
-        // Present tense ONLY: the probe proves current recording, never
-        // historical completeness — see AuditVerifyResult's doc comment.
-        console.log(`Audit log: recording (verified now) ✓ ${render.wrap(render.c.dim, "(verifies current recording, not history — a resynced node's audit has a hard start boundary at its copy time)")}`);
-      } else if (auditCheck.state === "degraded") {
-        if (auditCheck.cause === "disabled") {
-          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log DISABLED")} — ${auditCheck.detail}.`);
-          console.log(`   ${render.wrap(render.c.dim, "Fix: enable logging.auditLog in the ROOT harperdb-config.yaml (the Harper instance config, NOT flair's component config.yaml), then restart Harper.")}`);
+        // Verify semantic search ACTUALLY works (real embed→paraphrase-search
+        // round-trip). A clean-VM dogfood found semantic search dead out of the box
+        // (sudo/root-owned install can't write the embeddings models symlink →
+        // EACCES) while init reported success. Never report a clean init when
+        // recall-by-meaning is broken. Skipped paths (no key yet) are non-fatal.
+        console.log("Verifying semantic search...");
+        const embedCheck = await verifySemanticSearch(httpUrl, agentId, keysDir);
+        if (embedCheck.state === "ok") {
+          console.log(`Semantic search operational ✓ ${render.wrap(render.c.dim, `(paraphrase recall verified, score ${embedCheck.score.toFixed(2)})`)}`);
+        } else if (embedCheck.state === "degraded") {
+          // LOUD — embeddings not loaded. Same message class as `flair doctor`.
+          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search DEGRADED")} — embeddings not loaded; recall-by-meaning will NOT work.`);
+          console.log(`   ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
+          console.log(`   ${render.wrap(render.c.dim, "Common cause: the embeddings component lacks write access (sudo/root global installs).")}`);
+          console.log(`   ${render.wrap(render.c.dim, "Fix: install without sudo (see README Quick Start), then:")} flair restart && flair doctor`);
+        } else if (embedCheck.state === "failed") {
+          // flair#1501: the instance rejected the probe's signature. init just
+          // registered this agent, so this is a genuine auth defect, not a
+          // missing identity — surface it loudly with the signer named.
+          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search probe rejected")} — ${embedCheck.detail}.`);
+          console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
         } else {
-          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log NOT RECORDING")} — ${auditCheck.detail}.`);
-          console.log(`   ${render.wrap(render.c.red, "Audit reports as enabled, but fresh writes produced no audit entries — do not treat the audit log as a record of what happened.")}`);
-          console.log(`   ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
-          console.log(`   ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
+          console.log(`${render.icons.warn} Semantic search not verified ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
         }
-      } else if (auditCheck.state === "failed") {
-        // Same loud discipline as the semantic-search probe above (flair#1501).
-        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log probe rejected")} — ${auditCheck.detail}.`);
-        console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
+
+        // Verify the audit log ACTUALLY records (flair#970) — a positive
+        // control, not a flag read: `describe_table` reports `audit: true` on
+        // nodes whose audit trail is empty (base-copy elision, harper#2212).
+        // Same surface as the semantic-search check above.
+        console.log("Verifying audit log...");
+        const auditCheck = await verifyAuditLog(httpUrl, agentId, keysDir, `http://127.0.0.1:${opsPort}`, adminUser, adminPass);
+        if (auditCheck.state === "ok") {
+          // Present tense ONLY: the probe proves current recording, never
+          // historical completeness — see AuditVerifyResult's doc comment.
+          console.log(`Audit log: recording (verified now) ✓ ${render.wrap(render.c.dim, "(verifies current recording, not history — a resynced node's audit has a hard start boundary at its copy time)")}`);
+        } else if (auditCheck.state === "degraded") {
+          if (auditCheck.cause === "disabled") {
+            console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log DISABLED")} — ${auditCheck.detail}.`);
+            console.log(`   ${render.wrap(render.c.dim, "Fix: enable logging.auditLog in the ROOT harperdb-config.yaml (the Harper instance config, NOT flair's component config.yaml), then restart Harper.")}`);
+          } else {
+            console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log NOT RECORDING")} — ${auditCheck.detail}.`);
+            console.log(`   ${render.wrap(render.c.red, "Audit reports as enabled, but fresh writes produced no audit entries — do not treat the audit log as a record of what happened.")}`);
+            console.log(`   ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
+            console.log(`   ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
+          }
+        } else if (auditCheck.state === "failed") {
+          // Same loud discipline as the semantic-search probe above (flair#1501).
+          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log probe rejected")} — ${auditCheck.detail}.`);
+          console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
+        } else {
+          // An unrun check must not look like a pass.
+          console.log(`${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditCheck.detail})`);
+        }
+
       } else {
-        // An unrun check must not look like a pass.
-        console.log(`${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditCheck.detail})`);
+        console.log(`Agent registration deferred. After flair start, run flair init --agent ${JSON.stringify(agentId)} (keep your instance flags).`);
       }
 
       // flair#2141 S2 — seed the using-flair skill before init reports success.
       await seedUsingFlairSkillOnInstall();
 
-      // Output — admin password printed once, never written to disk
-      console.log("\n✅ Flair initialized successfully");
+      console.log(opts.skipStart ? "\n✅ Flair configured locally (no agent registered)" : "\n✅ Flair initialized successfully");
       console.log(`   Agent ID:    ${agentId}`);
       console.log(`   Flair URL:   ${httpUrl}`);
       console.log(`   Private key: ${privPath}`);
@@ -1345,7 +1344,7 @@ program
       // "AI assistant [default]" — it leaked into bootstrap output and
       // confused users. Now those paths leave the soul empty and nudge the
       // user toward `flair soul set` / `flair doctor` instead.
-      if (!opts.skipSoul && process.stdin.isTTY) {
+      if (!opts.skipStart && !opts.skipSoul && process.stdin.isTTY) {
         const soulEntries = await runSoulWizard(agentId);
         if (soulEntries.length > 0) {
           console.log("");
@@ -1368,7 +1367,7 @@ program
           console.log(`   Or run \`flair doctor\` anytime for a nudge.`);
         }
       } else {
-        const reason = opts.skipSoul ? "--skip-soul" : "non-interactive";
+        const reason = opts.skipStart ? "--skip-start" : opts.skipSoul ? "--skip-soul" : "non-interactive";
         console.log(`\n   Soul prompts skipped (${reason}). Add entries with:`);
         console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
       }
@@ -1570,7 +1569,7 @@ program
       // would render a green "MCP server responded" for a setup that never
       // starts an MCP server.
       const wiredAnyMcpClient = wiringResults.some((r) => r.client !== "pi");
-      if (!opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0 && wiredAnyMcpClient) {
+      if (!opts.skipStart && !opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0 && wiredAnyMcpClient) {
         console.log("\n   Smoke-testing MCP server...");
         try {
           // The RUNNING CLI's own server: mcpServerSpec() pins to THIS
@@ -1695,14 +1694,6 @@ program
       }
     }
 
-    // All init work is genuinely done at this point: Harper is installed +
-    // running (detached, unref'd — survives this process exiting), the agent is
-    // registered, semantic search is verified, MCP clients are wired, and the
-    // smoke test ran. The MCP smoke subprocess can leave a lingering npx handle
-    // that pins Node's event loop for ~60s after success ("rc=0 but doesn't
-    // return"). We've cleared/unref'd the known timers above; exit explicitly so
-    // the prompt returns in a couple seconds regardless of any stray handle. The
-    // running Harper instance is unaffected.
     await new Promise<void>((r) => process.stdout.write("", () => r()));
     process.exit(0);
   });

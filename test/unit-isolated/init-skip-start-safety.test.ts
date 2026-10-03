@@ -70,18 +70,27 @@ describe("local init skip-start safety through the built CLI", () => {
   beforeAll(() => ensureCliBuild(), 120_000);
 
   for (const flag of ["--agent", "--agent-id"]) {
-    test(`${flag} with --skip-start refuses before setup or requests`, () => {
-      const f = fixture();
-      const result = runInit(f, ["--skip-start", flag, "canary"], "unknown", false);
+    test(`${flag} with --skip-start writes local configuration and defers registration without requests`, () => {
+      const f = fixture(true);
+      const config = readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8");
+      const result = runInit(f, ["--skip-start", flag, "canary"]);
       expect(result.error).toBeUndefined();
-      expect(result.status, result.stdout + result.stderr).toBe(1);
-      expect(result.stderr).toContain("--skip-start cannot be combined with --agent or --agent-id");
-      expect(result.stderr).toContain("omit --agent/--agent-id for installation only");
-      expect(result.stderr).toContain("flair init --agent <id> without --skip-start");
-      expect(result.stdout).not.toContain("registered");
-      expect(result.stdout).not.toContain("initialized successfully");
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain('Agent registration deferred. After flair start, run flair init --agent "canary"');
+      expect(result.stdout).toContain("no agent registered");
+      expect(result.stdout).not.toContain("registered ✓");
+      expect(result.stdout).not.toContain("verified");
       expect(requests(f)).toEqual([]);
-      expectNoSetup(f);
+      expect(readFileSync(join(f.home, ".flair", "keys", "canary.key")).length).toBe(32);
+      expect(existsSync(join(f.home, ".flair", "keys", "canary.pub"))).toBe(true);
+      expect(existsSync(flairConfigPath(f.home))).toBe(true);
+      expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(true);
+      expect(readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8")).toBe(config);
+      const key = readFileSync(join(f.home, ".flair", "keys", "canary.key"));
+      const rerun = runInit(f, ["--skip-start", flag, "canary"]);
+      expect(rerun.status, rerun.stdout + rerun.stderr).toBe(0);
+      expect(readFileSync(join(f.home, ".flair", "keys", "canary.key"))).toEqual(key);
+      expect(requests(f)).toEqual([]);
     }, 30_000);
   }
 
