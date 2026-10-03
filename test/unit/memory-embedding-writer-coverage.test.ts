@@ -75,7 +75,7 @@ add("migrations/visibility-backfill", ["writer:table.put#1"], "ECHO",
 add("migrations/synthetic-test-migration", ["writer:table.put#1"], "ECHO",
   "Test-only migration backfill of existing rows.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
-  "flair#2139 S2 skill successor: carries the caller's locally-produced (or already-latch-tripped) stamp; Memory calls noteWriteStamp on the successor post-commit.");
+  "Memory computes or retains embeddings before this writer; FeedMemories does not compute embeddings.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
   "flair#2139 S2 skill predecessor close: read-modify-write re-writes the existing row's own stamp.");
 

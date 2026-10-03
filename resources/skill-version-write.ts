@@ -1,26 +1,13 @@
-/**
- * skill-version-write.ts — the transactional skill version writer (flair#2139
- * S2).
- *
- * Atomicity is mandatory (spec): inside the append helper's per-subject lock and
- * its ONE owned transaction, this module re-reads the subject's current live
- * Memory head, builds the successor, closes the predecessor, performs pointer
- * writes, and appends the version. Every table operation is given the SAME
- * transaction context, so any failure aborts everything. The helper (not this
- * module) owns the lock/transaction/append; `mutateRow` here only performs the
- * Memory writes that ride along.
- *
- * Main's detached close + catch-and-log path (closeSupersededIfNeeded) is never
- * used for skills: the predecessor close is part of the same transaction as the
- * successor write, so a failure rolls both back rather than leaving two active
- * rows or a swallowed error.
- */
+/** Skill writes share the ["flair-instruction-version", "skill"] lock. */
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { recordVersion, type RecordVersionOutcome } from "./instruction-version-record.js";
-import { SKILL_TAG, enforceSkillDurability } from "./skill-write.js";
+import { SKILL_TAG, enforceSkillDurability, skillEmbedText } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { skillWriteSource } from "./skill-write-policy.js";
+import type { AgentAuthVerdict } from "./agent-auth.js";
+import { FORBIDDEN } from "./record-type-kit.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
@@ -98,13 +85,38 @@ export function skillPayloadUnchanged(base: Record<string, any>, head: Record<st
     bookkeeping.has(key) || isDeepStrictEqual(value, head[key]));
 }
 
-/**
- * Resolve the current live head of a skill subject under the caller's lock.
- * `subjectId` is the stable `skillSubjectId`; `addressedId` is the physical row
- * the caller named (used to find the lineage for a legacy row that has no
- * `skillSubjectId` yet). Returns the live row, or the addressed row when it is
- * not yet enrolled, or null when neither exists.
- */
+export function skillWriteConflict(error: string): Response {
+  return Response.json({ error }, { status: 409 });
+}
+
+export async function prepareSkillBody(content: any, stored: Record<string, any> | null) {
+  const predecessor = typeof content.supersedes === "string" && content.supersedes.length > 0
+    ? await (databases as any).flair.Memory.get(content.supersedes)
+    : null;
+  if (!rowIsSkill(content) && !rowIsSkill(stored) && !rowIsSkill(predecessor)) {
+    return { content, predecessor };
+  }
+  if (content.supersedes && content.supersedes === content.id) return skillWriteConflict("skill_self_supersede");
+  if (content.supersedes && !predecessor && content.supersedes !== stored?.supersedes) {
+    return skillWriteConflict("skill_predecessor_missing");
+  }
+  if (content.tags !== undefined && (!Array.isArray(content.tags) || !content.tags.includes(SKILL_TAG))) {
+    return Response.json({ error: "skill_lineage_tag_removed" }, { status: 400 });
+  }
+  if ((content.archived != null && content.archived !== false) || (content.validTo != null && content.validTo !== "")) {
+    return Response.json({ error: "skill_state_requires_delete" }, { status: 400 });
+  }
+  const effective = { ...(stored ?? predecessor ?? {}), ...content };
+  effective.tags = content.tags ?? (rowIsSkill(stored) ? stored!.tags : predecessor?.tags);
+  if (content.embedding === undefined && skillEmbedText(effective) !== skillEmbedText(stored ?? predecessor ?? {})) {
+    effective.embedding = null;
+    effective.embeddingModel = null;
+  }
+  if (content.id === undefined) delete effective.id;
+  return { content: effective, predecessor };
+}
+
+/** Select exactly one open row; ambiguity refuses. */
 export async function resolveSkillHead(
   subjectId: string | null,
   addressedId: string | null,
@@ -112,26 +124,43 @@ export async function resolveSkillHead(
 ): Promise<Record<string, any> | null> {
   const table = (databases as any).flair?.Memory;
   if (!table || typeof table.search !== "function") throw new Error("flair: the Memory table is unavailable");
+  const live = new Map<string, Record<string, any>>();
   if (subjectId) {
-    let best: Record<string, any> | null = null;
     for await (const row of table.search({
       conditions: [{ attribute: "skillSubjectId", comparator: "equals", value: subjectId }],
-      limit: 200,
     }, shared)) {
-      if (!isOpenLiveRow(row)) continue;
-      // A subject should have exactly one live head; if several match, take the
-      // one with no successor-of-it still open — deterministically the latest
-      // by createdAt, then id, so the resolution is stable.
-      if (!best || String(row.createdAt ?? "") > String(best.createdAt ?? "") ||
-          (String(row.createdAt ?? "") === String(best.createdAt ?? "") && String(row.id) > String(best.id))) {
-        best = row;
-      }
+      if (isOpenLiveRow(row)) live.set(String(row.id), row);
     }
-    if (best) return best;
   }
   if (addressedId) {
     const row = await table.get(addressedId, shared);
-    if (row && typeof row === "object" && isOpenLiveRow(row)) return row;
+    if (isOpenLiveRow(row) && (!row.skillSubjectId || row.skillSubjectId === subjectId)) live.set(String(row.id), row);
+  }
+  if (live.size > 1) throw new Error("skill_head_ambiguous");
+  return live.values().next().value ?? null;
+}
+
+export async function authorizeSkillOwners(ctx: any, auth: AgentAuthVerdict, rows: any[], shared: any): Promise<Response | null> {
+  for (const row of rows.filter(Boolean)) {
+    if (typeof row.agentId !== "string" || !row.agentId.trim()) return FORBIDDEN("skill_owner_missing");
+    if (skillWriteSource(ctx, auth) !== "agent" || auth.kind !== "agent" || row.agentId === auth.agentId) continue;
+    let granted = false;
+    for await (const grant of (databases as any).flair.MemoryGrant.search({ conditions: [
+      { attribute: "granteeId", comparator: "equals", value: auth.agentId },
+      { attribute: "ownerId", comparator: "equals", value: row.agentId },
+    ] }, shared)) {
+      if (grant.scope === "write") granted = true;
+    }
+    if (!granted) return FORBIDDEN("forbidden: cannot write a skill owned by another agent without a write grant");
+  }
+  return null;
+}
+
+export async function validateSkillSnapshots(stored: any, predecessor: any, targetId: string | null, shared: any): Promise<Response | null> {
+  for (const [id, expected] of [[targetId, stored], [predecessor?.id, predecessor]]) {
+    if (!id) continue;
+    const current = await (databases as any).flair.Memory.get(id, shared);
+    if (!isDeepStrictEqual(current ?? null, expected ?? null)) return skillWriteConflict("skill_target_changed");
   }
   return null;
 }
@@ -198,7 +227,7 @@ export interface RunSkillVersionWriteArgs {
    * Build the write plan from the live head resolved under the lock. Returning
    * a Response refuses the write (and rolls back: nothing is written).
    */
-  plan: (head: Record<string, any> | null) => SkillWritePlan | Response;
+  plan: (head: Record<string, any> | null, shared: any) => SkillWritePlan | Response | Promise<SkillWritePlan | Response>;
   /** Resolve the live head under the lock. */
   head: (shared: any) => Promise<Record<string, any> | null>;
   hooks: SkillWriteHooks;
@@ -243,14 +272,14 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       subjectType: "skill",
       prepare: async (shared: any) => {
         const head = await args.head(shared);
-        const built = args.plan(head);
+        const built = await args.plan(head, shared);
         if (built instanceof Response) return built;
         plan = built;
         const target = built.kind === "delete" ? built.predecessor : built.successor;
         return {
           subjectType: "skill" as const,
           subjectId: args.subjectId,
-          agentId: args.agentId,
+          agentId: String(target.agentId),
           key: null,
           kind: built.kind,
           rowId: String(target.id),

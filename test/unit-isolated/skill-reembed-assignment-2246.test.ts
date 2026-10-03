@@ -22,7 +22,8 @@ let failAppend = false;
     shared.transaction.staged.push(() => versions.set(row.id, { ...row }));
   },
 };
-const { Memory } = await installMemoryHarperMock();
+const { Memory, _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
+const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { createEmbeddingStampMigration } = await import("../../resources/migrations/embedding-stamp.ts");
 const { resolveSkillManifest, resolvableSkillRows, SKILL_ROW_SELECT } = await import("../../resources/skill-manifest.ts");
 const table = databasesMock.flair.Memory;
@@ -55,6 +56,7 @@ async function manifest(agentId = "reader", own = false) {
 
 beforeEach(() => {
   resetHarnessState(); versions.clear(); locks.clear(); failAppend = false;
+  _resetLocalInstanceIdCacheForTests();
 });
 
 test("a PUT create preserves the supplied physical id and org assignment", async () => {
@@ -122,12 +124,21 @@ test("reembedding an unenrolled successor resolves the addressed live row", asyn
   expect(versions.get(`skill:${predecessor.id}:1`)?.memoryId).toBe(row.id);
 });
 
-test.each(["content", "trigger", "visibility", "metadata", "expiresAt", "archived", "validTo"])("a %s change with cleared embeddings still supersedes atomically", async (field) => {
+test.each(["content", "trigger", "visibility", "metadata", "expiresAt", "archived", "validTo"])("a %s change with cleared embeddings is applied or refused", async (field) => {
   const row = skill();
   harnessState.memoryStore.set(row.id, row);
   const values: Record<string, unknown> = { content: "edited", trigger: "new trigger", visibility: "private", metadata: JSON.stringify({ name: "renamed" }), expiresAt: "2099-01-01T00:00:00.000Z", archived: true, validTo: "2099-01-01T00:00:00.000Z" };
   const result = await writer(row.id).put({ ...row, [field]: values[field], embedding: null, embeddingModel: null });
+  if (field === "archived" || field === "validTo") {
+    expect(result.status).toBe(400);
+    expect(harnessState.memoryStore.get(row.id)).toEqual(row);
+    expect(harnessState.memoryStore.get(row.id)?.archived).toBe(false);
+    expect(harnessState.memoryStore.size).toBe(1);
+    expect(versions.size).toBe(0);
+    return;
+  }
   expect(result.id).not.toBe(row.id);
+  expect(harnessState.memoryStore.get(result.id)?.[field]).toEqual(values[field]);
   expect(harnessState.memoryStore.get(row.id)?.validTo).toBeString();
   expect(harnessState.memoryStore.get(result.id)?.skillSubjectId).toBe(row.id);
   expect(versions.get(`skill:${row.id}:1`)?.memoryId).toBe(result.id);
@@ -151,4 +162,194 @@ test("an admin agent cannot reembed another agent's skill", async () => {
   expect(result.status).toBe(403);
   expect(harnessState.memoryStore.get(row.id)).toEqual(row);
   expect(versions.size).toBe(0);
+});
+
+function feed(ctx = operator): any {
+  const resource: any = new FeedMemories();
+  resource.getContext = () => ctx;
+  return resource;
+}
+
+test.each(["put", "post", "feed"])("an admin agent cannot name another owner's predecessor through %s", async (method) => {
+  const row = skill();
+  harnessState.memoryStore.set(row.id, row);
+  const body = { ...skill("attacker", "admin"), supersedes: row.id };
+  const result = method === "feed" ? await feed(adminAgent).post(body) : await writer(body.id, adminAgent)[method](body);
+  expect(result.status).toBe(403);
+  expect([...harnessState.memoryStore.values()]).toEqual([row]);
+  expect(versions.size).toBe(0);
+});
+
+test("a granted admin agent preserves the predecessor owner and records the actor separately", async () => {
+  const row = skill();
+  harnessState.memoryStore.set(row.id, row);
+  const grants = databasesMock.flair.MemoryGrant;
+  const original = grants.search;
+  (grants as any).search = async function* () { yield { scope: "write" }; };
+  try {
+    const result = await writer("successor", adminAgent).put({ ...skill("successor", "admin"), supersedes: row.id });
+    expect(result.id).toBe("successor");
+    expect(harnessState.memoryStore.get(result.id)?.agentId).toBe("owner");
+    expect(versions.get(`skill:${row.id}:1`)?.agentId).toBe("owner");
+    expect(versions.get(`skill:${row.id}:1`)?.actorId).toBe("admin");
+    expect(versions.get(`skill:${row.id}:1`)?.sourceClass).toBe("agent");
+  } finally { grants.search = original; }
+});
+
+test.each([false, true])("stale-id update refuses without creating another live head (explicit=%s)", async (explicit) => {
+  const first = skill();
+  harnessState.memoryStore.set(first.id, first);
+  const result = await writer(first.id).put({ id: first.id, content: "second" });
+  const before = [...harnessState.memoryStore.values()];
+  const rejected = explicit
+    ? await writer("third").put({ ...skill("third"), supersedes: first.id })
+    : await writer(first.id).put({ id: first.id, content: "third" });
+  expect(rejected.status).toBe(409);
+  expect([...harnessState.memoryStore.values()]).toEqual(before);
+  expect(harnessState.memoryStore.get(result.id)?.validTo).toBeUndefined();
+  expect(versions.size).toBe(1);
+});
+
+test("stale-id delete closes the current head and deletes that head's pointer", async () => {
+  const first = skill();
+  harnessState.memoryStore.set(first.id, first);
+  const next = await writer(first.id).put({ id: first.id, content: "second" });
+  harnessState.pointerStore.set(next.id, { memoryId: next.id });
+  const result = await writer(first.id).delete(first.id);
+  expect(result.status).toBe(200);
+  expect((await result.json()).id).toBe(next.id);
+  expect(harnessState.pointerStore.has(next.id)).toBe(false);
+  expect(harnessState.memoryStore.get(next.id)?.validTo).toBeString();
+  expect(versions.get(`skill:${first.id}:2`)?.rowId).toBe(next.id);
+  expect(versions.get(`skill:${first.id}:2`)?.memoryId).toBeNull();
+});
+
+test.each(["ambiguous", "missing"])("%s live heads refuse updates and deletes", async (state) => {
+  const row = { ...skill(), skillSubjectId: "subject", ...(state === "missing" ? { validTo: "closed" } : {}) };
+  harnessState.memoryStore.set(row.id, row);
+  if (state === "ambiguous") harnessState.memoryStore.set("other", { ...skill("other"), skillSubjectId: "subject" });
+  const before = [...harnessState.memoryStore.values()];
+  expect((await writer(row.id).put({ id: row.id, content: "edit" })).status).toBeGreaterThanOrEqual(400);
+  expect((await writer(row.id).delete(row.id)).status).toBeGreaterThanOrEqual(400);
+  expect([...harnessState.memoryStore.values()]).toEqual(before);
+  expect(versions.size).toBe(0);
+});
+
+test.each(["put", "feed"])("%s scans a tagless edit of a stored skill", async (method) => {
+  const row = skill();
+  harnessState.memoryStore.set(row.id, row);
+  const body = { id: row.id, agentId: row.agentId, content: "```bash\nexec(rm -rf /)\n```" };
+  const result = method === "feed" ? await feed().post(body) : await writer(row.id).put(body);
+  expect(result.status).toBe(400);
+  expect((await result.json()).error).toBe("skill_scan_rejected");
+  expect([...harnessState.memoryStore.values()]).toEqual([row]);
+  expect(versions.size).toBe(0);
+});
+
+test.each(["put", "post", "feed"])("%s scans a tagless explicit skill successor", async (method) => {
+  const row = skill();
+  harnessState.memoryStore.set(row.id, row);
+  const body = { id: "next", agentId: "owner", supersedes: row.id, content: "```bash\nexec(rm -rf /)\n```" };
+  const result = method === "feed" ? await feed().post(body) : await writer("next")[method](body);
+  expect(result.status).toBe(400);
+  expect((await result.json()).error).toBe("skill_scan_rejected");
+  expect([...harnessState.memoryStore.values()]).toEqual([row]);
+  expect(versions.size).toBe(0);
+});
+
+test.each(["put", "post", "feed"])("%s refuses a failed predecessor lookup", async (method) => {
+  harnessState.getOverride = (id) => { if (id === "unreadable") throw new Error("lookup failed"); };
+  const body = { ...skill("next"), supersedes: "unreadable" };
+  const call = method === "feed" ? feed().post(body) : writer("next")[method](body);
+  await expect(call).rejects.toThrow("lookup failed");
+  expect(harnessState.memoryStore.size).toBe(0);
+  expect(versions.size).toBe(0);
+});
+
+test("feed re-ingest inherits skill tags and supersedes even when content is unchanged", async () => {
+  const first = await feed().post(skill());
+  const next = await feed().post({ id: first.id, agentId: "owner", content: first.content, trigger: "changed trigger" });
+  expect(next.id).not.toBe(first.id);
+  expect(next.supersedes).toBe(first.id);
+  expect(next.tags).toEqual(["skill"]);
+  expect(next.trigger).toBe("changed trigger");
+  expect(harnessState.memoryStore.get(first.id)?.validTo).toBeString();
+  expect([...versions.values()].map((v) => v.kind)).toEqual(["create", "update"]);
+});
+
+test.each([false, true])("feed stamps a skill inside the transaction (update=%s)", async (update) => {
+  harnessState.instanceRow = { id: "local" };
+  const stored = { ...skill(), originatorInstanceId: "origin", _originatorInstanceId: "receiver", _syncedFrom: "peer", _syncedAt: "receipt" };
+  if (update) harnessState.memoryStore.set(stored.id, stored);
+  const result = await feed().post({ ...skill(), originatorInstanceId: "forged", _originatorInstanceId: "forged", _syncedFrom: "forged", _syncedAt: "forged" });
+  const written = harnessState.memoryStore.get(result.id);
+  expect(written?.originatorInstanceId).toBe(update ? "origin" : "local");
+  for (const key of ["_originatorInstanceId", "_syncedFrom", "_syncedAt"] as const) {
+    expect(written?.[key]).toBe(update ? stored[key] : undefined);
+  }
+});
+
+test("feed refuses archive changes and preserves the stored archive state", async () => {
+  const row = skill();
+  harnessState.memoryStore.set(row.id, row);
+  const result = await feed().post({ id: row.id, agentId: "owner", content: row.content, archived: true });
+  expect(result.status).toBe(400);
+  expect(harnessState.memoryStore.get(row.id)?.archived).toBe(false);
+  expect([...harnessState.memoryStore.values()]).toEqual([row]);
+  expect(versions.size).toBe(0);
+});
+
+test("an admin agent cannot delete another owner's current head through its own old row", async () => {
+  const old = { ...skill("old", "admin"), skillSubjectId: "subject", validTo: "closed" };
+  const head = { ...skill("head", "victim"), skillSubjectId: "subject" };
+  harnessState.memoryStore.set(old.id, old);
+  harnessState.memoryStore.set(head.id, head);
+  const result = await writer(old.id, adminAgent).delete(old.id);
+  expect(result.status).toBe(403);
+  expect([...harnessState.memoryStore.values()]).toEqual([old, head]);
+  expect(versions.size).toBe(0);
+});
+
+test("a target changed after classification refuses under the lock", async () => {
+  const row = skill();
+  harnessState.memoryStore.set(row.id, row);
+  const original = table.search;
+  (table as any).search = (query: any, shared: any) => {
+    if (query?.conditions?.some((c: any) => c.attribute === "skillSubjectId")) {
+      expect(locks.size).toBe(1);
+      expect(shared.transaction.open).toBe(1);
+      harnessState.memoryStore.set(row.id, { ...row, content: "concurrent edit" });
+    }
+    return original(query);
+  };
+  try {
+    const result = await writer(row.id).put({ id: row.id, trigger: "updated" });
+    expect(result.status).toBe(409);
+    expect(harnessState.memoryStore.get(row.id)?.content).toBe("concurrent edit");
+    expect(harnessState.memoryStore.size).toBe(1);
+    expect(versions.size).toBe(0);
+  } finally { table.search = original; }
+});
+
+test.each(["put", "feed"])("%s refuses self-supersession", async (method) => {
+  const row = skill();
+  harnessState.memoryStore.set(row.id, row);
+  const body = { ...row, supersedes: row.id };
+  const result = method === "feed" ? await feed().post(body) : await writer(row.id).put(body);
+  expect(result.status).toBe(409);
+  expect([...harnessState.memoryStore.values()]).toEqual([row]);
+  expect(versions.size).toBe(0);
+});
+
+test("closing an unenrolled successor enrolls its retained row for stale-id deletion", async () => {
+  const prior = { ...skill("prior"), validTo: "closed" };
+  const row = { ...skill("legacy"), supersedes: prior.id };
+  harnessState.memoryStore.set(prior.id, prior);
+  harnessState.memoryStore.set(row.id, row);
+  const next = await writer(row.id).put({ ...row, content: "edit" });
+  expect(harnessState.memoryStore.get(row.id)?.skillSubjectId).toBe(prior.id);
+  const deleted = await writer(row.id).delete(row.id);
+  expect(deleted.status).toBe(200);
+  expect((await deleted.json()).id).toBe(next.id);
+  expect(harnessState.memoryStore.get(next.id)?.validTo).toBeString();
 });

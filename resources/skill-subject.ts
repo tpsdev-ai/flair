@@ -3,10 +3,7 @@
  * (flair#2139 S2). Pure: no Harper imports, so it is unit-testable and callable
  * from every skill writer.
  *
- * A skill is a Memory tagged "skill". An update SUPERSEDES (a fresh physical
- * Memory row) rather than overwriting in place, so the version chain must hang
- * off a subject id that outlives any single physical row. `Memory.skillSubjectId`
- * is that id, and it is SERVER-OWNED.
+ * Memory.skillSubjectId survives supersession and in-place writes.
  *
  * Derivation, in the one order the spec pins:
  *   1. An EXPLICIT successor (`supersedes` set) inherits its predecessor's
