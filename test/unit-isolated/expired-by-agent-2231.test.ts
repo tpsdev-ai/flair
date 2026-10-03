@@ -21,6 +21,7 @@ let activeError: string | null = null;
 let readError: string | null = null;
 let serviceText: string | null = null;
 let unitText: string | null = null;
+let auth: Record<string, unknown> = { kind: "internal" };
 let rows: Array<Record<string, unknown>> = [];
 
 function absent(code = "ENOENT"): never { throw Object.assign(new Error(code), { code }); }
@@ -65,7 +66,7 @@ mock.module("harper", () => ({
 mock.module("../../resources/agent-auth.js", () => ({
   allowVerified: async () => true,
   isAdmin: async () => false,
-  resolveAgentAuth: async () => ({ kind: "internal" }),
+  resolveAgentAuth: async () => auth,
 }));
 mock.module("../../resources/build-info.js", () => ({ resolveBuildInfo: () => null }));
 mock.module("../../resources/migrations/status.js", () => ({
@@ -123,6 +124,7 @@ function mem(id: string, agentId: string | undefined, validTo: string): Record<s
 }
 
 beforeEach(() => {
+  auth = { kind: "internal" };
   installed = true;
   statError = null;
   statErrorPath = TIMER;
@@ -317,6 +319,27 @@ for (const code of ["EACCES", null]) {
   });
 }
 
+
+for (const [who, caller, redacted] of [
+  ["verified non-admin", { kind: "agent", agentId: "agent-x", isAdmin: false }, true],
+  ["admin", { kind: "agent", agentId: "admin-agent", isAdmin: true }, false],
+] as const) {
+  test(`scheduler paths in warnings for a ${who} caller`, async () => {
+    auth = caller;
+    statError = "EACCES";
+    const probe = JSON.stringify((await new HealthDetail().get()).warnings);
+    statError = null;
+    serviceText = null;
+    const orphan = JSON.stringify((await new HealthDetail().get()).warnings);
+    const shown = redacted ? "~/.config/systemd/user/flair-rem-nightly.timer" : TIMER;
+    expect(probe).toContain(`state unknown: ${shown} (EACCES)`);
+    expect(orphan).toContain(`orphan timer file: ${shown}`);
+    if (redacted) {
+      expect(probe).not.toContain(HOME);
+      expect(orphan).not.toContain(HOME);
+    }
+  });
+}
 
 test("five named agents and an unowned row do not add a remainder agent", async () => {
   rows = Array.from({ length: 5 }, (_, i) => mem(`m${i}`, `agent-${i}`, "2000-01-01T00:00:00Z"));

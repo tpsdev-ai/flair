@@ -609,7 +609,7 @@ export class HealthDetail extends Resource {
           : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.service");
         const probeError = (path: string, error?: unknown): void => {
           const code = (error as NodeJS.ErrnoException)?.code ?? "error code unavailable";
-          warnings.push({ level: "warn", message: `REM nightly driver state unknown: ${path} (${code})` });
+          warnings.push({ level: "warn", message: `REM nightly driver state unknown: ${isAdmin ? path : redactHome(path)} (${code})` });
         };
         const filePresent = async (path: string): Promise<boolean | null> => {
           try {
@@ -631,7 +631,7 @@ export class HealthDetail extends Resource {
           && schedulerPresent !== unitPresent) {
           const orphan = schedulerPresent ? "timer" : "service";
           const orphanPath = schedulerPresent ? schedulerPath : unitPath;
-          warnings.push({ level: "warn", message: `REM nightly orphan ${orphan} file: ${orphanPath}` });
+          warnings.push({ level: "warn", message: `REM nightly orphan ${orphan} file: ${isAdmin ? orphanPath : redactHome(orphanPath)}` });
         }
         if (nightlyInstalled === true) {
           try {
