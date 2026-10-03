@@ -11,7 +11,8 @@
 //       bookkeeping re-PUT preserves the subject.
 //   (3) the seed reservation covers the logical LINEAGE, not only the physical
 //       seed id.
-//   (5) the TEST-ONLY per-step fault hook (resources/skill-write-fault.ts): a
+//   (5) the per-step fault hook (resources/skill-write-fault.ts), installed by
+//       the test-only fixture test/fixtures/skill-write-fault-2139/probe.js: a
 //       failure at the successor write, predecessor close, pointer write or
 //       version append aborts the whole transaction — no successor, no close,
 //       no version row.
@@ -22,10 +23,20 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
-import { ENABLE_TEST_FAULTS_ENV, TEST_FAULT_AGENT_PREFIX } from "../../resources/skill-write-fault.js";
+import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
+
+/** The test-only resource that installs the skill-write fault hook. */
+const FAULT_PROBE: ProbeFiles = {
+  source: join("test", "fixtures", "skill-write-fault-2139", "probe.js"),
+  target: join("dist", "resources", "zz-skill-write-fault-2139.js"),
+  out: "skill-write-fault-2139", // unused: the probe writes no files
+};
+/** The owner-id prefix the probe faults on (see the probe). */
+const TEST_FAULT_AGENT_PREFIX = "__flair_fault_test__";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
 const mkAgent = (id: string): TestAgent => {
@@ -44,6 +55,7 @@ const now = () => new Date().toISOString();
 
 let harper: HarperInstance;
 let installDir = "";
+let composed: ProbeComponent | undefined;
 
 function assertOwnInstance(h: HarperInstance): void {
   for (const url of [h.httpURL, h.opsURL]) {
@@ -115,10 +127,8 @@ const nextId = (label: string) => `skc-${label}-${sfx}-${++seq}`;
 
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
-  // Arm the test-only fault hook for THIS spawned Harper (inherited env). The
-  // hook still needs a reserved agent id, so no other write here can fault.
-  process.env[ENABLE_TEST_FAULTS_ENV] = "1";
-  harper = await startHarper();
+  composed = componentWithReplayProbe({ probe: FAULT_PROBE });
+  harper = await startHarper({ cwd: composed.dir, harperBinDir: composed.sourceRoot });
   installDir = harper.installDir;
   assertOwnInstance(harper);
   await ops({
@@ -131,9 +141,9 @@ beforeAll(async () => {
 }, 240_000);
 
 afterAll(async () => {
-  delete process.env[ENABLE_TEST_FAULTS_ENV];
   if (harper) await stopHarper(harper);
   if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 });
+  composed?.cleanup();
 });
 
 // ─── Item 1: retained-payload predicate on Memory GET/search ────────────────
@@ -210,6 +220,33 @@ describe("flair#2139 S2c (2) — _reindex is bookkeeping only", () => {
     expect(after.content).toBe("steady");
     expect(after.agentId).toBe(A.id);
     expect(after.skillSubjectId).toBe(stored.skillSubjectId);
+  }, 120_000);
+
+  test("a re-PUT cannot revive an expired skill", async () => {
+    const id = nextId("reindex-expired");
+    const expiresAt = "2020-01-01T00:00:00.000Z";
+    await ops({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{ ...skillBody(A, id, "expired"), skillSubjectId: id, visibility: "shared", expiresAt, createdAt: now() }],
+    });
+    const stored = await memoryRow(id);
+    const changed = await call(ADMIN_AGENT, "PUT", memPath(id), { ...stored, expiresAt: "2999-01-01T00:00:00.000Z", _reindex: true });
+    expect(changed.status, changed.text.slice(0, 200)).toBe(409);
+    const { expiresAt: _omit, ...omitted } = stored;
+    const kept = await call(ADMIN_AGENT, "PUT", memPath(id), { ...omitted, _reindex: true });
+    expect(kept.status, kept.text.slice(0, 200)).toBeLessThan(300);
+    expect((await memoryRow(id)).expiresAt).toBe(expiresAt);
+  }, 120_000);
+
+  test("a re-PUT cannot turn a plain memory into a skill", async () => {
+    const id = nextId("reindex-plain");
+    expect((await call(A, "PUT", memPath(id), { id, agentId: A.id, content: "a note", durability: "standard" })).status).toBeLessThan(300);
+    const stored = await memoryRow(id);
+    const res = await call(ADMIN_AGENT, "PUT", memPath(id), { ...stored, tags: ["skill"], content: "now a skill", _reindex: true });
+    expect(res.status, res.text.slice(0, 200)).toBe(409);
+    const after = await memoryRow(id);
+    expect(after.content).toBe("a note");
+    expect(after.tags ?? []).not.toContain("skill");
   }, 120_000);
 });
 

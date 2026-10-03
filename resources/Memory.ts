@@ -587,20 +587,22 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
 }
 
 /**
- * flair#2139 S2 — `_reindex` stays bookkeeping only. A re-PUT may repopulate
- * Harper's secondary indices, but it may NOT change a row's instruction fields,
- * ownership, visibility or skill lineage: the reference row must keep the same
- * owner and scope, and a skill must keep the same subject lineage and
- * instructions. Compare only the fields the submitted body SUPPLIES (a partial
- * re-PUT omits the rest) against the stored row; a supplied-but-different value
- * refuses the reindex. Returns the first drifting field, or null.
+ * flair#2139 S2 — `_reindex` stays bookkeeping only. Compare only the fields
+ * the submitted body SUPPLIES against the stored row (REINDEX_SKILL_FIELDS for
+ * a skill, REINDEX_PLAIN_FIELDS otherwise); a supplied-but-different value, or
+ * a skill tag on a plain row, refuses the reindex. Returns the first drifting
+ * field, or null.
  */
 const REINDEX_SKILL_FIELDS = [
   "agentId", "visibility", "tags", "content", "trigger", "metadata", "durability", "supersedes", "validTo", "archived", "skillSubjectId",
+  "expiresAt", "validFrom",
 ];
+const REINDEX_PLAIN_FIELDS = ["agentId", "visibility", "skillSubjectId", "supersedes", "validTo"];
 
 function reindexDrift(content: any, existing: Record<string, any>): string | null {
-  const fields = rowIsSkill(existing) ? REINDEX_SKILL_FIELDS : ["agentId", "visibility"];
+  const isSkill = rowIsSkill(existing);
+  if (!isSkill && rowIsSkill(content)) return "tags";
+  const fields = isSkill ? REINDEX_SKILL_FIELDS : REINDEX_PLAIN_FIELDS;
   for (const field of fields) {
     if (!Object.prototype.hasOwnProperty.call(content, field)) continue;
     const submitted = content[field];
@@ -1639,6 +1641,7 @@ export class Memory extends (databases as any).flair.Memory {
       // A1-iv items 1/3: strip a client-supplied server-stamped field, then
       // PRESERVE the existing row's incarnation token (reindex is a re-PUT of
       // an existing row, never a reincarnation).
+      const reindexBody = { ...content };
       stripServerStampedFields(content);
       // flair#1965 r3: resolve the stored row by the URL-BOUND target id (never a
       // body id alone); a body id that disagrees with the address, or a lookup
@@ -1658,9 +1661,8 @@ export class Memory extends (databases as any).flair.Memory {
           { status: 404, headers: { "content-type": "application/json" } },
         );
       }
-      // flair#2139 S2 — bookkeeping only: refuse a re-PUT that would change the
-      // row's instruction fields, ownership, visibility or skill lineage.
-      const drift = reindexDrift(content, reindexExisting);
+      // flair#2139 S2 — bookkeeping only (see reindexDrift).
+      const drift = reindexDrift(reindexBody, reindexExisting);
       if (drift) {
         return new Response(
           JSON.stringify({

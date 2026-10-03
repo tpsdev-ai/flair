@@ -1,54 +1,68 @@
-// flair#2139 S2 completion — the TEST-ONLY skill-write fault hook is gated so it
-// can never fire in production (resources/skill-write-fault.ts). TWO exact-match
-// conditions are required: the arming env var equals "1" AND the write's owner id
-// is the reserved prefix plus the step name. Production sets neither.
-import { describe, expect, test } from "bun:test";
-import {
-  ENABLE_TEST_FAULTS_ENV,
-  TEST_FAULT_AGENT_PREFIX,
-  faultStepOfAgent,
-  maybeThrowSkillWriteFault,
-  skillWriteFaultArmed,
-} from "../../resources/skill-write-fault.ts";
+// flair#2139 S2 completion — the skill-write fault hook is an injection point
+// that is empty unless the test-only fixture installs it
+// (resources/skill-write-fault.ts, test/fixtures/skill-write-fault-2139/probe.js).
+import { afterEach, describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+import { maybeThrowSkillWriteFault, setSkillWriteFaultHook } from "../../resources/skill-write-fault.ts";
 
-const faultAgent = (step: string) => `${TEST_FAULT_AGENT_PREFIX}${step}`;
-const ARMED = { [ENABLE_TEST_FAULTS_ENV]: "1" };
+const ROOT = join(import.meta.dir, "..", "..");
+const STEPS = ["successor", "close", "pointer", "append"] as const;
 
-describe("skillWriteFaultArmed — two exact-match gates (flair#2139 S2)", () => {
-  test("unset env var: never armed, whatever the agent id", () => {
-    expect(skillWriteFaultArmed("successor", faultAgent("successor"), {})).toBe(false);
+afterEach(() => setSkillWriteFaultHook(null));
+
+function sources(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) return sources(p);
+    return /\.(ts|js|mjs|cjs)$/.test(name) ? [p] : [];
+  });
+}
+
+describe("skill-write fault hook (flair#2139 S2)", () => {
+  test("production shape: no env value plus no agent id faults a write", () => {
+    const names = ["FLAIR_ENABLE_TEST_SKILL_WRITE_FAULT", "NODE_ENV", "FLAIR_TEST"];
+    const saved = names.map((n) => process.env[n]);
+    try {
+      for (const name of names) {
+        for (const value of ["1", "true", "test"]) {
+          process.env[name] = value;
+          for (const step of STEPS) {
+            for (const agentId of [`__flair_fault_test__${step}`, "__flair_fault_test__", "real-agent", undefined]) {
+              expect(() => maybeThrowSkillWriteFault(step, agentId)).not.toThrow();
+            }
+          }
+        }
+      }
+    } finally {
+      names.forEach((n, i) => {
+        if (saved[i] === undefined) delete process.env[n];
+        else process.env[n] = saved[i];
+      });
+    }
   });
 
-  test("the arming var plus the step in the agent id: armed", () => {
-    expect(skillWriteFaultArmed("append", faultAgent("append"), ARMED)).toBe(true);
+  test("an installed hook runs at the step; clearing it restores the no-op", () => {
+    setSkillWriteFaultHook((step, agentId) => {
+      if (agentId === `x-${step}`) throw new Error(step);
+    });
+    expect(() => maybeThrowSkillWriteFault("pointer", "x-pointer")).toThrow(/pointer/);
+    expect(() => maybeThrowSkillWriteFault("close", "x-pointer")).not.toThrow();
+    setSkillWriteFaultHook(null);
+    expect(() => maybeThrowSkillWriteFault("pointer", "x-pointer")).not.toThrow();
   });
 
-  test("a different step than the one encoded in the agent id: not armed", () => {
-    expect(skillWriteFaultArmed("close", faultAgent("successor"), ARMED)).toBe(false);
+  test("nothing under resources/ or src/ installs the hook", () => {
+    const callers = [...sources(join(ROOT, "resources")), ...sources(join(ROOT, "src"))]
+      .filter((p) => readFileSync(p, "utf8").includes("setSkillWriteFaultHook"))
+      .map((p) => relative(ROOT, p));
+    expect(callers).toEqual([join("resources", "skill-write-fault.ts")]);
   });
 
-  test("the arming var but an ordinary agent id: not armed (production shape)", () => {
-    expect(skillWriteFaultArmed("successor", "real-agent", ARMED)).toBe(false);
-    expect(skillWriteFaultArmed("successor", undefined, ARMED)).toBe(false);
-  });
-
-  test("a value like 'true' does not arm the hook", () => {
-    expect(skillWriteFaultArmed("successor", faultAgent("successor"), { [ENABLE_TEST_FAULTS_ENV]: "true" })).toBe(false);
-  });
-
-  test("a reserved prefix with an unknown step name arms nothing", () => {
-    expect(faultStepOfAgent(`${TEST_FAULT_AGENT_PREFIX}whatever`)).toBeNull();
-    expect(skillWriteFaultArmed("successor", `${TEST_FAULT_AGENT_PREFIX}whatever`, ARMED)).toBe(false);
-  });
-});
-
-describe("maybeThrowSkillWriteFault", () => {
-  test("throws when armed", () => {
-    expect(() => maybeThrowSkillWriteFault("pointer", faultAgent("pointer"), ARMED)).toThrow(/pointer/);
-  });
-
-  test("is a no-op otherwise", () => {
-    expect(() => maybeThrowSkillWriteFault("pointer", faultAgent("pointer"), {})).not.toThrow();
-    expect(() => maybeThrowSkillWriteFault("pointer", "real-agent", ARMED)).not.toThrow();
+  test("the fixture that installs it is outside the package's files", () => {
+    const files: string[] = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).files;
+    expect(files.some((f) => f.replace(/\/$/, "") === "test" || f.startsWith("test/"))).toBe(false);
+    expect(readFileSync(join(ROOT, "test", "fixtures", "skill-write-fault-2139", "probe.js"), "utf8"))
+      .toContain("setSkillWriteFaultHook(");
   });
 });
