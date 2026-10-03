@@ -58,7 +58,7 @@ import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
-import { refuseReservedSeedWrite, reservedSeedWriteDenial, writeTargetIds } from "./seed-reservation.js";
+import { refuseReservedSeedWrite, reservedSeedWriteDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -1344,7 +1344,11 @@ export class Memory extends (databases as any).flair.Memory {
       const skillPredecessor = typeof content.supersedes === "string" && content.supersedes.length > 0
         ? await (databases as any).flair.Memory.get(content.supersedes).catch(() => null)
         : null;
-      if (isSkillWrite(content) || (!!skillPredecessor && rowIsSkill(skillPredecessor))) {
+      // A reserved seed row keeps its fixed physical id (seed/assignment resolve
+      // by it), so it writes in place rather than superseding. See
+      // resources/seed-reservation.ts.
+      const reserved = [content?.id, (this as any).getId?.()].some((candidate) => isReservedSeedId("Memory", candidate));
+      if (!reserved && (isSkillWrite(content) || (!!skillPredecessor && rowIsSkill(skillPredecessor)))) {
         return await writeSkillCreateOrUpdate({ ctx, auth, content, storedRow: null, explicitPredecessor: skillPredecessor, method: "post", pointer });
       }
     }
@@ -1946,7 +1950,11 @@ export class Memory extends (databases as any).flair.Memory {
         ? await (databases as any).flair.Memory.get(content.supersedes).catch(() => null)
         : null;
       const skillTarget = isSkillWrite(content) || rowIsSkill(preExisting) || (!!skillPredecessor && rowIsSkill(skillPredecessor));
-      if (skillTarget) {
+      // A reserved seed row keeps its fixed physical id (seed/assignment resolve
+      // by it), so it writes in place rather than superseding. See
+      // resources/seed-reservation.ts.
+      const reserved = [content?.id, (this as any).getId?.()].some((candidate) => isReservedSeedId("Memory", candidate));
+      if (!reserved && skillTarget) {
         // Boundary pin: an enrolled lineage cannot drop the skill tag (deletion
         // ends the skill). An absent `tags` is a partial update and carries the
         // stored tags forward.
@@ -2017,7 +2025,9 @@ export class Memory extends (databases as any).flair.Memory {
     // retained payload, remove it from live selection, and append a tombstone,
     // all in one transaction. The row is NOT hard-deleted, so referenced
     // historical payloads survive.
-    if (rowIsSkill(record)) {
+    const reservedSeed = [id, (this as any).getId?.(), ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)]
+      .some((candidate) => isReservedSeedId("Memory", candidate));
+    if (!reservedSeed && rowIsSkill(record)) {
       return await writeSkillDelete({ ctx, auth, record });
     }
     // Durability controls retention, not the owner's authority to delete.
