@@ -221,7 +221,7 @@ an upgrade replaces that file, run the command again or edit the file.
 
 ChatGPT's published metadata document, `https://chatgpt.com/oauth/client.json`,
 declares `token_endpoint_auth_method: private_key_jwt`. `@harperfast/oauth`
-2.8.1, the version Flair pins, admits an interactive CIMD client that
+2.9.0, the version Flair pins, admits an interactive CIMD client that
 authenticates with `private_key_jwt` once the operator adds the client's host
 (`chatgpt.com`) to `mcp.clientIdMetadataDocuments.allowedHosts` and sets
 `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true`. The shipped

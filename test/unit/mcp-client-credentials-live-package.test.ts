@@ -52,7 +52,8 @@
  *      `token.js`'s `handleClientCredentialsGrant` uses (verify, THEN rate
  *      limit — confirmed by reading that function's source).
  */
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, beforeAll, afterEach } from "bun:test";
+import { readFileSync } from "node:fs";
 import { generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { signClientAssertion, publicJwkFromPrivateKey, requestMcpAccessToken, buildTokenRequestForm } from "../../src/mcp-client-assertion";
@@ -75,6 +76,12 @@ const TOKEN_ENDPOINT = `https://${CLIENT_HOST}/oauth/mcp/token`;
 const CLIENT_ID = `https://${CLIENT_HOST}/MCPClientMetadata/flint`;
 const ISSUER = "https://sso.example.net/tenant-a";
 
+beforeAll(() => {
+  const manifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+  const resolved = JSON.parse(readFileSync(new URL("../../node_modules/@harperfast/oauth/package.json", import.meta.url), "utf8"));
+  expect(resolved.version).toBe(manifest.dependencies["@harperfast/oauth"]);
+});
+
 afterEach(() => {
   _clearCimdCache();
   _setDnsLookup(undefined as any);
@@ -96,13 +103,7 @@ describe("signClientAssertion vs the REAL published verifyClientAssertion", () =
   });
 
   test("the released verifier accepts the token-endpoint form and refuses the issuer form (#2103)", () => {
-    // Measured on the pinned 2.8.1: the token-endpoint form is accepted, and
-    // the issuer form is still REFUSED — at the audience check, because this
-    // verifier call passes no issuer, so "client_assertion aud does not match
-    // an accepted audience". The 2.5.0 verifier had refused it on `typ`
-    // instead, which is why the switch's default stays the token-endpoint
-    // form. When this test fails, inspect the pinned verifier: the issuer form
-    // may have become accepted, or its rejection reason may have changed.
+    // Historical 2.8.1 measurement: issuer-form assertions failed the audience check.
     const { privateKey } = generateKeyPairSync("ed25519");
     const jwk = publicJwkFromPrivateKey(privateKey);
     const tokenEndpointForm = signClientAssertion({ clientId: CLIENT_ID, tokenEndpoint: TOKEN_ENDPOINT, privateKey });
