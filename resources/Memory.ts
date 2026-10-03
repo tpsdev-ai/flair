@@ -25,7 +25,10 @@ import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
-import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, SKILL_TAG } from "./skill-write.js";
+import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility } from "./skill-version-write.js";
+import { deriveSkillSubjectId } from "./skill-subject.js";
+import { skillWriteSource } from "./skill-write-policy.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -755,6 +758,107 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
  * body value is not trusted at any point.
  */
 
+/**
+ * flair#2139 S2 — write a skill create/update atomically through the
+ * transactional writer. `successorId` is the ACTUAL successor id (the write's
+ * addressable result); for a default same-id update a fresh id is generated and
+ * the subject's live head is superseded. The returned response names the
+ * successor id, which the MCP/client update paths surface to the caller.
+ */
+async function writeSkillCreateOrUpdate(
+  args: {
+    ctx: any;
+    auth: AgentAuthVerdict;
+    content: any;
+    storedRow: Record<string, any> | null;
+    explicitPredecessor: Record<string, any> | null;
+    method: "post" | "put";
+    pointer: { row: any } | null;
+  },
+): Promise<any> {
+  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer } = args;
+  // #1741 skill-write credential class: an admin AGENT key is an agent, not an
+  // operator — it keeps own-skill writes plus the explicit write-grant
+  // allowance, and cannot bypass the owner check for another agent's skill.
+  const source = skillWriteSource(ctx, auth);
+  const ownerId = String(content.agentId ?? storedRow?.agentId ?? "");
+  if (source === "agent" && ownerId && auth.kind === "agent" && ownerId !== auth.agentId &&
+      !(await hasWriteGrant(auth.agentId, ownerId))) {
+    return FORBIDDEN("forbidden: cannot write a skill owned by another agent");
+  }
+  const now = new Date().toISOString();
+  const explicitSuccessor = !!(explicitPredecessor && typeof content.supersedes === "string" && content.supersedes.length > 0);
+  const successorId = explicitSuccessor || !storedRow
+    ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
+    : `${content.agentId}-${randomUUID()}`;
+  const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
+  const addressedId = explicitPredecessor ? String(explicitPredecessor.id) : storedRow ? String(storedRow.id) : null;
+  const captured: { row: Record<string, any> | null } = { row: null };
+  const outcome = await runSkillVersionWrite({
+    ctx,
+    subjectId,
+    agentId: String(content.agentId),
+    head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
+    plan: (head) => {
+      const liveHead = explicitSuccessor ? explicitPredecessor : head;
+      const successor = buildSkillSuccessorRow({
+        base: content, predecessorRow: liveHead, successorId, subjectId,
+        supersedes: liveHead ? String(liveHead.id) : null, now,
+      });
+      captured.row = successor;
+      const value = typeof successor.content === "string" ? successor.content : null;
+      const visibility = skillVersionVisibility(successor);
+      if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+      return { kind: "update", predecessor: liveHead, successor, closePatch: { validTo: now, updatedAt: now }, value, visibility };
+    },
+    hooks: {
+      ...defaultSkillHooks,
+      pointer: pointer?.row
+        ? async (shared) => persistPointerRow({ ...pointer.row, memoryId: successorId }, shared)
+        : undefined,
+    },
+  });
+  if (!outcome.ok) return outcome.response;
+  if (captured.row) {
+    noteMemoryUpsert(captured.row);
+    noteWriteStamp(captured.row.embeddingModel);
+  }
+  return { id: successorId, written: true, visibility: skillVersionVisibility(captured.row) };
+}
+
+/**
+ * flair#2139 S2 — a skill delete is a LOGICAL delete: close/archive the retained
+ * payload, remove it from live selection, delete its pointer, and append a
+ * tombstone with no payload/hash, atomically.
+ */
+async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record: Record<string, any> }): Promise<any> {
+  const { ctx, auth, record } = args;
+  // #1741: an admin AGENT key may not delete another agent's skill.
+  const source = skillWriteSource(ctx, auth);
+  if (source === "agent" && auth.kind === "agent" && record.agentId && record.agentId !== auth.agentId &&
+      !(await hasWriteGrant(auth.agentId, String(record.agentId)))) {
+    return FORBIDDEN("forbidden: cannot delete a skill owned by another agent");
+  }
+  const now = new Date().toISOString();
+  const subjectId = String(record.skillSubjectId ?? record.id);
+  const outcome = await runSkillVersionWrite({
+    ctx,
+    subjectId,
+    agentId: String(record.agentId),
+    head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
+    plan: (head) => {
+      const liveHead = head ?? record;
+      return { kind: "delete", predecessor: liveHead, closePatch: { validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead) };
+    },
+    hooks: { ...defaultSkillHooks, pointer: async (shared) => deletePointerRow(String(record.id), shared) },
+  });
+  if (!outcome.ok) return outcome.response;
+  noteMemoryDelete(String(record.id));
+  return new Response(JSON.stringify({ id: String(record.id), deleted: true }), {
+    status: 200, headers: { "Content-Type": "application/json" },
+  });
+}
+
 export class Memory extends (databases as any).flair.Memory {
   /**
    * Self-authorize now that the global gate is non-rejecting. Closes the P0
@@ -1233,6 +1337,17 @@ export class Memory extends (databases as any).flair.Memory {
     // Pinned by test/unit/memory-host-source.test.ts (r20-post) — RED if this
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
+    // ── flair#2139 S2: a skill write supersedes, versioned and transactional ──
+    // Classify from the submitted state AND any explicit `supersedes`
+    // predecessor, so a skill write cannot escape the versioned path.
+    {
+      const skillPredecessor = typeof content.supersedes === "string" && content.supersedes.length > 0
+        ? await (databases as any).flair.Memory.get(content.supersedes).catch(() => null)
+        : null;
+      if (isSkillWrite(content) || (!!skillPredecessor && rowIsSkill(skillPredecessor))) {
+        return await writeSkillCreateOrUpdate({ ctx, auth, content, storedRow: null, explicitPredecessor: skillPredecessor, method: "post", pointer });
+      }
+    }
     // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
     // transaction. With a request context they join its open transaction; with
     // NO context (an internal direct call, e.g. new Memory().post(...))
@@ -1822,6 +1937,28 @@ export class Memory extends (databases as any).flair.Memory {
     // Pinned by test/unit/memory-host-source.test.ts (r20-put) — RED if this
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
+    // ── flair#2139 S2: a skill write supersedes, versioned and transactional ──
+    // Classify from the submitted state, the STORED target row, and any
+    // explicit `supersedes` predecessor, so omitting `tags` cannot escape the
+    // versioned path.
+    {
+      const skillPredecessor = typeof content.supersedes === "string" && content.supersedes.length > 0
+        ? await (databases as any).flair.Memory.get(content.supersedes).catch(() => null)
+        : null;
+      const skillTarget = isSkillWrite(content) || rowIsSkill(preExisting) || (!!skillPredecessor && rowIsSkill(skillPredecessor));
+      if (skillTarget) {
+        // Boundary pin: an enrolled lineage cannot drop the skill tag (deletion
+        // ends the skill). An absent `tags` is a partial update and carries the
+        // stored tags forward.
+        if (rowIsSkill(preExisting) && Array.isArray(content.tags) && !content.tags.includes(SKILL_TAG)) {
+          return new Response(
+            JSON.stringify({ error: "skill_lineage_tag_removed", message: "a skill's tag cannot be removed; deletion ends the skill" }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+        return await writeSkillCreateOrUpdate({ ctx, auth, content, storedRow: preExisting, explicitPredecessor: skillPredecessor, method: "put", pointer });
+      }
+    }
     // A1' item 2 (adjudication 0a): share ONE transaction with the pointer row
     // (see post()). The shared helper's owned-transaction branch is pinned by
     // test/unit/memory-host-source.test.ts (r20-atomic, which drives POST);
@@ -1874,6 +2011,14 @@ export class Memory extends (databases as any).flair.Memory {
     if (auth.kind === "agent" && !auth.isAdmin &&
         isForbiddenOwnerMutation(record, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
       return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
+    }
+
+    // flair#2139 S2: a skill delete is a LOGICAL delete — close/archive the
+    // retained payload, remove it from live selection, and append a tombstone,
+    // all in one transaction. The row is NOT hard-deleted, so referenced
+    // historical payloads survive.
+    if (rowIsSkill(record)) {
+      return await writeSkillDelete({ ctx, auth, record });
     }
     // Durability controls retention, not the owner's authority to delete.
     // A1' item 2 (adjudication 0a/0c): the Memory delete and its pointer

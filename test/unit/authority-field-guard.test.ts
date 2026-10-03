@@ -91,6 +91,12 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/migrations/visibility-backfill.ts", via: "alias-source", needle: "put(backfillRow)", kind: "echo" },
   { file: "resources/migrations/synthetic-test-migration.ts", via: "alias-source", needle: "put(synthRow)", kind: "echo" },
   { file: "resources/MemoryReindex.ts", via: "alias-source", needle: "_reindex: true", kind: "admin-restate" },
+  // flair#2139 S2: the transactional skill version writer writes the successor
+  // (a fresh row carrying the caller's already-guarded fields) and closes the
+  // predecessor on the existing row; Memory ran guardAuthorityFields before the
+  // branch, so the module re-writes a decided row.
+  { file: "resources/skill-version-write.ts", via: "direct-put", needle: "put(successor, shared)", kind: "trusted-stamp" },
+  { file: "resources/skill-version-write.ts", via: "direct-put", needle: "put(closed, shared)", kind: "echo" },
 ];
 
 function walkTs(dir: string): string[] {

@@ -6,7 +6,9 @@ import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-guard.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
-import { enforceSkillDurability, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
+import { enforceSkillDurability, isSkillWrite, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
+import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility } from "./skill-version-write.js";
+import { deriveSkillSubjectId } from "./skill-subject.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
@@ -156,6 +158,47 @@ export class FeedMemories extends Resource {
         "Memory",
       );
       if (authorityDenial) return authorityDenial;
+    }
+
+    // ── flair#2139 S2: skill ingestion is versioned, not a raw table put ──
+    // A content-hash match may return the existing result only when nothing the
+    // version cares about changed. For skills we always route through the
+    // transactional writer, so trigger/visibility/state changes are never
+    // suppressed by content-hash equality alone.
+    if (isSkillWrite(content)) {
+      const now = new Date().toISOString();
+      const addressed = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
+      const successorId = addressed
+        ? `${agentId}-${randomUUID()}`
+        : String(content.id ?? `${agentId}-${Date.now()}-${randomUUID()}`);
+      const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: addressed, predecessor: null });
+      const addressedId = addressed ? String(addressed.id) : null;
+      const captured: { row: Record<string, any> | null } = { row: null };
+      const outcome = await runSkillVersionWrite({
+        ctx,
+        subjectId,
+        agentId,
+        head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
+        plan: (head) => {
+          const successor = buildSkillSuccessorRow({
+            base: content, predecessorRow: head, successorId, subjectId,
+            supersedes: head ? String(head.id) : null, now,
+          });
+          // The feed re-stamps provenance from the verified identity (see the
+          // non-skill path below) — a legacy blob must not carry forward.
+          successor.provenance = buildProvenance(auth, successor.createdAt, content);
+          captured.row = successor;
+          const value = typeof successor.content === "string" ? successor.content : null;
+          const visibility = skillVersionVisibility(successor);
+          if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+          return { kind: "update", predecessor: head, successor, closePatch: { validTo: now, updatedAt: now }, value, visibility };
+        },
+        hooks: defaultSkillHooks,
+      });
+      if (!outcome.ok) return outcome.response;
+      const written = captured.row;
+      if (written) noteMemoryUpsert(written);
+      return written ?? { id: successorId, written: true, durability: "persistent" };
     }
 
     const now = new Date().toISOString();

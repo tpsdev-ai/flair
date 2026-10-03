@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { databases } from "harper";
 import { authorizeSoulWrite } from "./soul-write-policy.js";
+import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 
@@ -200,6 +201,46 @@ export async function readHead(subjectType: string, subjectId: string, shared?: 
   return null;
 }
 
+/** Server-derived attribution for an authorization outcome; never from a body. */
+const UNATTRIBUTED: VersionAttribution = { actorKind: "internal", actorId: null, sourceClass: "internal" };
+
+/**
+ * Dispatch authorization and attribution by subject type (flair#2139 S2). Soul
+ * uses Soul's operator/internal rule; skill uses the shared skill-write
+ * credential class (operator / agent / internal). An unrecognized subject type
+ * is refused, not silently attributed.
+ */
+export async function resolveVersionAuthorization(
+  subjectType: InstructionSubjectType,
+  context: any,
+): Promise<{ attribution: VersionAttribution; denied: Response | null }> {
+  if (subjectType === "soul") {
+    const { auth, source, denied } = await authorizeSoulWrite(context);
+    if (denied) return { attribution: UNATTRIBUTED, denied };
+    return {
+      attribution: {
+        actorKind: source === "operator" ? "operator" : "internal",
+        actorId: auth.kind === "agent" ? auth.agentId : null,
+        sourceClass: source!,
+      },
+      denied: null,
+    };
+  }
+  if (subjectType === "skill") {
+    const { auth, source, denied } = await authorizeSkillVersionWrite(context);
+    if (denied) return { attribution: UNATTRIBUTED, denied };
+    return {
+      attribution: {
+        actorKind: source!,
+        actorId: auth.kind === "agent" ? auth.agentId : null,
+        sourceClass: source!,
+      },
+      denied: null,
+    };
+  }
+  throw new Error(`instruction version: unknown subject type: ${String(subjectType)}`);
+}
+
 const LOCK_NAMESPACE = "flair-instruction-version";
 /** Bounded lock wait. */
 const LOCK_ATTEMPTS = 200;
@@ -220,13 +261,9 @@ export async function recordVersion(
   try {
     outcome = await withKeyLock(store, [LOCK_NAMESPACE, request.subjectType], () =>
       withOwnedTransaction(ctx, async (shared) => {
-        const { auth, source, denied } = await authorizeSoulWrite(shared);
-        if (denied) return { ok: false, response: denied } as RecordVersionOutcome;
-        const attribution: VersionAttribution = {
-          actorKind: source === "operator" ? "operator" : "internal",
-          actorId: auth.kind === "agent" ? auth.agentId : null,
-          sourceClass: source!,
-        };
+        const authorization = await resolveVersionAuthorization(request.subjectType, shared);
+        if (authorization.denied) return { ok: false, response: authorization.denied } as RecordVersionOutcome;
+        const attribution = authorization.attribution;
         const input = "prepare" in request ? await request.prepare(shared) : request;
         if (input === null) {
           const result = await mutateRow(shared);
@@ -244,7 +281,9 @@ export async function recordVersion(
         }
         const result = await mutateRow(shared);
         if (result instanceof Response && result.status >= 300) throw new RowMutationDenied(result);
-        if (input.kind !== "delete" && input.snapshot) {
+        // Only a Soul record carries a full stored snapshot; a skill record
+        // holds hashes and physical references, never a second content copy.
+        if (input.subjectType === "soul" && input.kind !== "delete" && input.snapshot) {
           const row = input.snapshot();
           if (!row) throw new Error("instruction version: stored snapshot unavailable");
           input.soulSnapshot = JSON.stringify(row);

@@ -37,6 +37,10 @@ add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.po
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the raw put (flair#1542).");
+add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
+  "Skill-writer: the transactional skill version writer (flair#2139 S2). Its success-row upsert and predecessor close run inside the append helper's lock and owned transaction, after the caller ran the SkillScan gate + forced durability. Classified GATED, not REJECTING/SKIPPING.");
+add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
+  "Read-only alias (resolveSkillHead searches the live skill head).");
 
 // ── REJECTING skill-writer sinks (400 skill_write_path) ──
 add("Memory", ["writer:super.patch#1"],

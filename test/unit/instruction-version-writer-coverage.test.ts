@@ -44,11 +44,13 @@ test("a new direct, aliased or computed writer fails classification", () => {
 });
 
 // The append enumeration. resources/Soul.ts wires recordVersion into post(),
-// put(), patch() and delete(); instruction-version-record.ts is the one
+// put(), patch() and delete(); resources/skill-version-write.ts wires it into
+// the skill create/update/delete path; instruction-version-record.ts is the one
 // declaration. Removing any one of those calls changes this map and fails.
 const EXPECTED_APPEND_SITES: Record<string, number> = {
   "resources/instruction-version-record.ts": 1,
   "resources/Soul.ts": 4,
+  "resources/skill-version-write.ts": 1,
 };
 
 test("every recordVersion append site is enumerated; removing one fails this test", () => {
