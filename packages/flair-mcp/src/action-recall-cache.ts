@@ -9,7 +9,7 @@
  * refusal here is a silent no-op there.
  *
  * Location: `<root>/<H(url)>/<H(principal)>/<H(session)>/`, where root is
- * installer/env-resolved (`FLAIR_ACTION_RECALL_DIR`, else `~/.flair/action-recall`)
+ * env/home-resolved (`FLAIR_ACTION_RECALL_DIR`, else `~/.flair/action-recall`)
  * — never taken from hook input. Writes use exclusive temp creation and atomic
  * rename, publishing the binding last.
  */
@@ -118,6 +118,8 @@ export async function readSecureFile(filePath: string, maxBytes: number): Promis
       length += bytesRead;
     }
     if (length > st.size) return { ok: false, reason: "growing" };
+    const after = await handle.stat();
+    if (length !== st.size || after.size !== st.size) return { ok: false, reason: "size-changed" };
     return { ok: true, text: buf.subarray(0, length).toString("utf8") };
   } finally {
     await handle.close().catch(() => {});

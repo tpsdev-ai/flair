@@ -2,8 +2,8 @@
  * Action recall (flair#2067 slice 2) — the SessionStart refresh lane.
  *
  * Covers the refresh contracts the pure module tests cannot reach: the scope
- * gate (a non-own or admin or absent scope writes NO cache), the signed read
- * path (`/Instance` then the bounded own-lesson query), the deadline leaving no
+ * gate (a non-own or admin or absent scope writes NO cache), request order
+ * (`/Instance` then the bounded own-lesson query), the deadline leaving no
  * usable binding, and the runHook wiring (opt-in via FLAIR_ACTION_RECALL).
  * Hermetic: a per-test temp root, an injected client — nothing touches the real
  * ~/.flair and no network call is made.

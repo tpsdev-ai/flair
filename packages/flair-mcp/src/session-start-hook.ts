@@ -453,8 +453,7 @@ export async function runHook(
 
   // Action-recall refresh (flair#2067 slice 2): opt-in, runs AFTER bootstrap
   // with the agent's own non-admin scope, through the recall client whose
-  // admin pair is empty. Bounded internally (3 s); a failure leaves the
-  // previous cache or none, and never changes this hook's output.
+  // admin pair is empty. Publication is deadline-checked.
   if (actionRecallEnabled()) {
     const session = typeof input.session_id === "string" ? input.session_id : "";
     const recallUrl = canonicalUrl(readEnvOrUnset("FLAIR_URL") ?? DEFAULT_FLAIR_URL);

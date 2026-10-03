@@ -1,6 +1,6 @@
 /**
  * Action-recall installer (flair#2067 slice 2) — `flair hook install|uninstall
- * --action-recall`. Pure filesystem logic: a fresh temp dir stands in for HOME
+ * --action-recall`. A fresh temp dir stands in for HOME
  * on every test, torn down after. Never touches the real ~/.claude or ~/.flair.
  *
  * The modules under test (installActionRecall / uninstallActionRecall /
@@ -21,6 +21,7 @@ import {
   type ActionRecallRuntime,
 } from "../../src/hook-install.ts";
 import { ACTION_RECALL_PRE_TOOL_USE_MATCHER, sessionStartEnablesActionRecall } from "../../src/doctor-client.ts";
+import { createActionRecallRuntime } from "../helpers/action-recall-runtime.ts";
 
 const RUNTIME: ActionRecallRuntime = {
   bunPath: process.execPath,
@@ -31,8 +32,7 @@ let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "flair-action-recall-home-"));
-  RUNTIME.artifactPath = join(home, "action-recall-hook.js");
-  writeFileSync(RUNTIME.artifactPath, "", { mode: 0o600 });
+  Object.assign(RUNTIME, createActionRecallRuntime(home));
 });
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });

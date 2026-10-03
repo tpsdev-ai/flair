@@ -4,10 +4,9 @@
  * Rebuilds the reader-specific cache of the agent's OWN lessons through the
  * ordinary signed read path at session start.
  *
- * There is NO administrator fallback: the client is built by the caller with
- * `adminUser:""` and `adminPassword:""` and a resolved Ed25519 key, and this
- * refresh refuses to proceed unless bootstrap returned a scope naming the
- * configured agent with `isAdmin === false`.
+ * Basic fallback is disabled; an unsigned request is refused by the server.
+ * Refresh requires bootstrap scope naming the configured agent with
+ * `isAdmin === false`.
  */
 
 import {

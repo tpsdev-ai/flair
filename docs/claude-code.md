@@ -147,7 +147,7 @@ The environment wins over the config file, where the keys are top-level entries;
 
 ### Action recall (`flair-action-recall`)
 
-`flair hook install --action-recall` installs a Claude Code `Bash` PreToolUse hook and enables SessionStart refresh. It requires an executable Bun and a regular built artifact; an incompatible SessionStart entry or held pin refuses installation.
+`flair hook install --action-recall` installs a Claude Code `Bash` PreToolUse hook and enables SessionStart refresh. It requires supported Bun and a version-matched built hook; an incompatible SessionStart entry or held pin refuses installation.
 
 **How it decides.** A lesson opts in through its JSON `metadata` field:
 
@@ -157,7 +157,7 @@ The environment wins over the config file, where the keys are top-level entries;
 
 Write a new lesson with `client.memory.write(content, { metadata: { flairActionRecall: { v: 1, triggers } } })`. For an existing lesson, `client.memory.update(id, content, { metadata: { flairActionRecall: { v: 1, triggers } } })` preserves other metadata keys.
 
-`verb` is a literal executable basename; `subcommands` are an exact contiguous argv prefix after it; `flags` are required members; `paths` are optional operand-glob alternatives matched against the command's operands, normalized against the payload `cwd`. A trigger with none of the three is rejected. At most 4 triggers per lesson, 3 subcommands, 8 flags and 2 path globs per trigger, each string at most 128 bytes. Replacing the `triggers` array replaces the complete set; `[]` or removing the key disables recall at the next refresh.
+`verb` is a literal executable basename; `subcommands` are an exact contiguous argv prefix after it; `flags` are required members; `paths` are optional operand-glob alternatives matched against the command's operands, normalized against the payload `cwd`. A trigger with none of the three is rejected. At most 4 triggers per lesson, 3 subcommands, 8 flags and 2 path globs per trigger, each string at most 128 bytes. Set `triggers: []` through `client.memory.update` to disable recall at the next refresh.
 
 The hot path reads a per-session cache of the agent's own lessons under `~/.flair/action-recall/`, refreshed at session start through a signed, non-admin read. The cache expires five minutes after refresh starts, shortened by each lesson's valid expiry or end-of-validity timestamp. Between refreshes, a deletion, edit or supersession can stay visible until expiry.
 

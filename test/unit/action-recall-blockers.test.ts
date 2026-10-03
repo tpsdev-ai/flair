@@ -5,14 +5,14 @@ import { dirname, join } from "node:path";
 import { actionRecallHookStatus, hookSettingsPath, installActionRecall, installHook, uninstallActionRecall } from "../../src/hook-install.ts";
 import { buildSessionStartHookCommand } from "../../src/doctor-client.ts";
 import { resolveActionRecallRuntime, resolveBunPath } from "../../src/lib/action-recall-runtime.ts";
+import { createActionRecallRuntime } from "../helpers/action-recall-runtime.ts";
 
 let home: string;
 let runtime: { bunPath: string; artifactPath: string };
 const url = "http://localhost:19926";
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "flair-recall-blockers-"));
-  runtime = { bunPath: process.execPath, artifactPath: join(home, "action-recall-hook.js") };
-  writeFileSync(runtime.artifactPath, "", { mode: 0o600 });
+  runtime = createActionRecallRuntime(home);
 });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 const path = () => hookSettingsPath(home, "claude-code");
@@ -88,6 +88,7 @@ test("runtime resolution and status refuse a non-executable Bun and a directory 
   const env = { HOME: home, PATH: home, FLAIR_BUN_PATH: bun, FLAIR_ACTION_RECALL_ARTIFACT: runtime.artifactPath };
   expect(resolveBunPath(env)).toBeNull();
   expect(resolveActionRecallRuntime({ env, fromUrl: import.meta.url }).ok).toBe(false);
+  writeFileSync(bun, "#!/bin/sh\nprintf '1.3.10\\n'\n");
   chmodSync(bun, 0o700);
   expect(resolveBunPath(env)).toBe(bun);
   runtime.bunPath = bun;

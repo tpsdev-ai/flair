@@ -9,7 +9,7 @@
 // fixSessionStartHook, driven by `applyOrReportSessionStartHook`) — but that
 // wiring is a side effect of a broader diagnostic/setup flow, not a
 // standalone, symmetric, testable command a user or an automation can run on
-// its own. This module is the pure (no network, no process spawn) decision
+// its own. This module is the decision
 // logic behind the new top-level `flair hook install|uninstall|status`
 // command family (wired into src/cli.ts). It intentionally reuses
 // doctor-client.ts's SESSION_START_HOOK_MARKER as the single source of truth
@@ -54,7 +54,7 @@
 //      reuses bootstrap's own maxTokens machinery.
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { isExecutableFile, isRegularFile } from "./lib/action-recall-runtime.js";
+import { isWorkingActionRecallRuntime } from "./lib/action-recall-runtime.js";
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
@@ -1231,7 +1231,7 @@ function executableActionRecallCommand(command: unknown): boolean {
   if (!match) return false;
   const [, agent, url, bun, artifact] = match;
   try {
-    return isExecutableFile(bun) && isRegularFile(artifact) && command === buildActionRecallHookCommand(bun, artifact, agent, url);
+    return isWorkingActionRecallRuntime({ bunPath: bun, artifactPath: artifact }) && command === buildActionRecallHookCommand(bun, artifact, agent, url);
   } catch {
     return false;
   }
@@ -1282,6 +1282,10 @@ export function installActionRecall(opts: ActionRecallInstallOptions): ActionRec
         backupPath: null, actions: null,
       };
     }
+  }
+
+  if (!isWorkingActionRecallRuntime(runtime)) {
+    return { ok: false, path, harness, dryRun, message: "action recall requires supported Bun and a version-matched built hook — nothing written", backupPath: null, actions: null };
   }
 
   if (dryRun) {
@@ -1404,7 +1408,7 @@ export function uninstallActionRecall(opts: UninstallHookOptions): ActionRecallM
     return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
   }
   if (result.status === "held") {
-    return { ok: !refused, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
+    return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
   }
   return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
 }
