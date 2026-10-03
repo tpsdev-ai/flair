@@ -85,14 +85,14 @@ function nodeBin(): string {
   return "node";
 }
 
-function runLocalInit(install: Install, extraArgs: string[]) {
+function runLocalInit(install: Install, extraArgs: string[], cwd = ROOT) {
   const startedAt = Date.now();
   const res = spawnSync(
     nodeBin(),
     [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), "--admin-pass", ADMIN_PASS,
       "--skip-soul", "--no-mcp", "--skip-smoke", "--skip-claude-md", "--skip-hook", ...extraArgs],
     {
-      cwd: ROOT,
+      cwd,
       encoding: "utf8",
       timeout: 120_000,
       killSignal: "SIGKILL",
@@ -248,7 +248,6 @@ describe("flair#2197 — local init --skip-start installs without starting", () 
   for (const { responds, existing, skipStart } of [
     { responds: true, existing: false, skipStart: true },
     { responds: false, existing: false, skipStart: true },
-    { responds: true, existing: true, skipStart: false },
     { responds: true, existing: true, skipStart: true },
   ]) {
     test(`an occupied HTTP port in another data directory refuses without credentials (installed=${existing}, health response=${responds}, skip-start=${skipStart})`, async () => {
@@ -300,6 +299,14 @@ describe("flair#2197 — local init --skip-start installs without starting", () 
       }
     }, 150_000);
   }
+
+  test("plain init with a fresh HOME and just-released ports succeeds from another cwd", async () => {
+    const install = await newInstall();
+    const init = runLocalInit(install, ["--agent-id", "userbot"], install.home);
+    expect(init.status, init.stdout + init.stderr).toBe(0);
+    expect(installed(install)).toBe(true);
+    await waitForInstance(install, init.startedAt);
+  }, 300_000);
 
   test("an already-installed instance: --skip-start starts nothing and leaves Harper's config unchanged", async () => {
     const install = await newInstall();

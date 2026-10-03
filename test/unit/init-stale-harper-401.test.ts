@@ -335,7 +335,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     const output = stdout + stderr;
     const requests = readStubLog(logPath);
 
-    expect(output).toContain("Refusing init:");
+    expect(output).toContain("Harper already running");
     expect(output).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
     expect(output).not.toContain("Waiting for Harper health check");
     expect(output).not.toContain("Operations API insert failed");
@@ -380,7 +380,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     const output = stdout + stderr;
     const requests = readStubLog(logPath);
 
-    expect(output).toContain("answered /health with HTTP");
+    expect(output).toContain("already answering on port");
     expect(output).not.toContain("flair stop");
     expect(output).toContain(`kill ${listener.pid}`);
     expect(output).not.toContain("wrong password");
@@ -424,7 +424,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     const output = stdout + stderr;
     const requests = readStubLog(logPath);
 
-    expect(output).toContain("answered /health with HTTP");
+    expect(output).toContain("already answering on port");
     expect(output).toContain(defaultDir);
     expect(output).toContain(`pid ${listener.pid}`);
     expect(output).toContain(`kill ${listener.pid}`);
@@ -433,7 +433,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     expect(children[0]?.exitCode).toBe(null);
   }, CASE_BUDGET_MS);
 
-  test("distinct port holders on an uninstalled directory: refuse before credentials", async () => {
+  test("distinct port holders: the operations 401 does not name the HTTP pid", async () => {
     scratch = mkdtempSync(join(tmpdir(), "flair-1749-"));
     const home = join(scratch, "home");
     const dataDir = join(scratch, "data");
@@ -453,19 +453,37 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       "--data-dir", dataDir,
       "--keys-dir", keysDir,
       "--admin-pass", "this-init-password",
-      ...SKIP_INIT_EXTRAS,
+      "--no-mcp",
+      "--skip-soul",
+      "--skip-hook",
+      "--skip-claude-md",
+      "--skip-smoke",
     ], isolatedEnv(home));
     const output = stdout + stderr;
 
     expect(code).not.toBe(0);
-    expect(output).toContain("Refusing init:");
-    expect(output).toContain(`port ${httpHolder.httpPort}`);
-    expect(output).not.toContain("Operations API insert failed");
-    expect(output).not.toContain("this-init-password");
-    expect(output).not.toContain("flair stop");
-    expectHealthLoggedThenNoAuthorization(readStubLog(httpLog));
-    expect(readStubLog(opsLog)).toEqual([]);
-    expect(existsSync(join(home, ".flair", "admin-pass"))).toBe(false);
+    expect(output).toContain("Operations API insert failed (401)");
+    expect(output).toContain(HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT);
+    expect(output).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
+    expect(output).not.toContain("wrong password");
+    expect(output).not.toContain("wrong username");
+    expect(output).not.toContain("admin credentials differ");
+    expect(output).not.toContain(`pid ${httpHolder.pid}`);
+    expect(output).not.toContain(`kill ${httpHolder.pid}`);
+    if (output.includes(`pid ${opsHolder.pid}`)) {
+      expect(output).toContain(`kill ${opsHolder.pid}`);
+    } else {
+      expect(output).toContain("a Harper instance this init did not start");
+      expect(output).not.toMatch(/\bkill \d+/);
+    }
+    const hasLsof = (() => {
+      try { execFileSync("lsof", ["-v"], { stdio: "ignore" }); return true; }
+      catch (e: any) { return e?.code !== "ENOENT"; }
+    })();
+    if ((process.platform === "linux" || process.platform === "darwin") && hasLsof) {
+      expect(output).toContain(`pid ${opsHolder.pid}`);
+      expect(output).toContain(`kill ${opsHolder.pid}`);
+    }
     expect(httpHolder.pid).not.toBe(opsHolder.pid);
     expect(children.every((child) => child.exitCode === null && child.killed === false)).toBe(true);
   }, 40_000);

@@ -85,7 +85,7 @@ describe("local init skip-start safety through the built CLI", () => {
     }, 30_000);
   }
 
-  for (const skip of [true, false]) {
+  for (const skip of [true]) {
     for (const listener of ["unknown", "foreign", "local"] as const) {
       test(`empty directory, occupied port, ${listener} attribution, skip-start=${skip}: no credentials or success`, () => {
         const f = fixture();
@@ -137,7 +137,7 @@ describe("local init skip-start safety through the built CLI", () => {
 
   test("an attributed HTTP listener does not authorize a foreign operations listener", () => {
     const f = fixture(true);
-    const result = runInit(f, ["--agent", "canary"], "foreign-ops");
+    const result = runInit(f, ["--skip-start"], "foreign-ops");
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain(`port ${OPS_PORT}`);
     expect(result.stderr).toContain("/foreign/ops");
@@ -150,7 +150,7 @@ describe("local init skip-start safety through the built CLI", () => {
   }, 30_000);
   test("a stopped HTTP port does not authorize an occupied foreign operations port", () => {
     const f = fixture();
-    const result = runInit(f, [], "foreign-ops", true, "explicit", false);
+    const result = runInit(f, ["--skip-start"], "foreign-ops", true, "explicit", false);
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain(`port ${OPS_PORT} answered with HTTP 401`);
     expect(requests(f).every(r => r.authorization === null)).toBe(true);

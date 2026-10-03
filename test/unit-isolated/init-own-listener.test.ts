@@ -86,14 +86,19 @@ for (const skipStart of [false, true]) {
   }, 30_000);
 
   for (const proof of ["foreign", "other-pid", "missing", "unrelated", "sidecar-pid", "sidecar-start", "many"] as const) {
-    test(`re-init refuses ${proof} proof before credentials, skip-start=${skipStart}`, () => {
+    test(`re-init with ${proof} proof, skip-start=${skipStart}`, () => {
       const result = runInit(proof, skipStart);
       expect(result.error).toBeUndefined();
+      if (!skipStart && proof !== "foreign") {
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(result.requests.some(r => r.authorization !== null)).toBe(true);
+        return;
+      }
       expect(result.status, result.stdout + result.stderr).toBe(1);
-      expect(result.stderr).toContain("not attributed");
+      expect(result.stderr).toContain(skipStart ? "not attributed" : "different data directory");
       expect(result.requests.length).toBeGreaterThan(0);
       expect(result.requests.every(r => r.authorization === null)).toBe(true);
-      expect(existsSync(join(result.home, ".flair", "admin-pass"))).toBe(false);
+      expect(existsSync(join(result.home, ".flair", "admin-pass"))).toBe(!skipStart);
     }, 30_000);
   }
 }

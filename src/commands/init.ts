@@ -40,6 +40,7 @@ import {
   commandArg,
   foreignOccupiedListenerDetail,
   describeOccupiedListener,
+  staleHarperBeforeAuthNotice,
   type OccupiedHarperListener,
   type OperationsPortAttribution,
 } from "../lib/init-occupied-listener.js";
@@ -661,42 +662,48 @@ program
       process.exit(1);
     }
     let alreadyRunning = false;
-    let healthStatus: number | undefined;
-    try {
-      const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
-      if (res.status > 0) {
-        alreadyRunning = true;
-        healthStatus = res.status;
+    if (opts.skipStart) {
+      let healthStatus: number | undefined;
+      try {
+        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) {
+          alreadyRunning = true;
+          healthStatus = res.status;
+        }
+      } catch {}
+      const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
+        const attributed = harperConfigPath(dataDir) !== null &&
+          listener.pids.length === 1 &&
+          listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
+          (listener.dataDirs.length === 1 ||
+            cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
+        if (attributed) return;
+        console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
+        console.error(foreignOccupiedListenerDetail(listener, dataDir));
+        console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
+        process.exit(1);
+      };
+      const httpListener = readOccupiedListener(httpPort);
+      alreadyRunning ||= httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort);
+      if (alreadyRunning) {
+        refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
+        console.log(`Harper already running on port ${httpPort} — skipping start`);
       }
-    } catch {}
-    const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
-      const attributed = harperConfigPath(dataDir) !== null &&
-        listener.pids.length === 1 &&
-        listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
-        (listener.dataDirs.length === 1 ||
-          cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
-      if (attributed) return;
-      console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
-      console.error(foreignOccupiedListenerDetail(listener, dataDir));
-      console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
-      process.exit(1);
-    };
-    const httpListener = readOccupiedListener(httpPort);
-    alreadyRunning ||= httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort);
-    if (alreadyRunning) {
-      refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
-      console.log(`Harper already running on port ${httpPort} — skipping start`);
+      const opsListener = readOccupiedListener(opsPort);
+      let opsAnswer: number | undefined;
+      try {
+        const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) opsAnswer = res.status;
+      } catch {}
+      if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
+        refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
+      }
+    } else {
+      try {
+        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) alreadyRunning = true;
+      } catch { /* not running */ }
     }
-    const opsListener = readOccupiedListener(opsPort);
-    let opsAnswer: number | undefined;
-    try {
-      const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
-      if (res.status > 0) opsAnswer = res.status;
-    } catch {}
-    if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
-      refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
-    }
-    const skippedOwnStart = alreadyRunning;
     const explicitCredential = !!(
       opts.adminPassFile || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || opts.adminPass
     );
@@ -850,7 +857,20 @@ program
     mkdirSync(dataDir, { recursive: true });
     readyOpsSocketPosture(dataDir);
 
-    // Install only when no listener answers and no Harper config exists.
+    let skippedOwnStart = false;
+    if (!opts.skipStart) {
+      if (alreadyRunning) {
+        console.log(`Harper already running on port ${httpPort} — skipping start`);
+        const httpListener = readOccupiedListener(httpPort);
+        const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
+        if (notice) {
+          console.error(notice);
+          process.exit(1);
+        }
+        skippedOwnStart = true;
+      }
+    }
+
     if (!alreadyRunning) {
       // Detect whether Harper has already been installed in this data dir.
       // Harper's config is created during install — its presence means
