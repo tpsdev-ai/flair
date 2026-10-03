@@ -1,0 +1,125 @@
+#!/usr/bin/env bun
+/**
+ * Flair capture hook for Claude Code (flair#2068) — the hot path.
+ *
+ * Registered (opt-in) for the `PostToolUse` and `Stop` events via `flair hook
+ * install --capture`. On every fire it reads the hook payload, plans at most
+ * ONE candidate memory (a failed command paired with its fix, or a decision
+ * stated in the turn's final text) and appends it to a local spool — then
+ * returns. It makes NO network call on the hot path: a detached background
+ * flush (this same binary, `--flush`) drains the spool through Flair's normal
+ * write path. When Flair is down the spool waits, bounded; the agent never
+ * blocks on its own diary.
+ *
+ * HARD CONTRACT
+ *   - NEVER writes to stdout: a PostToolUse/Stop hook's stdout is
+ *     harness-interpreted surface and this hook has nothing to say to it.
+ *   - Exit 0 on every path, including a malformed payload, a missing identity,
+ *     an unwritable spool or a failed flush.
+ *   - The payload is read up to a fixed cap and the read has an internal
+ *     deadline, so a stuck stdin cannot hang the agent.
+ *   - Nothing is stored before it is redacted (see ./capture.ts).
+ *
+ * CONFIG (env):
+ *   FLAIR_AGENT_ID   (required — absent ⇒ capture nothing)
+ *   FLAIR_URL, FLAIR_KEY_PATH   (flush only, via flair-client)
+ *   FLAIR_CAPTURE_DIR (default ~/.flair/capture; test override)
+ *   FLAIR_HOOK_PROBE (probe mode: exit immediately, no stdin read, no writes)
+ */
+
+import { spawn } from "node:child_process";
+import { isProbeMode } from "./env-guard.js";
+import {
+  CAPTURE_STDIN_MAX_BYTES,
+  claimFlushSlot,
+  resolveCaptureDir,
+  runCapture,
+  runCaptureFlush,
+  stripInterpolationLiteralsFromEnv,
+} from "./capture-spool.js";
+
+/** Read stdin up to `maxBytes`; resolves to "" on oversize, error or deadline. */
+function readStdin(maxBytes: number = CAPTURE_STDIN_MAX_BYTES, deadlineMs = 2000): Promise<string> {
+  return new Promise((resolve) => {
+    let data = "";
+    let done = false;
+    const finish = (value: string): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(""), deadlineMs);
+    timer.unref?.();
+    try {
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk: string) => {
+        data += chunk;
+        if (Buffer.byteLength(data, "utf8") > maxBytes) {
+          process.stdin.pause?.();
+          finish("");
+        }
+      });
+      process.stdin.on("end", () => finish(data));
+      process.stdin.on("error", () => finish(""));
+    } catch {
+      finish("");
+    }
+  });
+}
+
+/** Spawn a detached, unref'd flush; never waits on it. The flush runs the
+ *  version-matched published package (the installer records its spec in
+ *  FLAIR_CAPTURE_FLUSH_SPEC), which carries flair-client — so the hot-path
+ *  copy stays dependency-free. With no spec the spool simply waits. */
+function kickBackgroundFlush(): void {
+  try {
+    const env = process.env;
+    const agentId = env.FLAIR_AGENT_ID;
+    if (!agentId) return;
+    // Probe-only switch (see capture-runtime.ts): the certification run must
+    // not launch a flush, so it sets this and the spool simply waits.
+    if (env.FLAIR_CAPTURE_NO_FLUSH === "1") return;
+    const spec = env.FLAIR_CAPTURE_FLUSH_SPEC;
+    if (!spec || !/^@[A-Za-z0-9._/-]+@[A-Za-z0-9._-]+$/.test(spec)) return;
+    const dir = resolveCaptureDir(env);
+    if (!claimFlushSlot(dir, agentId, Date.now())) return;
+    const child = spawn("npx", ["-y", "-p", spec, "flair-capture", "--flush"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...env, FLAIR_CAPTURE_FLUSH: "1" },
+    });
+    child.unref();
+    child.on("error", () => {});
+  } catch {
+    // Fail-open: the spool waits, bounded.
+  }
+}
+
+async function main(): Promise<void> {
+  if (isProbeMode()) return;
+  stripInterpolationLiteralsFromEnv();
+  if (process.argv.includes("--flush")) {
+    try {
+      await runCaptureFlush();
+    } catch {
+      // Fail-open.
+    }
+    return;
+  }
+  try {
+    const raw = await readStdin();
+    runCapture(raw, { kickFlush: () => kickBackgroundFlush() });
+  } catch {
+    // Fail-open is the contract.
+  }
+}
+
+const importMeta = import.meta as ImportMeta & { main?: boolean };
+const isMain =
+  importMeta.main === true ||
+  (typeof process !== "undefined" && process.argv[1] != null && import.meta.url === `file://${process.argv[1]}`);
+
+if (isMain) {
+  void main().catch(() => {}).finally(() => process.exit(0));
+}

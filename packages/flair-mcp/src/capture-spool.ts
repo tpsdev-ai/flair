@@ -1,0 +1,386 @@
+/**
+ * Capture spool (flair#2068) — the local, bounded, private staging area the
+ * capture hook appends to on the hot path, and the background flush that
+ * writes each staged candidate through Flair's normal write path.
+ *
+ * WHY A SPOOL. Capture must never be on the agent's critical path: Flair may be
+ * down, slow or unreachable, and a hook must still return immediately. So the
+ * hook does exactly one cheap thing — append a bounded, already-redacted
+ * candidate to a local file — and a background flush drains that file with the
+ * ordinary signed memory write. When Flair is down the spool simply waits,
+ * bounded: new candidates evict the oldest, so it can never grow without limit
+ * and never blocks the agent.
+ *
+ * PRIVATE BY CONSTRUCTION. The spool directory is 0700 and every file 0600;
+ * records are redacted before they are written (see ./capture.ts), so the
+ * spool itself never holds a credential-shaped string.
+ *
+ * The file layout is per agent id:
+ *   <dir>/<agentId>.spool.json    staged candidates (bounded)
+ *   <dir>/<agentId>.pending.json  failed commands awaiting a fix (bounded)
+ *   <dir>/<agentId>.flush.stamp   last background-flush time (cooldown)
+ */
+
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
+import { memoryPutPath } from "./record-id-path.js";
+import {
+  CAPTURE_VERSION,
+  buildCaptureMemoryRow,
+  planPostToolUse,
+  planStop,
+  type CaptureCandidate,
+  type CaptureHookInput,
+  type PendingError,
+} from "./capture.js";
+
+// ── bounds ──────────────────────────────────────────────────────────────────
+
+/** At most this many staged candidates; the oldest is evicted past it. */
+export const CAPTURE_SPOOL_MAX_RECORDS = 100;
+
+/** At most this many bytes of spool JSON; records are dropped from the oldest
+ *  end until it fits, so a pathological payload cannot fill the disk. */
+export const CAPTURE_SPOOL_MAX_BYTES = 64 * 1024;
+
+/** At most this many failed commands awaiting a fix. Beyond it the OLDEST
+ *  pending error is evicted, so an error that is never fixed cannot pin
+ *  unbounded local state. */
+export const CAPTURE_PENDING_MAX = 8;
+
+/** Smallest interval between background-flush spawns. Bounds the child-process
+ *  rate so a burst of tool calls cannot fork a flush per call. */
+export const CAPTURE_FLUSH_COOLDOWN_MS = 1000;
+
+/** The largest hook payload read from stdin; a larger one is not captured. */
+export const CAPTURE_STDIN_MAX_BYTES = 1 * 1024 * 1024;
+
+// ── paths ───────────────────────────────────────────────────────────────────
+
+/** Where the spool lives. FLAIR_CAPTURE_DIR overrides for tests and isolated
+ *  repros, so no test ever touches the real ~/.flair. */
+export function resolveCaptureDir(env: Record<string, string | undefined> = process.env): string {
+  const override = env.FLAIR_CAPTURE_DIR;
+  if (typeof override === "string" && override.trim() !== "") return override;
+  const home = typeof env.HOME === "string" && env.HOME !== "" ? env.HOME : homedir();
+  return join(home, ".flair", "capture");
+}
+
+function isSafeFileId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value);
+}
+
+export function spoolPath(dir: string, agentId: string): string {
+  return join(dir, `${agentId}.spool.json`);
+}
+
+export function pendingPath(dir: string, agentId: string): string {
+  return join(dir, `${agentId}.pending.json`);
+}
+
+export function flushStampPath(dir: string, agentId: string): string {
+  return join(dir, `${agentId}.flush.stamp`);
+}
+
+/** 0700 for the directory, 0600 for the file (re-asserted on an existing
+ *  file — writeFileSync's mode only applies on create). */
+function writePrivate(path: string, data: string): void {
+  writeFileSync(path, data, { mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
+function atomicWritePrivate(path: string, data: string): void {
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  writePrivate(tmp, data);
+  renameSync(tmp, path);
+}
+
+function ensureCaptureDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+}
+
+// ── spool records ───────────────────────────────────────────────────────────
+
+export interface CaptureSpoolRecord {
+  v: number;
+  agentId: string;
+  kind: CaptureCandidate["kind"];
+  content: string;
+  dedupKey: string;
+  provenance: CaptureCandidate["provenance"];
+}
+
+function isSpoolRecord(value: unknown, agentId: string): value is CaptureSpoolRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record.v === CAPTURE_VERSION &&
+    record.agentId === agentId &&
+    (record.kind === "error-fix" || record.kind === "decision") &&
+    typeof record.content === "string" &&
+    typeof record.dedupKey === "string" &&
+    typeof record.provenance === "object" &&
+    record.provenance !== null
+  );
+}
+
+/** Read the staged records, tolerating a missing/malformed file as empty. */
+export function readSpool(dir: string, agentId: string): CaptureSpoolRecord[] {
+  try {
+    const raw = readFileSync(spoolPath(dir, agentId), "utf-8");
+    const parsed = JSON.parse(raw) as { records?: unknown };
+    if (!parsed || !Array.isArray(parsed.records)) return [];
+    return parsed.records.filter((r) => isSpoolRecord(r, agentId));
+  } catch {
+    return [];
+  }
+}
+
+function serializeSpool(agentId: string, records: CaptureSpoolRecord[]): string {
+  return `${JSON.stringify({ v: CAPTURE_VERSION, agentId, records })}\n`;
+}
+
+function trimRecords(records: CaptureSpoolRecord[]): CaptureSpoolRecord[] {
+  let kept = records.slice(-CAPTURE_SPOOL_MAX_RECORDS);
+  while (kept.length > 0 && Buffer.byteLength(serializeSpool(kept[0]!.agentId, kept), "utf8") > CAPTURE_SPOOL_MAX_BYTES) {
+    kept = kept.slice(1);
+  }
+  return kept;
+}
+
+/**
+ * Append one candidate, deduplicating by `dedupKey` against what is already
+ * staged. Returns "appended", "deduplicated" (already staged) or "refused"
+ * (nothing writable). The spool stays within its record and byte bounds.
+ */
+export function appendRecord(dir: string, agentId: string, candidate: CaptureCandidate): "appended" | "deduplicated" | "refused" {
+  try {
+    ensureCaptureDir(dir);
+    const records = readSpool(dir, agentId);
+    if (records.some((r) => r.dedupKey === candidate.dedupKey)) return "deduplicated";
+    records.push({
+      v: CAPTURE_VERSION,
+      agentId,
+      kind: candidate.kind,
+      content: candidate.content,
+      dedupKey: candidate.dedupKey,
+      provenance: candidate.provenance,
+    });
+    atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, trimRecords(records)));
+    return "appended";
+  } catch {
+    return "refused";
+  }
+}
+
+// ── pending errors ──────────────────────────────────────────────────────────
+
+function readPending(dir: string, agentId: string): PendingError[] {
+  try {
+    const raw = readFileSync(pendingPath(dir, agentId), "utf-8");
+    const parsed = JSON.parse(raw) as { pending?: unknown };
+    if (!parsed || !Array.isArray(parsed.pending)) return [];
+    return parsed.pending.filter((p): p is PendingError => {
+      if (typeof p !== "object" || p === null) return false;
+      const record = p as Record<string, unknown>;
+      return typeof record.signature === "string" && typeof record.command === "string" && typeof record.error === "string";
+    });
+  } catch {
+    return [];
+  }
+}
+
+function writePending(dir: string, agentId: string, pending: PendingError[]): void {
+  try {
+    ensureCaptureDir(dir);
+    atomicWritePrivate(pendingPath(dir, agentId), `${JSON.stringify({ v: CAPTURE_VERSION, pending: pending.slice(-CAPTURE_PENDING_MAX) })}\n`);
+  } catch {
+    // Fail-open: capture is an aid, never a gate.
+  }
+}
+
+// ── the hot path (append only, never a network call) ────────────────────────
+
+export interface CaptureDeps {
+  env?: Record<string, string | undefined>;
+  dir?: string;
+  now?: () => Date;
+  /** Injected by the entry point to kick a background flush; tests pass a spy. */
+  kickFlush?: (agentId: string, dir: string) => void;
+  /** Injected by tests to run flush inline; the real entry spawns a child. */
+  warn?: (message: string) => void;
+}
+
+export interface CaptureOutcome {
+  captured: boolean;
+  reason: "appended" | "deduplicated" | "error-recorded" | "not-capturable" | "no-agent-id" | "malformed-input" | "refused";
+}
+
+/**
+ * The whole capture flow for one hook fire. Parses the payload, plans a
+ * candidate (or a pending error), appends it to the spool, and kicks a
+ * background flush. Makes NO network call and NEVER throws.
+ */
+export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOutcome {
+  const env = deps.env ?? process.env;
+  const now = (deps.now ?? (() => new Date()))();
+
+  let input: CaptureHookInput;
+  try {
+    const parsed: unknown = JSON.parse(rawInput || "");
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { captured: false, reason: "malformed-input" };
+    }
+    input = parsed as CaptureHookInput;
+  } catch {
+    return { captured: false, reason: "malformed-input" };
+  }
+
+  const agentId = readEnvOrUnset("FLAIR_AGENT_ID", env);
+  if (!isSafeFileId(agentId)) return { captured: false, reason: "no-agent-id" };
+  const dir = deps.dir ?? resolveCaptureDir(env);
+  const capturedAt = now.toISOString();
+
+  if (input.hook_event_name === "Stop") {
+    const candidate = planStop(input, capturedAt);
+    if (!candidate) return { captured: false, reason: "not-capturable" };
+    const result = appendRecord(dir, agentId, candidate);
+    if (result === "appended") deps.kickFlush?.(agentId, dir);
+    return { captured: result !== "refused", reason: result };
+  }
+
+  if (input.hook_event_name === "PostToolUse") {
+    const pending = readPending(dir, agentId);
+    const plan = planPostToolUse(input, pending, capturedAt);
+    if (plan.action === "record-error") {
+      writePending(dir, agentId, [...pending, plan.error]);
+      return { captured: false, reason: "error-recorded" };
+    }
+    if (plan.action === "candidate") {
+      writePending(dir, agentId, pending.filter((_, i) => i !== plan.resolved));
+      const result = appendRecord(dir, agentId, plan.candidate);
+      if (result === "appended") deps.kickFlush?.(agentId, dir);
+      return { captured: result !== "refused", reason: result };
+    }
+    return { captured: false, reason: "not-capturable" };
+  }
+
+  return { captured: false, reason: "not-capturable" };
+}
+
+// ── background flush (the normal write path) ────────────────────────────────
+
+/** The one client surface the flush touches — structurally satisfied by the
+ *  real FlairClient, injectable in tests. */
+export interface CaptureClient {
+  request<T = unknown>(method: string, path: string, body?: unknown): Promise<T>;
+}
+
+export interface FlushDeps {
+  env?: Record<string, string | undefined>;
+  dir?: string;
+  now?: () => Date;
+  makeClient?: (agentId: string) => CaptureClient | Promise<CaptureClient>;
+  warn?: (message: string) => void;
+}
+
+export interface FlushOutcome {
+  flushed: number;
+  remaining: number;
+  reason: "flushed" | "nothing" | "no-agent-id" | "write-failed";
+}
+
+/** LAZY on purpose: flair-client resolves via its built dist/, and this module
+ *  must load and typecheck without that dist present. Tests always inject
+ *  makeClient. */
+async function defaultClientFactory(agentId: string): Promise<CaptureClient> {
+  // @ts-ignore -- resolvable only once flair-client's dist is built
+  const mod = await import("@tpsdev-ai/flair-client");
+  const FlairClient = mod.FlairClient as new (config: { agentId: string; url?: string; keyPath?: string }) => CaptureClient;
+  return new FlairClient({
+    agentId,
+    url: readEnvOrUnset("FLAIR_URL"),
+    keyPath: readEnvOrUnset("FLAIR_KEY_PATH"),
+  });
+}
+
+/**
+ * Drain the spool through Flair's normal write path. Each record is attempted
+ * once; a record Flair did not accept stays staged (bounded) for the next
+ * flush. Never throws.
+ */
+export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcome> {
+  const env = deps.env ?? process.env;
+  const warn = deps.warn ?? (() => {});
+  const agentId = readEnvOrUnset("FLAIR_AGENT_ID", env);
+  if (!isSafeFileId(agentId)) return { flushed: 0, remaining: 0, reason: "no-agent-id" };
+  const dir = deps.dir ?? resolveCaptureDir(env);
+  const records = readSpool(dir, agentId);
+  if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
+
+  const now = deps.now ?? (() => new Date());
+  const makeClient = deps.makeClient ?? defaultClientFactory;
+  let client: CaptureClient;
+  try {
+    client = await makeClient(agentId);
+  } catch (error) {
+    warn(`flush skipped (${error instanceof Error ? error.message : String(error)}).slice(0,200)`);
+    return { flushed: 0, remaining: records.length, reason: "write-failed" };
+  }
+
+  const kept: CaptureSpoolRecord[] = [];
+  let flushed = 0;
+  for (const record of records) {
+    const row = buildCaptureMemoryRow(
+      { kind: record.kind, content: record.content, dedupKey: record.dedupKey, provenance: record.provenance },
+      agentId,
+      now(),
+    );
+    try {
+      await client.request("PUT", memoryPutPath(row.id), row);
+      flushed++;
+    } catch (error) {
+      kept.push(record);
+      warn(`capture write skipped (${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
+  try {
+    if (kept.length === 0) {
+      if (existsSync(spoolPath(dir, agentId))) atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, []));
+    } else {
+      atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, kept));
+    }
+  } catch {
+    // Leaving the file as-is only re-attempts the same records next time.
+  }
+  return { flushed, remaining: kept.length, reason: flushed > 0 ? "flushed" : "write-failed" };
+}
+
+// ── flush cooldown ──────────────────────────────────────────────────────────
+
+/** True when a background flush may be spawned now (cooldown elapsed), and
+ *  records the spawn time. Best-effort: an unreadable stamp flushes. */
+export function claimFlushSlot(dir: string, agentId: string, now: number, cooldownMs: number = CAPTURE_FLUSH_COOLDOWN_MS): boolean {
+  try {
+    const stamp = flushStampPath(dir, agentId);
+    let last = 0;
+    try {
+      if (statSync(stamp).isFile()) last = Number(readFileSync(stamp, "utf-8")) || 0;
+    } catch {
+      last = 0;
+    }
+    if (now - last < cooldownMs) return false;
+    ensureCaptureDir(dir);
+    atomicWritePrivate(stamp, String(now));
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/** Re-exported for the entry point's env hygiene (see ./capture-hook.ts). */
+export { stripInterpolationLiteralsFromEnv };

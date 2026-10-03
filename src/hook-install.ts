@@ -55,6 +55,12 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { actionRecallInstallRoot, plannedActionRecallRuntime, probeActionRecallRuntime, provisionActionRecallRuntime } from "./lib/action-recall-runtime.js";
+import {
+  captureInstallRoot,
+  plannedCaptureRuntime,
+  probeCaptureRuntime,
+  provisionCaptureRuntime,
+} from "./lib/capture-runtime.js";
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
@@ -62,6 +68,13 @@ import {
   buildSessionStartHookCommand,
   buildActionRecallHookCommand,
   buildContinuityCaptureHookCommand,
+  buildCaptureHookCommand,
+  captureFlushSpec,
+  parseCaptureCommand,
+  isFlairCaptureCommand,
+  CAPTURE_HOOK_EVENTS,
+  CAPTURE_POST_TOOL_USE_MATCHER,
+  type CaptureHookEvent,
   checkContinuityCaptureHooks,
   computeContinuityHookInstall,
   computeContinuityHookRemoval,
@@ -1604,4 +1617,276 @@ export function uninstallContinuityHooks(opts: UninstallHookOptions): Continuity
  *  doctor's check consumes, resolved through the harness's settings path. */
 export function continuityHookStatus(homeDir: string, harness: Harness): ContinuityCaptureHookReport {
   return checkContinuityCaptureHooks(homeDir, hookSettingsPath(homeDir, harness));
+}
+
+// ── capture hooks (flair#2068) ───────────────────────────────────────────────
+//
+// The PostToolUse + Stop pair that captures at the point of learning: a failed
+// command paired with its later fix, and decisions stated in a turn's final
+// text, staged in a bounded local spool and flushed in the background through
+// Flair's normal write path. Claude Code only (the matcher is Claude tool
+// names). INSTALLING THE PAIR IS THE OPT-IN, so absence renders as "not
+// enabled", never a failure. The command and provisioning reuse the
+// action-recall runtime machinery (flair#2067) — a second descriptor, not a
+// second mechanism.
+
+export interface CaptureInstallOptions extends InstallHookOptions {
+  runtime: ActionRecallRuntime;
+}
+
+export interface CaptureMutationResult {
+  ok: boolean;
+  path: string;
+  harness: Harness;
+  dryRun: boolean;
+  message: string;
+  backupPath: string | null;
+  actions: Record<CaptureHookEvent, HookDeltaAction | "remove"> | null;
+}
+
+/** The capture status for `flair hook status --capture`. */
+export interface CaptureStatus {
+  path: string;
+  harness: Harness;
+  installed: boolean;
+  state: "installed" | "absent" | "partial" | "stale";
+  runtimeFailure?: string;
+}
+
+function findCaptureEntry(config: any, event: CaptureHookEvent): { group: any; hookIndex: number; groupIndex: number } | null {
+  const groups = config?.hooks?.[event];
+  if (!Array.isArray(groups)) return null;
+  for (let gi = 0; gi < groups.length; gi++) {
+    const hooks = groups[gi]?.hooks;
+    if (!Array.isArray(hooks)) continue;
+    for (let hi = 0; hi < hooks.length; hi++) {
+      if (isFlairCaptureCommand(hooks[hi]?.command)) return { group: groups[gi], hookIndex: hi, groupIndex: gi };
+    }
+  }
+  return null;
+}
+
+interface CaptureDelta {
+  changed: boolean;
+  newConfig: any;
+  actions: Record<CaptureHookEvent, HookDeltaAction>;
+}
+
+/** Pure merge of the capture pair into a parsed settings object. */
+export function computeCaptureHookInstall(config: any, runtime: ActionRecallRuntime, agentId: string, flairUrl: string): CaptureDelta {
+  const command = buildCaptureHookCommand(runtime.bunPath, runtime.artifactPath, agentId, flairUrl, captureFlushSpec());
+  const newConfig = deepClone(config ?? {});
+  newConfig.hooks = newConfig.hooks && typeof newConfig.hooks === "object" && !Array.isArray(newConfig.hooks) ? newConfig.hooks : {};
+  const actions = { PostToolUse: "noop", Stop: "noop" } as Record<CaptureHookEvent, HookDeltaAction>;
+  let changed = false;
+  for (const event of CAPTURE_HOOK_EVENTS) {
+    const existing = findCaptureEntry(newConfig, event);
+    const wantMatcher = event === "PostToolUse";
+    if (existing) {
+      const hook = existing.group.hooks[existing.hookIndex];
+      const matcherCurrent = !wantMatcher || existing.group.matcher === CAPTURE_POST_TOOL_USE_MATCHER;
+      if (hook.type !== "command" || hook.command !== command || !matcherCurrent) {
+        hook.command = command;
+        hook.type = "command";
+        if (wantMatcher) existing.group.matcher = CAPTURE_POST_TOOL_USE_MATCHER;
+        actions[event] = "update";
+        changed = true;
+      }
+    } else {
+      newConfig.hooks[event] = Array.isArray(newConfig.hooks[event]) ? newConfig.hooks[event] : [];
+      const group: any = { hooks: [{ type: "command", command }] };
+      if (wantMatcher) group.matcher = CAPTURE_POST_TOOL_USE_MATCHER;
+      newConfig.hooks[event].push(group);
+      actions[event] = "add";
+      changed = true;
+    }
+  }
+  return { changed, newConfig, actions };
+}
+
+/** Pure removal of the capture pair. */
+export function computeCaptureHookRemoval(config: any): CaptureDelta {
+  const newConfig = deepClone(config ?? {});
+  const actions = { PostToolUse: "noop", Stop: "noop" } as Record<CaptureHookEvent, HookDeltaAction>;
+  for (const event of CAPTURE_HOOK_EVENTS) {
+    const existing = findCaptureEntry(newConfig, event);
+    if (!existing) continue;
+    const groups = newConfig.hooks[event];
+    groups[existing.groupIndex].hooks.splice(existing.hookIndex, 1);
+    if (groups[existing.groupIndex].hooks.length === 0) groups.splice(existing.groupIndex, 1);
+    if (groups.length === 0) delete newConfig.hooks[event];
+    actions[event] = "remove";
+  }
+  return { changed: actions.PostToolUse !== "noop" || actions.Stop !== "noop", newConfig, actions };
+}
+
+/** Reproduce + re-probe a wired capture command, or a reason it is not one. */
+function captureCommandFailure(command: unknown): string | null {
+  const parts = parseCaptureCommand(typeof command === "string" ? command : "");
+  if (!parts) return "capture command is not an installer command";
+  try {
+    const rebuilt = buildCaptureHookCommand(parts.bunPath, parts.artifactPath, parts.agentId, parts.flairUrl, parts.flushSpec);
+    if (command !== rebuilt) return "capture command is not an installer command";
+    return probeCaptureRuntime({ bunPath: parts.bunPath, artifactPath: parts.artifactPath }, parts.agentId, parts.flairUrl ?? "http://localhost:19926", command);
+  } catch {
+    return "capture command is not an installer command";
+  }
+}
+
+/** Install (or repair) the capture PostToolUse + Stop pair. */
+export function installCaptureHooks(opts: CaptureInstallOptions): CaptureMutationResult {
+  const { homeDir, harness, agentId, flairUrl, runtime } = opts;
+  const dryRun = !!opts.dryRun;
+  const path = hookSettingsPath(homeDir, harness);
+
+  if (harness !== "claude-code") {
+    return {
+      ok: false, path, harness, dryRun,
+      message: `capture is Claude Code only — ${harness} has no PostToolUse/Stop matcher Flair can capture from`, backupPath: null, actions: null,
+    };
+  }
+  for (const [label, value] of [["agent id", agentId], ["Flair URL", flairUrl]] as const) {
+    if (!isHookCommandValueSafe(value)) {
+      return {
+        ok: false, path, harness, dryRun,
+        message: `${label} '${value}' contains characters that cannot be safely written into a shell hook command — refusing to write it`,
+        backupPath: null, actions: null,
+      };
+    }
+  }
+
+  const runtimeFailure = probeCaptureRuntime(runtime, agentId, flairUrl);
+  if (runtimeFailure) {
+    return { ok: false, path, harness, dryRun, message: `${runtimeFailure} — nothing written`, backupPath: null, actions: null };
+  }
+
+  if (dryRun) {
+    let planned: ActionRecallRuntime;
+    try {
+      planned = plannedCaptureRuntime(runtime, homeDir);
+    } catch (error) {
+      return { ok: false, path, harness, dryRun, message: `${error instanceof Error ? error.message : String(error)} — nothing written`, backupPath: null, actions: null };
+    }
+    const read = readSettingsFile(path);
+    if (read.parseError) {
+      return { ok: false, path, harness, dryRun, message: `${read.parseError} — dry run: nothing would be written until this is fixed`, backupPath: null, actions: null };
+    }
+    const delta = computeCaptureHookInstall(read.parsed ?? {}, planned, agentId, flairUrl);
+    const message = delta.changed
+      ? `would wire the capture hooks (PostToolUse: ${delta.actions.PostToolUse}, Stop: ${delta.actions.Stop}) in ${path} (dry run — nothing written)`
+      : `capture hooks already current in ${path} — no changes`;
+    return { ok: true, path, harness, dryRun, message, backupPath: null, actions: delta.actions };
+  }
+
+  mkdirSync(dirname(path), { recursive: true });
+  let actions: CaptureMutationResult["actions"] = null;
+  let refused = false;
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        refused = true;
+        return { hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.` };
+      }
+      let installed: ActionRecallRuntime;
+      try {
+        installed = provisionCaptureRuntime(runtime, homeDir, agentId, flairUrl);
+      } catch (error) {
+        return { hold: `${error instanceof Error ? error.message : String(error)} — nothing written` };
+      }
+      const delta = computeCaptureHookInstall(read.parsed ?? {}, installed, agentId, flairUrl);
+      actions = delta.actions;
+      if (!delta.changed) return { noop: `capture hooks already current in ${path}` };
+      return { write: encodeConfig(delta.newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
+
+  const backupPath = result.backupPath ?? null;
+  if (result.status === "written") {
+    return { ok: true, path, harness, dryRun, message: `wired the capture hooks (PostToolUse: ${actions!.PostToolUse}, Stop: ${actions!.Stop}) in ${path}`, backupPath, actions };
+  }
+  if (result.status === "noop") {
+    return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
+  }
+  if (result.status === "held") {
+    return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
+  }
+  return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
+}
+
+/** Symmetric removal of the capture pair + its provisioned runtime. */
+export function uninstallCaptureHooks(opts: UninstallHookOptions): CaptureMutationResult {
+  const { homeDir, harness } = opts;
+  const dryRun = !!opts.dryRun;
+  const path = hookSettingsPath(homeDir, harness);
+
+  if (harness !== "claude-code") {
+    return { ok: false, path, harness, dryRun, message: `capture is Claude Code only`, backupPath: null, actions: null };
+  }
+  if (!existsSync(path)) {
+    if (!dryRun) rmSync(captureInstallRoot(homeDir), { recursive: true, force: true });
+    return { ok: true, path, harness, dryRun, message: `no capture hooks found in ${path} — nothing to remove`, backupPath: null, actions: { PostToolUse: "noop", Stop: "noop" } };
+  }
+  if (dryRun) {
+    const read = readSettingsFile(path);
+    if (read.parseError) return { ok: false, path, harness, dryRun, message: read.parseError, backupPath: null, actions: null };
+    const delta = computeCaptureHookRemoval(read.parsed ?? {});
+    const message = delta.changed
+      ? `would remove the capture hooks (PostToolUse: ${delta.actions.PostToolUse}, Stop: ${delta.actions.Stop}) from ${path} (dry run — nothing written)`
+      : `no capture hooks found in ${path} — nothing to remove (dry run)`;
+    return { ok: true, path, harness, dryRun, message, backupPath: null, actions: delta.actions };
+  }
+  let actions: CaptureMutationResult["actions"] = null;
+  let refused = false;
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        refused = true;
+        return { hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.` };
+      }
+      const delta = computeCaptureHookRemoval(read.parsed ?? {});
+      actions = delta.actions;
+      if (!delta.changed) return { noop: `no capture hooks found in ${path} — nothing to remove` };
+      return { write: encodeConfig(delta.newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
+
+  if (result.status === "written" || result.status === "noop") {
+    rmSync(captureInstallRoot(homeDir), { recursive: true, force: true });
+  }
+  const backupPath = result.backupPath ?? null;
+  if (result.status === "written") {
+    return { ok: true, path, harness, dryRun, message: `removed the capture hooks from ${path}`, backupPath, actions };
+  }
+  if (result.status === "noop") {
+    return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
+  }
+  if (result.status === "held") {
+    return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
+  }
+  return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
+}
+
+/** Read-only capture status — reports both entries and re-probes the runtime. */
+export function captureHookStatus(homeDir: string, harness: Harness): CaptureStatus {
+  const path = hookSettingsPath(homeDir, harness);
+  const read = readSettingsFile(path);
+  const config = read.parsed ?? {};
+  const entries = CAPTURE_HOOK_EVENTS.map((event) => findCaptureEntry(config, event));
+  const presentCount = entries.filter(Boolean).length;
+  if (presentCount === 0) return { path, harness, installed: false, state: "absent" };
+  if (presentCount < CAPTURE_HOOK_EVENTS.length) return { path, harness, installed: false, state: "partial" };
+  const postToolUse = entries[0]!;
+  const command = postToolUse.group.hooks[postToolUse.hookIndex]?.command;
+  const runtimeFailure = captureCommandFailure(command);
+  const matcherOk = postToolUse.group.matcher === CAPTURE_POST_TOOL_USE_MATCHER;
+  if (runtimeFailure || !matcherOk) {
+    return { path, harness, installed: false, state: "stale", ...(runtimeFailure ? { runtimeFailure } : {}) };
+  }
+  return { path, harness, installed: true, state: "installed" };
 }

@@ -88,7 +88,7 @@ This is a prompt-driven CLI setup: Claude must choose to run these commands. For
 
 ## Hooks
 
-`@tpsdev-ai/flair-mcp` ships five Claude Code hooks. Each is a separate binary and each is optional. Each exits 0 on every failure it handles, but a hook can still delay the session start, the prompt or the compaction it runs for; the time budgets and limits of prompt recall and of the PreCompact hook are described below.
+`@tpsdev-ai/flair-mcp` ships six Claude Code hooks. Each is a separate binary and each is optional. Each exits 0 on every failure it handles, but a hook can still delay the session start, the prompt or the compaction it runs for; the time budgets and limits of prompt recall and of the PreCompact hook are described below.
 
 | Hook | Claude Code event | What it does | Install |
 |---|---|---|---|
@@ -96,6 +96,7 @@ This is a prompt-driven CLI setup: Claude must choose to run these commands. For
 | `flair-continuity-capture` | `PostToolUse` and `Stop` | Journals the agent's working state into the ephemeral memory tier, so the next session start can point at it with a one-line resume hint. | `flair hook install --continuity` |
 | `flair-prompt-recall` | `UserPromptSubmit` | Searches memory with each prompt and adds the relevant memories as context before the model answers. | By hand, below |
 | `flair-action-recall` | `PreToolUse` | Matches the pending Bash command against the agent's own triggered lessons and adds the matching ones as context on the next model request. | `flair hook install --action-recall` |
+| `flair-capture` | `PostToolUse` and `Stop` | Captures a failed command and its later fix, and decisions stated in a turn, as candidate memories staged locally and flushed in the background. | `flair hook install --capture` |
 | `flair-precompact` | `PreCompact` | Saves a bounded continuity record just before a compaction, for `flair-session-start` to show first afterwards. | By hand, [below](#continuity-across-compaction-flair-precompact-optional) |
 
 ### Per-prompt recall (`flair-prompt-recall`)
@@ -164,6 +165,16 @@ Write a new lesson with `client.memory.write(content, { type: "lesson", metadata
 The hot path reads a per-session cache of the agent's own lessons under `~/.flair/action-recall/`, refreshed at session start through a signed, non-admin read. The cache expires five minutes after refresh starts, shortened by each lesson's valid expiry or end-of-validity timestamp. Between refreshes, a deletion, edit or supersession can stay visible until expiry.
 
 **What it never does.** It emits only `hookSpecificOutput.additionalContext` — never a permission decision, a question, replacement input or blocking output. It never executes or echoes the submitted command. Caught read and input errors produce no context. Missing, corrupt, wrong-mode, oversized or stale caches do not match. The reader checks path components for symlinks before opening and uses `O_NOFOLLOW` on the final component. A command it cannot read as one simple argv command (expansions, substitutions, assignments, redirects, comments, pipelines, lists, heredocs, compound commands) is silently not matched. At most three lessons are shown, each quoted line bounded, the whole output at most 4 KiB; excerpts are redacted before they are cached and quoted when shown. The hook does not read or use credentials, signs nothing and makes no network call.
+
+### Learning capture (`flair-capture`)
+
+`flair hook install --capture` copies the version-matched hook and its runtime modules to `~/.flair/hooks/capture/<version>-<content hash>/` and probes that installed command. It wires two Claude Code events: `PostToolUse` (matching `Write|Edit|NotebookEdit|Bash`) and `Stop`. A turn that states a decision or a correction becomes one memory; a turn with none captures nothing.
+
+**The hot path stays off the critical path.** On every fire the hook plans at most one candidate — a failed `Bash` command paired with the call that later fixes it, or one decision sentence from the turn's final text — redacts it, appends it to a bounded, private spool under `~/.flair/capture/`, and returns. It makes no network call. A detached background flush drains the spool through Flair's normal write path; when Flair is unreachable the spool waits, bounded, and the agent never blocks. The hook's own work is single-digit milliseconds; the launcher and Bun start-up happen before it runs.
+
+Redaction happens before anything is stored: a credential-shaped string — a prefixed token, an `Authorization` value, a `name=value` secret, a private key block, `user:password@` in a URL — is replaced with `[redacted]`, so it never reaches the spool or Flair. This is pattern matching and best effort; a secret with no recognizable shape is stored as written.
+
+Install probes the copied command; status probes a detected entry and reports `partial` when only one of the two events is wired. Uninstall removes both entries and the provisioned directory. Absence is informational: installing the pair is the opt-in. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first.
 
 ## Multiple Projects
 
