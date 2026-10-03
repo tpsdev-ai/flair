@@ -415,17 +415,9 @@ type OrgSkillAssignmentHistory @table(database: "flair") {
   at: String!
 }
 
-# InstructionVersion — the append-only version history for instruction subjects
-# (soul and, in a later slice, skill), one row per accepted write
-# (resources/instruction-version-record.ts's recordVersion). The shape is
-# frozen by flair#2139 slice 1. The application writes rows only through the
-# in-process helper; the resource class denies every REST mutation verb to every
-# principal, so this is a read-only table over HTTP. Reads default-deny by subjectType: slice
-# 1 authorizes `soul` only, under Soul's verified-agent rule.
-#
-# The administrator operations API (raw upsert/delete) is an explicit deferred
-# exception: it is not audited by this table, so a version row written that way
-# carries no provenance here. See docs/api-reference.md.
+# InstructionVersion — Soul resource write history (flair#2139 slice 1).
+# REST mutation verbs are refused; reads authorize soul subjects only.
+# The administrator operations API is an unaudited exception.
 type InstructionVersion @table(database: "flair") @export {
   id: ID @primaryKey              # encodes subjectType + subjectId + version
   subjectType: String! @indexed   # soul | skill

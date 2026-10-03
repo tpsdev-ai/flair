@@ -1,31 +1,11 @@
 /**
- * instruction-version-record.ts — the frozen InstructionVersion shape and the
- * one shared transactional append helper for instruction-version history
- * (flair#2139 slice 1).
- *
- * ─── What this is ────────────────────────────────────────────────────────────
- * `recordVersion` is the only application writer of InstructionVersion. It resolves the
- * subject's head, allocates the next per-subject sequence, verifies the
- * caller's attribution, optionally compares an expected head, appends the
- * version row, and runs the caller's row mutation — all in ONE serialized,
- * owned transaction. Any failure aborts the transaction, so neither the append
- * nor the row mutation survives (fail-closed: no unaudited mutation, no phantom
- * version).
- *
- * ─── Serialization, and what it is NOT ───────────────────────────────────────
- * Writes to one subject are serialized by this process's per-key lock on the
- * InstructionVersion primary store (resources/key-lock.ts) plus an owned
- * transaction. That lock is per key, shared by the threads of ONE Harper
- * process (key-lock.ts) — it is NOT cross-instance compare-and-swap. Two
- * processes writing the same subject at once can allocate the same sequence;
- * the second append then hits the version primary key and the whole
- * transaction rolls back. That fail-closed collision is the correct direction
- * for an append-only audit table, and it is why version ids never encode a
- * content hash.
+ * The application append helper for InstructionVersion (flair#2139 slice 1).
+ * State preparation, attribution, head checks, row mutation and insert-only
+ * appends share an owned transaction under a process-local subject-type lock.
  */
 import { createHash } from "node:crypto";
 import { databases } from "harper";
-import type { AgentAuthVerdict } from "./agent-auth.js";
+import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 
@@ -52,16 +32,14 @@ export interface RecordVersionInput {
   kind: VersionKind;
   /** The physical row this version describes. */
   rowId: string;
-  /** The value the row carries; hashed, never stored here. Null on delete. */
+  /** Value bytes for the digest; soulSnapshot also contains the value. */
   value?: string | null;
   soulSnapshot?: string | null;
   memoryId?: string | null;
   visibility?: string | null;
-  attribution: VersionAttribution;
+  snapshot?: () => Record<string, any>;
   /** The addressable version id the caller compared against; null ⇒ unguarded. */
   expectedVersion?: string | null;
-  /** Server clock, ISO. */
-  createdAt: string;
   /**
    * A logical-key change: when set, the write first appends a delete tombstone
    * to this closed subject, in the same transaction, before the subject's own
@@ -148,15 +126,6 @@ export function soulSubjectId(agentId: string, key: string): string {
   return `${agentId}:${key}`;
 }
 
-/** Server-derived attribution for a Soul write (operator Basic or deliberate internal). */
-export function soulAttribution(auth: AgentAuthVerdict, source: "operator" | "internal"): VersionAttribution {
-  return {
-    actorKind: source === "operator" ? "operator" : "internal",
-    actorId: auth.kind === "agent" ? auth.agentId : null,
-    sourceClass: source,
-  };
-}
-
 /** A version row carries the expectedVersion it compared iff it is guarded; otherwise null. */
 export function expectedVersionOf(input: RecordVersionInput): string | null {
   return input.expectedVersion ?? null;
@@ -183,7 +152,7 @@ class RowMutationDenied extends Error {
 }
 
 function isTableLike(table: unknown): boolean {
-  return !!table && typeof (table as any).search === "function" && typeof (table as any).put === "function";
+  return !!table && typeof (table as any).search === "function" && typeof (table as any).create === "function";
 }
 
 /**
@@ -192,7 +161,7 @@ function isTableLike(table: unknown): boolean {
  * has already dropped the thread's cached read snapshot (withKeyLock), so it
  * sees the last committed head under the subject lock.
  */
-async function readHead(subjectType: string, subjectId: string): Promise<Record<string, any> | null> {
+async function readHead(subjectType: string, subjectId: string, shared: any): Promise<Record<string, any> | null> {
   const table = (databases as any).flair?.InstructionVersion;
   if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
   for await (const row of table.search({
@@ -202,43 +171,65 @@ async function readHead(subjectType: string, subjectId: string): Promise<Record<
     ],
     sort: { attribute: "version", descending: true },
     limit: 1,
-  })) {
+  }, shared)) {
     return row as Record<string, any>;
   }
   return null;
 }
 
 const LOCK_NAMESPACE = "flair-instruction-version";
-/** The wait for another write to the same subject: at most LOCK_ATTEMPTS × LOCK_WAIT_MS. */
+/** Bounded lock wait. */
 const LOCK_ATTEMPTS = 200;
 const LOCK_WAIT_MS = 10;
 
-/**
- * Append one version row for `input.subject` and run `mutateRow` in the same
- * owned transaction. `mutateRow` receives the shared context the row write must
- * be given; it returns the resource's Response (a non-success status aborts the
- * append) or any value.
- */
+export interface PreparedVersionInput {
+  subjectType: InstructionSubjectType;
+  prepare: (shared: any) => Promise<RecordVersionInput | Response | null>;
+}
+
 export async function recordVersion(
   ctx: any,
-  input: RecordVersionInput,
+  request: RecordVersionInput | PreparedVersionInput,
   mutateRow: (shared: any) => Promise<any>,
 ): Promise<RecordVersionOutcome> {
-  const expected = expectedVersionOf(input);
   const store = (databases as any).flair?.InstructionVersion?.primaryStore;
   let outcome;
   try {
-    outcome = await withKeyLock(store, [LOCK_NAMESPACE, input.subjectType, input.subjectId], () =>
+    outcome = await withKeyLock(store, [LOCK_NAMESPACE, request.subjectType], () =>
       withOwnedTransaction(ctx, async (shared) => {
+        const { auth, source, denied } = await authorizeSoulWrite(shared);
+        if (denied) return { ok: false, response: denied } as RecordVersionOutcome;
+        const attribution: VersionAttribution = {
+          actorKind: source === "operator" ? "operator" : "internal",
+          actorId: auth.kind === "agent" ? auth.agentId : null,
+          sourceClass: source!,
+        };
+        const input = "prepare" in request ? await request.prepare(shared) : request;
+        if (input === null) {
+          const result = await mutateRow(shared);
+          if (result instanceof Response && result.status >= 300) throw new RowMutationDenied(result);
+          return { ok: true, result, version: "" } as RecordVersionOutcome;
+        }
+        if (input instanceof Response) return { ok: false, response: input } as RecordVersionOutcome;
+        if (input.subjectType !== request.subjectType) throw new Error("instruction version: subject type changed during preparation");
+        const expected = expectedVersionOf(input);
         const table = (databases as any).flair?.InstructionVersion;
         if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
-        const head = await readHead(input.subjectType, input.subjectId);
+        const head = await readHead(input.subjectType, input.subjectId, shared);
         if (expected != null && (!head || head.id !== expected)) {
           return { ok: false, response: staleHeadResponse(expected, head) } as RecordVersionOutcome;
         }
+        const result = await mutateRow(shared);
+        if (result instanceof Response && result.status >= 300) throw new RowMutationDenied(result);
+        if (input.kind !== "delete" && input.snapshot) {
+          const row = input.snapshot();
+          if (!row) throw new Error("instruction version: stored snapshot unavailable");
+          input.soulSnapshot = JSON.stringify(row);
+          input.value = typeof row.value === "string" ? row.value : null;
+        }
         // A logical-key change closes the old subject first, in this transaction.
         if (input.previousSubjectId && input.previousSubjectId !== input.subjectId) {
-          const oldHead = await readHead(input.subjectType, input.previousSubjectId);
+          const oldHead = await readHead(input.subjectType, input.previousSubjectId, shared);
           const oldSequence = oldHead ? BigInt(oldHead.version as any) + 1n : 1n;
           const oldRecord: Record<string, unknown> = {
             id: versionId(input.subjectType, input.previousSubjectId, oldSequence),
@@ -254,15 +245,15 @@ export async function recordVersion(
             soulSnapshot: null,
             memoryId: null,
             visibility: null,
-            actorKind: input.attribution.actorKind,
-            actorId: input.attribution.actorId,
-            sourceClass: input.attribution.sourceClass,
-            createdAt: input.createdAt,
+            actorKind: attribution.actorKind,
+            actorId: attribution.actorId,
+            sourceClass: attribution.sourceClass,
+            createdAt: new Date().toISOString(),
             guarded: false,
             expectedVersion: null,
           };
           oldRecord.recordHash = recordDigest(oldRecord);
-          await table.put(oldRecord, shared);
+          await table.create(oldRecord, shared);
         }
         const sequence = head ? BigInt(head.version as any) + 1n : 1n;
         const id = versionId(input.subjectType, input.subjectId, sequence);
@@ -280,17 +271,15 @@ export async function recordVersion(
           soulSnapshot: input.kind === "delete" ? null : (input.soulSnapshot ?? null),
           memoryId: input.memoryId ?? null,
           visibility: input.visibility ?? null,
-          actorKind: input.attribution.actorKind,
-          actorId: input.attribution.actorId,
-          sourceClass: input.attribution.sourceClass,
-          createdAt: input.createdAt,
+          actorKind: attribution.actorKind,
+          actorId: attribution.actorId,
+          sourceClass: attribution.sourceClass,
+          createdAt: new Date().toISOString(),
           guarded: expected != null,
           expectedVersion: expected,
         };
         record.recordHash = recordDigest(record);
-        await table.put(record, shared);
-        const result = await mutateRow(shared);
-        if (result instanceof Response && result.status >= 300) throw new RowMutationDenied(result);
+        await table.create(record, shared);
         return { ok: true, result, version: id } as RecordVersionOutcome;
       }),
     LOCK_ATTEMPTS,
@@ -314,7 +303,7 @@ export async function recordVersion(
       ok: false,
       response: jsonResponse(409, {
         error: "instruction_version_busy",
-        message: "another write to this subject is still in progress; retry",
+        message: "another instruction write is still in progress; retry",
       }),
     };
   }

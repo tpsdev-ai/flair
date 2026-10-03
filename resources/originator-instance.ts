@@ -232,6 +232,7 @@ export async function resolveStoredRow(
   tableName: string,
   content: unknown,
   getUrlBound: () => unknown,
+  context?: any,
 ): Promise<{ row: Record<string, any> | null; denial?: Response }> {
   const targetId = urlTargetId(resource);
   const bodyId = isPlainObject(content) && content.id != null ? content.id : undefined;
@@ -246,7 +247,7 @@ export async function resolveStoredRow(
   try {
     const table = (databases as any).flair?.[tableName];
     if (table && typeof table.get === "function") {
-      const row = await table.get(id);
+      const row = await table.get(id, context ?? (resource as any)?.getContext?.());
       return { row: isStoredRow(row) ? row : null };
     }
     // No static table reader (an in-process harness): read the resource's own

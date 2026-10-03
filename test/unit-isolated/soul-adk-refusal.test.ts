@@ -26,7 +26,8 @@ const InstructionVersionBase = {
     rows.sort((a, b) => Number(b.version) - Number(a.version));
     for (const row of rows.slice(0, query?.limit ?? rows.length)) yield row;
   },
-  async put(record: any) {
+  async create(record: any) {
+    if (versionStore.has(record.id)) throw new Error("Record already exists");
     versionStore.set(record.id, { ...record });
   },
 };
@@ -300,7 +301,9 @@ test("failed learned-content lookup aborts all content writes", async () => {
   lookupFails = true;
   for (const method of ["post", "put", "patch"]) {
     soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "original" });
-    await expect(makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "replacement" })).rejects.toThrow("provenance unavailable");
+    const write = makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "replacement" });
+    if (method === "patch") expect((await write).status).toBe(500);
+    else await expect(write).rejects.toThrow("provenance unavailable");
     expect(soulStore.get("soul").value).toBe("original");
   }
 });

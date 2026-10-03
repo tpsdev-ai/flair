@@ -47,7 +47,8 @@ const InstructionVersionBase = {
     rows.sort((a, b) => Number(b.version) - Number(a.version));
     for (const row of rows.slice(0, query?.limit ?? rows.length)) yield row;
   },
-  async put(record: any) {
+  async create(record: any) {
+    if (versionStore.has(record.id)) throw new Error("Record already exists");
     versionStore.set(record.id, { ...record });
   },
 };

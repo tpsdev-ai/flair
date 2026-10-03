@@ -13,9 +13,6 @@
 //     Basic admin included.
 //   - spoofed audit fields on a Soul write are ignored.
 //
-// The helper's own guard, duplicate-id and failure paths are exercised in
-// test/unit-isolated/instruction-version-record.test.ts (no REST request
-// compares a head in slice 1, so those are not reachable here).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { createHash, randomUUID } from "node:crypto";
@@ -232,8 +229,7 @@ describe("flair#2139 S1 — Soul lifecycle leaves a chained history", () => {
     }
     for (const r of rows) expect(r.recordHash).toBe(recordHashOf(r));
 
-    // Snapshots: the stored state at write time, including its value; the
-    // tombstone carries none.
+    // Snapshot values; the tombstone carries none.
     const snap = (r: any) => (r.soulSnapshot == null ? null : JSON.parse(r.soulSnapshot).value);
     expect(rows.map(snap)).toEqual(["v1", "v2", "v3", null, "v1"]);
     expect(rows[3].valueHash).toBeNull();
@@ -259,6 +255,10 @@ describe("flair#2139 S1 — Soul lifecycle leaves a chained history", () => {
       const res = await call("basic", "PUT", soulPath(id), { id, agentId: A.id, key, value: `c${i + 1}`, createdAt: when, updatedAt: when });
       expect(res.status, res.text.slice(0, 200)).toBeLessThan(300);
       const row = await soulRow(id);
+      const latest = (await versionsOf(subjectId)).at(-1)!;
+      expect(JSON.parse(latest.soulSnapshot)).toEqual(row);
+      expect(Date.parse(latest.createdAt)).toBeGreaterThanOrEqual(Date.parse(row.updatedAt));
+      expect(latest.createdAt).not.toBe(created);
       expect(row.createdAt, `PUT ${i + 1} reset createdAt`).toBe(created);
       expect(row.updatedAt).not.toBe(when);
     }
@@ -282,6 +282,65 @@ describe("flair#2139 S1 — Soul lifecycle leaves a chained history", () => {
       expect(rows[i].previousVersionHash, `version ${i + 1} must chain to version ${i}`).toBe(rows[i - 1].recordHash);
     }
   }, 180_000);
+
+  test("POST and PUT without body ids snapshot the physical stored row", async () => {
+    const key = `iv-no-id-${sfx}`;
+    const subjectId = `${A.id}:${key}`;
+    const posted = await call("basic", "POST", "/Soul/", { agentId: A.id, key, value: "first", originatorInstanceId: "forged" });
+    expect(posted.status, posted.text).toBeLessThan(300);
+    const [created] = await versionsOf(subjectId);
+    const id = created.rowId;
+    expect(id).not.toBe(subjectId);
+    expect(JSON.parse(created.soulSnapshot)).toEqual(await soulRow(id));
+    const put = await call("basic", "PUT", soulPath(id), { agentId: A.id, key, value: "second", originatorInstanceId: "forged" });
+    expect(put.status, put.text).toBeLessThan(300);
+    const updated = (await versionsOf(subjectId)).at(-1)!;
+    expect(updated.rowId).toBe(id);
+    expect(JSON.parse(updated.soulSnapshot)).toEqual(await soulRow(id));
+  }, 120_000);
+
+  test("overlapping PATCHes retain different fields in the final snapshot", async () => {
+    const key = `iv-overlap-${sfx}`;
+    const id = `${A.id}:${key}`;
+    await createSoul(id, A.id, key, "before");
+    const results = await Promise.all([
+      call("basic", "PATCH", soulPath(id), { value: "after", originatorInstanceId: "forged" }),
+      call("basic", "PATCH", soulPath(id), { durability: "persistent", createdAt: "forged" }),
+    ]);
+    expect(results.every((r) => r.status < 300)).toBe(true);
+    const row = await soulRow(id);
+    const versions = await versionsOf(`${A.id}:${key}`);
+    expect(versions).toHaveLength(3);
+    expect(row.value).toBe("after");
+    expect(row.durability).toBe("persistent");
+    expect(row.originatorInstanceId).not.toBe("forged");
+    expect(row.createdAt).toBe(JSON.parse(versions[0].soulSnapshot).createdAt);
+    expect(JSON.parse(versions[2].soulSnapshot)).toEqual(row);
+  }, 120_000);
+
+  test("ordinary and key-change duplicate ids preserve the prior version and Soul row", async () => {
+    for (const collision of ["ordinary", "tombstone", "successor"]) {
+      const key = `iv-duplicate-${collision}-${sfx}`;
+      const id = `${A.id}:${key}`;
+      const newKey = collision === "ordinary" ? key : `${key}-new`;
+      const before = { id, agentId: A.id, key, value: "before", createdAt: "2020-01-01T00:00:00.000Z" };
+      await upsert("Soul", [before]);
+      const occupiedSubject = collision === "successor" ? `${A.id}:${newKey}` : id;
+      const occupiedId = `soul:${occupiedSubject}:1`;
+      await upsert("InstructionVersion", [{
+        id: occupiedId, subjectType: "soul", subjectId: `hidden-${collision}-${sfx}`, agentId: A.id,
+        key, version: 1, kind: "create", rowId: id, recordHash: "unchanged", createdAt: now(), guarded: false,
+      }]);
+      const occupied = await ops({ operation: "search_by_id", database: "flair", table: "InstructionVersion", ids: [occupiedId], get_attributes: ["*"] });
+      const stored = await soulRow(id);
+      const result = await call("basic", "PUT", soulPath(id), { agentId: A.id, key: newKey, value: "after" });
+      expect(result.status, result.text).toBe(500);
+      expect(await soulRow(id)).toEqual(stored);
+      expect(await ops({ operation: "search_by_id", database: "flair", table: "InstructionVersion", ids: [occupiedId], get_attributes: ["*"] })).toEqual(occupied);
+      expect(await versionsOf(id)).toEqual([]);
+      if (newKey !== key) expect(await versionsOf(`${A.id}:${newKey}`)).toEqual([]);
+    }
+  }, 120_000);
 
   test("spoofed audit fields on a Soul write are ignored", async () => {
     const key = `iv-spoof-${sfx}`;

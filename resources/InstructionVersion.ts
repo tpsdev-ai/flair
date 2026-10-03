@@ -18,8 +18,7 @@
  * on both the by-id and the collection read, so a later skill slice cannot
  * become org-readable through Soul's rule.
  *
- * Slice 1 does not expose an expected-head guard on the REST read: callers of
- * the shared helper compare an addressable version id (its `id`).
+ * Soul REST writes do not expose the helper's expected-head guard.
  */
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
