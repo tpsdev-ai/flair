@@ -19,12 +19,8 @@
 //     no listener or identifies that pid on this test's port;
 //   - the CLI runs under Node, so the Harper it starts runs under Node too.
 //
-// Readiness (flair#2240). The CLI's `init`/`start` returns once Harper answers
-// its HTTP health endpoint, but the operations API is a separate listener that
-// can still be coming up at that moment — the re-init case in CI got
-// ConnectionRefused on it. Every `waitForInstance()` below waits for BOTH the
-// health endpoint and a real ops request before the test issues an ops call, the
-// same two-port wait `startHarper()` in test/helpers/harper-lifecycle.ts performs.
+// Readiness (flair#2240): wait for health and ops before the test's subsequent
+// direct ops calls; credential-less pending starts do not guarantee ops readiness.
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -43,12 +39,6 @@ const CLI = join(ROOT, "dist", "cli.js");
 const ADMIN_USER = "admin";
 const ADMIN_PASS = `seed-local-${randomUUID()}`;
 
-// Measured on a 2-vCPU host (2026-10-03): the CLI's `init` reaches HTTP health
-// in ~12 s idle and ~24 s under four CPU hogs. The readiness deadline below is
-// ~5x the loaded figure, and every `waitForInstance` logs or reports the figure
-// it saw, so a slow runner is not mistaken for a regression. The teardown
-// deadline covers SIGTERM plus the 15 s exit wait inside `stopInstall`, which
-// Bun's default 5 s hook timeout would cut short (flair#2240).
 const INSTANCE_READY_TIMEOUT_MS = 120_000;
 const TEARDOWN_TIMEOUT_MS = 60_000;
 
@@ -131,7 +121,7 @@ function runLocalInit(install: Install, extraArgs: string[]) {
     {
       cwd: ROOT,
       encoding: "utf8",
-      timeout: 240_000, // the child's own deadline: install + start + agent probes + seed
+      timeout: 240_000,
       killSignal: "SIGKILL",
       env: childEnv(install.home, launchctlStub(install.home)),
     },
@@ -155,12 +145,7 @@ function runLocalService(install: Install, command: "start" | "stop", extraEnv: 
  * Wait until this test's instance is actually serving: its HTTP `/Health`
  * endpoint answers 2xx or 401 AND its operations API answers a real request.
  *
- * The CLI's `init`/`start` returns once HTTP health is up, but the operations
- * API is a separate listener; a fetch issued right after it returns can get
- * ConnectionRefused (flair#2240). Both listeners must answer before the test
- * proceeds. `startedAt` is when the run expected to start the instance was
- * launched; the timeout reports the measured startup so the next failure can be
- * told apart from a regression.
+ * `startedAt` is the CLI launch time included in the timeout's measured startup.
  */
 async function waitForInstance(install: Install, startedAt: number): Promise<number> {
   const healthURL = `http://127.0.0.1:${install.httpPort}/Health`;
@@ -295,6 +280,9 @@ afterEach(async () => {
   while (installs.length > 0) await stopInstall(installs.pop() as Install);
 }, TEARDOWN_TIMEOUT_MS);
 
+// Case budgets (seconds), including two 90 s build steps and 60 s teardown:
+// fresh: 180 + 240 + (120 + 7.25 overrun) + 45 direct requests + 60 + 30 margin.
+// handoff: 180 + 6*240 + 3*(120 + 7.25) + 85 direct requests + 60 + 30 margin.
 describe("flair#2141 S2 — two fresh local init paths and one installed-instance --skip-start handoff", () => {
   test("with an agent registered (init's agent path)", async () => {
     ensureCliBuild();
@@ -304,7 +292,7 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
     await waitForInstance(install, run.startedAt);
     await expectSeeded(install);
-  }, 330_000);
+  }, 682_250);
 
   test("with no agent registered (init's no-agent path)", async () => {
     ensureCliBuild();
@@ -314,7 +302,7 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
     await waitForInstance(install, run.startedAt);
     await expectSeeded(install);
-  }, 330_000);
+  }, 682_250);
 
   test("an already-installed default instance re-initialized with --skip-start stays pending through a credential-less start and seeds on a credentialed start", async () => {
     ensureCliBuild();
@@ -355,5 +343,5 @@ describe("flair#2141 S2 — two fresh local init paths and one installed-instanc
     expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(false);
     await waitForInstance(install, withCredential.startedAt);
     await expectSeeded(install);
-  }, 900_000);
+  }, 2_176_750);
 });
