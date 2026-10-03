@@ -787,10 +787,12 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
     },
     {
       // tier d — the enable library, reached through the `mcp` module (#2116's --ops-url sat here).
+      // flair#2115: the `principal` group's commands reach this file too now (its
+      // link/unlink/links handlers call into it), so the fallback reach is wider.
       file: "src/lib/mcp-enable.ts",
       from: "Environment, then re-run with --confirm-secrets-applied.",
       to: "Environment, then re-run with --confirm-secrets-applied-now.",
-      expected: "--confirm-secrets-applied-now → 15 commands in reach",
+      expected: "--confirm-secrets-applied-now → 18 commands in reach",
     },
   ];
   for (const row of mutationRows) {
