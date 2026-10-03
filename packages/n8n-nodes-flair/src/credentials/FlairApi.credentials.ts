@@ -1,31 +1,5 @@
-import type {
-  IAuthenticateGeneric,
-  ICredentialTestRequest,
-  ICredentialType,
-  INodeProperties,
-} from 'n8n-workflow';
+import type { ICredentialType, INodeProperties } from 'n8n-workflow';
 
-/**
- * Flair API credential — v1 Harper admin-password authentication.
- *
- * SECURITY NOTE: the admin password grants read/write to the entire Flair
- * instance, not just the specified agentId. The blast radius is the whole
- * memory store. This is acceptable for v1 / proof-of-concept where the
- * operator controls the n8n workflow inputs, but planned Ed25519 per-agent
- * auth should land before any deployment with sensitive memories from
- * untrusted workflow inputs.
- *
- * The agentId field controls memory ownership — workflows that share an
- * agentId share memory ownership, allowing "this assistant remembers"
- * patterns across workflows. Use distinct agentIds when isolation matters.
- *
- * AUTH FLOW: Flair (Harper) accepts `Authorization: Basic` with the
- * admin user (`admin`) and the admin password. We pass the password in
- * via the `adminPassword` credential field; the Basic-auth header is
- * constructed via the n8n expression engine. The credential test hits
- * `/Memory` (auth-required) — `/Health` is unauthenticated, so testing
- * against it would silently pass with wrong credentials.
- */
 export class FlairApi implements ICredentialType {
   name = 'flairApi';
 
@@ -50,41 +24,25 @@ export class FlairApi implements ICredentialType {
       default: '',
       required: true,
       description:
-        'Logical identity used as the memory owner. Workflows that share an agentId share memory ownership.',
+        'The memory owner and, with Agent Private Key selected, signing identity. Workflows that share an agent id share memory ownership.',
     },
     {
-      displayName: 'Admin Password',
+      displayName: 'Agent Private Key',
+      name: 'agentPrivateKey',
+      type: 'string',
+      typeOptions: { password: true },
+      default: '',
+      description:
+        "Register a new agent with `flair agent add <agent-id>`, or use an existing agent's matching Ed25519 key; encode it with `base64 < ~/.flair/keys/<agent-id>.key` and paste the output. With Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories; administrator-role agents have broader authority.",
+    },
+    {
+      displayName: 'Admin Password (deprecated)',
       name: 'adminPassword',
       type: 'string',
       typeOptions: { password: true },
       default: '',
-      required: true,
       description:
-        "Flair (Harper) admin password. Sensitive: grants read/write to the entire instance. Use Ed25519 per-agent auth (planned) for production with untrusted workflow inputs.",
+        "Used only with Agent Private Key empty. Harper administrator Basic authentication includes access to other agents' private memories; each node execution warns.",
     },
   ];
-
-  authenticate: IAuthenticateGeneric = {
-    type: 'generic',
-    // Use n8n's built-in HTTP Basic auth handling — it base64-encodes
-    // username:password internally. Avoids relying on Buffer being in n8n's
-    // expression sandbox (it isn't always, depending on n8n version).
-    // Earlier the credential used a custom expression with `Buffer.from(...)`
-    // which silently produced an empty Authorization header on installs
-    // where Buffer wasn't whitelisted in the expression engine, causing
-    // "Authorization failed" with valid credentials (2026-05-11 incident).
-    properties: {
-      auth: {
-        username: 'admin',
-        password: '={{ $credentials.adminPassword }}',
-      },
-    },
-  };
-
-  test: ICredentialTestRequest = {
-    request: {
-      baseURL: '={{ $credentials.baseUrl }}',
-      url: '/Memory',
-    },
-  };
 }
