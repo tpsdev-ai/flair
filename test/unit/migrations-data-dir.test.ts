@@ -41,7 +41,7 @@ beforeEach(() => {
 
 afterEach(() => {
   // Re-open anything the tests locked down so rm can recurse into it.
-  for (const d of ["ro", "ro2"]) {
+  for (const d of ["ro", "ro2", "no-search"]) {
     const p = join(root, d);
     if (existsSync(p)) {
       try { chmodSync(p, 0o700); } catch { /* best effort */ }
@@ -127,11 +127,42 @@ describe("probeMigrationDataDir", () => {
   it("refuses a candidate that does not exist, and does not create it", () => {
     const absent = join(root, "absent");
 
-    const probe = probeMigrationDataDir(absent);
+    const p = probeMigrationDataDir(absent);
 
-    expect(probe.ok).toBe(false);
-    expect(probe.reason).toContain("does not exist");
+    expect(p.ok).toBe(false);
+    expect(p.reason).toContain("refusing to create it");
     expect(existsSync(absent)).toBe(false);
+  });
+
+  it("refuses a candidate that is a file, not a directory", () => {
+    const file = join(root, "a-file");
+    writeFileSync(file, "x");
+
+    const p = probeMigrationDataDir(file);
+
+    expect(p.ok).toBe(false);
+    expect(p.reason).toBe("not a directory");
+  });
+
+  it("refuses — and does not create — a candidate it cannot even stat", () => {
+    const secret = join(root, "no-search");
+    const candidate = join(secret, "instance");
+    mkdirSync(secret, { recursive: true });
+    chmodSync(secret, 0o600); // no search bit: statSync(<secret>/instance) throws EACCES
+
+    let reason = "";
+    try {
+      const p = probeMigrationDataDir(candidate);
+      expect(p.ok).toBe(false);
+      reason = p.reason ?? "";
+    } finally {
+      chmodSync(secret, 0o700);
+    }
+
+    expect(reason).toContain("EACCES");
+    expect(reason).toContain("cannot confirm the candidate is an existing directory");
+    // Nothing was created while the candidate was unreadable.
+    expect(existsSync(candidate)).toBe(false);
   });
 });
 
@@ -173,8 +204,8 @@ describe("resolveWritableMigrationDataDir", () => {
     mkdirSync(home, { recursive: true });
     mkdirSync(instance, { recursive: true });
 
-    // os.homedir() is resolved once at process start, so HOME must be set in
-    // a child's environment rather than on this process.
+    // bun resolves os.homedir() once at process start, so HOME must be set
+    // in a child's environment, not on this process.
     const moduleUrl = pathToFileURL(join(import.meta.dir, "../../resources/migrations/data-dir.ts")).href;
     const script = [
       `import { resolveWritableMigrationDataDir } from ${JSON.stringify(moduleUrl)};`,

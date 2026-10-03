@@ -76,13 +76,13 @@
  *      instead of the environment leaves candidate 4 empty — this covers
  *      that case without guessing.
  *
- * The first EXISTING candidate wins. The probe NEVER materializes a
- * candidate: one that is not already a directory is refused before anything
- * is created, and only then does the probe DO THE REAL OPERATION the runner
- * would do — create `<dir>/.migrations` at 0700 and check it is writable —
- * rather than a proxy check that could disagree with it. The probe stays
- * idempotent and is satisfied by the first candidate without touching the
- * others.
+ * Only an EXISTING candidate can win: the first one that is usable is chosen.
+ * The probe NEVER materializes a candidate — one that is not already a
+ * directory is refused before anything is created — and only then does it DO
+ * THE REAL OPERATION the runner would do: create `<dir>/.migrations` at 0700
+ * and check it is writable, rather than a proxy check that could disagree
+ * with it. The probe stays idempotent and is satisfied by the first usable
+ * candidate without touching the others.
  *
  * If NO candidate is usable, `resolveWritableMigrationDataDir` returns
  * `dataDir: null` WITH the per-candidate reasons, and the boot path turns
@@ -177,7 +177,7 @@ export function probeMigrationDataDir(dir: string): DataDirProbe {
     return {
       dir,
       ok: false,
-      reason: `${(err as Error)?.message ?? String(err)}: candidate does not exist — refusing to create it`,
+      reason: `${(err as Error)?.message ?? String(err)}: cannot confirm the candidate is an existing directory — refusing to create it`,
     };
   }
   const owned = join(dir, MIGRATIONS_SUBDIR);
