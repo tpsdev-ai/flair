@@ -95,7 +95,7 @@ This is a prompt-driven CLI setup: Claude must choose to run these commands. For
 | `flair-session-start` | `SessionStart` | Loads bootstrap context (soul plus relevant memories) when a session opens. | `flair hook install` ([details](mcp-clients.md#auto-recall-on-session-start-optional-hook)) |
 | `flair-continuity-capture` | `PostToolUse` and `Stop` | Journals the agent's working state into the ephemeral memory tier, so the next session start can point at it with a one-line resume hint. | `flair hook install --continuity` |
 | `flair-prompt-recall` | `UserPromptSubmit` | Searches memory with each prompt and adds the relevant memories as context before the model answers. | By hand, below |
-| `flair-action-recall` | `PreToolUse` | Matches the pending Bash command against the agent's own triggered lessons and adds the matching ones as context for the next action. | `flair hook install --action-recall` |
+| `flair-action-recall` | `PreToolUse` | Matches the pending Bash command against the agent's own triggered lessons and adds the matching ones as context on the next model request. | `flair hook install --action-recall` |
 | `flair-precompact` | `PreCompact` | Saves a bounded continuity record just before a compaction, for `flair-session-start` to show first afterwards. | By hand, [below](#continuity-across-compaction-flair-precompact-optional) |
 
 ### Per-prompt recall (`flair-prompt-recall`)
@@ -149,7 +149,7 @@ The environment wins over the config file, where the keys are top-level entries;
 
 ### Action recall (`flair-action-recall`)
 
-`flair hook install --action-recall` uses the version-matched `flair-mcp` package beside the CLI or in npm’s npx cache and requires its built hook to pass a local cache probe. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first. An incompatible SessionStart entry or held pin refuses installation.
+`flair hook install --action-recall` copies the version-matched hook and its runtime modules to `~/.flair/hooks/action-recall/<version>-<content hash>/` and probes that installed command. This Flair-owned directory survives npm cache eviction; uninstall removes it. Status probes a detected entry; absence is informational. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first. An incompatible SessionStart entry or held pin refuses installation.
 
 **How it decides.** A lesson opts in through its JSON `metadata` field:
 
@@ -163,7 +163,7 @@ Write a new lesson with `client.memory.write(content, { type: "lesson", metadata
 
 The hot path reads a per-session cache of the agent's own lessons under `~/.flair/action-recall/`, refreshed at session start through a signed, non-admin read. The cache expires five minutes after refresh starts, shortened by each lesson's valid expiry or end-of-validity timestamp. Between refreshes, a deletion, edit or supersession can stay visible until expiry.
 
-**What it never does.** It emits only `hookSpecificOutput.additionalContext` — never a permission decision, a question, replacement input or blocking output. It never executes or echoes the submitted command. Caught read and input errors produce no context. Missing, corrupt, wrong-mode, symlinked, oversized or stale caches do not match. A command it cannot read as one simple argv command (expansions, substitutions, assignments, redirects, comments, pipelines, lists, heredocs, compound commands) is silently not matched. At most three lessons are shown, each quoted line bounded, the whole output at most 4 KiB; excerpts are redacted before they are cached and quoted when shown. The hook holds no credential, signs nothing and makes no network call.
+**What it never does.** It emits only `hookSpecificOutput.additionalContext` — never a permission decision, a question, replacement input or blocking output. It never executes or echoes the submitted command. Caught read and input errors produce no context. Missing, corrupt, wrong-mode, oversized or stale caches do not match. The reader checks path components for symlinks before opening and uses `O_NOFOLLOW` on the final component. A command it cannot read as one simple argv command (expansions, substitutions, assignments, redirects, comments, pipelines, lists, heredocs, compound commands) is silently not matched. At most three lessons are shown, each quoted line bounded, the whole output at most 4 KiB; excerpts are redacted before they are cached and quoted when shown. The hook does not read or use credentials, signs nothing and makes no network call.
 
 ## Multiple Projects
 

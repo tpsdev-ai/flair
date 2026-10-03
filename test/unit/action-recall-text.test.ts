@@ -7,7 +7,7 @@ test("action-recall text states the client update, authentication and publicatio
   const docs = read("docs/claude-code.md");
   expect(docs).not.toContain("[]` or removing the key disables recall");
   expect(docs).toContain("Set `triggers: []` through `client.memory.update`");
-  expect(docs).toContain("requires its built hook to pass a local cache probe");
+  expect(docs).toContain("probes that installed command");
   const refresh = read("packages/flair-mcp/src/action-recall-refresh.ts");
   expect(refresh).not.toContain("a resolved Ed25519 key");
   expect(refresh).toContain("Basic fallback is disabled");

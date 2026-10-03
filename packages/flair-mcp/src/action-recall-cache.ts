@@ -68,7 +68,7 @@ async function lstatOrNull(p: string): Promise<Awaited<ReturnType<typeof lstat>>
   }
 }
 
-/** No component of `filePath` may be a symlink. */
+/** Check components for symlinks before opening. */
 async function noSymlinkComponents(filePath: string): Promise<boolean> {
   const parts = resolve(filePath).split(sep).filter(Boolean);
   let cur: string = sep;

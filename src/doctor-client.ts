@@ -221,7 +221,7 @@ export const ACTION_RECALL_PRE_TOOL_USE_MATCHER = "Bash";
 /**
  * Build the exact `command` string registered for the PreToolUse action-recall
  * hook. Throws rather than emitting a quoted approximation when a value is
- * unsafe (same allow-list as the other builders).
+ * unsafe. Artefact paths also allow `@`.
  */
 export function buildActionRecallHookCommand(
   bunPath: string,

@@ -1,4 +1,4 @@
-- `flair hook install --action-recall` uses a version-matched local or npx-cached hook for Claude Code Bash recall.
-  SessionStart caches own lessons with `metadata.flairActionRecall` triggers. Install and status require
-  a local cache probe through the installed command; a failed probe makes status fail. Invalid client
-  response caps are rejected (flair#2067).
+- `flair hook install --action-recall` copies a version-matched Claude Code Bash recall hook to Flair-owned storage.
+  SessionStart caches own lessons with `metadata.flairActionRecall` triggers. Install probes the copied command;
+  status probes a detected entry, while absence is informational. Uninstall removes the provisioned runtime.
+  Invalid client response caps are rejected (flair#2067).

@@ -12,14 +12,15 @@
  * this package, so dist/ is not guaranteed to exist.
  *
  * Hermetic: each test gets its own temp HOME and an explicit
- * FLAIR_ACTION_RECALL_DIR inside it; the hook holds no credential and makes no
+ * FLAIR_ACTION_RECALL_DIR inside it; the hook does not read or use credentials and makes no
  * network call.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { CACHE_VERSION, encodeBinding, encodeEnvelope, sha256Hex, type CachePayload } from "../src/action-recall.ts";
 import { sessionDir } from "../src/action-recall-cache.ts";
@@ -157,13 +158,19 @@ test("held-open stdin stays open until the entry exits silently", async () => {
 });
 
 
-test("output validation runs inside the hook process", async () => {
-  const { isActionRecallOutput } = await import("../src/action-recall-run.ts");
-  for (const output of ["", "garbage", "null", "[]", '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":7}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x","permissionDecision":"allow"}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x"},"decision":"block"}']) {
-    expect(isActionRecallOutput(output)).toBe(false);
+test("output validation runs inside the spawned hook process", () => {
+  const entry = join(home, "action-recall-hook.ts");
+  const runner = join(home, "action-recall-run.js");
+  const realRunner = pathToFileURL(join(import.meta.dir, "../src/action-recall-run.ts")).href;
+  writeFileSync(entry, readFileSync(ENTRY));
+  const validOutput = JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "x" } });
+  for (const output of ["garbage", "null", "[]", '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":7}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x","permissionDecision":"allow"}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x"},"decision":"block"}', JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "x".repeat(4096) } }), validOutput]) {
+    writeFileSync(runner, `export { isActionRecallOutput, readStdin, shouldRunAsMain } from ${JSON.stringify(realRunner)}; export async function runActionRecall() { return ${JSON.stringify(output)}; }`);
+    const res = spawnSync(process.execPath, [entry], { input: "{}", env: childEnv(), encoding: "utf8", timeout: CHILD_DEADLINE_MS });
+    expect(res.status).toBe(0);
+    expect(res.stderr).toBe("");
+    expect(res.stdout).toBe(output === validOutput ? output : "");
   }
-  expect(isActionRecallOutput(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "x" } }))).toBe(true);
-  expect(isActionRecallOutput(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "x".repeat(4096) } }))).toBe(false);
 });
 
 

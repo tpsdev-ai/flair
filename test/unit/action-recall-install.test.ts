@@ -49,6 +49,7 @@ describe("flair hook install --action-recall", () => {
     expect(result.ok).toBe(true);
     expect(result.actions?.preToolUse).toBe("add");
     expect(existsSync(path)).toBe(false);
+    expect(existsSync(join(home, ".flair/hooks/action-recall"))).toBe(false);
   });
 
   it("install wires a Bash PreToolUse group with an absolute runtime, then uninstall removes it", () => {
@@ -58,12 +59,14 @@ describe("flair hook install --action-recall", () => {
     const group = config.hooks.PreToolUse[0];
     expect(group.matcher).toBe(ACTION_RECALL_PRE_TOOL_USE_MATCHER);
     const command = group.hooks[0].command as string;
-    expect(command).toContain(RUNTIME.artifactPath);
+    expect(command).toContain(join(home, ".flair/hooks/action-recall"));
     expect(command).toContain(RUNTIME.bunPath);
     expect(command).not.toContain("npx");
 
     const status = actionRecallHookStatus(home, "claude-code");
     expect(status.installed).toBe(true);
+    expect(uninstallActionRecall({ homeDir: home, harness: "codex" }).ok).toBe(false);
+    expect(actionRecallHookStatus(home, "claude-code").installed).toBe(true);
 
     const removed = uninstallActionRecall({ homeDir: home, harness: "claude-code" });
     expect(removed.ok).toBe(true);
@@ -97,5 +100,9 @@ describe("flair hook install --action-recall", () => {
     expect(again.ok).toBe(true);
     expect(again.actions?.preToolUse).toBe("noop");
     expect(again.actions?.sessionStart).toBe("noop");
+    const preview = installActionRecall({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926", runtime: RUNTIME, dryRun: true });
+    expect(preview.ok).toBe(true);
+    expect(preview.actions?.preToolUse).toBe("noop");
+    expect(preview.actions?.sessionStart).toBe("noop");
   });
 });

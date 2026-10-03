@@ -53,8 +53,8 @@
 //   6. Size-budgeted payload — also owned by session-start-hook.ts, which
 //      reuses bootstrap's own maxTokens machinery.
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { probeActionRecallRuntime } from "./lib/action-recall-runtime.js";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { actionRecallInstallRoot, plannedActionRecallRuntime, probeActionRecallRuntime, provisionActionRecallRuntime } from "./lib/action-recall-runtime.js";
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
@@ -1150,7 +1150,7 @@ interface ActionRecallDelta {
   changed: boolean;
   newConfig: any;
   actions: { preToolUse: HookDeltaAction; sessionStart: HookDeltaAction | "skipped" };
-  /** The SessionStart command a write would produce, when one is safe. */
+  /** The existing SessionStart command. */
   sessionStartBefore?: string | null;
 }
 
@@ -1293,11 +1293,17 @@ export function installActionRecall(opts: ActionRecallInstallOptions): ActionRec
   }
 
   if (dryRun) {
+    let planned: ActionRecallRuntime;
+    try {
+      planned = plannedActionRecallRuntime(runtime, homeDir);
+    } catch (error) {
+      return { ok: false, path, harness, dryRun, message: `${error instanceof Error ? error.message : String(error)} — nothing written`, backupPath: null, actions: null };
+    }
     const read = readSettingsFile(path);
     if (read.parseError) {
       return { ok: false, path, harness, dryRun, message: `${read.parseError} — dry run: nothing would be written until this is fixed`, backupPath: null, actions: null };
     }
-    const delta = computeActionRecallInstall(read.parsed ?? {}, runtime, agentId, flairUrl);
+    const delta = computeActionRecallInstall(read.parsed ?? {}, planned, agentId, flairUrl);
     const refusal = actionRecallInstallRefusal(delta, path);
     if (refusal) return { ok: false, path, harness, dryRun, message: refusal, backupPath: null, actions: delta.actions };
     const message = delta.changed
@@ -1321,8 +1327,16 @@ export function installActionRecall(opts: ActionRecallInstallOptions): ActionRec
       actions = delta.actions;
       const refusal = actionRecallInstallRefusal(delta, path);
       if (refusal) return { hold: refusal };
-      if (!delta.changed) return { noop: `action-recall hook already current in ${path}` };
-      return { write: encodeConfig(delta.newConfig) };
+      let installed: ActionRecallRuntime;
+      try {
+        installed = provisionActionRecallRuntime(runtime, homeDir, agentId, flairUrl);
+      } catch (error) {
+        return { hold: `${error instanceof Error ? error.message : String(error)} — nothing written` };
+      }
+      const durableDelta = computeActionRecallInstall(read.parsed ?? {}, installed, agentId, flairUrl);
+      actions = durableDelta.actions;
+      if (!durableDelta.changed) return { noop: `action-recall hook already current in ${path}` };
+      return { write: encodeConfig(durableDelta.newConfig) };
     },
     { backup: (bytes) => backupBytesTo(path, bytes) },
   );
@@ -1373,7 +1387,11 @@ export function uninstallActionRecall(opts: UninstallHookOptions): ActionRecallM
   const dryRun = !!opts.dryRun;
   const path = hookSettingsPath(homeDir, harness);
 
+  if (harness !== "claude-code") {
+    return { ok: false, path, harness, dryRun, message: `action recall is Claude Code only`, backupPath: null, actions: null };
+  }
   if (!existsSync(path)) {
+    if (!dryRun) rmSync(actionRecallInstallRoot(homeDir), { recursive: true, force: true });
     return { ok: true, path, harness, dryRun, message: `no action-recall hook found in ${path} — nothing to remove`, backupPath: null, actions: { preToolUse: "noop", sessionStart: "noop" } };
   }
   if (dryRun) {
@@ -1403,6 +1421,9 @@ export function uninstallActionRecall(opts: UninstallHookOptions): ActionRecallM
     { backup: (bytes) => backupBytesTo(path, bytes) },
   );
 
+  if (result.status === "written" || result.status === "noop") {
+    rmSync(actionRecallInstallRoot(homeDir), { recursive: true, force: true });
+  }
   const backupPath = result.backupPath ?? null;
   if (result.status === "written") {
     return { ok: true, path, harness, dryRun, message: `removed the action-recall hook from ${path}`, backupPath, actions };

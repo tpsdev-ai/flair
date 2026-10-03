@@ -33,7 +33,7 @@ import {
   sessionDir,
 } from "./action-recall-cache.js";
 
-/** Reads and publication are deadline checked, from just after bootstrap. */
+/** Reads and publication are deadline checked from refresh start. */
 export const REFRESH_DEADLINE_MS = 3000;
 /** Response-byte cap for the bounded Memory read (8 MiB). */
 export const REFRESH_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;

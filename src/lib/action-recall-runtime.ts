@@ -4,7 +4,7 @@
  * Probe the installed command against an isolated cache before accepting it.
  */
 
-import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
@@ -125,6 +125,84 @@ function isBuiltActionRecallArtifact(path: string): boolean {
       && readFileSync(path, "utf8").split("\n", 3).includes(`// flair-action-recall-built@${pkg.version}`);
   } catch {
     return false;
+  }
+}
+
+const RUNTIME_FILES = [
+  "action-recall-hook.js", "action-recall-run.js", "action-recall-cache.js",
+  "action-recall.js", "env-guard.js", "secret-redaction.js",
+];
+
+export function actionRecallInstallRoot(homeDir: string): string {
+  return join(homeDir, ".flair", "hooks", "action-recall");
+}
+
+function privateDirectory(path: string): void {
+  mkdirSync(path, { mode: 0o700 });
+}
+
+function ensurePrivateDirectory(path: string): void {
+  try { privateDirectory(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const st = lstatSync(path);
+  if (!st.isDirectory() || st.isSymbolicLink() || (process.getuid && st.uid !== process.getuid())) {
+    throw new Error(`unsafe hook directory: ${path}`);
+  }
+  chmodSync(path, 0o700);
+}
+
+function actionRecallInstallation(runtime: ActionRecallRuntime, homeDir: string) {
+  const source = dirname(dirname(runtime.artifactPath));
+  const files = new Map<string, Buffer>([["package.json", readFileSync(join(source, "package.json"))]]);
+  for (const name of RUNTIME_FILES) files.set(`dist/${name}`, readFileSync(join(source, "dist", name)));
+  const hash = createHash("sha256");
+  for (const [name, bytes] of files) hash.update(name).update("\0").update(bytes).update("\0");
+  const root = actionRecallInstallRoot(homeDir);
+  const destination = join(root, `${flairCliVersion()}-${hash.digest("hex")}`);
+  return { files, destination, installed: { ...runtime, artifactPath: actionRecallArtifactForPackage(destination) } };
+}
+
+export function plannedActionRecallRuntime(runtime: ActionRecallRuntime, homeDir: string): ActionRecallRuntime {
+  return actionRecallInstallation(runtime, homeDir).installed;
+}
+
+export function provisionActionRecallRuntime(runtime: ActionRecallRuntime, homeDir: string, agentId: string, flairUrl: string): ActionRecallRuntime {
+  const { files, destination, installed } = actionRecallInstallation(runtime, homeDir);
+  const root = actionRecallInstallRoot(homeDir);
+  ensurePrivateDirectory(join(homeDir, ".flair"));
+  ensurePrivateDirectory(join(homeDir, ".flair", "hooks"));
+  ensurePrivateDirectory(root);
+  try {
+    lstatSync(destination);
+    ensurePrivateDirectory(destination);
+    ensurePrivateDirectory(join(destination, "dist"));
+    for (const [name, bytes] of files) {
+      const path = join(destination, name);
+      const st = lstatSync(path);
+      if (!st.isFile() || st.isSymbolicLink() || (st.mode & 0o777) !== 0o600
+        || (process.getuid && st.uid !== process.getuid()) || !readFileSync(path).equals(bytes)) {
+        throw new Error(`unsafe hook file: ${path}`);
+      }
+    }
+    const failure = probeActionRecallRuntime(installed, agentId, flairUrl);
+    if (failure) throw new Error(failure);
+    return installed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const stage = mkdtempSync(join(root, ".stage-"));
+  try {
+    privateDirectory(join(stage, "dist"));
+    for (const [name, bytes] of files) writeFileSync(join(stage, name), bytes, { mode: 0o600, flag: "wx" });
+    const failure = probeActionRecallRuntime({ ...runtime, artifactPath: actionRecallArtifactForPackage(stage) }, agentId, flairUrl);
+    if (failure) throw new Error(failure);
+    renameSync(stage, destination);
+    const installedFailure = probeActionRecallRuntime(installed, agentId, flairUrl);
+    if (installedFailure) throw new Error(installedFailure);
+    return installed;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
   }
 }
 
