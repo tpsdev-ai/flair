@@ -234,7 +234,9 @@ export function readCheckpoint(path: string): CheckpointRead {
         !parsed.byDurability || !ALL_TIERS.every(tier => Number.isSafeInteger(parsed.byDurability[tier]) && parsed.byDurability[tier] >= 0)) {
       return { kind: "unreadable", reason: "checkpoint is not a version-1 integrity checkpoint" };
     }
-    parsed.ids = Object.assign(Object.create(null), parsed.ids);
+    const ids: Record<string, string> = Object.create(null);
+    for (const [id, tier] of Object.entries(parsed.ids)) ids[id] = tier;
+    parsed.ids = ids;
     return { kind: "ok", checkpoint: parsed };
   } catch (err) {
     return { kind: "unreadable", reason: `checkpoint is not valid JSON: ${err instanceof Error ? err.message : String(err)}` };
