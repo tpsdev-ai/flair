@@ -38,7 +38,7 @@ export interface UnitStep {
 //     check and post steps after it): at most 53 s (2026-09-29);
 //   - the whole lane: 401–510 s, and 456 s locally;
 //   - `root unit tests`, the one long step: 252–327 s (280 s locally);
-//   - every other step at most 33 s (a CLI-spawning isolated test); in that
+//   - every other step at most 33 s; in that
 //     set the median is 1–2 s.
 // The budget is whole-lane headroom: about 1.53× the slowest measured lane
 // (510 s), still subject to each step's own limit below; the old 510 s
