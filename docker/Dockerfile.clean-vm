@@ -17,7 +17,7 @@
 # published npm version.
 
 # ── Builder: build + pack the HEAD tarball ──────────────────────────────────
-FROM node:24-slim AS builder
+FROM node:24.21.0-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS builder
 
 WORKDIR /app
 
@@ -63,7 +63,7 @@ RUN npm pack && mv tpsdev-ai-flair-*.tgz /flair-head.tgz && \
 # user-home copy is in the WRONG place → cache miss → download attempt into the
 # root-owned dir → EACCES → semantic search DEGRADED → the gate FAILS. That is
 # the regression we are guarding.
-FROM node:24-slim AS cleanvm
+FROM node:24.21.0-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS cleanvm
 
 # Tools: ca-certificates for npm/HTTPS. The embeddings model is NOT curled here
 # (see below) — it is staged via COPY from the build context, so this image never
