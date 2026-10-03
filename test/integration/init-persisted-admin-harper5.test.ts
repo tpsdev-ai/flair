@@ -36,6 +36,7 @@ let dataDir: string;
 let adminPassPath: string;
 let httpPort: number;
 let opsPort: number;
+let installedPassword: string;
 
 function freePort(): number {
   const r = spawnSync(
@@ -170,6 +171,12 @@ describe.skipIf(process.platform !== "linux")("fresh explicit credentials on a r
 
 describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
   test("a real `flair init` creates a data dir the detector reads as a persisted admin user", async () => {
+    stopHarper();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(join(home, ".flair"), { recursive: true });
+    symlinkSync(dataDir, join(home, ".flair", "data"));
     const firstRun = await runInit([
       "--data-dir", dataDir,
       "--port", String(httpPort),
@@ -178,6 +185,7 @@ describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
     ]);
     expect(firstRun.code, `flair init failed:\n${firstRun.out.slice(-4000)}`).toBe(0);
     expect(existsSync(adminPassPath)).toBe(true);
+    installedPassword = readFileSync(adminPassPath, "utf8").trim();
     // The real data dir has Harper's persisted admin user (RocksDB hdb_user/).
     expect(detectPersistedAdminUser(dataDir)).toBe(true);
   }, 150_000);
@@ -208,11 +216,11 @@ describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
       "--port", String(httpPort),
       "--ops-port", String(opsPort),
       "--skip-start",
-      "--admin-pass", "the-original-persisted-password",
+      "--admin-pass", installedPassword,
       ...SKIP_EXTRAS,
     ]);
     expect(r.code, `flair init failed:\n${r.out.slice(-4000)}`).toBe(0);
     expect(existsSync(adminPassPath)).toBe(true);
-    expect(readFileSync(adminPassPath, "utf-8")).toBe("the-original-persisted-password\n");
+    expect(readFileSync(adminPassPath, "utf-8")).toBe(installedPassword + "\n");
   }, 150_000);
 });

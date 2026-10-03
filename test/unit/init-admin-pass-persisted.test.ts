@@ -161,9 +161,6 @@ describe("detectPersistedAdminUser — Harper's own user-record paths", () => {
     expect(detectPersistedAdminUser(dir)).toBe(true);
   });
 
-  // Harper 5: the system schema is one RocksDB at database/system; the admin
-  // row is the hdb_user/ primary column family. main's detector only knows the
-  // LMDB paths, so the two positive cases below are RED on main.
   test("Harper 5: a user row in the hdb_user/ RocksDB column family is a persisted user", () => {
     const dir = makeTmpDir();
     dirs.push(dir);

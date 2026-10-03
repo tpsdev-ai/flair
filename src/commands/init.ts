@@ -599,8 +599,6 @@ program
     let reusedExistingAdminPass = false;
     let pendingAdminPassRotate = false;
     const adminPassPath = defaultAdminPassPath();
-    // Harper's persisted user is read from its OWN store. An unreadable store is
-    // NOT `false` — refuse rather than generate a fresh, desynced file.
     let persistedAdminUser: boolean;
     try {
       persistedAdminUser = detectPersistedAdminUser(dataDir);

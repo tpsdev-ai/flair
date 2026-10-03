@@ -743,8 +743,6 @@ program
     // The remedy names the two exits: `--admin-pass-file` / `--reset-admin-pass`.
     try {
       const dataDir = defaultDataDir();
-      // An unreadable system store is UNVERIFIED, not "no user": say so rather
-      // than reporting nothing (which would read as no desync).
       let persistedAdminUser: boolean | null;
       try {
         persistedAdminUser = detectPersistedAdminUser(dataDir);
@@ -752,6 +750,7 @@ program
         persistedAdminUser = null;
       }
       if (persistedAdminUser === null) {
+        issues++;
         console.log(
           `  ${render.icons.warn} ${render.wrap(
             render.c.yellow,

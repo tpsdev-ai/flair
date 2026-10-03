@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -11,7 +11,7 @@ const CLI = pathToFileURL(join(import.meta.dir, "../../src/cli.ts")).href;
 const sources = ["inline", "file", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD"] as const;
 const password = "fixture-explicit-admin-password";
 
-function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false) {
+function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false, options: { umask?: number; columns?: string } = {}) {
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|TPS_TEST_ROOT$|ROOTPATH$)/.test(key),
   ));
@@ -27,6 +27,15 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
   const script = `
     Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
     globalThis.fetch = async () => { throw new Error("offline fixture"); };
+    ${options.umask === undefined ? "" : `process.umask(${options.umask});`}
+    ${options.columns === undefined ? "" : `
+      const { createRequire } = await import("node:module");
+      const here = createRequire(${JSON.stringify(CLI)});
+      const { mock } = await import("bun:test");
+      mock.module(createRequire(here.resolve("harper")).resolve("@harperfast/rocksdb-js"), () => ({
+        RocksDatabase: { open: () => ({ columns: ${options.columns}, close() {} }) },
+      }));
+    `}
     const { program } = await import(${JSON.stringify(CLI)});
     ${foreignOwner ? "const uid = process.getuid(); process.getuid = () => uid + 1;" : ""}
     await program.parseAsync(${JSON.stringify(args)}, { from: "user" });
@@ -101,5 +110,71 @@ describe("fresh init persists explicit admin credentials", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("owned by another user");
     expect(readFileSync(path, "utf8")).toBe("unchanged");
+  });
+});
+
+describe("admin credential persistence refuses unassessed stores", () => {
+  test("inaccessible parent directory refuses init without writing admin-pass", () => {
+    expect(process.getuid?.()).not.toBe(0);
+    const home = tempDir("i-");
+    const dataDir = tempDir("d-");
+    const parent = join(dataDir, "database");
+    mkdirSync(join(parent, "system"), { recursive: true });
+    chmodSync(parent, 0);
+    try {
+      const result = runInit(home, dataDir, "inline", "linux");
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      expect(result.stderr).toContain("Refusing to initialize");
+      expect(result.stderr).toContain("EACCES");
+      expect(result.stderr).toContain(dataDir);
+      expect(existsSync(join(home, ".flair", "admin-pass"))).toBe(false);
+    } finally {
+      chmodSync(parent, 0o700);
+    }
+  });
+
+  for (const columns of ["undefined", "null", "{}", "'hdb_user/'", "[123]"]) {
+    test(`invalid columns metadata ${columns} refuses init without writing admin-pass`, () => {
+      const home = tempDir("i-");
+      const dataDir = tempDir("d-");
+      mkdirSync(join(dataDir, "database", "system"), { recursive: true });
+      const result = runInit(home, dataDir, "inline", "linux", false, { columns });
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      expect(result.stderr).toContain("Refusing to initialize");
+      expect(result.stderr).toContain("columns metadata");
+      expect(existsSync(join(home, ".flair", "admin-pass"))).toBe(false);
+    });
+  }
+
+  test("explicit password has exact 0600 under restrictive umasks", () => {
+    for (const umask of [0o077, 0o277]) {
+      const home = tempDir("i-");
+      const dataDir = tempDir("d-");
+      mkdirSync(join(home, ".flair"));
+      symlinkSync(dataDir, join(home, ".flair", "data"));
+      const result = runInit(home, dataDir, "inline", "linux", false, { umask });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      const path = join(home, ".flair", "admin-pass");
+      expect(readFileSync(path, "utf8")).toBe(password + "\n");
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  test("doctor counts an unassessed admin-pass check and exits nonzero", () => {
+    const home = tempDir("i-");
+    const dataDir = tempDir("d-");
+    mkdirSync(join(home, ".flair"));
+    symlinkSync(dataDir, join(home, ".flair", "data"));
+    const doctor = offlineDoctor(home, null);
+    const baseline = doctor();
+    mkdirSync(join(dataDir, "database", "system"), { recursive: true });
+    writeFileSync(join(dataDir, "database", "system", "junk"), "invalid database");
+    const observed: { status: number | null } = { status: null };
+    const output = doctor([], result => { observed.status = result.status; });
+    expect(output).toContain("not assessing the admin-pass desync");
+    expect(output).not.toContain("No issues found");
+    expect(observed.status).toBe(1);
+    const issues = (text: string) => Number(/(\d+) issues? found/.exec(text)?.[1]);
+    expect(issues(output)).toBe(issues(baseline) + 1);
   });
 });

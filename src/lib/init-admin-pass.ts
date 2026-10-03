@@ -27,7 +27,7 @@
 import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
 import { createRequire } from "node:module";
-import { existsSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** Copy-pasteable recovery commands. Tests assert these strings verbatim. */
@@ -159,8 +159,7 @@ export const HDB_USER_PRIMARY_CF = "hdb_user/";
  *
  * `@harperfast/rocksdb-js` is resolved through the installed `harper`
  * package: flair does not depend on it directly, and the reader must be the
- * same engine Harper wrote the store with. A read failure PROPAGATES — an
- * unreadable store is never read as "no user".
+ * same engine Harper wrote the store with.
  */
 export function countRocksAdminUsers(systemDbDir: string): number {
   const requireFromHere = createRequire(import.meta.url);
@@ -180,7 +179,10 @@ export function countRocksAdminUsers(systemDbDir: string): number {
   const probe = RocksDatabase.open(systemDbDir, { readOnly: true });
   let hasUserStore: boolean;
   try {
-    hasUserStore = Array.isArray(probe.columns) && probe.columns.includes(HDB_USER_PRIMARY_CF);
+    if (!Array.isArray(probe.columns) || !probe.columns.every(column => typeof column === "string")) {
+      throw new Error(`Invalid RocksDB columns metadata at ${systemDbDir}`);
+    }
+    hasUserStore = probe.columns.includes(HDB_USER_PRIMARY_CF);
   } finally {
     probe.close?.();
   }
@@ -199,16 +201,24 @@ export function countRocksAdminUsers(systemDbDir: string): number {
  * directories, and the `hdb_user/` RocksDB store for Harper 5. Config presence
  * alone is not enough — mount creates the empty `hdb_user/` store before any
  * user is added, so a config file (or an empty store) must not read as a user.
- *
- * A system database that exists but cannot be read is NOT `false`: the read
- * throws so the caller refuses rather than generating a fresh, desynced
- * admin-pass file.
  */
 export function detectPersistedAdminUser(dataDir: string): boolean {
-  if (existsSync(join(dataDir, "system", "hdb_user", "data.mdb"))) return true;
-  if (existsSync(join(dataDir, "system", "hdb_user.mdb"))) return true;
+  for (const path of [join(dataDir, "system", "hdb_user", "data.mdb"), join(dataDir, "system", "hdb_user.mdb")]) {
+    try {
+      const fd = openSync(path, "r");
+      closeSync(fd);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
   const systemDbDir = join(dataDir, HARPER_SYSTEM_DB_REL);
-  if (!existsSync(systemDbDir)) return false;
+  try {
+    statSync(systemDbDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
   return countRocksAdminUsers(systemDbDir) > 0;
 }
 
