@@ -46,6 +46,14 @@ function jsonRes(res: ServerResponse, status: number, data: unknown) {
   res.end(JSON.stringify(data));
 }
 
+/** Answer a backup operations-API row-count request (flair#2228). */
+function opsRes(body: string, res: ServerResponse) {
+  const b = JSON.parse(body);
+  if (b.operation === "describe_table") return jsonRes(res, 200, { record_count: AGENTS.length });
+  if (b.operation === "search_by_value") return jsonRes(res, 200, []);
+  jsonRes(res, 404, { error: "not found" });
+}
+
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 const AGENTS = [
@@ -481,8 +489,11 @@ describe("flair backup — non-TTY stdout routes progress to stderr", () => {
 
   it("writes archive to default path and progress to stderr when stdout is not a TTY (scheduler / flair#968 regression)", async () => {
     // Start a dedicated mock server for this test to rule out beforeEach
-    // lifecycle issues.
-    const srv = await startMockServer((req, _body, res) => {
+    // lifecycle issues. It also answers the operations-API row counts backup
+    // now checks (flair#2228): describe_table reports every agent, and the
+    // per-agent searches match the empty Memory/Soul listings above.
+    const srv = await startMockServer((req, body, res) => {
+      if (req.method === "POST") return opsRes(body, res);
       if (req.url === "/Agent/") return jsonRes(res, 200, AGENTS);
       if (req.url?.startsWith("/Memory/?agentId=")) return jsonRes(res, 200, []);
       if (req.url?.startsWith("/Soul/?agentId=")) return jsonRes(res, 200, []);
@@ -490,7 +501,7 @@ describe("flair backup — non-TTY stdout routes progress to stderr", () => {
     });
 
     const r = await spawnAsync("bun", [CLI_SOURCE, "backup", "--url", srv.url], {
-      env: { FLAIR_ADMIN_PASS: "test-dummy", HOME: tmpHome },
+      env: { FLAIR_ADMIN_PASS: "test-dummy", FLAIR_OPS_TARGET: srv.url, HOME: tmpHome },
       timeoutMs: 10_000,
     });
 
@@ -518,7 +529,8 @@ describe("flair backup — non-TTY stdout routes progress to stderr", () => {
   });
 
   it("writes archive to --output path and progress to stderr when stdout is not a TTY", async () => {
-    const srv = await startMockServer((req, _body, res) => {
+    const srv = await startMockServer((req, body, res) => {
+      if (req.method === "POST") return opsRes(body, res);
       if (req.url === "/Agent/") return jsonRes(res, 200, AGENTS);
       if (req.url?.startsWith("/Memory/?agentId=")) return jsonRes(res, 200, []);
       if (req.url?.startsWith("/Soul/?agentId=")) return jsonRes(res, 200, []);
@@ -527,7 +539,7 @@ describe("flair backup — non-TTY stdout routes progress to stderr", () => {
 
     const outputPath = join(tmpHome, "my-backup.json");
     const r = await spawnAsync("bun", [CLI_SOURCE, "backup", "--url", srv.url, "--output", outputPath], {
-      env: { FLAIR_ADMIN_PASS: "test-dummy", HOME: tmpHome },
+      env: { FLAIR_ADMIN_PASS: "test-dummy", FLAIR_OPS_TARGET: srv.url, HOME: tmpHome },
       timeoutMs: 10_000,
     });
 

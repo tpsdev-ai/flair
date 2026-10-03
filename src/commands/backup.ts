@@ -16,6 +16,8 @@ export type BackupCli = {
   addSharedCredentialOptions: (...args: any[]) => any;
   applyAdminPassFile: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
+  resolveOpsPort: (...args: any[]) => any;
+  resolveOpsUrlFromTarget: (...args: any[]) => any;
 };
 
 let cli: BackupCli;
@@ -35,6 +37,14 @@ function applyAdminPassFile(...args: any[]): any {
 
 function resolveHttpPort(...args: any[]): any {
   return cli.resolveHttpPort(...args);
+}
+
+function resolveOpsPort(...args: any[]): any {
+  return cli.resolveOpsPort(...args);
+}
+
+function resolveOpsUrlFromTarget(...args: any[]): any {
+  return cli.resolveOpsUrlFromTarget(...args);
 }
 
 export function register(program: Command): void {
@@ -80,6 +90,23 @@ addSharedCredentialOptions(
 
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
+    // Independent row counts (flair#2228) come from the operations API — a
+    // SEPARATE listener from the data API backup reads (see the "operations
+    // API only exists on its own port/socket" note in cli.ts, and
+    // buildOpsSearch in commands/rem.ts). `describe_table` reports an exact
+    // whole-table `record_count`, and `search_by_value` on the indexed
+    // `agentId` counts one agent's rows. Neither is the listing backup reads,
+    // so a listing that succeeds but omits rows is still caught. The ops
+    // endpoint is FLAIR_OPS_TARGET when set, else derived from --url
+    // (resolveOpsUrlFromTarget), else the local ops port (resolveOpsPort:
+    // FLAIR_OPS_PORT, config, then httpPort-1).
+    const opsTarget = process.env.FLAIR_OPS_TARGET;
+    const opsUrl: string = opsTarget
+      ? opsTarget.replace(/\/$/, "")
+      : opts.url
+        ? resolveOpsUrlFromTarget(opts.url)
+        : `http://127.0.0.1:${resolveOpsPort(opts)}`;
+
     type Row = Record<string, unknown> & { id: string };
     const ids = { Agent: new Set<string>(), Memory: new Set<string>(), Soul: new Set<string>() };
 
@@ -113,8 +140,73 @@ addSharedCredentialOptions(
       }
     }
 
+    async function opsPost(body: Record<string, unknown>, context: string): Promise<unknown> {
+      try {
+        const res = await fetch(opsUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
+        }
+        return await res.json();
+      } catch (error) {
+        throw new Error(`${context}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    /**
+     * Exact whole-table row count via the ops API. `exact_count: true` forces
+     * the full scan (Harper dataLayer/schemaDescribe.ts sets
+     * `tableResult.record_count` from `getRecordCount({exactCount})`); without
+     * it Harper may return an estimate. Used for Agent, which backup reads
+     * whole (the --agents filter is applied client-side).
+     */
+    async function agentRowCount(): Promise<number> {
+      const parsed: any = await opsPost(
+        { operation: "describe_table", database: "flair", table: "Agent", exact_count: true },
+        "Agent row count",
+      );
+      const n = parsed?.record_count;
+      if (!Number.isInteger(n) || n < 0) {
+        throw new Error("Agent row count via the operations API: response carried no record_count");
+      }
+      return n;
+    }
+
+    /**
+     * One agent's row count via `search_by_value` on the indexed `agentId`
+     * (the same filtered count flair uses elsewhere, e.g. commands/agent.ts).
+     * Counts ids only; no row content is read into the error.
+     */
+    async function rowsForAgent(table: "Memory" | "Soul", agentId: string): Promise<number> {
+      const parsed: any = await opsPost(
+        {
+          operation: "search_by_value",
+          database: "flair",
+          table,
+          search_attribute: "agentId",
+          search_value: agentId,
+          get_attributes: ["id"],
+        },
+        `${table} for agent ${agentId} row count`,
+      );
+      const rows = Array.isArray(parsed) ? parsed : parsed?.results;
+      if (!Array.isArray(rows)) {
+        throw new Error(`${table} for agent ${agentId} row count via the operations API: response was not a row array`);
+      }
+      return rows.length;
+    }
+
     log("Fetching agents...");
+    const agentCount = await agentRowCount();
     const allAgents = await adminGet("Agent");
+    if (allAgents.length < agentCount) {
+      throw new Error(`Agent: server reports ${agentCount} rows, backup read ${allAgents.length}`);
+    }
     const filterIds: string[] | null = opts.agents ? opts.agents.split(",").map((s: string) => s.trim()) : null;
     if (filterIds) {
       for (const id of filterIds) {
@@ -126,13 +218,25 @@ addSharedCredentialOptions(
     log(`Fetching memories for ${agents.length} agent(s)...`);
     const memories: Row[] = [];
     for (const agent of agents) {
+      const expected = await rowsForAgent("Memory", agent.id);
+      const before = memories.length;
       for (const row of await adminGet("Memory", agent.id)) memories.push(row);
+      const received = memories.length - before;
+      if (received < expected) {
+        throw new Error(`Memory for agent ${agent.id}: server reports ${expected} rows, backup read ${received}`);
+      }
     }
 
     log("Fetching souls...");
     const souls: Row[] = [];
     for (const agent of agents) {
+      const expected = await rowsForAgent("Soul", agent.id);
+      const before = souls.length;
       for (const row of await adminGet("Soul", agent.id)) souls.push(row);
+      const received = souls.length - before;
+      if (received < expected) {
+        throw new Error(`Soul for agent ${agent.id}: server reports ${expected} rows, backup read ${received}`);
+      }
     }
 
     const backup = {

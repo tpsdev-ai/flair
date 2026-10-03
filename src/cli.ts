@@ -8418,6 +8418,8 @@ bindBackupCli({
   addSharedCredentialOptions,
   applyAdminPassFile,
   resolveHttpPort,
+  resolveOpsPort,
+  resolveOpsUrlFromTarget,
 });
 registerBackup(program);
 

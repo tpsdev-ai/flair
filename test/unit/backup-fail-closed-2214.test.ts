@@ -30,6 +30,12 @@ async function runBackup(overrides: Record<string, Reply> = {}, options: {
     }
   }
   const script = join(home, "run.ts");
+  // Independent counts the ops API reports, derived from the same fixtures so a
+  // successful backup stays successful: whole-table Agent via describe_table,
+  // per-agent Memory/Soul via search_by_value on agentId.
+  const opsAgentCount = (options.empty ? [] : agents).length;
+  const memByAgent = Object.fromEntries(agents.map(a => [a.id, memories.filter(m => m.agentId === a.id).map(m => ({ id: m.id }))]));
+  const soulByAgent = Object.fromEntries(agents.map(a => [a.id, souls.filter(s => s.agentId === a.id).map(s => ({ id: s.id }))]));
   writeFileSync(script, `
 import { mock } from "bun:test";
 import * as fs from "node:fs";
@@ -64,10 +70,24 @@ mock.module("node:fs", () => ({ ...fs,
 }));
 const fixture = ${JSON.stringify(fixture)};
 const requests = [];
+const opsAgentCount = ${JSON.stringify(opsAgentCount)};
+const memByAgent = ${JSON.stringify(memByAgent)};
+const soulByAgent = ${JSON.stringify(soulByAgent)};
 globalThis.fetch = async (url, init) => {
   if (init.headers.Authorization !== "Basic YWRtaW46dGVzdC1wYXNz") throw new Error("incorrect auth");
   if (!init.signal) throw new Error("missing timeout signal");
   const u = new URL(url);
+  if (u.origin === "http://ops.invalid") {
+    const body = JSON.parse(String(init.body));
+    if (body.operation === "describe_table" && body.table === "Agent") {
+      return Response.json({ record_count: opsAgentCount });
+    }
+    if (body.operation === "search_by_value") {
+      const byAgent = body.table === "Memory" ? memByAgent : soulByAgent;
+      return Response.json(byAgent[body.search_value] ?? []);
+    }
+    throw new Error("unexpected ops operation " + JSON.stringify(body));
+  }
   if (u.origin !== "http://backup.invalid") throw new Error("unexpected target");
   const path = u.pathname + u.search;
   requests.push(path);
@@ -83,6 +103,8 @@ bindCli({
   addSharedCredentialOptions(command) { return command.option("--admin-pass <pass>").option("--admin-user <user>"); },
   applyAdminPassFile() {},
   resolveHttpPort() { throw new Error("unexpected local port resolution"); },
+  resolveOpsPort() { throw new Error("unexpected local ops port resolution"); },
+  resolveOpsUrlFromTarget() { return "http://ops.invalid"; },
 });
 const program = new Command();
 register(program);
