@@ -142,7 +142,7 @@ describe("principal disable/enable read the principal first (#2127)", () => {
     const result = await runCli(args("disable", "alice"), { HOME: scratch });
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("did not confirm principal 'alice' is deactivated");
-    expect(result.stderr).toContain("the read-back found active");
+    expect(result.stderr).toContain("the stored status is not deactivated");
     expect(result.stdout).not.toContain("deactivated");
   }, 25_000);
 

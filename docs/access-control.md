@@ -340,7 +340,7 @@ requested status; the line reports that read-back status.
   `FLAIR_TARGET` and `FLAIR_OPS_TARGET` do not select a principal target.
   Redirects, unconfirmed results, and requests that fail or time out are
   refused with a non-zero exit. Diagnostics omit URL userinfo, query values,
-  and response bodies; an unparseable target is printed only as
+  and unexpected response values; an unparseable target is printed only as
   `<unparseable URL>`.
 - Disable sets the principal's `status` to `deactivated`; enable sets it to
   `active`. Both update its `updatedAt` and nothing else: the principal's

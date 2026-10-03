@@ -155,12 +155,8 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
     | { kind: "absent" }
     | { kind: "unreadable" };
 
-  /**
-   * One by-id read of the principal. A read that fails, returns no body, or
-   * returns rows that are not the single requested record is "unreadable" —
-   * never "absent": an id with no row and an unread id are different states,
-   * and both are settled before any write.
-   */
+  // Transport/HTTP failures exit in post/checkResponse; invalid successful
+  // responses are "unreadable".
   const readPrincipal = async (stage: string): Promise<RowRead> => {
     const res = await post({
       operation: "search_by_value", database: "flair", table: "Agent",
@@ -206,7 +202,7 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
   const after = await readPrincipal(`${action} read-back`);
   const storedStatus = after.kind === "found" ? after.status : "no single record";
   if (storedStatus !== status) {
-    console.error(`Error: ${safeUrl} did not confirm principal '${id}' is ${status}; the read-back found ${storedStatus}. Check its status on the target before retrying.`);
+    console.error(`Error: ${safeUrl} did not confirm principal '${id}' is ${status}; the stored status is not ${status}; check the principal's status.`);
     process.exit(1);
   }
   console.log(`✅ Principal '${id}' ${status === "active" ? "activated" : "deactivated"} (stored status: ${storedStatus})`);

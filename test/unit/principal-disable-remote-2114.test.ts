@@ -179,7 +179,7 @@ describe("principal disable/enable remote instance (#2114)", () => {
       expect(remote.seen.map((x) => x.operation)).toEqual(readBack
         ? ["search_by_value", "update", "search_by_value"]
         : ["search_by_value", "update"]);
-      expect(result.stderr).toContain(readBack ? "the read-back found" : "did not confirm the update");
+      expect(result.stderr).toContain(readBack ? "the stored status is not" : "did not confirm the update");
     }, 25_000);
   }
 

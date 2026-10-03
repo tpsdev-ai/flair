@@ -126,16 +126,29 @@ describe("principal state command, socket-free", () => {
       ? { update_hashes: ["alice"] } : [{ id: "alice", status: "active" }])));
     expect(result.exited).toBe(true);
     expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
-    expect(result.errors).toContain("the read-back found active");
+    expect(result.errors).toContain("the stored status is not deactivated");
     expect(result.logs).not.toContain("deactivated");
   });
+
+  for (const [verb, status] of [["disable", "deactivated"], ["enable", "active"]] as const) {
+    test(`${verb}: an unexpected read-back status never appears in output`, async () => {
+      const result = await invoke(verb, remote, (call, index) => index < 2 ? ok(call)
+        : new Response(JSON.stringify([{ id: "alice", status: "secret-response-token" }])));
+      expect(result.exited).toBe(true);
+      expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
+      expect(result.calls[1].body.records[0]).toMatchObject({ id: "alice", status });
+      expect(result.errors).toContain(`the stored status is not ${status}; check the principal's status`);
+      expect(result.errors + result.logs).not.toContain("secret-response-token");
+      expect(result.logs).toBe("");
+    });
+  }
 
   test("a matching state for another principal refuses success", async () => {
     const result = await invoke("disable", remote, (call, index) => index === 0 ? ok(call) : new Response(JSON.stringify(call.body.operation === "update"
       ? { update_hashes: ["alice"] } : [{ id: "mallory", status: "deactivated" }])));
     expect(result.exited).toBe(true);
     expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
-    expect(result.errors).toContain("the read-back found no single record");
+    expect(result.errors).toContain("the stored status is not deactivated");
     expect(result.logs).not.toContain("deactivated");
   });
 
