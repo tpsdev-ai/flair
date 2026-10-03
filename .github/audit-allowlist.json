@@ -36,6 +36,37 @@
   },
   "entries": [
     {
+      "ghsa": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "severity": "high",
+      "class": "no-patch-published",
+      "sources": [
+        "bun",
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> micromatch -> braces; harper -> fast-glob -> micromatch -> braces; adk-flair-js -> @google/adk -> (@mikro-orm/core | @mikro-orm/reflection) -> globby -> fast-glob -> micromatch -> braces (bun workspace only)",
+      "reason": "Offline registry-cache inspection on 2026-10-03 found latest braces 3.0.3 and no version outside <=3.0.3; no safe version override exists in that snapshot. Harper's npm-shrinkwrap also pins braces 3.0.3. Runtime discovery reaches braces through fast-glob's pattern expansion (node_modules/.bun/fast-glob@3.3.3/node_modules/fast-glob/out/utils/pattern.js:137): Harper passes component config source/ignore patterns (node_modules/harper/dist/components/ComponentV1.js:225), loadEnv config patterns (node_modules/harper/dist/config/componentEnvPrepass.js:144,162), and configured/local project-directory paths (node_modules/harper/dist/components/operations.js:55,60,63). Flair's shipped patterns are fixed (.env, schemas/*.graphql, dist/resources/*.js; config.yaml:4,6,8). Request-time matching uses configured patterns, not the URL as a pattern (node_modules/harper/dist/server/static.js:79); isMatch and scan delegate to picomatch, not braces (node_modules/.bun/micromatch@4.0.8/node_modules/micromatch/index.js:128,408). No request-to-braces-pattern path was found in Flair; configuration or project-directory writers remain a DoS risk. The ADK adapter imports SDK types only (packages/adk-flair-js/src/memory_service.ts:15). Short exception pending an upstream patch.",
+      "added": "2026-10-03",
+      "expires": "2026-10-17",
+      "removeWhen": "A braces release outside this advisory's vulnerable range is published, a harper release whose npm-shrinkwrap resolves it is adopted, and every bun path resolves it (or those paths are removed); re-check config and filesystem pattern inputs before renewal."
+    },
+    {
+      "ghsa": "GHSA-ch52-4w7c-c8xp",
+      "package": "http-cache-semantics",
+      "severity": "high",
+      "class": "no-patch-published",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "adk-flair-js -> @google/adk -> @mikro-orm/sqlite (peer) -> sqlite3 -> node-gyp (optional) -> make-fetch-happen -> http-cache-semantics",
+      "reason": "Offline registry-cache inspection on 2026-10-03 found latest http-cache-semantics 4.2.0 and no version outside <=4.2.0; no safe version override exists in that snapshot. This is a bun workspace dependency, absent from Harper's npm-shrinkwrap and the root package's dependency closure. SQLite's install script tries prebuild-install first and falls back to node-gyp only if that fails, and its rebuild script calls node-gyp directly (node_modules/.bun/sqlite3@5.1.7/node_modules/sqlite3/package.json:69,71). Its make-fetch-happen call downloads build headers/libraries with no cachePath or cacheManager (node_modules/.bun/node-gyp@8.4.1/node_modules/node-gyp/lib/install.js:337-354); caching is disabled without cachePath (node_modules/.bun/make-fetch-happen@9.1.0/node_modules/make-fetch-happen/lib/cache/policy.js:75-78). The ADK adapter's SDK imports are type-only (packages/adk-flair-js/src/memory_service.ts:15-18). No Flair runtime caller or shared response cache using this package was found. Short exception pending an upstream patch.",
+      "added": "2026-10-03",
+      "expires": "2026-10-17",
+      "removeWhen": "An http-cache-semantics release outside this advisory's vulnerable range is published and the affected bun path resolves it, or that dependency path is removed; re-check runtime callers and cache sharing before renewal."
+    },
+    {
       "ghsa": "GHSA-83w8-p2f5-377r",
       "package": "@fastify/static",
       "severity": "high",
