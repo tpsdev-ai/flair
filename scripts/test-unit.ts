@@ -453,14 +453,14 @@ export function runUnitSteps(
   const ownsTempRoot = !reuseTempRoot && tempBase !== undefined;
   const laneTempRoot = ownsTempRoot && tempBase !== undefined
     ? realpathSync(mkdtempSync(join(tempBase, "f")))
-    : reuseTempRoot ? callerTempRoot : undefined;
+    : callerTempRoot;
   if (ownsTempRoot && process.getuid && process.getgid) {
-    chownSync(laneTempRoot!, process.getuid(), process.getgid());
+    chownSync(laneTempRoot, process.getuid(), process.getgid());
   }
-  if (laneTempRoot !== undefined) {
-    process.env.TMPDIR = laneTempRoot;
-    process.env.FLAIR_UNIT_TEMP_ROOT = laneTempRoot;
-  }
+  // Steps inherit TMPDIR even where the caller left it unset, so the leak guard
+  // scans the root they write to.
+  process.env.TMPDIR = laneTempRoot;
+  process.env.FLAIR_UNIT_TEMP_ROOT = laneTempRoot;
   const laneBudgetMs = limits?.laneBudgetMs;
   const deadline = laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
   const budgetRanOut = `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
@@ -474,13 +474,11 @@ export function runUnitSteps(
   const ownsTripwire = options.tripwire === undefined;
   const finish = (code: number): number => {
     if (ownsTripwire) tripwire.cleanup();
-    if (laneTempRoot !== undefined) {
-      if (previousTmpdir === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = previousTmpdir;
-      if (previousTempRoot === undefined) delete process.env.FLAIR_UNIT_TEMP_ROOT;
-      else process.env.FLAIR_UNIT_TEMP_ROOT = previousTempRoot;
-      if (ownsTempRoot) rmSync(laneTempRoot, { recursive: true, force: true });
-    }
+    if (previousTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpdir;
+    if (previousTempRoot === undefined) delete process.env.FLAIR_UNIT_TEMP_ROOT;
+    else process.env.FLAIR_UNIT_TEMP_ROOT = previousTempRoot;
+    if (ownsTempRoot) rmSync(laneTempRoot, { recursive: true, force: true });
     return code;
   };
   // Read the tripwire log after a step. A nonempty log is a step failure naming
@@ -510,7 +508,7 @@ export function runUnitSteps(
   // ever touching the real one (flair#1853 round 3).
   const before = snapshotClientConfigs(guardHome);
   // The temp-dir leak guard's `before` snapshot (flair#1889).
-  const guardTempDir = laneTempRoot ?? callerTempRoot;
+  const guardTempDir = laneTempRoot;
   const tempBefore = flairTempNames(guardTempDir);
 
   // Both guards run ONCE, at the END (flair#2030). Collecting their failures in
