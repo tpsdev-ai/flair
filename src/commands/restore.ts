@@ -8,6 +8,7 @@
 import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { comparePreservedFields } from "../lib/restore-verify.js";
 import * as render from "../render.js";
 import { existsSync, readFileSync } from "node:fs";
 
@@ -152,6 +153,7 @@ program
       for (const row of rows) {
         const path = `/${name}/${encodeRecordId(row.id)}`;
         let status: number | undefined;
+        let restored: any;
         try {
           const res = await fetch(`${baseUrl}${path}`, {
             headers: { Authorization: auth },
@@ -159,7 +161,7 @@ program
           });
           status = res.status;
           if (!res.ok) throw new Error();
-          const restored = await res.json();
+          restored = await res.json();
           if (!restored || typeof restored !== "object" || Array.isArray(restored)
             || restored.id !== row.id
             || (name !== "Agent" && restored.agentId !== row.agentId)) {
@@ -167,6 +169,12 @@ program
           }
         } catch {
           failures.push(`${diagnostic(name, row, "GET", status)}: verification failed`);
+          continue;
+        }
+        // Report mismatched field names without mismatched content values.
+        const mismatched = comparePreservedFields(name, row, restored);
+        if (mismatched.length > 0) {
+          failures.push(`${label(name, row)}: GET verification failed (field mismatch: ${mismatched.join(", ")})`);
         }
       }
     }
