@@ -273,7 +273,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
   // Mount /mcp after the guard.
   srv.http(
     withMCPAuth(rateLimitedMcpHandler(handler), {
-      getConfig: () => (deps.harper ?? harper).resources?.get("oauth")?.Resource?.mcpConfig?.enabled === true
+      getConfig: () => (deps.harper ?? harper).server?.resources?.get("oauth")?.Resource?.mcpConfig?.enabled === true
         ? mcpAuthConfig()
         : undefined,
     }),

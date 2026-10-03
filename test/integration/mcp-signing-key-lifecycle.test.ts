@@ -1,9 +1,7 @@
 /**
  * mcp-signing-key-lifecycle.test.ts — flair#2194: with the shipped config no
  * longer declaring `mcp.signingKeyPem`, prove the INSTALLED @harperfast/oauth
- * generates and persists a signing key through its OWN mint path, and that a
- * token it minted still verifies across a restart and after a real pin is
- * removed.
+ * generates and persists a signing key through its OWN mint path.
  *
  * ── The mint is the plugin's real one, over HTTP ───────────────────────────
  * The test seeds the fields needed for exchange, modeled on a stored client
@@ -177,7 +175,7 @@ describe("flair#2194 signing-key lifecycle: no pin, the library's own mint persi
   let harper: HarperInstance;
 
   test(
-    "no seeded key: the token endpoint mints (generating + persisting a key), and the token verifies before and after a restart",
+    "no pin: persists a key and /mcp returns 200 across restart",
     async () => {
       setEnableEnv(undefined);
       workDir = makeWorkDir("flair-lifecycle-nopin-");
@@ -202,10 +200,8 @@ describe("flair#2194 signing-key lifecycle: no pin, the library's own mint persi
       expect(typeof rows[0].public_key_pem).toBe("string");
       expect(rows[0].public_key_pem).toContain("BEGIN PUBLIC KEY");
 
-      // The minted token verifies against the running component.
       expect(await postMcp(harper, token)).toBe(200);
 
-      // ...and still verifies after a restart (the persisted key survived).
       const installDir = harper.installDir;
       await stopHarper(harper, { keepInstallDir: true });
       harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, installDir });
@@ -218,7 +214,7 @@ describe("flair#2194 signing-key lifecycle: no pin, the library's own mint persi
 
 describe("flair#2194 signing-key lifecycle: pinned then unpinned (upgrade path)", () => {
   test(
-    "a token the library minted under a REAL pin still verifies after the pin is removed",
+    "pin removed: /mcp returns 200 for the existing token",
     async () => {
       // Boot WITH the pin declared and staged.
       setEnableEnv(pinPrivatePem);
@@ -241,9 +237,7 @@ describe("flair#2194 signing-key lifecycle: pinned then unpinned (upgrade path)"
       expect(jwtHeader(token).kid).toBe("rs256-default");
       expect(await postMcp(harper, token)).toBe(200);
 
-      // Remove the pin (shipped config, no signing-key env) and restart on the
-      // SAME data dir: the persisted pin stays in the store, so the token still
-      // verifies.
+      // Remove the pin and restart on the same data directory.
       const installDir = harper.installDir;
       await stopHarper(harper, { keepInstallDir: true });
       setEnableEnv(undefined);

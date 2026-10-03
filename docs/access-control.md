@@ -472,8 +472,6 @@ shares her connector's memories.
 
 **How to choose:** use one principal when both apps should see the same private
 memories. Keep two when you want to revoke or audit them separately.
-ChatGPT's CIMD client needs the settings in [ChatGPT](#chatgpt) before it can
-be the second app.
 
 **Check:** `bootstrap` in each app returns the `agentId` you chose.
 **Revoke:** `flair principal disable` for the principal you want to stop.
