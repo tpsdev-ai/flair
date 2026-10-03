@@ -1388,8 +1388,11 @@ export async function provisionIdpIdentityMapping(
     readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject);
   const subjectCreds = await findCredentialsForSubject();
   const activeCreds = subjectCreds.filter(isResolvableCredential);
+  // flair#2222 — retain Agent presence and the compared principal-bearing IdP fields.
+  const preflight = mappingPreflight(params.principal, params.idpSubject, foundAgents.length > 0, subjectCreds);
 
   if (foundAgents.length === 0) {
+    await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight);
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1405,6 +1408,7 @@ export async function provisionIdpIdentityMapping(
             kind: params.principalKind,
             type: params.principalKind,
             status: "active",
+            publicKey: `idp:${params.idpProvider}:${params.idpSubject}`,
             admin: false,
             defaultTrustTier: "endorsed",
             createdAt: now,
@@ -1418,6 +1422,7 @@ export async function provisionIdpIdentityMapping(
       throw new Error(`Identity mapping: failed to create principal '${params.principal}' (HTTP ${insertRes.status}): ${text}`);
     }
     principalCreated = true;
+    preflight.principalPresent = true;
   }
 
   // Survivor: an ACTIVE same-provider credential is re-pointed (the idempotent
@@ -1435,6 +1440,7 @@ export async function provisionIdpIdentityMapping(
   // ops-API operation is the strongest atomicity this surface can express, and
   // ordering the survivor first means even a partially-applied batch can never
   // leave the subject with ZERO resolvable credentials (the fail-open denial).
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight, principalCreated);
   const upsertRes = await fetchImpl(opsUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1718,6 +1724,83 @@ function principalMissingMessage(principal: string): string {
   );
 }
 
+// ─── flair#2222 — the pre-write re-validation bound ───────────────────────────
+//
+// These separate ops requests offer no compare-and-set or shared transaction.
+// Harper 5.2.8 accepts unknown fields (validation/validationWrapper.ts:93-94);
+// processLocalTransaction dispatches with ambient user context, preserving an
+// existing transaction (server/serverHelpers/serverUtilities.ts:120-136).
+// Re-read Agent presence and the canonicalized principal-bearing IdP fields
+// before each write. lastUsedAt is not compared. The read/write race remains.
+
+/** Agent presence and selected fields of principal-bearing IdP rows for the subject. */
+interface MappingPreflight {
+  principal: string;
+  idpSubject: string;
+  /** Expected presence, including an Agent inserted by this command. */
+  principalPresent: boolean;
+  /** canonicalSubjectRows' selected fields; principal-less rows were skipped. */
+  subjectRows: string;
+}
+
+/** Canonicalize id, kind, principalId, idpProvider, idpSubject, status, label and createdAt. */
+function canonicalSubjectRows(rows: any[]): string {
+  return JSON.stringify(
+    rows
+      .map((r) => ({
+        id: String(r?.id),
+        kind: r?.kind ?? null,
+        principalId: r?.principalId ?? null,
+        idpProvider: r?.idpProvider ?? null,
+        idpSubject: r?.idpSubject ?? null,
+        status: r?.status ?? null,
+        label: r?.label ?? null,
+        createdAt: r?.createdAt ?? null,
+      }))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  );
+}
+
+function mappingPreflight(principal: string, idpSubject: string, principalPresent: boolean, subjectRows: any[]): MappingPreflight {
+  return { principal, idpSubject, principalPresent, subjectRows: canonicalSubjectRows(subjectRows) };
+}
+
+/** Valid comparison differences refuse here; invalid changed rows can fail earlier validation
+ * with missing-or-invalid-credential-field. Both fail closed. */
+function mappingChangedMessage(principal: string, idpSubject: string, principalCreated = false): string {
+  return (
+    `Identity mapping: mapping-changed-underneath — the Agent presence or compared IdP mapping fields for principal '${principal}' ` +
+    `and IdP subject '${idpSubject}' changed on the target between this command's validation and its write. ` +
+    (principalCreated ? `Agent '${principal}' was created; no rollback was attempted. No Credential write was made. ` : `Nothing was written. `) +
+    `Re-run the command.`
+  );
+}
+
+/**
+ * Re-read the state a preflight validated and refuse if it moved.
+ *
+ * A failed read propagates: an unreadable table is not an unchanged one, and
+ * this stands in front of a write. Called immediately before each write in
+ * `provisionIdpIdentityMapping`, `linkPrincipalMapping` and
+ * `unlinkPrincipalMapping`.
+ */
+async function assertMappingUnchanged(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  preflight: MappingPreflight,
+  principalCreated = false,
+): Promise<void> {
+  const agents = await opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Agent", { id: preflight.principal }));
+  if ((agents.length > 0) !== preflight.principalPresent) {
+    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject, principalCreated));
+  }
+  const rows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, preflight.idpSubject);
+  if (canonicalSubjectRows(rows) !== preflight.subjectRows) {
+    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject, principalCreated));
+  }
+}
+
 /**
  * flair#2115 — `flair principal link|unlink|links` carry the target instance's
  * admin credential to its operations API, so the target they accept is narrower
@@ -1768,9 +1851,8 @@ export async function linkPrincipalMapping(
   // Refuse a missing requested principal before either mapping branch.
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
-  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true)).filter(
-    isResolvableCredential,
-  );
+  const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
+  const active = subjectRows.filter(isResolvableCredential);
   const elsewhere = active.filter((c) => c?.principalId !== params.principal);
   if (elsewhere.length > 0 && !params.replace) {
     const current = [...new Set(elsewhere.map((c) => String(c?.principalId)))].join(", ");
@@ -1793,6 +1875,11 @@ export async function linkPrincipalMapping(
     };
   }
   const previousPrincipal = elsewhere.length > 0 ? String(elsewhere[0]?.principalId) : undefined;
+
+  // flair#2222 — the write is the shared provisioner's; re-validate the state
+  // this preflight acted on so a concurrent change refuses here, not after the
+  // provisioner has already re-read and moved on.
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, mappingPreflight(params.principal, params.idpSubject, true, subjectRows));
 
   const mapping = await provisionIdpIdentityMapping(
     {
@@ -1846,9 +1933,8 @@ export async function unlinkPrincipalMapping(
 
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
-  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true)).filter(
-    isResolvableCredential,
-  );
+  const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
+  const active = subjectRows.filter(isResolvableCredential);
   const mine = active.filter((c) => c?.principalId === params.principal);
   if (mine.length === 0) {
     const elsewhere = [...new Set(active.map((c) => String(c?.principalId)))].join(", ");
@@ -1865,6 +1951,9 @@ export async function unlinkPrincipalMapping(
         `--idp-provider ${providers[0]}.`,
     );
   }
+
+  // flair#2222 — re-validate the state this preflight acted on before revoking.
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, mappingPreflight(params.principal, params.idpSubject, true, subjectRows));
 
   const ids = mine.map((c) => String(c?.id));
   const unconfirmedMessage = (unconfirmed: string[]) =>

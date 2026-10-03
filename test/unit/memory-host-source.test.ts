@@ -938,3 +938,43 @@ describe("round 22 — (5) one orphan's failure does not stop the sweep", () => 
     expect(pointerStore.has("mem-orphan-2")).toBe(false); // assertion: the later orphan was cleaned
   });
 });
+
+
+describe("client-forged skillSubjectId", () => {
+  it("Memory POST strips skillSubjectId", async () => {
+    await makeMemory(agentCtx("agent-a")).post({ id: "skill-strip-post", content: "x", skillSubjectId: "forged-subject" });
+    expect(memoryStore.has("skill-strip-post")).toBe(true);
+    expect(memoryStore.get("skill-strip-post")?.skillSubjectId).toBeUndefined();
+  });
+
+  it("Memory PUT strips skillSubjectId", async () => {
+    const row = seedMemory({ id: "skill-strip-put" });
+    await makeMemory(agentCtx("agent-a")).put({ ...row, skillSubjectId: "forged-subject" });
+    expect(memoryStore.get(row.id)?.content).toBe(row.content);
+    expect(memoryStore.get(row.id)?.skillSubjectId).toBeUndefined();
+  });
+
+  it("Memory PATCH strips skillSubjectId", async () => {
+    const row = seedMemory({ id: "skill-strip-patch" });
+    await makeMemory(agentCtx("agent-a")).patch({ id: row.id, content: "edited", skillSubjectId: "forged-subject" });
+    expect(memoryStore.get(row.id)?.content).toBe("edited");
+    expect(memoryStore.get(row.id)?.skillSubjectId).toBeUndefined();
+  });
+
+  it("Memory PUT _reindex strips skillSubjectId", async () => {
+    const row = seedMemory({ id: "skill-strip-reindex", type: "session" });
+    const m: any = new (Memory as any)();
+    m.getContext = () => ({});
+    await m.put({ ...row, _reindex: true, skillSubjectId: "forged-subject" });
+    expect(memoryStore.get(row.id)?.provenance).toBe(row.provenance);
+    expect(memoryStore.get(row.id)?.skillSubjectId).toBeUndefined();
+  });
+
+  it("FeedMemories POST strips skillSubjectId", async () => {
+    const feed: any = new (FeedMemories as any)();
+    feed.getContext = () => ({ request: agentCtx("agent-a") });
+    await feed.post({ id: "skill-strip-feed", agentId: "agent-a", content: "x", skillSubjectId: "forged-subject" });
+    expect(memoryStore.has("skill-strip-feed")).toBe(true);
+    expect(memoryStore.get("skill-strip-feed")?.skillSubjectId).toBeUndefined();
+  });
+});
