@@ -774,9 +774,11 @@ async function writeSkillCreateOrUpdate(
     explicitPredecessor: Record<string, any> | null;
     method: "post" | "put";
     pointer: { row: any } | null;
+    /** A reserved seed id: version the write IN PLACE (same physical id). */
+    inPlaceId?: string | null;
   },
 ): Promise<any> {
-  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer } = args;
+  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId } = args;
   // #1741 skill-write credential class: an admin AGENT key is an agent, not an
   // operator — it keeps own-skill writes plus the explicit write-grant
   // allowance, and cannot bypass the owner check for another agent's skill.
@@ -788,9 +790,11 @@ async function writeSkillCreateOrUpdate(
   }
   const now = new Date().toISOString();
   const explicitSuccessor = !!(explicitPredecessor && typeof content.supersedes === "string" && content.supersedes.length > 0);
-  const successorId = explicitSuccessor || !storedRow
-    ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
-    : `${content.agentId}-${randomUUID()}`;
+  const successorId = inPlaceId
+    ? inPlaceId
+    : explicitSuccessor || !storedRow
+      ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
+      : `${content.agentId}-${randomUUID()}`;
   const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
   const addressedId = explicitPredecessor ? String(explicitPredecessor.id) : storedRow ? String(storedRow.id) : null;
   const captured: { row: Record<string, any> | null } = { row: null };
@@ -800,14 +804,21 @@ async function writeSkillCreateOrUpdate(
     agentId: String(content.agentId),
     head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
     plan: (head) => {
-      const liveHead = explicitSuccessor ? explicitPredecessor : head;
+      const liveHead = inPlaceId ? head : (explicitSuccessor ? explicitPredecessor : head);
       const successor = buildSkillSuccessorRow({
         base: content, predecessorRow: liveHead, successorId, subjectId,
-        supersedes: liveHead ? String(liveHead.id) : null, now,
+        // An in-place (reserved seed) write keeps the same physical id, so it
+        // sets no `supersedes` and closes no row.
+        supersedes: inPlaceId || !liveHead ? null : String(liveHead.id), now,
       });
       captured.row = successor;
       const value = typeof successor.content === "string" ? successor.content : null;
       const visibility = skillVersionVisibility(successor);
+      if (inPlaceId) {
+        return liveHead
+          ? { kind: "update", predecessor: null, successor, closePatch: {}, value, visibility }
+          : { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+      }
       if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
       return { kind: "update", predecessor: liveHead, successor, closePatch: { validTo: now, updatedAt: now }, value, visibility };
     },
@@ -1345,11 +1356,14 @@ export class Memory extends (databases as any).flair.Memory {
         ? await (databases as any).flair.Memory.get(content.supersedes).catch(() => null)
         : null;
       // A reserved seed row keeps its fixed physical id (seed/assignment resolve
-      // by it), so it writes in place rather than superseding. See
+      // by it), so it is versioned IN PLACE rather than superseding. See
       // resources/seed-reservation.ts.
-      const reserved = [content?.id, (this as any).getId?.()].some((candidate) => isReservedSeedId("Memory", candidate));
-      if (!reserved && (isSkillWrite(content) || (!!skillPredecessor && rowIsSkill(skillPredecessor)))) {
-        return await writeSkillCreateOrUpdate({ ctx, auth, content, storedRow: null, explicitPredecessor: skillPredecessor, method: "post", pointer });
+      const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
+      if (isSkillWrite(content) || (!!skillPredecessor && rowIsSkill(skillPredecessor))) {
+        return await writeSkillCreateOrUpdate({
+          ctx, auth, content, storedRow: null, explicitPredecessor: skillPredecessor, method: "post", pointer,
+          inPlaceId: reservedId != null ? String(reservedId) : null,
+        });
       }
     }
     // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
@@ -1951,10 +1965,10 @@ export class Memory extends (databases as any).flair.Memory {
         : null;
       const skillTarget = isSkillWrite(content) || rowIsSkill(preExisting) || (!!skillPredecessor && rowIsSkill(skillPredecessor));
       // A reserved seed row keeps its fixed physical id (seed/assignment resolve
-      // by it), so it writes in place rather than superseding. See
+      // by it), so it is versioned IN PLACE rather than superseding. See
       // resources/seed-reservation.ts.
-      const reserved = [content?.id, (this as any).getId?.()].some((candidate) => isReservedSeedId("Memory", candidate));
-      if (!reserved && skillTarget) {
+      const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
+      if (skillTarget) {
         // Boundary pin: an enrolled lineage cannot drop the skill tag (deletion
         // ends the skill). An absent `tags` is a partial update and carries the
         // stored tags forward.
@@ -1964,7 +1978,10 @@ export class Memory extends (databases as any).flair.Memory {
             { status: 400, headers: { "content-type": "application/json" } },
           );
         }
-        return await writeSkillCreateOrUpdate({ ctx, auth, content, storedRow: preExisting, explicitPredecessor: skillPredecessor, method: "put", pointer });
+        return await writeSkillCreateOrUpdate({
+          ctx, auth, content, storedRow: preExisting, explicitPredecessor: skillPredecessor, method: "put", pointer,
+          inPlaceId: reservedId != null ? String(reservedId) : null,
+        });
       }
     }
     // A1' item 2 (adjudication 0a): share ONE transaction with the pointer row
