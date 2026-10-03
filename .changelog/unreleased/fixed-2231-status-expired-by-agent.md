@@ -3,6 +3,7 @@
   reports rows with no agent id separately.
   It marks an installed nightly scheduler whose plist or service names each agent.
   Linux installation requires both timer and service; orphans report their path.
-  Scheduler file and active-state probe failures report unknown with the path
-  and error code when available.
+  Scheduler file read failures report unknown with the path and error code.
+  The active-state probe reports not active when systemctl cannot reach a user
+  session bus, and unknown only when the probe command cannot run at all.
   The breakdown is included in `flair status --json` when expired rows exist.
