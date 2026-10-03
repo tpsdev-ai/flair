@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { chownSync, existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 // Sandbox HOME for every child step, and the guard that fails the lane if a
 // real client config changed anyway (flair#1853). Importing sandbox-home also
@@ -20,25 +20,6 @@ import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isola
 /** The short, canonical temp base darwin unit steps run under (flair#2137). */
 export const DARWIN_TEMP_BASE = "/private/tmp";
 
-/**
- * The base for the lane's own short temp root, or `undefined` to keep using the
- * OS temp dir as-is (flair#2137).
- *
- * On darwin the OS temp dir is the per-user `/var/folders/<xx>/<id>/T/`: 49
- * bytes, and `/var` is a symlink to `/private/var`. A scratch HOME beneath it
- * pushes `flair init`'s operations-socket path past its 103-byte limit, so a
- * handful of unit tests fail on macOS by design; and a guard watching the
- * unresolved path misses a resolved entry (flair#2136). `/private/tmp` is short
- * and already canonical.
- *
- * Everywhere else the OS temp dir is already short and canonical, so the lane
- * keeps using it unchanged (`undefined`).
- *
- * `FLAIR_UNIT_TEMP_BASE`, when set nonblank, overrides the platform default.
- *
- * Pure — platform and environment in, base out — so the darwin branch is
- * unit-testable on any host.
- */
 export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined {
   const override = env.FLAIR_UNIT_TEMP_BASE?.trim();
   if (override) return override;
@@ -196,6 +177,7 @@ export function stepEnvironment(
   tripwireDir: string,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...unitEnvironment(source), ...sandbox.env };
+  if (source.FLAIR_UNIT_TEMP_ROOT) env.FLAIR_UNIT_TEMP_ROOT = source.FLAIR_UNIT_TEMP_ROOT;
   env.PATH = `${tripwireDir}:${env.PATH ?? ""}`;
   return env;
 }
@@ -460,17 +442,25 @@ export function runUnitSteps(
   options: UnitLaneOptions = {},
 ): number {
   const { keepGoing = false, limits, createSandbox = createSandboxHome } = options;
-  // flair#2137: when a temp base is selected (darwin, or an explicit
-  // FLAIR_UNIT_TEMP_BASE), run the whole lane under a short, canonical temp root
-  // and point the temp-dir leak guard at it. Setting TMPDIR in THIS process is
-  // what makes createSandboxHome, the tripwire and every child resolve the same
-  // root through `os.tmpdir()`; `finish` restores it and removes the root.
-  const tempBase = unitTempBase(process.platform, process.env);
-  const laneTempRoot = tempBase === undefined
-    ? undefined
-    : realpathSync(mkdtempSync(join(tempBase, "flair-unit-lane-")));
   const previousTmpdir = process.env.TMPDIR;
-  if (laneTempRoot !== undefined) process.env.TMPDIR = laneTempRoot;
+  const previousTempRoot = process.env.FLAIR_UNIT_TEMP_ROOT;
+  const tempBase = unitTempBase(process.platform, process.env);
+  const callerTempRoot = realpathSync(tmpdir());
+  const reuseTempRoot = !process.env.FLAIR_UNIT_TEMP_BASE?.trim() && (
+    previousTempRoot === callerTempRoot ||
+    (process.platform === "darwin" && dirname(callerTempRoot) === DARWIN_TEMP_BASE && /^f[a-zA-Z0-9]{6}$/.test(basename(callerTempRoot)))
+  );
+  const ownsTempRoot = !reuseTempRoot && tempBase !== undefined;
+  const laneTempRoot = ownsTempRoot && tempBase !== undefined
+    ? realpathSync(mkdtempSync(join(tempBase, "f")))
+    : reuseTempRoot ? callerTempRoot : undefined;
+  if (ownsTempRoot && process.getuid && process.getgid) {
+    chownSync(laneTempRoot!, process.getuid(), process.getgid());
+  }
+  if (laneTempRoot !== undefined) {
+    process.env.TMPDIR = laneTempRoot;
+    process.env.FLAIR_UNIT_TEMP_ROOT = laneTempRoot;
+  }
   const laneBudgetMs = limits?.laneBudgetMs;
   const deadline = laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
   const budgetRanOut = `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
@@ -487,7 +477,9 @@ export function runUnitSteps(
     if (laneTempRoot !== undefined) {
       if (previousTmpdir === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = previousTmpdir;
-      rmSync(laneTempRoot, { recursive: true, force: true });
+      if (previousTempRoot === undefined) delete process.env.FLAIR_UNIT_TEMP_ROOT;
+      else process.env.FLAIR_UNIT_TEMP_ROOT = previousTempRoot;
+      if (ownsTempRoot) rmSync(laneTempRoot, { recursive: true, force: true });
     }
     return code;
   };

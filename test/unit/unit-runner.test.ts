@@ -439,7 +439,7 @@ describe("shared unit lane", () => {
     // The step records its TMPDIR, then leaves a flair-* dir in it.
     const script =
       `const fs = require("node:fs"), path = require("node:path");` +
-      `fs.writeFileSync(${JSON.stringify(seen)}, process.env.TMPDIR || "");` +
+      `fs.writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ root: process.env.TMPDIR, marker: process.env.FLAIR_UNIT_TEMP_ROOT, gid: fs.statSync(process.env.TMPDIR).gid }));` +
       `fs.mkdirSync(path.join(process.env.TMPDIR, "flair-2137-leak"));`;
     const savedTmpdir = process.env.TMPDIR;
     const savedBase = process.env.FLAIR_UNIT_TEMP_BASE;
@@ -456,17 +456,17 @@ describe("shared unit lane", () => {
         else process.env.FLAIR_UNIT_TEMP_BASE = savedBase;
       }
     })();
-    const childTmpdir = readFileSync(seen, "utf8").trim();
-    // The step ran under a fresh, symlink-resolved mkdtemp directly under the base...
+    const child = JSON.parse(readFileSync(seen, "utf8"));
+    const childTmpdir = child.root;
+    expect(child.marker).toBe(childTmpdir);
+    if (process.getgid) expect(child.gid).toBe(process.getgid());
     expect(dirname(childTmpdir)).toBe(realpathSync(base));
-    expect(basename(childTmpdir).startsWith("flair-unit-lane-")).toBe(true);
-    // ...the step itself succeeded, so only the leak it left in its TMPDIR fails the lane...
+    expect(basename(childTmpdir)).toMatch(/^f[a-zA-Z0-9]{6}$/);
     expect(code).toBe(1);
     expect(errors).toContain("Temp-dir leak guard FAILED");
     expect(errors).toContain("flair-2137-leak");
     expect(errors).toContain(childTmpdir);
-    // ...and the lane removed its own root and restored the ambient TMPDIR.
-    expect(readdirSync(base).filter((name) => name.startsWith("flair-unit-lane-"))).toEqual([]);
+    expect(readdirSync(base).filter((name) => name.startsWith("f"))).toEqual([]);
     expect(process.env.TMPDIR).toBe(savedTmpdir);
   });
 
@@ -489,7 +489,38 @@ describe("shared unit lane", () => {
       }
     })();
     expect(code).toBe(0);
-    expect(readdirSync(base).filter((name) => name.startsWith("flair-unit-lane-"))).toEqual([]);
+    expect(readdirSync(base).filter((name) => name.startsWith("f"))).toEqual([]);
     expect(process.env.TMPDIR).toBe(savedTmpdir);
   });
+  test("the cli-v2 socket path fits with a 13-digit timestamp and 21-digit random suffix (flair#2137)", () => {
+    const suffix = (2 ** -53).toString(36).slice(2);
+    expect(suffix.length).toBe(21);
+    const socket = join(DARWIN_TEMP_BASE, "fXXXXXX", `flair-cli-test-9999999999999-${suffix}`, ".flair/data/operations-server");
+    expect(Buffer.byteLength(socket)).toBe(101);
+    expect(Buffer.byteLength(socket.replace("flair-cli-test-", "flair-cli-errors-"))).toBe(103);
+  });
+
+  test("a nested runner reuses the caller's root and leaves its leak visible (flair#1889, flair#2137)", () => {
+    for (const marked of [false, true]) {
+      if (!marked && process.platform !== "darwin") continue;
+      const base = fixture();
+      const seen = join(base, "nested.json");
+      const script = `
+        import { runUnitSteps } from ${JSON.stringify(join(root, "scripts/test-unit.ts"))};
+        import { writeFileSync, existsSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        const root = tmpdir();
+        ${marked ? "" : "delete process.env.FLAIR_UNIT_TEMP_ROOT;"}
+        const code = runUnitSteps([{ name: "nested leak", cwd: root, files: [], args: ["-e", 'require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, "flair-nested-leak"))'] }], process.execPath, root);
+        writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ code, root, after: tmpdir(), exists: existsSync(root + "/flair-nested-leak") }));
+      `;
+      expect(runUnitSteps([{ name: "nested runner", cwd: root, files: [], args: ["-e", script] }], process.execPath, base)).toBe(1);
+      const result = JSON.parse(readFileSync(seen, "utf8"));
+      expect(result.code).toBe(1);
+      expect(result.after).toBe(result.root);
+      expect(result.exists).toBe(true);
+      rmSync(join(result.root, "flair-nested-leak"), { recursive: true, force: true });
+    }
+  });
+
 });
