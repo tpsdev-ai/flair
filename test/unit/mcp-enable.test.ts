@@ -321,7 +321,7 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
  */
 function credentialTable(seed: Record<string, any>[] = []) {
   const rows = new Map<string, any>(
-    seed.map((r) => [String(r.id), { kind: "idp", status: "active", ...r }]),
+    seed.map((r) => [String(r.id), { kind: "idp", status: "active", createdAt: "2026-10-02T00:00:00.000Z", ...r }]),
   );
   const handle = (body: any): Response | null => {
     if (body?.operation === "search_by_conditions" && (body.table ?? "Credential") === "Credential") {
@@ -362,6 +362,14 @@ function mockOpsFetch(opts: {
   failFindStatus?: number;
   failInsert?: boolean;
   failUpsert?: boolean;
+  /** flair#2115 — answer the Credential search with a failed response. */
+  failCredSearch?: boolean;
+  /** flair#2115 — answer the Credential search with 200 and a body that is NOT a list. */
+  credSearchNotAList?: boolean;
+  /** flair#2115 — answer the Credential search with 200 and this body. */
+  credSearchBody?: unknown;
+  /** flair#2115 — answer the Agent search with 200 and this body. */
+  agentSearchBody?: unknown;
   /** flair#1317 — make the post-write invariant read-back lie (see its test). */
   poisonReadBack?: (rows: Map<string, any>) => void;
 } = {}): { fetchImpl: typeof fetch; calls: any[]; creds: ReturnType<typeof credentialTable> } {
@@ -375,6 +383,7 @@ function mockOpsFetch(opts: {
     calls.push({ url: String(url), body });
     if (body.operation === "search_by_value" && body.table === "Agent") {
       if (opts.failFind) return new Response("boom", { status: opts.failFindStatus ?? 500 });
+      if ("agentSearchBody" in opts) return new Response(JSON.stringify(opts.agentSearchBody), { status: 200 });
       return new Response(JSON.stringify(opts.existingPrincipal ? [{ id: body.search_value }] : []), { status: 200 });
     }
     if (body.operation === "insert" && body.table === "Agent") {
@@ -383,6 +392,11 @@ function mockOpsFetch(opts: {
     }
     if (body.operation === "upsert" && body.table === "Credential" && opts.failUpsert) {
       return new Response("upsert failed", { status: 500 });
+    }
+    if (body.operation === "search_by_conditions" && body.table === "Credential") {
+      if (opts.failCredSearch) return new Response("boom", { status: 500 });
+      if (opts.credSearchNotAList) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if ("credSearchBody" in opts) return new Response(JSON.stringify(opts.credSearchBody), { status: 200 });
     }
     const credRes = creds.handle(body);
     if (credRes) {
@@ -414,10 +428,7 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
-    // The trailing search_by_conditions is the flair#1317 invariant read-back:
-    // the function asks the STORE whether exactly one active credential now
-    // maps the subject, rather than trusting the write it just issued.
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_conditions", "upsert", "search_by_conditions"]);
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions"]);
     const credRecord = calls[3].body.records[0];
     expect(credRecord.kind).toBe("idp");
     expect(credRecord.idpProvider).toBe("github");
@@ -438,6 +449,66 @@ describe("provisionIdpIdentityMapping", () => {
     const ops = calls.map((c) => c.body.operation);
     expect(ops).toEqual(["search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
   });
+
+  // ─── flair#2115 — the pre-write read (the step `flair principal link` reuses) ──
+
+  test("flair#2115: the pre-write Credential read refuses a FAILED response, writing nothing", async () => {
+    // This read decides which rows the batch revokes. Answered with [] on
+    // failure, it said "no rows for this subject" — and the write that followed
+    // re-pointed a mapping it could not see. It refuses instead.
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true, failCredSearch: true });
+    await expect(
+      provisionIdpIdentityMapping(
+        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/ops API read at .* failed \(HTTP 500\)/);
+    // The call log itself: no upsert, no revocation, after the failed read.
+    expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value", "search_by_conditions"]);
+  });
+
+  test("flair#2115: the pre-write Credential read refuses a body that is NOT a record list", async () => {
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true, credSearchNotAList: true });
+    await expect(
+      provisionIdpIdentityMapping(
+        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/did not answer with a record list/);
+    expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value", "search_by_conditions"]);
+  });
+
+  test("flair#2115: the pre-write Credential read refuses [null] rows, writing nothing", async () => {
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true, credSearchBody: [null] });
+    await expect(
+      provisionIdpIdentityMapping(
+        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/answered with a malformed Credential record \(entry 0\)/);
+    expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value", "search_by_conditions"]);
+  });
+
+  const MALFORMED_AGENT_ANSWERS: Array<[unknown, RegExp]> = [
+    [{ ok: true }, /did not answer with a record list/],
+    ["not json rows", /did not answer with a record list/],
+    [[null], /answered with a malformed Agent record \(entry 0\)/],
+    [[{ name: "self" }], /answered with a malformed Agent record \(entry 0\)/],
+    [[{ id: "someone-else" }], /query-mismatch:id/],
+  ];
+
+  for (const [agentSearchBody, reason] of MALFORMED_AGENT_ANSWERS) {
+    test(`flair#2115: the Agent read refuses ${JSON.stringify(agentSearchBody)} — no principal created, nothing written`, async () => {
+      const { fetchImpl, calls } = mockOpsFetch({ agentSearchBody });
+      await expect(
+        provisionIdpIdentityMapping(
+          { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+          { fetchImpl },
+        ),
+      ).rejects.toThrow(reason);
+      expect(calls.map((c) => c.body.operation)).toEqual(["search_by_value"]);
+    });
+  }
 
   // ─── flair#1317 — the (kind, idpSubject) uniqueness constraint ─────────────
 
@@ -536,7 +607,7 @@ describe("provisionIdpIdentityMapping", () => {
       poisonReadBack: (rows) => {
         rows.set("cred_smuggled", {
           id: "cred_smuggled", kind: "idp", status: "active",
-          idpProvider: "smuggled", idpSubject: "octocat", principalId: "agt_other",
+          idpProvider: "smuggled", idpSubject: "octocat", principalId: "agt_other", createdAt: "2026-10-02T00:00:00.000Z",
         });
       },
     });
@@ -545,7 +616,7 @@ describe("provisionIdpIdentityMapping", () => {
         { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
         { fetchImpl },
       ),
-    ).rejects.toThrow(/uniqueness invariant does not hold.*2 active Credential/s);
+    ).rejects.toThrow(/post-write-mismatch/);
   });
 
   test("flair#1317: the invariant error names the actor, the state and the remedy", async () => {
@@ -559,7 +630,7 @@ describe("provisionIdpIdentityMapping", () => {
     ).catch((e) => e as Error);
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain("octocat");           // which subject
-    expect(err.message).toContain("0 active");           // what state
+    expect(err.message).toContain("0 resolvable (principal-bearing) active");           // what state
     expect(err.message).toContain("flair#1317");         // why it matters
     expect(err.message).toMatch(/revoke the rows/);      // what to do
   });
@@ -638,7 +709,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
 
       expect(attempted).toEqual(Array(5).fill(`${origin}/`));
       expect(received.map((r) => r.operation)).toEqual([
-        "search_by_value", "insert", "search_by_conditions", "upsert", "search_by_conditions",
+        "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions",
       ]);
       expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
       expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
@@ -960,9 +1031,9 @@ describe("buildClaudePasteBlock", () => {
 
 // ─── enableMcp orchestration ──────────────────────────────────────────────────
 
-function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sysInfoPidProvider?: () => number } = {}): { fetchImpl: typeof fetch; calls: string[] } {
+function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sysInfoPidProvider?: () => number; existingCredentials?: Record<string, any>[] } = {}): { fetchImpl: typeof fetch; calls: string[]; creds: ReturnType<typeof credentialTable> } {
   const calls: string[] = [];
-  const creds = credentialTable(); // flair#1317 — the mapping step reads its own write back
+  const creds = credentialTable(overrides.existingCredentials);
   let _sysInfoCallCount = 0;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const urlStr = String(url);
@@ -987,7 +1058,7 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sys
       }
     return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
    }) as typeof fetch;
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, creds };
 }
 
 const TARGET = "http://127.0.0.1:9926";
@@ -1204,6 +1275,20 @@ function shippedMcpBlock(): any {
 }
 
 describe("enableMcp — full happy path", () => {
+  test("enable heals a subject mapped to two principals and prints SUPERSEDED", async () => {
+    const { fetchImpl, creds } = fullMockFetch({ existingCredentials: [
+      { id: "cred_self", kind: "idp", idpProvider: "github", idpSubject: "octocat", principalId: "self" },
+      { id: "cred_stray", kind: "idp", idpProvider: "okta", idpSubject: "octocat", principalId: "agt_b" },
+    ] });
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true }, { fetchImpl },
+    );
+    expect(result.ok).toBe(true);
+    expect(creds.active().map(row => [row.id, row.principalId])).toEqual([["cred_self", "self"]]);
+    expect(creds.rows.get("cred_stray")?.status).toBe("revoked");
+    expect(result.steps.find(step => step.step === "identity-mapping")?.detail).toMatch(/SUPERSEDED:.*cred_stray/);
+  });
+
   test("runs every step in order and returns a working paste block with no DCR call anywhere", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const result = await enableMcp(

@@ -39,6 +39,18 @@ function captureErrors<T>(body: () => T): { result: T; errors: string } {
   }
 }
 
+/** Run `body` with console.log captured, returning its result and the stdout text. */
+function captureLogs<T>(body: () => T): { result: T; logs: string } {
+  const logs: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  try {
+    return { result: body(), logs: logs.join("\n") };
+  } finally {
+    console.log = original;
+  }
+}
+
 /** A `node -e` snippet that writes a client config under `home` — what the home-isolation guard detects. */
 function plantConfig(home: string): string {
   const dir = join(home, ".codex");
@@ -363,7 +375,7 @@ describe("shared unit lane", () => {
     }
   });
 
-  test("the time bounds fit inside the CI job that runs the lane (flair#2030)", () => {
+  test("the time bounds fit inside the CI job that runs the lane (flair#2030, resized flair#2224)", () => {
     const workflow = readFileSync(join(root, ".github", "workflows", "test.yml"), "utf8");
     const start = workflow.indexOf("\n  test-unit:\n");
     const end = workflow.indexOf("\n  test-unit-gate:\n");
@@ -373,20 +385,38 @@ describe("shared unit lane", () => {
     // The derivation's input from the workflow: change the two together.
     expect(Number(job.match(/^ {4}timeout-minutes: (\d+)$/m)?.[1]) * 60_000).toBe(CI_JOB_LIMIT_MS);
     expect(job).toContain("run: bun run test:unit --keep-going");
-    // Measured on green CI legs (see the constants in scripts/test-unit.ts): the
-    // slowest lane, its root step, the slowest other step, and the job's own
+    // Measured on CI legs and locally (see the constants in scripts/test-unit.ts):
+    // the slowest lane, its root step, the slowest other step, and the job's own
     // steps outside the lane.
-    const lane = 401_000, rootStep = 266_000, otherStep = 30_000, outside = 53_000;
+    const lane = 510_000, rootStep = 327_000, otherStep = 33_000, outside = 53_000;
     expect(KEEP_GOING_LIMITS).toEqual({ stepTimeoutMs: STEP_TIMEOUT_MS, laneBudgetMs: KEEP_GOING_LANE_BUDGET_MS });
     expect(KEEP_GOING_LANE_BUDGET_MS + CI_OUTSIDE_LANE_MS).toBeLessThanOrEqual(CI_JOB_LIMIT_MS);
     expect(CI_OUTSIDE_LANE_MS).toBeGreaterThan(outside);
     expect(STEP_TIMEOUT_MS).toBeGreaterThanOrEqual(3 * otherStep);
     expect(ROOT_STEP_TIMEOUT_MS).toBeGreaterThan(rootStep);
+    // The whole-lane budget carries at least 1.5× headroom over the slowest
+    // measured lane (flair#2224); each step's own limit still applies.
+    expect(KEEP_GOING_LANE_BUDGET_MS).toBeGreaterThanOrEqual(1.5 * lane);
     // One hung step, wherever it is, still leaves every later step room to run
     // inside the budget.
     expect(lane + STEP_TIMEOUT_MS).toBeLessThanOrEqual(KEEP_GOING_LANE_BUDGET_MS);
     expect(lane - rootStep + ROOT_STEP_TIMEOUT_MS).toBeLessThanOrEqual(KEEP_GOING_LANE_BUDGET_MS);
     const limited = unitPlan(root).filter(step => step.timeoutMs !== undefined);
     expect(limited.map(step => [step.name, step.timeoutMs])).toEqual([["root unit tests", ROOT_STEP_TIMEOUT_MS]]);
+  });
+
+  test("every step that runs reports its own duration (flair#2224)", () => {
+    // The lane budget is sized from measured step times, so the lane prints each
+    // one; a resize then reads the numbers from the log instead of re-deriving
+    // them from CI timestamps.
+    const dir = fixture();
+    const { result: code, logs } = captureLogs(() => runUnitSteps(
+      [{ name: "quick step", cwd: dir, args: ["-e", "process.exit(0)"], files: [] }],
+      process.execPath,
+      dir,
+      { keepGoing: true },
+    ));
+    expect(code).toBe(0);
+    expect(logs).toMatch(/quick step: \d+ s/);
   });
 });
