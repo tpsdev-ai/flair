@@ -43,7 +43,7 @@ function settings(): any {
 }
 
 describe("flair hook install --action-recall", () => {
-  it("dry-run writes nothing and reports the delta", () => {
+  it("dry-run leaves settings unchanged and reports the delta", () => {
     const path = hookSettingsPath(home, "claude-code");
     const result = installActionRecall({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926", dryRun: true, runtime: RUNTIME });
     expect(result.ok).toBe(true);

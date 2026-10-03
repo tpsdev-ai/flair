@@ -131,6 +131,21 @@ export async function runActionRecall(rawInput: string, opts: RunOptions = {}): 
   return utf8Bytes(output) > STDOUT_MAX_BYTES ? "" : output;
 }
 
+export function isActionRecallOutput(output: string): boolean {
+  if (!output || utf8Bytes(output) > STDOUT_MAX_BYTES) return false;
+  try {
+    const record = JSON.parse(output);
+    const context = record?.hookSpecificOutput;
+    return typeof record === "object" && record !== null && !Array.isArray(record)
+      && Object.keys(record).length === 1
+      && typeof context === "object" && context !== null && !Array.isArray(context)
+      && Object.keys(context).length === 2
+      && context.hookEventName === "PreToolUse" && typeof context.additionalContext === "string";
+  } catch {
+    return false;
+  }
+}
+
 /** True when this module is the process entry point (Bun or Node 22+). */
 export function shouldRunAsMain(importMeta: ImportMeta & { main?: boolean }, argv1: string | undefined): boolean {
   return importMeta.main === true || (argv1 != null && importMeta.url === `file://${argv1}`);

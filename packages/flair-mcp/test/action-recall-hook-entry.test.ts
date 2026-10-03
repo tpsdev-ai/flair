@@ -2,7 +2,7 @@
  * action-recall-hook-entry.test.ts — flair#2067 slice 2: the `flair-action-recall`
  * ENTRY POINT, spawned as its own process, reading a prepared on-disk cache.
  *
- * What only a spawned process can show: the exit code (always 0), that stdout
+ * The spawned cases check exit 0 and that stdout
  * is EXACTLY the `hookSpecificOutput` envelope (never a permission decision or
  * anything else) and that an unrelated command, a missing cache or a held-open
  * stdin produce ZERO bytes — no stdout, no stderr.
@@ -154,4 +154,37 @@ test("held-open stdin stays open until the entry exits silently", async () => {
   expect(result.signal).toBeNull();
   expect(result.stdout).toBe("");
   expect(result.stderr).toBe("");
+});
+
+
+test("output validation runs inside the hook process", async () => {
+  const { isActionRecallOutput } = await import("../src/action-recall-run.ts");
+  for (const output of ["", "garbage", "null", "[]", '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":7}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x","permissionDecision":"allow"}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x"},"decision":"block"}']) {
+    expect(isActionRecallOutput(output)).toBe(false);
+  }
+  expect(isActionRecallOutput(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "x" } }))).toBe(true);
+  expect(isActionRecallOutput(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "x".repeat(4096) } }))).toBe(false);
+});
+
+
+test("a closed stdout pipe exits silently", async () => {
+  writeCache();
+  const child = spawn(process.execPath, [ENTRY], { env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", data => { stderr += data; });
+  const timer = setTimeout(() => child.kill("SIGKILL"), CHILD_DEADLINE_MS);
+  try {
+    const result = new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", status => resolve(status));
+    });
+    child.stdout.destroy();
+    child.stdin.end(JSON.stringify({ tool_name: "Bash", session_id: SESSION, tool_input: { command: "git push --force" } }));
+    expect(await result).toBe(0);
+    expect(stderr).toBe("");
+  } finally {
+    clearTimeout(timer);
+    child.stdin.destroy();
+    child.kill();
+  }
 });

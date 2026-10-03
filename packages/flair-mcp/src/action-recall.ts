@@ -11,8 +11,7 @@
  * SessionStart refresh, ./action-recall-refresh.ts) and the read side (the
  * hot path, ./action-recall-hook.ts): the trigger grammar and its limits, a
  * restricted Bash argv reader, the path-glob matcher, the cache envelope, and
- * the bounded, redacted rendering. It imports only ./secret-redaction.ts — no
- * client, no key, no network, no filesystem.
+ * the bounded, redacted rendering.
  *
  * EVERY limit below is a build contract (flair#2067 slice 2 build spec).
  */

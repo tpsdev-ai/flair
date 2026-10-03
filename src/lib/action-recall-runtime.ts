@@ -4,7 +4,7 @@
  * Probe the installed command against an isolated cache before accepting it.
  */
 
-import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
@@ -85,14 +85,22 @@ export function actionRecallArtifactForPackage(packageDir: string): string {
 }
 
 /** Locate the installed @tpsdev-ai/flair-mcp package directory. */
-export function resolveFlairMcpPackageDir(fromUrl: string): string | null {
+export function resolveFlairMcpPackageDir(fromUrl: string, env: NodeJS.ProcessEnv = process.env): string | null {
   try {
     const require = createRequire(fromUrl);
     const pkgJson = require.resolve(`${FLAIR_MCP_PACKAGE}/package.json`);
     return dirname(pkgJson);
-  } catch {
-    return null;
-  }
+  } catch {}
+  const cache = env.npm_config_cache ?? env.NPM_CONFIG_CACHE ?? (env.HOME ? join(env.HOME, ".npm") : null);
+  if (!cache || !isAbsolute(cache)) return null;
+  try {
+    const npxDir = join(cache, "_npx");
+    for (const entry of readdirSync(npxDir).sort()) {
+      const packageDir = join(npxDir, entry, "node_modules", FLAIR_MCP_PACKAGE);
+      if (isBuiltActionRecallArtifact(actionRecallArtifactForPackage(packageDir))) return packageDir;
+    }
+  } catch {}
+  return null;
 }
 
 /** Read a package's version from its directory, or null. */
@@ -179,7 +187,7 @@ export function resolveActionRecallRuntime(opts: ResolveOptions): ActionRecallRu
   if (artifactOverride !== undefined) {
     artifactPath = artifactOverride;
   } else {
-    const packageDir = resolveFlairMcpPackageDir(opts.fromUrl);
+    const packageDir = resolveFlairMcpPackageDir(opts.fromUrl, env);
     if (packageDir) {
       const version = packageVersion(packageDir);
       if (version !== null && version !== flairCliVersion()) {
@@ -197,7 +205,7 @@ export function resolveActionRecallRuntime(opts: ResolveOptions): ActionRecallRu
   if (!artifactPath || !isBuiltActionRecallArtifact(artifactPath)) {
     return {
       ok: false,
-      reason: `the action-recall artefact ${artifactPath ?? FLAIR_MCP_PACKAGE} is not a version-matched built hook; rebuild or reinstall ${FLAIR_MCP_PACKAGE} at the same version`,
+      reason: `the action-recall artefact ${artifactPath ?? FLAIR_MCP_PACKAGE} is not a version-matched built hook; run npx -y -p ${FLAIR_MCP_PACKAGE}@${flairCliVersion()} node --version, then retry`,
     };
   }
   const bunPath = resolveBunPath(env);

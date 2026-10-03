@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import { actionRecallHookStatus, hookSettingsPath, installActionRecall } from "../../src/hook-install.ts";
-import { buildActionRecallHookCommand } from "../../src/doctor-client.ts";
-import { resolveActionRecallRuntime } from "../../src/lib/action-recall-runtime.ts";
+import { actionRecallHookStatus, hookSettingsPath, installHook, installActionRecall } from "../../src/hook-install.ts";
+import { buildActionRecallHookCommand, buildSessionStartHookCommand } from "../../src/doctor-client.ts";
+import { probeActionRecallRuntime, resolveActionRecallRuntime } from "../../src/lib/action-recall-runtime.ts";
 import { flairCliVersion } from "../../src/lib/mcp-spec.ts";
 import { createActionRecallRuntime } from "../helpers/action-recall-runtime.ts";
 
@@ -20,7 +20,7 @@ const resolveRuntime = (bunPath = process.execPath, artifactPath = artifact) => 
 function status(bunPath: string, artifactPath: string) {
   const path = hookSettingsPath(home, "claude-code");
   mkdirSync(join(home, ".claude"), { recursive: true });
-  writeFileSync(path, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: buildActionRecallHookCommand(bunPath, artifactPath, "me") }] }] } }));
+  writeFileSync(path, JSON.stringify({ hooks: { SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: buildSessionStartHookCommand("me") }] }], PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: buildActionRecallHookCommand(bunPath, artifactPath, "me") }] }] } }));
   return actionRecallHookStatus(home, "claude-code");
 }
 
@@ -66,7 +66,7 @@ test("the package build stamps a hook that Bun can execute", () => {
   const packageDir = resolve(import.meta.dir, "../../packages/flair-mcp");
   execFileSync(process.execPath, ["run", "build"], { cwd: packageDir, timeout: 15_000, stdio: "pipe" });
   const result = resolveRuntime(process.execPath, join(packageDir, "dist/action-recall-hook.js"));
-  expect(result.ok).toBe(true);
+  expect(result.ok, result.ok ? "" : result.reason).toBe(true);
   if (!result.ok) throw new Error(result.reason);
   const hook = spawnSync(result.runtime.bunPath, [result.runtime.artifactPath], { input: "{}", encoding: "utf8", timeout: 5000, env: { ...process.env, FLAIR_ACTION_RECALL_DIR: home } });
   expect(hook.status).toBe(0);
@@ -99,24 +99,33 @@ for (const decoy of ["version-only runtime", "exit-only artifact", "hung runtime
   }, 15_000);
 }
 
-test("the wrapper discards version text emitted by a runtime decoy", () => {
-  const bunPath = join(home, "bun");
-  writeFileSync(bunPath, "#!/bin/sh\nprintf '1.3.10\\n'\n", { mode: 0o700 });
-  const hook = spawnSync("/bin/sh", ["-c", buildActionRecallHookCommand(bunPath, artifact, "me")], { input: "{}", encoding: "utf8", timeout: 2000, env: { HOME: home, PATH: "/usr/bin:/bin" } });
-  expect(hook.status).toBe(0);
-  expect(hook.stdout).toBe("");
-  expect(hook.stderr).toBe("");
-});
-
 for (const output of ["garbage", '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x","permissionDecision":"allow"}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":7}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x"},"decision":"block"}']) {
-  test(`the wrapper refuses invalid context output: ${output}`, () => {
+  test(`certification refuses invalid context output: ${output}`, () => {
     writeFileSync(artifact, `// flair-action-recall-built@${flairCliVersion()}\nprocess.stdout.write(${JSON.stringify(output)});`);
-    const hook = spawnSync("/bin/sh", ["-c", buildActionRecallHookCommand(process.execPath, artifact, "me")], { input: "{}", encoding: "utf8", timeout: 2000, env: { HOME: home, PATH: "/usr/bin:/bin" } });
-    expect(hook.status).toBe(0);
-    expect(hook.stdout).toBe("");
-    expect(hook.stderr).toBe("");
+    expect(resolveRuntime().ok).toBe(false);
+    expect(status(process.execPath, artifact).installed).toBe(false);
   });
 }
+
+test("standard npx cache layout resolves and installs without an artifact override", () => {
+  const packageDir = join(home, ".npm/_npx/fetched/node_modules/@tpsdev-ai/flair-mcp");
+  mkdirSync(dirname(packageDir), { recursive: true });
+  cpSync(dirname(dirname(artifact)), packageDir, { recursive: true });
+  const result = resolveActionRecallRuntime({ fromUrl: new URL(`file://${home}/cli/dist/cli.js`).href, env: { HOME: home, FLAIR_BUN_PATH: process.execPath } });
+  expect(result.ok, result.ok ? "" : result.reason).toBe(true);
+  if (!result.ok) throw new Error(result.reason);
+  expect(result.runtime.artifactPath).toBe(join(packageDir, "dist/action-recall-hook.js"));
+  installHook({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926" });
+  expect(installActionRecall({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926", runtime: result.runtime }).ok).toBe(true);
+  expect(actionRecallHookStatus(home, "claude-code").installed).toBe(true);
+});
+
+test("an empty standard npx cache refuses by package name with the fetch remedy", () => {
+  const result = resolveActionRecallRuntime({ fromUrl: new URL(`file://${home}/cli/dist/cli.js`).href, env: { HOME: home, FLAIR_BUN_PATH: process.execPath } });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("unexpected runtime");
+  expect(result.reason).toContain(`npx -y -p @tpsdev-ai/flair-mcp@${flairCliVersion()} node --version`);
+});
 
 test("status probes the artifact again after installation", () => {
   const runtime = { bunPath: process.execPath, artifactPath: artifact };
@@ -129,6 +138,11 @@ test("status probes the artifact again after installation", () => {
 
 test("the built CLI names rejected runtime and artifact decoys", () => {
   const cli = resolve(import.meta.dir, "../../dist/cli.js");
+  installHook({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926" });
+  expect(installActionRecall({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926", runtime: { bunPath: process.execPath, artifactPath: artifact } }).ok).toBe(true);
+  const healthy = spawnSync("node", [cli, "hook", "status", "--action-recall"], { encoding: "utf8", timeout: 15_000, env: { HOME: home, USERPROFILE: home, TMPDIR: tmpdir(), PATH: process.env.PATH } });
+  expect(healthy.status).toBe(0);
+  expect(healthy.stdout).toContain("refresh enabled");
   const bunPath = join(home, "bun");
   writeFileSync(bunPath, "#!/bin/sh\nprintf '1.3.10\\n'\n", { mode: 0o700 });
   for (const runtime of [{ bunPath, artifactPath: artifact }, { bunPath: process.execPath, artifactPath: artifact }]) {
@@ -145,3 +159,15 @@ test("the built CLI names rejected runtime and artifact decoys", () => {
     expect(observed.stdout).toContain(artifact);
   }
 }, 60_000);
+
+
+test("the installed command launches Bun only for the hook", () => {
+  const bunPath = join(home, "traced-bun");
+  const calls = join(home, "bun-calls");
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  writeFileSync(bunPath, `#!/bin/sh\nif [ "$1" != --version ]; then printf '%s\\n' "$1" >> ${quote(calls)}; fi\nexec ${quote(process.execPath)} "$@"\n`, { mode: 0o700 });
+  expect(probeActionRecallRuntime({ bunPath, artifactPath: artifact })).toBeNull();
+  const invocations = readFileSync(calls, "utf8").trim().split("\n");
+  expect(invocations.length).toBeGreaterThanOrEqual(2);
+  expect(invocations.every(value => value === artifact)).toBe(true);
+});

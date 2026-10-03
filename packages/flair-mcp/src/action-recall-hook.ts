@@ -14,8 +14,6 @@
  *   - Emits ONLY `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"…"}}`.
  *     Never a permission decision, a question, replacement input or blocking
  *     output.
- *   - On ANY error, missing/corrupt/stale/wrong-mode cache, unsupported input
- *     or tool: ZERO stdout and ZERO stderr, exit 0.
  *   - Never executes or echoes the submitted command; never logs an excerpt.
  *
  * NO NETWORK, NO SIGNING, NO SUBPROCESS: this entry point imports no client,
@@ -23,24 +21,22 @@
  * Stdin and file reads each have a best-effort internal deadline.
  */
 
-import { readStdin, runActionRecall, shouldRunAsMain } from "./action-recall-run.js";
+import { isActionRecallOutput, readStdin, runActionRecall, shouldRunAsMain } from "./action-recall-run.js";
 
 export { runActionRecall };
 
 const importMeta = import.meta as ImportMeta & { main?: boolean };
 if (shouldRunAsMain(importMeta, process.argv[1])) {
   void (async () => {
-    let output = "";
+    process.stdout.on("error", () => process.exit(0));
     try {
-      output = await runActionRecall(await readStdin());
-    } catch {
-      output = "";
-    }
-    if (output) {
-      await new Promise<void>((resolveWrite) => {
-        process.stdout.write(output, () => resolveWrite());
-      });
-    }
+      const output = await runActionRecall(await readStdin());
+      if (isActionRecallOutput(output)) {
+        await new Promise<void>((resolveWrite) => {
+          process.stdout.write(output, () => resolveWrite());
+        });
+      }
+    } catch {}
     process.exit(0);
   })();
 }

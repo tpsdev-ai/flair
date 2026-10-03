@@ -89,12 +89,6 @@ async function isPrivateDir(dir: string): Promise<boolean> {
   return true;
 }
 
-/**
- * Read a regular file of at most `maxBytes` with no symlink component, an
- * owner-only mode, a single link and a stable size. Descriptor errors may throw.
- * The open is no-follow and non-blocking; the opened
- * descriptor is re-checked, and a file that grows during the read is refused.
- */
 export async function readSecureFile(filePath: string, maxBytes: number): Promise<SecureRead> {
   if (!(await noSymlinkComponents(filePath))) return { ok: false, reason: "symlink-component" };
   let handle;

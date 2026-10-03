@@ -45,6 +45,7 @@ export const REFRESH_CANDIDATES = 256;
 export const REFRESH_SELECT = [
   "id",
   "agentId",
+  "type",
   "content",
   "createdAt",
   "updatedAt",
@@ -94,6 +95,7 @@ export interface RefreshResult {
 interface MemoryRow {
   id?: unknown;
   agentId?: unknown;
+  type?: unknown;
   content?: unknown;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -110,7 +112,7 @@ interface MemoryRow {
 /** Harper collection path for the bounded own-lesson read. */
 export function memoryRecallPath(agentId: string): string {
   const select = REFRESH_SELECT.join(",");
-  return `/Memory?agentId=${encodeURIComponent(agentId)}&select(${select})&sort(-createdAt)&limit(0,${REFRESH_CANDIDATES})`;
+  return `/Memory?agentId=${encodeURIComponent(agentId)}&type=lesson&select(${select})&sort(-createdAt)&limit(0,${REFRESH_CANDIDATES})`;
 }
 
 function parseStamp(value: unknown): number | null {
@@ -119,12 +121,8 @@ function parseStamp(value: unknown): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-/**
- * A row is eligible when it is live: not archived, not expired, no ended or
- * future validity window, and not carrying safety flags. Its content must be a
- * string within the skip bound.
- */
 export function rowEligible(row: MemoryRow, now: number): boolean {
+  if (row.type !== "lesson") return false;
   if (row.archived === true) return false;
   if (typeof row.content !== "string") return false;
   if (utf8Bytes(row.content) > CONTENT_SKIP_BYTES) return false;

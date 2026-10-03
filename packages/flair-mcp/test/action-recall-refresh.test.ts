@@ -45,6 +45,7 @@ function row(id: string) {
   return {
     id,
     agentId: AGENT,
+    type: "lesson",
     content: `lesson ${id}: force push the release branch after the lane passes`,
     createdAt: "2026-10-01T00:00:00.000Z",
     metadata: JSON.stringify({ flairActionRecall: { v: 1, triggers: [trigger()] } }),
@@ -123,6 +124,8 @@ describe("refresh reads and publishes", () => {
     const memory = client.calls[1];
     expect(memory.path).toContain(`sort(-createdAt)&limit(0,${REFRESH_CANDIDATES})`);
     expect(memory.path).toContain(encodeURIComponent(AGENT));
+    expect(memory.path).toContain("&type=lesson&");
+    expect(memory.path).toContain("agentId,type,content");
     for (const call of client.calls) {
       expect(call.maxResponseBytes).toBe(REFRESH_MAX_RESPONSE_BYTES);
       expect(call.signal).toBeInstanceOf(AbortSignal);
@@ -141,7 +144,7 @@ describe("refresh reads and publishes", () => {
   });
 
   test("an own row without triggers, a foreign row and an ineligible row are excluded", async () => {
-    const untriggered = { id: "no-trig", agentId: AGENT, content: "x", metadata: JSON.stringify({ other: 1 }) };
+    const untriggered = { id: "no-trig", agentId: AGENT, type: "lesson", content: "x", metadata: JSON.stringify({ other: 1 }) };
     const foreign = { ...row("foreign"), agentId: "other" };
     const archived = { ...row("archived"), archived: true };
     const live = row("live");
@@ -149,6 +152,29 @@ describe("refresh reads and publishes", () => {
     const result = await refreshActionRecallCache(client, baseOpts({ root, bootstrapResult: { scope: { agentId: AGENT, isAdmin: false } } }));
     expect(result.ok).toBe(true);
     expect(result.entries).toBe(1);
+  });
+
+  test("independent eligibility recheck excludes triggered non-lessons", async () => {
+    const records = ["session", "fact", undefined].map((type, index) => ({ ...row(`non-lesson-${index}`), type }));
+    const client = fakeClient(call => call.path === "/Instance" ? [{ id: INSTANCE }] : [...records, row("lesson")]);
+    const result = await refreshActionRecallCache(client, baseOpts({ bootstrapResult: { scope: { agentId: AGENT, isAdmin: false } } }));
+    expect(result.entries).toBe(1);
+    const output = await runActionRecall(JSON.stringify({ tool_name: "Bash", session_id: SESSION, tool_input: { command: "git push --force" } }), { root, now: NOW, env: { FLAIR_AGENT_ID: AGENT, FLAIR_URL: URL } });
+    expect(output).toContain("id: lesson");
+    expect(output).not.toContain("non-lesson");
+  });
+
+  test("newer triggered sessions cannot displace a lesson from the server candidate window", async () => {
+    const sessions = Array.from({ length: REFRESH_CANDIDATES + 1 }, (_, index) => ({ ...row(`session-${index}`), type: "session" }));
+    const client = fakeClient(call => {
+      if (call.path === "/Instance") return [{ id: INSTANCE }];
+      const records = [...sessions, row("older-lesson")];
+      return (call.path.includes("&type=lesson&") ? records.filter(record => record.type === "lesson") : records).slice(0, REFRESH_CANDIDATES);
+    });
+    const result = await refreshActionRecallCache(client, baseOpts({ bootstrapResult: { scope: { agentId: AGENT, isAdmin: false } } }));
+    expect(result.entries).toBe(1);
+    const output = await runActionRecall(JSON.stringify({ tool_name: "Bash", session_id: SESSION, tool_input: { command: "git push --force" } }), { root, now: NOW, env: { FLAIR_AGENT_ID: AGENT, FLAIR_URL: URL } });
+    expect(output).toContain("older-lesson");
   });
 
   test("refuses unless exactly one instance identity is returned", async () => {

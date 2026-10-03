@@ -234,9 +234,9 @@ export function buildActionRecallHookCommand(
     ["bun path", bunPath],
     ["artefact path", artifactPath],
   ] as const) {
-    if (!isHookCommandValueSafe(value)) {
+    if (!(label === "artefact path" ? /^[A-Za-z0-9._:@/-]+$/.test(value) : isHookCommandValueSafe(value))) {
       throw new Error(
-        `${label} '${value}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+        `${label} '${value}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -; artefact paths also allow @)`,
       );
     }
   }
@@ -247,12 +247,12 @@ export function buildActionRecallHookCommand(
   }
   const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
   const invocation = `${env} ${bunPath} ${artifactPath}`;
-  return String.raw`sh -c 'out=$(${invocation} 2>/dev/null) && [ -n "$out" ] && [ "${"$"}{#out}" -le 4096 ] && ok=$(${bunPath} -e "const o=JSON.parse(process.argv[1]); const h=o?.hookSpecificOutput; if(Buffer.byteLength(process.argv[1])<=4096 && Object.keys(o).length===1 && h && Object.keys(h).length===2 && h.hookEventName===\"PreToolUse\" && typeof h.additionalContext===\"string\") process.stdout.write(\"valid\");" "$out" 2>/dev/null) && [ "$ok" = valid ] && printf %s "$out" || true'`;
+  return String.raw`sh -c 'out=$(${invocation} 2>/dev/null) && [ -n "$out" ] && [ "${"$"}{#out}" -le 4096 ] && printf %s "$out" || true'`;
 }
 
 /** Match the artifact marker in commands without npx. */
 export function isFlairActionRecallCommand(command: string): boolean {
-  return typeof command === "string" && command.includes(ACTION_RECALL_HOOK_MARKER) && !command.includes("npx");
+  return typeof command === "string" && command.includes(ACTION_RECALL_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
 }
 
 /**
