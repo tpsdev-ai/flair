@@ -32,8 +32,11 @@ beforeEach(() => {
       const url = new URL(req.url);
       requests.push({ path: url.pathname, auth: req.headers.get("authorization") ?? "" });
       if (req.method === "POST") {
-        const body = await req.json().catch(() => ({})) as { operation?: string };
-        if (body.operation === "describe_table") return Response.json({ record_count: 0 });
+        const body = await req.json().catch(() => ({})) as { operation?: string; exact_count?: boolean };
+        if (body.operation === "describe_table") {
+          if (body.exact_count !== true) return Response.json({ error: "exact_count must be true" }, { status: 400 });
+          return Response.json({ record_count: 0 });
+        }
         return Response.json([]);
       }
       return Response.json([]);

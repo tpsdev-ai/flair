@@ -49,7 +49,10 @@ function jsonRes(res: ServerResponse, status: number, data: unknown) {
 /** Answer a backup operations-API row-count request (flair#2228). */
 function opsRes(body: string, res: ServerResponse) {
   const b = JSON.parse(body);
-  if (b.operation === "describe_table") return jsonRes(res, 200, { record_count: b.table === "Agent" ? AGENTS.length : 0 });
+  if (b.operation === "describe_table") {
+    if (b.exact_count !== true) return jsonRes(res, 400, { error: "exact_count must be true" });
+    return jsonRes(res, 200, { record_count: b.table === "Agent" ? AGENTS.length : 0 });
+  }
   if (b.operation === "search_by_value") return jsonRes(res, 200, b.table === "Agent" ? AGENTS : []);
   jsonRes(res, 404, { error: "not found" });
 }

@@ -79,6 +79,7 @@ globalThis.fetch = async (url, init) => {
   requests.targets.push(u.origin);
   if (u.origin === ${JSON.stringify((config.opsTargetFlag ?? config.opsTarget)?.replace(/\/$/, "") ?? (config.port ? `http://127.0.0.1:${Number(config.port)-1}` : config.local ? "http://127.0.0.1:19925" : opsOrigin))}) {
     const body = JSON.parse(String(init.body));
+    if (body.operation === "describe_table" && body.exact_count !== true) throw new Error("exact_count must be true");
     const key = body.operation === "describe_table"
       ? "describe_table:" + body.table
       : "search_by_value:" + body.table + ":" + body.search_value;
@@ -146,7 +147,7 @@ function expectNoPublication(result: Awaited<ReturnType<typeof runBackup>>) {
 
 describe("backup verifies received rows against an independent server count (flair#2228)", () => {
   test("a shortened Memory array is fatal, naming the agent, collection and both counts", async () => {
-    // Data API returns one of flint's two Memory rows; the ops count still reports two.
+    // Whole-table count: four Memory rows; flint inventory: two.
     const result = await runBackup({
       rest: { "/Memory/?agentId=flint": { body: memories.filter(m => m.agentId === "flint").slice(0, 1) } },
     });
@@ -188,7 +189,7 @@ describe("backup verifies received rows against an independent server count (fla
     expect(result.stderr).toContain("record_count");
   });
 
-  test("a non-array count response refuses publication", async () => {
+  test("a non-array inventory response refuses publication", async () => {
     const result = await runBackup({ ops: { "search_by_value:Memory:*": { body: { not: "rows" } } } });
     expectNoPublication(result);
     expect(result.stderr).toContain("Memory inventory");

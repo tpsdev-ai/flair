@@ -78,6 +78,7 @@ globalThis.fetch = async (url, init) => {
   if (u.origin === "http://ops.invalid") {
     const body = JSON.parse(String(init.body));
     if (body.operation === "describe_table") {
+      if (body.exact_count !== true) throw new Error("exact_count must be true");
       const count = body.table === "Agent" ? opsAgentCount : opsAgents.length ? Object.values(body.table === "Memory" ? memByAgent : soulByAgent).flat().length : 0;
       return Response.json({ record_count: count });
     }
