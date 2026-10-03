@@ -55,6 +55,7 @@ import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
+import { refuseReservedSeedWrite, reservedSeedWriteDenial, writeTargetIds } from "./seed-reservation.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -655,7 +656,7 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  * closeSupersededIfNeeded) already treats it as unset with no further
  * changes needed.
  */
-async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict): Promise<Response | null> {
+async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict, ctx: any): Promise<Response | null> {
   if (content.supersedes === null) {
     delete content.supersedes;
   }
@@ -664,6 +665,10 @@ async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdi
       status: 400, headers: { "Content-Type": "application/json" },
     });
   }
+  // flair#2141 S2: superseding closes the target row, so a reserved seed id
+  // needs operator authority here too (resources/seed-reservation.ts).
+  const seedDenial = reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth);
+  if (seedDenial) return seedDenial;
   if (content.supersedes && auth.kind === "agent" && !auth.isAdmin) {
     const target = await (databases as any).flair.Memory.get(content.supersedes).catch(() => null);
     if (target && target.agentId !== auth.agentId) {
@@ -933,6 +938,10 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // Rate limiting — use authenticated agent ID, not client-supplied body field
@@ -1103,7 +1112,7 @@ export class Memory extends (databases as any).flair.Memory {
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with put() — see validateAndAuthorizeSupersedes doc).
-    const supersedesError = await validateAndAuthorizeSupersedes(content, auth);
+    const supersedesError = await validateAndAuthorizeSupersedes(content, auth, ctx);
     if (supersedesError) return supersedesError;
 
     // Temporal validity: validFrom defaults to now, validTo left null for active facts.
@@ -1282,6 +1291,10 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   async patch(content: any, query?: any) {
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // flair#1383 — patch() routes past put(), so it needs its own refuse.
@@ -1407,6 +1420,10 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async put(content: any) {
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
@@ -1658,7 +1675,7 @@ export class Memory extends (databases as any).flair.Memory {
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
     // this too: it's the only HTTP-reachable create path).
-    const supersedesError = await validateAndAuthorizeSupersedes(content, auth);
+    const supersedesError = await validateAndAuthorizeSupersedes(content, auth, ctx);
     if (supersedesError) return supersedesError;
     if (content.supersedes && !content.validFrom) {
       content.validFrom = content.createdAt;
@@ -1845,6 +1862,12 @@ export class Memory extends (databases as any).flair.Memory {
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = reservedSeedWriteDenial(
+      "Memory", [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], ctx, auth,
+    );
+    if (seedDenial) return seedDenial;
     // Read stored ownership, not the read-scoped get() response. Enforce here
     // as well as middleware so MCP/in-process callers have the same policy.
     const record = await super.get(id);

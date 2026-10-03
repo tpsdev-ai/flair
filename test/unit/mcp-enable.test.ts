@@ -29,7 +29,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, hostname as osHostname } from "node:os";
 import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 import yaml from "js-yaml";
@@ -97,7 +97,6 @@ describe("isLocalOrigin / checkLocalOriginRefusal", () => {
     "http://172.31.255.255:9926",
     "http://192.168.1.1:9926",
     "http://169.254.1.1:9926",
-    "not a url at all",
   ])("%s is local", (url) => {
     expect(isLocalOrigin(url)).toBe(true);
   });
@@ -111,11 +110,12 @@ describe("isLocalOrigin / checkLocalOriginRefusal", () => {
     expect(isLocalOrigin(url)).toBe(false);
   });
 
-  test("checkLocalOriginRefusal returns the exact addendum message for a local origin", () => {
+  test("checkLocalOriginRefusal names a local hostname", () => {
     const result = checkLocalOriginRefusal("http://localhost:9926");
     expect(result).toEqual({
       refused: true,
-      message: "claude.ai connectors need a public HTTPS origin; this instance is local. See the hosted-shape docs.",
+      reason: "local",
+      message: "Issuer refused: local hostname or loopback, unspecified, reserved 0.0.0.0/8, private or link-local IP literal.",
     });
   });
 
@@ -802,7 +802,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true }, { fetchImpl });
     expect(result.ok).toBe(true);
     expect(mappingUrls.length).toBe(4);
-    expect(mappingUrls.every((u) => u === `https://flair.example.com:${HOSTED_OPS_PORT}/`)).toBe(true);
+    expect(mappingUrls.every((u) => u === `http://127.0.0.1:${HOSTED_OPS_PORT}/`)).toBe(true);
   });
 });
 
@@ -987,7 +987,7 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sys
   let _sysInfoCallCount = 0;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const urlStr = String(url);
-    if (urlStr === `${ISSUER}/.well-known/oauth-authorization-server`) {
+    if (new URL(urlStr).pathname === "/.well-known/oauth-authorization-server") {
       calls.push("self-verify");
       const status = overrides.verifyStatus ?? 200;
       const body = overrides.verifyBody ?? CIMD_METADATA;
@@ -1011,8 +1011,11 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sys
   return { fetchImpl, calls };
 }
 
+const TARGET = "http://127.0.0.1:9926";
+
 const BASE_PARAMS = {
-  instance: ISSUER,
+  instance: TARGET,
+  issuer: ISSUER,
   idpClientId: "client-id",
   idpClientSecret: "client-secret",
   idpSubject: "octocat",
@@ -1031,11 +1034,11 @@ describe("enableMcp — local-origin refusal", () => {
   test("refuses immediately with zero fetch calls", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const result = await enableMcp(
-      { ...BASE_PARAMS, ...tempPaths(), instance: "http://localhost:9926" },
+      { ...BASE_PARAMS, ...tempPaths(), instance: "http://localhost:9926", issuer: undefined },
       { fetchImpl },
     );
     expect(result.ok).toBe(false);
-    expect(result.refused?.message).toContain("claude.ai connectors need a public HTTPS origin");
+    expect(result.refused?.message).toContain("Issuer refused: local hostname");
     expect(result.failedStep).toBe("local-origin-check");
     expect(calls).toHaveLength(0);
   });
@@ -1107,8 +1110,8 @@ describe("enableMcp — the issuer must be an http(s) origin", () => {
           { fetchImpl },
         );
         expect(result.ok).toBe(false);
-        expect(result.failedStep).toBe("issuer-origin-check");
-        expect(result.refused?.message).toContain("must be an absolute http(s) origin");
+        expect(result.failedStep).toBe(["", "flair.example.com"].includes(badIssuer) ? "local-origin-check" : "issuer-origin-check");
+        expect(result.refused?.message).toContain(["", "flair.example.com"].includes(badIssuer) ? "Issuer refused: invalid URL." : "must be an absolute http(s) origin");
         expect(calls).toHaveLength(0);
         expect(existsSync(paths.secretsStagingPath)).toBe(false);
         expect(readdirSync(dir).sort()).toEqual(listingBefore);
@@ -1151,7 +1154,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     // Identity mapping DOES run before the gate.
     expect(calls).toContain("ops:search_by_value");
     expect(result.steps.at(-1)?.detail).toBe(
-      `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${ISSUER}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
+      `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${TARGET}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
     );
   });
 
@@ -1163,7 +1166,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
       { fetchImpl, confirmPrompt: async (message) => { prompt = message; return false; } },
     );
     expect(result.ok).toBe(false);
-    expect(prompt).toBe(`Have you applied the 5 vars staged at ${join(dir, "secrets.env")} to ${ISSUER}'s environment?`);
+    expect(prompt).toBe(`Have you applied the 5 vars staged at ${join(dir, "secrets.env")} to ${TARGET}'s environment?`);
   });
 
   test("pushed and read-back Fabric secrets, without confirmation: asks for a restart and never calls restart", async () => {
@@ -1194,11 +1197,11 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     expect(result.failedStep).toBe("secrets-provisioning");
     expect(setNames.length).toBeGreaterThan(0);
     expect(readBackNames).toEqual(setNames);
-    expect(prompt).toContain(`secrets were pushed to ${ISSUER} and read back`);
+    expect(prompt).toContain(`secrets were pushed to ${TARGET} and read back`);
     expect(prompt).toContain("loaded them into the instance's process environment");
     expect(prompt).not.toContain("staged");
     const detail = result.steps.at(-1)!.detail;
-    expect(detail).toContain(`the secrets were pushed to ${ISSUER} and read back; load them into the instance's process environment`);
+    expect(detail).toContain(`the secrets were pushed to ${TARGET} and read back; load them into the instance's process environment`);
     expect(detail).not.toContain("staged secrets");
     expect(calls).not.toContain("ops:restart");
   });
@@ -1317,7 +1320,7 @@ describe("enableMcp — full happy path", () => {
 describe("enableMcp — self-verify failure names the step to re-run", () => {
   test("standalone refuses target metadata redirected to a valid public issuer", async () => {
     const publicIssuer = "https://other.public.example";
-    const targetUrl = `${ISSUER}/.well-known/oauth-authorization-server`;
+    const targetUrl = `${TARGET}/.well-known/oauth-authorization-server`;
     const publicUrl = `${publicIssuer}/.well-known/oauth-authorization-server`;
     const publicMetadata = {
       ...CIMD_METADATA,
@@ -2247,6 +2250,85 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(result.issuer).toBe(FABRIC_ISSUER);
     expect(result.resource).toBe(`${FABRIC_ISSUER}/mcp`);
     expect(result.secretsMechanism).toBe("fabric-env-secrets");
+  });
+});
+
+describe("enableMcp — URL target classification (flair#2189)", () => {
+  const CUSTOM = "https://mcp.acme.example";
+  const customParams = () => ({
+    ...BASE_PARAMS,
+    ...tempPaths(),
+    instance: CUSTOM,
+    issuer: CUSTOM,
+    confirmSecretsApplied: true,
+  });
+
+  test("a remote target reporting this machine's hostname is refused before any change", async () => {
+    const calls: string[] = [];
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      calls.push(`ops:${body.operation ?? String(url)}`);
+      if (body.operation === "system_information") {
+        return new Response(
+          JSON.stringify({ system: { hostname: osHostname() }, harperdb_processes: { core: [{ pid: 4242 }] } }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+    }) as typeof fetch;
+
+    const configBefore = readFileSync(join(dir, "config.yaml"), "utf-8");
+    const result = await enableMcp(customParams(), { fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("target-shape-check");
+    expect(result.refused?.message).toContain("--fabric");
+    expect(result.refused?.message).toContain(CUSTOM);
+    expect(calls).toEqual([]);
+    expect(calls).not.toContain("ops:restart");
+    expect(calls.some((c) => c.includes("get_secrets_public_key") || c.includes("set_secret"))).toBe(false);
+    expect(readFileSync(join(dir, "config.yaml"), "utf-8")).toBe(configBefore);
+    expect(existsSync(join(dir, "signing-key.pem"))).toBe(false);
+    expect(existsSync(join(dir, "secrets.env"))).toBe(false);
+  });
+
+  test("the same target with --fabric takes the Fabric branch", async () => {
+    const meta = {
+      issuer: CUSTOM,
+      token_endpoint: `${CUSTOM}/oauth/mcp/token`,
+      client_id_metadata_document_supported: true,
+      token_endpoint_auth_methods_supported: ["none"],
+    };
+    const calls: string[] = [];
+    const creds = credentialTable();
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr === `${CUSTOM}/.well-known/oauth-authorization-server`) {
+        calls.push("metadata");
+        return new Response(JSON.stringify(meta), { status: 200 });
+      }
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      calls.push(`ops:${body.operation ?? urlStr}`);
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      const credRes = creds.handle(body);
+      if (credRes) return credRes;
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await enableMcp({ ...customParams(), fabric: true }, { fetchImpl });
+
+    expect(result.ok, JSON.stringify(result.steps)).toBe(true);
+    expect(result.steps.map((s) => s.step).slice(-2)).toEqual(["fabric-operator-deploy", "self-verify"]);
+    expect(calls).not.toContain("ops:restart");
+    expect(result.steps.some((s) => s.step === "target-shape-check")).toBe(false);
+  });
+
+  test.each(["http://127.0.0.1:9926", "http://127.23.45.67:9926", "http://localhost:9926", "http://[::1]:9926"])("loopback target %s with a public issuer takes the standalone branch", async (instance) => {
+    const { fetchImpl, calls } = fullMockFetch();
+    const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), instance, confirmSecretsApplied: true }, { fetchImpl });
+    expect(calls).toContain("ops:restart");
+    expect(result.ok).toBe(true);
+    expect(result.steps.some((s) => s.step === "target-shape-check")).toBe(false);
   });
 });
 

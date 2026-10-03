@@ -249,10 +249,13 @@ jobs:
     # margin, or a hang in a LATE case is cancelled anonymously (the same class
     # one level up from the case budgets):
     #   per-case budgets: 660 + 760 + 740 + 450 + 420 = 3030 s
+    #   using-flair-seed-2141 beforeAll + case budgets: 1260 s
+    #   using-flair-seed-reserved-2141 beforeAll + case budgets: 960 s
     #   setup allowance (bun install + bun run build + build:cli +
     #     check-darwin-gated-tests): ~240 s
-    #   3030 + 240 = 3270 s; rounded up with margin to 60 min (3600 s)
-    timeout-minutes: 60
+    #   embedding-model fetch: at most 180 s (its step timeout)
+    #   3030 + 1260 + 960 + 240 + 180 = 5670 s; rounded up with margin to 100 min (6000 s)
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -273,6 +276,19 @@ jobs:
         run: bun run build && bun run build:cli
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
+      # flair#2141 S2 — `flair init` seeds a skill row, and the instance embeds
+      # it as it writes it, so the init case below is this job's first embed.
+      # Test instances read FLAIR_MODELS_DIR=<repo>/models. Without a model
+      # there, they may download it during embedding, delaying the init case.
+      # Same pinned fetch as other lanes that embed (flair#715).
+      # After the unit step, so <cwd>/models is absent
+      # while the darwin-gated unit tests run.
+      - name: Pre-download embedding model
+        # Bounded so a stalled download cannot spend the case budgets above.
+        timeout-minutes: 3
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      - name: using-flair seed acceptance (flair#2141)
+        run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
       - name: Real-launchd doctor --fix integration (flair#1581)
         run: bun test test/integration/doctor-fix-launchd-darwin.test.ts
 

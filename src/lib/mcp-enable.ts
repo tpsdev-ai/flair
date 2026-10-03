@@ -138,6 +138,7 @@
  *     expansion.
  */
 
+import { isLoopbackUrl } from "../component-env.js";
 import { probeSecretsCapability, pushSecrets, PROCESS_ENV_TIER } from "./secrets-push.js";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync, realpathSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
@@ -161,43 +162,47 @@ export const REQUIRED_ACCESS_TOKEN_TTL = 900;
 
 // ─── Local-origin detection (scenario addendum, binding) ───────────────────
 
-const LOCAL_ORIGIN_REFUSAL =
-  "claude.ai connectors need a public HTTPS origin; this instance is local. See the hosted-shape docs.";
+function isLocalIpv4(a: number, b: number): boolean {
+  return a === 0 || a === 10 || a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) || (a === 169 && b === 254);
+}
 
-/**
- * Is `url`'s host a local/private origin claude.ai's servers could never
- * dial into? Covers localhost, loopback, RFC1918 private ranges, link-local,
- * and `.local` mDNS. An unparseable URL is treated as local (refuse rather
- * than proceed against an origin we can't even parse).
- */
 export function isLocalOrigin(url: string): boolean {
   let hostname: string;
   try {
-    hostname = new URL(url).hostname.toLowerCase();
+    hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
   } catch {
-    return true;
+    return false;
   }
   if (hostname === "localhost" || hostname.endsWith(".localhost")) return true;
-  // WHATWG URL keeps IPv6 hosts bracketed in `.hostname` (e.g. "[::1]").
-  if (hostname === "::1" || hostname === "[::1]") return true;
   if (hostname.endsWith(".local")) return true;
-  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const a = Number(ipv4[1]);
-    const b = Number(ipv4[2]);
-    if (a === 127) return true; // loopback
-    if (a === 10) return true; // RFC1918
-    if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
-    if (a === 192 && b === 168) return true; // RFC1918
-    if (a === 169 && b === 254) return true; // link-local
-    if (a === 0) return true;
+  if (hostname.startsWith("[")) {
+    if (hostname === "[::]" || hostname === "[::1]") return true;
+    const first = parseInt(hostname.slice(1).split(":")[0] || "0", 16);
+    if ((first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80) return true;
+    const mapped = hostname.match(/^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/);
+    if (mapped) {
+      const high = parseInt(mapped[1], 16);
+      return isLocalIpv4(high >>> 8, high & 0xff);
+    }
+    return false;
   }
-  return false;
+  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return ipv4 !== null && isLocalIpv4(Number(ipv4[1]), Number(ipv4[2]));
 }
 
-/** Structural refusal check + the exact operator-facing message (scenario addendum). */
-export function checkLocalOriginRefusal(url: string): { refused: true; message: string } | { refused: false } {
-  if (isLocalOrigin(url)) return { refused: true, message: LOCAL_ORIGIN_REFUSAL };
+export function checkLocalOriginRefusal(url: string):
+  { refused: true; reason: "invalid" | "local"; message: string } | { refused: false } {
+  try {
+    if (!new URL(url).hostname) throw new Error("missing host");
+  } catch {
+    return { refused: true, reason: "invalid", message: "Issuer refused: invalid URL." };
+  }
+  if (isLocalOrigin(url)) return {
+    refused: true, reason: "local",
+    message: "Issuer refused: local hostname or loopback, unspecified, reserved 0.0.0.0/8, private or link-local IP literal.",
+  };
   return { refused: false };
 }
 
@@ -219,9 +224,6 @@ export function issuerOriginRefusal(issuer: string): string | null {
 
 // ─── Fabric-shape detection (secrets-mechanism default) ────────────────────
 
-/** Is this a Harper Fabric-hosted origin? (`*.harperfabric.com`.) Used only
- *  to pick the secrets-provisioning mechanism's DEFAULT — always overridable
- *  via `--secrets-mechanism`. */
 export function isFabricOrigin(url: string): boolean {
   try {
     return new URL(url).hostname.toLowerCase().endsWith(".harperfabric.com");
@@ -230,44 +232,19 @@ export function isFabricOrigin(url: string): boolean {
   }
 }
 
+export function isFabricTarget(instanceUrl: string, fabric = false): boolean {
+  return fabric === true || isFabricOrigin(instanceUrl);
+}
+
+export function fabricLoopbackRefusal(instanceUrl: string, fabric = false): string | undefined {
+  if (fabric && isLoopbackUrl(instanceUrl)) return "--fabric cannot be used with a loopback or unspecified target. Remove --fabric.";
+}
+
 export type SecretsMechanism = "fabric-env-secrets" | "env-file";
 
-/**
- * Which secrets-delivery mechanism should `enable` use? The remote path is
- * primary per the scenario addendum: a recognized Fabric origin defaults to
- * `fabric-env-secrets` (Harper's encrypted env-secrets, 5.2-alpha as of this
- * writing — see the module header on why this is a DOCUMENTED procedure, not
- * an automated push: no confirmed ops-API operation for it exists in the
- * installed 5.1.17 SDK). Anything else defaults to `env-file` — the
- * documented, universally-supported fallback. Always overridable.
- */
-/**
- * ── The hostname no longer selects the mechanism (flair#1094) ───────────────
- *
- * This used to be `isFabricOrigin(url) ? "fabric-env-secrets" : "env-file"`, and
- * that was wrong in BOTH directions on the day it was replaced:
- *
- *   - `tps.dtrt.harperfabric.com` runs Harper 5.1.26 and has no secrets
- *     operations at all — measured; `set_secret` answers "Operation 'set_secret'
- *     not found", identical to an invented operation — and was selected for the
- *     automated mechanism purely because of its name.
- *   - a self-hosted Harper 5.2 with the Pro env-secrets component is fully
- *     capable and was sent down the manual Studio path for not matching.
- *
- * A hostname is not a capability, and neither is a version — the write
- * operations and the Pro decryptor that makes a `processEnv` secret reach the
- * process ship separately. `probeSecretsCapability` asks the target instead, and
- * the answer decides at provisioning time.
- *
- * What remains here is the STAGING FILE's flavour of instructions, which is
- * genuinely about where the operator will paste if we end up falling back.
- * Fabric operators paste into Studio; everyone else edits a unit file. That is a
- * UI fact about a human, not a claim about the server, so a hostname is a
- * reasonable signal for it and a wrong guess costs only slightly-off prose.
- */
-export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMechanism): SecretsMechanism {
+export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMechanism, fabric = false): SecretsMechanism {
   if (override) return override;
-  return isFabricOrigin(instanceUrl) ? "fabric-env-secrets" : "env-file";
+  return isFabricTarget(instanceUrl, fabric) ? "fabric-env-secrets" : "env-file";
 }
 
 // ─── --cimd-allowed-hosts (flair#2113) ───────────────────────────────────────
@@ -340,13 +317,8 @@ export function validateCimdAllowedHosts(entries: readonly string[]): string[] {
   return hosts;
 }
 
-/**
- * The refusal for a Fabric target, else null. `enable` writes a config.yaml
- * only on its non-Fabric branch, and this uses the same `isFabricOrigin` test
- * that picks that branch.
- */
-export function cimdAllowedHostsShapeRefusal(instanceUrl: string): string | null {
-  if (!isFabricOrigin(instanceUrl)) return null;
+export function cimdAllowedHostsShapeRefusal(instanceUrl: string, fabric = false): string | null {
+  if (!isFabricTarget(instanceUrl, fabric)) return null;
   return (
     `--cimd-allowed-hosts is refused for a Fabric instance (${new URL(instanceUrl).hostname}): ` +
     `the component reads ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} from the @harperfast/oauth block of the config.yaml ` +
@@ -360,7 +332,7 @@ export function cimdAllowedHostsShapeRefusal(instanceUrl: string): string | null
  * `{ hosts }` when it is valid for this target, `{ error }` otherwise. An
  * explicit empty value is an error, never "absent".
  */
-export function cimdAllowedHostsFromFlag(raw: unknown, instanceUrl: string): { hosts?: string[]; error?: string } {
+export function cimdAllowedHostsFromFlag(raw: unknown, instanceUrl: string, fabric = false): { hosts?: string[]; error?: string } {
   if (raw === undefined) return {};
   let hosts: string[];
   try {
@@ -368,7 +340,7 @@ export function cimdAllowedHostsFromFlag(raw: unknown, instanceUrl: string): { h
   } catch (err: any) {
     return { error: err?.message ?? String(err) };
   }
-  const refusal = cimdAllowedHostsShapeRefusal(instanceUrl);
+  const refusal = cimdAllowedHostsShapeRefusal(instanceUrl, fabric);
   return refusal ? { error: refusal } : { hosts };
 }
 
@@ -1015,17 +987,16 @@ export interface SecretsProvisioningResult {
 export function provisionSecrets(
   instanceUrl: string,
   bundle: Record<string, string>,
-  opts: { mechanism?: SecretsMechanism; stagingPath?: string } = {},
+  opts: { mechanism?: SecretsMechanism; stagingPath?: string; fabric?: boolean } = {},
 ): SecretsProvisioningResult {
-  const mechanism = selectSecretsMechanism(instanceUrl, opts.mechanism);
+  const mechanism = selectSecretsMechanism(instanceUrl, opts.mechanism, opts.fabric);
   const path = opts.stagingPath ?? defaultSecretsStagingPath(instanceUrl);
   writeSecretsStagingFile(path, bundle);
   const varNames = Object.keys(bundle);
 
   const instructions =
     mechanism === "fabric-env-secrets"
-      ? `Fabric env-secrets (enc:v1) push is alpha-only as of this writing — no confirmed ops-API operation exists in the installed SDK to automate it. ` +
-        `Apply the ${varNames.length} vars staged at ${path} via Fabric Studio → Cluster Settings → Environment, then re-run with --confirm-secrets-applied.`
+      ? `Apply the ${varNames.length} vars staged at ${path} via Fabric Studio → Cluster Settings → Environment, then re-run with --confirm-secrets-applied.`
       : `Apply the ${varNames.length} vars staged at ${path} to the target instance's process environment (systemd/launchd unit, or your process manager), then re-run with --confirm-secrets-applied.`;
 
   return { mechanism, path, varNames, instructions };
@@ -1158,6 +1129,13 @@ function canonicalHttpOrigin(value: unknown): URL | null {
     // A malformed URL is not an ops target.
   }
   return null;
+}
+
+export function targetOriginRefusal(instance: string): string | undefined {
+  if (canonicalHttpOrigin(instance)) return;
+  const origin = showOpsTarget(instance);
+  return "Target must be a canonical http:// or https:// origin, optionally followed by /." +
+    (canonicalHttpOrigin(origin) ? ` Use ${origin}.` : "");
 }
 
 /** Resolve the ops target, or throw naming the field, its safe display and the
@@ -1827,6 +1805,7 @@ export async function captureBootDiscriminator(
 
 export type EnableStepName =
   | "local-origin-check"
+  | "target-shape-check"
   | "issuer-origin-check"
   | "cimd-allowed-hosts"
   | "config-block"
@@ -1847,8 +1826,6 @@ export interface EnableStepResult {
 }
 
 export interface EnableMcpParams {
-  /** Ops-API / restart target — the operator's machine talks TO this remote
-   *  instance. Defaults to FLAIR_URL at the CLI layer. */
   instance: string;
   /** Public origin claude.ai will use; defaults to `instance`. */
   issuer?: string;
@@ -1881,6 +1858,7 @@ export interface EnableMcpParams {
    *  environment. Required (or an interactive `prompt` confirmation) before
    *  `enable` calls restart — never assumed. */
   confirmSecretsApplied?: boolean;
+  fabric?: boolean;
   /** Path to the local component config.yaml for standalone-local installs.
    *  When set, enable flips mcp.enabled to true before restarting.
    *  When unset, enable tries common locations (./config.yaml,
@@ -1908,7 +1886,7 @@ export interface EnableMcpDeps {
 export interface EnableMcpResult {
   ok: boolean;
   dryRun: boolean;
-  refused?: { message: string };
+  refused?: { message: string; reason?: "invalid" | "local" };
   steps: EnableStepResult[];
   failedStep?: EnableStepName;
   issuer?: string;
@@ -1949,24 +1927,33 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   //
   // Initialised to the first step rather than left undefined so a throw before
   // any assignment cannot be attributed to an arbitrary fallback name.
-  let currentStep: EnableStepName = "local-origin-check";
+  let currentStep: EnableStepName = "target-shape-check";
   const dryRun = Boolean(params.dryRun);
   const push = (ok: boolean, detail: string) => steps.push({ step: currentStep, ok, detail });
 
+  const targetRefusal = targetOriginRefusal(params.instance) ?? fabricLoopbackRefusal(params.instance, params.fabric);
+  if (targetRefusal) {
+    currentStep = "target-shape-check";
+    push(false, targetRefusal);
+    return { ok: false, dryRun, refused: { message: targetRefusal }, steps, failedStep: "target-shape-check" };
+  }
+
   // ── Local-origin refusal (scenario addendum, binding) ─────────────────────
   currentStep = "local-origin-check";
-  const localCheck = checkLocalOriginRefusal(params.instance);
-  if (localCheck.refused) {
-    push(false, localCheck.message);
-    return { ok: false, dryRun, refused: { message: localCheck.message }, steps, failedStep: "local-origin-check" };
-  }
-  push(true, `${params.instance} is a public-shaped origin`);
-
   const rawIssuer = params.issuer ?? params.instance;
   const issuer = rawIssuer.replace(/\/$/, "");
+  const localCheck = checkLocalOriginRefusal(issuer);
+  if (localCheck.refused) {
+    push(false, localCheck.message);
+    return { ok: false, dryRun, refused: { reason: localCheck.reason, message: localCheck.message }, steps, failedStep: "local-origin-check" };
+  }
+  push(true, `${issuer}: URL parsed; hostname/IP-literal check passed (no DNS lookup)`);
+
   const idpProvider = params.idpProvider ?? "github";
   const principal = params.principal ?? "self";
   const principalKind = params.principalKind ?? "human";
+
+  const fabricTarget = isFabricTarget(params.instance, params.fabric);
 
   try {
     // ── Issuer origin (flair#2194) ────────────────────────────────────────────
@@ -1977,15 +1964,16 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       return { ok: false, dryRun, refused: { message: issuerIssue }, steps, failedStep: "issuer-origin-check" };
     }
     push(true, `issuer ${issuer} is an absolute http(s) origin`);
+    if (!dryRun && !fabricTarget && !isLoopbackUrl(params.instance)) {
+      currentStep = "target-shape-check";
+      const message =
+        `${params.instance} is not a loopback URL or a *.harperfabric.com target. ` +
+        `For Harper Fabric behind a custom domain, use --fabric. Nothing was changed.`;
+      push(false, message);
+      return { ok: false, dryRun, refused: { message }, steps, failedStep: "target-shape-check" };
+    }
 
     // ── --cimd-allowed-hosts (flair#2113) ─────────────────────────────────────
-    // Before any step with a side effect: the hosts are validated, a Fabric
-    // target is refused, the config.yaml to edit must exist with an
-    // @harperfast/oauth mcp block, and (except under --dry-run, which skips it)
-    // the preflight match must pass. Any of these failing refuses the flag with
-    // nothing changed. The list itself is ensured
-    // at local-config-update, before the restart: written unless the file
-    // already holds that exact list, then read back.
     let cimdAllowedHosts: string[] | undefined;
     if (params.cimdAllowedHosts !== undefined) {
       currentStep = "cimd-allowed-hosts";
@@ -1998,7 +1986,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       } catch (err: any) {
         return refuse(err?.message ?? String(err));
       }
-      const shapeRefusal = cimdAllowedHostsShapeRefusal(params.instance);
+      const shapeRefusal = cimdAllowedHostsShapeRefusal(params.instance, params.fabric);
       if (shapeRefusal) return refuse(shapeRefusal);
       const current = readLocalConfigCimdAllowedHosts(params.localConfigPath);
       if (!current.ok) {
@@ -2098,11 +2086,12 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // write; not staging costs an operator stranded mid-enable.
     const secretsResult = provisionSecrets(params.instance, bundle, {
       mechanism: params.secretsMechanism,
+      fabric: params.fabric,
       stagingPath: params.secretsStagingPath,
     });
 
     // Ask the TARGET whether it can take these, rather than inferring from its
-    // hostname or its version (flair#1094 — see selectSecretsMechanism's note).
+    // hostname or its version.
     // An explicit --secrets-mechanism is an operator override and is honoured
     // without a probe: they have said what they want.
     let secretsPushed = false;
@@ -2195,7 +2184,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     if (!confirmed && deps.confirmPrompt) {
       confirmed = await deps.confirmPrompt(
         secretsPushed
-          ? isFabricOrigin(params.instance)
+          ? fabricTarget
             ? `The ${secretsResult.varNames.length} secrets were pushed to ${params.instance} and read back. Have you restarted the Fabric instance to load them?`
             : `The ${secretsResult.varNames.length} secrets were pushed to ${params.instance} and read back. Have you loaded them into the instance's process environment?`
           : `Have you applied the ${secretsResult.varNames.length} vars staged at ${secretsResult.path} to ${params.instance}'s environment?`,
@@ -2204,7 +2193,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     if (!confirmed) {
       push(false,
         secretsPushed
-          ? `not confirmed: the secrets were pushed to ${params.instance} and read back; ${isFabricOrigin(params.instance) ? "restart the Fabric instance" : "load them into the instance's process environment"}, then re-run \`flair mcp enable\` with --confirm-secrets-applied.`
+          ? `not confirmed: the secrets were pushed to ${params.instance} and read back; ${fabricTarget ? "restart the Fabric instance" : "load them into the instance's process environment"}, then re-run \`flair mcp enable\` with --confirm-secrets-applied.`
           : `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
       return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
@@ -2221,9 +2210,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     //   - Fabric: `enable` does not restart the instance; the operator applies
     //     the environment and restarts. Report the requirement LOUDLY — never
     //     report success with /mcp still dark.
-    const isFabric = isFabricOrigin(params.instance);
-
-    if (isFabric) {
+    if (fabricTarget) {
       // ── Fabric: operator-deploy requirement ──────────────────────────────
       currentStep = "fabric-operator-deploy";
       const host = new URL(params.instance).hostname;
