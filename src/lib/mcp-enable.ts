@@ -1451,7 +1451,7 @@ export async function provisionIdpIdentityMapping(
           status: "active",
           idpProvider: params.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: reused ? undefined : now,
+          createdAt: typeof reused?.createdAt === "string" ? reused.createdAt : now,
           lastUsedAt: now,
         },
         // Retained, not deleted: the revocation stays legible in storage and in
@@ -1467,7 +1467,7 @@ export async function provisionIdpIdentityMapping(
           status: "revoked",
           idpProvider: c.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: c.createdAt,
+          createdAt: typeof c.createdAt === "string" ? c.createdAt : now,
           updatedAt: now,
         })),
       ],
@@ -1599,16 +1599,19 @@ async function opsReadRows(
   authHeader: string,
   query: MappingReadQuery,
   written?: WrittenMapping,
+  refuseAmbiguous = false,
 ): Promise<any[]> {
   const res = await fetchImpl(opsUrl, { method: "POST", headers: opsHeaders(authHeader), body: JSON.stringify(query) });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Identity mapping: the ops API read at ${opsUrl} failed (HTTP ${res.status})${text ? `: ${text}` : ""}`);
   }
-  return opsRecordList(res, opsUrl, query, written);
+  return opsRecordList(res, opsUrl, query, written, refuseAmbiguous);
 }
 
-async function opsRecordList(res: Response, opsUrl: string, query: MappingReadQuery, written?: WrittenMapping): Promise<any[]> {
+async function opsRecordList(
+  res: Response, opsUrl: string, query: MappingReadQuery, written?: WrittenMapping, refuseAmbiguous = false,
+): Promise<any[]> {
   const parsed = await res.json().catch(() => null);
   if (!Array.isArray(parsed)) {
     throw new Error(
@@ -1620,34 +1623,37 @@ async function opsRecordList(res: Response, opsUrl: string, query: MappingReadQu
     ? [[query.search_attribute!, query.search_value!]]
     : query.conditions!.map(c => [c.search_attribute, c.search_value]);
   const ids = new Set<string>();
+  const rows: any[] = [];
   for (const [index, row] of parsed.entries()) {
     const refuse = (reason: string): never => {
       throw new Error(`Identity mapping: the ops API read at ${opsUrl} answered with a malformed ${query.table} record (entry ${index}): ${reason}.`);
     };
     if (row === null || typeof row !== "object" || Array.isArray(row)) refuse("invalid-row-shape");
     if (!isNonEmptyString(row.id)) refuse("missing-or-invalid-id");
-    if (query.table === "Credential" &&
-        (!isNonEmptyString(row.principalId) || typeof row.idpProvider !== "string" ||
-         typeof row.idpSubject !== "string" || typeof row.createdAt !== "string" ||
-         (row.label != null && typeof row.label !== "string") ||
-         (row.status != null && typeof row.status !== "string"))) {
-      refuse("missing-or-invalid-credential-field");
-    }
     for (const [field, value] of predicate) {
       if (!query.get_attributes.includes(field)) refuse(`predicate-attribute-not-requested:${field}`);
       if (!Object.hasOwn(row, field) || row[field] !== value) refuse(`query-mismatch:${field}`);
     }
     if (ids.has(row.id)) refuse("duplicate-row-id");
     ids.add(row.id);
+    if (query.table === "Credential" && !isNonEmptyString(row.principalId)) continue;
+    if (query.table === "Credential" &&
+        (typeof row.idpProvider !== "string" ||
+         typeof row.idpSubject !== "string" ||
+         (row.label != null && typeof row.label !== "string") ||
+         (row.status != null && typeof row.status !== "string"))) {
+      refuse("missing-or-invalid-credential-field");
+    }
+    rows.push(row);
   }
-  if (query.table === "Credential" && predicate.some(([field]) => field === "idpSubject")) {
-    const principals = [...new Set(parsed.filter(isResolvableCredential).map(row => row.principalId))];
+  if (refuseAmbiguous && query.table === "Credential" && predicate.some(([field]) => field === "idpSubject")) {
+    const principals = [...new Set(rows.filter(isResolvableCredential).map(row => row.principalId))];
     if (principals.length > 1) {
-      throw new Error(`Identity mapping: ambiguous-prior-principals: ${principals.join(", ")} — refusing the subject read.`);
+      throw new Error(`Identity mapping: ambiguous-prior-principals: ${principals.join(", ")} — refusing the subject read. Run flair mcp enable to heal this subject mapping.`);
     }
   }
   if (written) {
-    const active = parsed.filter(isResolvableCredential);
+    const active = rows.filter(isResolvableCredential);
     if (active.length !== 1 || Object.entries(written).some(([field, value]) => active[0][field] !== value)) {
       const subject = predicate.find(([field]) => field === "idpSubject")?.[1];
       const seen = active.map(c => `${c.id} → ${c.principalId} (provider '${c.idpProvider}')`).join("; ") || "none";
@@ -1659,7 +1665,7 @@ async function opsRecordList(res: Response, opsUrl: string, query: MappingReadQu
       );
     }
   }
-  return parsed;
+  return rows;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -1672,8 +1678,9 @@ async function readIdpCredentialsForSubject(
   authHeader: string,
   idpSubject: string,
   written?: WrittenMapping,
+  refuseAmbiguous = false,
 ): Promise<any[]> {
-  return opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Credential", { kind: "idp", idpSubject }), written);
+  return opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Credential", { kind: "idp", idpSubject }), written, refuseAmbiguous);
 }
 
 async function readIdpCredentialsForPrincipal(
@@ -1760,7 +1767,7 @@ export async function linkPrincipalMapping(
   // Refuse a missing requested principal before either mapping branch.
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
-  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)).filter(
+  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true)).filter(
     isResolvableCredential,
   );
   const elsewhere = active.filter((c) => c?.principalId !== params.principal);
@@ -1838,7 +1845,7 @@ export async function unlinkPrincipalMapping(
 
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
-  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)).filter(
+  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true)).filter(
     isResolvableCredential,
   );
   const mine = active.filter((c) => c?.principalId === params.principal);

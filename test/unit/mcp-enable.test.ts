@@ -563,7 +563,7 @@ describe("provisionIdpIdentityMapping", () => {
       existingPrincipal: true,
       existingCredentials: [
         { id: "cred_a", idpProvider: "mcp-oauth", principalId: "agt_a" },
-        { id: "cred_b", idpProvider: "okta", principalId: "agt_a" },
+        { id: "cred_b", idpProvider: "okta", principalId: "agt_b" },
       ],
     });
     const result = await provisionIdpIdentityMapping(
@@ -619,7 +619,7 @@ describe("provisionIdpIdentityMapping", () => {
         { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
         { fetchImpl },
       ),
-    ).rejects.toThrow(/ambiguous-prior-principals/);
+    ).rejects.toThrow(/post-write-mismatch/);
   });
 
   test("flair#1317: the invariant error names the actor, the state and the remedy", async () => {
@@ -1034,9 +1034,9 @@ describe("buildClaudePasteBlock", () => {
 
 // ─── enableMcp orchestration ──────────────────────────────────────────────────
 
-function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sysInfoPidProvider?: () => number } = {}): { fetchImpl: typeof fetch; calls: string[] } {
+function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sysInfoPidProvider?: () => number; existingCredentials?: Record<string, any>[] } = {}): { fetchImpl: typeof fetch; calls: string[]; creds: ReturnType<typeof credentialTable> } {
   const calls: string[] = [];
-  const creds = credentialTable(); // flair#1317 — the mapping step reads its own write back
+  const creds = credentialTable(overrides.existingCredentials);
   let _sysInfoCallCount = 0;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const urlStr = String(url);
@@ -1061,7 +1061,7 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sys
       }
     return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
    }) as typeof fetch;
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, creds };
 }
 
 const TARGET = "http://127.0.0.1:9926";
@@ -1278,6 +1278,20 @@ function shippedMcpBlock(): any {
 }
 
 describe("enableMcp — full happy path", () => {
+  test("enable heals a subject mapped to two principals and prints SUPERSEDED", async () => {
+    const { fetchImpl, creds } = fullMockFetch({ existingCredentials: [
+      { id: "cred_self", kind: "idp", idpProvider: "github", idpSubject: "octocat", principalId: "self" },
+      { id: "cred_stray", kind: "idp", idpProvider: "okta", idpSubject: "octocat", principalId: "agt_b" },
+    ] });
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true }, { fetchImpl },
+    );
+    expect(result.ok).toBe(true);
+    expect(creds.active().map(row => [row.id, row.principalId])).toEqual([["cred_self", "self"]]);
+    expect(creds.rows.get("cred_stray")?.status).toBe("revoked");
+    expect(result.steps.find(step => step.step === "identity-mapping")?.detail).toMatch(/SUPERSEDED:.*cred_stray/);
+  });
+
   test("runs every step in order and returns a working paste block with no DCR call anywhere", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const result = await enableMcp(

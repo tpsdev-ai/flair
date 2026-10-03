@@ -741,8 +741,6 @@ describe("operations read predicates", () => {
     const row = stage === "principal credentials" || stage === "unlink subject"
       ? { ...good, principalId: "alice" } : good;
     const answers = [
-      { name: "missing-createdAt", rows: [Object.fromEntries(Object.entries(row).filter(([key]) => key !== "createdAt"))], reason: "missing-or-invalid-credential-field" },
-      { name: "invalid-createdAt", rows: [{ ...row, createdAt: 42 }], reason: "missing-or-invalid-credential-field" },
       { name: "invalid-label", rows: [{ ...row, label: [] }], reason: "missing-or-invalid-credential-field" },
       { name: "wrong-kind", rows: [{ ...row, kind: "api-key" }], reason: "query-mismatch:kind" },
       { name: "missing-kind", rows: [Object.fromEntries(Object.entries(row).filter(([key]) => key !== "kind"))], reason: "query-mismatch:kind" },
@@ -754,7 +752,7 @@ describe("operations read predicates", () => {
       { name: "multi-principal", rows: [row, { ...row, id: "cred_extra", principalId: "carl" }], reason:
           stage === "principal credentials" ? "query-mismatch:principalId" : "ambiguous-prior-principals" },
     ];
-    for (const answer of answers) {
+    for (const answer of answers.filter(answer => stage !== "provisioner subject" || answer.name !== "multi-principal")) {
       test(`${stage}: ${answer.name} answer refuses without writing`, async () => {
         const st = mappingStub({ expectedUrl: HOSTED_OPS, credBody: answer.rows,
           principals: stage === "provisioner subject" ? [] : ["alice"] });
@@ -770,7 +768,7 @@ describe("operations read predicates", () => {
     }
   }
   for (const fault of ["wrong-kind", "mixed-kind", "mixed-subject", "missing-kind", "duplicate", "multi-principal",
-                       "wrong-principal", "wrong-provider", "wrong-status", "missing-createdAt", "invalid-createdAt", "invalid-label"] as const) {
+                       "wrong-principal", "wrong-provider", "wrong-status", "invalid-label"] as const) {
     test(`post-write verification: ${fault} refuses and sends no further write`, async () => {
       const st = mappingStub({ expectedUrl: HOSTED_OPS });
       let reads = 0;
@@ -782,8 +780,6 @@ describe("operations read predicates", () => {
         writesAtRead = st.writes().length;
         const rows = await response.json() as any[];
         const row = rows[0];
-        if (fault === "missing-createdAt") delete row.createdAt;
-        if (fault === "invalid-createdAt") row.createdAt = 42;
         if (fault === "invalid-label") row.label = [];
         if (fault === "wrong-kind") row.kind = "api-key";
         if (fault === "missing-kind") delete row.kind;
@@ -797,14 +793,93 @@ describe("operations read predicates", () => {
         return Response.json(rows);
       }) as typeof fetch;
       const reason = fault === "duplicate" ? "duplicate-row-id"
-        : fault === "multi-principal" ? "ambiguous-prior-principals"
+        : fault === "multi-principal" ? "post-write-mismatch"
         : fault === "mixed-subject" ? "query-mismatch:idpSubject"
         : ["wrong-kind", "mixed-kind", "missing-kind"].includes(fault) ? "query-mismatch:kind"
-        : ["missing-createdAt", "invalid-createdAt", "invalid-label"].includes(fault) ? "missing-or-invalid-credential-field"
+        : fault === "invalid-label" ? "missing-or-invalid-credential-field"
         : "uniqueness invariant";
       await expect(provision(fetchImpl)).rejects.toThrow(reason);
       expect(writesAtRead).toBe(1);
       expect(st.writes()).toHaveLength(writesAtRead);
+    });
+  }
+});
+
+describe("legacy Credential mapping reads", () => {
+  const params = { hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT };
+  const now = "2026-10-03T00:00:00.000Z";
+  for (const stage of ["link", "unlink", "links", "provisioner"] as const) {
+    test(`${stage} accepts a credential without createdAt`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials: [
+        { id: "cred_legacy", kind: "idp", principalId: "alice", ...SUBJECT, createdAt: undefined },
+      ] });
+      if (stage === "link") expect((await linkPrincipalMapping(params, { fetchImpl: st.fetchImpl })).action).toBe("already-linked");
+      if (stage === "unlink") expect((await unlinkPrincipalMapping(params, { fetchImpl: st.fetchImpl })).revokedCredentialIds).toEqual(["cred_legacy"]);
+      if (stage === "links") expect((await listPrincipalMappings(params, { fetchImpl: st.fetchImpl })).mappings).toHaveLength(1);
+      if (stage === "provisioner") expect((await provisionIdpIdentityMapping({ ...params, principalKind: "human" }, { fetchImpl: st.fetchImpl })).credentialReused).toBe(true);
+    });
+  }
+  for (const stage of ["link", "unlink", "provisioner"] as const) {
+    test(`${stage} skips an idp credential without principalId`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials: [
+        { id: "cred_legacy", kind: "idp", ...SUBJECT, createdAt: undefined },
+        { id: "cred_alice", kind: "idp", principalId: "alice", ...SUBJECT },
+      ] });
+      if (stage === "link") expect((await linkPrincipalMapping(params, { fetchImpl: st.fetchImpl })).action).toBe("already-linked");
+      if (stage === "unlink") expect((await unlinkPrincipalMapping(params, { fetchImpl: st.fetchImpl })).revokedCredentialIds).toEqual(["cred_alice"]);
+      if (stage === "provisioner") expect((await provisionIdpIdentityMapping({ ...params, principalKind: "human" }, { fetchImpl: st.fetchImpl })).credentialId).toBe("cred_alice");
+      expect(st.rows.get("cred_legacy")?.status).toBe("active");
+      expect(st.writes().flatMap(call => call.body.records).some(row => row.id === "cred_legacy")).toBe(false);
+    });
+  }
+  for (const createdAt of ["2025-01-01T00:00:00.000Z", undefined, 42]) {
+    for (const provider of ["github", "okta"]) {
+      test(`legacy ${provider === "github" ? "reused" : "superseded"} createdAt ${String(createdAt)} is preserved or assigned`, async () => {
+        const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials: [
+          { id: "cred_legacy", kind: "idp", principalId: "bob", ...SUBJECT, idpProvider: provider, createdAt },
+        ] });
+        await provisionIdpIdentityMapping({ ...params, principalKind: "human" }, { fetchImpl: st.fetchImpl, now: () => now });
+        const written = st.writes().flatMap(call => call.body.records).find(row => row.id === "cred_legacy");
+        expect(written.createdAt).toBe(typeof createdAt === "string" ? createdAt : now);
+        expect(st.rows.get("cred_legacy")?.createdAt).toBe(written.createdAt);
+      });
+    }
+  }
+  for (const createdAt of [undefined, 42]) {
+    test(`post-write read accepts createdAt ${String(createdAt)}`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS });
+      let reads = 0;
+      const fetchImpl = (async (url: any, init?: RequestInit) => {
+        const response = await st.fetchImpl(url, init);
+        const query = JSON.parse(String(init?.body));
+        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || ++reads !== 2) return response;
+        const rows = await response.json() as any[];
+        rows[0].createdAt = createdAt;
+        return Response.json(rows);
+      }) as typeof fetch;
+      expect((await provisionIdpIdentityMapping({ ...params, principalKind: "human" }, { fetchImpl })).credentialId).toBeDefined();
+      expect(st.writes()).toHaveLength(1);
+    });
+  }
+  test("a principal-less row still must match the subject query", async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, credBody: [
+      { id: "cred_legacy", kind: "idp", idpSubject: "unrelated" },
+    ] });
+    await expect(linkPrincipalMapping(params, { fetchImpl: st.fetchImpl })).rejects.toThrow("query-mismatch:idpSubject");
+    expect(st.writes()).toEqual([]);
+  });
+  for (const stage of ["link", "unlink"] as const) {
+    test(`${stage} preflight refuses ambiguity and names the healing command`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials: [
+        { id: "cred_a", principalId: "alice", ...SUBJECT },
+        { id: "cred_b", principalId: "bob", ...SUBJECT, idpProvider: "okta" },
+      ] });
+      const result = await (stage === "link" ? linkPrincipalMapping({ ...params, replace: true }, { fetchImpl: st.fetchImpl })
+        : unlinkPrincipalMapping(params, { fetchImpl: st.fetchImpl })).catch(error => error);
+      expect(result).toBeInstanceOf(Error);
+      expect(result.message).toContain("ambiguous-prior-principals");
+      expect(result.message).toContain("flair mcp enable");
+      expect(st.writes()).toEqual([]);
     });
   }
 });
