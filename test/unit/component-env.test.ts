@@ -17,14 +17,20 @@ import {
   DURABLE_PUBLIC_URL_LOCATION,
   envKeyNames,
   isLoopbackUrl,
+  isLoopbackHost,
   isNodeModulesEnvPath,
   looksLikeSecretKey,
   planComponentEnv,
   publicUrlRemedy,
   readEnvValue,
 } from "../../src/component-env.js";
+import { UNSPECIFIED_TARGETS } from "../helpers/mcp-enable-target-shapes.ts";
 
 describe("isLoopbackUrl", () => {
+  test.each(UNSPECIFIED_TARGETS)("treats unspecified destination %s as local", (url) => {
+    expect(isLoopbackUrl(url)).toBe(true);
+    expect(isLoopbackHost(new URL(url).hostname)).toBe(true);
+  });
   test("recognises the addresses only the serving machine can reach", () => {
     for (const url of [
       "http://127.0.0.1:9926",
@@ -34,6 +40,12 @@ describe("isLoopbackUrl", () => {
       "https://localhost",
       "http://sub.localhost:3000",
       "http://[::1]:9926",
+      "http://localhost.:9926",
+      "http://LOCALHOST.:9926",
+      "http://sub.localhost.:9926",
+      "http://[::ffff:127.0.0.1]:9926",
+      "http://[::ffff:7f00:1]:9926",
+      "http://[0:0:0:0:0:ffff:127.1.2.3]:9926",
     ]) {
       expect({ url, loopback: isLoopbackUrl(url) }).toEqual({ url, loopback: true });
     }
@@ -45,6 +57,9 @@ describe("isLoopbackUrl", () => {
       "https://cluster.org.harperfabric.com",
       "http://10.0.0.4:9926",
       "https://192.168.1.10",
+      "http://[::ffff:10.0.0.4]:9926",
+      "http://[::ffff:7e00:1]:9926",
+      "http://[::ffff:0:1]:9926",
     ]) {
       expect({ url, loopback: isLoopbackUrl(url) }).toEqual({ url, loopback: false });
     }
@@ -89,6 +104,11 @@ describe("env parsing", () => {
 });
 
 describe("planComponentEnv", () => {
+  test.each(UNSPECIFIED_TARGETS)("warns about operator's unspecified destination %s", (url) => {
+    const plan = planComponentEnv(`FLAIR_PUBLIC_URL=${url}\n`, "https://flair.example.com");
+    expect(plan.action).toBe("operator-value-kept");
+    expect(plan.notices.join(" ")).toContain("loopback or unspecified");
+  });
   test("adds FLAIR_PUBLIC_URL when the payload has no .env at all", () => {
     const plan = planComponentEnv(null, "https://flair.example.com");
     expect(plan.action).toBe("added");
@@ -129,7 +149,7 @@ describe("planComponentEnv", () => {
   test("says so out loud when the operator's own value is a loopback address", () => {
     const plan = planComponentEnv("FLAIR_PUBLIC_URL=http://127.0.0.1:9926\n", "https://flair.example.com");
     expect(plan.action).toBe("operator-value-kept");
-    expect(plan.notices.join(" ")).toContain("loopback");
+    expect(plan.notices.join(" ")).toContain("loopback or unspecified");
   });
 
   test("supplies nothing when there is no public URL to advertise", () => {
@@ -219,6 +239,15 @@ describe("publicUrlRemedy", () => {
 describe("describePublicUrlFinding (flair doctor)", () => {
   const ENV_PATH = "/opt/flair/.env";
   const base = { componentEnvValue: null, processEnvValue: null, componentEnvPath: ENV_PATH };
+
+  test.each(UNSPECIFIED_TARGETS)("diagnoses unspecified discovery and configured values: %s", (url) => {
+    const advertised = { ...base, advertisedIssuer: url };
+    expect(describePublicUrlFinding(advertised)?.icon).toBe("warn");
+    expect(describePublicUrlFinding({ ...advertised, componentEnvValue: "https://flair.example.com" })?.isIssue).toBe(true);
+    expect(describePublicUrlFinding({ ...advertised, processEnvValue: "https://flair.example.com" })?.isIssue).toBe(true);
+    expect(describePublicUrlFinding({ ...advertised, componentEnvValue: url })?.icon).toBe("warn");
+    expect(describePublicUrlFinding({ ...advertised, processEnvValue: url })?.icon).toBe("warn");
+  });
 
   test("says nothing when the instance could not be asked — a skipped check is not a pass", () => {
     expect(describePublicUrlFinding({ ...base, advertisedIssuer: null })).toBeNull();

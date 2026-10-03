@@ -533,6 +533,8 @@ jobs:
         run: bun add --no-save @node-llama-cpp/linux-x64@3
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli
+      - name: Build flair-client
+        run: cd packages/flair-client && bun run build
       - name: Verify critical exports in dist
         run: |
           echo "Checking embeddings-provider exports..."
