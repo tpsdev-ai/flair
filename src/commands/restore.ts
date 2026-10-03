@@ -171,9 +171,7 @@ program
           failures.push(`${diagnostic(name, row, "GET", status)}: verification failed`);
           continue;
         }
-        // #2215 confirms the row is READABLE at the archived id/owner; this
-        // confirms its preserved CONTENT landed. Only field NAMES are reported,
-        // never a value (the archived record is untrusted data).
+        // Report mismatched field names without mismatched content values.
         const mismatched = comparePreservedFields(name, row, restored);
         if (mismatched.length > 0) {
           failures.push(`${label(name, row)}: GET verification failed (field mismatch: ${mismatched.join(", ")})`);

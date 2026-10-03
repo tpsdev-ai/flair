@@ -5,15 +5,16 @@
  * Memory.put() (resources/Memory.ts):
  *   - excluded: `updatedAt`, `provenance`, and `instanceToken` (new on create,
  *     stored on update).
- *   - excluded: `_safetyFlags`; content safety rescans only when `content` or
- *     `summary` is truthy, and SkillScan can add flags for skill writes.
  *   - excluded: `originatorInstanceId` (local on create, stored on update) and
  *     `_originatorInstanceId`/`_syncedFrom`/`_syncedAt` (dropped on create,
  *     stored on update; resources/originator-instance.ts).
  *   - excluded: `retrievalCount`/`lastRetrieved` (MemoryHitStat read overlay).
- *   - excluded: `embedding`/`embeddingModel`; generation requires embedding
- *     text and no write-body embedding. Skills use a nonempty `trigger`, falling
- *     back to `content`; `embeddingModel` comes from getModelId().
+ *   - compared: supplied `embedding` and its `embeddingModel`. Without an
+ *     embedding, exclude both when embedding text permits generation; the
+ *     generated model comes from getModelId() (Memory.ts:505-544, 1750-1753).
+ *   - compared: `_safetyFlags` when neither content safety nor SkillScan runs;
+ *     exclude during scans because they can replace or append flags
+ *     (Memory.ts:1689-1712; skill-write.ts:125-157).
  *   - compared: `visibility` (defaulted on create when nullish), `createdAt`
  *     and `archived` (defaulted when nullish).
  *   - compared: `archivedAt`, `expiresAt`, `validFrom`; falsy values, including
@@ -32,7 +33,8 @@
  * Agent rows retain the id-only check.
  * A field is compared only when the archived row owns it; conditional write
  * transformations of compared fields still fail closed on a mismatch.
- * `undefined` and `null` compare equal; objects compare with sorted keys;
+ * `undefined` and `null` values compare equal; missing nested keys remain distinct;
+ * objects compare with sorted keys;
  * arrays compare in order.
  */
 
@@ -52,7 +54,7 @@ export const RESTORE_PRESERVED_FIELDS: Readonly<Record<string, readonly string[]
   ]),
 });
 
-/** Absent (undefined) and explicit null mean the same thing here: no value. */
+/** Undefined values equal null; missing nested keys remain distinct. */
 function normalize(value: unknown): unknown {
   if (value === undefined || value === null) return null;
   if (Array.isArray(value)) return value.map(normalize);
@@ -76,11 +78,18 @@ function sameValue(a: unknown, b: unknown): boolean {
  * Non-`Memory`/`Soul` tables have no extra compared fields and return `[]`.
  */
 export function comparePreservedFields(table: string, archived: unknown, restored: unknown): string[] {
-  const fields = RESTORE_PRESERVED_FIELDS[table] ?? [];
+  const fields = [...(RESTORE_PRESERVED_FIELDS[table] ?? [])];
   if (!archived || typeof archived !== "object" || Array.isArray(archived)) return [];
   if (!restored || typeof restored !== "object" || Array.isArray(restored)) return [];
   const from = archived as Record<string, unknown>;
   const to = restored as Record<string, unknown>;
+  if (table === "Memory") {
+    const skill = Array.isArray(from.tags) && from.tags.includes("skill");
+    const skillTrigger = skill && typeof from.trigger === "string" && from.trigger.length > 0;
+    const embedText = skillTrigger ? from.trigger : from.content;
+    if (from.embedding || !embedText) fields.push("embedding", "embeddingModel");
+    if (!from.content && !from.summary && !skillTrigger) fields.push("_safetyFlags");
+  }
   const mismatched: string[] = [];
   for (const field of fields) {
     if (!Object.prototype.hasOwnProperty.call(from, field)) continue;

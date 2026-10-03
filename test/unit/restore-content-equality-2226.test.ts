@@ -75,7 +75,7 @@ function refused(result: Awaited<ReturnType<typeof run>>, ...names: string[]) {
 const agent = { id: "flint" };
 
 describe("restore verifies preserved content (#2226)", () => {
-  test("a stale row at the same ID and owner fails, naming the field and never its value", async () => {
+  test("content still differing after PUT fails without logging the content values", async () => {
     const archive = {
       version: 1, agents: [agent], souls: [],
       memories: [{ id: "m1", agentId: "flint", content: "ARCHIVED", tags: ["a", "b"] }],
@@ -121,9 +121,7 @@ describe("restore verifies preserved content (#2226)", () => {
       tags: ["a"], durability: "standard", visibility: "private",
     };
     const archive = { version: 1, agents: [agent], souls: [], memories: [archived] };
-    // What the server returns after the PUT: same preserved content, every
-    // restamped/derived field changed (updatedAt, provenance, instanceToken,
-    // the MemoryHitStat overlay, the safety rescan).
+    // Simulated GET response after PUT.
     const restored = {
       ...archived,
       updatedAt: "2026-10-02T00:00:00.000Z",
@@ -152,16 +150,67 @@ describe("restore verifies preserved content (#2226)", () => {
     expect(result.stderr).not.toContain(secret);
   });
 
-  test("a differing server-derived embedding is not a content mismatch", async () => {
-    // embedding/embeddingModel are recomputed by the write path when absent and
-    // stored at reduced precision, so restore does not compare them.
+  test("generation with an absent embedding passes", async () => {
     const archive = {
       version: 1, agents: [agent], souls: [],
-      memories: [{ id: "m1", agentId: "flint", content: "same", embedding: [0.1, 0.2], embeddingModel: "old-model" }],
+      memories: [{ id: "m1", agentId: "flint", content: "same", embeddingModel: "old-model" }],
     };
     const restored = { id: "m1", agentId: "flint", content: "same", embedding: [0.5, 0.6], embeddingModel: "new-model" };
     const result = await run(archive, [{ method: "GET", path: "/Memory/m1", body: restored }]);
     expect(result.exitCode).toBe(0);
+  });
+
+  for (const [field, value] of [
+    ["embedding", [0.5, 0.6]],
+    ["embeddingModel", "corrupted-model"],
+    ["_safetyFlags", ["corrupted-flag"]],
+  ] as const) {
+    test(`supplied ${field} corruption after PUT fails verification`, async () => {
+      const archived = {
+        id: "m1", agentId: "flint", content: "", summary: "",
+        embedding: [0.1, 0.2], embeddingModel: "archived-model", _safetyFlags: ["archived-flag"],
+      };
+      const restored = { ...archived, [field]: value };
+      expect(comparePreservedFields("Memory", archived, restored)).toEqual([field]);
+      const archive = { version: 1, agents: [agent], souls: [], memories: [archived] };
+      refused(await run(archive, [{ method: "GET", path: "/Memory/m1", body: restored }]), "m1", field);
+    });
+  }
+
+  test("a supplied embedding and model pass unchanged with nonempty content", async () => {
+    const archived = { id: "m1", agentId: "flint", content: "same", embedding: [0.1, 0.2], embeddingModel: "archived-model" };
+    const archive = { version: 1, agents: [agent], souls: [], memories: [archived] };
+    expect((await run(archive)).exitCode).toBe(0);
+    for (const field of ["embedding", "embeddingModel"]) {
+      const restored = { ...archived, [field]: field === "embedding" ? [0.3, 0.2] : "changed-model" };
+      refused(await run(archive, [{ method: "GET", path: "/Memory/m1", body: restored }]), field);
+    }
+  });
+
+  test("without embedding text, a supplied model remains compared", async () => {
+    const archived = { id: "m1", agentId: "flint", content: "", embedding: null, embeddingModel: "archived-model" };
+    const archive = { version: 1, agents: [agent], souls: [], memories: [archived] };
+    refused(await run(archive, [{ method: "GET", path: "/Memory/m1", body: { ...archived, embeddingModel: "changed-model" } }]), "embeddingModel");
+  });
+
+  test("skill trigger generation and scans can change derived fields", async () => {
+    const archived = {
+      id: "m1", agentId: "flint", content: "", summary: "", tags: ["skill"], trigger: "when reviewing",
+      embedding: null, embeddingModel: "old-model", _safetyFlags: ["archived-flag"],
+    };
+    const restored = { ...archived, embedding: [0.5, 0.6], embeddingModel: "generated-model", _safetyFlags: ["skill:flag"] };
+    const archive = { version: 1, agents: [agent], souls: [], memories: [archived] };
+    expect((await run(archive, [{ method: "GET", path: "/Memory/m1", body: restored }])).exitCode).toBe(0);
+  });
+
+  test("a skill without scan text preserves flags", () => {
+    const archived = { content: "", summary: "", trigger: "", tags: ["skill"], _safetyFlags: ["archived-flag"] };
+    expect(comparePreservedFields("Memory", archived, { ...archived, _safetyFlags: null })).toEqual(["_safetyFlags"]);
+  });
+
+  test("a missing nested key differs from a null nested value", () => {
+    expect(comparePreservedFields("Memory", { meta: { nested: null } }, { meta: {} })).toEqual(["meta"]);
+    expect(comparePreservedFields("Memory", { meta: null }, {})).toEqual([]);
   });
 
   test("the archive's omitted columns are not demanded back", async () => {
