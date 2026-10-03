@@ -14,6 +14,7 @@ import { Command } from "commander";
 import * as render from "../render.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
 
 export type SoulCli = {
   api: (...args: any[]) => Promise<any>;
@@ -49,7 +50,7 @@ export function register(program: Command): void {
     .requiredOption("--agent <id>")
     .requiredOption("--key <key>")
     .requiredOption("--value <value>")
-    .option("--durability <d>", "permanent|persistent|standard|ephemeral (default permanent — soul entries are identity, not working memory)")
+    .option("--durability <d>", `${DURABILITY_TIERS_HELP} (default permanent — soul entries are identity, not working memory)`)
     .option("--url <url>", "Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts: any) => {

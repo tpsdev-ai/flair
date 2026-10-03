@@ -228,10 +228,11 @@ export default function (pi: ExtensionAPI) {
         Type.String({ 
           enum: ["permanent", "persistent", "standard", "ephemeral"] as const,
           description:
-            "permanent — inviolable facts, identity, explicit never-forget (e.g., 'my name is Nathan')\n" +
-            "persistent — key decisions and lessons to recall weeks later (e.g., 'PR review process')\n" +
-            "standard — default working memory, recent context (e.g., 'discussed auth flow today')\n" +
-            "ephemeral — scratch state; this tool's writes receive a server-configured expiresAt (24 hours by default); search and bootstrap skip expired rows (e.g., 'currently debugging issue #42')",
+            "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.\n" +
+            "persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).\n" +
+            "standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.\n" +
+            "ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.\n" +
+            "No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.",
         }),
       ),
       tags: Type.Optional(Type.Array(Type.String(), { description: "Array of tag strings" })),

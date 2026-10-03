@@ -393,6 +393,16 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 
 > The host pointer (`hostSource`) is **not** a Memory attribute — it lives in its own `MemoryHostSource` table (below). There is no `hostSource` / `hostSourceVisibility` field on `Memory`.
 
+#### Durability tiers (#2217)
+
+Every selection point — the MCP tool descriptions, the CLI `--durability` help, the SDK doc comments, the shipped skills, and the README/docs pages — states the same guarantee per tier, and none claims more than the code provides (the documentation contract test enumerates the points it checks):
+
+- permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.
+- persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).
+- standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+- ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+- No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
+
 #### Memory host pointer (`MemoryHostSource`, #1940 A1'-A5)
 
 The pointer is a host-object pointer — versioned JSON `{ v: 1, host, kind, id, url? }` — that records which host object the writer claims as the memory’s source. **Supported writes store host pointers only in `MemoryHostSource`. For non-admin `Memory.get`, `Memory.search`, and `SemanticSearch` results, the gated projection removes inline pointer fields and renders a pointer only from a bound `MemoryHostSource` row.**
