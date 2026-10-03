@@ -330,6 +330,7 @@ describe("flair#2139 S1 — Soul lifecycle leaves a chained history", () => {
       await upsert("InstructionVersion", [{
         id: occupiedId, subjectType: "soul", subjectId: `hidden-${collision}-${sfx}`, agentId: A.id,
         key, version: 1, kind: "create", rowId: id, recordHash: "unchanged", createdAt: now(), guarded: false,
+        actorKind: "operator", sourceClass: "operator",
       }]);
       const occupied = await ops({ operation: "search_by_id", database: "flair", table: "InstructionVersion", ids: [occupiedId], get_attributes: ["*"] });
       const stored = await soulRow(id);
