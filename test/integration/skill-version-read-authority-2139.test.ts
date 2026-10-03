@@ -1,15 +1,9 @@
 // ─── flair#2139 S2 — skill version READ authority against a real Harper ──────
 //
-// Slice 2 applies the frozen InstructionVersion table to skills. This file
-// covers the READ half (spec decision 3): a skill version is readable only when
-// the reader holds Memory read permission against BOTH the requested version's
-// stored owner/visibility AND the subject's current authority (the head's live
-// Memory row, or the head tombstone after a logical delete). It is the more
-// restrictive of write-time and current: tightening a skill to private revokes
-// its earlier versions; loosening it never widens a version that was private
-// when written. Missing/inconsistent authority state denies; unknown subject
-// types deny; anonymous denies; admin/internal keep Memory's unfiltered
-// exception.
+// Ordinary skill readers require readable stored visibility and current authority:
+// matching subjects, a live skill row owned by the head's owner, or a delete head
+// with null memoryId; references require nonempty owners and private/shared visibility.
+// Unknown subject types deny; admin/internal keep unfiltered skill reads.
 //
 // Skill version rows are inserted through the administrator operations API (the
 // documented unaudited exception) because the REST write surface refuses every
@@ -84,23 +78,23 @@ function nextSubjectId(label: string): string {
   return `skr-${label}-${sfx}-${subjectSeq}`;
 }
 
-async function upsertMemory(id: string, agentId: string, visibility: string, tags: string[] = ["skill"]): Promise<void> {
+async function upsertMemory(id: string, agentId: string, visibility: string, skillSubjectId: string, overrides: Record<string, unknown> = {}): Promise<void> {
   await ops({
     operation: "upsert", database: "flair", table: "Memory",
-    records: [{ id, agentId, content: `skill ${id}`, trigger: `trigger ${id}`, tags, visibility, durability: "persistent", createdAt: now() }],
+    records: [{ id, agentId, content: `skill ${id}`, trigger: `trigger ${id}`, tags: ["skill"], skillSubjectId, visibility, durability: "persistent", createdAt: now(), ...overrides }],
   });
 }
 
 interface VersionInput {
   subjectId: string; agentId: string; visibility: string | null; memoryId: string | null;
-  kind?: string; version: number; id?: string;
+  kind?: string; version: number; id?: string; subjectType?: string;
 }
 async function insertVersion(input: VersionInput): Promise<string> {
   const id = input.id ?? `skill:${input.subjectId}:${input.version}`;
   await ops({
     operation: "upsert", database: "flair", table: "InstructionVersion",
     records: [{
-      id, subjectType: "skill", subjectId: input.subjectId, agentId: input.agentId, key: null,
+      id, subjectType: input.subjectType ?? "skill", subjectId: input.subjectId, agentId: input.agentId, key: null,
       version: input.version, kind: input.kind ?? "create", rowId: input.memoryId ?? `row-${id}`,
       valueHash: null, previousVersionHash: null, recordHash: `raw-${id}`,
       soulSnapshot: null, memoryId: input.memoryId, visibility: input.visibility,
@@ -136,7 +130,7 @@ describe("flair#2139 S2 — skill version read authority", () => {
   test("a shared skill version is readable by another verified agent", async () => {
     const subject = nextSubjectId("shared");
     const memId = `mem-${subject}`;
-    await upsertMemory(memId, A.id, "shared");
+    await upsertMemory(memId, A.id, "shared", subject);
     const id = await insertVersion({ subjectId: subject, agentId: A.id, visibility: "shared", memoryId: memId, version: 1 });
 
     const asOther = await call(B, "GET", versionPath(id));
@@ -147,7 +141,7 @@ describe("flair#2139 S2 — skill version read authority", () => {
   test("a private skill version is denied to a non-owner; the owner and an admin agent read it", async () => {
     const subject = nextSubjectId("private");
     const memId = `mem-${subject}`;
-    await upsertMemory(memId, A.id, "shared");
+    await upsertMemory(memId, A.id, "shared", subject);
     const id = await insertVersion({ subjectId: subject, agentId: A.id, visibility: "private", memoryId: memId, version: 1 });
 
     expect((await call(B, "GET", versionPath(id))).status).toBe(404);
@@ -159,8 +153,8 @@ describe("flair#2139 S2 — skill version read authority", () => {
     const subject = nextSubjectId("revoke");
     const sharedMem = `mem-${subject}-shared`;
     const privateMem = `mem-${subject}-private`;
-    await upsertMemory(sharedMem, A.id, "shared");
-    await upsertMemory(privateMem, A.id, "private");
+    await upsertMemory(sharedMem, A.id, "shared", subject);
+    await upsertMemory(privateMem, A.id, "private", subject);
     const v1 = await insertVersion({ subjectId: subject, agentId: A.id, visibility: "shared", memoryId: sharedMem, version: 1 });
     const v2 = await insertVersion({ subjectId: subject, agentId: A.id, visibility: "shared", memoryId: privateMem, version: 2, kind: "update" });
 
@@ -172,14 +166,14 @@ describe("flair#2139 S2 — skill version read authority", () => {
   test("after a logical delete, the tombstone's last authority governs the chain", async () => {
     const shared = nextSubjectId("tomb-shared");
     const sharedMem = `mem-${shared}`;
-    await upsertMemory(sharedMem, A.id, "shared");
+    await upsertMemory(sharedMem, A.id, "shared", shared);
     const s1 = await insertVersion({ subjectId: shared, agentId: A.id, visibility: "shared", memoryId: sharedMem, version: 1 });
     await insertVersion({ subjectId: shared, agentId: A.id, visibility: "shared", memoryId: null, version: 2, kind: "delete" });
     expect((await call(B, "GET", versionPath(s1))).status, "a shared tombstone keeps the chain readable").toBe(200);
 
     const priv = nextSubjectId("tomb-private");
     const privMem = `mem-${priv}`;
-    await upsertMemory(privMem, A.id, "shared");
+    await upsertMemory(privMem, A.id, "shared", priv);
     const p1 = await insertVersion({ subjectId: priv, agentId: A.id, visibility: "shared", memoryId: privMem, version: 1 });
     await insertVersion({ subjectId: priv, agentId: A.id, visibility: "private", memoryId: null, version: 2, kind: "delete" });
     expect((await call(B, "GET", versionPath(p1))).status, "a private tombstone revokes the chain").toBe(404);
@@ -192,7 +186,7 @@ describe("flair#2139 S2 — skill version read authority", () => {
 
     const legacy = nextSubjectId("legacy");
     const legacyMem = `mem-${legacy}`;
-    await upsertMemory(legacyMem, A.id, "shared");
+    await upsertMemory(legacyMem, A.id, "shared", legacy);
     const l1 = await insertVersion({ subjectId: legacy, agentId: A.id, visibility: null, memoryId: legacyMem, version: 1 });
     expect((await call(B, "GET", versionPath(l1))).status, "missing write-time visibility must not read as public").toBe(404);
   }, 120_000);
@@ -200,12 +194,12 @@ describe("flair#2139 S2 — skill version read authority", () => {
   test("the collection read includes only authorized skill versions", async () => {
     const okSubject = nextSubjectId("coll-ok");
     const okMem = `mem-${okSubject}`;
-    await upsertMemory(okMem, A.id, "shared");
+    await upsertMemory(okMem, A.id, "shared", okSubject);
     const okId = await insertVersion({ subjectId: okSubject, agentId: A.id, visibility: "shared", memoryId: okMem, version: 1 });
 
     const badSubject = nextSubjectId("coll-bad");
     const badMem = `mem-${badSubject}`;
-    await upsertMemory(badMem, A.id, "shared");
+    await upsertMemory(badMem, A.id, "shared", badSubject);
     const badId = await insertVersion({ subjectId: badSubject, agentId: A.id, visibility: "private", memoryId: badMem, version: 1 });
 
     const collection = await call(B, "GET", collectionPath);
@@ -215,10 +209,37 @@ describe("flair#2139 S2 — skill version read authority", () => {
     expect(listed, "an unauthorized skill version must not be listed").not.toContain(badId);
   }, 120_000);
 
+  for (const [label, memoryOverrides, versionOverrides] of [
+    ["unrelated shared Memory", { skillSubjectId: "unrelated" }, {}],
+    ["non-skill Memory", { tags: [] }, {}],
+    ["owner mismatch", { agentId: B.id }, {}],
+    ["archived Memory", { archived: true }, {}],
+    ["closed Memory", { validTo: "2020-01-01T00:00:00.000Z" }, {}],
+    ["empty Memory owner", { agentId: "" }, {}],
+    ["unknown Memory visibility", { visibility: "public" }, {}],
+    ["empty version owner", {}, { agentId: "" }],
+    ["unknown version visibility", {}, { visibility: "public" }],
+    ["unknown subject type", {}, { subjectType: "unknown" }],
+    ["malformed tombstone", {}, { kind: "delete" }],
+  ] as const) {
+    test(`${label} denies by-id and collection reads`, async () => {
+      const subject = nextSubjectId("invalid");
+      const memId = `mem-${subject}`;
+      await upsertMemory(memId, A.id, "shared", subject, memoryOverrides);
+      const id = await insertVersion({ subjectId: subject, agentId: A.id, visibility: "shared", memoryId: memId, version: 1, ...versionOverrides });
+      for (const reader of [A, B]) {
+        expect((await call(reader, "GET", versionPath(id))).status).toBe(404);
+        const collection = await call(reader, "GET", collectionPath);
+        expect(collection.status).toBe(200);
+        expect(JSON.parse(collection.text).map((r: any) => r.id)).not.toContain(id);
+      }
+    }, 120_000);
+  }
+
   test("anonymous is denied on both the by-id and collection reads", async () => {
     const subject = nextSubjectId("anon");
     const memId = `mem-${subject}`;
-    await upsertMemory(memId, A.id, "shared");
+    await upsertMemory(memId, A.id, "shared", subject);
     const id = await insertVersion({ subjectId: subject, agentId: A.id, visibility: "shared", memoryId: memId, version: 1 });
     expect([401, 403]).toContain((await call("anonymous", "GET", versionPath(id))).status);
     expect([401, 403]).toContain((await call("anonymous", "GET", collectionPath)).status);
