@@ -6,6 +6,7 @@ import { databases } from "harper";
 import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
+import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
 
@@ -134,18 +135,13 @@ export interface InstructionReadRef {
 }
 
 /**
- * Can `readerId` read a retained skill reference under Memory's open-within-org
- * rule? Own records at any visibility, plus every other agent's non-private
- * record. Stricter than the raw Memory predicate in ONE load-bearing way: a
- * missing/empty `visibility` DENIES. Skill history is audit metadata; a version
- * captured without explicit visibility must fail closed, never read as public
- * (flair#2139 S2 decision 3 — "normalize legacy missing visibility when
- * capturing it, rather than treating missing audit metadata as public").
+ * Skill references require a nonempty owner and explicit private/shared visibility.
  */
 export function skillRefReadable(ref: InstructionReadRef | null | undefined, readerId: string): boolean {
   if (!ref || typeof ref !== "object") return false;
-  if (typeof ref.visibility !== "string" || ref.visibility.length === 0) return false;
-  return ref.agentId === readerId || ref.visibility !== "private";
+  if (typeof ref.agentId !== "string" || ref.agentId.length === 0) return false;
+  if (ref.visibility !== PRIVATE_VISIBILITY && ref.visibility !== SHARED_VISIBILITY) return false;
+  return ref.agentId === readerId || ref.visibility === SHARED_VISIBILITY;
 }
 
 /** A version row carries the expectedVersion it compared iff it is guarded; otherwise null. */
@@ -178,11 +174,9 @@ function isTableLike(table: unknown): boolean {
 }
 
 /**
- * The subject's current head, or null when it has no history yet. Read through
- * the raw table handle: this runs inside the caller's append transaction and
- * has already dropped the thread's cached read snapshot (withKeyLock), so it
- * sees the last committed head under the subject lock. Also exported so the
- * read resource resolves a skill subject's head through the same handle.
+ * The subject's current head, or null when it has no history yet.
+ * The append caller reads under its subject lock and transaction after resetting
+ * the cached read snapshot; the read resource uses the same raw handle without a lock.
  */
 export async function readHead(subjectType: string, subjectId: string, shared?: any): Promise<Record<string, any> | null> {
   const table = (databases as any).flair?.InstructionVersion;

@@ -140,15 +140,8 @@ type Memory @table(database: "flair") {
                                # that producer is a follow-up); additive/nullable, existing rows carry no
                                # entities, readers tolerate absent (same pattern as Presence.activityUpdatedAt).
                                # See docs/entity-vocabulary.md.
-  skillSubjectId: String @indexed  # flair#2139 S2: the STABLE logical subject of a skill-tagged Memory row.
-                               # A skill is a Memory tagged `skill`; an update SUPERSEDES (a new physical
-                               # row) rather than overwriting, so the subject must outlive any single
-                               # physical row for the version chain to survive replacement. This column
-                               # is SERVER-OWNED and nullable: derived on a skill's first physical write
-                               # from that row's id, or adopted from an explicit `supersedes` predecessor;
-                               # every successor inherits it, and it is never derived from a name, content
-                               # hash, client metadata or a successor's fresh id. Nullable/additive —
-                               # non-skill rows and pre-existing skill rows read back null.
+  skillSubjectId: String @indexed  # Nullable, server-owned skill subject for version reads.
+                               # Derivation, supersession and application-written skill history are deferred to #2246.
 }
 
 # Explicit entity-to-entity relationships with temporal validity.
@@ -425,7 +418,7 @@ type OrgSkillAssignmentHistory @table(database: "flair") {
 }
 
 # InstructionVersion — single-row Soul resource write history; Soul collection deletes are refused.
-# REST mutation verbs are refused; reads authorize soul subjects only.
+# REST mutation verbs are refused; reads authorize soul and skill subjects.
 # The administrator operations API is an unaudited exception.
 type InstructionVersion @table(database: "flair") @export {
   id: ID @primaryKey              # encodes subjectType + subjectId + version

@@ -17,7 +17,7 @@
  * decision 3: the reader must hold Memory read permission against BOTH the
  * requested version's stored owner/visibility AND the subject's current
  * authority (the head's live Memory row, or the head tombstone after a logical
- * delete), fail-closed on missing metadata; admin/internal keep Memory's
+ * delete); admin/internal keep Memory's
  * unfiltered exception. Any other subject type is denied on both the by-id and
  * the collection read.
  *
@@ -51,23 +51,27 @@ const readGate = makeAuthGate();
  * delete, the head tombstone's last owner/visibility). It is the more
  * restrictive of write-time and current: tightening a skill to private revokes
  * its earlier versions, and loosening it never widens a version that was private
- * when written. A missing or inconsistent authority state denies. Admin agents
- * and trusted internal calls keep Memory's unfiltered read exception.
+ * when written. Ordinary readers require matching subjects, a live skill Memory
+ * row owned by the head's owner, and explicit private/shared authority references.
+ * Delete heads require a null memoryId. Admin/internal keep unfiltered reads.
  */
 async function skillVersionReadable(row: Record<string, any>, auth: any): Promise<boolean> {
   if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) return true;
   const reader = auth.agentId;
+  if (typeof row.subjectId !== "string" || row.subjectId.length === 0) return false;
   if (!skillRefReadable({ agentId: row.agentId, visibility: row.visibility }, reader)) return false;
   let head: Record<string, any> | null;
   try {
-    head = await readHead(SKILL_SUBJECT_TYPE, String(row.subjectId));
+    head = await readHead(SKILL_SUBJECT_TYPE, row.subjectId);
   } catch {
     return false;
   }
-  if (!head) return false;
+  if (!head || head.subjectType !== SKILL_SUBJECT_TYPE || head.subjectId !== row.subjectId) return false;
+  if (!skillRefReadable({ agentId: head.agentId, visibility: head.visibility }, head.agentId)) return false;
   if (head.kind === "delete") {
-    return skillRefReadable({ agentId: head.agentId, visibility: head.visibility }, reader);
+    return head.memoryId === null && skillRefReadable(head, reader);
   }
+  if (head.kind !== "create" && head.kind !== "update") return false;
   if (typeof head.memoryId !== "string" || head.memoryId.length === 0) return false;
   let memory: any;
   try {
@@ -75,7 +79,13 @@ async function skillVersionReadable(row: Record<string, any>, auth: any): Promis
   } catch {
     return false;
   }
-  if (!memory) return false;
+  if (!memory || memory.id !== head.memoryId || memory.skillSubjectId !== row.subjectId) return false;
+  if (memory.agentId !== head.agentId || memory.archived === true) return false;
+  if (!Array.isArray(memory.tags) || !memory.tags.includes("skill")) return false;
+  for (const end of [memory.validTo, memory.expiresAt]) {
+    if (end == null) continue;
+    if (typeof end !== "string" || !(Date.parse(end) > Date.now())) return false;
+  }
   return skillRefReadable({ agentId: memory.agentId, visibility: memory.visibility }, reader);
 }
 
