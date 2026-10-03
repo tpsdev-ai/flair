@@ -248,16 +248,31 @@ an upgrade replaces that file, run the command again or edit the file.
 
 ### ChatGPT
 
-ChatGPT's published metadata document, `https://chatgpt.com/oauth/client.json`,
-declares `token_endpoint_auth_method: private_key_jwt`. `@harperfast/oauth`
-2.9.0, the version Flair pins, admits an interactive CIMD client that
-authenticates with `private_key_jwt` once the operator adds the client's host
-(`chatgpt.com`) to `mcp.clientIdMetadataDocuments.allowedHosts` and sets
-`mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true`. The shipped
-`config.yaml` does neither — its list is `claude.ai` and `claude.com`, and that
-setting is off — so a stock instance still refuses ChatGPT's CIMD client.
-Stored registrations are a separate path (see [2. Which apps](#2-which-apps)),
-and registration of new clients is off.
+With MCP enabled and a provider configured, admitting ChatGPT's CIMD client
+requires `chatgpt.com` in `mcp.clientIdMetadataDocuments.allowedHosts` and
+`mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true`. ChatGPT's assertion
+uses the token-endpoint URL as its audience, so the pinned `@harperfast/oauth`
+2.9.0 also requires this exception in the deployed `config.yaml`:
+
+```yaml
+'@harperfast/oauth':
+  mcp:
+    clientIdMetadataDocuments:
+      allowedHosts:
+        - claude.ai
+        - claude.com
+        - chatgpt.com
+      privateKeyJwt:
+        enabled: true
+        tokenEndpointAudience:
+          clientIds:
+            - https://chatgpt.com/oauth/client.json
+          expiresAt: '2026-11-01T00:00:00Z'
+```
+
+Use the exact client ID and an operator-chosen future ISO 8601 `expiresAt`;
+the exception stops accepting the token-endpoint audience at that expiry.
+Restart Flair after editing the configuration.
 
 ## 3. What they can touch
 

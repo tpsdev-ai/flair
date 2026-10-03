@@ -150,7 +150,7 @@ async function adminOp(op: Record<string, any>): Promise<Response> {
   });
 }
 
-describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 component", () => {
+describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth component", () => {
   beforeAll(async () => {
     // Capture the real config.yaml checksum BEFORE anything touches it.
     configChecksum = sha256(CONFIG_PATH);
