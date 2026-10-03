@@ -506,7 +506,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **IdJagReplay** | oauth.graphql | no | Used ID-JAG `jti` values |
 | **OAuthSingleUse** | oauth.graphql | no | A claim to redeem an authorization code or rotate a refresh token, keyed by its SHA-256 |
 
-`flair integrity check` reports missing checkpointed durable Memory IDs or replacements with differing nonempty tokens without matching new deletion history. A row created and lost entirely between scans is not observed.
+`flair integrity check` reports missing checkpointed durable Memory IDs or replacements with changed or missing previously nonempty tokens without matching new deletion history. A row created and lost entirely between scans is not observed.
 
 `InstructionVersion` rows are appended by Flair's in-process write path. The administrator operations API (`upsert` / `delete` under admin auth) can also write version rows, and that path is not audited by this table — a documented, deferred exception.
 

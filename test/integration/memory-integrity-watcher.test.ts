@@ -9,7 +9,7 @@
  * alone. An equal-size replacement with a different ID is caught
  * by the ID set even though the count is unchanged.
  *
- * Throwaway HOME + data dir, ephemeral ports (never 9925/9926).
+ * Throwaway HOME + data dir, ephemeral ports.
  */
 import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
 import { randomUUID } from "node:crypto";

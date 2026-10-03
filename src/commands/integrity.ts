@@ -141,7 +141,7 @@ export function register(program: Command): void {
     .command("check")
     .description("Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed")
     .option("--json", "Print the verdict as JSON")
-    .option("--accept", "Re-baseline losses except replacements missing a token")
+    .option("--accept", "On an alert, advance the whole checkpoint only if no reported replacement lacks a token; otherwise write no checkpoint, even with other losses")
     .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")

@@ -18,9 +18,7 @@ import { mock } from "bun:test";
 export const harnessState = {
   memoryStore: new Map<string, any>(),
   pointerStore: new Map<string, any>(),
-  // flair#2213: the append-only Memory deletion record. Memory.delete and
-  // MemoryMaintenance's expiry append here in the same transaction as the row
-  // delete; the mock models the table so those writers behave as in Harper.
+  // flair#2213: Flair's deletion writers append records here in the row delete's transaction.
   deletionStore: new Map<string, any>(),
   instanceRow: null as any,
   pointerSearchCalls: 0,

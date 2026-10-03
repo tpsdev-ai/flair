@@ -866,7 +866,7 @@ flair integrity check
       description: Print the verdict as JSON
       attr: json
     --accept
-      description: Re-baseline losses except replacements missing a token
+      description: On an alert, advance the whole checkpoint only if no reported replacement lacks a token; otherwise write no checkpoint, even with other losses
       attr: accept
     --checkpoint <path>
       description: Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)
@@ -3649,7 +3649,9 @@ nonempty tokens; rows created and lost entirely between scans are not observed
 
 Options:
   --json               Print the verdict as JSON
-  --accept             Re-baseline losses except replacements missing a token
+  --accept             On an alert, advance the whole checkpoint only if no
+                       reported replacement lacks a token; otherwise write no
+                       checkpoint, even with other losses
   --checkpoint <path>  Checkpoint file path (default:
                        ~/.flair/integrity-checkpoint.json)
   --ops-port <port>    Harper operations API port
