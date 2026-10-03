@@ -245,9 +245,22 @@ describe("flair#2197 — local init --skip-start installs without starting", () 
     expect(assignments[0]).toMatchObject({ id: SEED_ASSIGNMENT_ID, skillName: "using-flair", skillRef: SEED_SKILL_ID });
   }, 300_000);
 
-  for (const responds of [true, false]) {
-    test(`an occupied HTTP port and empty local data directory refuse without credentials (health response=${responds})`, async () => {
+  for (const { responds, existing, skipStart } of [
+    { responds: true, existing: false, skipStart: true },
+    { responds: false, existing: false, skipStart: true },
+    { responds: true, existing: true, skipStart: false },
+    { responds: true, existing: true, skipStart: true },
+  ]) {
+    test(`an occupied HTTP port in another data directory refuses without credentials (installed=${existing}, health response=${responds}, skip-start=${skipStart})`, async () => {
       const install = await newInstall();
+      const foreignDataDir = join(install.home, "foreign-data");
+      mkdirSync(foreignDataDir);
+      const configPath = join(install.dataDir, "harper-config.yaml");
+      const config = `rootPath: ${install.dataDir}\n`;
+      if (existing) {
+        mkdirSync(install.dataDir, { recursive: true });
+        writeFileSync(configPath, config);
+      }
       const log = join(install.home, "requests.jsonl");
       const script = `
         import { createServer } from "node:http";
@@ -258,7 +271,7 @@ describe("flair#2197 — local init --skip-start installs without starting", () 
         }).listen(${install.httpPort}, "127.0.0.1", () => console.log("ready"));
       `;
       const listener = spawn(nodeBin(), ["--input-type=module", "-e", script], {
-        env: childEnv(install.home, launchctlStub(install.home)), stdio: ["ignore", "pipe", "pipe"],
+        env: { ...childEnv(install.home, launchctlStub(install.home)), ROOTPATH: foreignDataDir }, stdio: ["ignore", "pipe", "pipe"],
       });
       const exited = once(listener, "exit");
       try {
@@ -268,14 +281,15 @@ describe("flair#2197 — local init --skip-start installs without starting", () 
           listener.once("error", err => { clearTimeout(timer); reject(err); });
           listener.once("exit", () => { clearTimeout(timer); reject(new Error("fixture listener exited")); });
         });
-        const init = runLocalInit(install, ["--skip-start"]);
+        const init = runLocalInit(install, skipStart ? ["--skip-start"] : []);
         expect(init.status, init.stdout + init.stderr).toBe(1);
         expect(init.stderr).toContain(responds
           ? `port ${install.httpPort} answered /health with HTTP 200`
           : `port ${install.httpPort} has a listener without a /health response`);
         expect(init.stderr).toContain("Remedy:");
         expect(init.stdout).not.toContain("initialized successfully");
-        expect(installed(install)).toBe(false);
+        expect(installed(install)).toBe(existing);
+        if (existing) expect(readFileSync(configPath, "utf8")).toBe(config);
         expect(existsSync(join(install.home, ".flair", "admin-pass"))).toBe(false);
         expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(false);
         const requests = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));

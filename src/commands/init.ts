@@ -78,6 +78,7 @@ export type InitCli = {
   seedAgentViaOpsApi: (...args: any[]) => any;
   seedFederationInstanceViaOpsApi: (...args: any[]) => any;
   readOccupiedListener: (port: number) => OccupiedHarperListener;
+  resolveInstanceServingPid: (dataDir: string, port: number, deps: { findListeningPids: (port: number) => number[] }) => number | null;
   shouldShowInlineSecretWarning: (...args: any[]) => any;
   verifyAuditLog: (...args: any[]) => any;
   verifySemanticSearch: (...args: any[]) => any;
@@ -670,8 +671,10 @@ program
     } catch {}
     const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
       const attributed = harperConfigPath(dataDir) !== null &&
-        listener.pids.length === 1 && listener.dataDirs.length === 1 &&
-        canonicalLexicalPath(listener.dataDirs[0]) === canonicalLexicalPath(dataDir);
+        listener.pids.length === 1 &&
+        listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
+        (listener.dataDirs.length === 1 ||
+          cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
       if (attributed) return;
       console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
       console.error(foreignOccupiedListenerDetail(listener, dataDir));
