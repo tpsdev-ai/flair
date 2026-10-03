@@ -56,6 +56,7 @@ import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-track
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 import { refuseReservedSeedWrite, reservedSeedWriteDenial, writeTargetIds } from "./seed-reservation.js";
+import { refuseContentSuffixId } from "./memory-id-guard.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -942,6 +943,8 @@ export class Memory extends (databases as any).flair.Memory {
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
+    if (contentSuffixDenial) return contentSuffixDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // Rate limiting — use authenticated agent ID, not client-supplied body field
@@ -1295,6 +1298,8 @@ export class Memory extends (databases as any).flair.Memory {
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
+    if (contentSuffixDenial) return contentSuffixDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // flair#1383 — patch() routes past put(), so it needs its own refuse.
@@ -1424,6 +1429,8 @@ export class Memory extends (databases as any).flair.Memory {
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
+    if (contentSuffixDenial) return contentSuffixDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");

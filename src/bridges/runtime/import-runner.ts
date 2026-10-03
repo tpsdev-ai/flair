@@ -19,6 +19,7 @@ import type { BridgeMemory, YamlBridgeDescriptor } from "../types.js";
 import { BridgeRuntimeError } from "../types.js";
 import { importFromYaml } from "./execute.js";
 import type { BridgeContext } from "../types.js";
+import { endsWithContentSelectorSuffix } from "../../lib/memory-id-policy.js";
 
 export interface ImportRunOptions {
   /**
@@ -121,6 +122,20 @@ export async function runImport(opts: ImportRunOptions): Promise<ImportRunResult
       : "standard";
 
     const id = m.id ?? `${resolvedAgent}-${Date.now()}-${shortRand()}`;
+    // flair#2199: a Memory id ending in `.content` collides with the property
+    // selector Harper reads on a by-id request, so the importer refuses it here
+    // rather than have a read resolve to a different record.
+    if (endsWithContentSelectorSuffix(id)) {
+      throw new BridgeRuntimeError({
+        bridge: opts.bridgeName,
+        op: "import",
+        record: total,
+        field: "id",
+        expected: "a Memory id that does not end in .content",
+        got: id,
+        hint: `Memory ids must not end in ".content": the suffix collides with the Memory property selector. Change the bridge's id mapping for ${id}.`,
+      });
+    }
 
     const body: PutMemoryBody = {
       id,
