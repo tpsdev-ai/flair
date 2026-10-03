@@ -87,7 +87,7 @@ function normalizeSourceTarget(
     }
   }
   // A null-prototype copy: an own `__proto__` map key survives as a key rather
-  // than being applied as the map's prototype (flair#2235).
+  // than being silently dropped by `[[Set]]` (flair#2235).
   const map = protoSafeRecord(mapIn) as Record<string, string>;
 
   const out: YamlSourceTarget = {
