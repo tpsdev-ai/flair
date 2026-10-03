@@ -137,7 +137,7 @@ describe("principal state command, socket-free", () => {
       expect(result.exited).toBe(true);
       expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
       expect(result.calls[1].body.records[0]).toMatchObject({ id: "alice", status });
-      expect(result.errors).toContain(`the stored status is not ${status}; check the principal's status`);
+      expect(result.errors).toContain(`the stored status is not ${status}. Check the principal's status on that instance`);
       expect(result.errors + result.logs).not.toContain("secret-response-token");
       expect(result.logs).toBe("");
     });

@@ -202,7 +202,7 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
   const after = await readPrincipal(`${action} read-back`);
   const storedStatus = after.kind === "found" ? after.status : "no single record";
   if (storedStatus !== status) {
-    console.error(`Error: ${safeUrl} did not confirm principal '${id}' is ${status}; the stored status is not ${status}; check the principal's status.`);
+    console.error(`Error: ${safeUrl} did not confirm principal '${id}' is ${status}; the stored status is not ${status}. Check the principal's status on that instance.`);
     process.exit(1);
   }
   console.log(`✅ Principal '${id}' ${status === "active" ? "activated" : "deactivated"} (stored status: ${storedStatus})`);
