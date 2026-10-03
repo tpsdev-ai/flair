@@ -129,7 +129,7 @@ beforeEach(() => {
   activeState = true;
   activeError = null;
   readError = null;
-  serviceText = "Environment=FLAIR_AGENT_ID=agent-a\n";
+  serviceText = "[Service]\nEnvironment=FLAIR_AGENT_ID=agent-a\n";
   unitText = "Description=Flair REM nightly timer (agent-a)\n";
   rows = [mem("a1", "agent-a", "2000-01-01T00:00:00Z"), mem("a2", "agent-a", "2000-01-01T00:00:00Z")];
   setSystemTime(NOW);
@@ -217,7 +217,7 @@ test("installed but unreadable unit: UNKNOWN, never 'no driver'", async () => {
   activeState = true;
   activeError = null;
   readError = null;
-  serviceText = "Environment=FLAIR_AGENT_ID=agent-a\n";
+  serviceText = "[Service]\nEnvironment=FLAIR_AGENT_ID=agent-a\n";
   readError = "EACCES";
   const detail = await new HealthDetail().get();
   expect(detail.memories.expiredByAgent.agents).toEqual([
@@ -273,7 +273,7 @@ for (const code of ["EACCES", "EPERM", "ENOTDIR", "ELOOP"]) {
 }
 
 test("divergent timer and service use the service agent", async () => {
-  serviceText = "Environment=FLAIR_AGENT_ID=agent-b\n";
+  serviceText = "[Service]\nEnvironment=FLAIR_AGENT_ID=agent-b\n";
   rows.push(mem("b1", "agent-b", "2000-01-01T00:00:00Z"));
   const detail = await new HealthDetail().get();
   expect(detail.memories.expiredByAgent.agents).toEqual([
@@ -330,8 +330,8 @@ test("five named agents and an unowned row do not add a remainder agent", async 
 });
 
 for (const text of [
-  "# Environment=FLAIR_AGENT_ID=agent-b\nEnvironment=FLAIR_AGENT_ID=agent-a\n",
-  "Environment=FLAIR_AGENT_ID=agent-b\nEnvironment=FLAIR_AGENT_ID=agent-a\n",
+  "[Service]\n# Environment=FLAIR_AGENT_ID=agent-b\nEnvironment=FLAIR_AGENT_ID=agent-a\n",
+  "[Service]\nEnvironment=FLAIR_AGENT_ID=agent-b\nEnvironment=FLAIR_AGENT_ID=agent-a\n",
 ]) {
   test(`service assignments ignore comments and use the last value: ${JSON.stringify(text)}`, async () => {
     serviceText = text;
@@ -340,10 +340,11 @@ for (const text of [
 }
 
 for (const text of [
-  "# Environment=FLAIR_AGENT_ID=agent-a\n",
-  "Description=FLAIR_AGENT_ID=agent-a\n",
-  "Environment=FLAIR_AGENT_ID=agent-a%I\n",
-  'Environment="FLAIR_AGENT_ID=agent-a\n',
+  "Environment=FLAIR_AGENT_ID=agent-a\n",
+  "[Service]\n# Environment=FLAIR_AGENT_ID=agent-a\n",
+  "[Service]\nDescription=FLAIR_AGENT_ID=agent-a\n",
+  "[Service]\nEnvironment=FLAIR_AGENT_ID=agent-a%I\n",
+  '[Service]\nEnvironment="FLAIR_AGENT_ID=agent-a\n',
 ]) {
   test(`ambiguous service identity reports UNKNOWN: ${JSON.stringify(text)}`, async () => {
     serviceText = text;

@@ -1,6 +1,6 @@
 export function systemdAgentId(unit: string): string | null {
   let agent: string | null = null;
-  let section = "Service";
+  let section: string | null = null;
   for (const raw of unit.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || /^[#;]/.test(line)) continue;

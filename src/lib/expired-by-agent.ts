@@ -1,7 +1,7 @@
 /** Named agents in the warning before the remainder is folded into a count. */
 export const EXPIRED_BY_AGENT_NAMED_MAX = 5;
 
-/** Facts about the local REM nightly driver, from the scheduler files status/doctor already read. */
+/** Facts about the local REM nightly driver, from the scheduler file paths status/doctor check. */
 export interface NightlyDriverFacts {
   /** Plist present, or both Linux timer and service present; null = unknown. */
   installed: boolean | null;
@@ -19,7 +19,7 @@ export interface ExpiredAgentEntry {
 }
 
 export interface ExpiredByAgent {
-  /** Named agents, most expired rows first. At most EXPIRED_BY_AGENT_NAMED_MAX. */
+  /** Named agents, most expired rows first. Default limit: EXPIRED_BY_AGENT_NAMED_MAX. */
   agents: ExpiredAgentEntry[];
   /** Named agents with at least one expired row. */
   agentCount: number;

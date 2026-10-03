@@ -5,4 +5,4 @@
   Linux installation requires both timer and service; orphans report their path.
   Scheduler file and active-state probe failures report unknown with the path
   and error code when available.
-  The breakdown is included in `flair status --json`.
+  The breakdown is included in `flair status --json` when expired rows exist.
