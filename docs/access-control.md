@@ -137,10 +137,8 @@ name:
   provider name, the run revokes it (the row stays, with status `revoked`) and
   prints its id after `SUPERSEDED:`.
 - After writing, it reads the login's credentials back and fails unless exactly
-  one of them is not `revoked` and that one is the credential it wrote. It does
-  not compare the principal that credential names: `bootstrap`'s `agentId` (see
-  [Check who you are](#check-who-you-are)) shows which principal the login
-  resolves to.
+  one of them is not `revoked` and that one is the credential it wrote.
+  It also compares the principal that credential names.
 
 ### Just-in-time provisioning
 

@@ -1520,15 +1520,9 @@ export async function provisionIdpIdentityMapping(
 
 // ─── flair principal link / unlink / links (flair#2115) ──────────────────────
 //
-// Map ONE IdP login to a principal on an instance that is already enabled,
-// without walking `flair mcp enable`'s whole flow (and its restart prompt).
-// The mapping WRITE is `provisionIdpIdentityMapping` above — the same step
-// `mcp enable` runs. These functions add only the checks an operator acting on
-// one person needs: a target `checkMappingTargetRefusal` refuses is refused
-// before the first request, the principal must exist, a subject already mapped
-// to the same principal is reported and not rewritten, a subject mapped
-// elsewhere is refused unless the operator says `replace`, and a read that
-// FAILED refuses rather than standing in for "no mapping".
+// link maps one IdP login to a principal.
+// unlink revokes a mapping.
+// links lists current mappings.
 
 /** One current mapping, as `flair principal links` reports it. */
 export interface PrincipalMappingRow {
@@ -1785,9 +1779,7 @@ export async function linkPrincipalMapping(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
 
-  // flair#2115 — the principal is checked before either branch below, so an
-  // orphaned credential naming a deleted principal is not reported as a live
-  // mapping and a missing principal gets its own refusal.
+  // Refuse a missing requested principal before either mapping branch.
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
   const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)).filter(
@@ -2443,7 +2435,7 @@ export interface EnableMcpResult {
 }
 
 /**
- * flair#1317/#2115 — the one sentence a mapping reports when it revoked a prior
+ * flair#1317/#2115 — the note a mapping reports when it revoked a prior
  * credential for the subject. Returned with a leading space so it appends to a
  * line, and empty when nothing was superseded. One implementation, so `flair
  * principal link` prints it exactly as `flair mcp enable` does.
@@ -2452,7 +2444,7 @@ function supersededCredentialNote(mapping: IdentityMappingResult): string {
   return mapping.credentialSuperseded
     ? ` SUPERSEDED: ${mapping.supersededCredentialIds.length} prior Credential(kind:idp) row(s) for this subject ` +
       `were REVOKED, not de-duplicated — ${mapping.supersededCredentialIds.join(", ")}. ` +
-      `They no longer resolve, and anything relying on them stops working. ` +
+      `The revoked rows no longer resolve. Future calls for this subject use the surviving mapping. ` +
       `Exactly one active credential per (kind, idpSubject) is the invariant that keeps resolution deterministic.`
     : "";
 }

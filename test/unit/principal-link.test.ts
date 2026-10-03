@@ -280,7 +280,7 @@ describe("flair principal link (flair#2115)", () => {
     expect(result.lines).toHaveLength(1);
     expect(result.lines[0]).toContain(
       " SUPERSEDED: 1 prior Credential(kind:idp) row(s) for this subject were REVOKED, not de-duplicated — cred_c2. " +
-        "They no longer resolve, and anything relying on them stops working. " +
+        "The revoked rows no longer resolve. Future calls for this subject use the surviving mapping. " +
         "Exactly one active credential per (kind, idpSubject) is the invariant that keeps resolution deterministic.",
     );
     expect(st.rows.get("cred_c2")?.status).toBe("revoked");
