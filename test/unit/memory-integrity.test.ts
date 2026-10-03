@@ -6,7 +6,7 @@
  * a restart) is in test/integration/memory-integrity-watcher.test.ts.
  */
 import { describe, test, expect, afterEach, spyOn } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -37,6 +37,24 @@ const baseCheckpoint = (rows: Array<[string, string]>, at = "2026-10-02T00:00:00
   emptyCheckpoint(at, rowsOf(rows));
 
 describe("checkpoint file I/O", () => {
+  test("only lstat ENOENT is absent; a dangling symlink and directory are unreadable", () => {
+    const dir = tmp();
+    const target = join(dir, "missing.json");
+    const path = join(dir, "checkpoint.json");
+    expect(readCheckpoint(target).kind).toBe("absent");
+    symlinkSync(target, path);
+    expect(readCheckpoint(path).kind).toBe("unreadable");
+    expect(readCheckpoint(dir).kind).toBe("unreadable");
+  });
+
+  test("lstat EACCES is unreadable", () => {
+    const failure = spyOn(fs, "lstatSync").mockImplementation(() => {
+      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    });
+    try {
+      expect(readCheckpoint("checkpoint.json")).toEqual({ kind: "unreadable", reason: "permission denied" });
+    } finally { failure.mockRestore(); }
+  });
   test("write is atomic, 0600, and round-trips", () => {
     const d = tmp();
     const path = join(d, "integrity-checkpoint.json");
@@ -201,12 +219,12 @@ describe("compareScan", () => {
 
 
 describe("checkpoint regressions", () => {
-  test("a present row needs two nonempty tokens to be a replacement", () => {
+  test("a known token changing or disappearing is a replacement", () => {
     for (const before of [undefined, null, "", "old"]) {
       for (const after of [undefined, null, "", "old", "new"]) {
         const checkpoint = emptyCheckpoint("before", [{ id: "m", durability: "permanent", instanceToken: before }]);
         const verdict = compareScan({ checkpoint, rows: [{ id: "m", durability: "permanent", instanceToken: after }], deletions: [], scannedAt: "after" });
-        const replaced = before === "old" && after === "new";
+        const replaced = before === "old" && after !== "old";
         expect(verdict.status).toBe(replaced ? "alert" : "healthy");
         expect(verdict.losses).toEqual(replaced ? [{ id: "m", tier: "permanent", reason: "replaced" }] : []);
       }

@@ -1,10 +1,85 @@
 import { expect, test } from "bun:test";
 import { Command } from "commander";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir";
 import { bindIntegrityCli, register } from "../../src/commands/integrity";
 import { emptyCheckpoint } from "../../src/lib/memory-integrity";
+
+test("a missing checkpointed token is replaced and never advances, even with --accept, unless new history explains it", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalWrite = process.stdout.write;
+  const path = join(tempDir("flair-integrity-token-loss-"), "checkpoint.json");
+  const seen = { id: "seen", memoryId: "m", memoryInstanceToken: "old", at: "deleted" };
+  const checkpoint = JSON.stringify(emptyCheckpoint("baseline", [{ id: "m", durability: "permanent", instanceToken: "old" }], [seen]));
+  try {
+    bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
+    process.exit = ((code: number) => { throw new Error(`exit:${code}`); }) as typeof process.exit;
+    for (const instanceToken of [undefined, null, ""]) {
+      for (const accept of [false, true]) {
+        for (const deletions of [[], [seen], [{ ...seen, id: "wrong", memoryInstanceToken: "other" }], [{ ...seen, id: "new" }]]) {
+          writeFileSync(path, checkpoint);
+          let output = "";
+          process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
+          globalThis.fetch = (async (_url: any, init: any) => {
+            const { table } = JSON.parse(init.body);
+            return new Response(JSON.stringify(table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken }] : deletions));
+          }) as typeof fetch;
+          const program = new Command();
+          register(program);
+          const explained = deletions[0]?.id === "new";
+          await expect(program.parseAsync(["integrity", "check", "--json", ...(accept ? ["--accept"] : []), "--checkpoint", path, "--admin-pass", "secret"], { from: "user" })).rejects.toThrow(`exit:${explained ? 0 : 2}`);
+          const verdict = JSON.parse(output);
+          expect(verdict.status).toBe(explained ? "healthy" : "alert");
+          expect(verdict.losses).toEqual(explained ? [] : [{ id: "m", tier: "permanent", reason: "replaced" }]);
+          expect(verdict.checkpointWritten).toBe(explained);
+          if (!explained) expect(readFileSync(path, "utf8")).toBe(checkpoint);
+          else expect(JSON.parse(readFileSync(path, "utf8")).instanceTokens.m).toBeNull();
+        }
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stdout.write = originalWrite;
+  }
+});
+
+test("a dangling checkpoint symlink reports UNKNOWN and stays untouched even with --accept", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalWrite = process.stdout.write;
+  const dir = tempDir("flair-integrity-symlink-");
+  const path = join(dir, "checkpoint.json");
+  const target = join(dir, "missing.json");
+  symlinkSync(target, path);
+  const before = lstatSync(path);
+  try {
+    bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
+    process.exit = ((code: number) => { throw new Error(`exit:${code}`); }) as typeof process.exit;
+    globalThis.fetch = (async () => new Response("[]")) as unknown as typeof fetch;
+    for (const accept of [false, true]) {
+      let output = "";
+      process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
+      const program = new Command();
+      register(program);
+      await expect(program.parseAsync(["integrity", "check", "--json", ...(accept ? ["--accept"] : []), "--checkpoint", path, "--admin-pass", "secret"], { from: "user" })).rejects.toThrow("exit:3");
+      const verdict = JSON.parse(output);
+      expect(verdict.status).toBe("unknown");
+      expect(verdict.reason).toContain("checkpoint unreadable");
+      expect(verdict.checkpointWritten).toBe(false);
+      expect(lstatSync(path).isSymbolicLink()).toBe(true);
+      expect(lstatSync(path).ino).toBe(before.ino);
+      expect(readlinkSync(path)).toBe(target);
+      expect(existsSync(target)).toBe(false);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stdout.write = originalWrite;
+  }
+});
 
 test("a legacy row's first token is healthy and adopted into the next checkpoint", async () => {
   const originalFetch = globalThis.fetch;

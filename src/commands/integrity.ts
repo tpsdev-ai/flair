@@ -1,9 +1,8 @@
 /**
  * integrity.ts — `flair integrity check` (flair#2213).
  *
- * Operator-invoked, one-shot: read the live Memory corpus over the operations
- * API, compare it to the out-of-store checkpoint, report, and (only on a
- * non-alerting scan or `--accept`) advance the checkpoint. Two reads with
+ * Operator-invoked, one-shot: compare the live Memory corpus over the operations
+ * API with the checkpoint. Two reads with
  * explicit timeouts, no server-side job. `--json` for machines, human output
  * otherwise. A read failure reports UNKNOWN and never overwrites the checkpoint.
  *
@@ -129,20 +128,20 @@ function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
     lines.push(`  ❌ unexplained ${tier} decrease of ${delta} not accounted for by the id set`);
   }
   if (v.checkpointWritten) lines.push("  checkpoint advanced.");
-  else lines.push("  checkpoint NOT advanced (unresolved loss). Use --accept to re-baseline deliberately.");
+  else lines.push("  checkpoint NOT advanced (unresolved loss).");
   return lines.join("\n");
 }
 
 export function register(program: Command): void {
   const integrity = program
     .command("integrity")
-    .description("Detect missing checkpointed durable Memory IDs or replacements with differing nonempty tokens");
+    .description("Detect missing checkpointed durable Memory IDs or changed or missing previously nonempty tokens");
 
   integrity
     .command("check")
-    .description("Report missing checkpointed durable IDs or replacements with differing nonempty tokens; rows created and lost entirely between scans are not observed")
+    .description("Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed")
     .option("--json", "Print the verdict as JSON")
-    .option("--accept", "Advance the checkpoint even when a loss is open (re-baseline; deliberate)")
+    .option("--accept", "Re-baseline losses except replacements missing a token")
     .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
@@ -172,7 +171,9 @@ export function register(program: Command): void {
           verdict = { ...compareScan({ checkpoint: cp, rows, deletions, scannedAt }), status: "baseline", checkpointWritten: true };
         } else {
           verdict = compareScan({ checkpoint: read.checkpoint, rows, deletions, scannedAt });
-          if (verdict.status === "healthy" || opts.accept) {
+          const missingTokenLoss = verdict.losses.some(loss => loss.reason === "replaced" &&
+            rows.some(row => row.id === loss.id && !row.instanceToken));
+          if (verdict.status === "healthy" || (opts.accept && !missingTokenLoss)) {
             writeCheckpoint(checkpointPath, emptyCheckpoint(scannedAt, rows, deletions));
             verdict.checkpointWritten = true;
           }

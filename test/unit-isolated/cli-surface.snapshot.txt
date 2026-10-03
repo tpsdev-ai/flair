@@ -853,20 +853,20 @@ flair revoke
       attr: adminUser
 
 flair integrity
-  description: Detect missing checkpointed durable Memory IDs or replacements with differing nonempty tokens
+  description: Detect missing checkpointed durable Memory IDs or changed or missing previously nonempty tokens
   usage: [options] [command]
   options: (none)
   subcommands: check
 
 flair integrity check
-  description: Report missing checkpointed durable IDs or replacements with differing nonempty tokens; rows created and lost entirely between scans are not observed
+  description: Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed
   usage: [options]
   options:
     --json
       description: Print the verdict as JSON
       attr: json
     --accept
-      description: Advance the checkpoint even when a loss is open (re-baseline; deliberate)
+      description: Re-baseline losses except replacements missing a token
       attr: accept
     --checkpoint <path>
       description: Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)
@@ -2743,7 +2743,7 @@ Commands:
   idp                                       Manage enterprise IdP configurations (XAA)
   grant [options] <from-agent> <to-agent>   Grant an agent read access to another agent's memories
   revoke [options] <from-agent> <to-agent>  Revoke a memory grant between two agents
-  integrity                                 Detect missing checkpointed durable Memory IDs or replacements with differing nonempty tokens
+  integrity                                 Detect missing checkpointed durable Memory IDs or changed or missing previously nonempty tokens
   federation                                Manage federation (hub-and-spoke sync)
   rem                                       Memory hygiene and reflection
   status [options]                          Show Flair instance status, memory stats, and agent info
@@ -3626,7 +3626,7 @@ Global Options:
 ----- flair integrity -----
 Usage: flair integrity [options] [command]
 
-Detect missing checkpointed durable Memory IDs or replacements with differing
+Detect missing checkpointed durable Memory IDs or changed or missing previously
 nonempty tokens
 
 Options:
@@ -3636,21 +3636,20 @@ Global Options:
   -v, --version    output the version number
 
 Commands:
-  check [options]  Report missing checkpointed durable IDs or replacements with
-                   differing nonempty tokens; rows created and lost entirely
+  check [options]  Report missing checkpointed durable IDs or changed or missing
+                   previously nonempty tokens; rows created and lost entirely
                    between scans are not observed
   help [command]   display help for command
 
 ----- flair integrity check -----
 Usage: flair integrity check [options]
 
-Report missing checkpointed durable IDs or replacements with differing nonempty
-tokens; rows created and lost entirely between scans are not observed
+Report missing checkpointed durable IDs or changed or missing previously
+nonempty tokens; rows created and lost entirely between scans are not observed
 
 Options:
   --json               Print the verdict as JSON
-  --accept             Advance the checkpoint even when a loss is open
-                       (re-baseline; deliberate)
+  --accept             Re-baseline losses except replacements missing a token
   --checkpoint <path>  Checkpoint file path (default:
                        ~/.flair/integrity-checkpoint.json)
   --ops-port <port>    Harper operations API port

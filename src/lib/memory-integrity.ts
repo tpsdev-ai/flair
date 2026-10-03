@@ -3,15 +3,14 @@
  * comparison logic (flair#2213, slice 1 of #971; covers #1244's unnoticed-loss
  * risk).
  *
- * A checkpoint — per-tier counts AND the set of
- * Memory ids (durability and instanceToken) — lives outside Harper, under the
- * operator's flair config dir (`~/.flair/integrity-checkpoint.json`, mode 0600,
- * written atomically). `flair integrity check` scans the live corpus and
- * compares it to that checkpoint:
+ * The default checkpoint is `~/.flair/integrity-checkpoint.json` (mode 0600,
+ * written atomically); `--checkpoint` selects another path, which must stay
+ * outside Harper data. It stores per-tier counts and Memory ids (durability
+ * and instanceToken). `flair integrity check` compares the corpus to it:
  *
- *   - a durable-tier id (permanent / persistent) missing or replaced with differing
- *     nonempty tokens, without new matching deletion history, is an UNEXPLAINED LOSS.
- *     A row returning with its checkpointed token can make the next scan healthy; `--accept` re-baselines a loss.
+ *   - a durable-tier id (permanent / persistent) missing, or with a changed or
+ *     missing previously nonempty token, without new matching history, is an UNEXPLAINED LOSS.
+ *     A row returning with its checkpointed token can make the next scan healthy.
  *   - a durable-tier id gone WITH a new matching deletion record is history-backed.
  *   - a present id with changed durability reports a TIER CHANGE, including replacements.
  *   - a durable-tier count decrease beyond the id-set diff is also an alert.
@@ -20,7 +19,7 @@
  *
  * This module compares scans and reads and writes checkpoints.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -171,7 +170,7 @@ export function compareScan(opts: {
     const curRow = current.get(id);
     const curToken = typeof curRow?.instanceToken === "string" && curRow.instanceToken.length > 0 ? curRow.instanceToken : null;
     const cpToken = checkpoint.instanceTokens[id];
-    const replaced = curRow !== undefined && !!cpToken && !!curToken && curToken !== cpToken;
+    const replaced = curRow !== undefined && !!cpToken && curToken !== cpToken;
     if (curRow === undefined || replaced) {
       const record = deletedTiers.get(id);
       if (record) {
@@ -213,7 +212,7 @@ export function compareScan(opts: {
   };
 }
 
-/** The checkpoint path under the operator's flair config dir. */
+/** The default checkpoint path under the operator's flair config dir. */
 export function integrityCheckpointPath(home: string): string {
   return join(home, ".flair", INTEGRITY_CHECKPOINT_FILENAME);
 }
@@ -229,7 +228,12 @@ export type CheckpointRead =
  * "no checkpoint". Never a silent default.
  */
 export function readCheckpoint(path: string): CheckpointRead {
-  if (!existsSync(path)) return { kind: "absent" };
+  try {
+    lstatSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    return { kind: "unreadable", reason: err instanceof Error ? err.message : String(err) };
+  }
   let raw: string;
   try {
     raw = readFileSync(path, "utf-8");
