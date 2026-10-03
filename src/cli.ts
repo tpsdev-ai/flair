@@ -3537,7 +3537,7 @@ export async function seedAgentViaOpsApi(
       try {
         after = occupiedListener.reread();
       } catch {
-        after = { port: occupiedListener.before.port, pids: [], dataDirs: [] };
+        after = { port: occupiedListener.before.port, pids: [], dataDirs: [], pidsKnown: false };
       }
       return occupiedListenerAuthFailure({
         lead: "Operations API insert failed (401): ",

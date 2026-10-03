@@ -44,6 +44,12 @@ export interface OccupiedHarperListener {
    * could not read a directory — that is not a foreign data directory.
    */
   dataDirs: string[];
+  /**
+   * Whether the pid read succeeded. False (or absent) means the probe failed
+   * (no lsof), which is UNKNOWN — not "no listener". A caller that decides a
+   * port is free treats unknown as not-free.
+   */
+  pidsKnown?: boolean;
 }
 
 /** Pid list and ROOTPATH reads for one observation. Tests inject both. */
@@ -57,13 +63,14 @@ export interface OccupiedListenerLookup {
  * so it cannot become a pre-auth refusal. Does not decide `flair stop`.
  */
 export function listenerFromLookup(port: number, lookup: OccupiedListenerLookup): OccupiedHarperListener {
-  const pids = lookup.pids(port) ?? [];
+  const read = lookup.pids(port);
+  const pids = read ?? [];
   const dataDirs: string[] = [];
   for (const pid of pids) {
-    const read = lookup.rootPath(pid);
-    if (read.environReadable && read.rootPath && !dataDirs.includes(read.rootPath)) dataDirs.push(read.rootPath);
+    const root = lookup.rootPath(pid);
+    if (root.environReadable && root.rootPath && !dataDirs.includes(root.rootPath)) dataDirs.push(root.rootPath);
   }
-  return { port, pids, dataDirs };
+  return { port, pids, dataDirs, pidsKnown: read !== null };
 }
 
 /**
@@ -93,12 +100,13 @@ export function stableAnsweredHolder(
     after.pids.length === 1 &&
     before.pids[0] === after.pids[0];
   if (!sameSingle) {
-    return { port: after.port, pids: [], dataDirs: [] };
+    return { port: after.port, pids: [], dataDirs: [], pidsKnown: after.pidsKnown };
   }
   return {
     port: after.port,
     pids: [after.pids[0]],
     dataDirs: after.dataDirs,
+    pidsKnown: after.pidsKnown,
   };
 }
 

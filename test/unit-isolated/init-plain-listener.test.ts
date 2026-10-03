@@ -17,8 +17,7 @@ for (const { skipStart, occupied } of [
   { skipStart: true, occupied: false },
   { skipStart: false, occupied: true },
 ]) {
-  test(`fresh HOME from another cwd, occupied=${occupied}, skip-start=${skipStart}`, () => {
-    const home = tempDir("ipl-");
+  test(`fresh HOME from another cwd, occupied=${occupied}, skip-start=${skipStart}`, () => {    const home = tempDir("ipl-");
     const log = join(home, "actions.json");
     const requests = join(home, "requests.jsonl");
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
@@ -65,16 +64,30 @@ for (const { skipStart, occupied } of [
         return new Response(JSON.stringify(stored.get(String(url)) ?? {}), { status: stored.has(String(url)) ? 200 : 404 });
       };
       const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
-      setOccupiedListenerLookupForTests({ pids: () => { if (${occupied}) return [42]; if (!${skipStart}) throw new Error("plain init looked up a released port"); return []; }, rootPath: () => ({ rootPath: null, environReadable: false }) });
+      setOccupiedListenerLookupForTests({ pids: () => { if (${occupied}) return [42]; return []; }, rootPath: () => ({ rootPath: null, environReadable: false }) });
       await program.parseAsync(${JSON.stringify(["init", "--port", "20991", "--ops-port", "20990", "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", ...(skipStart ? ["--skip-start"] : [])])}, { from: "user" });
       writeFileSync(${JSON.stringify(log)}, JSON.stringify(actions));
       process.exit(0);
     `;
     const result = spawnSync("bun", ["--eval", script], { cwd: home, env, encoding: "utf8", timeout: 20_000 });
     expect(result.error).toBeUndefined();
+    if (occupied) {
+      // Plain init attributes the listener before any credential; an
+      // unattributed listener refuses by name and receives none (flair#2251).
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      expect(result.stderr).toContain("Refusing init");
+      expect(result.stderr).toContain("port 20991");
+      expect(result.stderr).toContain("pid 42");
+      expect(result.stderr).toContain("Remedy:");
+      expect(JSON.parse(readFileSync(log, "utf8")), result.stdout + result.stderr).toEqual([]);
+      const sent = readFileSync(requests, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      expect(sent.length).toBeGreaterThan(0);
+      expect(sent.every(r => r.authorization === null)).toBe(true);
+      return;
+    }
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain("Flair initialized");
-    expect(JSON.parse(readFileSync(log, "utf8")), result.stdout + result.stderr).toEqual(occupied ? [] : skipStart ? ["install"] : ["install", "run"]);
+    expect(JSON.parse(readFileSync(log, "utf8")), result.stdout + result.stderr).toEqual(skipStart ? ["install"] : ["install", "run"]);
     const sent = readFileSync(requests, "utf8").trim().split("\n").map(line => JSON.parse(line));
     expect(sent.some(r => r.authorization !== null)).toBe(!skipStart);
   }, 30_000);

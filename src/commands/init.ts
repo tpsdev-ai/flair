@@ -40,7 +40,6 @@ import {
   commandArg,
   foreignOccupiedListenerDetail,
   describeOccupiedListener,
-  staleHarperBeforeAuthNotice,
   type OccupiedHarperListener,
   type OperationsPortAttribution,
 } from "../lib/init-occupied-listener.js";
@@ -657,6 +656,32 @@ program
       process.exit(1);
     }
     let alreadyRunning = false;
+    // One listener probe, re-used by both paths. The pid/owner proof is
+    // #2248's: exactly one pid, every readable ROOTPATH this init's data dir,
+    // and — when no ROOTPATH could be read (the macOS launchd case) — the
+    // instance's own serving pid from hdb.pid equal to that pid. Anything else
+    // is unattributed, and init refuses before sending a credential. Used by
+    // --skip-start and by plain init alike (flair#2251).
+    const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
+      const attributed = harperConfigPath(dataDir) !== null &&
+        listener.pids.length === 1 &&
+        listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
+        (listener.dataDirs.length === 1 ||
+          cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
+      if (attributed) return;
+      console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
+      console.error(foreignOccupiedListenerDetail(listener, dataDir));
+      console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
+      process.exit(1);
+    };
+    // A failed lsof probe is not a free port (flair#2251). Plain init would
+    // otherwise start Harper against — and send credentials to — a port it
+    // could not read, so an unreadable probe refuses rather than proceeding.
+    const refuseUnknownListener = (listener: OccupiedHarperListener): void => {
+      console.error(`Refusing init: could not read the listener on port ${listener.port} (the lsof probe failed) — an unreadable probe is unknown, not a free port.`);
+      console.error("Remedy: make lsof available on PATH, free that port, or choose --port and --ops-port for this data directory, then rerun init.");
+      process.exit(1);
+    };
     if (opts.skipStart && !agentId) {
       let healthStatus: number | undefined;
       try {
@@ -666,18 +691,6 @@ program
           healthStatus = res.status;
         }
       } catch {}
-      const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
-        const attributed = harperConfigPath(dataDir) !== null &&
-          listener.pids.length === 1 &&
-          listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
-          (listener.dataDirs.length === 1 ||
-            cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
-        if (attributed) return;
-        console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
-        console.error(foreignOccupiedListenerDetail(listener, dataDir));
-        console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
-        process.exit(1);
-      };
       const httpListener = readOccupiedListener(httpPort);
       alreadyRunning ||= httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort);
       if (alreadyRunning) {
@@ -694,10 +707,36 @@ program
         refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
       }
     } else if (!opts.skipStart) {
+      // Plain init: attribute any listener on the configured HTTP/ops ports to
+      // this data directory's own instance BEFORE any admin credential is sent
+      // (flair#2251). An unattributed listener refuses by name; a listener
+      // probe that failed is unknown, never free.
+      let healthStatus: number | undefined;
       try {
         const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
-        if (res.status > 0) alreadyRunning = true;
+        if (res.status > 0) {
+          alreadyRunning = true;
+          healthStatus = res.status;
+        }
       } catch { /* not running */ }
+      const httpListener = readOccupiedListener(httpPort);
+      if (alreadyRunning || httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort)) {
+        refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
+        alreadyRunning = true;
+      } else if (!httpListener.pidsKnown) {
+        refuseUnknownListener(httpListener);
+      }
+      const opsListener = readOccupiedListener(opsPort);
+      let opsAnswer: number | undefined;
+      try {
+        const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) opsAnswer = res.status;
+      } catch {}
+      if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
+        refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
+      } else if (!opsListener.pidsKnown) {
+        refuseUnknownListener(opsListener);
+      }
     }
     const explicitCredential = !!(
       opts.adminPassFile || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || opts.adminPass
@@ -853,17 +892,9 @@ program
     readyOpsSocketPosture(dataDir);
 
     let skippedOwnStart = false;
-    if (!opts.skipStart) {
-      if (alreadyRunning) {
-        console.log(`Harper already running on port ${httpPort} — skipping start`);
-        const httpListener = readOccupiedListener(httpPort);
-        const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
-        if (notice) {
-          console.error(notice);
-          process.exit(1);
-        }
-        skippedOwnStart = true;
-      }
+    if (!opts.skipStart && alreadyRunning) {
+      console.log(`Harper already running on port ${httpPort} — skipping start`);
+      skippedOwnStart = true;
     }
 
     if (!alreadyRunning) {
