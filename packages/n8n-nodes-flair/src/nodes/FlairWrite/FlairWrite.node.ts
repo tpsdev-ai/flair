@@ -112,7 +112,7 @@ export class FlairWrite implements INodeType {
         ],
         default: "standard",
         description:
-          "Durability tier. permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.",
+          "Durability tier. permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row unless an ephemeral TTL has also expired; reaping takes precedence); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row unless an ephemeral TTL has also expired; reaping takes precedence). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.",
       },
       {
         displayName: "Type",

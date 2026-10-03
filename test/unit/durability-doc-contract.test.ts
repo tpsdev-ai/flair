@@ -5,8 +5,8 @@ import { join } from "node:path";
 const REPO = join(import.meta.dir, "../..");
 
 const CANONICAL_TIERS: readonly string[] = [
-  "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.",
-  "persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).",
+  "permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row unless an ephemeral TTL has also expired; reaping takes precedence); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.",
+  "persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row unless an ephemeral TTL has also expired; reaping takes precedence).",
   "standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.",
   "ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.",
 ];
