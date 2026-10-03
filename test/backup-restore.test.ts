@@ -49,8 +49,8 @@ function jsonRes(res: ServerResponse, status: number, data: unknown) {
 /** Answer a backup operations-API row-count request (flair#2228). */
 function opsRes(body: string, res: ServerResponse) {
   const b = JSON.parse(body);
-  if (b.operation === "describe_table") return jsonRes(res, 200, { record_count: AGENTS.length });
-  if (b.operation === "search_by_value") return jsonRes(res, 200, []);
+  if (b.operation === "describe_table") return jsonRes(res, 200, { record_count: b.table === "Agent" ? AGENTS.length : 0 });
+  if (b.operation === "search_by_value") return jsonRes(res, 200, b.table === "Agent" ? AGENTS : []);
   jsonRes(res, 404, { error: "not found" });
 }
 
@@ -488,10 +488,6 @@ describe("flair backup — non-TTY stdout routes progress to stderr", () => {
   }
 
   it("writes archive to default path and progress to stderr when stdout is not a TTY (scheduler / flair#968 regression)", async () => {
-    // Start a dedicated mock server for this test to rule out beforeEach
-    // lifecycle issues. It also answers the operations-API row counts backup
-    // now checks (flair#2228): describe_table reports every agent, and the
-    // per-agent searches match the empty Memory/Soul listings above.
     const srv = await startMockServer((req, body, res) => {
       if (req.method === "POST") return opsRes(body, res);
       if (req.url === "/Agent/") return jsonRes(res, 200, AGENTS);

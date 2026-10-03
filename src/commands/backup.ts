@@ -90,22 +90,12 @@ addSharedCredentialOptions(
 
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-    // Independent row counts (flair#2228) come from the operations API — a
-    // SEPARATE listener from the data API backup reads (see the "operations
-    // API only exists on its own port/socket" note in cli.ts, and
-    // buildOpsSearch in commands/rem.ts). `describe_table` reports an exact
-    // whole-table `record_count`, and `search_by_value` on the indexed
-    // `agentId` counts one agent's rows. Neither is the listing backup reads,
-    // so a listing that succeeds but omits rows is still caught. The ops
-    // endpoint is FLAIR_OPS_TARGET when set, else derived from --url
-    // (resolveOpsUrlFromTarget), else the local ops port (resolveOpsPort:
-    // FLAIR_OPS_PORT, config, then httpPort-1).
     const opsTarget = process.env.FLAIR_OPS_TARGET;
     const opsUrl: string = opsTarget
       ? opsTarget.replace(/\/$/, "")
       : opts.url
         ? resolveOpsUrlFromTarget(opts.url)
-        : `http://127.0.0.1:${resolveOpsPort(opts)}`;
+        : `http://127.0.0.1:${opts.port !== undefined ? resolveHttpPort(opts) - 1 : resolveOpsPort(opts)}`;
 
     type Row = Record<string, unknown> & { id: string };
     const ids = { Agent: new Set<string>(), Memory: new Set<string>(), Soul: new Set<string>() };
@@ -117,20 +107,19 @@ addSharedCredentialOptions(
         const res = await fetch(`${baseUrl}${path}`, {
           headers: { Authorization: auth },
           signal: AbortSignal.timeout(10_000),
-        });
+        }).catch(() => { throw new Error("request failed"); });
         if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`GET ${path} failed (${res.status}): ${text}`);
+          throw new Error(`GET ${path} failed (${res.status})`);
         }
-        const rows: unknown = await res.json();
+        const rows: unknown = await res.json().catch(() => { throw new Error("invalid JSON response"); });
         if (!Array.isArray(rows)) throw new Error("expected an array response");
         for (const [index, row] of rows.entries()) {
           if (!row || typeof row !== "object" || typeof row.id !== "string" || !row.id.trim()) {
             throw new Error(`row ${index}: missing or invalid id`);
           }
-          if (ids[table].has(row.id)) throw new Error(`row ${row.id}: duplicate id`);
+          if (ids[table].has(row.id)) throw new Error(`row ${index}: duplicate id`);
           if (agentId !== undefined && row.agentId !== agentId) {
-            throw new Error(`row ${row.id}: agentId does not match ${agentId}`);
+            throw new Error(`row ${index}: agentId does not match ${agentId}`);
           }
           ids[table].add(row.id);
         }
@@ -147,66 +136,68 @@ addSharedCredentialOptions(
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
-        });
+        }).catch(() => { throw new Error("request failed"); });
         if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
+          throw new Error(`HTTP ${res.status}`);
         }
-        return await res.json();
+        return await res.json().catch(() => { throw new Error("invalid JSON response"); });
       } catch (error) {
         throw new Error(`${context}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
-    /**
-     * Exact whole-table row count via the ops API. `exact_count: true` forces
-     * the full scan (Harper dataLayer/schemaDescribe.ts sets
-     * `tableResult.record_count` from `getRecordCount({exactCount})`); without
-     * it Harper may return an estimate. Used for Agent, which backup reads
-     * whole (the --agents filter is applied client-side).
-     */
-    async function agentRowCount(): Promise<number> {
+    type Table = keyof typeof ids;
+    type Inventory = Map<string, unknown>;
+
+    async function rowCount(table: Table): Promise<number> {
       const parsed: any = await opsPost(
-        { operation: "describe_table", database: "flair", table: "Agent", exact_count: true },
-        "Agent row count",
+        { operation: "describe_table", database: "flair", table, exact_count: true },
+        `${table} row count`,
       );
       const n = parsed?.record_count;
-      if (!Number.isInteger(n) || n < 0) {
-        throw new Error("Agent row count via the operations API: response carried no record_count");
+      if (!Number.isSafeInteger(n) || n < 0) {
+        throw new Error(`${table} row count via the operations API: response carried no record_count`);
       }
       return n;
     }
 
-    /**
-     * One agent's row count via `search_by_value` on the indexed `agentId`
-     * (the same filtered count flair uses elsewhere, e.g. commands/agent.ts).
-     * Counts ids only; no row content is read into the error.
-     */
-    async function rowsForAgent(table: "Memory" | "Soul", agentId: string): Promise<number> {
-      const parsed: any = await opsPost(
-        {
-          operation: "search_by_value",
-          database: "flair",
-          table,
-          search_attribute: "agentId",
-          search_value: agentId,
-          get_attributes: ["id"],
-        },
-        `${table} for agent ${agentId} row count`,
-      );
+    async function inventory(table: Table): Promise<Inventory> {
+      const expected = await rowCount(table);
+      const parsed: any = await opsPost({
+        operation: "search_by_value", database: "flair", table,
+        search_attribute: "id", search_value: "*", get_attributes: table === "Agent" ? ["id"] : ["id", "agentId"],
+      }, `${table} inventory`);
       const rows = Array.isArray(parsed) ? parsed : parsed?.results;
-      if (!Array.isArray(rows)) {
-        throw new Error(`${table} for agent ${agentId} row count via the operations API: response was not a row array`);
+      if (!Array.isArray(rows)) throw new Error(`${table} inventory: expected a row array`);
+      const result: Inventory = new Map();
+      for (const row of rows) {
+        if (!row || typeof row.id !== "string" || !row.id.trim() || result.has(row.id)) {
+          throw new Error(`${table} inventory: invalid or duplicate id`);
+        }
+        result.set(row.id, row.agentId);
       }
-      return rows.length;
+      if (result.size !== expected) {
+        throw new Error(`${table}: server reports ${expected} rows, inventory read ${result.size}`);
+      }
+      const after = await rowCount(table);
+      if (after !== expected) throw new Error(`${table}: source count changed; retry backup when writes are paused`);
+      return result;
     }
 
-    log("Fetching agents...");
-    const agentCount = await agentRowCount();
-    const allAgents = await adminGet("Agent");
-    if (allAgents.length < agentCount) {
-      throw new Error(`Agent: server reports ${agentCount} rows, backup read ${allAgents.length}`);
+    function verifyRows(table: Table, rows: Row[], expected: Inventory, agentId?: string): void {
+      const selected = new Set([...expected].filter(([, owner]) => agentId === undefined || owner === agentId).map(([id]) => id));
+      const context = agentId === undefined ? table : `${table} for agent ${agentId}`;
+      if (rows.length !== selected.size) {
+        throw new Error(`${context}: server reports ${selected.size} rows, backup read ${rows.length}`);
+      }
+      if (rows.some(row => !selected.has(row.id))) throw new Error(`${context}: backup ids differ from inventory`);
     }
+
+    const inventories = { Agent: await inventory("Agent"), Memory: await inventory("Memory"), Soul: await inventory("Soul") };
+
+    log("Fetching agents...");
+    const allAgents = await adminGet("Agent");
+    verifyRows("Agent", allAgents, inventories.Agent);
     const filterIds: string[] | null = opts.agents ? opts.agents.split(",").map((s: string) => s.trim()) : null;
     if (filterIds) {
       for (const id of filterIds) {
@@ -218,24 +209,24 @@ addSharedCredentialOptions(
     log(`Fetching memories for ${agents.length} agent(s)...`);
     const memories: Row[] = [];
     for (const agent of agents) {
-      const expected = await rowsForAgent("Memory", agent.id);
-      const before = memories.length;
-      for (const row of await adminGet("Memory", agent.id)) memories.push(row);
-      const received = memories.length - before;
-      if (received < expected) {
-        throw new Error(`Memory for agent ${agent.id}: server reports ${expected} rows, backup read ${received}`);
-      }
+      const rows = await adminGet("Memory", agent.id);
+      verifyRows("Memory", rows, inventories.Memory, agent.id);
+      memories.push(...rows);
     }
 
     log("Fetching souls...");
     const souls: Row[] = [];
     for (const agent of agents) {
-      const expected = await rowsForAgent("Soul", agent.id);
-      const before = souls.length;
-      for (const row of await adminGet("Soul", agent.id)) souls.push(row);
-      const received = souls.length - before;
-      if (received < expected) {
-        throw new Error(`Soul for agent ${agent.id}: server reports ${expected} rows, backup read ${received}`);
+      const rows = await adminGet("Soul", agent.id);
+      verifyRows("Soul", rows, inventories.Soul, agent.id);
+      souls.push(...rows);
+    }
+
+    for (const table of ["Agent", "Memory", "Soul"] as const) {
+      const after = await inventory(table);
+      const before = inventories[table];
+      if (after.size !== before.size || [...before].some(([id, owner]) => !after.has(id) || after.get(id) !== owner)) {
+        throw new Error(`${table}: source ids changed; retry backup when writes are paused`);
       }
     }
 

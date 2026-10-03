@@ -30,12 +30,9 @@ async function runBackup(overrides: Record<string, Reply> = {}, options: {
     }
   }
   const script = join(home, "run.ts");
-  // Independent counts the ops API reports, derived from the same fixtures so a
-  // successful backup stays successful: whole-table Agent via describe_table,
-  // per-agent Memory/Soul via search_by_value on agentId.
   const opsAgentCount = (options.empty ? [] : agents).length;
-  const memByAgent = Object.fromEntries(agents.map(a => [a.id, memories.filter(m => m.agentId === a.id).map(m => ({ id: m.id }))]));
-  const soulByAgent = Object.fromEntries(agents.map(a => [a.id, souls.filter(s => s.agentId === a.id).map(s => ({ id: s.id }))]));
+  const memByAgent = Object.fromEntries(agents.map(a => [a.id, memories.filter(m => m.agentId === a.id).map(m => ({ id: m.id, agentId: m.agentId }))]));
+  const soulByAgent = Object.fromEntries(agents.map(a => [a.id, souls.filter(s => s.agentId === a.id).map(s => ({ id: s.id, agentId: s.agentId }))]));
   writeFileSync(script, `
 import { mock } from "bun:test";
 import * as fs from "node:fs";
@@ -69,6 +66,7 @@ mock.module("node:fs", () => ({ ...fs,
   },
 }));
 const fixture = ${JSON.stringify(fixture)};
+const opsAgents = ${JSON.stringify(fixtureAgents)};
 const requests = [];
 const opsAgentCount = ${JSON.stringify(opsAgentCount)};
 const memByAgent = ${JSON.stringify(memByAgent)};
@@ -79,12 +77,12 @@ globalThis.fetch = async (url, init) => {
   const u = new URL(url);
   if (u.origin === "http://ops.invalid") {
     const body = JSON.parse(String(init.body));
-    if (body.operation === "describe_table" && body.table === "Agent") {
-      return Response.json({ record_count: opsAgentCount });
+    if (body.operation === "describe_table") {
+      const count = body.table === "Agent" ? opsAgentCount : opsAgents.length ? Object.values(body.table === "Memory" ? memByAgent : soulByAgent).flat().length : 0;
+      return Response.json({ record_count: count });
     }
     if (body.operation === "search_by_value") {
-      const byAgent = body.table === "Memory" ? memByAgent : soulByAgent;
-      return Response.json(byAgent[body.search_value] ?? []);
+      return Response.json(body.table === "Agent" ? opsAgents : opsAgents.length ? Object.values(body.table === "Memory" ? memByAgent : soulByAgent).flat() : []);
     }
     throw new Error("unexpected ops operation " + JSON.stringify(body));
   }
@@ -177,7 +175,7 @@ describe("backup fails closed (flair#2214)", () => {
       const row = table === "Agent" ? agents[0] : (table === "Memory" ? memories[4] : souls[2]);
       const result = await runBackup({ [path]: { body: [row, row] } });
       expectFailure(result, table);
-      expect(result.stderr).toContain(row.id);
+      expect(result.stderr).toContain("row 1: duplicate id");
       expect(result.stderr).toContain("duplicate");
     });
   }
@@ -187,7 +185,8 @@ describe("backup fails closed (flair#2214)", () => {
       test(`${table} rejects missing or mismatched owner ${agentId}`, async () => {
         const result = await runBackup({ [`/${table}/?agentId=kern`]: { body: [{ id: "bad-owner", agentId }] } });
         expectFailure(result, "kern");
-        expect(result.stderr).toContain("bad-owner");
+        expect(result.stderr).not.toContain("bad-owner");
+        expect(result.stderr).toContain("row 0: agentId");
         expect(result.stderr).toContain("agentId");
       });
     }
@@ -195,7 +194,8 @@ describe("backup fails closed (flair#2214)", () => {
       const firstId = table === "Memory" ? memories[0].id : souls[0].id;
       const result = await runBackup({ [`/${table}/?agentId=kern`]: { body: [{ id: firstId, agentId: "kern" }] } });
       expectFailure(result, "kern");
-      expect(result.stderr).toContain(firstId);
+      expect(result.stderr).not.toContain(firstId);
+      expect(result.stderr).toContain("row 0: duplicate id");
       expect(result.stderr).toContain("duplicate");
     });
   }
