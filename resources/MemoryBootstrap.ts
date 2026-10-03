@@ -653,8 +653,18 @@ export class BootstrapMemories extends Resource {
       && receivesOrgSkills(await withDetachedTxnAsync(ctx, () => (databases as any).flair.Agent.get(agentId)))) {
       const refRows: any[] = [];
       for (const ref of new Set(orgRows.map((row) => row.skillRef).filter((ref) => typeof ref === "string"))) {
+        // flair#2139 S2: a skillRef names a physical Memory id. A skill update
+        // supersedes into a fresh physical row that carries the referenced id
+        // as its `skillSubjectId`, so fetch BOTH — the live successor resolves
+        // the ref when the originally referenced row is no longer live.
         const refQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
-          conditions: [{ attribute: "id", comparator: "equals", value: ref }],
+          conditions: [{
+            operator: "or",
+            conditions: [
+              { attribute: "id", comparator: "equals", value: ref },
+              { attribute: "skillSubjectId", comparator: "equals", value: ref },
+            ],
+          }],
           select: SKILL_ROW_SELECT,
         }));
         for await (const record of refQuery as AsyncIterable<any>) refRows.push(record);

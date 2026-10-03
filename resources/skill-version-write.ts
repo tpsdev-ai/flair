@@ -19,10 +19,11 @@
  */
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
-import { recordVersion, type RecordVersionOutcome } from "./instruction-version-record.js";
+import { recordVersion, readHead, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
 import { SKILL_TAG, enforceSkillDurability } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
+import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
 function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
@@ -87,6 +88,60 @@ function isOpenLiveRow(row: Record<string, any> | null | undefined): boolean {
 /** Is this row a skill-tagged Memory row? */
 export function rowIsSkill(row: Record<string, any> | null | undefined): boolean {
   return !!row && Array.isArray(row.tags) && row.tags.includes(SKILL_TAG);
+}
+
+/**
+ * flair#2139 S2 — the close-payload bypass predicate. A reader who may not read
+ * a skill VERSION must not be able to read a retained (CLOSED) payload of that
+ * same skill through Memory's GET/search or the Feed replay. A CURRENT (open)
+ * skill row keeps its ordinary live read semantics (this returns true). A closed
+ * skill row is re-checked under decision 3: the reader must hold Memory read
+ * permission against BOTH the retained row's own owner/visibility AND the
+ * subject's CURRENT authority — the live head, or the head tombstone after a
+ * logical delete. A missing or inconsistent authority state denies.
+ */
+export async function closedSkillPayloadReadable(
+  row: Record<string, any> | null | undefined,
+  readerId: string,
+  read: { headOf?: (subjectId: string) => Promise<Record<string, any> | null>; memoryGet?: (id: string) => Promise<any> } = {},
+): Promise<boolean> {
+  if (!row || typeof row !== "object" || !rowIsSkill(row)) return true;
+  if (isOpenLiveRow(row)) return true;
+  if (!skillRefReadable({ agentId: row.agentId, visibility: row.visibility }, readerId)) return false;
+  const subjectId = typeof row.skillSubjectId === "string" && row.skillSubjectId.length > 0
+    ? row.skillSubjectId
+    : String(row.id);
+  let head: Record<string, any> | null;
+  try {
+    head = await resolveSkillHead(subjectId, String(row.id), undefined);
+  } catch {
+    return false;
+  }
+  if (head && String(head.id) !== String(row.id)) {
+    return skillRefReadable({ agentId: head.agentId, visibility: head.visibility }, readerId);
+  }
+  // No live head: the subject's current authority is its head tombstone.
+  const headOf = read.headOf ?? ((sid: string) => readHead(SKILL_SUBJECT_TYPE, sid));
+  let versionHead: Record<string, any> | null;
+  try {
+    versionHead = await headOf(subjectId);
+  } catch {
+    return false;
+  }
+  if (!versionHead) return false;
+  if (versionHead.kind === "delete") {
+    return skillRefReadable({ agentId: versionHead.agentId, visibility: versionHead.visibility }, readerId);
+  }
+  if (typeof versionHead.memoryId !== "string" || versionHead.memoryId.length === 0) return false;
+  const memoryGet = read.memoryGet ?? ((id: string) => (databases as any).flair?.Memory?.get(id));
+  let live: any;
+  try {
+    live = await memoryGet(versionHead.memoryId);
+  } catch {
+    return false;
+  }
+  if (!live) return false;
+  return skillRefReadable({ agentId: live.agentId, visibility: live.visibility }, readerId);
 }
 
 /**
@@ -256,13 +311,17 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
     async (shared: any) => {
       const writePlan = plan!;
       if (writePlan.kind === "delete") {
+        maybeThrowSkillWriteFault("close", args.agentId);
         await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
       } else {
+        maybeThrowSkillWriteFault("successor", args.agentId);
         await args.hooks.createSuccessor!(writePlan.successor, shared);
         if (writePlan.predecessor) {
+          maybeThrowSkillWriteFault("close", args.agentId);
           await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
         }
       }
+      maybeThrowSkillWriteFault("pointer", args.agentId);
       const pointerDenial = await args.hooks.pointer?.(shared);
       if (pointerDenial) return pointerDenial;
       return okResponse();

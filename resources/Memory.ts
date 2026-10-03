@@ -26,7 +26,7 @@ import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./mem
 import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, SKILL_TAG } from "./skill-write.js";
-import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import { skillWriteSource } from "./skill-write-policy.js";
 import {
@@ -58,7 +58,7 @@ import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
-import { refuseReservedSeedWrite, reservedSeedWriteDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
+import { refuseReservedSeedWrite, reservedSeedWriteDenial, reservedSeedSubjectDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -588,6 +588,30 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
 }
 
 /**
+ * flair#2139 S2 — `_reindex` stays bookkeeping only. A re-PUT may repopulate
+ * Harper's secondary indices, but it may NOT change a row's instruction fields,
+ * ownership, visibility or skill lineage: the reference row must keep the same
+ * owner and scope, and a skill must keep the same subject lineage and
+ * instructions. Compare only the fields the submitted body SUPPLIES (a partial
+ * re-PUT omits the rest) against the stored row; a supplied-but-different value
+ * refuses the reindex. Returns the first drifting field, or null.
+ */
+function reindexDrift(content: any, existing: Record<string, any>): string | null {
+  const fields = rowIsSkill(existing)
+    ? ["agentId", "visibility", "tags", "content", "trigger", "metadata", "durability", "supersedes", "validTo", "archived", "skillSubjectId"]
+    : ["agentId", "visibility"];
+  for (const field of fields) {
+    if (!Object.prototype.hasOwnProperty.call(content, field)) continue;
+    const submitted = content[field];
+    const stored = existing[field];
+    if (submitted === stored) continue;
+    if ((field === "tags" || field === "metadata") && JSON.stringify(submitted ?? null) === JSON.stringify(stored ?? null)) continue;
+    return field;
+  }
+  return null;
+}
+
+/**
  * Read-modify-write close of a superseded record, with the SAME transaction
  * detachment discipline as findConservativeDedupMatch (each discrete Harper
  * call individually wrapped — see withDetachedTxn's doc for why a single
@@ -796,6 +820,11 @@ async function writeSkillCreateOrUpdate(
       ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
       : `${content.agentId}-${randomUUID()}`;
   const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
+  // flair#2139 S2 — the reservation covers the whole logical lineage: a write
+  // whose subject is the seed's requires the operator source, not only one that
+  // names the seed's physical id.
+  const seedLineageDenial = reservedSeedSubjectDenial("Memory", [subjectId], ctx, auth);
+  if (seedLineageDenial) return seedLineageDenial;
   const addressedId = explicitPredecessor ? String(explicitPredecessor.id) : storedRow ? String(storedRow.id) : null;
   const captured: { row: Record<string, any> | null } = { row: null };
   const outcome = await runSkillVersionWrite({
@@ -852,6 +881,8 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
   }
   const now = new Date().toISOString();
   const subjectId = String(record.skillSubjectId ?? record.id);
+  const seedLineageDenial = reservedSeedSubjectDenial("Memory", [subjectId], ctx, auth);
+  if (seedLineageDenial) return seedLineageDenial;
   const outcome = await runSkillVersionWrite({
     ctx,
     subjectId,
@@ -938,6 +969,12 @@ export class Memory extends (databases as any).flair.Memory {
       readTarget = targetId != null ? { id: targetId } : {};
     }
     const result = await memoryByIdReadGate.call(this, readTarget, (t: any) => super.get(t));
+    // flair#2139 S2 — close-payload bypass: a retained (closed) skill payload a
+    // non-admin reader may not read must 404 like the version would (live-row
+    // semantics for a current skill are unchanged).
+    if (nonAdminAgent && result && typeof result === "object" && !(result instanceof Response)) {
+      if (!(await closedSkillPayloadReadable(result as any, auth.agentId))) return NOT_FOUND();
+    }
     // flair#1940 A3 (by-ID surface): the pointer is projected for THIS reader
     // BEFORE the trust block is attached. Admin/internal stay unfiltered (they
     // read the unredacted row, like every other field); a non-admin agent is
@@ -1038,6 +1075,9 @@ export class Memory extends (databases as any).flair.Memory {
         rows = [];
         const projected = await projectRowsThroughPointers(batch, readerAgentId);
         for (const row of projected) {
+          // flair#2139 S2 — close-payload bypass (see get()): filter a retained
+          // closed skill payload the reader may not read. Open rows pass.
+          if (!(await closedSkillPayloadReadable(row, readerAgentId))) continue;
           yield await applyHitStats(row, ctx);
         }
       };
@@ -1605,7 +1645,25 @@ export class Memory extends (databases as any).flair.Memory {
           { status: 404, headers: { "content-type": "application/json" } },
         );
       }
+      // flair#2139 S2 — bookkeeping only: refuse a re-PUT that would change the
+      // row's instruction fields, ownership, visibility or skill lineage.
+      const drift = reindexDrift(content, reindexExisting);
+      if (drift) {
+        return new Response(
+          JSON.stringify({
+            error: "reindex_would_change_row",
+            message: `the _reindex re-PUT may not change '${drift}'; it is bookkeeping only`,
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
       stampInstanceToken(content, reindexExisting);
+      // A reindex is a re-PUT of the SAME row, never a lineage change: restore
+      // the stored server-owned subject id (the full-record PUT would otherwise
+      // drop it, breaking the skill's chain across changed physical ids).
+      if (typeof reindexExisting.skillSubjectId === "string" && reindexExisting.skillSubjectId.length > 0) {
+        content.skillSubjectId = reindexExisting.skillSubjectId;
+      }
       // Keep the EXISTING row's STORED provenance byte-for-byte. The rest of
       // the row is filtered above and may gain an absent incarnation token.
       // The body's provenance was stripped above so it cannot be forged;

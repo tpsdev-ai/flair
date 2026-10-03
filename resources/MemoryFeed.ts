@@ -7,7 +7,7 @@ import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-gu
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
-import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
@@ -353,8 +353,8 @@ export class FeedMemories extends Resource {
     const readStored = (id: any) => (databases as any).flair.Memory.get(id);
     const replaysHistory = request.startTime !== undefined || request.previousCount !== undefined;
     for await (const event of subscription) {
-      if (!(await readableRowEvent(event, scope.isAllowed, readStored))) continue;
-      if (replaysHistory && !(await storedRowReadable(event?.id, scope.isAllowed, readStored))) continue;
+      if (!(await readableRowEvent(event, auth.agentId, scope.isAllowed, readStored))) continue;
+      if (replaysHistory && !(await storedRowReadable(event?.id, auth.agentId, scope.isAllowed, readStored))) continue;
       yield event;
     }
   }
@@ -418,14 +418,21 @@ function scopedSubscriptionRequest(callerRequest: any, rowFilter: (record: any) 
  */
 async function readableRowEvent(
   event: any,
+  readerId: string,
   isAllowed: (record: any) => boolean,
   readStored: (id: any) => Promise<any> | any,
 ): Promise<boolean> {
   if (!event || (event.type !== "put" && event.type !== "invalidate")) return false;
   const row = event.value;
   if (row == null || typeof row !== "object") return false;
-  if (typeof row.agentId === "string" && row.visibility !== undefined) return isAllowed(row);
-  return storedRowReadable(event.id, isAllowed, readStored);
+  if (typeof row.agentId === "string" && row.visibility !== undefined) {
+    if (!isAllowed(row)) return false;
+  } else if (!(await storedRowReadable(event.id, readerId, isAllowed, readStored))) {
+    return false;
+  }
+  // flair#2139 S2 close-payload bypass: a retained (closed) skill payload the
+  // reader may not read is withheld exactly as its version would be.
+  return closedSkillPayloadReadable(row, readerId);
 }
 
 /**
@@ -442,6 +449,7 @@ async function readableRowEvent(
  */
 async function storedRowReadable(
   id: any,
+  readerId: string,
   isAllowed: (record: any) => boolean,
   readStored: (id: any) => Promise<any> | any,
 ): Promise<boolean> {
@@ -453,5 +461,6 @@ async function storedRowReadable(
     return false;
   }
   if (stored == null || typeof stored !== "object" || typeof stored.agentId !== "string") return false;
-  return isAllowed(stored);
+  if (!isAllowed(stored)) return false;
+  return closedSkillPayloadReadable(stored, readerId);
 }

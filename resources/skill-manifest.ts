@@ -65,11 +65,13 @@ export interface SkillRow {
   archived?: unknown;
   validTo?: unknown;
   expiresAt?: unknown;
+  /** The stable logical subject id (flair#2139 S2); carried by every successor. */
+  skillSubjectId?: unknown;
 }
 
 /** The Memory fields the bootstrap skill-row query selects. */
 export const SKILL_ROW_SELECT = [
-  "id", "agentId", "visibility", "tags", "metadata", "archived", "validTo", "expiresAt",
+  "id", "agentId", "visibility", "tags", "metadata", "archived", "validTo", "expiresAt", "skillSubjectId",
 ];
 
 export type SkillRefResolution =
@@ -170,12 +172,29 @@ export function resolveSkillRef(name: string, rows: SkillRow[], agentId: string)
     ?? { kind: "unresolved", reason: "the agent has no live skill row with this name" };
 }
 
-/** An org assignment's `skillRef`, resolved against the rows it may name. */
+/**
+ * An org assignment's `skillRef`, resolved against the rows it may name
+ * (flair#2139 S2). A `skillRef` names a PHYSICAL Memory id, and a skill update
+ * supersedes: the referenced row may have been closed, with the lineage's live
+ * head now a fresh successor id. So a ref resolves to a live row by id, or —
+ * when the referenced row is no longer live — to the one live row whose carried
+ * `skillSubjectId` is that ref (the current live successor). Assignment
+ * authority and precedence are unchanged; only the physical-id resolution
+ * follows the lineage.
+ */
 function resolveOrgRef(skillRef: unknown, rows: SkillRow[]): SkillRefResolution {
-  if (typeof skillRef === "string" && rows.some((row) => row.id === skillRef)) {
-    return { kind: "resolved", skillId: skillRef };
+  if (typeof skillRef !== "string" || skillRef.length === 0) {
+    return { kind: "unresolved", reason: "the skillRef is not a live skill row this agent can read" };
   }
-  return { kind: "unresolved", reason: "the skillRef is not a live skill row this agent can read" };
+  const byId = rows.filter((row) => row.id === skillRef);
+  const matches = byId.length > 0 ? byId : rows.filter((row) => row.skillSubjectId === skillRef);
+  if (matches.length === 1) return { kind: "resolved", skillId: matches[0].id as string };
+  if (matches.length === 0) return { kind: "unresolved", reason: "the skillRef is not a live skill row this agent can read" };
+  return {
+    kind: "ambiguous",
+    reason: `${matches.length} live skill rows resolve this skillRef`,
+    candidates: matches.map((row) => row.id as string).sort(),
+  };
 }
 
 /** The "## Active Skills" prose line for a manifest entry. */
