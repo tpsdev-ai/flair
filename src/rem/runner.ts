@@ -811,7 +811,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
       || typeof obj.model !== "string" || !obj.model.trim()
       || !obj.candidates.every((c: unknown) => c && typeof c === "object" && typeof (c as { id?: unknown }).id === "string" && (c as { id: string }).id.length > 0)
       || !Number.isInteger(obj.gathered) || (obj.gathered as number) < 0
-      || !Number.isInteger(obj.unreflected) || (obj.unreflected as number) < (obj.gathered as number)
+      || !Number.isInteger(obj.unreflected) || (obj.unreflected as number) < 0
       || (obj.gathered === 0 && obj.candidates.length > 0)) {
       throw new Error("unexpected /ReflectMemories response shape");
     }

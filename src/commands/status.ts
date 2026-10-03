@@ -662,7 +662,7 @@ const statusCmd = program
       if (typeof r.pendingCandidates === "number") {
         console.log(render.kv("Pending candidates", render.wrap(ds.stale || r.pendingCandidates > 0 ? render.c.yellow : render.c.dim, String(r.pendingCandidates))));
       }
-      if (ds.lastDistilledAt || ds.stale) {
+      if (typeof r.pendingCandidates === "number" || ds.lastDistilledAt || ds.stale) {
         const text = distillStalenessLine(ds, render.relativeTime);
         console.log(render.kv("Last distilled", ds.stale ? render.wrap(render.c.yellow, text) : render.wrap(render.c.dim, text)));
       }
@@ -760,7 +760,7 @@ statusCmd
     } else {
       console.log(render.kv("Pending candidates", render.wrap(render.c.dim, "— (schema not available)"), 18));
     }
-    if (ds.lastDistilledAt || ds.stale) {
+    if (typeof r.pendingCandidates === "number" || ds.lastDistilledAt || ds.stale) {
       const text = distillStalenessLine(ds, render.relativeTime);
       console.log(render.kv("Last distilled", ds.stale ? render.wrap(render.c.yellow, text) : render.wrap(render.c.dim, text), 18));
     }
@@ -1128,7 +1128,7 @@ statusCmd
       if (r.lastNightlyAt) console.log(`Last nightly:      ${relativeTime(r.lastNightlyAt)} (${r.lastNightlyAt})`);
       if (typeof r.pendingCandidates === "number") console.log(`Pending candidates: ${r.pendingCandidates}`);
       const ds = distillationStaleness(r);
-      if (ds.lastDistilledAt || ds.stale) {
+      if (typeof r.pendingCandidates === "number" || ds.lastDistilledAt || ds.stale) {
         const base = ds.lastDistilledAt ? `${relativeTime(ds.lastDistilledAt)} (${ds.lastDistilledAt})` : "not observed";
         console.log(`Last distilled:     ${base} (server-local log tail)${ds.stale ? DISTILL_STALE_HINT : ""}`);
       }

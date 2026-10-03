@@ -1332,8 +1332,28 @@ describe("review regressions #2230", () => {
     expect(readLogRows()[0].distilledAt).toBeUndefined();
   });
 
+  for (const unreflected of [0, 1]) {
+    it(`records generation with 3 gathered rows and ${unreflected} unreflected`, async () => {
+      const { api } = makeTagAwareApi({ activeTags: [], reflect: () => ({
+        candidates: [{ id: "candidate" }], count: 1, model: "default", gathered: 3, unreflected,
+      }) });
+      const result = await runNightlyCycle(baseOpts({ apiCall: api }));
+      expect(result.status).toBe("completed");
+      expect(result.logRow.errors).toEqual([]);
+      expect(result.logRow.skips).toEqual([]);
+      expect(result.logRow.distill).toEqual({ gathered: 3, unreflected, maxMemories: DEFAULT_MAX_MEMORIES_PER_RUN });
+      expect(result.logRow.distilledAt).toBe(result.logRow.runAt);
+      expect(readLogRows()[0].distilledAt).toBe(result.logRow.runAt);
+    });
+  }
+
   it("malformed response does not record generation", async () => {
-    for (const response of [{}, { candidates: [], count: 0, model: "default", gathered: 1 },
+    for (const response of [
+      ...[-1, 0.5, "0", null].map((unreflected) => ({ candidates: [], count: 0, model: "default", gathered: 3, unreflected })),
+      ...[-1, 0.5, "3", null].map((gathered) => ({ candidates: [], count: 0, model: "default", gathered, unreflected: 0 })),
+      { candidates: [], count: 1, model: "default", gathered: 3, unreflected: 0 },
+      { candidates: [], count: 0, model: " ", gathered: 3, unreflected: 0 },
+      {}, { candidates: [], count: 0, model: "default", gathered: 1 },
       { candidates: [{}], count: 1, model: "default", gathered: 1, unreflected: 1 },
       { candidates: [{ id: "" }], count: 1, model: "default", gathered: 1, unreflected: 1 },
       { candidates: [{ id: "candidate" }], count: 1, model: "default", gathered: 0, unreflected: 0 }]) {
