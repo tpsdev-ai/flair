@@ -17,8 +17,9 @@
  * So: resolution must fall through to a usable candidate, and total failure
  * must be REPORTED with the paths tried and a remedy — never a bare false.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -144,25 +145,65 @@ describe("probeMigrationDataDir", () => {
     expect(p.reason).toBe("not a directory");
   });
 
-  it("refuses — and does not create — a candidate it cannot even stat", () => {
-    const secret = join(root, "no-search");
-    const candidate = join(secret, "instance");
-    mkdirSync(secret, { recursive: true });
-    chmodSync(secret, 0o600); // no search bit: statSync(<secret>/instance) throws EACCES
-
-    let reason = "";
+  it("refuses a candidate when lstat fails with EACCES, without creating it", () => {
+    const candidate = join(root, "no-search", "instance");
+    const realLstat = fs.lstatSync;
+    const denied = spyOn(fs, "lstatSync").mockImplementation(((...args: Parameters<typeof fs.lstatSync>) => {
+      if (args[0] === candidate) {
+        throw Object.assign(new Error("EACCES: permission denied, lstat"), { code: "EACCES" });
+      }
+      return realLstat(...args);
+    }) as typeof fs.lstatSync);
     try {
       const p = probeMigrationDataDir(candidate);
+      expect(denied).toHaveBeenCalled();
       expect(p.ok).toBe(false);
-      reason = p.reason ?? "";
+      expect(p.reason).toContain("EACCES");
+      expect(p.reason).toContain("cannot confirm the candidate is an existing directory");
+      expect(existsSync(candidate)).toBe(false);
     } finally {
-      chmodSync(secret, 0o700);
+      denied.mockRestore();
     }
+  });
 
-    expect(reason).toContain("EACCES");
-    expect(reason).toContain("cannot confirm the candidate is an existing directory");
-    // Nothing was created while the candidate was unreadable.
-    expect(existsSync(candidate)).toBe(false);
+  it("does not recreate a candidate removed between lstat and mkdir", () => {
+    const candidate = join(root, "vanished");
+    mkdirSync(candidate);
+    const realMkdir = fs.mkdirSync;
+    const race = spyOn(fs, "mkdirSync").mockImplementation((...args: Parameters<typeof fs.mkdirSync>) => {
+      if (args[0] === join(candidate, MIGRATIONS_SUBDIR)) rmSync(candidate, { recursive: true });
+      return realMkdir(...args);
+    });
+    try {
+      const p = probeMigrationDataDir(candidate);
+      expect(race).toHaveBeenCalled();
+      expect(p.ok).toBe(false);
+      expect(p.reason).toContain("ENOENT");
+      expect(existsSync(candidate)).toBe(false);
+    } finally {
+      race.mockRestore();
+    }
+  });
+
+  it.each(["", "/"])("refuses a symlink candidate without writing through it (suffix=%s)", (suffix) => {
+    const candidate = join(root, "linked");
+    const target = join(root, "target");
+    mkdirSync(target);
+    symlinkSync(target, candidate);
+    expect(probeMigrationDataDir(candidate + suffix)).toMatchObject({ ok: false });
+    expect(existsSync(join(target, MIGRATIONS_SUBDIR))).toBe(false);
+  });
+
+  it("refuses a symlink .migrations child", () => {
+    const target = join(root, "target");
+    mkdirSync(target);
+    symlinkSync(target, join(root, MIGRATIONS_SUBDIR));
+    expect(probeMigrationDataDir(root)).toMatchObject({ ok: false });
+  });
+
+  it("accepts an existing .migrations directory", () => {
+    mkdirSync(join(root, MIGRATIONS_SUBDIR));
+    expect(probeMigrationDataDir(root).ok).toBe(true);
   });
 });
 
@@ -226,6 +267,25 @@ describe("resolveWritableMigrationDataDir", () => {
     expect(out.first).toMatchObject({ dir: join(home, ".flair", "data"), ok: false });
     expect(out.dataDir).toBe(instance);
     expect(existsSync(join(home, ".flair", "data"))).toBe(false);
+  });
+
+  it.each([true, false])("selects the default ahead of ROOTPATH only when usable (usable=%s)", (usable) => {
+    const home = join(root, "home");
+    const defaultDir = join(home, ".flair", "data");
+    const instance = join(root, "instance-x");
+    mkdirSync(defaultDir, { recursive: true });
+    mkdirSync(instance);
+    if (!usable) writeFileSync(join(defaultDir, MIGRATIONS_SUBDIR), "blocked");
+    const moduleUrl = pathToFileURL(join(import.meta.dir, "../../resources/migrations/data-dir.ts")).href;
+    const script = `import { resolveWritableMigrationDataDir } from ${JSON.stringify(moduleUrl)};
+console.log(JSON.stringify(resolveWritableMigrationDataDir({ ROOTPATH: ${JSON.stringify(instance)} })));`;
+    const child = Bun.spawnSync([process.execPath, "-e", script], {
+      env: { ...process.env, HOME: home },
+    });
+    expect(child.exitCode).toBe(0);
+    const out = JSON.parse(child.stdout.toString().trim());
+    expect(out.dataDir).toBe(usable ? defaultDir : instance);
+    expect(out.tried[0]).toMatchObject({ dir: defaultDir, ok: usable });
   });
 });
 

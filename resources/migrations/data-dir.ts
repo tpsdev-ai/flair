@@ -59,12 +59,10 @@
  *      lives, and reordering would silently relocate it (costing a
  *      re-detect pass and orphaning the existing audit record) on instances
  *      that have no problem at all. This fix is about instances where the
- *      cycle cannot run, not about relocating ones where it can. Because the
- *      probe refuses an absent candidate, a fresh custom `--data-dir`
- *      install falls through to `ROOTPATH` and keeps its state beside its
- *      data. A host running BOTH a default and a custom instance still
- *      resolves here (the default's directory exists); set
- *      `FLAIR_MIGRATION_DATA_DIR` on the custom instance to separate them.
+ *      cycle cannot run, not about relocating ones where it can. The
+ *      default wins ahead of `ROOTPATH` when usable, regardless of which
+ *      instance runs; an absent or unusable default loses. Set
+ *      `FLAIR_MIGRATION_DATA_DIR` to separate custom migration state.
  *   4. `ROOTPATH` — Harper's real root path. The rescue candidate: it is
  *      writable by definition on a running instance (Harper is writing its
  *      own databases there), so a shape whose `homedir()` is unusable still
@@ -76,13 +74,9 @@
  *      instead of the environment leaves candidate 4 empty — this covers
  *      that case without guessing.
  *
- * Only an EXISTING candidate can win: the first one that is usable is chosen.
- * The probe NEVER materializes a candidate — one that is not already a
- * directory is refused before anything is created — and only then does it DO
- * THE REAL OPERATION the runner would do: create `<dir>/.migrations` at 0700
- * and check it is writable, rather than a proxy check that could disagree
- * with it. The probe stays idempotent and is satisfied by the first usable
- * candidate without touching the others.
+ * The probe never creates a candidate: it creates only `.migrations`
+ * non-recursively inside an existing directory and refuses symlinks at
+ * either path. The first usable candidate wins.
  *
  * If NO candidate is usable, `resolveWritableMigrationDataDir` returns
  * `dataDir: null` WITH the per-candidate reasons, and the boot path turns
@@ -91,9 +85,9 @@
  * `flair quality`'s `instance.migrationsClean`. An instance that cannot run
  * migrations now says so; that silence was the actual defect.
  */
-import { accessSync, constants, existsSync, mkdirSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Explicit operator override for the migration data dir (see module doc). */
@@ -160,17 +154,10 @@ export interface DataDirProbe {
   reason?: string;
 }
 
-/**
- * Probes a candidate by first requiring it to ALREADY be a directory — the
- * probe must never bring a candidate into existence — and then performing
- * the exact operation the runner's lock acquisition performs
- * (`mkdir -p <dir>/.migrations` at 0700) and confirming the result is
- * writable. Idempotent: on an already-working instance this is a no-op
- * stat/mkdir against directories that already exist.
- */
+/** Requires an existing directory, then creates only its `.migrations` child. */
 export function probeMigrationDataDir(dir: string): DataDirProbe {
   try {
-    if (!statSync(dir).isDirectory()) {
+    if (!lstatSync(resolve(dir)).isDirectory()) {
       return { dir, ok: false, reason: "not a directory" };
     }
   } catch (err) {
@@ -182,7 +169,14 @@ export function probeMigrationDataDir(dir: string): DataDirProbe {
   }
   const owned = join(dir, MIGRATIONS_SUBDIR);
   try {
-    mkdirSync(owned, { recursive: true, mode: 0o700 });
+    try {
+      mkdirSync(owned, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    if (!lstatSync(owned).isDirectory()) {
+      return { dir, ok: false, reason: ".migrations is not a directory" };
+    }
     accessSync(owned, constants.W_OK | constants.X_OK);
     return { dir, ok: true };
   } catch (err) {
