@@ -10,9 +10,9 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
-    "google-adk>=2.6",
-    "httpx>=0.27",
-    "cryptography>=42",
+    "google-adk==2.11.0",
+    "httpx==0.28.1",
+    "cryptography==50.0.2",
 ]
 keywords = [
     "flair",
@@ -42,8 +42,8 @@ classifiers = [
 # asyncio_mode = "auto" (below) and the suite has async tests + an async agent
 # registration helper in conftest.py.
 test = [
-    "pytest>=8.2",
-    "pytest-asyncio>=0.24",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
 ]
 
 [project.urls]
