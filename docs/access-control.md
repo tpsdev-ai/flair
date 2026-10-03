@@ -323,8 +323,9 @@ flair principal enable alice \
 ```
 
 Set `TARGET_ADMIN_PASS` to that instance's admin password before running the
-remote example. A success line appears only after the operations API names
-`alice` in its update result and a read-back confirms the requested status.
+remote example. A success line appears only after the command reads `alice`,
+the operations API names it in the update result, and a read-back shows the
+requested status; the line reports that read-back status.
 
 - On the local path it sends an `update` to the operations API at `127.0.0.1`
   on the machine it runs on. The port precedence is a valid explicit
@@ -344,9 +345,10 @@ remote example. A success line appears only after the operations API names
 - Disable sets the principal's `status` to `deactivated`; enable sets it to
   `active`. Both update its `updatedAt` and nothing else: the principal's
   memories and its login mapping stay. Harper can accept an update for an id
-  that has no record; this command
-  refuses success unless the result names the id and a read-back finds the row
-  in the requested state.
+  that has no record, so the command reads the principal first and refuses
+  `no principal <id>` before any update when no row exists; a read that fails
+  or returns an unreadable body is refused as unverified rather than as
+  missing.
 - Flair reads the principal's status on every `tools/call` for a known tool, and
   refuses those calls for a deactivated principal, including calls that carry a
   token issued before the change:

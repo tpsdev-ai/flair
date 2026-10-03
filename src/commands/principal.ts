@@ -67,7 +67,7 @@ const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | numbe
 
 const PRINCIPAL_OPS_TIMEOUT_MS = 10_000;
 
-/** Only a confirmed write followed by the named row in the requested state is success. */
+/** Only a principal that exists, a confirmed update for it, and a read-back of the requested status are success. */
 async function setPrincipalStatus(id: string, status: "active" | "deactivated", opts: {
   instance?: string; adminPass?: string; adminUser?: string; opsPort?: string | number;
 }): Promise<void> {
@@ -150,6 +150,47 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
     }
   };
 
+  type RowRead =
+    | { kind: "found"; status: string }
+    | { kind: "absent" }
+    | { kind: "unreadable" };
+
+  /**
+   * One by-id read of the principal. A read that fails, returns no body, or
+   * returns rows that are not the single requested record is "unreadable" —
+   * never "absent": an id with no row and an unread id are different states,
+   * and both are settled before any write.
+   */
+  const readPrincipal = async (stage: string): Promise<RowRead> => {
+    const res = await post({
+      operation: "search_by_value", database: "flair", table: "Agent",
+      search_attribute: "id", search_type: "equals", search_value: id,
+      get_attributes: ["id", "status"],
+    }, stage);
+    checkResponse(res, stage);
+    let rows: unknown;
+    try { rows = await res.json(); } catch { return { kind: "unreadable" }; }
+    if (!Array.isArray(rows)) return { kind: "unreadable" };
+    if (rows.length === 0) return { kind: "absent" };
+    if (rows.length !== 1) return { kind: "unreadable" };
+    const row = rows[0] as { id?: unknown; status?: unknown };
+    if (row?.id !== id || typeof row.status !== "string") return { kind: "unreadable" };
+    return { kind: "found", status: row.status };
+  };
+
+  // Read the principal BEFORE the update. Harper answers an update for an id
+  // with no row, so existence has to come from a read, not from the update's
+  // status. An unreadable read is refused separately — never treated as absent.
+  const before = await readPrincipal(`${action} lookup`);
+  if (before.kind === "absent") {
+    console.error(`Error: no principal ${id} at ${safeUrl} — nothing to ${action}. Check the id and the target, then create it with \`flair principal add\` or name an existing principal.`);
+    process.exit(1);
+  }
+  if (before.kind === "unreadable") {
+    console.error(`Error: ${safeUrl} could not read principal ${id} before the ${action}; the read did not return the single requested record, so no change was made. ${remedy}`);
+    process.exit(1);
+  }
+
   const updated = await post({
     operation: "update", database: "flair", table: "Agent",
     records: [{ id, status, updatedAt: new Date().toISOString() }],
@@ -162,19 +203,13 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
     process.exit(1);
   }
 
-  const read = await post({
-    operation: "search_by_value", database: "flair", table: "Agent",
-    search_attribute: "id", search_type: "equals", search_value: id,
-    get_attributes: ["id", "status"],
-  }, `${action} read-back`);
-  checkResponse(read, "read-back");
-  let rows: unknown;
-  try { rows = await read.json(); } catch { rows = null; }
-  if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.id !== id || rows[0]?.status !== status) {
-    console.error(`Error: ${safeUrl} did not confirm principal '${id}' is ${status}. Check its status on the target before retrying.`);
+  const after = await readPrincipal(`${action} read-back`);
+  const storedStatus = after.kind === "found" ? after.status : "no single record";
+  if (storedStatus !== status) {
+    console.error(`Error: ${safeUrl} did not confirm principal '${id}' is ${status}; the read-back found ${storedStatus}. Check its status on the target before retrying.`);
     process.exit(1);
   }
-  console.log(`✅ Principal '${id}' ${status === "active" ? "activated" : "deactivated"}`);
+  console.log(`✅ Principal '${id}' ${status === "active" ? "activated" : "deactivated"} (stored status: ${storedStatus})`);
 }
 
 /** Both state verbs accept the same target and admin credentials. */

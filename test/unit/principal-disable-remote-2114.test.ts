@@ -114,9 +114,9 @@ describe("principal disable/enable remote instance (#2114)", () => {
       expect(result.code).toBe(0);
       expect(result.stderr).toBe("");
       expect(result.stdout).toContain(`Principal 'alice' ${word}`);
-      expect(remote.seen.map((x) => x.operation)).toEqual(["update", "search_by_value"]);
-      expect(remote.seen[0].body.records[0]).toMatchObject({ id: "alice", status });
-      expect(remote.seen[1].body.search_value).toBe("alice");
+      expect(remote.seen.map((x) => x.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
+      expect(remote.seen[1].body.records[0]).toMatchObject({ id: "alice", status });
+      expect(remote.seen[2].body.search_value).toBe("alice");
       expect(remote.seen[0].authorization).toBe(`Basic ${Buffer.from("admin:target-pass-2114").toString("base64")}`);
       expect(sink.seen).toHaveLength(0);
     }, 25_000);
@@ -128,7 +128,7 @@ describe("principal disable/enable remote instance (#2114)", () => {
     expectedStatus = "deactivated";
     const result = await runCli(["principal", "disable", "alice", "--admin-pass", "target-pass-2114"], { HOME: scratch, FLAIR_URL: REMOTE_INSTANCE, FLAIR_OPS_TARGET: sink.url });
     expect(result.code).toBe(0);
-    expect(remote.seen).toHaveLength(2);
+    expect(remote.seen).toHaveLength(3);
   }, 25_000);
 
   test("local fallback uses --ops-port only when no instance is set", async () => {
@@ -137,7 +137,7 @@ describe("principal disable/enable remote instance (#2114)", () => {
     expectedStatus = "active";
     const result = await runCli(["principal", "enable", "bob", "--ops-port", String(local.port), "--admin-pass", "local-pass"], { HOME: scratch, FLAIR_OPS_TARGET: sink.url });
     expect(result.code).toBe(0);
-    expect(local.seen.map((x) => x.operation)).toEqual(["update", "search_by_value"]);
+    expect(local.seen.map((x) => x.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
     expect(result.stdout).toContain("Principal 'bob' activated");
   }, 25_000);
 
@@ -175,7 +175,7 @@ describe("principal disable/enable remote instance (#2114)", () => {
       expect(result.stdout).not.toContain("deactivated");
       expect(result.stderr).toContain("Check");
       expect(result.stderr).not.toContain("secret-response-token");
-      expect(remote.seen).toHaveLength(mode === "wrong-state" || mode === "read-empty" || mode === "read-error" || mode === "read-other-id" ? 2 : 1);
+      expect(remote.seen).toHaveLength(mode === "wrong-state" ? 3 : mode === "read-empty" || mode === "read-error" || mode === "read-other-id" ? 1 : 2);
     }, 25_000);
   }
 
@@ -230,7 +230,7 @@ describe("principal disable/enable remote instance (#2114)", () => {
   test("unreachable target never prints the raw fetch error or query token", async () => {
     const result = await runCli(["principal", "disable", "alice", "--instance", "http://127.77.21.13/?token=topsecret", "--admin-pass", "pass"], { HOME: scratch });
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("could not disable update");
+    expect(result.stderr).toContain("could not disable lookup");
     expect(result.stderr).not.toContain("topsecret");
     expect(result.stderr).toContain("Check --instance");
   }, 25_000);
