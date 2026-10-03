@@ -19,7 +19,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18"
+    "node": "v26.10.0"
   },
   "keywords": [
     "adk",
@@ -37,7 +37,7 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@google/adk": "^1.6.0",
-    "@google/genai": "^1.52.0"
+    "@google/adk": "1.6.0",
+    "@google/genai": "1.52.0"
   }
 }

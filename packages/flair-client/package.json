@@ -24,7 +24,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18"
+    "node": "v26.10.0"
   },
   "license": "Apache-2.0",
   "repository": {

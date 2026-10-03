@@ -6,7 +6,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=22"
+    "node": "v26.10.0"
   },
   "bin": {
     "cursor-flair-wake": "src/cli.ts"
@@ -22,7 +22,7 @@
     "@tpsdev-ai/flair-client": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "24.11.0"
+    "@types/node": "24.19.0"
   },
   "repository": {
     "type": "git",
