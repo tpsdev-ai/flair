@@ -147,7 +147,7 @@ The environment wins over the config file, where the keys are top-level entries;
 
 ### Action recall (`flair-action-recall`)
 
-`flair hook install --action-recall` installs a Claude Code `Bash` PreToolUse hook and enables SessionStart refresh. It requires supported Bun and a version-matched built hook; an incompatible SessionStart entry or held pin refuses installation.
+`flair hook install --action-recall` installs a Claude Code `Bash` PreToolUse hook and enables SessionStart refresh. Install and status require the version-matched built hook to pass a local cache probe; an incompatible SessionStart entry or held pin refuses installation.
 
 **How it decides.** A lesson opts in through its JSON `metadata` field:
 
@@ -161,7 +161,7 @@ Write a new lesson with `client.memory.write(content, { metadata: { flairActionR
 
 The hot path reads a per-session cache of the agent's own lessons under `~/.flair/action-recall/`, refreshed at session start through a signed, non-admin read. The cache expires five minutes after refresh starts, shortened by each lesson's valid expiry or end-of-validity timestamp. Between refreshes, a deletion, edit or supersession can stay visible until expiry.
 
-**What it never does.** It emits only `hookSpecificOutput.additionalContext` — never a permission decision, a question, replacement input or blocking output. It never executes or echoes the submitted command. On any error, or a missing, corrupt, wrong-mode, symlinked, oversized or stale cache, it writes nothing to stdout or stderr and exits 0. A command it cannot read as one simple argv command (expansions, substitutions, assignments, redirects, comments, pipelines, lists, heredocs, compound commands) is silently not matched. At most three lessons are shown, each quoted line bounded, the whole output at most 4 KiB; excerpts are redacted before they are cached and quoted when shown. The hook holds no credential, signs nothing and makes no network call.
+**What it never does.** It emits only `hookSpecificOutput.additionalContext` — never a permission decision, a question, replacement input or blocking output. It never executes or echoes the submitted command. Caught read and input errors produce no context. Missing, corrupt, wrong-mode, symlinked, oversized or stale caches do not match. A command it cannot read as one simple argv command (expansions, substitutions, assignments, redirects, comments, pipelines, lists, heredocs, compound commands) is silently not matched. At most three lessons are shown, each quoted line bounded, the whole output at most 4 KiB; excerpts are redacted before they are cached and quoted when shown. The hook holds no credential, signs nothing and makes no network call.
 
 ## Multiple Projects
 

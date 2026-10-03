@@ -54,7 +54,7 @@
 //      reuses bootstrap's own maxTokens machinery.
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { isWorkingActionRecallRuntime } from "./lib/action-recall-runtime.js";
+import { probeActionRecallRuntime } from "./lib/action-recall-runtime.js";
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
@@ -1225,15 +1225,16 @@ function actionRecallInstallRefusal(delta: ActionRecallDelta, path: string): str
   return null;
 }
 
-function executableActionRecallCommand(command: unknown): boolean {
-  if (typeof command !== "string") return false;
-  const match = /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^ ]+) (?:FLAIR_URL=([^ ]+) )?([^ ]+) ([^ ]+) 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/.exec(command);
-  if (!match) return false;
+function actionRecallCommandFailure(command: unknown): string | null {
+  if (typeof command !== "string") return "action-recall command is not an installer command";
+  const match = /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^ ]+) (?:FLAIR_URL=([^ ]+) )?([^ ]+) ([^ ]+) 2>\/dev\/null\) /.exec(command);
+  if (!match) return "action-recall command is not an installer command";
   const [, agent, url, bun, artifact] = match;
   try {
-    return isWorkingActionRecallRuntime({ bunPath: bun, artifactPath: artifact }) && command === buildActionRecallHookCommand(bun, artifact, agent, url);
+    if (command !== buildActionRecallHookCommand(bun, artifact, agent, url)) return "action-recall command is not an installer command";
+    return probeActionRecallRuntime({ bunPath: bun, artifactPath: artifact }, agent, url, command);
   } catch {
-    return false;
+    return "action-recall command is not an installer command";
   }
 }
 
@@ -1243,6 +1244,7 @@ export interface ActionRecallStatus {
   harness: Harness;
   installed: boolean;
   refreshEnabled: boolean;
+  runtimeFailure?: string;
 }
 
 export function actionRecallHookStatus(homeDir: string, harness: Harness): ActionRecallStatus {
@@ -1251,7 +1253,8 @@ export function actionRecallHookStatus(homeDir: string, harness: Harness): Actio
   const config = read.parsed ?? {};
   const entry = findActionRecallEntry(config);
   const hook = entry ? entry.group.hooks[entry.hookIndex] : null;
-  const installed = harness === "claude-code" && hook?.type === "command" && entry?.group.matcher === ACTION_RECALL_PRE_TOOL_USE_MATCHER && executableActionRecallCommand(hook.command);
+  const runtimeFailure = hook ? actionRecallCommandFailure(hook.command) : null;
+  const installed = harness === "claude-code" && hook?.type === "command" && entry?.group.matcher === ACTION_RECALL_PRE_TOOL_USE_MATCHER && runtimeFailure === null;
   let refreshEnabled = false;
   const ss = findHookEntry(config);
   if (ss) {
@@ -1259,7 +1262,7 @@ export function actionRecallHookStatus(homeDir: string, harness: Harness): Actio
     const form = parseInstallerHookForm(hook.command);
     refreshEnabled = hook.type === "command" && form?.harness === "claude-code" && sessionStartEnablesActionRecall(hook.command);
   }
-  return { path, harness, installed, refreshEnabled };
+  return { path, harness, installed, refreshEnabled, ...(runtimeFailure ? { runtimeFailure } : {}) };
 }
 
 /** Install (or repair) the action-recall PreToolUse hook + SessionStart refresh. */
@@ -1284,8 +1287,9 @@ export function installActionRecall(opts: ActionRecallInstallOptions): ActionRec
     }
   }
 
-  if (!isWorkingActionRecallRuntime(runtime)) {
-    return { ok: false, path, harness, dryRun, message: "action recall requires supported Bun and a version-matched built hook — nothing written", backupPath: null, actions: null };
+  const runtimeFailure = probeActionRecallRuntime(runtime, agentId, flairUrl);
+  if (runtimeFailure) {
+    return { ok: false, path, harness, dryRun, message: `${runtimeFailure} — nothing written`, backupPath: null, actions: null };
   }
 
   if (dryRun) {
@@ -1363,8 +1367,7 @@ function computeActionRecallRemoval(config: any): ActionRecallDelta {
   return { changed: preToolUse === "remove" || sessionStart === "update", newConfig, actions: { preToolUse, sessionStart } };
 }
 
-/** Symmetric removal of the action-recall PreToolUse group and the SessionStart
- *  refresh flag. Only Flair's own entries are touched. */
+/** Remove the first marker-matched PreToolUse entry and compatible refresh flag. */
 export function uninstallActionRecall(opts: UninstallHookOptions): ActionRecallMutationResult {
   const { homeDir, harness } = opts;
   const dryRun = !!opts.dryRun;

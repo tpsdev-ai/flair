@@ -32,7 +32,7 @@ export const CACHE_MAX_BYTES = 256 * 1024;
 export const CACHE_MAX_ENTRIES = 64;
 /** Maximum size of the session binding file. */
 export const BINDING_MAX_BYTES = 2 * 1024;
-/** Session caches retained per principal; the oldest are evicted. */
+/** Session cache retention target per principal. */
 export const MAX_SESSION_CACHES = 8;
 /** A generation expires this long after its refresh START (shortened per lesson). */
 export const STALE_MS = 5 * 60 * 1000;

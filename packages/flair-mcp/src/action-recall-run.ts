@@ -1,10 +1,8 @@
 /**
  * Action recall (flair#2067 slice 2) — the testable hot-path runner.
  *
- * Split out of ./action-recall-hook.ts so a unit test can call
- * `runActionRecall` without executing the binary. Everything here is
- * side-effect free except reads under the cache root; every failure returns
- * "" (silence). See the hook file for the hard output contract.
+ * `runActionRecall` reads the cache; `readStdin` changes stream state and installs
+ * listeners and a timer.
  */
 
 import { readEnvOrUnset } from "./env-guard.js";
@@ -94,7 +92,7 @@ async function readPayload(
 /**
  * The whole read path. Returns the exact hook output string, or "" when there
  * is nothing to say (non-Bash tool, unsupported command, missing identity,
- * missing/corrupt/stale cache, no matching lesson, any error).
+ * missing/corrupt/stale cache, no matching lesson).
  */
 export async function runActionRecall(rawInput: string, opts: RunOptions = {}): Promise<string> {
   const env = opts.env ?? process.env;

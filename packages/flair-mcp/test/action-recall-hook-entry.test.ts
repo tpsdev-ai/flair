@@ -11,13 +11,13 @@
  * session-start-hook-probe.test.ts: this lane builds flair-client but never
  * this package, so dist/ is not guaranteed to exist.
  *
- * Hermetic: every child gets its own temp HOME and an explicit
+ * Hermetic: each test gets its own temp HOME and an explicit
  * FLAIR_ACTION_RECALL_DIR inside it; the hook holds no credential and makes no
  * network call.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -36,7 +36,7 @@ let home: string;
 let root: string;
 
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "flair-2067-entry-home-"));
+  home = realpathSync(mkdtempSync(join(tmpdir(), "flair-2067-entry-home-")));
   root = join(home, ".flair", "action-recall");
 });
 afterEach(() => {

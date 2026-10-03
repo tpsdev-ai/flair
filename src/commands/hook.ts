@@ -270,6 +270,8 @@ export function register(program: Command): void {
         const recall = actionRecallHookStatus(home, harness);
         if (recall.installed && recall.refreshEnabled) {
           console.log(`  ${render.icons.ok} action recall: PreToolUse (Bash) wired, refresh enabled`);
+        } else if (recall.runtimeFailure) {
+          console.log(`  ${render.icons.warn} ${recall.runtimeFailure}`);
         } else if (recall.installed) {
           console.log(`  ${render.icons.warn} action recall: PreToolUse wired, refresh NOT enabled ${render.wrap(render.c.dim, `(re-run: ${hookInstallHint(harness, "--action-recall")})`)}`);
         } else {

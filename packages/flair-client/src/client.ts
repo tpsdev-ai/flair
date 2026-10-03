@@ -94,7 +94,7 @@ function assertBasicAuthTransportAllowed(target: string, base: string): void {
  * truncated parse.
  */
 async function readBodyCapped(res: Response, maxBytes: number): Promise<string> {
-  if (!(maxBytes > 0) || !res.body) return await res.text();
+  if (!res.body) return "";
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let total = 0;
@@ -275,6 +275,9 @@ export class FlairClient {
     body?: unknown,
     opts: { signal?: AbortSignal; maxResponseBytes?: number } = {},
   ): Promise<T> {
+    if (opts.maxResponseBytes !== undefined && (!Number.isFinite(opts.maxResponseBytes) || opts.maxResponseBytes <= 0)) {
+      throw new RangeError("flair-client: invalid maxResponseBytes; expected a finite positive number");
+    }
     if (!path.startsWith("/")) {
       throw new Error('flair-client: a request path must start with "/"');
     }
@@ -323,7 +326,7 @@ export class FlairClient {
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: combined.signal,
       });
-      const text = opts.maxResponseBytes
+      const text = opts.maxResponseBytes !== undefined
         ? await readBodyCapped(res, opts.maxResponseBytes)
         : await res.text().catch((err: unknown) => {
           if (res.ok) throw err;

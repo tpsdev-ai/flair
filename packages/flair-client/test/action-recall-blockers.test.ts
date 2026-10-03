@@ -71,3 +71,12 @@ test("memory.update accepts absent metadata and refuses malformed metadata witho
     }
   }
 });
+
+for (const cap of [0, -1, NaN, Infinity, -Infinity]) {
+  test(`request rejects invalid maxResponseBytes=${String(cap)} before fetch`, async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; return new Response("{}"); }) as typeof fetch;
+    await expect(client().request("GET", "/Memory", undefined, { maxResponseBytes: cap })).rejects.toThrow("flair-client: invalid maxResponseBytes");
+    expect(calls).toBe(0);
+  });
+}

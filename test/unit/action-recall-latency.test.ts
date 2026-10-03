@@ -17,8 +17,8 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 for (const [program, message] of [
-  ['console.log("garbage")', "unrelated: unexpected stdout"],
-  ['process.exit(7)', "matching: expected context-only output"],
+  ['console.log("garbage")', "action-recall self-test failed"],
+  ['process.exit(7)', "action-recall self-test failed"],
 ]) {
   test(`latency gate rejects a fast broken hook: ${message}`, () => {
     writeFileSync(join(root, "packages/flair-mcp/dist/action-recall-hook.js"), `#!/usr/bin/env bun\n// flair-action-recall-built@${flairCliVersion()}\n${program}`);

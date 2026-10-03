@@ -9,7 +9,7 @@
  * ~/.flair and no network call is made.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -79,7 +79,7 @@ function baseOpts(overrides: Partial<RefreshOptions> = {}): RefreshOptions {
 
 let root: string;
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "flair-2067-refresh-"));
+  root = realpathSync(mkdtempSync(join(tmpdir(), "flair-2067-refresh-")));
 });
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });

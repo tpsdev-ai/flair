@@ -91,8 +91,8 @@ async function isPrivateDir(dir: string): Promise<boolean> {
 
 /**
  * Read a regular file of at most `maxBytes` with no symlink component, an
- * owner-only mode, a single link and a stable size. Any failure is a refusal,
- * never an empty result. The open is no-follow and non-blocking; the opened
+ * owner-only mode, a single link and a stable size. Descriptor errors may throw.
+ * The open is no-follow and non-blocking; the opened
  * descriptor is re-checked, and a file that grows during the read is refused.
  */
 export async function readSecureFile(filePath: string, maxBytes: number): Promise<SecureRead> {
@@ -129,7 +129,7 @@ export async function readSecureFile(filePath: string, maxBytes: number): Promis
 /**
  * Read and validate the session binding. Returns the binding only when the
  * session directory is private, the file is secure and its content decodes.
- * A missing, unreadable or malformed binding is null (silence).
+ * A missing or malformed binding is null; descriptor errors may throw.
  */
 export async function readBinding(
   dir: string,
@@ -148,7 +148,7 @@ export async function readBinding(
 
 /**
  * Read and validate the generation a binding points at, then verify the
- * payload's bindings and age. Returns null on any failure (missing, corrupt,
+ * payload's bindings and age. Returns null on validation failure (missing, corrupt,
  * digest mismatch, wrong bindings, expired).
  */
 export async function readGeneration(dir: string, binding: CacheBinding, now: number): Promise<CachePayload | null> {
@@ -240,7 +240,7 @@ export async function publishGeneration(
   return { ok: true, generation: payload.generation };
 }
 
-/** Invalidate the session binding before a refresh begins reading. */
+/** Best-effort binding removal before a refresh begins reading. */
 export async function invalidateBinding(dir: string): Promise<void> {
   await rm(bindingPath(dir), { force: true }).catch(() => {});
 }
@@ -264,7 +264,7 @@ export async function acquireRefreshLock(dir: string): Promise<(() => Promise<vo
   };
 }
 
-/** Remove generation files (and their instance dirs) other than the current one. */
+/** Best-effort removal of older generations and instance directories. */
 export async function cleanupOldGenerations(dir: string, instance: string, generation: string): Promise<void> {
   const keepInstance = sha256Hex(instance);
   let entries;
@@ -294,7 +294,7 @@ export async function cleanupOldGenerations(dir: string, instance: string, gener
   }
 }
 
-/** Retain at most MAX_SESSION_CACHES session directories per principal, oldest evicted. */
+/** Best-effort eviction of sessions beyond MAX_SESSION_CACHES, oldest first. */
 export async function pruneSessionCaches(root: string, url: string, principal: string): Promise<void> {
   const principalDir = join(root, sha256Hex(url), sha256Hex(principal));
   let entries;

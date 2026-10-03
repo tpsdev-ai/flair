@@ -210,12 +210,7 @@ export function sessionStartEnablesActionRecall(command: string): boolean {
 
 // ── the action-recall PreToolUse hook (flair#2067 slice 2) ──────────────────
 //
-// Unlike every other Flair hook, this one does NOT go through `npx`: it runs
-// the built artefact directly with an absolute Bun executable, resolved at
-// install time (src/lib/action-recall-runtime.ts). The command still uses the
-// #1007 stdout-capture/zero-exit wrapper, so a broken runtime is silent rather
-// than an injected context or a hook error, but there is NO installation
-// fallback during a tool call.
+// Runs the absolute runtime and artifact paths selected at installation.
 
 /** The exact substring identifying a Flair action-recall hook command. */
 export const ACTION_RECALL_HOOK_MARKER = "action-recall-hook.js";
@@ -252,10 +247,10 @@ export function buildActionRecallHookCommand(
   }
   const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
   const invocation = `${env} ${bunPath} ${artifactPath}`;
-  return `sh -c 'out=$(${invocation} 2>/dev/null) && printf %s "$out" || true'`;
+  return String.raw`sh -c 'out=$(${invocation} 2>/dev/null) && [ -n "$out" ] && [ "${"$"}{#out}" -le 4096 ] && ok=$(${bunPath} -e "const o=JSON.parse(process.argv[1]); const h=o?.hookSpecificOutput; if(Buffer.byteLength(process.argv[1])<=4096 && Object.keys(o).length===1 && h && Object.keys(h).length===2 && h.hookEventName===\"PreToolUse\" && typeof h.additionalContext===\"string\") process.stdout.write(\"valid\");" "$out" 2>/dev/null) && [ "$ok" = valid ] && printf %s "$out" || true'`;
 }
 
-/** Does this command invoke the Flair action-recall artefact directly (no npx)? */
+/** Match the artifact marker in commands without npx. */
 export function isFlairActionRecallCommand(command: string): boolean {
   return typeof command === "string" && command.includes(ACTION_RECALL_HOOK_MARKER) && !command.includes("npx");
 }

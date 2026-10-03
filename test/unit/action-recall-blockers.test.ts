@@ -92,7 +92,9 @@ test("runtime resolution and status refuse a non-executable Bun and a directory 
   chmodSync(bun, 0o700);
   expect(resolveBunPath(env)).toBe(bun);
   runtime.bunPath = bun;
-  expect(install().ok).toBe(true);
+  const rejected = install();
+  expect(rejected.ok).toBe(false);
+  expect(rejected.message).toContain("action-recall self-test failed");
   chmodSync(bun, 0o600);
   expect(actionRecallHookStatus(home, "claude-code").installed).toBe(false);
   chmodSync(bun, 0o700);

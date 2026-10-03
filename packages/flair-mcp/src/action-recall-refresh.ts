@@ -33,7 +33,7 @@ import {
   sessionDir,
 } from "./action-recall-cache.js";
 
-/** Deadline for the whole refresh, measured from just after bootstrap. */
+/** Reads and publication are deadline checked, from just after bootstrap. */
 export const REFRESH_DEADLINE_MS = 3000;
 /** Response-byte cap for the bounded Memory read (8 MiB). */
 export const REFRESH_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -192,9 +192,6 @@ export function singleInstanceId(rows: unknown): string | null {
   return row.id;
 }
 
-/**
- * Run the refresh; invalidate the binding before reading.
- */
 export async function refreshActionRecallCache(
   client: ActionRecallRefreshClient,
   opts: RefreshOptions,

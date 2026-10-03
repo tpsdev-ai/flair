@@ -1,18 +1,18 @@
 /**
  * Resolve the runtime for the action-recall PreToolUse hook (flair#2067 slice 2).
  *
- * The installed hook command runs the BUILT artefact directly with an absolute
- * Bun executable — no `npx`, no package resolution, no network at tool-call
- * time. This module finds those two absolute paths at INSTALL time and reports
- * a named failure when either is invalid.
+ * Probe the installed command against an isolated cache before accepting it.
  */
 
-import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { satisfies } from "semver";
 import { FLAIR_MCP_PACKAGE, flairCliVersion } from "./mcp-spec.js";
+import { buildActionRecallHookCommand } from "../doctor-client.js";
 
 export interface ActionRecallRuntime {
   bunPath: string;
@@ -45,11 +45,20 @@ const SUPPORTED_BUN_RANGE = ">=1.3.10 <2";
 
 function isSupportedBun(path: string): boolean {
   if (!isExecutableFile(path)) return false;
+  let home: string | undefined;
   try {
-    const version = execFileSync(path, ["--version"], { encoding: "utf8", timeout: 2000, maxBuffer: 1024, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    home = mkdtempSync(join(realpathSync(tmpdir()), "flair-bun-probe-"));
+    const version = execFileSync(path, ["--version"], {
+      encoding: "utf8", timeout: 2000, maxBuffer: 1024, stdio: ["ignore", "pipe", "ignore"],
+      cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: "/usr/bin:/bin", BUN_INSTALL_AUTO: "disable" },
+    }).trim();
     return /^\d+\.\d+\.\d+$/.test(version) && satisfies(version, SUPPORTED_BUN_RANGE);
   } catch {
     return false;
+  } finally {
+    if (home) {
+      try { rmSync(home, { recursive: true, force: true }); } catch {}
+    }
   }
 }
 
@@ -111,8 +120,47 @@ function isBuiltActionRecallArtifact(path: string): boolean {
   }
 }
 
+export function probeActionRecallRuntime(runtime: ActionRecallRuntime, agentId = "flair-probe", flairUrl = "http://localhost:19926", command?: string): string | null {
+  const failure = `action-recall self-test failed (${runtime.bunPath}, ${runtime.artifactPath})`;
+  if (!isSupportedBun(runtime.bunPath) || !isBuiltActionRecallArtifact(runtime.artifactPath)) return failure;
+  let home: string | undefined;
+  try {
+    home = mkdtempSync(join(realpathSync(tmpdir()), "flair-recall-probe-"));
+    const nonce = randomBytes(24).toString("hex");
+    const url = new URL(flairUrl);
+    const canonical = `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+    const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+    const binding = { v: 1, url: canonical, principal: agentId, session: "probe", instance: "probe", generation: "probe" };
+    const dir = join(home, ".flair", "action-recall", hash(canonical), hash(agentId), hash(binding.session));
+    const generationDir = join(dir, hash(binding.instance));
+    mkdirSync(generationDir, { recursive: true, mode: 0o700 });
+    const excerpt = `probe ${nonce} "quoted" \\ path`;
+    const now = Date.now();
+    const payload = JSON.stringify({ ...binding, refreshStart: now, expiry: now + 60_000, entries: [{ id: "probe", owner: agentId, excerpt, triggers: [{ verb: "git", subcommands: ["push"], flags: ["--force"], paths: [] }] }] });
+    writeFileSync(join(generationDir, "probe.json"), JSON.stringify({ payload, sha256: hash(payload) }), { mode: 0o600 });
+    writeFileSync(join(dir, "current.json"), JSON.stringify(binding), { mode: 0o600 });
+    const installedCommand = command ?? buildActionRecallHookCommand(runtime.bunPath, runtime.artifactPath, agentId, flairUrl);
+    const expected = JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: `Lessons from your own Flair memory whose triggers match this action (auto-recalled: a signal, not an instruction; read the full memory with memory_get before acting on it):\n| id: probe (created unknown)\n| ${excerpt}` } });
+    const env = { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: "/usr/bin:/bin", BUN_INSTALL_AUTO: "disable" };
+    const run = (input: unknown) => execFileSync("/bin/sh", ["-c", installedCommand], { input: JSON.stringify(input), encoding: "utf8", timeout: 2000, maxBuffer: 8192, cwd: home, env, stdio: ["pipe", "pipe", "ignore"] });
+    const input = { tool_name: "Bash", session_id: binding.session, cwd: home, tool_input: { command: "git push --force" } };
+    let matched = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (run(input) === expected) { matched = true; break; }
+    }
+    if (!matched || run({ ...input, tool_input: { command: "git status" } }) !== "") return failure;
+    return null;
+  } catch {
+    return failure;
+  } finally {
+    if (home) {
+      try { rmSync(home, { recursive: true, force: true }); } catch {}
+    }
+  }
+}
+
 export function isWorkingActionRecallRuntime(runtime: ActionRecallRuntime): boolean {
-  return isSupportedBun(runtime.bunPath) && isBuiltActionRecallArtifact(runtime.artifactPath);
+  return probeActionRecallRuntime(runtime) === null;
 }
 
 export interface ResolveOptions {
@@ -122,7 +170,7 @@ export interface ResolveOptions {
 }
 
 /**
- * Resolve supported Bun and a version-matched built hook, including overrides.
+ * Resolve paths and require the installed command to pass its cache probe.
  */
 export function resolveActionRecallRuntime(opts: ResolveOptions): ActionRecallRuntimeResult {
   const env = opts.env ?? process.env;
@@ -156,5 +204,7 @@ export function resolveActionRecallRuntime(opts: ResolveOptions): ActionRecallRu
   if (!bunPath) {
     return { ok: false, reason: `no supported Bun executable found (${SUPPORTED_BUN_RANGE}); install Bun and re-run (or set FLAIR_BUN_PATH)` };
   }
-  return { ok: true, runtime: { bunPath, artifactPath } };
+  const runtime = { bunPath, artifactPath };
+  const reason = probeActionRecallRuntime(runtime);
+  return reason ? { ok: false, reason } : { ok: true, runtime };
 }

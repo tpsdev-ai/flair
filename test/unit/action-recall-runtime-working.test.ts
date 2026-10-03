@@ -1,21 +1,19 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { actionRecallHookStatus, hookSettingsPath, installActionRecall } from "../../src/hook-install.ts";
 import { buildActionRecallHookCommand } from "../../src/doctor-client.ts";
 import { resolveActionRecallRuntime } from "../../src/lib/action-recall-runtime.ts";
 import { flairCliVersion } from "../../src/lib/mcp-spec.ts";
+import { createActionRecallRuntime } from "../helpers/action-recall-runtime.ts";
 
 let home: string;
 let artifact: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "flair-runtime-working-"));
-  artifact = join(home, "dist/action-recall-hook.js");
-  mkdirSync(join(home, "dist"));
-  writeFileSync(join(home, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair-mcp", version: flairCliVersion(), bin: { "flair-action-recall": "dist/action-recall-hook.js" } }));
-  writeFileSync(artifact, `#!/usr/bin/env bun\n// flair-action-recall-built@${flairCliVersion()}\nprocess.exit(0);\n`);
+  artifact = createActionRecallRuntime(home).artifactPath;
 });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 const resolveRuntime = (bunPath = process.execPath, artifactPath = artifact) => resolveActionRecallRuntime({ fromUrl: import.meta.url, env: { PATH: process.env.PATH, HOME: home, FLAIR_BUN_PATH: bunPath, FLAIR_ACTION_RECALL_ARTIFACT: artifactPath } });
@@ -42,9 +40,9 @@ test("runtime and status reject missing or stale embedded build versions", () =>
   }
 });
 test("runtime rejects a package version that differs from its built hook", () => {
-  const pkg = JSON.parse(readFileSync(join(home, "package.json"), "utf8"));
+  const pkg = JSON.parse(readFileSync(join(dirname(dirname(artifact)), "package.json"), "utf8"));
   pkg.version = "0.0.1";
-  writeFileSync(join(home, "package.json"), JSON.stringify(pkg));
+  writeFileSync(join(dirname(dirname(artifact)), "package.json"), JSON.stringify(pkg));
   expect(resolveRuntime().ok).toBe(false);
 });
 test("runtime rejects Bun versions outside the supported range or malformed version output", () => {
@@ -55,7 +53,7 @@ test("runtime rejects Bun versions outside the supported range or malformed vers
     expect(status(bun, artifact).installed).toBe(false);
   }
 });
-test("runtime accepts Bun and a matching built hook", () => {
+test("runtime and status pass the nonce self-test with the built hook", () => {
   expect(resolveRuntime().ok).toBe(true);
   expect(status(process.execPath, artifact).installed).toBe(true);
 });
@@ -75,3 +73,75 @@ test("the package build stamps a hook that Bun can execute", () => {
   expect(hook.stdout).toBe("");
   expect(hook.stderr).toBe("");
 });
+
+for (const decoy of ["version-only runtime", "exit-only artifact", "hung runtime"]) {
+  test(`install and status reject ${decoy} by name`, () => {
+    let bunPath = process.execPath;
+    if (decoy === "exit-only artifact") {
+      writeFileSync(artifact, `// flair-action-recall-built@${flairCliVersion()}\nprocess.exit(0);\n`);
+    } else {
+      bunPath = join(home, "bun");
+      writeFileSync(bunPath, decoy === "hung runtime"
+        ? '#!/bin/sh\nif [ "$1" = "--version" ]; then echo 1.3.10; else exec /bin/sleep 10; fi\n'
+        : "#!/bin/sh\nprintf '1.3.10\\n'\n", { mode: 0o700 });
+    }
+    const runtime = { bunPath, artifactPath: artifact };
+    const result = installActionRecall({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926", runtime });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("action-recall self-test failed");
+    expect(result.message).toContain(bunPath);
+    expect(result.message).toContain(artifact);
+    const observed = status(bunPath, artifact);
+    expect(observed.installed).toBe(false);
+    expect(observed.runtimeFailure).toContain("action-recall self-test failed");
+    expect(observed.runtimeFailure).toContain(artifact);
+    expect(resolveRuntime(bunPath).ok).toBe(false);
+  }, 15_000);
+}
+
+test("the wrapper discards version text emitted by a runtime decoy", () => {
+  const bunPath = join(home, "bun");
+  writeFileSync(bunPath, "#!/bin/sh\nprintf '1.3.10\\n'\n", { mode: 0o700 });
+  const hook = spawnSync("/bin/sh", ["-c", buildActionRecallHookCommand(bunPath, artifact, "me")], { input: "{}", encoding: "utf8", timeout: 2000, env: { HOME: home, PATH: "/usr/bin:/bin" } });
+  expect(hook.status).toBe(0);
+  expect(hook.stdout).toBe("");
+  expect(hook.stderr).toBe("");
+});
+
+for (const output of ["garbage", '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x","permissionDecision":"allow"}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":7}}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"x"},"decision":"block"}']) {
+  test(`the wrapper refuses invalid context output: ${output}`, () => {
+    writeFileSync(artifact, `// flair-action-recall-built@${flairCliVersion()}\nprocess.stdout.write(${JSON.stringify(output)});`);
+    const hook = spawnSync("/bin/sh", ["-c", buildActionRecallHookCommand(process.execPath, artifact, "me")], { input: "{}", encoding: "utf8", timeout: 2000, env: { HOME: home, PATH: "/usr/bin:/bin" } });
+    expect(hook.status).toBe(0);
+    expect(hook.stdout).toBe("");
+    expect(hook.stderr).toBe("");
+  });
+}
+
+test("status probes the artifact again after installation", () => {
+  const runtime = { bunPath: process.execPath, artifactPath: artifact };
+  expect(installActionRecall({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926", runtime }).ok).toBe(true);
+  writeFileSync(artifact, `// flair-action-recall-built@${flairCliVersion()}\nprocess.exit(0);`);
+  const observed = actionRecallHookStatus(home, "claude-code");
+  expect(observed.installed).toBe(false);
+  expect(observed.runtimeFailure).toContain("action-recall self-test failed");
+});
+
+test("the built CLI names rejected runtime and artifact decoys", () => {
+  const cli = resolve(import.meta.dir, "../../dist/cli.js");
+  const bunPath = join(home, "bun");
+  writeFileSync(bunPath, "#!/bin/sh\nprintf '1.3.10\\n'\n", { mode: 0o700 });
+  for (const runtime of [{ bunPath, artifactPath: artifact }, { bunPath: process.execPath, artifactPath: artifact }]) {
+    if (runtime.bunPath === process.execPath) writeFileSync(artifact, `// flair-action-recall-built@${flairCliVersion()}\nprocess.exit(0);`);
+    const env = { HOME: home, USERPROFILE: home, TMPDIR: tmpdir(), PATH: process.env.PATH, FLAIR_BUN_PATH: runtime.bunPath, FLAIR_ACTION_RECALL_ARTIFACT: artifact };
+    const result = spawnSync("node", [cli, "hook", "install", "--action-recall", "--agent", "me"], { encoding: "utf8", timeout: 15_000, env });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("action-recall self-test failed");
+    expect(result.stderr).toContain(runtime.bunPath);
+    status(runtime.bunPath, artifact);
+    const observed = spawnSync("node", [cli, "hook", "status", "--action-recall"], { encoding: "utf8", timeout: 15_000, env });
+    expect(observed.status).toBe(1);
+    expect(observed.stdout).toContain("action-recall self-test failed");
+    expect(observed.stdout).toContain(artifact);
+  }
+}, 60_000);

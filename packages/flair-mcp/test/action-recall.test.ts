@@ -6,7 +6,7 @@
  * exercises the limits the build spec calls build contracts.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -101,7 +101,7 @@ function sha256(text: string): string {
 }
 
 function scratch(): string {
-  return mkdtempSync(join(tmpdir(), "flair-2067-test-"));
+  return realpathSync(mkdtempSync(join(tmpdir(), "flair-2067-test-")));
 }
 
 // ── trigger grammar ──────────────────────────────────────────────────────────
