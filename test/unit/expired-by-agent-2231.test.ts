@@ -9,7 +9,7 @@ import {
 const driverFor = (agent: string): NightlyDriverFacts => ({ installed: true, agent, agentKnown: true });
 
 describe("summarizeExpiredByAgent (flair#2231)", () => {
-  test("names agents by count, most first, and marks the driver's agent covered", () => {
+  test("names agents by count, most first, and marks the agent named by the installed scheduler", () => {
     const b = summarizeExpiredByAgent([["bob", 2], ["alice", 3]], driverFor("alice"));
     expect(b.agentCount).toBe(2);
     expect(b.total).toBe(5);
@@ -70,7 +70,7 @@ describe("summarizeExpiredByAgent (flair#2231)", () => {
     const b = summarizeExpiredByAgent([["alice", 3], ["bob", 2]], driverFor("alice"));
     const text = expiredByAgentWarningLines(b);
     expect(text).toContain("grouped by agent:");
-    expect(text).toContain("alice: 3 — nightly scheduler file matches");
-    expect(text).toContain("bob: 2 — NO matching nightly scheduler file");
+    expect(text).toContain("alice: 3 — installed nightly scheduler names this agent");
+    expect(text).toContain("bob: 2 — NO matching installed nightly scheduler");
   });
 });

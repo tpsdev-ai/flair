@@ -604,30 +604,43 @@ export class HealthDetail extends Resource {
         const schedulerPath = plat === "darwin"
           ? join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist")
           : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer");
-        const probeError = (path: string, error: unknown): void => {
-          const code = (error as NodeJS.ErrnoException)?.code ?? "UNKNOWN";
+        const unitPath = plat === "darwin" ? schedulerPath
+          : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.service");
+        const probeError = (path: string, error?: unknown): void => {
+          const code = (error as NodeJS.ErrnoException)?.code ?? "error code unavailable";
           warnings.push({ level: "warn", message: `REM nightly driver state unknown: ${path} (${code})` });
         };
-        try {
-          await fsp.stat(schedulerPath);
-          nightlyInstalled = true;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-            nightlyInstalled = false;
-          } else {
-            nightlyInstalled = null;
-            probeError(schedulerPath, error);
+        const filePresent = async (path: string): Promise<boolean | null> => {
+          try {
+            await fsp.stat(path);
+            return true;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+            probeError(path, error);
+            return null;
           }
+        };
+        const [schedulerPresent, unitPresent] = await Promise.all([
+          filePresent(schedulerPath),
+          plat === "darwin" ? Promise.resolve(true) : filePresent(unitPath),
+        ]);
+        nightlyInstalled = schedulerPresent === null || unitPresent === null
+          ? null : schedulerPresent && unitPresent;
+        if (plat === "linux" && schedulerPresent !== null && unitPresent !== null
+          && schedulerPresent !== unitPresent) {
+          const orphan = schedulerPresent ? "timer" : "service";
+          const orphanPath = schedulerPresent ? schedulerPath : unitPath;
+          warnings.push({ level: "warn", message: `REM nightly orphan ${orphan} file: ${orphanPath}` });
         }
         if (nightlyInstalled === true) {
           try {
             const { queryActiveStateAsync } = await import("../src/rem/scheduler.js");
             nightlyEnabled = await queryActiveStateAsync(plat);
-          } catch {
+            if (nightlyEnabled === null) probeError(schedulerPath);
+          } catch (error) {
             nightlyEnabled = null;
+            probeError(schedulerPath, error);
           }
-          const unitPath = plat === "darwin" ? schedulerPath
-            : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.service");
           try {
             const unitText = await fsp.readFile(unitPath, "utf-8");
             const m = plat === "darwin"

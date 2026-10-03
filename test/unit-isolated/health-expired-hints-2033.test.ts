@@ -9,6 +9,7 @@ const NOW = Date.parse("2026-09-28T12:00:00Z");
 const HOME = "/fixture/flair-2033";
 const LOG = HOME + "/.flair/logs/rem-nightly.jsonl";
 const TIMER = HOME + "/.config/systemd/user/flair-rem-nightly.timer";
+const SERVICE = HOME + "/.config/systemd/user/flair-rem-nightly.service";
 let installed = true;
 let active: boolean | null = false;
 let platformError = false;
@@ -32,7 +33,7 @@ mock.module("node:fs", () => ({
   readFileSync: absent,
   promises: {
     stat: async (path: string) => {
-      if (path === TIMER && installed) return { size: 0 };
+      if ((path === TIMER || path === SERVICE) && installed) return { size: 0 };
       if (path === LOG) return { size: Buffer.byteLength(logText) };
       return absent();
     },

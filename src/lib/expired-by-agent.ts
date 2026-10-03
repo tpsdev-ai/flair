@@ -8,7 +8,7 @@ export const EXPIRED_BY_AGENT_NAMED_MAX = 5;
 
 /** Facts about the local REM nightly driver, from the scheduler files status/doctor already read. */
 export interface NightlyDriverFacts {
-  /** Unit files present on this host. null = the probe could not tell (it failed). */
+  /** Plist present, or both Linux timer and service present; null = unknown. */
   installed: boolean | null;
   /** The agent named by the scheduler file. */
   agent: string | null;
@@ -19,7 +19,7 @@ export interface NightlyDriverFacts {
 export interface ExpiredAgentEntry {
   agentId: string;
   count: number;
-  /** Whether local scheduler files name this agent; null = unknown. */
+  /** Installed nightly scheduler whose plist or service names this agent; null = unknown. */
   nightlyDriverInstalled: boolean | null;
 }
 
@@ -68,9 +68,9 @@ export function expiredByAgentWarningLines(b: ExpiredByAgent): string {
   const lines: string[] = ["    grouped by agent:\n"];
   for (const a of b.agents) {
     const state = a.nightlyDriverInstalled === true
-      ? "nightly scheduler file matches"
+      ? "installed nightly scheduler names this agent"
       : a.nightlyDriverInstalled === false
-        ? "NO matching nightly scheduler file"
+        ? "NO matching installed nightly scheduler"
         : "nightly driver state unknown";
     lines.push(`      ${a.agentId || "(no agent id)"}: ${a.count} — ${state}\n`);
   }
