@@ -88,20 +88,12 @@ export const LOCK_DIR_REMEDY =
 export function seedOwnerFailureNote(id: string, err: unknown): string {
   return (
     `[federation] stored the signing seed for ${id} but could not record its ownership sidecar ` +
-    `(${err instanceof Error ? err.message : String(err)}). The seed stays in place and \`flair keys prune --apply\` will never remove it. ` +
+    `(${err instanceof Error ? err.message : String(err)}). Node-shaped files without .pub stay report-only. ` +
     `Remedy: make $HOME/.flair/keys writable by the Harper process (mode 0700).`
   );
 }
 
-/**
- * Store an instance seed AND the ownership sidecar that proves which instance it
- * belongs to (flair#2200). The seed write is the operation and may throw. The
- * sidecar write is ownership METADATA: a failure is logged with a distinct note
- * (never reported as a failed seed write — the seed IS stored), and the seed is
- * simply unowned, so `flair keys prune --apply` will never remove it. The data
- * directory defaults to this process's store root (ROOTPATH), the instance
- * identity `flair keys prune --data-dir` names.
- */
+/** Store the seed and attempt to record its sidecar; metadata failure is logged. */
 export async function storeInstanceSeed(
   id: string,
   seed: Uint8Array,

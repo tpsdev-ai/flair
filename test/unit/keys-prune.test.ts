@@ -205,7 +205,7 @@ describe("classifyKeysDir — orphan instance seeds (flair#1925)", () => {
     expect(res.aborted).toBe(false);
 
     const byName = Object.fromEntries(res.entries.map((e) => [e.name, e.class]));
-    expect(byName["flair_1111aaaa.key"]).toBe("orphan-candidate");
+    expect(byName["flair_1111aaaa.key"]).toBe("unidentified");
     expect(byName["flair_2222bbbb.key"]).toBe("keep");
 
     const moved = applyKeyPrune(keysDir, res.entries, "2026-10-02");
@@ -449,6 +449,19 @@ describe("flair keys prune — subprocess acceptance checks", () => {
     rmSync(isoHome, { recursive: true, force: true });
     rmSync(subKeysDir, { recursive: true, force: true });
   });
+
+  test("--data-dir refuses by name even with only agent keys", () => {
+    writeFileSync(join(subKeysDir, "agent-stale.key"), "fixture");
+    const r = runCLI(
+      ["keys", "prune", "--apply", "--keys-dir", subKeysDir, "--data-dir", isoHome, "--instance", "http://127.0.0.1:1"],
+      { HOME: isoHome },
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(isoHome);
+    expect(r.stderr).toContain("identity cannot be verified");
+    expect(existsSync(join(subKeysDir, "agent-stale.key"))).toBe(true);
+    expect(existsSync(join(subKeysDir, PRUNED_DIR_NAME))).toBe(false);
+  }, 20_000);
 
   test("fresh/empty key dir: exits 0 without needing a reachable instance", { timeout: 20_000 }, () => {
     // Deliberately point --instance at a bogus, unroutable-fast address —

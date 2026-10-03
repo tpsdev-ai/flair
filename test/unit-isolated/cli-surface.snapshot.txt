@@ -234,7 +234,7 @@ flair keys
   subcommands: prune
 
 flair keys prune
-  description: Move stale/unregistered keys to <keysDir>/.pruned/<date>/; move an instance seed only with proof it is an orphan of the targeted instance — dry-run by default
+  description: Move stale/unregistered agent keys to <keysDir>/.pruned/<date>/; node-shaped files without .pub stay report-only — dry-run by default
   usage: [options]
   options:
     --apply
@@ -250,7 +250,7 @@ flair keys prune
       description: Harper HTTP port (used when --instance/FLAIR_URL/FLAIR_TARGET are not set)
       attr: port
     --data-dir <dir>
-      description: Data directory of the instance being pruned for; an instance seed moves only when its owner record names this instance (omit to list only)
+      description: Refuse the run when this directory cannot be bound to the running target by identity
       attr: dataDir
 
 flair hook
@@ -2950,16 +2950,16 @@ Global Options:
   -v, --version    output the version number
 
 Commands:
-  prune [options]  Move stale/unregistered keys to <keysDir>/.pruned/<date>/;
-                   move an instance seed only with proof it is an orphan of the
-                   targeted instance — dry-run by default
+  prune [options]  Move stale/unregistered agent keys to
+                   <keysDir>/.pruned/<date>/; node-shaped files without .pub
+                   stay report-only — dry-run by default
   help [command]   display help for command
 
 ----- flair keys prune -----
 Usage: flair keys prune [options]
 
-Move stale/unregistered keys to <keysDir>/.pruned/<date>/; move an instance seed
-only with proof it is an orphan of the targeted instance — dry-run by default
+Move stale/unregistered agent keys to <keysDir>/.pruned/<date>/; node-shaped
+files without .pub stay report-only — dry-run by default
 
 Options:
   --apply           Actually move prunable keys (default: dry-run, prints what
@@ -2970,9 +2970,8 @@ Options:
                     FLAIR_TARGET/FLAIR_URL/config)
   --port <port>     Harper HTTP port (used when
                     --instance/FLAIR_URL/FLAIR_TARGET are not set)
-  --data-dir <dir>  Data directory of the instance being pruned for; an instance
-                    seed moves only when its owner record names this instance
-                    (omit to list only)
+  --data-dir <dir>  Refuse the run when this directory cannot be bound to the
+                    running target by identity
   -h, --help        display help for command
 
 Global Options:

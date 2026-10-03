@@ -151,21 +151,12 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 deletes.
 
 - Agent signing keys whose seed parses are prunable when the agent is not
-  registered on the targeted instance.
-- Node-shaped instance seeds (`flair_<hex8>.key` without a `.pub`) are removed
-  only with proof of ownership. A minted instance seed records its instance id
-  and data directory in a sidecar (`<seed>.key.owner.json`). `--apply` moves a
-  seed only when the sidecar names the targeted instance's data directory and
-  the targeted instance's `Instance` table does not reference the seed. A seed
-  with no sidecar (every seed minted before this feature), an unreadable or
-  malformed sidecar, or one naming another instance is listed with the reason
-  and left in place.
+  registered on the targeted instance, except node-shaped files without `.pub`.
+- Node-shaped files (`flair_<hex8>.key` without `.pub`) stay report-only.
+  Minting attempts to record a sidecar; sidecar-write failure leaves them report-only.
 
-The targeted instance's data directory is named by `--data-dir <dir>`. Without
-it no owner record can be proven, so instance seeds stay in the report; prune
-fails safe. Prune also fails safe when the directory's recorded port does not
-match the target. An unavailable identity match or unreadable rows leave files
-unidentified.
+`--data-dir <dir>` refuses the run because directory identity cannot be verified.
+Unreadable reference rows leave node-shaped files unidentified.
 
 ## What about a `flair secret` CLI?
 

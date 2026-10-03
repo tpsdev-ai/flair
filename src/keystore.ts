@@ -152,19 +152,6 @@ class FileKeyStore implements KeyStore {
 export const keystore: KeyStore = new FileKeyStore();
 
 // ─── Seed ownership sidecars (flair#2200) ───────────────────────────────────
-//
-// A keystore directory is shared by every Flair instance running under the same
-// home, while each instance keeps its own `flair.Instance` table. So the absence
-// of a row in one instance's table does NOT show that no instance uses a seed:
-// `flair keys prune --apply` cannot look at one table and conclude a seed is
-// unowned. The sidecar below records, AT MINT TIME, which instance the seed
-// belongs to — its Instance id and the data directory whose table holds that row
-// (the data directory is the instance identity, see cli.ts's port resolution).
-//
-// A seed with no sidecar (every seed minted before this change), an unreadable
-// or malformed sidecar, or one naming another data directory is never removed.
-// Ownership is a fact recorded by the writer, never inferred by the pruner.
-
 /** File name suffix of a seed's ownership sidecar, appended to the seed path. */
 export const SEED_OWNER_SUFFIX = ".owner.json";
 
