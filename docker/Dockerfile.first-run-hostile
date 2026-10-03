@@ -16,7 +16,7 @@
 # published npm version.
 
 # ── Builder: build + pack the HEAD tarball ──────────────────────────────────
-FROM node:24-slim AS builder
+FROM node:24.21.0-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS builder
 
 WORKDIR /app
 
@@ -49,7 +49,7 @@ RUN npm pack && mv tpsdev-ai-flair-*.tgz /flair-head.tgz && \
     echo "Packed HEAD tarball: $(du -sh /flair-head.tgz | cut -f1)"
 
 # ── Runtime: minimal base with hostile conditions ────────────────────────────
-FROM node:24-slim AS hostile
+FROM node:24.21.0-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS hostile
 
 # ca-certificates for npm/HTTPS.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
