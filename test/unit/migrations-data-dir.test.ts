@@ -123,6 +123,16 @@ describe("probeMigrationDataDir", () => {
     expect(probe.reason).toContain("EACCES");
     expect(probe.reason).toContain(MIGRATIONS_SUBDIR);
   });
+
+  it("refuses a candidate that does not exist, and does not create it", () => {
+    const absent = join(root, "absent");
+
+    const probe = probeMigrationDataDir(absent);
+
+    expect(probe.ok).toBe(false);
+    expect(probe.reason).toContain("does not exist");
+    expect(existsSync(absent)).toBe(false);
+  });
 });
 
 describe("resolveWritableMigrationDataDir", () => {
@@ -155,6 +165,36 @@ describe("resolveWritableMigrationDataDir", () => {
     expect(resolved.dataDir).toBe(good);
     expect(resolved.tried).toHaveLength(1);
     expect(existsSync(join(root, "never-touched"))).toBe(false);
+  });
+
+  it("picks an existing ROOTPATH candidate when ~/.flair/data is absent, and leaves it absent", () => {
+    const home = join(root, "home");
+    const instance = join(root, "instance-x");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(instance, { recursive: true });
+
+    // os.homedir() is resolved once at process start, so HOME must be set in
+    // a child's environment rather than on this process.
+    const moduleUrl = pathToFileURL(join(import.meta.dir, "../../resources/migrations/data-dir.ts")).href;
+    const script = [
+      `import { resolveWritableMigrationDataDir } from ${JSON.stringify(moduleUrl)};`,
+      `const r = resolveWritableMigrationDataDir({ ROOTPATH: ${JSON.stringify(instance)} });`,
+      `console.log(JSON.stringify({ dataDir: r.dataDir, first: r.tried[0] }));`,
+    ].join("\n");
+    const child = Bun.spawnSync([process.execPath, "-e", script], {
+      env: { ...process.env, HOME: home },
+    });
+    expect(child.exitCode).toBe(0);
+    const out = JSON.parse(child.stdout.toString().trim()) as {
+      dataDir: string | null;
+      first: { dir: string; ok: boolean };
+    };
+
+    // ~/.flair/data does not exist, so the absent candidate is refused
+    // (and NOT created) and the instance's own root wins.
+    expect(out.first).toMatchObject({ dir: join(home, ".flair", "data"), ok: false });
+    expect(out.dataDir).toBe(instance);
+    expect(existsSync(join(home, ".flair", "data"))).toBe(false);
   });
 });
 
