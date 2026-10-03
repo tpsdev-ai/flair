@@ -194,12 +194,12 @@ instead (see below).
   `client_id` before it sends the person to the identity provider; the person
   continues from there.
 - **Public clients with PKCE.** The document of an app that signs people in
-  declares its token endpoint auth method. With the shipped `config.yaml` it
+  may declare its token endpoint auth method. With the shipped `config.yaml` it
   must be `token_endpoint_auth_method: none`, or the field left out; any other
   value is refused with `invalid_client`. Every authorization request must
-  carry a PKCE `code_challenge` with method `S256`. The shipped `config.yaml`'s
-  server advertises `none`, `client_secret_basic` and `client_secret_post` as
-  token endpoint auth methods (the last two apply only to registered clients)
+  carry a PKCE `code_challenge` with method `S256`. With MCP enabled and a
+  provider configured, the shipped server advertises `none`,
+  `client_secret_basic` and `client_secret_post` as token endpoint auth methods (the last two apply only to registered clients)
   and does not advertise `private_key_jwt`. Setting
   `mcp.clientCredentials.enabled: true`, which turns on the headless grant,
   changes the metadata: it then also lists `private_key_jwt`, the

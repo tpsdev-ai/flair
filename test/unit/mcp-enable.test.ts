@@ -164,13 +164,6 @@ describe("buildMcpOAuthConfigBlock", () => {
     expect(oauth.mcp.accessTokenTtl).toBe(REQUIRED_ACCESS_TOKEN_TTL);
     expect(oauth.mcp.accessTokenTtl).toBe(900);
     expect(oauth.mcp.clientIdMetadataDocuments.allowedHosts).toEqual(DEFAULT_CIMD_ALLOWED_HOSTS);
-    // flair#2194: the shipped block carries NO signingKeyPem. @harperfast/oauth
-    // 2.8.1 fails the plugin's load when a DECLARED signingKeyPem's whole-token
-    // placeholder is unresolved, so an unconditional pin made every MCP-on boot
-    // without a staged key degrade. The component generates and persists a
-    // key when the field is absent, on the first token mint. Pinning is a
-    // manual choice: add the field to the deployed config and stage the
-    // variable.
     expect("signingKeyPem" in oauth.mcp).toBe(false);
   });
 

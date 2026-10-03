@@ -222,7 +222,7 @@ describe("flair#2194 signing-key lifecycle: no pin, the library's own mint persi
 
 describe("flair#2194 signing-key lifecycle: pinned then unpinned (upgrade path)", () => {
   test(
-    "pin removed: /mcp returns 200 for the existing token",
+    "pin removed: /mcp returns 200 for existing and freshly minted tokens",
     async () => {
       // Boot WITH the pin declared and staged.
       setEnableEnv(pinPrivatePem);
@@ -254,6 +254,13 @@ describe("flair#2194 signing-key lifecycle: pinned then unpinned (upgrade path)"
       instances.push(harper);
       expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
       expect(await postMcp(harper, token)).toBe(200);
+
+      const freshPkce = pkcePair();
+      await seedClientAndCode(harper, "unpinned-code", freshPkce.challenge);
+      const freshToken = await mint(harper, "unpinned-code", freshPkce.verifier);
+      expect(jwtHeader(freshToken).kid).toBe(rows[0].kid);
+      expect(await postMcp(harper, freshToken)).toBe(200);
+      expect((await readKeyRows(harper)).map((r) => r.kid)).toEqual([rows[0].kid]);
     },
     360_000,
   );

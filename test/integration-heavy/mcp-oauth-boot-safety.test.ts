@@ -30,8 +30,7 @@
  *   2b. NO SIGNING KEY (flair#2194): the shipped config with FLAIR_MCP_OAUTH on
  *      and NO signing key boots CLEAN — the block no longer declares
  *      signingKeyPem, so @harperfast/oauth no longer refuses the load over that
- *      unresolved placeholder. The library generates and persists the key on
- *      the FIRST MINT, not at boot.
+ *      unresolved placeholder.
  *   2c. DECLARED PIN STILL FAILS (flair#2194): a config that DOES declare
  *      `signingKeyPem: ${VAR}` with the variable unset still degrades the boot,
  *      the load error naming the variable — the library's check is NOT loosened.

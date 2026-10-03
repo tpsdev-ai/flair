@@ -145,7 +145,8 @@ registered identities.
          allowedHosts:                        # CIMD is the only supported client-registration path
            - claude.ai
            - claude.com
-       # signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}  # OPTIONAL pin (e.g. a cluster sharing one key). Omitted from the shipped block — @harperfast/oauth 2.8.1 refuses the plugin's load when it is DECLARED but its placeholder is unresolved, and absent it generates and persists a key on the first token mint. To pin, add this line and stage the variable.
+       # signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}  # Optional pin; add this line and stage the variable.
+       # Without a pin, minting reuses a persisted key or generates and persists one if the key table is empty.
    ```
 
    **DCR is not supported; clients connect via CIMD (Client ID Metadata
