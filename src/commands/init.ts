@@ -18,6 +18,7 @@ import {
   resolveInitAdminPasswordRefuseReason,
   resolveInitAdminPasswordSource,
 } from "../lib/init-admin-pass.js";
+import { canonicalLexicalPath } from "../lib/daemon-liveness.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { seedUsingFlairSkill } from "../lib/skill-seed.js";
@@ -31,13 +32,14 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { join, resolve } from "node:path";
+import { createConnection } from "node:net";
 import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
 import {
   commandArg,
   foreignOccupiedListenerDetail,
-  staleHarperBeforeAuthNotice,
+  describeOccupiedListener,
   type OccupiedHarperListener,
   type OperationsPortAttribution,
 } from "../lib/init-occupied-listener.js";
@@ -86,6 +88,20 @@ export type InitCli = {
   MQTT_DISABLED_CONFIG: any;
   STARTUP_TIMEOUT_MS: any;
 };
+
+async function localPortAcceptsTcp(port: number): Promise<boolean> {
+  return new Promise((resolveConnected) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const finish = (connected: boolean): void => {
+      socket.destroy();
+      resolveConnected(connected);
+    };
+    socket.setTimeout(1000);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.once("timeout", () => finish(false));
+  });
+}
 
 let cli: InitCli;
 
@@ -314,7 +330,7 @@ program
   .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
-  .option("--skip-start", "Install and configure without starting Harper")
+  .option("--skip-start", "Install and configure local Harper without starting (omit --agent)")
   .option("--skip-soul", "Skip interactive personality setup")
   .option("--client <client>", "Client(s) to wire: claude-code, codex, gemini, cursor, antigravity, pi (native extension), all, or none")
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
@@ -546,6 +562,11 @@ program
     }
 
     // ── Local init (full one-command setup) ──
+    if (opts.skipStart && agentId) {
+      console.error("Error: --skip-start cannot be combined with --agent or --agent-id: agent registration and verification require a running instance.");
+      console.error("Remedy: omit --agent/--agent-id for installation only, then rerun flair init --agent <id> without --skip-start (keep your instance flags).");
+      process.exit(1);
+    }
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     // Resolve ONCE, here: the operator means "relative to my shell's cwd", but
     // Harper is spawned with cwd = the flair package directory, so a raw
@@ -639,10 +660,40 @@ program
       process.exit(1);
     }
     let alreadyRunning = false;
+    let healthStatus: number | undefined;
     try {
       const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
-      if (res.status > 0) alreadyRunning = true;
-    } catch { /* not running */ }
+      if (res.status > 0) {
+        alreadyRunning = true;
+        healthStatus = res.status;
+      }
+    } catch {}
+    const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
+      const attributed = harperConfigPath(dataDir) !== null &&
+        listener.pids.length === 1 && listener.dataDirs.length === 1 &&
+        canonicalLexicalPath(listener.dataDirs[0]) === canonicalLexicalPath(dataDir);
+      if (attributed) return;
+      console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
+      console.error(foreignOccupiedListenerDetail(listener, dataDir));
+      console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
+      process.exit(1);
+    };
+    const httpListener = readOccupiedListener(httpPort);
+    alreadyRunning ||= httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort);
+    if (alreadyRunning) {
+      refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
+      console.log(`Harper already running on port ${httpPort} — skipping start`);
+    }
+    const opsListener = readOccupiedListener(opsPort);
+    let opsAnswer: number | undefined;
+    try {
+      const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
+      if (res.status > 0) opsAnswer = res.status;
+    } catch {}
+    if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
+      refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
+    }
+    const skippedOwnStart = alreadyRunning;
     const explicitCredential = !!(
       opts.adminPassFile || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || opts.adminPass
     );
@@ -796,36 +847,7 @@ program
     mkdirSync(dataDir, { recursive: true });
     readyOpsSocketPosture(dataDir);
 
-    // True only when the port was already answering and the single pre-auth
-    // read did not include a different data directory (that case exits
-    // below, before any authenticated request). An unreadable directory,
-    // including every macOS lookup, does not count as different. A later
-    // ops 401 is a separate before-and-after read of the operations port,
-    // not this HTTP observation (flair#1749).
-    let skippedOwnStart = false;
-
-    if (alreadyRunning && !opts.skipStart) {
-      console.log(`Harper already running on port ${httpPort} — skipping start`);
-      // One read of the HTTP port that answered /health. When that read
-      // includes a ROOTPATH other than this init's, stop before
-      // waitForHealth, which would send Authorization. An unreadable
-      // directory is not treated as foreign. This is not the
-      // before-and-after check used for an operations-port 401. A
-      // different directory does not prove the passwords differ, and
-      // this init does not signal the process.
-      const httpListener = readOccupiedListener(httpPort);
-      const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
-      if (notice) {
-        console.error(notice);
-        process.exit(1);
-      }
-      skippedOwnStart = true;
-    }
-
-    // flair#2197: `--skip-start` INSTALLS AND CONFIGURES WITHOUT STARTING.
-    // The install below therefore runs whether or not --skip-start was given;
-    // only the start half (spawn, health wait, service registration) stays
-    // under `!opts.skipStart`.
+    // Install only when no listener answers and no Harper config exists.
     if (!alreadyRunning) {
       // Detect whether Harper has already been installed in this data dir.
       // Harper's config is created during install — its presence means

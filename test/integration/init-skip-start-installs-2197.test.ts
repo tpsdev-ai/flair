@@ -1,35 +1,13 @@
-// ─── flair#2197 — `init --skip-start` installs and configures without starting ─
-//
-// `--skip-start` used to skip Harper installation as well as the start, so on an
-// empty data directory nothing existed for a later `flair start` and anything
-// deferred to first start (the #2165 pending using-flair seed) never happened.
-// It now installs and configures without starting: on an empty data directory
-// the installation exists, nothing is running, and on the default instance the
-// first-start work is queued for the next `flair start`, which starts the
-// instance and performs it. On an already-installed instance it starts nothing
-// and leaves the installation unchanged.
-//
-// The built CLI runs under Node (Harper's native modules need it). Isolation:
-//   - HOME is a fresh temp dir, so the default data dir, admin-pass, keys and
-//     any plist land there;
-//   - ports are free ephemeral ports, asserted not to be 9925/9926;
-//   - PATH starts with a `launchctl` stub, so on macOS init's read-only launchd
-//     checks never reach the real launchd domain;
-//   - teardown signals only the pid in this data dir's hdb.pid; the temp HOME is
-//     removed.
-//
-// Each case fails on main where applicable:
-//   - (a) fails on main at "the installation exists" (init --skip-start installed
-//     nothing);
-//   - (b) is a no-regression guard: --skip-start must not start or reconfigure an
-//     already-installed instance.
+// Local init --skip-start on a stopped default instance with free ports.
+// The rerun checks Harper's config contents.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { SEED_ASSIGNMENT_ID, SEED_SKILL_ID } from "../../src/lib/skill-seed.js";
 import { skillSeedPendingPath } from "../../src/lib/skill-seed-pending.js";
@@ -91,8 +69,8 @@ function launchctlStub(home: string): string {
 
 async function newInstall(): Promise<Install> {
   // Short prefix: <HOME>/.flair/data/operations-server must fit the 103-byte socket limit.
-  const home = mkdtempSync(join(tmpdir(), "fss-"));
   const [httpPort, opsPort] = await freePorts();
+  const home = mkdtempSync(join(tmpdir(), "fss-"));
   const install: Install = { home, dataDir: join(home, ".flair", "data"), httpPort, opsPort };
   expect(httpPort).not.toBe(opsPort);
   for (const port of [httpPort, opsPort]) expect(["9925", "9926"]).not.toContain(String(port));
@@ -233,7 +211,7 @@ async function stopInstall(install: Install): Promise<void> {
   rmSync(install.home, { recursive: true, force: true });
 }
 
-describe("flair#2197 — init --skip-start installs and configures without starting", () => {
+describe("flair#2197 — local init --skip-start installs without starting", () => {
   beforeAll(() => ensureCliBuild(), 210_000);
 
   afterEach(async () => {
@@ -267,6 +245,48 @@ describe("flair#2197 — init --skip-start installs and configures without start
     expect(assignments[0]).toMatchObject({ id: SEED_ASSIGNMENT_ID, skillName: "using-flair", skillRef: SEED_SKILL_ID });
   }, 300_000);
 
+  for (const responds of [true, false]) {
+    test(`an occupied HTTP port and empty local data directory refuse without credentials (health response=${responds})`, async () => {
+      const install = await newInstall();
+      const log = join(install.home, "requests.jsonl");
+      const script = `
+        import { createServer } from "node:http";
+        import { appendFileSync } from "node:fs";
+        createServer((req, res) => {
+          appendFileSync(${JSON.stringify(log)}, JSON.stringify({ url: req.url, authorization: req.headers.authorization ?? null }) + "\\n");
+          if (${responds}) res.end("unrelated listener");
+        }).listen(${install.httpPort}, "127.0.0.1", () => console.log("ready"));
+      `;
+      const listener = spawn(nodeBin(), ["--input-type=module", "-e", script], {
+        env: childEnv(install.home, launchctlStub(install.home)), stdio: ["ignore", "pipe", "pipe"],
+      });
+      const exited = once(listener, "exit");
+      try {
+        await new Promise<void>((resolveReady, reject) => {
+          const timer = setTimeout(() => reject(new Error("fixture listener did not start")), 5_000);
+          listener.stdout.once("data", () => { clearTimeout(timer); resolveReady(); });
+          listener.once("error", err => { clearTimeout(timer); reject(err); });
+          listener.once("exit", () => { clearTimeout(timer); reject(new Error("fixture listener exited")); });
+        });
+        const init = runLocalInit(install, ["--skip-start"]);
+        expect(init.status, init.stdout + init.stderr).toBe(1);
+        expect(init.stderr).toContain(responds
+          ? `port ${install.httpPort} answered /health with HTTP 200`
+          : `port ${install.httpPort} has a listener without a /health response`);
+        expect(init.stderr).toContain("Remedy:");
+        expect(init.stdout).not.toContain("initialized successfully");
+        expect(installed(install)).toBe(false);
+        expect(existsSync(join(install.home, ".flair", "admin-pass"))).toBe(false);
+        expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(false);
+        const requests = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));
+        expect(requests).toEqual([{ url: "/health", authorization: null }]);
+      } finally {
+        listener.kill("SIGKILL");
+        await exited;
+      }
+    }, 150_000);
+  }
+
   test("an already-installed instance: --skip-start starts nothing and leaves Harper's config unchanged", async () => {
     const install = await newInstall();
 
@@ -285,7 +305,7 @@ describe("flair#2197 — init --skip-start installs and configures without start
     expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
     // Nothing started ...
     expect(await serves(install.httpPort), "--skip-start started an installed instance").toBe(false);
-    // ... and the installation was not reconfigured.
+    // Harper's config contents are unchanged.
     expect(readFileSync(join(install.dataDir, "harper-config.yaml"), "utf8")).toBe(configBefore);
   }, 300_000);
 });

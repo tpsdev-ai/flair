@@ -61,7 +61,7 @@ flair init
       description: Harper data directory
       attr: dataDir
     --skip-start
-      description: Install and configure without starting Harper
+      description: Install and configure local Harper without starting (omit --agent)
       attr: skipStart
     --skip-soul
       description: Skip interactive personality setup
@@ -2783,7 +2783,8 @@ Options:
                                provisioning always create 'admin')
   --keys-dir <dir>             Directory for Ed25519 keys
   --data-dir <dir>             Harper data directory
-  --skip-start                 Install and configure without starting Harper
+  --skip-start                 Install and configure local Harper without
+                               starting (omit --agent)
   --skip-soul                  Skip interactive personality setup
   --client <client>            Client(s) to wire: claude-code, codex, gemini,
                                cursor, antigravity, pi (native extension), all,

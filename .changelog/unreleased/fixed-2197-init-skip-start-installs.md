@@ -1,9 +1,8 @@
-- **`flair init --skip-start` installs and configures Harper without starting it.**
-  On an empty data directory it now performs the same installation `flair init`
-  does and stops short of starting Harper, so a later `flair start` on that
-  default instance starts it and performs the first-start work (such as the
-  `using-flair` seed) left queued. On an already-installed instance it does not
-  install or start it.
-
-  Previously `--skip-start` skipped Harper installation as well as the start, so
-  a later `flair start` on an empty data directory had no instance to run.
+- **Local `flair init --skip-start` installs Harper without starting it.**
+  With free ports and an empty local data directory, init installs and configures
+  Harper; the default instance queues the `using-flair` seed for `flair start`.
+  An installed, stopped local instance is not reinstalled or started.
+  Local `--skip-start` refuses `--agent` / `--agent-id`; omit them for installation
+  only, then rerun init with the agent and without `--skip-start`.
+  Init refuses occupied ports not attributed to this installed data directory
+  before writing or sending admin credentials.

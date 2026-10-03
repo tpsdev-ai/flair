@@ -45,7 +45,7 @@ flair init --agent mybot           # name the agent (--agent-id also works)
 flair init --client claude-code    # wire one specific MCP client
 flair init --no-mcp                # instance + agent only, skip MCP wiring
 flair init --skip-smoke            # skip the MCP smoke test
-flair init --skip-start            # install and configure without starting Harper
+flair init --skip-start            # install local Harper without starting (omit --agent)
 flair init --port 8000             # use a non-default port
 ```
 
