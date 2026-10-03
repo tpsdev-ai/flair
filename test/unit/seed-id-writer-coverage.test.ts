@@ -152,7 +152,7 @@ test("each GUARDED path runs the decision before it writes", () => {
   expect(memory.match(/validateAndAuthorizeSupersedes\(content, auth, ctx\)/g)?.length).toBe(2);
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
-  const feedCheck = feed.indexOf('reservedSeedWriteDenial("Memory", [content?.id], ctx, auth)');
+  const feedCheck = feed.indexOf('reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth)');
   expect(feedCheck).toBeGreaterThan(-1);
   expect(feed.indexOf(".flair.Memory.put(")).toBeGreaterThan(feedCheck);
 

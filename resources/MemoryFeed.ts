@@ -7,15 +7,16 @@ import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-gu
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
-import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
-import { noteMemoryUpsert } from "./bm25-index-service.js";
+import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
+import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
-import { reservedSeedWriteDenial } from "./seed-reservation.js";
+import { reservedSeedSubjectDenial, reservedSeedWriteDenial } from "./seed-reservation.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -35,7 +36,7 @@ export class FeedMemories extends Resource {
 
     // flair#2141 S2: check a body id against the operator-source seed
     // reservation (resources/seed-reservation.ts).
-    const seedDenial = reservedSeedWriteDenial("Memory", [content?.id], ctx, auth);
+    const seedDenial = reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth);
     if (seedDenial) return seedDenial;
 
     // No-forge attribution: use the kit's stampAttribution to stamp agentId
@@ -62,8 +63,8 @@ export class FeedMemories extends Resource {
     if (attr.denied) return attr.denied;
 
     // Guard against body-supplied id targeting another agent's record.
+    const existingRecord = content?.id ? await (databases as any).flair.Memory.get(content.id) : null;
     if (content?.id) {
-      const existingRecord = await (databases as any).flair.Memory.get(content.id);
       if (existingRecord && existingRecord.agentId !== content.agentId) {
         return FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
       }
@@ -78,6 +79,9 @@ export class FeedMemories extends Resource {
       }
     }
 
+    const preparedSkill = await prepareSkillBody(content, existingRecord);
+    if (preparedSkill instanceof Response) return preparedSkill;
+    content = preparedSkill.content;
     const agentId = content.agentId;
     const body = String(content?.content ?? "");
     if (!agentId || !body) {
@@ -160,43 +164,57 @@ export class FeedMemories extends Resource {
       if (authorityDenial) return authorityDenial;
     }
 
-    // ── flair#2139 S2: skill ingestion is versioned, not a raw table put ──
-    // A content-hash match may return the existing result only when nothing the
-    // version cares about changed. For skills we always route through the
-    // transactional writer, so trigger/visibility/state changes are never
-    // suppressed by content-hash equality alone.
     if (isSkillWrite(content)) {
       const now = new Date().toISOString();
-      const addressed = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
+      const addressed = existingRecord;
+      const predecessor = preparedSkill.predecessor;
       const successorId = addressed
         ? `${agentId}-${randomUUID()}`
         : String(content.id ?? `${agentId}-${Date.now()}-${randomUUID()}`);
-      const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: addressed, predecessor: null });
-      const addressedId = addressed ? String(addressed.id) : null;
-      const captured: { row: Record<string, any> | null } = { row: null };
+      const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: addressed, predecessor });
+      const seedLineageDenial = reservedSeedSubjectDenial("Memory", [subjectId], ctx, auth);
+      if (seedLineageDenial) return seedLineageDenial;
+      const addressedId = addressed ? String(addressed.id) : predecessor ? String(predecessor.id) : null;
+      const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
       const outcome = await runSkillVersionWrite({
         ctx,
         subjectId,
         agentId,
         head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
-        plan: (head) => {
+        plan: async (head, shared) => {
+          const stale = await validateSkillSnapshots(addressed, predecessor, content.id ?? null, shared);
+          if (stale) return stale;
+          const denied = await authorizeSkillOwners(ctx, auth, [addressed, predecessor, head ?? content], shared);
+          if (denied) return denied;
+          if ((addressed || predecessor) && !head) return skillWriteConflict("skill_head_missing");
+          if (predecessor && (!addressed || content.supersedes !== addressed.supersedes) && head?.id !== predecessor.id) return skillWriteConflict("skill_predecessor_stale");
+          if (addressed && head?.id !== addressed.id) return skillWriteConflict("skill_target_stale");
           const successor = buildSkillSuccessorRow({
-            base: content, predecessorRow: head, successorId, subjectId,
+            base: { ...content, agentId: head?.agentId ?? agentId }, predecessorRow: head, successorId, subjectId,
             supersedes: head ? String(head.id) : null, now,
           });
-          // The feed re-stamps provenance from the verified identity (see the
-          // non-skill path below) — a legacy blob must not carry forward.
           successor.provenance = buildProvenance(auth, successor.createdAt, content);
+          stripAuthorityFields(successor, "Memory");
+          await applyOriginatorInstanceId(successor, head);
+          applyFederationBookkeeping(successor, head);
           captured.row = successor;
+          captured.closed = head;
           const value = typeof successor.content === "string" ? successor.content : null;
           const visibility = skillVersionVisibility(successor);
           if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
-          return { kind: "update", predecessor: head, successor, closePatch: { validTo: now, updatedAt: now }, value, visibility };
+          return { kind: "update", predecessor: head, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility };
         },
-        hooks: defaultSkillHooks,
+        hooks: {
+          ...defaultSkillHooks,
+          pointer: async (shared) => {
+            if (captured.closed) await deletePointerRowViaTable(String(captured.closed.id), shared);
+            return null;
+          },
+        },
       });
       if (!outcome.ok) return outcome.response;
       const written = captured.row;
+      if (captured.closed) noteMemoryDelete(String(captured.closed.id));
       if (written) noteMemoryUpsert(written);
       return written ?? { id: successorId, written: true, durability: "persistent" };
     }

@@ -41,11 +41,11 @@ flair init --target https://<cluster>.<org>.harperfabric.com \
 - `--remote` marks it a federation **hub** and creates the `flair_pair_initiator` role; without it, pairing later fails role-not-found.
 - Generated admin password lands in `~/.tps/secrets/flair-fabric-hdb` (mode `0600`); `--flair-admin-pass` to choose your own.
 
-### Port derivation trap
+### Operations endpoint
 
-Locally, Flair serves data on `19926` and the ops API on `19925`. The CLI derives **ops = data − 1** everywhere. A managed endpoint is HTTPS on 443 with no port, so derivation produces `:442` — where nothing answers.
+Portless HTTPS targets derive the ops endpoint at `:9925`. <!-- docs-freshness-allow: Fabric ops API port (FABRIC_OPS_PORT), not legacy data port -->
 
-**Pass `--ops-target <url>` explicitly** (or set `FLAIR_OPS_TARGET`) on any command that touches the ops API: `init --target`, `agent add --target`, `federation token --target`.
+Set `FLAIR_OPS_TARGET` to override the derived endpoint, including for `flair backup`.
 
 ---
 
@@ -63,7 +63,7 @@ On Fabric / managed deploys, Harper's secrets mechanism can provision environmen
 
 ### How `flair mcp enable` delivers its secrets
 
-`flair mcp enable` provisions five variables for the target's process, including `FLAIR_MCP_OAUTH` and the RS256 signing key. Those two are read from `process.env` only, so `set_configuration` cannot deliver them.
+`flair mcp enable` provisions five variables for the target's process, including `FLAIR_MCP_OAUTH`, which is read from `process.env` only, so `set_configuration` cannot deliver it.
 
 Use `--fabric` for a non-loopback custom-domain Fabric target.
 
@@ -98,8 +98,8 @@ surface in this order:
    `<instance-url>/.well-known/oauth-authorization-server` must name the verified issuer and advertise
    the MCP token endpoint `/oauth/mcp/token`. A mismatch refuses the run.
 2. **Public-origin self-verify.** Metadata at the same path is fetched from the public issuer. The check
-   requires a matching issuer, a string `token_endpoint` other than Flair's `/OAuthToken`, and advertised
-   CIMD support. It does not require the public token endpoint to equal `/oauth/mcp/token`. `flair mcp status`
+   requires a matching issuer, the issuer's `/oauth/mcp/token` endpoint, and advertised
+   CIMD support. `flair mcp status`
    uses this check.
 
 Then one of:

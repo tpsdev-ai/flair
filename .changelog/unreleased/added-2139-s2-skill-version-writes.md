@@ -1,15 +1,10 @@
-- **Skill writes now append version records and keep history.** A skill update
-  supersedes (a fresh Memory row, the predecessor closed) instead of
-  overwriting, and a stable `skillSubjectId` carries the chain across physical
-  rows. A create and a feed ingest append a version too.
+- **Transactional skill versions for Memory and FeedMemories.**
 
-  A skill delete is now a logical delete: the retained payload is closed, not
-  removed, and a tombstone version is appended. Read authority is unchanged from
-  the read half (owner/non-private, against both the version and the subject's
-  current state).
+  Updates require one live head and reject stale targets. PUT/feed archive
+  transitions are refused. Cross-owner agent writes require a write grant;
+  successors retain the subject owner.
 
-  > **Heads-up:** the operator's reserved `using-flair` seed skill keeps its
-  > fixed id and is versioned in place; an operator `DELETE` of that one
-  > reserved row is still a hard delete and appends no tombstone. The
-  > administrator operations API remains an explicitly unaudited exception for
-  > all skill versions.
+  Unreserved skill deletes close the retained payload and append a tombstone.
+  Reserved seed writes and unchanged-payload embedding regeneration keep their
+  physical IDs. Reserved-seed deletes, `_reindex`, and the administrator
+  operations API do not append skill versions.

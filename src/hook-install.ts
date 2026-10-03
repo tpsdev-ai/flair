@@ -9,7 +9,7 @@
 // fixSessionStartHook, driven by `applyOrReportSessionStartHook`) — but that
 // wiring is a side effect of a broader diagnostic/setup flow, not a
 // standalone, symmetric, testable command a user or an automation can run on
-// its own. This module is the pure (no network, no process spawn) decision
+// its own. This module is the decision
 // logic behind the new top-level `flair hook install|uninstall|status`
 // command family (wired into src/cli.ts). It intentionally reuses
 // doctor-client.ts's SESSION_START_HOOK_MARKER as the single source of truth
@@ -53,21 +53,26 @@
 //   6. Size-budgeted payload — also owned by session-start-hook.ts, which
 //      reuses bootstrap's own maxTokens machinery.
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { actionRecallInstallRoot, plannedActionRecallRuntime, probeActionRecallRuntime, provisionActionRecallRuntime } from "./lib/action-recall-runtime.js";
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
+  ACTION_RECALL_PRE_TOOL_USE_MATCHER,
   buildSessionStartHookCommand,
+  buildActionRecallHookCommand,
   buildContinuityCaptureHookCommand,
   checkContinuityCaptureHooks,
   computeContinuityHookInstall,
   computeContinuityHookRemoval,
   hookCommandIsSilenced,
   hookCommandDiscardsStderr,
+  isFlairActionRecallCommand,
   isFlairHookCommand,
   isHookCommandValueSafe,
   isSessionStartHookInvocation,
   readClientMcpBlock,
+  sessionStartEnablesActionRecall,
   type ContinuityCaptureHookReport,
   type ContinuityHookEvent,
   type ContinuityMutationAction,
@@ -554,7 +559,7 @@ function findHookMatches(config: any): Array<{ groupIndex: number; hookIndex: nu
 const HOOK_BARE_FORM_RE =
   /^FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start$/d;
 const HOOK_CLAUDE_FORM_RE =
-  /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/d;
+  /^sh -c 'out=\$\((?:FLAIR_ACTION_RECALL=1 )?FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/d;
 const HOOK_CODEX_FORM_RE =
   /^sh -c 'out=\$\(FLAIR_HOOK_HARNESS=codex FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start\) && printf %s "\$out" \|\| true'$/d;
 
@@ -1099,6 +1104,337 @@ export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOp
  *  installContinuityHooks() checks first and reports instead. */
 export function buildContinuityHookCommand(agentId: string, flairUrl: string): string {
   return buildContinuityCaptureHookCommand(agentId, flairUrl);
+}
+
+// ── action-recall (flair#2067 slice 2) ──────────────────────────────────────
+//
+// Claude Code PreToolUse wiring and SessionStart refresh opt-in.
+
+export interface ActionRecallRuntime {
+  bunPath: string;
+  artifactPath: string;
+}
+
+export interface ActionRecallInstallOptions extends InstallHookOptions {
+  /** Resolved absolute Bun + artefact paths. */
+  runtime: ActionRecallRuntime;
+}
+
+export interface ActionRecallMutationResult {
+  ok: boolean;
+  path: string;
+  harness: Harness;
+  dryRun: boolean;
+  message: string;
+  backupPath: string | null;
+  actions: { preToolUse: HookDeltaAction; sessionStart: HookDeltaAction | "skipped" } | null;
+}
+
+/** Find the PreToolUse group carrying an action-recall hook command. */
+function findActionRecallEntry(config: any): { groupIndex: number; hookIndex: number; group: any } | null {
+  const groups = config?.hooks?.PreToolUse;
+  if (!Array.isArray(groups)) return null;
+  for (let gi = 0; gi < groups.length; gi++) {
+    const hooks = groups[gi]?.hooks;
+    if (!Array.isArray(hooks)) continue;
+    for (let hi = 0; hi < hooks.length; hi++) {
+      if (isFlairActionRecallCommand(hooks[hi]?.command)) {
+        return { groupIndex: gi, hookIndex: hi, group: groups[gi] };
+      }
+    }
+  }
+  return null;
+}
+
+interface ActionRecallDelta {
+  changed: boolean;
+  newConfig: any;
+  actions: { preToolUse: HookDeltaAction; sessionStart: HookDeltaAction | "skipped" };
+  /** The existing SessionStart command. */
+  sessionStartBefore?: string | null;
+}
+
+/**
+ * Compute the action-recall install delta. The SessionStart refresh flag is
+ * only ever added to an installer-form command.
+ */
+function computeActionRecallInstall(
+  config: any,
+  runtime: ActionRecallRuntime,
+  agentId: string,
+  flairUrl: string,
+): ActionRecallDelta {
+  const command = buildActionRecallHookCommand(runtime.bunPath, runtime.artifactPath, agentId, flairUrl);
+  const newConfig = deepClone(config);
+  let preToolUse: HookDeltaAction = "noop";
+
+  const existing = findActionRecallEntry(newConfig);
+  if (existing) {
+    const hook = newConfig.hooks.PreToolUse[existing.groupIndex].hooks[existing.hookIndex];
+    if (hook.type !== "command" || hook.command !== command || existing.group.matcher !== ACTION_RECALL_PRE_TOOL_USE_MATCHER) {
+      hook.command = command;
+      hook.type = "command";
+      existing.group.matcher = ACTION_RECALL_PRE_TOOL_USE_MATCHER;
+      preToolUse = "update";
+    }
+  } else {
+    newConfig.hooks = newConfig.hooks && typeof newConfig.hooks === "object" && !Array.isArray(newConfig.hooks) ? newConfig.hooks : {};
+    newConfig.hooks.PreToolUse = Array.isArray(newConfig.hooks.PreToolUse) ? newConfig.hooks.PreToolUse : [];
+    newConfig.hooks.PreToolUse.push({
+      matcher: ACTION_RECALL_PRE_TOOL_USE_MATCHER,
+      hooks: [{ type: "command", command }],
+    });
+    preToolUse = "add";
+  }
+
+  let sessionStart: HookDeltaAction | "skipped" = "skipped";
+  let sessionStartBefore: string | null = null;
+  const ss = findHookEntry(newConfig);
+  if (ss) {
+    const current = newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex].command as string;
+    sessionStartBefore = current;
+    const form = parseInstallerHookForm(current);
+    if (!form) {
+      sessionStart = "skipped";
+    } else {
+      const rebuilt = buildSessionStartHookCommand(agentId, flairUrl, {
+        actionRecall: true,
+      });
+      if (rebuilt === current && newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex].type === "command") {
+        sessionStart = "noop";
+      } else {
+        newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex] = { type: "command", command: rebuilt };
+        sessionStart = "update";
+      }
+    }
+  } else {
+    newConfig.hooks.SessionStart = Array.isArray(newConfig.hooks.SessionStart) ? newConfig.hooks.SessionStart : [];
+    newConfig.hooks.SessionStart.push({ hooks: [{ type: "command", command: buildSessionStartHookCommand(agentId, flairUrl, { actionRecall: true }) }] });
+    sessionStart = "add";
+  }
+
+  return { changed: preToolUse !== "noop" || sessionStart === "update" || sessionStart === "add", newConfig, actions: { preToolUse, sessionStart }, sessionStartBefore };
+}
+
+function actionRecallInstallRefusal(delta: ActionRecallDelta, path: string): string | null {
+  if (delta.actions.sessionStart === "skipped") return `SessionStart in ${path} is not a compatible installer command — nothing written`;
+  if (delta.actions.sessionStart === "add" || delta.actions.sessionStart === "update") {
+    const decision = decidePinWrite({ pkg: FLAIR_MCP_PACKAGE, entry: `SessionStart hook in ${path}`, existingText: guardedPinSpan(delta.sessionStartBefore ?? null), runningVersion: flairCliVersion() });
+    if (decision.action !== "write") return decision.line!;
+  }
+  return null;
+}
+
+function actionRecallCommandFailure(command: unknown): string | null {
+  if (typeof command !== "string") return "action-recall command is not an installer command";
+  const match = /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^ ]+) (?:FLAIR_URL=([^ ]+) )?([^ ]+) ([^ ]+) 2>\/dev\/null\) /.exec(command);
+  if (!match) return "action-recall command is not an installer command";
+  const [, agent, url, bun, artifact] = match;
+  try {
+    if (command !== buildActionRecallHookCommand(bun, artifact, agent, url)) return "action-recall command is not an installer command";
+    return probeActionRecallRuntime({ bunPath: bun, artifactPath: artifact }, agent, url, command);
+  } catch {
+    return "action-recall command is not an installer command";
+  }
+}
+
+/** Whether the action-recall hook is wired, and whether SessionStart enables refresh. */
+export interface ActionRecallStatus {
+  path: string;
+  harness: Harness;
+  installed: boolean;
+  refreshEnabled: boolean;
+  runtimeFailure?: string;
+}
+
+export function actionRecallHookStatus(homeDir: string, harness: Harness): ActionRecallStatus {
+  const path = hookSettingsPath(homeDir, harness);
+  const read = readSettingsFile(path);
+  const config = read.parsed ?? {};
+  const entry = findActionRecallEntry(config);
+  const hook = entry ? entry.group.hooks[entry.hookIndex] : null;
+  const runtimeFailure = hook ? actionRecallCommandFailure(hook.command) : null;
+  const installed = harness === "claude-code" && hook?.type === "command" && entry?.group.matcher === ACTION_RECALL_PRE_TOOL_USE_MATCHER && runtimeFailure === null;
+  let refreshEnabled = false;
+  const ss = findHookEntry(config);
+  if (ss) {
+    const hook = config.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex];
+    const form = parseInstallerHookForm(hook.command);
+    refreshEnabled = hook.type === "command" && form?.harness === "claude-code" && sessionStartEnablesActionRecall(hook.command);
+  }
+  return { path, harness, installed, refreshEnabled, ...(runtimeFailure ? { runtimeFailure } : {}) };
+}
+
+/** Install (or repair) the action-recall PreToolUse hook + SessionStart refresh. */
+export function installActionRecall(opts: ActionRecallInstallOptions): ActionRecallMutationResult {
+  const { homeDir, harness, agentId, flairUrl, runtime } = opts;
+  const dryRun = !!opts.dryRun;
+  const path = hookSettingsPath(homeDir, harness);
+
+  if (harness !== "claude-code") {
+    return {
+      ok: false, path, harness, dryRun,
+      message: `action recall is Claude Code only — ${harness} has no PreToolUse Bash hook`, backupPath: null, actions: null,
+    };
+  }
+  for (const [label, value] of [["agent id", agentId], ["Flair URL", flairUrl]] as const) {
+    if (!isHookCommandValueSafe(value)) {
+      return {
+        ok: false, path, harness, dryRun,
+        message: `${label} '${value}' contains characters that cannot be safely written into a shell hook command — refusing to write it`,
+        backupPath: null, actions: null,
+      };
+    }
+  }
+
+  const runtimeFailure = probeActionRecallRuntime(runtime, agentId, flairUrl);
+  if (runtimeFailure) {
+    return { ok: false, path, harness, dryRun, message: `${runtimeFailure} — nothing written`, backupPath: null, actions: null };
+  }
+
+  if (dryRun) {
+    let planned: ActionRecallRuntime;
+    try {
+      planned = plannedActionRecallRuntime(runtime, homeDir);
+    } catch (error) {
+      return { ok: false, path, harness, dryRun, message: `${error instanceof Error ? error.message : String(error)} — nothing written`, backupPath: null, actions: null };
+    }
+    const read = readSettingsFile(path);
+    if (read.parseError) {
+      return { ok: false, path, harness, dryRun, message: `${read.parseError} — dry run: nothing would be written until this is fixed`, backupPath: null, actions: null };
+    }
+    const delta = computeActionRecallInstall(read.parsed ?? {}, planned, agentId, flairUrl);
+    const refusal = actionRecallInstallRefusal(delta, path);
+    if (refusal) return { ok: false, path, harness, dryRun, message: refusal, backupPath: null, actions: delta.actions };
+    const message = delta.changed
+      ? `would wire the action-recall hook (PreToolUse: ${delta.actions.preToolUse}, SessionStart: ${delta.actions.sessionStart}) in ${path} (dry run — nothing written)`
+      : `action-recall hook already current in ${path} — no changes`;
+    return { ok: true, path, harness, dryRun, message, backupPath: null, actions: delta.actions };
+  }
+
+  mkdirSync(dirname(path), { recursive: true });
+  let actions: ActionRecallMutationResult["actions"] = null;
+  let refused = false;
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        refused = true;
+        return { hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.` };
+      }
+      const delta = computeActionRecallInstall(read.parsed ?? {}, runtime, agentId, flairUrl);
+      actions = delta.actions;
+      const refusal = actionRecallInstallRefusal(delta, path);
+      if (refusal) return { hold: refusal };
+      let installed: ActionRecallRuntime;
+      try {
+        installed = provisionActionRecallRuntime(runtime, homeDir, agentId, flairUrl);
+      } catch (error) {
+        return { hold: `${error instanceof Error ? error.message : String(error)} — nothing written` };
+      }
+      const durableDelta = computeActionRecallInstall(read.parsed ?? {}, installed, agentId, flairUrl);
+      actions = durableDelta.actions;
+      if (!durableDelta.changed) return { noop: `action-recall hook already current in ${path}` };
+      return { write: encodeConfig(durableDelta.newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
+
+  const backupPath = result.backupPath ?? null;
+  if (result.status === "written") {
+    return { ok: true, path, harness, dryRun, message: `wired the action-recall hook (PreToolUse: ${actions!.preToolUse}, SessionStart: ${actions!.sessionStart}) in ${path}`, backupPath, actions };
+  }
+  if (result.status === "noop") {
+    return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
+  }
+  if (result.status === "held") {
+    return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
+  }
+  return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
+}
+
+function computeActionRecallRemoval(config: any): ActionRecallDelta {
+  const newConfig = deepClone(config);
+  let preToolUse: HookDeltaAction = "noop";
+  const entry = findActionRecallEntry(newConfig);
+  if (entry) {
+    const group = newConfig.hooks.PreToolUse[entry.groupIndex];
+    group.hooks.splice(entry.hookIndex, 1);
+    if (group.hooks.length === 0) newConfig.hooks.PreToolUse.splice(entry.groupIndex, 1);
+    if (newConfig.hooks.PreToolUse.length === 0) delete newConfig.hooks.PreToolUse;
+    preToolUse = "remove";
+  }
+  let sessionStart: HookDeltaAction | "skipped" = "skipped";
+  const ss = findHookEntry(newConfig);
+  if (ss) {
+    const current = newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex].command as string;
+    const form = parseInstallerHookForm(current);
+    if (form && sessionStartEnablesActionRecall(current)) {
+      const rebuilt = buildSessionStartHookCommand(form.agentId, form.flairUrl, { harness: form.harness });
+      newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex] = { type: "command", command: rebuilt };
+      sessionStart = "update";
+    } else {
+      sessionStart = "noop";
+    }
+  }
+  return { changed: preToolUse === "remove" || sessionStart === "update", newConfig, actions: { preToolUse, sessionStart } };
+}
+
+/** Remove the first marker-matched PreToolUse entry and compatible refresh flag. */
+export function uninstallActionRecall(opts: UninstallHookOptions): ActionRecallMutationResult {
+  const { homeDir, harness } = opts;
+  const dryRun = !!opts.dryRun;
+  const path = hookSettingsPath(homeDir, harness);
+
+  if (harness !== "claude-code") {
+    return { ok: false, path, harness, dryRun, message: `action recall is Claude Code only`, backupPath: null, actions: null };
+  }
+  if (!existsSync(path)) {
+    if (!dryRun) rmSync(actionRecallInstallRoot(homeDir), { recursive: true, force: true });
+    return { ok: true, path, harness, dryRun, message: `no action-recall hook found in ${path} — nothing to remove`, backupPath: null, actions: { preToolUse: "noop", sessionStart: "noop" } };
+  }
+  if (dryRun) {
+    const read = readSettingsFile(path);
+    if (read.parseError) return { ok: false, path, harness, dryRun, message: read.parseError, backupPath: null, actions: null };
+    const delta = computeActionRecallRemoval(read.parsed ?? {});
+    const message = delta.changed
+      ? `would remove the action-recall hook (PreToolUse: ${delta.actions.preToolUse}, SessionStart: ${delta.actions.sessionStart}) from ${path} (dry run — nothing written)`
+      : `no action-recall hook found in ${path} — nothing to remove (dry run)`;
+    return { ok: true, path, harness, dryRun, message, backupPath: null, actions: delta.actions };
+  }
+  let actions: ActionRecallMutationResult["actions"] = null;
+  let refused = false;
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        refused = true;
+        return { hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.` };
+      }
+      const delta = computeActionRecallRemoval(read.parsed ?? {});
+      actions = delta.actions;
+      if (!delta.changed) return { noop: `no action-recall hook found in ${path} — nothing to remove` };
+      return { write: encodeConfig(delta.newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
+
+  if (result.status === "written" || result.status === "noop") {
+    rmSync(actionRecallInstallRoot(homeDir), { recursive: true, force: true });
+  }
+  const backupPath = result.backupPath ?? null;
+  if (result.status === "written") {
+    return { ok: true, path, harness, dryRun, message: `removed the action-recall hook from ${path}`, backupPath, actions };
+  }
+  if (result.status === "noop") {
+    return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
+  }
+  if (result.status === "held") {
+    return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
+  }
+  return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
 }
 
 export interface ContinuityMutationResult {

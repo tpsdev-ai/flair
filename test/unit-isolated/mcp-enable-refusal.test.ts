@@ -58,7 +58,7 @@ for (const [instance, issuer, fabric, refusal] of [
       await expect(program.parseAsync([
         "node", "flair", "mcp", "enable", "--instance", instance,
         ...(issuer === undefined ? [] : ["--issuer", issuer]),
-        "--admin-pass", "fixture", "--signing-key-file", join(dir, "key.pem"),
+        "--admin-pass", "fixture",
         "--secrets-path", join(dir, "secrets.env"),
         ...(fabric ? ["--fabric"] : []), ...(dryRun ? ["--dry-run"] : []),
       ])).rejects.toThrow("exit 1");

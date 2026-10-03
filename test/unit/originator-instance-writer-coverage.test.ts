@@ -56,7 +56,7 @@ const POLICY: Record<string, { count: number; disposition: Disposition; note: st
   "resources/XAA.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "IdP principal raw Agent create" },
   "resources/mcp-handler.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "JIT OAuth principal raw Agent create" },
   "resources/MemoryFeed.ts|Memory|put": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update" },
-  "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "flair#2139 S2 skill version writer: successor upsert + predecessor close on an already-stamped row (Memory stamps before the branch)" },
+  "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory and FeedMemories stamp successors in their transaction plans; predecessor closes retain stored stamps." },
   // Update-only / resource-internal raw writes — they re-write an existing row.
   "resources/Memory.ts|Memory|post": { count: 1, disposition: "resource-internal", note: "Memory writeMemoryRowPost fallback (content already stamped)" },
   "resources/Memory.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord (existing row)" },

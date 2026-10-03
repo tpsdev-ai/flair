@@ -56,7 +56,7 @@ Then set an admin password in Fabric Studio (Cluster Settings → Admin). `flair
 
 `flair agent add` takes a positional id and `--target`. There is no `--remote` flag on this command (`--remote` belongs to `flair init`).
 
-On Fabric, ops lives on the **same hostname at port 9925**, not the CLI's default "data port − 1" derivation (that would be `:442`, where nothing answers). Pass `--ops-target` explicitly: <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
+For portless HTTPS, the CLI derives the ops endpoint at `:9925`; `--ops-target` overrides it. <!-- docs-freshness-allow: Fabric ops API port -->
 
 ```bash
 export FLAIR_URL=https://<cluster>.<org>.harperfabric.com
@@ -64,7 +64,7 @@ export FLAIR_URL=https://<cluster>.<org>.harperfabric.com
 # Keep the Fabric admin password in an owner-only file; the CLI reads it in-process.
 printf '%s\n' '<fabric-admin-password>' > ~/.flair/fabric-admin-pass && chmod 600 ~/.flair/fabric-admin-pass
 
-# Fabric ops is :9925 on the same host, not derived :442. docs-freshness-allow: Fabric ops API
+# Operations endpoint override. docs-freshness-allow: Fabric ops API
 flair agent add mybot --target "$FLAIR_URL" --ops-target https://<cluster>.<org>.harperfabric.com:9925 --admin-pass-file ~/.flair/fabric-admin-pass
 ```
 

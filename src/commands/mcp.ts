@@ -818,12 +818,11 @@ export function register(program: Command): void {
         "Always refused with --fabric or a *.harperfabric.com instance. " +
         "Without it the list is not changed (shipped: claude.ai,claude.com)",
     )
-    .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
     .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
-    .option("--dry-run", "Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config; report the signing key path. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run")
+    .option("--dry-run", "Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
@@ -893,7 +892,6 @@ export function register(program: Command): void {
           principalKind: opts.principalKind,
           adminUser: resolveAdminUser(opts.adminUser),
           adminPass,
-          signingKeyFilePath: opts.signingKeyFile,
           secretsMechanism,
           secretsStagingPath: opts.secretsPath,
           cimdAllowedHosts: cimdFlag.hosts,

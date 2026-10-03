@@ -1,17 +1,10 @@
-// ─── flair#2139 S2 — the transactional skill version writer ─────────────────
-//
-// resources/skill-version-write.ts runs one skill write atomically inside the
-// append helper's per-subject lock and ONE owned transaction: re-read the live
-// Memory head, build the successor, close the predecessor, pointer writes, and
-// append the version. This file drives it against a mocked Harper (the same
-// technique test/unit-isolated/instruction-version-record.test.ts uses) and
-// injects a failure at each step, asserting NO successor, NO close and NO
-// version row survive.
+// Mocked transactions exercise rollback under the subject-type lock.
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
 type Row = Record<string, any>;
 const store = new Map<string, Row>();       // InstructionVersion rows
 const memoryStore = new Map<string, Row>(); // Memory rows
+const pointers = new Map<string, Row>();
 const locks = new Set<string>();
 let failNextAppend = false;
 let hideHead = false;
@@ -69,12 +62,13 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
   const txn: any = {
     open: 1, saveCommits: false, aborted: false,
-    versions: new Map(store), memories: new Map(memoryStore),
+    versions: new Map(store), memories: new Map(memoryStore), pointers: new Map(pointers),
     abort() { this.open = 0; this.aborted = true; },
     commit() {
       this.open = 0;
       store.clear(); for (const [id, row] of this.versions) store.set(id, row);
       memoryStore.clear(); for (const [id, row] of this.memories) memoryStore.set(id, row);
+      pointers.clear(); for (const [id, row] of this.pointers) pointers.set(id, row);
     },
   };
   context.transaction = txn;
@@ -99,7 +93,7 @@ function failHook<T>(message: string): () => Promise<T> {
 }
 
 beforeEach(() => {
-  store.clear(); memoryStore.clear(); locks.clear();
+  store.clear(); memoryStore.clear(); locks.clear(); pointers.clear();
   failNextAppend = false; hideHead = false;
   (globalThis as any).transaction = mockTransaction;
 });
@@ -234,6 +228,26 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     expect(store.size).toBe(0);
   });
 
+  test("a pointer-write failure rolls back the successor, close and pointer", async () => {
+    let reached = false;
+    const pointerBefore = { memoryId: "m1" };
+    pointers.set("m1", pointerBefore);
+    const res = await attemptUpdate({ pointer: async (shared: any) => {
+      reached = true;
+      expect(shared.transaction.memories.get("m2")).toBeDefined();
+      expect(shared.transaction.memories.get("m1").validTo).toBeString();
+      shared.transaction.pointers.delete("m1");
+      shared.transaction.pointers.set("m2", { memoryId: "m2" });
+      throw new Error("pointer-write-failed");
+    } });
+    expect(reached).toBe(true);
+    expect(res.ok).toBe(false);
+    expect(memoryStore.get("m1")!.validTo).toBeUndefined();
+    expect(memoryStore.has("m2")).toBe(false);
+    expect([...pointers.entries()]).toEqual([["m1", pointerBefore]]);
+    expect(store.size).toBe(0);
+  });
+
   test("a version-append failure rolls back the successor and the close", async () => {
     failNextAppend = true;
     const res = await attemptUpdate();
@@ -268,7 +282,7 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "create", predecessor: null, successor: s2, closePatch: {}, value: "c2", visibility: "shared" }),
+      plan: (head) => ({ kind: "update", predecessor: head, successor: s2, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" }),
       hooks: { createSuccessor, closePredecessor },
     });
     const s3 = { ...liveSkill("m3", "m1", "c3"), supersedes: "m2", createdAt: "2020-01-03T00:00:00.000Z" };
