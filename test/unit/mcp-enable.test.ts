@@ -33,6 +33,8 @@ import { tmpdir, hostname as osHostname } from "node:os";
 import { join } from "node:path";
 import yaml from "js-yaml";
 import { resolveHome, withHome } from "../../src/lib/home.ts";
+import { agentInsertSchemaError } from "../helpers/agent-insert-schema.ts";
+import { importEd25519Key } from "../../resources/ed25519-auth.ts";
 
 import {
   isLocalOrigin,
@@ -378,16 +380,20 @@ function mockOpsFetch(opts: {
   const creds = credentialTable(
     seed.map((c) => ({ idpProvider: "github", idpSubject: "octocat", principalId: "self", ...c })),
   );
+  let principalPresent = opts.existingPrincipal ?? false;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push({ url: String(url), body });
     if (body.operation === "search_by_value" && body.table === "Agent") {
       if (opts.failFind) return new Response("boom", { status: opts.failFindStatus ?? 500 });
       if ("agentSearchBody" in opts) return new Response(JSON.stringify(opts.agentSearchBody), { status: 200 });
-      return new Response(JSON.stringify(opts.existingPrincipal ? [{ id: body.search_value }] : []), { status: 200 });
+      return new Response(JSON.stringify(principalPresent ? [{ id: body.search_value }] : []), { status: 200 });
     }
     if (body.operation === "insert" && body.table === "Agent") {
+      const error = agentInsertSchemaError(body.records ?? []);
+      if (error) return error;
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
+      principalPresent = true;
       return new Response(JSON.stringify({ message: "inserted" }), { status: 200 });
     }
     if (body.operation === "upsert" && body.table === "Credential" && opts.failUpsert) {
@@ -417,6 +423,27 @@ function mockOpsFetch(opts: {
 }
 
 describe("provisionIdpIdentityMapping", () => {
+  for (const field of ["name", "publicKey", "createdAt"]) {
+    test(`ops fake rejects an Agent insert missing ${field}`, async () => {
+      const { fetchImpl } = mockOpsFetch();
+      const record: Record<string, unknown> = {
+        id: "self", name: "self", publicKey: "idp:github:octocat", createdAt: "2026-10-02T00:00:00.000Z",
+      };
+      delete record[field];
+      const response = await fetchImpl(ISSUER, {
+        method: "POST",
+        body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [record] }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: `Property ${field} is required` });
+      const found = await fetchImpl(ISSUER, {
+        method: "POST",
+        body: JSON.stringify({ operation: "search_by_value", table: "Agent", search_value: "self" }),
+      });
+      expect(await found.json()).toEqual([]);
+    });
+  }
+
   test("creates the principal when missing and a fresh credential", async () => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: false, existingCredential: null });
     const result = await provisionIdpIdentityMapping(
@@ -428,8 +455,11 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions"]);
-    const credRecord = calls[3].body.records[0];
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+    const agentRecord = calls.find((c) => c.body.operation === "insert")!.body.records[0];
+    expect(agentRecord.publicKey).toBe("idp:github:octocat");
+    await expect(importEd25519Key(agentRecord.publicKey)).rejects.toThrow();
+    const credRecord = calls.find((c) => c.body.operation === "upsert")!.body.records[0];
     expect(credRecord.kind).toBe("idp");
     expect(credRecord.idpProvider).toBe("github");
     expect(credRecord.idpSubject).toBe("octocat");
@@ -447,7 +477,7 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.credentialId).toBe("cred_existing");
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
   });
 
   // ─── flair#2115 — the pre-write read (the step `flair principal link` reuses) ──
@@ -523,7 +553,7 @@ describe("provisionIdpIdentityMapping", () => {
       { fetchImpl },
     );
     const searches = calls.filter((c) => c.body.operation === "search_by_conditions");
-    expect(searches.length).toBe(2); // the dedup lookup + the invariant read-back
+    expect(searches.length).toBe(3); // the dedup lookup, the pre-write guard, the invariant read-back
     for (const s of searches) {
       const attrs = s.body.conditions.map((c: any) => c.search_attribute).sort();
       expect(attrs).toEqual(["idpSubject", "kind"]);
@@ -682,14 +712,20 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   test("a local URL string with a non-default port: every request goes to exactly that port, and nothing else is contacted", async () => {
     const creds = credentialTable();
     const received: { host: string; operation: string }[] = [];
+    let principalPresent = false;
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       async fetch(req) {
         const body: any = await req.json().catch(() => ({}));
         received.push({ host: req.headers.get("host") ?? "", operation: body.operation });
-        if (body.operation === "search_by_value") return Response.json([]);
-        if (body.operation === "insert") return Response.json({ message: "inserted" });
+        if (body.operation === "search_by_value") return Response.json(principalPresent ? [{ id: body.search_value }] : []);
+        if (body.operation === "insert") {
+          const error = agentInsertSchemaError(body.records ?? []);
+          if (error) return error;
+          principalPresent = true;
+          return Response.json({ message: "inserted" });
+        }
         return creds.handle(body) ?? new Response("unexpected operation", { status: 400 });
       },
     });
@@ -707,9 +743,9 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
 
       const result = await provisionIdpIdentityMapping({ opsPortOrUrl: origin, ...MAPPING }, { fetchImpl });
 
-      expect(attempted).toEqual(Array(5).fill(`${origin}/`));
+      expect(attempted).toEqual(Array(9).fill(`${origin}/`));
       expect(received.map((r) => r.operation)).toEqual([
-        "search_by_value", "search_by_conditions", "insert", "upsert", "search_by_conditions",
+        "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions",
       ]);
       expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
       expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
@@ -726,7 +762,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   ] as const)("opsPortOrUrl %p is used as given: %s", async (opsPortOrUrl, expected) => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
     await provisionIdpIdentityMapping({ opsPortOrUrl, ...MAPPING }, { fetchImpl });
-    expect(calls.length).toBe(4);
+    expect(calls.length).toBe(6);
     expect(calls.every((c) => c.url === expected)).toBe(true);
   });
 
@@ -737,7 +773,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
   ])("hostedOrigin %p resolves to its host at the hosted ops port", async (hostedOrigin, expected) => {
     const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
     await provisionIdpIdentityMapping({ hostedOrigin, ...MAPPING }, { fetchImpl });
-    expect(calls.length).toBe(4);
+    expect(calls.length).toBe(6);
     expect(calls.every((c) => c.url === expected)).toBe(true);
   });
 
@@ -851,7 +887,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     }) as typeof fetch;
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true }, { fetchImpl });
     expect(result.ok).toBe(true);
-    expect(mappingUrls.length).toBe(4);
+    expect(mappingUrls.length).toBe(6);
     expect(mappingUrls.every((u) => u === `http://127.0.0.1:${HOSTED_OPS_PORT}/`)).toBe(true);
   });
 });

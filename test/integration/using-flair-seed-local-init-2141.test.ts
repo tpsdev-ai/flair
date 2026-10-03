@@ -18,7 +18,10 @@
 //   - teardown kills only the pid in this data dir's hdb.pid when lsof finds
 //     no listener or identifies that pid on this test's port;
 //   - the CLI runs under Node, so the Harper it starts runs under Node too.
-import { afterEach, describe, expect, test } from "bun:test";
+//
+// Readiness (flair#2240): wait for health and ops before the test's subsequent
+// direct ops calls; credential-less pending starts do not guarantee ops readiness.
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -35,6 +38,9 @@ const ROOT = resolve(import.meta.dirname, "..", "..");
 const CLI = join(ROOT, "dist", "cli.js");
 const ADMIN_USER = "admin";
 const ADMIN_PASS = `seed-local-${randomUUID()}`;
+
+const INSTANCE_READY_TIMEOUT_MS = 30_000;
+const TEARDOWN_TIMEOUT_MS = 60_000;
 
 interface Install {
   home: string;
@@ -107,6 +113,7 @@ function nodeBin(): string {
 }
 
 function runLocalInit(install: Install, extraArgs: string[]) {
+  const startedAt = Date.now();
   const res = spawnSync(
     nodeBin(),
     [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), "--admin-pass", ADMIN_PASS,
@@ -114,23 +121,69 @@ function runLocalInit(install: Install, extraArgs: string[]) {
     {
       cwd: ROOT,
       encoding: "utf8",
-      timeout: 240_000, // the child's own deadline: install + start + agent probes + seed
+      timeout: 60_000,
       killSignal: "SIGKILL",
       env: childEnv(install.home, launchctlStub(install.home)),
     },
   );
-  return { status: res.status, signal: res.signal, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  return { status: res.status, signal: res.signal, stdout: res.stdout ?? "", stderr: res.stderr ?? "", startedAt };
 }
 
 function runLocalService(install: Install, command: "start" | "stop", extraEnv: Record<string, string> = {}) {
+  const startedAt = Date.now();
   const res = spawnSync(nodeBin(), [CLI, command, "--port", String(install.httpPort)], {
     cwd: ROOT,
     encoding: "utf8",
-    timeout: 240_000,
+    timeout: 60_000,
     killSignal: "SIGKILL",
     env: { ...childEnv(install.home, launchctlStub(install.home)), ...extraEnv },
   });
-  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "", startedAt };
+}
+
+/**
+ * Wait until this test's instance is actually serving: its HTTP `/Health`
+ * endpoint answers 2xx or 401 AND its operations API answers a real request.
+ *
+ * `startedAt` is the CLI launch time included in the timeout's measured startup.
+ */
+async function waitForInstance(install: Install, startedAt: number): Promise<number> {
+  const healthURL = `http://127.0.0.1:${install.httpPort}/Health`;
+  const opsURL = `http://127.0.0.1:${install.opsPort}/`;
+  const deadline = Date.now() + INSTANCE_READY_TIMEOUT_MS;
+  let last = "no attempt yet";
+  while (Date.now() < deadline) {
+    try {
+      const health = await fetch(healthURL, {
+        headers: { Authorization: basic() },
+        signal: AbortSignal.timeout(2_000),
+      });
+      // 2xx = healthy; 401 = Harper up, credentials wrong — still serving.
+      if (health.ok || health.status === 401) {
+        const res = await fetch(opsURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: basic() },
+          body: JSON.stringify({ operation: "search_by_id", database: "flair", table: "Memory", ids: ["__readiness_probe__"], get_attributes: ["id"] }),
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (res.status === 200) {
+          const elapsed = Date.now() - startedAt;
+          console.log(`[2141-local-init] instance ready (health + ops answered) after ${elapsed}ms`);
+          return elapsed;
+        }
+        last = `ops answered HTTP ${res.status}`;
+      } else {
+        last = `health HTTP ${health.status}`;
+      }
+    } catch (err: any) {
+      last = err?.message ?? String(err);
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(
+    `the instance (http ${install.httpPort}, ops ${install.opsPort}) was not serving within ` +
+    `${INSTANCE_READY_TIMEOUT_MS}ms (measured startup ${Date.now() - startedAt}ms); last: ${last}`,
+  );
 }
 
 const basic = () => "Basic " + Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString("base64");
@@ -223,64 +276,82 @@ async function stopInstall(install: Install): Promise<void> {
   rmSync(install.home, { recursive: true, force: true });
 }
 
-afterEach(async () => {
-  while (installs.length > 0) await stopInstall(installs.pop() as Install);
-});
+// Case budgets (seconds): CLI + readiness + probe overrun + requests + teardown + margin.
+// fresh: 60 + 30 + 7.25 + 45 + 60 + 30 = 232.25.
+// handoff stages: 2*60 + 30 + 7.25 + 20 + 60 + 30 = 267.25.
+// seeded restart: 2*60 + 30 + 7.25 + 45 + 60 + 30 = 292.25.
 
-describe("flair#2141 S2 — two fresh local init paths and one installed-instance --skip-start handoff", () => {
-  test("with an agent registered (init's agent path)", async () => {
-    ensureCliBuild();
-    const install = await newInstall();
-    const run = runLocalInit(install, ["--agent-id", `fli-init-${Date.now().toString(36)}`]);
-    expect(run.status, `init failed (signal ${run.signal}):\n${run.stdout.slice(-1500)}\n${run.stderr.slice(-1500)}`).toBe(0);
-    expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
-    await expectSeeded(install);
-  }, 330_000);
+describe("flair#2141 S2 — local init and installed-instance handoff", () => {
+  beforeAll(() => ensureCliBuild(), 210_000);
 
-  test("with no agent registered (init's no-agent path)", async () => {
-    ensureCliBuild();
-    const install = await newInstall();
-    const run = runLocalInit(install, []);
-    expect(run.status, `init failed (signal ${run.signal}):\n${run.stdout.slice(-1500)}\n${run.stderr.slice(-1500)}`).toBe(0);
-    expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
-    await expectSeeded(install);
-  }, 330_000);
+  describe("fresh init", () => {
+    afterEach(async () => {
+      while (installs.length > 0) await stopInstall(installs.pop() as Install);
+    }, TEARDOWN_TIMEOUT_MS);
 
-  test("an already-installed default instance re-initialized with --skip-start stays pending through a credential-less start and seeds on a credentialed start", async () => {
-    ensureCliBuild();
-    const install = await newInstall();
-    // Harper must be installed before `flair start` can boot it, and a
-    // `--skip-start` init installs nothing (src/commands/init.ts). Install with
-    // a normal init, then clear the seed so the deferred seed is observable.
-    const initial = runLocalInit(install, []);
-    expect(initial.status, initial.stdout + initial.stderr).toBe(0);
-    await ops(install, { operation: "delete", database: "flair", table: "Memory", ids: [SEED_SKILL_ID] });
-    await ops(install, { operation: "delete", database: "flair", table: "OrgSkillAssignment", ids: [SEED_ASSIGNMENT_ID] });
-    const firstStop = runLocalService(install, "stop");
-    expect(firstStop.status, firstStop.stdout + firstStop.stderr).toBe(0);
+    test("with an agent registered (init's agent path)", async () => {
+      const install = await newInstall();
+      const run = runLocalInit(install, ["--agent-id", `fli-init-${Date.now().toString(36)}`]);
+      expect(run.status, `init failed (signal ${run.signal}):\n${run.stdout.slice(-1500)}\n${run.stderr.slice(-1500)}`).toBe(0);
+      expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
+      await waitForInstance(install, run.startedAt);
+      await expectSeeded(install);
+    }, 232_250);
 
-    const skipped = runLocalInit(install, ["--skip-start"]);
-    expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
-    expect(skipped.stdout).toContain("using-flair skill: pending");
-    expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
-    const adminPassPath = join(install.home, ".flair", "admin-pass");
-    // Remove the operator credential regardless of the persisted-admin detector (#2210).
-    rmSync(adminPassPath, { force: true });
+    test("with no agent registered (init's no-agent path)", async () => {
+      const install = await newInstall();
+      const run = runLocalInit(install, []);
+      expect(run.status, `init failed (signal ${run.signal}):\n${run.stdout.slice(-1500)}\n${run.stderr.slice(-1500)}`).toBe(0);
+      expect(run.stdout).toContain("using-flair skill: seeded the using-flair skill");
+      await waitForInstance(install, run.startedAt);
+      await expectSeeded(install);
+    }, 232_250);
+  });
 
-    const withoutCredential = runLocalService(install, "start");
-    expect(withoutCredential.status, withoutCredential.stdout + withoutCredential.stderr).toBe(0);
-    expect(withoutCredential.stderr).toContain("using-flair skill seed is still pending");
-    expect(withoutCredential.stderr).toContain("FLAIR_ADMIN_PASS");
-    expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
-    expect((await seedRows(install)).row).toBeNull();
+  describe("installed-instance handoff", () => {
+    let install: Install;
+    afterAll(async () => {
+      while (installs.length > 0) await stopInstall(installs.pop() as Install);
+    }, TEARDOWN_TIMEOUT_MS);
 
-    // flair start WITH FLAIR_ADMIN_PASS completes the seed and removes the marker.
-    const secondStop = runLocalService(install, "stop");
-    expect(secondStop.status, secondStop.stdout + secondStop.stderr).toBe(0);
-    const withCredential = runLocalService(install, "start", { FLAIR_ADMIN_PASS: ADMIN_PASS });
-    expect(withCredential.status, withCredential.stdout + withCredential.stderr).toBe(0);
-    expect(withCredential.stdout).toContain("using-flair skill: seeded the using-flair skill");
-    expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(false);
-    await expectSeeded(install);
-  }, 900_000);
+    test("install, clear the seed and stop the default instance", async () => {
+      install = await newInstall();
+      const initial = runLocalInit(install, []);
+      expect(initial.status, initial.stdout + initial.stderr).toBe(0);
+      await waitForInstance(install, initial.startedAt);
+      await ops(install, { operation: "delete", database: "flair", table: "Memory", ids: [SEED_SKILL_ID] });
+      await ops(install, { operation: "delete", database: "flair", table: "OrgSkillAssignment", ids: [SEED_ASSIGNMENT_ID] });
+      const firstStop = runLocalService(install, "stop");
+      expect(firstStop.status, firstStop.stdout + firstStop.stderr).toBe(0);
+    }, 267_250);
+
+    test("--skip-start stays pending through a credential-less start", async () => {
+      const skipped = runLocalInit(install, ["--skip-start"]);
+      expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
+      expect(skipped.stdout).toContain("using-flair skill: pending");
+      expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
+      const adminPassPath = join(install.home, ".flair", "admin-pass");
+      // Remove the operator credential regardless of the persisted-admin detector (#2210).
+      rmSync(adminPassPath, { force: true });
+
+      const withoutCredential = runLocalService(install, "start");
+      expect(withoutCredential.status, withoutCredential.stdout + withoutCredential.stderr).toBe(0);
+      expect(withoutCredential.stderr).toContain("using-flair skill seed is still pending");
+      expect(withoutCredential.stderr).toContain("FLAIR_ADMIN_PASS");
+      expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);
+      await waitForInstance(install, withoutCredential.startedAt);
+      expect((await seedRows(install)).row).toBeNull();
+    }, 267_250);
+
+    test("a credentialed restart completes the pending seed", async () => {
+      const secondStop = runLocalService(install, "stop");
+      expect(secondStop.status, secondStop.stdout + secondStop.stderr).toBe(0);
+      const withCredential = runLocalService(install, "start", { FLAIR_ADMIN_PASS: ADMIN_PASS });
+      expect(withCredential.status, withCredential.stdout + withCredential.stderr).toBe(0);
+      expect(withCredential.stdout).toContain("using-flair skill: seeded the using-flair skill");
+      expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(false);
+      await waitForInstance(install, withCredential.startedAt);
+      await expectSeeded(install);
+    }, 292_250);
+  });
 });
