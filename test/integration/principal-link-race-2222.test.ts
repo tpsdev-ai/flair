@@ -1,7 +1,9 @@
 // ─── flair#2222 — a concurrent change between preflight and write refuses ────
 //
 // Re-read Agent presence and canonicalized fields of principal-bearing IdP rows
-// before each write; a detected change refuses the pending write.
+// before each write. Valid comparison differences refuse with mapping-changed-underneath;
+// invalid changed rows can fail earlier validation with missing-or-invalid-credential-field.
+// Both fail closed.
 //
 // Every command talks only to this test's own ephemeral instance: the numeric
 // ops port it was started on, checked before the first call.

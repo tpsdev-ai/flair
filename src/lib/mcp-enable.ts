@@ -1765,7 +1765,8 @@ function mappingPreflight(principal: string, idpSubject: string, principalPresen
   return { principal, idpSubject, principalPresent, subjectRows: canonicalSubjectRows(subjectRows) };
 }
 
-/** The one refusal a changed-underneath mapping gets, wherever it is checked. */
+/** Valid comparison differences refuse here; invalid changed rows can fail earlier validation
+ * with missing-or-invalid-credential-field. Both fail closed. */
 function mappingChangedMessage(principal: string, idpSubject: string, principalCreated = false): string {
   return (
     `Identity mapping: mapping-changed-underneath — the Agent presence or compared IdP mapping fields for principal '${principal}' ` +

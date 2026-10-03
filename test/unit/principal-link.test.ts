@@ -909,7 +909,9 @@ describe("legacy Credential mapping reads", () => {
 // ─── flair#2222 — a change between preflight and write refuses ───────────────
 //
 // Re-read Agent presence and canonicalized fields of principal-bearing IdP rows
-// before each write; a detected change refuses the pending write.
+// before each write. Valid comparison differences refuse with mapping-changed-underneath;
+// invalid changed rows can fail earlier validation with missing-or-invalid-credential-field.
+// Both fail closed.
 
 describe("flair#2222 — the pre-write re-validation bound", () => {
   const provisionParams = { hostedOrigin: HOSTED, ...ADMIN, principal: "self", principalKind: "human" as const, ...SUBJECT };
@@ -1005,7 +1007,7 @@ describe("flair#2222 — the pre-write re-validation bound", () => {
       linkPrincipalMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT, replace: true }, { fetchImpl: st.fetchImpl }),
     ).rejects.toThrow(/mapping-changed-underneath/);
     expect(st.writes()).toEqual([]);
-    expect(st.rows.get("cred_c1")!.principalId, "the row nobody validated is untouched").toBe("carl");
+    expect(st.rows.get("cred_c1")!.principalId, "the concurrently changed row was not overwritten").toBe("carl");
   });
 
   test("unlink refuses when the Credential row moved after the preflight", async () => {
