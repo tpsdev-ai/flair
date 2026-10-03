@@ -8,7 +8,7 @@
  * never throws.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
 import { FLAIR_MCP_PACKAGE, flairCliVersion } from "./mcp-spec.js";
@@ -22,10 +22,19 @@ export type ActionRecallRuntimeResult =
   | { ok: true; runtime: ActionRecallRuntime }
   | { ok: false; reason: string };
 
-function isExecutableFile(path: string): boolean {
+export function isExecutableFile(path: string): boolean {
   try {
-    const st = statSync(path);
-    return st.isFile();
+    if (!isAbsolute(path) || !statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isRegularFile(path: string): boolean {
+  try {
+    return isAbsolute(path) && statSync(path).isFile();
   } catch {
     return false;
   }
@@ -106,7 +115,7 @@ export function resolveActionRecallRuntime(opts: ResolveOptions): ActionRecallRu
       artifactPath = actionRecallArtifactForPackage(packageDir);
     }
   }
-  if (!artifactPath || !existsSync(artifactPath)) {
+  if (!artifactPath || !isRegularFile(artifactPath)) {
     return {
       ok: false,
       reason: `the action-recall artefact ${artifactPath ?? FLAIR_MCP_PACKAGE} is not installed; install ${FLAIR_MCP_PACKAGE} at the same version`,

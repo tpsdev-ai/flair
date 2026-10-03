@@ -16,7 +16,7 @@
  * network call.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,20 +88,29 @@ function childEnv(): NodeJS.ProcessEnv {
   };
 }
 
-function run(command: string, opts: { holdOpen?: boolean } = {}) {
-  const input = JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "/repo", session_id: SESSION });
-  return spawnSync(process.execPath, [ENTRY], {
-    input: opts.holdOpen ? "" : input,
-    env: childEnv(),
-    encoding: "utf8",
-    timeout: CHILD_DEADLINE_MS,
+function run(command: string, opts: { holdOpen?: boolean } = {}): Promise<{ status: number | null; signal: string | null; stdout: string; stderr: string; stdinEnded: boolean }> {
+  const child = spawn(process.execPath, [ENTRY], { env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+  let stdout = "", stderr = "", stdinEnded = false;
+  child.stdout.on("data", data => { stdout += data; });
+  child.stderr.on("data", data => { stderr += data; });
+  child.once("exit", () => { stdinEnded = child.stdin.writableEnded; });
+  const timer = setTimeout(() => child.kill("SIGKILL"), CHILD_DEADLINE_MS);
+  const result = new Promise<{ status: number | null; signal: string | null; stdout: string; stderr: string; stdinEnded: boolean }>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr, stdinEnded }));
+  });
+  if (!opts.holdOpen) child.stdin.end(JSON.stringify({ tool_name: "Bash", tool_input: { command }, cwd: "/repo", session_id: SESSION }));
+  return result.finally(() => {
+    clearTimeout(timer);
+    child.stdin.destroy();
+    child.kill();
   });
 }
 
 describe("action-recall entry point (spawned)", () => {
-  test("a matching Bash command emits exactly the context-only envelope with the lesson id", () => {
+  test("a matching Bash command emits exactly the context-only envelope with the lesson id", async () => {
     writeCache();
-    const res = run("git push --force origin main");
+    const res = await run("git push --force origin main");
     expect(res.status).toBe(0);
     expect(res.stderr).toBe("");
     const parsed = JSON.parse(res.stdout);
@@ -113,16 +122,16 @@ describe("action-recall entry point (spawned)", () => {
     expect(parsed.hookSpecificOutput).not.toHaveProperty("updatedInput");
   });
 
-  test("an unrelated command is silent (zero bytes, exit 0)", () => {
+  test("an unrelated command is silent (zero bytes, exit 0)", async () => {
     writeCache();
-    const res = run("git status");
+    const res = await run("git status");
     expect(res.status).toBe(0);
     expect(res.stdout).toBe("");
     expect(res.stderr).toBe("");
   });
 
-  test("a missing cache and a non-Bash tool are silent (zero bytes, exit 0)", () => {
-    const missing = run("git push --force origin main");
+  test("a missing cache and a non-Bash tool are silent (zero bytes, exit 0)", async () => {
+    const missing = await run("git push --force origin main");
     expect(missing.status).toBe(0);
     expect(missing.stdout).toBe("");
     const nonBash = spawnSync(process.execPath, [ENTRY], {
@@ -135,4 +144,14 @@ describe("action-recall entry point (spawned)", () => {
     expect(nonBash.stdout).toBe("");
     expect(nonBash.stderr).toBe("");
   });
+});
+
+test("held-open stdin stays open until the entry exits silently", async () => {
+  writeCache();
+  const result = await run("git push --force", { holdOpen: true });
+  expect(result.stdinEnded).toBe(false);
+  expect(result.status).toBe(0);
+  expect(result.signal).toBeNull();
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe("");
 });

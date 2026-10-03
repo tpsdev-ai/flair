@@ -17,12 +17,10 @@
  *   - On ANY error, missing/corrupt/stale/wrong-mode cache, unsupported input
  *     or tool: ZERO stdout and ZERO stderr, exit 0.
  *   - Never executes or echoes the submitted command; never logs an excerpt.
- *   - Redaction ran before caching and runs again before rendering.
  *
  * NO NETWORK, NO SIGNING, NO SUBPROCESS: this entry point imports no client,
  * reads no key and spawns nothing. It only reads files under the cache root.
- * The whole read is wrapped in a best-effort 25 ms internal deadline covering
- * stdin and the asynchronous file work; held-open stdin exits silently.
+ * Stdin and file reads each have a best-effort internal deadline.
  */
 
 import { readStdin, runActionRecall, shouldRunAsMain } from "./action-recall-run.js";

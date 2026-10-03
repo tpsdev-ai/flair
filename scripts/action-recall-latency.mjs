@@ -2,18 +2,13 @@
 /**
  * Action-recall latency gate (flair#2067 slice 2).
  *
- * Times the EXACT installed shell command — the stdout-capture/zero-exit
- * wrapper around the built artefact run by an absolute Bun — over 200 fresh
- * processes per scenario, with a parent monotonic timer that starts before the
- * spawn and stops after exit and output are collected. Reports raw samples and
- * the nearest-rank p50/p95. The spec's 25 ms is an internal deadline, not this
- * number; this is the honest end-to-end figure.
+ * Times the installer-produced command with a parent monotonic timer.
  *
  * Usage: node scripts/action-recall-latency.mjs [--runs 200]
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,21 +61,33 @@ function entry(id) {
   };
 }
 
-function installedCommand(cacheRoot, home) {
-  const env = `HOME=${home} FLAIR_ACTION_RECALL_DIR=${cacheRoot} FLAIR_AGENT_ID=${AGENT} FLAIR_URL=${URL}`;
-  return `sh -c 'out=$(${env} ${BUN} ${ARTIFACT} 2>/dev/null) && printf %s "$out" || true'`;
+function installedCommand(home) {
+  const script = `
+    import { installActionRecall, hookSettingsPath } from ${JSON.stringify(join(ROOT, "src", "hook-install.ts"))};
+    import { readFileSync } from "node:fs";
+    const homeDir = ${JSON.stringify(home)};
+    const result = installActionRecall({ homeDir, harness: "claude-code", agentId: ${JSON.stringify(AGENT)}, flairUrl: ${JSON.stringify(URL)}, runtime: { bunPath: ${JSON.stringify(BUN)}, artifactPath: ${JSON.stringify(ARTIFACT)} } });
+    if (!result.ok) throw new Error(result.message);
+    console.log(JSON.parse(readFileSync(hookSettingsPath(homeDir, "claude-code"), "utf8")).hooks.PreToolUse[0].hooks[0].command);
+  `;
+  return execFileSync(BUN, ["-e", script], { encoding: "utf8", env: { ...process.env, HOME: home } }).trim();
 }
 
-function runOnce(command, input, holdOpen) {
-  return new Promise((resolve) => {
+function runOnce(command, input, holdOpen, env) {
+  return new Promise((resolve, reject) => {
     const start = process.hrtime.bigint();
-    const child = spawn("sh", ["-c", command], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("sh", ["-c", command], { stdio: ["pipe", "pipe", "pipe"], env });
     let out = "";
+    let err = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
     child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", () => {});
-    child.on("close", (code) => {
+    child.stderr.on("data", (d) => (err += d));
+    child.once("error", reject);
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      child.stdin.destroy();
       const ms = Number(process.hrtime.bigint() - start) / 1e6;
-      resolve({ ms, code, out });
+      resolve({ ms, code, signal, out, err });
     });
     if (!holdOpen) {
       child.stdin.write(input);
@@ -96,10 +103,25 @@ function percentile(sorted, p) {
   return sorted[Math.min(sorted.length - 1, Math.max(0, rank - 1))];
 }
 
-async function scenario(name, count, command, input, holdOpen) {
+async function scenario(name, count, command, input, holdOpen, env, expectedIds = []) {
   const samples = [];
   for (let i = 0; i < count; i++) {
-    const { ms } = await runOnce(command, input, holdOpen);
+    const { ms, code, signal, out, err } = await runOnce(command, input, holdOpen, env);
+    if (code !== 0 || signal !== null) throw new Error(`${name.trim()}: expected exit 0, got ${code}/${signal}`);
+    if (err !== "") throw new Error(`${name.trim()}: unexpected stderr`);
+    if (expectedIds.length === 0) {
+      if (out !== "") throw new Error(`${name.trim()}: unexpected stdout`);
+    } else {
+      let parsed;
+      try { parsed = JSON.parse(out); } catch { throw new Error(`${name.trim()}: expected context-only output`); }
+      const hook = parsed.hookSpecificOutput;
+      if (JSON.stringify(Object.keys(parsed)) !== '["hookSpecificOutput"]' || !hook ||
+          JSON.stringify(Object.keys(hook).sort()) !== '["additionalContext","hookEventName"]' ||
+          hook.hookEventName !== "PreToolUse" || typeof hook.additionalContext !== "string" ||
+          expectedIds.some(id => !hook.additionalContext.includes(`id: ${id} `)) || Buffer.byteLength(out) > 4096) {
+        throw new Error(`${name.trim()}: expected context-only output with every lesson`);
+      }
+    }
     samples.push(ms);
   }
   const sorted = [...samples].sort((a, b) => a - b);
@@ -113,8 +135,8 @@ async function main() {
   const runsIdx = process.argv.indexOf("--runs");
   const runs = runsIdx > -1 ? Number(process.argv[runsIdx + 1]) : 200;
   if (!(runs > 0)) throw new Error("--runs must be positive");
-  const root = mkdtempSync(join(tmpdir(), "flair-2067-lat-"));
-  const home = mkdtempSync(join(tmpdir(), "flair-2067-lat-home-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "flair-2067-lat-")));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "flair-2067-lat-home-")));
   const fullRoot = root + "-full";
   const corruptRoot = root + "-corrupt";
   const missingRoot = root + "-missing";
@@ -122,6 +144,8 @@ async function main() {
   console.log(`bun:      ${BUN}\n`);
   const results = [];
   try {
+    const command = installedCommand(home);
+    const env = (cacheRoot) => ({ ...process.env, HOME: home, FLAIR_ACTION_RECALL_DIR: cacheRoot });
     makeCache(fullRoot, [entry("m1"), entry("m2"), entry("m3")]);
     makeCache(corruptRoot, [entry("m1")]);
     // Corrupt the generation in place (digest mismatch): a full-size, well
@@ -130,11 +154,11 @@ async function main() {
     writeFileSync(join(corruptDir, "gen-1.json"), JSON.stringify({ payload: "{}", sha256: "0".repeat(64) }), { mode: 0o600 });
     const matching = JSON.stringify({ tool_name: "Bash", tool_input: { command: "git push --force origin main" }, cwd: "/repo", session_id: SESSION });
     const unrelated = JSON.stringify({ tool_name: "Bash", tool_input: { command: "git status" }, cwd: "/repo", session_id: SESSION });
-    results.push(await scenario("unrelated", runs, installedCommand(fullRoot, home), unrelated, false));
-    results.push(await scenario("matching ", runs, installedCommand(fullRoot, home), matching, false));
-    results.push(await scenario("missing  ", runs, installedCommand(missingRoot, home), matching, false));
-    results.push(await scenario("corrupt  ", runs, installedCommand(corruptRoot, home), matching, false));
-    results.push(await scenario("held-open", runs, installedCommand(fullRoot, home), "", true));
+    results.push(await scenario("unrelated", runs, command, unrelated, false, env(fullRoot)));
+    results.push(await scenario("matching ", runs, command, matching, false, env(fullRoot), ["m1", "m2", "m3"]));
+    results.push(await scenario("missing  ", runs, command, matching, false, env(missingRoot)));
+    results.push(await scenario("corrupt  ", runs, command, matching, false, env(corruptRoot)));
+    results.push(await scenario("held-open", runs, command, "", true, env(fullRoot)));
   } finally {
     for (const p of [root, home, fullRoot, corruptRoot, missingRoot]) rmSync(p, { recursive: true, force: true });
   }

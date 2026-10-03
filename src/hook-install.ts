@@ -54,6 +54,7 @@
 //      reuses bootstrap's own maxTokens machinery.
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { isExecutableFile, isRegularFile } from "./lib/action-recall-runtime.js";
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
@@ -1107,10 +1108,7 @@ export function buildContinuityHookCommand(agentId: string, flairUrl: string): s
 
 // ── action-recall (flair#2067 slice 2) ──────────────────────────────────────
 //
-// `flair hook install --action-recall` wires ONE Claude-only PreToolUse group
-// (matcher "Bash") running the built action-recall artefact via an absolute Bun
-// (no npx at tool-call time) AND enables the cache refresh on the existing
-// SessionStart entry. Uninstall removes both. Claude Code only.
+// Claude Code PreToolUse wiring and SessionStart refresh opt-in.
 
 export interface ActionRecallRuntime {
   bunPath: string;
@@ -1158,9 +1156,7 @@ interface ActionRecallDelta {
 
 /**
  * Compute the action-recall install delta. The SessionStart refresh flag is
- * only ever added to an EXACT installer-form command (so no hand-edit is
- * rewritten); when the existing SessionStart entry is not a form, it is left
- * alone and reported as skipped.
+ * only ever added to an installer-form command.
  */
 function computeActionRecallInstall(
   config: any,
@@ -1175,7 +1171,7 @@ function computeActionRecallInstall(
   const existing = findActionRecallEntry(newConfig);
   if (existing) {
     const hook = newConfig.hooks.PreToolUse[existing.groupIndex].hooks[existing.hookIndex];
-    if (hook.command !== command || existing.group.matcher !== ACTION_RECALL_PRE_TOOL_USE_MATCHER) {
+    if (hook.type !== "command" || hook.command !== command || existing.group.matcher !== ACTION_RECALL_PRE_TOOL_USE_MATCHER) {
       hook.command = command;
       hook.type = "command";
       existing.group.matcher = ACTION_RECALL_PRE_TOOL_USE_MATCHER;
@@ -1191,8 +1187,6 @@ function computeActionRecallInstall(
     preToolUse = "add";
   }
 
-  // Enable the refresh on the existing SessionStart entry, when it is one of
-  // the exact installer forms and does not already enable it.
   let sessionStart: HookDeltaAction | "skipped" = "skipped";
   let sessionStartBefore: string | null = null;
   const ss = findHookEntry(newConfig);
@@ -1202,23 +1196,45 @@ function computeActionRecallInstall(
     const form = parseInstallerHookForm(current);
     if (!form) {
       sessionStart = "skipped";
-    } else if (sessionStartEnablesActionRecall(current)) {
-      sessionStart = "noop";
     } else {
-      const rebuilt = buildSessionStartHookCommand(form.agentId, form.flairUrl, {
-        harness: form.harness,
+      const rebuilt = buildSessionStartHookCommand(agentId, flairUrl, {
         actionRecall: true,
       });
-      if (rebuilt === current) {
+      if (rebuilt === current && newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex].type === "command") {
         sessionStart = "noop";
       } else {
         newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex] = { type: "command", command: rebuilt };
         sessionStart = "update";
       }
     }
+  } else {
+    newConfig.hooks.SessionStart = Array.isArray(newConfig.hooks.SessionStart) ? newConfig.hooks.SessionStart : [];
+    newConfig.hooks.SessionStart.push({ hooks: [{ type: "command", command: buildSessionStartHookCommand(agentId, flairUrl, { actionRecall: true }) }] });
+    sessionStart = "add";
   }
 
-  return { changed: preToolUse !== "noop" || sessionStart === "update", newConfig, actions: { preToolUse, sessionStart }, sessionStartBefore };
+  return { changed: preToolUse !== "noop" || sessionStart === "update" || sessionStart === "add", newConfig, actions: { preToolUse, sessionStart }, sessionStartBefore };
+}
+
+function actionRecallInstallRefusal(delta: ActionRecallDelta, path: string): string | null {
+  if (delta.actions.sessionStart === "skipped") return `SessionStart in ${path} is not a compatible installer command — nothing written`;
+  if (delta.actions.sessionStart === "add" || delta.actions.sessionStart === "update") {
+    const decision = decidePinWrite({ pkg: FLAIR_MCP_PACKAGE, entry: `SessionStart hook in ${path}`, existingText: guardedPinSpan(delta.sessionStartBefore ?? null), runningVersion: flairCliVersion() });
+    if (decision.action !== "write") return decision.line!;
+  }
+  return null;
+}
+
+function executableActionRecallCommand(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const match = /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^ ]+) (?:FLAIR_URL=([^ ]+) )?([^ ]+) ([^ ]+) 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/.exec(command);
+  if (!match) return false;
+  const [, agent, url, bun, artifact] = match;
+  try {
+    return isExecutableFile(bun) && isRegularFile(artifact) && command === buildActionRecallHookCommand(bun, artifact, agent, url);
+  } catch {
+    return false;
+  }
 }
 
 /** Whether the action-recall hook is wired, and whether SessionStart enables refresh. */
@@ -1233,12 +1249,15 @@ export function actionRecallHookStatus(homeDir: string, harness: Harness): Actio
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   const config = read.parsed ?? {};
-  const installed = findActionRecallEntry(config) !== null;
+  const entry = findActionRecallEntry(config);
+  const hook = entry ? entry.group.hooks[entry.hookIndex] : null;
+  const installed = harness === "claude-code" && hook?.type === "command" && entry?.group.matcher === ACTION_RECALL_PRE_TOOL_USE_MATCHER && executableActionRecallCommand(hook.command);
   let refreshEnabled = false;
   const ss = findHookEntry(config);
   if (ss) {
-    const command = config.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex]?.command;
-    refreshEnabled = sessionStartEnablesActionRecall(command);
+    const hook = config.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex];
+    const form = parseInstallerHookForm(hook.command);
+    refreshEnabled = hook.type === "command" && form?.harness === "claude-code" && sessionStartEnablesActionRecall(hook.command);
   }
   return { path, harness, installed, refreshEnabled };
 }
@@ -1271,6 +1290,8 @@ export function installActionRecall(opts: ActionRecallInstallOptions): ActionRec
       return { ok: false, path, harness, dryRun, message: `${read.parseError} — dry run: nothing would be written until this is fixed`, backupPath: null, actions: null };
     }
     const delta = computeActionRecallInstall(read.parsed ?? {}, runtime, agentId, flairUrl);
+    const refusal = actionRecallInstallRefusal(delta, path);
+    if (refusal) return { ok: false, path, harness, dryRun, message: refusal, backupPath: null, actions: delta.actions };
     const message = delta.changed
       ? `would wire the action-recall hook (PreToolUse: ${delta.actions.preToolUse}, SessionStart: ${delta.actions.sessionStart}) in ${path} (dry run — nothing written)`
       : `action-recall hook already current in ${path} — no changes`;
@@ -1290,16 +1311,9 @@ export function installActionRecall(opts: ActionRecallInstallOptions): ActionRec
       }
       const delta = computeActionRecallInstall(read.parsed ?? {}, runtime, agentId, flairUrl);
       actions = delta.actions;
+      const refusal = actionRecallInstallRefusal(delta, path);
+      if (refusal) return { hold: refusal };
       if (!delta.changed) return { noop: `action-recall hook already current in ${path}` };
-      if (delta.actions.sessionStart === "update") {
-        const decision = decidePinWrite({
-          pkg: FLAIR_MCP_PACKAGE,
-          entry: `SessionStart hook in ${path}`,
-          existingText: guardedPinSpan(delta.sessionStartBefore ?? null),
-          runningVersion: flairCliVersion(),
-        });
-        if (decision.action !== "write") return { hold: decision.line! };
-      }
       return { write: encodeConfig(delta.newConfig) };
     },
     { backup: (bytes) => backupBytesTo(path, bytes) },
@@ -1313,9 +1327,36 @@ export function installActionRecall(opts: ActionRecallInstallOptions): ActionRec
     return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
   }
   if (result.status === "held") {
-    return { ok: !refused, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
+    return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
   }
   return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
+}
+
+function computeActionRecallRemoval(config: any): ActionRecallDelta {
+  const newConfig = deepClone(config);
+  let preToolUse: HookDeltaAction = "noop";
+  const entry = findActionRecallEntry(newConfig);
+  if (entry) {
+    const group = newConfig.hooks.PreToolUse[entry.groupIndex];
+    group.hooks.splice(entry.hookIndex, 1);
+    if (group.hooks.length === 0) newConfig.hooks.PreToolUse.splice(entry.groupIndex, 1);
+    if (newConfig.hooks.PreToolUse.length === 0) delete newConfig.hooks.PreToolUse;
+    preToolUse = "remove";
+  }
+  let sessionStart: HookDeltaAction | "skipped" = "skipped";
+  const ss = findHookEntry(newConfig);
+  if (ss) {
+    const current = newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex].command as string;
+    const form = parseInstallerHookForm(current);
+    if (form && sessionStartEnablesActionRecall(current)) {
+      const rebuilt = buildSessionStartHookCommand(form.agentId, form.flairUrl, { harness: form.harness });
+      newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex] = { type: "command", command: rebuilt };
+      sessionStart = "update";
+    } else {
+      sessionStart = "noop";
+    }
+  }
+  return { changed: preToolUse === "remove" || sessionStart === "update", newConfig, actions: { preToolUse, sessionStart } };
 }
 
 /** Symmetric removal of the action-recall PreToolUse group and the SessionStart
@@ -1328,6 +1369,15 @@ export function uninstallActionRecall(opts: UninstallHookOptions): ActionRecallM
   if (!existsSync(path)) {
     return { ok: true, path, harness, dryRun, message: `no action-recall hook found in ${path} — nothing to remove`, backupPath: null, actions: { preToolUse: "noop", sessionStart: "noop" } };
   }
+  if (dryRun) {
+    const read = readSettingsFile(path);
+    if (read.parseError) return { ok: false, path, harness, dryRun, message: read.parseError, backupPath: null, actions: null };
+    const delta = computeActionRecallRemoval(read.parsed ?? {});
+    const message = delta.changed
+      ? `would remove the action-recall hook (PreToolUse: ${delta.actions.preToolUse}, SessionStart: ${delta.actions.sessionStart}) from ${path} (dry run — nothing written)`
+      : `no action-recall hook found in ${path} — nothing to remove (dry run)`;
+    return { ok: true, path, harness, dryRun, message, backupPath: null, actions: delta.actions };
+  }
   let actions: ActionRecallMutationResult["actions"] = null;
   let refused = false;
   const result = withConfigCriticalSection(
@@ -1338,34 +1388,10 @@ export function uninstallActionRecall(opts: UninstallHookOptions): ActionRecallM
         refused = true;
         return { hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.` };
       }
-      const config = read.parsed ?? {};
-      const newConfig = deepClone(config);
-      let preToolUse: HookDeltaAction = "noop";
-      const entry = findActionRecallEntry(newConfig);
-      if (entry) {
-        const group = newConfig.hooks.PreToolUse[entry.groupIndex];
-        group.hooks.splice(entry.hookIndex, 1);
-        if (group.hooks.length === 0) newConfig.hooks.PreToolUse.splice(entry.groupIndex, 1);
-        if (newConfig.hooks.PreToolUse.length === 0) delete newConfig.hooks.PreToolUse;
-        preToolUse = "remove";
-      }
-      let sessionStart: HookDeltaAction | "skipped" = "skipped";
-      const ss = findHookEntry(newConfig);
-      if (ss) {
-        const current = newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex].command as string;
-        const form = parseInstallerHookForm(current);
-        if (form && sessionStartEnablesActionRecall(current)) {
-          const rebuilt = buildSessionStartHookCommand(form.agentId, form.flairUrl, { harness: form.harness });
-          newConfig.hooks.SessionStart[ss.groupIndex].hooks[ss.hookIndex] = { type: "command", command: rebuilt };
-          sessionStart = "update";
-        } else {
-          sessionStart = "noop";
-        }
-      }
-      actions = { preToolUse, sessionStart };
-      const changed = preToolUse === "remove" || sessionStart === "update";
-      if (!changed) return { noop: `no action-recall hook found in ${path} — nothing to remove` };
-      return { write: encodeConfig(newConfig) };
+      const delta = computeActionRecallRemoval(read.parsed ?? {});
+      actions = delta.actions;
+      if (!delta.changed) return { noop: `no action-recall hook found in ${path} — nothing to remove` };
+      return { write: encodeConfig(delta.newConfig) };
     },
     { backup: (bytes) => backupBytesTo(path, bytes) },
   );

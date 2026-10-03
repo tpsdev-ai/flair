@@ -43,7 +43,7 @@ export const STDIN_MAX_BYTES = 32 * 1024;
 export const COMMAND_MAX_BYTES = 8 * 1024;
 /** Maximum argv tokens read from one command. */
 export const MAX_ARGV_TOKENS = 128;
-/** Internal best-effort deadline (ms) covering stdin and async file work. */
+/** Best-effort deadline for each stdin or file read. */
 export const INTERNAL_DEADLINE_MS = 25;
 
 /** Maximum hits rendered. */
@@ -347,9 +347,7 @@ const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * Read ONE simple argv command: whitespace-separated tokens, literal single
  * and double quoting, and backslash escapes. Rejects expansions,
  * substitutions, assignments/wrappers, redirects, comments, pipelines, lists,
- * heredocs and compound commands. `$` and backtick are rejected everywhere
- * (including inside double quotes) because they expand there; inside single
- * quotes every other character is literal. Never executes anything.
+ * heredocs and compound commands. Never executes anything.
  */
 export function parseSimpleBashCommand(command: string): BashParse {
   if (typeof command !== "string" || command.trim() === "") return { ok: false, reason: "empty" };
@@ -373,10 +371,14 @@ export function parseSimpleBashCommand(command: string): BashParse {
       continue;
     }
     if (ch === "\\") {
-      // Backslash escape: the next character is literal (outside single quotes).
       const next = command[i + 1];
       if (next === undefined) return { ok: false, reason: "trailing backslash" };
-      buf += next;
+      if (inDouble && !["$", "`", '"', "\\", "\n"].includes(next)) {
+        buf += ch;
+        started = true;
+        continue;
+      }
+      if (next !== "\n") buf += next;
       started = true;
       i++;
       continue;
@@ -748,7 +750,7 @@ function renderHit(entry: CacheEntry): string {
   for (const line of entry.excerpt.split(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/)) {
     lines.push(`${QUOTE_PREFIX}${line.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")}`);
   }
-  return lines.join("\n");
+  return redactSecrets(lines.join("\n"));
 }
 
 /**

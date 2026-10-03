@@ -8,7 +8,7 @@
  * construction.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,14 +23,16 @@ import {
 import { ACTION_RECALL_PRE_TOOL_USE_MATCHER, sessionStartEnablesActionRecall } from "../../src/doctor-client.ts";
 
 const RUNTIME: ActionRecallRuntime = {
-  bunPath: "/usr/local/bin/bun",
-  artifactPath: "/opt/flair-mcp/dist/action-recall-hook.js",
+  bunPath: process.execPath,
+  artifactPath: "",
 };
 
 let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "flair-action-recall-home-"));
+  RUNTIME.artifactPath = join(home, "action-recall-hook.js");
+  writeFileSync(RUNTIME.artifactPath, "", { mode: 0o600 });
 });
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
@@ -94,6 +96,6 @@ describe("flair hook install --action-recall", () => {
     const again = installActionRecall({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926", runtime: RUNTIME });
     expect(again.ok).toBe(true);
     expect(again.actions?.preToolUse).toBe("noop");
-    expect(again.actions?.sessionStart).toBe("skipped"); // no SessionStart entry in this home
+    expect(again.actions?.sessionStart).toBe("noop");
   });
 });

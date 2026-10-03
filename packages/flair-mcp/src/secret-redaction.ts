@@ -9,10 +9,7 @@
  * (./action-recall-hook.ts).
  *
  * THE LINE-BREAK SET. An Authorization-style value is redacted up to the first
- * character of the set below and no further, so the line after a value is never
- * consumed with it. The quoted display in a consumer splits on the same set
- * (see ./precompact.ts quoteRecordLines and ./action-recall.ts quoteLines), so
- * the redactor never stops at fewer breaks than the display splits on.
+ * character of the set below and no further.
  */
 
 /** What a redacted secret is replaced with. */

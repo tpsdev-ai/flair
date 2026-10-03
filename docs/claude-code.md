@@ -147,17 +147,19 @@ The environment wins over the config file, where the keys are top-level entries;
 
 ### Action recall (`flair-action-recall`)
 
-Claude Code documents a `PreToolUse` hook's `hookSpecificOutput.additionalContext` as context for the model's NEXT request, delivered alongside the tool result — it cannot change the command already issued, and it is never a permission decision. So this hook's value is guidance for the actions that follow a command like the one just seen, not a guardrail on that command. `flair hook install --action-recall` wires one `PreToolUse` group (matcher `Bash`) that runs the built artefact directly with an absolute Bun executable — no `npx`, no package resolution at tool-call time — and enables the cache refresh on the existing `SessionStart` entry. It is Claude Code only.
+`flair hook install --action-recall` installs a Claude Code `Bash` PreToolUse hook and enables SessionStart refresh. It requires an executable Bun and a regular built artifact; an incompatible SessionStart entry or held pin refuses installation.
 
-**How it decides.** A lesson opts in by carrying `flairActionRecall` in its Memory row's JSON `metadata` field (written through the ordinary signed `memory.write` path; other `metadata` keys are preserved):
+**How it decides.** A lesson opts in through its JSON `metadata` field:
 
 ```json
 { "flairActionRecall": { "v": 1, "triggers": [ { "verb": "git", "subcommands": ["push"], "flags": ["--force"], "paths": [] } ] } }
 ```
 
+Write a new lesson with `client.memory.write(content, { metadata: { flairActionRecall: { v: 1, triggers } } })`. For an existing lesson, `client.memory.update(id, content, { metadata: { flairActionRecall: { v: 1, triggers } } })` preserves other metadata keys.
+
 `verb` is a literal executable basename; `subcommands` are an exact contiguous argv prefix after it; `flags` are required members; `paths` are optional operand-glob alternatives matched against the command's operands, normalized against the payload `cwd`. A trigger with none of the three is rejected. At most 4 triggers per lesson, 3 subcommands, 8 flags and 2 path globs per trigger, each string at most 128 bytes. Replacing the `triggers` array replaces the complete set; `[]` or removing the key disables recall at the next refresh.
 
-The hot path reads only a cache of the agent's OWN lessons, in a per-session directory under `~/.flair/action-recall/`, refreshed at session start through the agent's own signed, non-admin read (there is no administrator fallback). The cache expires five minutes after its refresh starts, shortened by each lesson's own validity. Between refreshes a deletion, edit or supersession can stay visible for up to that window; after it, recall stays silent until the next session start.
+The hot path reads a per-session cache of the agent's own lessons under `~/.flair/action-recall/`, refreshed at session start through a signed, non-admin read. The cache expires five minutes after refresh starts, shortened by each lesson's valid expiry or end-of-validity timestamp. Between refreshes, a deletion, edit or supersession can stay visible until expiry.
 
 **What it never does.** It emits only `hookSpecificOutput.additionalContext` — never a permission decision, a question, replacement input or blocking output. It never executes or echoes the submitted command. On any error, or a missing, corrupt, wrong-mode, symlinked, oversized or stale cache, it writes nothing to stdout or stderr and exits 0. A command it cannot read as one simple argv command (expansions, substitutions, assignments, redirects, comments, pipelines, lists, heredocs, compound commands) is silently not matched. At most three lessons are shown, each quoted line bounded, the whole output at most 4 KiB; excerpts are redacted before they are cached and quoted when shown. The hook holds no credential, signs nothing and makes no network call.
 

@@ -10,12 +10,12 @@
  *
  * Location: `<root>/<H(url)>/<H(principal)>/<H(session)>/`, where root is
  * installer/env-resolved (`FLAIR_ACTION_RECALL_DIR`, else `~/.flair/action-recall`)
- * — never taken from hook input. Directories are 0700, files 0600; writes use
- * exclusive temp creation and atomic rename, publishing the binding last.
+ * — never taken from hook input. Writes use exclusive temp creation and atomic
+ * rename, publishing the binding last.
  */
 
-import { constants as fsConstants } from "node:fs";
-import { mkdir, open, readdir, rename, rm, stat, chmod, lstat } from "node:fs/promises";
+import { constants as fsConstants, renameSync } from "node:fs";
+import { mkdir, open, readdir, rm, stat, chmod, lstat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import {
@@ -27,6 +27,7 @@ import {
   decodeEnvelope,
   encodeBinding,
   encodeEnvelope,
+  effectiveExpiry,
   sha256Hex,
   type CacheBinding,
   type CachePayload,
@@ -165,27 +166,35 @@ export async function readGeneration(dir: string, binding: CacheBinding, now: nu
     return null;
   }
   if (payload.refreshStart > now + 60_000) return null; // future refresh stamp
-  if (payload.expiry <= now) return null; // expired generation
+  if (effectiveExpiry(payload) <= now) return null; // expired generation
   return payload;
 }
 
-/** Create `dir` (and parents) as 0700, fixing the mode if it already exists loose. */
+/** Create private directories; chmod the final directory. */
 async function ensurePrivateDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
 }
 
 /** Write one file atomically (exclusive temp, fsync, rename), mode 0600. */
-async function writeFileAtomic(filePath: string, text: string): Promise<void> {
+async function writeFileAtomic(filePath: string, text: string, checkDeadline: () => void): Promise<void> {
+  checkDeadline();
   const tmp = `${filePath}.tmp-${process.pid}-${Date.now().toString(36)}`;
-  const handle = await open(tmp, "wx", 0o600);
   try {
-    await handle.writeFile(text, "utf8");
-    await handle.sync();
+    const handle = await open(tmp, "wx", 0o600);
+    try {
+      checkDeadline();
+      await handle.writeFile(text, "utf8");
+      checkDeadline();
+      await handle.sync();
+    } finally {
+      await handle.close().catch(() => {});
+    }
+    checkDeadline();
+    renameSync(tmp, filePath);
   } finally {
-    await handle.close().catch(() => {});
+    await rm(tmp, { force: true }).catch(() => {});
   }
-  await rename(tmp, filePath);
 }
 
 export interface PublishResult {
@@ -196,14 +205,20 @@ export interface PublishResult {
 
 /**
  * Publish a generation and bind the session to it. Writes the generation file
- * first, then the binding file LAST, so a failed write leaves no usable
- * binding. `generation` and `instance` come from the caller (both from the
- * refresh).
+ * first, then the binding file LAST.
  */
-export async function publishGeneration(dir: string, payload: CachePayload): Promise<PublishResult> {
+export async function publishGeneration(
+  dir: string,
+  payload: CachePayload,
+  opts: { signal?: AbortSignal; deadlineAt?: number } = {},
+): Promise<PublishResult> {
+  const checkDeadline = (): void => {
+    if (opts.signal?.aborted || (opts.deadlineAt !== undefined && performance.now() >= opts.deadlineAt)) throw new Error("timeout");
+  };
   try {
+    checkDeadline();
     await ensurePrivateDir(join(dir, sha256Hex(payload.instance)));
-    await writeFileAtomic(generationPath(dir, payload.instance, payload.generation), encodeEnvelope(payload));
+    await writeFileAtomic(generationPath(dir, payload.instance, payload.generation), encodeEnvelope(payload), checkDeadline);
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : "write" };
   }
@@ -216,7 +231,7 @@ export async function publishGeneration(dir: string, payload: CachePayload): Pro
     generation: payload.generation,
   };
   try {
-    await writeFileAtomic(bindingPath(dir), encodeBinding(binding));
+    await writeFileAtomic(bindingPath(dir), encodeBinding(binding), checkDeadline);
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : "bind" };
   }

@@ -27,6 +27,7 @@ export interface Memory {
   durability: Durability;
   tags: string[];
   subject?: string;
+  metadata?: string | null;
   /** Writer-controlled sharing intent. Absent on records written before this
    *  field existed — the server treats absence as "shared" (migration-
    *  invariant: an existing memory keeps reading to exactly whoever holds a

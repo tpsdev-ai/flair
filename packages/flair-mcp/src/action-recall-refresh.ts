@@ -2,12 +2,7 @@
  * Action recall (flair#2067 slice 2) — the SessionStart refresh.
  *
  * Rebuilds the reader-specific cache of the agent's OWN lessons through the
- * ordinary signed read path, then publishes it atomically. It runs off the hot
- * path (at session start only) and is bounded: it must finish within
- * REFRESH_DEADLINE_MS after bootstrap, and it publishes NOTHING after that
- * deadline. Every failure — no scope, no instance, an incomplete verification,
- * a timeout — leaves the previous cache untouched or absent; a failed refresh
- * never writes a usable binding.
+ * ordinary signed read path at session start.
  *
  * There is NO administrator fallback: the client is built by the caller with
  * `adminUser:""` and `adminPassword:""` and a resolved Ed25519 key, and this
@@ -199,8 +194,7 @@ export function singleInstanceId(rows: unknown): string | null {
 }
 
 /**
- * Run the refresh. Returns `{ok:false}` (with a reason) without writing when
- * anything cannot be verified; only a fully verified refresh publishes.
+ * Run the refresh; invalidate the binding before reading.
  */
 export async function refreshActionRecallCache(
   client: ActionRecallRefreshClient,
@@ -210,6 +204,7 @@ export async function refreshActionRecallCache(
   const now = opts.now ?? Date.now();
   const root = opts.root ?? resolveCacheRoot(env);
   const deadlineMs = opts.deadlineMs ?? REFRESH_DEADLINE_MS;
+  const deadlineAt = performance.now() + deadlineMs;
 
   const scope = opts.bootstrapResult?.scope;
   if (!scope || scope.agentId !== opts.agentId || scope.isAdmin !== false) {
@@ -245,7 +240,13 @@ export async function refreshActionRecallCache(
       signal: controller.signal,
       maxResponseBytes: REFRESH_MAX_RESPONSE_BYTES,
     });
-    const list: MemoryRow[] = Array.isArray(rows) ? rows : ((rows as { results?: MemoryRow[] })?.results ?? []);
+    const list: unknown = Array.isArray(rows) ? rows : (rows as { results?: unknown } | null)?.results;
+    if (!Array.isArray(list) || list.some(row =>
+      typeof row !== "object" || row === null || Array.isArray(row) ||
+      typeof row.id !== "string" || typeof row.agentId !== "string" || typeof row.content !== "string"
+    )) {
+      return { ok: false, reason: "response" };
+    }
     // Independent recheck: ownership and eligibility, on the rows we selected.
     const entries: CacheEntry[] = [];
     for (const row of list) {
@@ -266,7 +267,7 @@ export async function refreshActionRecallCache(
       refreshStart + 5 * 60 * 1000,
     );
     if (timedOut) return { ok: false, reason: "timeout" };
-    const published = await publishGeneration(dir, payload);
+    const published = await publishGeneration(dir, payload, { signal: controller.signal, deadlineAt });
     if (!published.ok) return { ok: false, reason: published.reason ?? "publish" };
     await cleanupOldGenerations(dir, instance, generation);
     await pruneSessionCaches(root, opts.url, opts.agentId);
