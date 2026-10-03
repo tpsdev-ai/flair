@@ -370,6 +370,29 @@ const skill_get: StdioHandler = async ({ id }, { flair, heartbeat }) => {
   }
 };
 
+const team_directory: StdioHandler = async ({ id, name, cursor, limit }, { flair, heartbeat }) => {
+  heartbeat();
+  try {
+    const result = await flair.teamDirectory.list({ id, name, cursor, limit });
+    const entries: any[] = Array.isArray(result?.entries) ? result.entries : [];
+    if (entries.length === 0) {
+      return {
+        content: [{ type: "text", text: "No published team contacts found." }],
+        structuredContent: result as unknown as Record<string, unknown>,
+      };
+    }
+    const text = entries
+      .map((e) => `- ${e.name} (id: ${e.agentId}) — ${e.platform}: ${e.email}`)
+      .join("\n");
+    return {
+      content: [{ type: "text", text }],
+      structuredContent: result as unknown as Record<string, unknown>,
+    };
+  } catch (err) {
+    return errorResult(err, flair.url);
+  }
+};
+
 /** FlairClient bindings keyed by descriptor name — the adapter-side impl map. */
 export const STDIO_TOOL_HANDLERS: Record<string, StdioHandler> = {
   memory_search,
@@ -388,6 +411,7 @@ export const STDIO_TOOL_HANDLERS: Record<string, StdioHandler> = {
   skill_store,
   skill_search,
   skill_get,
+  team_directory,
 };
 
 export function stdioHandlerNames(): string[] {

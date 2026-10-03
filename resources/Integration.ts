@@ -2,6 +2,16 @@ import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { makeByIdReadGate, makeReadScope, makeScopedSearch } from "./record-type-kit.js";
+import { resolveStoredRow } from "./originator-instance.js";
+import { soulWriteSource } from "./soul-write-policy.js";
+import { withOwnedTransaction } from "./request-transaction.js";
+import {
+  TEAM_DIRECTORY_MAX_STRING_BYTES,
+  TEAM_DIRECTORY_PLATFORM,
+  isActiveAgentPrincipal,
+  isValidPublicationStamp,
+  utf8Bytes,
+} from "./team-directory.js";
 
 // Owner-only read scope, applied through the shared by-id gate and scoped search
 // (resources/record-type-kit.ts).
@@ -15,12 +25,118 @@ const UNAUTH = () =>
   new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
 const NOT_FOUND = () =>
   new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+const BAD_REQUEST = (error: string, message: string) =>
+  new Response(JSON.stringify({ error, message }), { status: 400, headers: { "Content-Type": "application/json" } });
+const CONFLICT = (error: string, message: string) =>
+  new Response(JSON.stringify({ error, message }), { status: 409, headers: { "Content-Type": "application/json" } });
+const UNAVAILABLE = (error: string) =>
+  new Response(JSON.stringify({ error }), { status: 503, headers: { "Content-Type": "application/json" } });
+
+/** The field whose value is the team-directory publication stamp. */
+const DIRECTORY_STAMP_FIELD = "directoryPublishedAt";
+
+function hasField(content: any, field: string): boolean {
+  return content != null && typeof content === "object" && Object.hasOwn(content, field);
+}
+
+/**
+ * The operator source, or a refusal. Publication and withdrawal of a
+ * team-directory contact are operator-only: `soulWriteSource` admits a verified
+ * Basic administrator or the deliberate internal marker, and refuses runtime
+ * credentials (agent keys, admin-agent keys, delegated OAuth identities).
+ */
+async function requireOperator(self: any, why: string): Promise<Response | null> {
+  const context = (self as any).getContext?.();
+  const auth = await resolveAgentAuth(context);
+  if (auth.kind === "anonymous") return UNAUTH();
+  if (!soulWriteSource(context, auth)) return FORBIDDEN(`integration_directory_requires_operator: ${why}`);
+  return null;
+}
+
+/**
+ * Validate a publication body against the exact approved binding
+ * (`agentId`/`platform`/`email`). A read failure of the Agent table is a
+ * refusal, never "the agent does not exist".
+ */
+async function validatePublication(content: any): Promise<Response | null> {
+  if (typeof content?.agentId !== "string" || content.agentId === "") {
+    return BAD_REQUEST("directory_publication_agent_required", "agentId must name the agent being published");
+  }
+  if (content.platform !== TEAM_DIRECTORY_PLATFORM) {
+    return BAD_REQUEST("directory_publication_platform_unsupported", `only "${TEAM_DIRECTORY_PLATFORM}" contacts are published`);
+  }
+  if (typeof content.email !== "string" || content.email === "") {
+    return BAD_REQUEST("directory_publication_email_required", "email must be a non-empty string");
+  }
+  if (utf8Bytes(content.email) > TEAM_DIRECTORY_MAX_STRING_BYTES) {
+    return BAD_REQUEST("directory_publication_email_too_long", `email must be at most ${TEAM_DIRECTORY_MAX_STRING_BYTES} UTF-8 bytes`);
+  }
+  let agent: any;
+  try {
+    agent = await (databases as any).flair.Agent.get(content.agentId);
+  } catch {
+    return UNAVAILABLE("directory_publication_agent_store_unavailable");
+  }
+  if (!isActiveAgentPrincipal(agent) || agent.id !== content.agentId) {
+    return FORBIDDEN("directory_publication_agent_not_active");
+  }
+  return null;
+}
+
+/**
+ * Decide the publication stamp this write should carry:
+ *   - a server-stamped ISO time for a publication,
+ *   - `null` for a withdrawal,
+ *   - `undefined` when the write does not touch publication.
+ * A non-operator write to the stamp, or an address change on a published row
+ * without a preceding withdrawal, is refused here.
+ */
+async function resolvePublicationStamp(
+  self: any,
+  content: any,
+  stored: any,
+): Promise<{ denial?: Response; stamp?: string | null }> {
+  if (hasField(content, DIRECTORY_STAMP_FIELD)) {
+    const denial = await requireOperator(self, "publication and withdrawal are operator-only");
+    if (denial) return { denial };
+    if (content[DIRECTORY_STAMP_FIELD] === null) return { stamp: null };
+    const invalid = await validatePublication(content);
+    if (invalid) return { denial: invalid };
+    return { stamp: new Date().toISOString() };
+  }
+
+  // No publication field in the body. A published row's address is frozen:
+  // changing it requires an explicit withdrawal first (and then a republication).
+  if (stored && isValidPublicationStamp(stored[DIRECTORY_STAMP_FIELD])) {
+    const changesAddress =
+      (hasField(content, "email") && content.email !== stored.email) ||
+      (hasField(content, "platform") && content.platform !== stored.platform);
+    if (changesAddress) {
+      return {
+        denial: CONFLICT(
+          "integration_directory_withdraw_before_address_change",
+          "withdraw the published contact (set directoryPublishedAt to null) before changing its address",
+        ),
+      };
+    }
+  }
+  return {};
+}
 
 /**
  * Integration records are agent-owned. Auth: the non-rejecting gate annotates the
  * request; this resource self-enforces (resolveAgentAuth → internal/agent/anonymous).
  * Anonymous HTTP is denied on every path; non-admin agents are scoped to their own
  * agentId. Mirrors the WorkspaceState pattern.
+ *
+ * Team directory (flair#2141 S3a): `directoryPublishedAt` is the
+ * operator-stamped publication of an exact `agentId`/`platform`/`email`
+ * `tps-mail` binding. Publication, withdrawal and removal of a published entry
+ * are operator-only (see `requireOperator`); ownership and address are frozen
+ * once published (change the address by withdrawing first, then republishing);
+ * timestamps and the publication stamp are server-stamped; and the validate +
+ * commit pair runs inside one owned transaction so a concurrent withdrawal
+ * cannot interleave. Reads are unchanged: owner-scoped, anonymous denied.
  */
 export class Integration extends (databases as any).flair.Integration {
   private _auth() {
@@ -72,20 +188,39 @@ export class Integration extends (databases as any).flair.Integration {
         headers: { "Content-Type": "application/json" },
       });
     }
-    return super.post(content, context);
+    return withOwnedTransaction((this as any).getContext?.(), async () => {
+      const pub = await resolvePublicationStamp(this, content, null);
+      if (pub.denial) return pub.denial;
+      const now = new Date().toISOString();
+      const record: any = { ...content, createdAt: typeof content?.createdAt === "string" ? content.createdAt : now, updatedAt: now };
+      if (pub.stamp !== undefined) record[DIRECTORY_STAMP_FIELD] = pub.stamp;
+      return super.post(record, context);
+    });
   }
 
   // PATCH routes past put(), so agentId immutability is enforced on both verbs
   // via the one shared delegate.
   async patch(content: any, query?: any) {
-    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
-    if (denial) return denial;
-    return super.patch(content, query);
+    const auth = await this._auth();
+    if (auth.kind === "anonymous") return UNAUTH();
+    if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
+      return FORBIDDEN("forbidden: cannot write integration for another agent");
+    }
+    return withOwnedTransaction((this as any).getContext?.(), async () => {
+      const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+      if (ownerDenial) return ownerDenial;
+      const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
+      if (stored.denial) return stored.denial;
+      if (!stored.row) return NOT_FOUND();
+      const pub = await resolvePublicationStamp(this, content, stored.row);
+      if (pub.denial) return pub.denial;
+      const changes: any = { ...content, updatedAt: new Date().toISOString() };
+      if (pub.stamp !== undefined) changes[DIRECTORY_STAMP_FIELD] = pub.stamp;
+      return super.patch(changes, query);
+    });
   }
 
   async put(content: any, context?: any) {
-    const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
-    if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
     if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
@@ -97,21 +232,46 @@ export class Integration extends (databases as any).flair.Integration {
         headers: { "Content-Type": "application/json" },
       });
     }
-    return super.put(content, context);
+    return withOwnedTransaction((this as any).getContext?.(), async () => {
+      const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+      if (ownerDenial) return ownerDenial;
+      const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
+      if (stored.denial) return stored.denial;
+      const pub = await resolvePublicationStamp(this, content, stored.row);
+      if (pub.denial) return pub.denial;
+      const now = new Date().toISOString();
+      const record: any = {
+        ...content,
+        createdAt: typeof stored.row?.createdAt === "string" ? stored.row.createdAt : now,
+        updatedAt: now,
+      };
+      if (pub.stamp !== undefined) record[DIRECTORY_STAMP_FIELD] = pub.stamp;
+      else if (stored.row) record[DIRECTORY_STAMP_FIELD] = stored.row[DIRECTORY_STAMP_FIELD] ?? null;
+      return super.put(record, context);
+    });
   }
 
   async delete(id: any) {
-    const auth = await this._auth();
-    if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.delete(id);
-    }
     // Use super.get(id), NOT this.get(id): the new get() override above 404s
     // (a truthy Response) for a non-owner id, which would otherwise defeat
     // the `if (!record)` check below and mis-route a genuinely-missing
     // record into the FORBIDDEN branch instead of a clean super.delete(id)
     // no-op. Mirrors Memory.ts's delete() — same rationale, same fix.
     const record = await super.get(id);
+
+    // Removing a published directory entry is operator-only — a withdrawal
+    // (directoryPublishedAt: null) is the routine way to hide it.
+    if (record && isValidPublicationStamp(record[DIRECTORY_STAMP_FIELD])) {
+      const denial = await requireOperator(this, "removing a published directory entry is operator-only; withdraw it instead");
+      if (denial) return denial;
+      return super.delete(id);
+    }
+
+    const auth = await this._auth();
+    if (auth.kind === "anonymous") return UNAUTH();
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
+      return super.delete(id);
+    }
     if (!record) return super.delete(id);
     if (record.agentId !== auth.agentId) {
       return FORBIDDEN("forbidden: cannot delete integration for another agent");

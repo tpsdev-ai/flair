@@ -13,6 +13,8 @@
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 
 let integrationStore: Map<string, any>;
+let agents: Map<string, any>;
+let failAgentStore = false;
 
 function matchesCondition(record: any, cond: any): boolean {
   if (cond.operator && Array.isArray(cond.conditions)) {
@@ -26,9 +28,19 @@ function matchesCondition(record: any, cond: any): boolean {
 }
 
 class BaseIntegration {
+  // The STATIC table read (resolveStoredRow uses `databases.flair.Integration.get`).
+  static async get(id: any) {
+    return integrationStore.get(id) ?? null;
+  }
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id;
     return integrationStore.get(id) ?? null;
+  }
+  async patch(content: any) {
+    const prev = integrationStore.get(content.id) ?? {};
+    const merged = { ...prev, ...content };
+    integrationStore.set(content.id, merged);
+    return { ...merged };
   }
   async post(content: any) {
     const id = content.id ?? `int-${Math.random().toString(36).slice(2)}`;
@@ -58,7 +70,19 @@ class BaseIntegration {
 const databasesMock = {
   flair: {
     Integration: BaseIntegration,
-    Agent: { get: async () => null, search: async () => [] },
+    Agent: {
+      async get(id: string) {
+        if (failAgentStore) throw new Error("agent store down");
+        return agents.get(id) ?? null;
+      },
+      search() {
+        if (failAgentStore) throw new Error("agent store down");
+        async function* gen() {
+          for (const a of agents.values()) yield a;
+        }
+        return gen();
+      },
+    },
   },
 };
 
@@ -66,9 +90,10 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 
 const { Integration } = await import("../../resources/Integration.ts");
 
-function makeIntegration(ctxRequest: any) {
+function makeIntegration(ctxRequest: any, boundId?: string) {
   const r: any = new (Integration as any)();
   r.getContext = () => ({ request: ctxRequest });
+  if (boundId) r.getId = () => boundId;
   return r;
 }
 const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tpsAgentIsAdmin: isAdmin });
@@ -76,6 +101,13 @@ const anonCtx = () => ({ tpsAnonymous: true });
 
 beforeEach(() => {
   integrationStore = new Map();
+  agents = new Map();
+  agents.set("agent-a", { id: "agent-a", kind: "agent", status: "active" });
+  agents.set("agent-b", { id: "agent-b", kind: "agent", status: "active" });
+  failAgentStore = false;
+  // request-transaction.ts needs Harper's global transaction() for the owned
+  // write scope; a passthrough keeps the publication path exercisable.
+  (globalThis as any).transaction = async (ctx: any, cb: any) => cb(ctx ?? {});
 });
 
 describe("Integration.allowRead — closes the anonymous GET /Integration/<id> and describe leak", () => {
@@ -184,5 +216,130 @@ describe("Integration.delete() — ownership check uses the raw record (super.ge
     const i = makeIntegration(agentCtx("agent-owner"));
     const res = await (i as any).delete("does-not-exist");
     expect(res instanceof Response).toBe(false);
+  });
+});
+
+// ─── flair#2141 S3a — the team-directory publication gate ────────────────────
+// A published `directoryPublishedAt` is an operator-approved contact. These
+// cases live here (not a second file) because this file owns the one
+// process-global `harper` mock for resources/Integration.ts.
+
+// A verified Basic administrator — the operator source.
+const operatorCtx = () => ({
+  tpsAgent: "operator",
+  tpsAgentIsAdmin: true,
+  headers: { get: (k: string) => (k.toLowerCase() === "authorization" ? "Basic b3BlcmF0b3I6cHc=" : undefined) },
+});
+
+function seedPublished(fields: Record<string, unknown> = {}) {
+  integrationStore.set("int-1", {
+    id: "int-1",
+    agentId: "agent-a",
+    platform: "tps-mail",
+    email: "a@example.test",
+    directoryPublishedAt: "2026-09-01T00:00:00.000Z",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:00.000Z",
+    ...fields,
+  });
+}
+
+describe("Integration directory publication — non-operator refusals", () => {
+  it("a runtime agent cannot publish (403), nothing stored", async () => {
+    const i = makeIntegration(agentCtx("agent-a"));
+    const res = await (i as any).post({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test", directoryPublishedAt: "2026-10-01T00:00:00.000Z" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(integrationStore.has("int-1")).toBe(false);
+  });
+
+  it("an admin AGENT (runtime credential, no Basic) still cannot publish", async () => {
+    const i = makeIntegration(agentCtx("agent-a", true));
+    const res = await (i as any).post({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test", directoryPublishedAt: "2026-10-01T00:00:00.000Z" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+  });
+
+  it("a runtime agent cannot withdraw a published entry (403), unchanged", async () => {
+    seedPublished();
+    const i = makeIntegration(agentCtx("agent-a"), "int-1");
+    const res = await (i as any).put({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test", directoryPublishedAt: null });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(integrationStore.get("int-1").directoryPublishedAt).toBe("2026-09-01T00:00:00.000Z");
+  });
+
+  it("a published address cannot be changed without withdrawal first (409)", async () => {
+    seedPublished();
+    const i = makeIntegration(agentCtx("agent-a"), "int-1");
+    const res = await (i as any).put({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "new@example.test" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(409);
+    expect(integrationStore.get("int-1").email).toBe("a@example.test");
+  });
+
+  it("an owner cannot delete a published entry (403); a withdrawal is the routine hide", async () => {
+    seedPublished();
+    const i = makeIntegration(agentCtx("agent-a"), "int-1");
+    const res = await (i as any).delete("int-1");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(integrationStore.has("int-1")).toBe(true);
+  });
+});
+
+describe("Integration directory publication — operator publication", () => {
+  it("publishes an exact agentId/platform/email with a server-stamped time", async () => {
+    const i = makeIntegration(operatorCtx());
+    const res = await (i as any).post({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test", directoryPublishedAt: "1999-01-01T00:00:00.000Z" });
+    expect(res instanceof Response).toBe(false);
+    const stored = integrationStore.get("int-1");
+    expect(stored.platform).toBe("tps-mail");
+    expect(stored.email).toBe("a@example.test");
+    expect(stored.directoryPublishedAt).not.toBe("1999-01-01T00:00:00.000Z");
+    expect(Number.isFinite(Date.parse(stored.directoryPublishedAt))).toBe(true);
+    expect(Number.isFinite(Date.parse(stored.createdAt))).toBe(true);
+    expect(Number.isFinite(Date.parse(stored.updatedAt))).toBe(true);
+  });
+
+  it("rejects a non-tps-mail platform (400)", async () => {
+    const i = makeIntegration(operatorCtx());
+    const res = await (i as any).post({ id: "int-1", agentId: "agent-a", platform: "slack", email: "a@example.test", directoryPublishedAt: "x" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+  });
+
+  it("rejects publishing an agent that is not an active agent-kind principal (403)", async () => {
+    agents.set("agent-b", { id: "agent-b", kind: "agent", status: "deactivated" });
+    const i = makeIntegration(operatorCtx());
+    const res = await (i as any).post({ id: "int-2", agentId: "agent-b", platform: "tps-mail", email: "b@example.test", directoryPublishedAt: "x" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+  });
+
+  it("a failed Agent read refuses the publication (503), never a false 'no such agent' success", async () => {
+    failAgentStore = true;
+    const i = makeIntegration(operatorCtx());
+    const res = await (i as any).post({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test", directoryPublishedAt: "x" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(503);
+    expect(integrationStore.has("int-1")).toBe(false);
+  });
+
+  it("withdraws by stamping directoryPublishedAt to null (operator)", async () => {
+    seedPublished();
+    const i = makeIntegration(operatorCtx(), "int-1");
+    const res = await (i as any).put({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test", directoryPublishedAt: null });
+    expect(res instanceof Response).toBe(false);
+    expect(integrationStore.get("int-1").directoryPublishedAt).toBeNull();
+  });
+
+  it("allows an address change once the entry is withdrawn", async () => {
+    seedPublished({ directoryPublishedAt: null });
+    const i = makeIntegration(operatorCtx(), "int-1");
+    const res = await (i as any).put({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "new@example.test" });
+    expect(res instanceof Response).toBe(false);
+    expect(integrationStore.get("int-1").email).toBe("new@example.test");
+    expect(integrationStore.get("int-1").directoryPublishedAt).toBeNull();
   });
 });

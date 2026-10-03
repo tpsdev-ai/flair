@@ -325,12 +325,13 @@ describe("RECORD_TYPES.<Table>.mcp — golden values (backfilled surface, slice 
 });
 
 describe("COMPOSITE_MCP_TOOLS — golden-value pin (slice 3, flair#520)", () => {
-  it("pins the exact eight composite tool names, in order", () => {
+  it("pins the exact nine composite tool names, in order", () => {
     // flair#1472 — memory_basement / memory_restore are the two new composite
     // (non-table) tools: the archive action, appended after the slice-3 trio.
     // flair#1542 — skill_store is the skill-tagged Memory write (non-table).
     // flair#1546 — skill_search / skill_get are the skill recall tools (non-table):
     // skill_search rides SemanticSearch, skill_get rides Memory.get.
+    // flair#2141 — team_directory rides the shared team-directory resolver.
     expect(COMPOSITE_MCP_TOOLS).toEqual([
       "bootstrap",
       "attention",
@@ -340,6 +341,7 @@ describe("COMPOSITE_MCP_TOOLS — golden-value pin (slice 3, flair#520)", () => 
       "skill_store",
       "skill_search",
       "skill_get",
+      "team_directory",
     ]);
   });
 

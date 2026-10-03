@@ -5,8 +5,6 @@
 // outside a live Harper; this module has no Harper dependency, so
 // test/unit/bootstrap-team.test.ts exercises the real shipped code.
 
-import { wrapUntrusted } from "./content-safety.js";
-
 /**
  * Is `record` a live teammate of `callerId` for roster purposes?
  *
@@ -82,20 +80,19 @@ export function isZeroRowNoOpEvent(event: {
 }
 
 /**
- * Format the "## Team" roster line for a list of teammate ids, or `null`
- * when the roster is empty (caller should omit the section entirely).
+ * The fixed, budgeted team-directory discovery hint (flair#2141 S3a).
  *
- * Teammate ids are registrant-chosen strings, not something Flair controls —
- * they're untrusted the same way memory content is, so only the id list goes
- * through wrapUntrusted; the surrounding instructional text is trusted and
- * stays outside the wrap.
+ * Replaces the old unbounded "## Team" roster line, which listed every
+ * teammate id inline — a cost that grew with the size of the office. The roster
+ * is now discovered through the team-directory resolver (the `team_directory`
+ * MCP tool, `GET /TeamDirectory`, and the flair client), so bootstrap carries a
+ * FIXED pointer instead of an open-ended list. Constant text: no caller data, no
+ * per-agent cost, included even when prose and soul are disabled.
  */
-export function formatTeamLine(teammateIds: string[]): string | null {
-  if (teammateIds.length === 0) return null;
-  const plural = teammateIds.length === 1 ? "agent shares" : "agents share";
-  return (
-    `${teammateIds.length} other ${plural} this Flair office (${wrapUntrusted(teammateIds.join(", "))}). ` +
-    `Before deep-diving an unfamiliar problem, search their memories for related work — ` +
-    `\`memory_search\` covers any agent's non-private memories on this instance (open-within-org read; no grant required).`
-  );
+export const DIRECTORY_HINT_TEXT =
+  "Need a teammate? Call the `team_directory` tool (MCP) or `GET /TeamDirectory` " +
+  "for this office's active agents and their published tps-mail addresses.";
+
+export function directoryHint(): string {
+  return DIRECTORY_HINT_TEXT;
 }

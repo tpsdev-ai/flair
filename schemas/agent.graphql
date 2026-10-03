@@ -76,6 +76,11 @@ type Integration @table(database: "flair") @export {
   email: String
   encryptedCredential: String
   metadata: String
+  # flair#2141 S3a — team-directory publication stamp (tps-mail addresses only).
+  # Null or absent means unpublished (a plain Integration, or a withdrawn
+  # entry); a value is the server-stamped ISO time of an operator publication.
+  # Only the Integration resource writes it, only for the tps-mail platform.
+  directoryPublishedAt: String
   createdAt: String!
   updatedAt: String
 }
