@@ -312,3 +312,49 @@ test("maintenance archival clears the health count without removing rows", async
   expect(JSON.stringify(after.warnings)).not.toContain("expired validTo");
   expect(JSON.stringify(after.warnings)).not.toContain(CLEAR);
 });
+
+test("HealthDetail uses complete timestamps, not empty, legacy or partially failed log rows", async () => {
+  active = true;
+  const at = new Date(NOW - 1000).toISOString();
+  for (const latest of [
+    { status: "completed", runAt: at, distilledAt: at, distill: { gathered: 0, unreflected: 0 } },
+    { status: "completed", runAt: at, distill: { gathered: 1, unreflected: 1 } },
+    { status: "failed", runAt: at, distilledAt: at, errors: ["tag failure"], distill: { gathered: 1 } },
+    { status: "completed", runAt: at, distilledAt: at, skips: ["pause"], distill: { aborted: true } },
+  ]) {
+    logText = JSON.stringify(latest) + "\n";
+    const detail = await new HealthDetail().get();
+    expect(detail.rem.lastDistilledAt).toBeNull();
+    expect(detail.rem.lastDistillationIncomplete).toBe(true);
+    const output = await statusOutput(detail, []);
+    expect(output).toContain("Pending candidates");
+    expect(output).toContain("Last distilled");
+    expect(output).toContain("not observed (server-local log tail)");
+    expect(output).toContain("no recent complete distillation observed");
+  }
+});
+
+test("HealthDetail keeps older observed success but an empty latest cycle stays stale", async () => {
+  active = true;
+  const at = new Date(NOW - 1000).toISOString();
+  logText = JSON.stringify({ status: "completed", runAt: at, distilledAt: at, errors: [], skips: [], distill: { gathered: 1 } }) + "\n"
+    + JSON.stringify({ status: "completed", runAt: new Date(NOW).toISOString(), distill: { gathered: 0 } }) + "\n";
+  const detail = await new HealthDetail().get();
+  expect(detail.rem.lastDistilledAt).toBe(at);
+  expect(detail.rem.lastDistillationIncomplete).toBe(true);
+  const output = await statusOutput(detail, []);
+  expect(output).toMatch(/Pending candidates[^\n]*0/);
+  expect(output).toContain("server-local log tail");
+  expect(output).toContain("no recent complete distillation observed");
+});
+
+test("HealthDetail does not recover timestamps outside its bounded local tail", async () => {
+  active = true;
+  const at = new Date(NOW - 1000).toISOString();
+  logText = JSON.stringify({ status: "completed", distilledAt: at, distill: { gathered: 1 } }) + "\n"
+    + "x".repeat(256 * 1024) + "\n"
+    + JSON.stringify({ status: "completed", runAt: at, distill: { gathered: 1 } }) + "\n";
+  const detail = await new HealthDetail().get();
+  expect(detail.rem.lastDistilledAt).toBeNull();
+  expect((await statusOutput(detail, [])).includes("not observed (server-local log tail)")).toBe(true);
+});

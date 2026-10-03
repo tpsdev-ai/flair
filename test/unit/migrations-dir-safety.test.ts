@@ -8,6 +8,10 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, chmodSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { probeMigrationDataDir } from "../../resources/migrations/data-dir.ts";
+import { writeMigrationStateEntry } from "../../resources/migrations/state.ts";
+import { createMigrationSnapshot } from "../../resources/migrations/snapshot.ts";
+import { createContentOnlyExport } from "../../resources/migrations/export.ts";
 import { ensureSecureDir, verifySecureDir, writeSecureFile, UnsafeDirectoryError } from "../../resources/migrations/dir-safety.ts";
 
 let testRoot: string;
@@ -34,11 +38,12 @@ describe("ensureSecureDir — creation", () => {
     expect(() => ensureSecureDir(dir)).not.toThrow();
   });
 
-  it("creates nested parent directories as needed", () => {
+  it("fails with ENOENT rather than creating missing parents", () => {
     const dir = join(testRoot, "a", "b", "c");
-    ensureSecureDir(dir);
-    expect(existsSync(dir)).toBe(true);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    let error: unknown;
+    try { ensureSecureDir(dir); } catch (err) { error = err; }
+    expect((error as NodeJS.ErrnoException)?.code).toBe("ENOENT");
+    expect(existsSync(join(testRoot, "a"))).toBe(false);
   });
 
   it("remediates a world/group-readable EXISTING directory back to 0700 (the umask-widened-mkdir case)", () => {
@@ -105,3 +110,18 @@ describe("writeSecureFile — re-verifies at write time, not only creation", () 
     expect(existsSync(file)).toBe(false);
   });
 });
+
+for (const [name, create] of [
+  ["state", () => writeMigrationStateEntry(join(testRoot, ".migrations", "state.json"), "test", { lastOutcome: "success" })],
+  ["snapshot", () => createMigrationSnapshot({ migrationId: "test", scope: "metadata-only", fromVersion: "old", toVersion: "new", rowCounts: {} }, { snapshotRoot: join(testRoot, ".migrations", "snapshots"), now: () => new Date() })],
+  ["export", () => createContentOnlyExport({ migrationId: "test", table: "Memory", rows: [], fromVersion: "old" }, { exportRoot: join(testRoot, ".migrations", "exports"), now: () => new Date() })],
+] as const) {
+  it(`${name} fails with ENOENT when the candidate is removed after the probe`, () => {
+    expect(probeMigrationDataDir(testRoot).ok).toBe(true);
+    rmSync(testRoot, { recursive: true });
+    let error: unknown;
+    try { create(); } catch (err) { error = err; }
+    expect((error as NodeJS.ErrnoException)?.code).toBe("ENOENT");
+    expect(existsSync(testRoot)).toBe(false);
+  });
+}

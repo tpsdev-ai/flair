@@ -610,6 +610,21 @@ export class HealthDetail extends Resource {
       nightlyRunFailed = lastNightlyRec?.status === "failed";
       const lastNightlyAt = lastNightlyRec ? (lastNightlyRec.at ?? lastNightlyRec.ts ?? lastNightlyRec.timestamp ?? null) : null;
 
+      // Newest distillation from a completed cycle with no errors or skips, observed in the server-local log tail.
+      let lastDistilledAt: string | null = null;
+      const completeDistillation = (rec: any): boolean => rec?.status === "completed"
+        && !rec.errors?.length && !rec.skips?.length && !rec.distill?.aborted
+        && typeof rec.distilledAt === "string" && Number.isFinite(Date.parse(rec.distilledAt))
+        && Number.isInteger(rec.distill?.gathered) && rec.distill.gathered > 0;
+      const lastDistillationIncomplete = !!lastNightlyRec && !completeDistillation(lastNightlyRec);
+      for (let i = nightlyRecords.length - 1; i >= 0; i--) {
+        const rec = nightlyRecords[i];
+        if (completeDistillation(rec)) {
+          lastDistilledAt = rec.distilledAt;
+          break;
+        }
+      }
+
       let pendingCandidates: number | null = null;
       try {
         let count = 0;
@@ -625,6 +640,7 @@ export class HealthDetail extends Resource {
         !lastRestorativeAt &&
         nightlyEnabled === null &&
         !lastNightlyAt &&
+        !lastDistilledAt &&
         pendingCandidates === null;
       if (allNull) {
         stats.rem = null;
@@ -635,6 +651,8 @@ export class HealthDetail extends Resource {
           lastRestorativeAt,
           nightlyEnabled,
           lastNightlyAt,
+          lastDistilledAt,
+          lastDistillationIncomplete,
           pendingCandidates,
         };
         if (nightlyEnabled && lastNightlyAt && nowMs - new Date(lastNightlyAt).getTime() > 48 * 3600 * 1000) {

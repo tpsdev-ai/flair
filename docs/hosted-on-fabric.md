@@ -41,11 +41,11 @@ flair init --target https://<cluster>.<org>.harperfabric.com \
 - `--remote` marks it a federation **hub** and creates the `flair_pair_initiator` role; without it, pairing later fails role-not-found.
 - Generated admin password lands in `~/.tps/secrets/flair-fabric-hdb` (mode `0600`); `--flair-admin-pass` to choose your own.
 
-### Port derivation trap
+### Operations endpoint
 
-Locally, Flair serves data on `19926` and the ops API on `19925`. The CLI derives **ops = data − 1** everywhere. A managed endpoint is HTTPS on 443 with no port, so derivation produces `:442` — where nothing answers.
+Portless HTTPS targets derive the ops endpoint at `:9925`. <!-- docs-freshness-allow: Fabric ops API port (FABRIC_OPS_PORT), not legacy data port -->
 
-**Pass `--ops-target <url>` explicitly** (or set `FLAIR_OPS_TARGET`) on any command that touches the ops API: `init --target`, `agent add --target`, `federation token --target`.
+Set `FLAIR_OPS_TARGET` to override the derived endpoint, including for `flair backup`.
 
 ---
 
