@@ -18,6 +18,7 @@ import type {
   YamlFormat,
 } from "../types.js";
 import { BridgeRuntimeError } from "../types.js";
+import { protoSafeRecord } from "../../lib/proto-safe-record.js";
 
 const VALID_FORMATS: readonly YamlFormat[] = [
   "jsonl",
@@ -79,14 +80,15 @@ function normalizeSourceTarget(
       `${fieldBase}.map must be an object of BridgeMemory-field → mapping expression`);
   }
   const mapIn = obj.map as Record<string, unknown>;
-  const map: Record<string, string> = {};
   for (const [k, v] of Object.entries(mapIn)) {
     if (typeof v !== "string") {
       fail(bridge, path, `${fieldBase}.map.${k}`, "string expression", v,
         `map entries must be strings; got ${typeof v} for ${k}`);
     }
-    map[k] = v;
   }
+  // A null-prototype copy: an own `__proto__` map key survives as a key rather
+  // than being applied as the map's prototype (flair#2235).
+  const map = protoSafeRecord(mapIn) as Record<string, string>;
 
   const out: YamlSourceTarget = {
     path: obj.path as string,
