@@ -94,7 +94,8 @@ function paths() {
 }
 
 const BASE = {
-  instance: ISSUER,
+  instance: "http://127.0.0.1:9926",
+  issuer: ISSUER,
   idpClientId: "client-id",
   idpClientSecret: "client-secret",
   idpSubject: "octocat",
@@ -146,7 +147,7 @@ function mockFetch(
   let sysInfo = 0;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const u = new URL(String(url));
-    if (u.hostname !== host) {
+    if (u.hostname !== host && u.hostname !== "127.0.0.1") {
       foreign.push(String(url));
       return new Response("refused by test", { status: 599 });
     }
@@ -259,7 +260,7 @@ describe("enableMcp, non-Fabric target — the clientIdMetadataDocuments.allowed
     const p = paths();
     const before = readFileSync(p.localConfigPath, "utf-8");
     const { fetchImpl, foreign } = mockFetch("flair.example.com");
-    const result = await enableMcp({ ...BASE, ...p, confirmSecretsApplied: true }, { fetchImpl });
+    const result = await enableMcp({ ...BASE, ...p, confirmSecretsApplied: true }, { fetchImpl, ...targetRunsFrom(dir) });
 
     expect(result.ok).toBe(true);
     expect(foreign).toEqual([]);

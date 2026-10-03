@@ -309,9 +309,9 @@ flair principal enable alice
 For a principal on a remote instance, pass the instance URL and its admin
 password explicitly. These commands share two precedence and credential rules
 with `flair mcp enable`: an explicit `--instance` wins over `FLAIR_URL`, and a
-remote operation requires an explicit `--admin-pass`. Their complete target
-rules are not equivalent: the principal commands accept an explicit loopback
-`--instance`, while `flair mcp enable` refuses local origins.
+remote operation requires an explicit `--admin-pass`. The principal commands accept
+explicit loopback targets; `flair mcp enable` accepts loopback or unspecified targets
+for the local restart but refuses local issuers.
 
 ```bash
 flair principal disable alice \
