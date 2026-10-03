@@ -42,7 +42,7 @@ export interface UnitStep {
 //     set the median is 1–2 s.
 // The budget is whole-lane headroom: about 1.53× the slowest measured lane
 // (510 s), still subject to each step's own limit below; the old 510 s
-// budget was under that worst lane and killed whichever late step was running
+// budget sat at that worst lane's length and killed whichever late step was running
 // on a busy runner (flair#2224: `flair-mcp` on #2220, `adk-flair-js` on main).
 // unit-runner.test.ts pins the job limit and re-checks the arithmetic, so a
 // change to either side fails there first.
