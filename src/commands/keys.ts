@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { existsSync, mkdirSync, renameSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import * as render from "../render.js";
 import { loadEd25519PrivateKeyFromFile } from "../mcp-client-assertion.js";
 import { defaultAdminPassPath, defaultKeysDir, isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
@@ -249,7 +249,7 @@ export function makeReadInstanceIds(deps: {
       return {
         state: "unreadable",
         bindingRefused: true,
-        reason: `--data-dir ${dataDir} refused: its identity cannot be verified against the running target ${baseUrl}; nothing moved`,
+        reason: `Data directory ${dataDir} refused: its identity cannot be verified against the running target ${baseUrl}; nothing moved`,
       };
     }
     let target: URL;
@@ -327,35 +327,17 @@ export function register(program: Command): void {
     .option("--keys-dir <dir>", "Directory to scan for key files (else FLAIR_KEY_DIR, ~/.flair/keys)")
     .option("--instance <url>", "Flair instance to check registration against (else FLAIR_TARGET/FLAIR_URL/config)")
     .option("--port <port>", "Harper HTTP port (used when --instance/FLAIR_URL/FLAIR_TARGET are not set)")
-    .option("--data-dir <dir>", "Refuse the run when this directory cannot be bound to the running target by identity")
     .action(async (opts) => {
       const keysDir: string = opts.keysDir ?? process.env.FLAIR_KEY_DIR ?? defaultKeysDir();
-      const dataDir = opts.dataDir !== undefined ? resolve(opts.dataDir) : undefined;
       const apply = !!opts.apply;
-      let baseUrl: string;
-      if (opts.instance) {
-        baseUrl = resolveBaseUrl({ target: opts.instance, port: opts.port });
-      } else if (dataDir !== undefined) {
-        baseUrl = `http://127.0.0.1:${resolveHttpPort({ port: opts.port, dataDir })}`;
-      } else {
-        baseUrl = resolveBaseUrl({ target: opts.instance, port: opts.port });
-      }
+      const baseUrl = resolveBaseUrl({ target: opts.instance, port: opts.port });
       const readInstanceIds = makeReadInstanceIds({
-        baseUrl, port: opts.port, dataDir, resolveHttpPort, resolveOpsPort,
+        baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
       });
-
-      if (dataDir !== undefined) {
-        const read = await readInstanceIds();
-        if (read.state === "unreadable") {
-          console.error(read.reason);
-          process.exit(1);
-        }
-      }
 
       console.log(`\n${render.wrap(render.c.bold, "🔑 Flair Keys Prune")}${apply ? "" : render.wrap(render.c.dim, " (dry run)")}\n`);
       console.log(`  Keys directory: ${render.wrap(render.c.dim, keysDir)}`);
       console.log(`  Instance:       ${render.wrap(render.c.dim, baseUrl)}`);
-      if (dataDir !== undefined) console.log(`  Data directory: ${render.wrap(render.c.dim, dataDir)}`);
       console.log("");
 
       const result = await classifyKeysDir(keysDir, baseUrl, readInstanceIds);

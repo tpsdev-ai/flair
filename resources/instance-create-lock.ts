@@ -89,7 +89,7 @@ export function seedOwnerFailureNote(id: string, err: unknown): string {
   return (
     `[federation] stored the signing seed for ${id} but could not record its ownership sidecar ` +
     `(${err instanceof Error ? err.message : String(err)}). Node-shaped files without .pub stay report-only. ` +
-    `Remedy: make $HOME/.flair/keys writable by the Harper process (mode 0700).`
+    `Remedy: inspect and clear any conflicting sidecar path; check that $HOME/.flair/keys is writable by the Harper process (mode 0700).`
   );
 }
 

@@ -307,7 +307,11 @@ describe("keys prune — sidecar move ordering", () => {
     } finally {
       console.error = realError;
     }
-    expect(logs.join("\n")).toContain("report-only");
+    const message = logs.join("\n");
+    expect(message).toContain("EISDIR");
+    expect(message).toContain("inspect and clear any conflicting sidecar path");
+    expect(message).toContain("writable by the Harper process");
+    expect(message).toContain("report-only");
     const dir = owner.slice(0, owner.lastIndexOf("/"));
     const result = await classifyKeysDir(dir, BASE_URL, reader([LIVE], "/stores/live"));
     expect(result.entries.find((e) => e.agentId === id)?.class).toBe("unidentified");
@@ -318,10 +322,10 @@ describe("keys prune — sidecar move ordering", () => {
 
 // ─── CLI wiring ───────────────────────────────────────────────────────────────
 
-describe("`flair keys prune` exposes --data-dir (flair#2200)", () => {
-  test("registers --data-dir", () => {
+describe("`flair keys prune` omits --data-dir (flair#2200)", () => {
+  test("does not register --data-dir", () => {
     const prune = program.commands.find((c) => c.name() === "keys")?.commands.find((c) => c.name() === "prune");
     expect(prune).toBeDefined();
-    expect(prune!.options.some((o: { flags: string }) => o.flags.includes("--data-dir"))).toBe(true);
+    expect(prune!.options.some((o: { flags: string }) => o.flags.includes("--data-dir"))).toBe(false);
   });
 });

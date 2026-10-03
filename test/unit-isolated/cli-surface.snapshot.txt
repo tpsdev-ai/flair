@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=136 options=609
+# commands=136 options=608
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -249,9 +249,6 @@ flair keys prune
     --port <port>
       description: Harper HTTP port (used when --instance/FLAIR_URL/FLAIR_TARGET are not set)
       attr: port
-    --data-dir <dir>
-      description: Refuse the run when this directory cannot be bound to the running target by identity
-      attr: dataDir
 
 flair hook
   description: Manage ambient-memory harness SessionStart hooks (flair#745)
@@ -2970,8 +2967,6 @@ Options:
                     FLAIR_TARGET/FLAIR_URL/config)
   --port <port>     Harper HTTP port (used when
                     --instance/FLAIR_URL/FLAIR_TARGET are not set)
-  --data-dir <dir>  Refuse the run when this directory cannot be bound to the
-                    running target by identity
   -h, --help        display help for command
 
 Global Options:

@@ -450,15 +450,14 @@ describe("flair keys prune — subprocess acceptance checks", () => {
     rmSync(subKeysDir, { recursive: true, force: true });
   });
 
-  test("--data-dir refuses by name even with only agent keys", () => {
+  test("--data-dir is rejected as an unknown option", () => {
     writeFileSync(join(subKeysDir, "agent-stale.key"), "fixture");
     const r = runCLI(
       ["keys", "prune", "--apply", "--keys-dir", subKeysDir, "--data-dir", isoHome, "--instance", "http://127.0.0.1:1"],
       { HOME: isoHome },
     );
     expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain(isoHome);
-    expect(r.stderr).toContain("identity cannot be verified");
+    expect(r.stderr).toContain("unknown option '--data-dir'");
     expect(existsSync(join(subKeysDir, "agent-stale.key"))).toBe(true);
     expect(existsSync(join(subKeysDir, PRUNED_DIR_NAME))).toBe(false);
   }, 20_000);

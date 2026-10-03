@@ -155,7 +155,6 @@ deletes.
 - Node-shaped files (`flair_<hex8>.key` without `.pub`) stay report-only.
   Minting attempts to record a sidecar; sidecar-write failure leaves them report-only.
 
-`--data-dir <dir>` refuses the run because directory identity cannot be verified.
 Unreadable reference rows leave node-shaped files unidentified.
 
 ## What about a `flair secret` CLI?

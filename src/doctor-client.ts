@@ -2358,29 +2358,6 @@ export function orphanInstanceSeedAdvisory(input: {
   return `${candidates} orphan candidate(s) in ${keysDir}, absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched); ownership cannot be proven; not removed (see #2200)`;
 }
 
-// ── Node-scoped federation keys vs agent signing keys (flair#1193) ─────────
-//
-// `~/.flair/keys/` is a namespace shared by two writers with two file shapes:
-//
-//   • agent Ed25519 signing keys — a 32-byte raw seed at `<name>.key`, ALWAYS
-//     written together with a sibling `<name>.pub` (see the keypair write in
-//     src/cli.ts: the seed and the public key are emitted in the same block).
-//   • node-scoped federation keys — `flair_<hex8>.key`, an AES-256-GCM
-//     keystore blob written by FileKeyStore during Fabric provisioning
-//     (flair#1026). The id is minted as `flair_${randomBytes(4).toString("hex")}`
-//     in resources/Federation.ts, and NO `.pub` is ever written for it.
-//
-// Nothing used to tell them apart, so doctor tried to Ed25519-parse the node
-// blob — a "DECODER routines::unsupported" warning that reads as agent-auth
-// breakage when agent auth is fine — and `doctor --fix` could infer the node
-// id as the sole "agent" and wire it as a connector identity, authenticating
-// as a phantom, unregistered node whose key cannot sign (flair#1193).
-//
-// The guard is STRUCTURAL, not a parse attempt: a node id matches
-// `flair_<hex8>` AND has no sibling `.pub`. We deliberately do NOT classify by
-// parsing the file and treating a decode failure as "must be a node key" —
-// that is the exact fails-open move flair#1026 warns against (a genuinely
-// corrupt agent key would be misread as a node key and silently skipped).
 /** Node-shaped file ids. */
 const NODE_KEY_ID_RE = /^flair_[0-9a-f]{8}$/;
 
