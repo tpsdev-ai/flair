@@ -432,7 +432,7 @@ describe("shared unit lane", () => {
     expect(unitTempBase("darwin", { FLAIR_UNIT_TEMP_BASE: " /short " })).toBe("/short");
   });
 
-  test("a short temp base runs every step under a fresh lane root, and the leak guard watches it (flair#2137)", () => {
+  test("a short temp base runs a step under the lane's fresh root, and the leak guard watches that root (flair#2137)", () => {
     const base = fixture();
     const home = fixture();
     const seen = join(base, "child-tmpdir.txt");

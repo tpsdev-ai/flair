@@ -460,7 +460,8 @@ export function runUnitSteps(
   options: UnitLaneOptions = {},
 ): number {
   const { keepGoing = false, limits, createSandbox = createSandboxHome } = options;
-  // flair#2137: on darwin, run the whole lane under a short, canonical temp root
+  // flair#2137: when a temp base is selected (darwin, or an explicit
+  // FLAIR_UNIT_TEMP_BASE), run the whole lane under a short, canonical temp root
   // and point the temp-dir leak guard at it. Setting TMPDIR in THIS process is
   // what makes createSandboxHome, the tripwire and every child resolve the same
   // root through `os.tmpdir()`; `finish` restores it and removes the root.
