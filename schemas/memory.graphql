@@ -408,6 +408,7 @@ type OrgSkillAssignment @table(database: "flair") {
 type MemoryDeletionHistory @table(database: "flair") {
   id: ID @primaryKey               # unique per deletion record (a memory id can be deleted and re-created)
   memoryId: String! @indexed
+  memoryInstanceToken: String
   durability: String               # the deleted row's durability at deletion, when known
   actor: String                    # the deleting principal; null when no actor is supplied
   sourceClass: String!             # agent | admin | internal

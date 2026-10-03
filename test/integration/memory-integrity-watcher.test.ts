@@ -12,6 +12,7 @@
  * Throwaway HOME + data dir, ephemeral ports (never 9925/9926).
  */
 import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -38,7 +39,7 @@ async function opsInsertMemory(id: string, durability: string): Promise<void> {
       operation: "insert",
       database: "flair",
       table: "Memory",
-      records: [{ id, agentId: "integrity-e2e", content: `row ${id}`, durability, createdAt: new Date().toISOString() }],
+      records: [{ id, agentId: "integrity-e2e", content: `row ${id}`, durability, instanceToken: randomUUID(), createdAt: new Date().toISOString() }],
     }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -132,7 +133,7 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect(r.json?.status).toBe("alert");
     const lostIds = (r.json?.losses ?? []).map((l: any) => l.id);
     expect(lostIds).toContain("itg-perm-1");
-    // The checkpoint was NOT advanced (the alert never clears itself).
+    // The checkpoint was not advanced while this row was missing.
     expect(readFileSync(checkpointPath(), "utf-8")).toBe(before);
   }, 120_000);
 
@@ -176,5 +177,20 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect(r.json?.status).toBe("alert");
     const lostIds = (r.json?.losses ?? []).map((l: any) => l.id);
     expect(lostIds).toContain("itg-swap-old");
+  }, 150_000);
+
+  test("recorded delete, same-id recreation, checkpoint, raw delete alerts", async () => {
+    rmSync(checkpointPath(), { force: true });
+    await opsInsertMemory("itg-recreated", "permanent");
+    expect(runCheck().json?.status).toBe("baseline");
+    expect([200, 204]).toContain(await restDeleteMemory("itg-recreated"));
+    await opsInsertMemory("itg-recreated", "permanent");
+    expect(runCheck().json?.status).toBe("healthy");
+    await opsDeleteMemory("itg-recreated");
+    const r = runCheck();
+    expect(r.code, r.out).toBe(2);
+    expect(r.json?.losses).toContainEqual({ id: "itg-recreated", tier: "permanent" });
+    expect(r.json?.attributedDeletes).toEqual([]);
+    expect(r.json?.unexplainedDecrease).toEqual({});
   }, 150_000);
 });

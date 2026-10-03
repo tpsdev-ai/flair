@@ -101,10 +101,9 @@ export class MemoryMaintenance extends Resource {
                 const result = await (databases as any).flair.Memory.delete(record.id, c);
                 if (result !== true) throw new Error("Memory row delete was not confirmed");
                 await deletePointerRowOrThrow(record.id, c);
-                // The durable, attributable record of the expiry delete
-                // (flair#2213), in the same transaction.
                 await recordMemoryDeletion({
                   memoryId: record.id,
+                  memoryInstanceToken: stored.instanceToken ?? null,
                   durability: stored.durability ?? null,
                   actor: actorId ?? null,
                   sourceClass: callerIsAdmin ? "admin" : "agent",

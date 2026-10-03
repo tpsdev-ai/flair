@@ -13,6 +13,7 @@ export type MemoryDeletionSourceClass = "agent" | "admin" | "internal";
 
 export interface MemoryDeletionInput {
   memoryId: string;
+  memoryInstanceToken?: string | null;
   /** The deleted row's durability at deletion, when known. */
   durability?: string | null;
   /** The deleting principal; null when no actor is supplied. */
@@ -34,6 +35,7 @@ export async function recordMemoryDeletion(input: MemoryDeletionInput, ctx?: unk
     {
       id: randomUUID(),
       memoryId: input.memoryId,
+      memoryInstanceToken: input.memoryInstanceToken ?? null,
       durability: input.durability ?? null,
       actor: input.actor ?? null,
       sourceClass: input.sourceClass,

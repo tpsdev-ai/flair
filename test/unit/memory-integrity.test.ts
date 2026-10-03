@@ -31,7 +31,7 @@ afterEach(() => {
   for (const d of dirs.splice(0)) { try { rmSync(d, { recursive: true, force: true }); } catch { /* */ } }
 });
 
-const rowsOf = (rows: Array<[string, string]>) => rows.map(([id, durability]) => ({ id, durability }));
+const rowsOf = (rows: Array<[string, string]>) => rows.map(([id, durability]) => ({ id, durability, instanceToken: "2026-10-01T00:00:00.000Z" }));
 const baseCheckpoint = (rows: Array<[string, string]>, at = "2026-10-02T00:00:00.000Z"): IntegrityCheckpoint =>
   emptyCheckpoint(at, rowsOf(rows));
 
@@ -89,14 +89,14 @@ describe("compareScan", () => {
     });
     expect(v.status).toBe("alert");
     expect(v.losses).toEqual([{ id: "p1", tier: "permanent" }]);
-    expect(v.unexplainedDecrease).toEqual({ permanent: 1 });
+    expect(v.unexplainedDecrease).toEqual({});
   });
 
   test("a durable id gone WITH a deletion record is attributed, not alerted", () => {
     const v = compareScan({
       checkpoint: cp,
       rows: rowsOf([["s1", "persistent"], ["std1", "standard"], ["e1", "ephemeral"]]),
-      deletions: [{ id: "delete-p1", memoryId: "p1", durability: "permanent", at: "2026-10-02T00:30:00.000Z" }],
+      deletions: [{ id: "delete-p1", memoryId: "p1", memoryInstanceToken: "2026-10-01T00:00:00.000Z", durability: "permanent", at: "2026-10-02T00:30:00.000Z" }],
       scannedAt: "2026-10-02T01:00:00.000Z",
     });
     expect(v.status).toBe("healthy");
@@ -143,7 +143,8 @@ describe("compareScan", () => {
     // Checkpoint counts say 3 permanent, but its id set has only one: the count
     // drop (3 -> 1) exceeds what the id diff explains.
     const inconsistent: IntegrityCheckpoint = {
-      version: 1,
+      version: 2,
+      instanceTokens: { p1: null, s1: null, std1: null, e1: null },
       historyIds: [],
       scannedAt: "2026-10-02T00:00:00.000Z",
       byDurability: { permanent: 3, persistent: 1, standard: 1, ephemeral: 1 },
@@ -159,7 +160,7 @@ describe("compareScan", () => {
     expect(v.unexplainedDecrease).toEqual({ permanent: 2 });
   });
 
-  test("a failed read is UNKNOWN, with no counts and no checkpoint write", () => {
+  test("a failed read is UNKNOWN with no checkpoint write", () => {
     const v = unknownVerdict("connection refused", "2026-10-02T01:00:00.000Z");
     expect(v.status).toBe("unknown");
     expect(v.checkpointWritten).toBe(false);
@@ -175,8 +176,44 @@ describe("compareScan", () => {
 
 
 describe("checkpoint regressions", () => {
+  test("a reappearing row makes the next scan healthy", () => {
+    const rows = rowsOf([["m", "permanent"]]);
+    const cp = emptyCheckpoint("before", rows);
+    expect(compareScan({ checkpoint: cp, rows: [], deletions: [], scannedAt: "missing" }).status).toBe("alert");
+    expect(compareScan({ checkpoint: cp, rows, deletions: [], scannedAt: "returned" }).status).toBe("healthy");
+  });
+
+  test("a delete of another incarnation cannot explain a missing checkpointed row", () => {
+    const oldRows = [{ id: "m", durability: "permanent", instanceToken: "2026-10-01" }];
+    const cp = emptyCheckpoint("before", oldRows);
+    const deletion = { id: "d", memoryId: "m", memoryInstanceToken: "2026-10-01", at: "deleted" };
+    expect(compareScan({ checkpoint: cp, rows: [], deletions: [deletion], scannedAt: "after-delete" }).status).toBe("healthy");
+    const recreated = [{ ...oldRows[0], instanceToken: "2026-10-02" }];
+    expect(compareScan({ checkpoint: cp, rows: recreated, deletions: [deletion], scannedAt: "recreated" }).status).toBe("healthy");
+    // Model delayed history visibility at the recreated row's checkpoint.
+    const next = emptyCheckpoint("recreated", recreated);
+    const verdict = compareScan({ checkpoint: next, rows: [], deletions: [deletion], scannedAt: "raw-deleted" });
+    expect(verdict.status).toBe("alert");
+    expect(verdict.losses).toEqual([{ id: "m", tier: "permanent" }]);
+    expect(verdict.attributedDeletes).toEqual([]);
+    expect(verdict.unexplainedDecrease).toEqual({});
+    const fresh = { ...deletion, id: "new-delete", memoryInstanceToken: "2026-10-02" };
+    expect(compareScan({ checkpoint: next, rows: [], deletions: [deletion, fresh], scannedAt: "recorded-delete" }).status).toBe("healthy");
+  });
+
+  test("missing incarnation metadata never attributes a loss", () => {
+    for (const instanceToken of [undefined, null, "", "current-token"]) {
+      const cp = emptyCheckpoint("before", [{ id: "m", durability: "permanent", instanceToken }]);
+      for (const memoryInstanceToken of [undefined, null, "", "2026-10-01"]) {
+        const verdict = compareScan({ checkpoint: cp, rows: [], deletions: [{ id: "d", memoryId: "m", memoryInstanceToken, at: "after" }], scannedAt: "now" });
+        expect(verdict.status).toBe("alert");
+        expect(verdict.losses).toEqual([{ id: "m", tier: "permanent" }]);
+      }
+    }
+  });
+
   test("delete, recreate, checkpoint, raw delete remains an unexplained loss", () => {
-    const old = { id: "old-delete", memoryId: "recreated", at: "2099-01-01" };
+    const old = { id: "old-delete", memoryId: "recreated", memoryInstanceToken: "2026-10-01T00:00:00.000Z", at: "2099-01-01" };
     const cp = emptyCheckpoint("2026-10-02", rowsOf([["recreated", "permanent"]]), [old]);
     const verdict = compareScan({ checkpoint: cp, rows: [], deletions: [old], scannedAt: "2026-10-03" });
     expect(verdict.status).toBe("alert");
@@ -193,6 +230,8 @@ describe("checkpoint regressions", () => {
     expect(read.kind).toBe("ok");
     if (read.kind !== "ok") throw new Error("checkpoint unreadable");
     expect(Object.getPrototypeOf(read.checkpoint.ids)).toBeNull();
+    expect(Object.getPrototypeOf(read.checkpoint.instanceTokens)).toBeNull();
+    expect(read.checkpoint.instanceTokens["__proto__"]).toBe("2026-10-01T00:00:00.000Z");
     const verdict = compareScan({ checkpoint: read.checkpoint, rows: rowsOf([["replacement", "permanent"]]), deletions: [], scannedAt: "later" });
     expect(verdict.status).toBe("alert");
     expect(verdict.losses).toEqual([{ id: "__proto__", tier: "permanent" }]);
@@ -201,7 +240,7 @@ describe("checkpoint regressions", () => {
   test("malformed checkpoint ID maps and history watermarks are unreadable", () => {
     const cp = baseCheckpoint([["m1", "permanent"]]);
     const path = join(tmp(), "checkpoint.json");
-    for (const patch of [{ ids: [] }, { ids: { m1: {} } }, { ids: { "": "permanent" } }, { historyIds: [42] }, { historyIds: undefined }]) {
+    for (const patch of [{ ids: [] }, { ids: { m1: {} } }, { ids: { "": "permanent" } }, { historyIds: [42] }, { historyIds: undefined }, { version: 1 }, { instanceTokens: undefined }, { instanceTokens: [] }, { instanceTokens: {} }, { instanceTokens: { m1: 42 } }, { instanceTokens: { m1: "" } }, { instanceTokens: { m1: null, extra: null } }]) {
       writeFileSync(path, JSON.stringify({ ...cp, ...patch }));
       expect(readCheckpoint(path).kind).toBe("unreadable");
     }

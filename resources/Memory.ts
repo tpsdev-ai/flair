@@ -1904,6 +1904,7 @@ export class Memory extends (databases as any).flair.Memory {
       if (pointerDenial) return pointerDenial;
       await recordMemoryDeletion({
         memoryId: deletedId,
+        memoryInstanceToken: stored.instanceToken ?? null,
         durability: stored.durability ?? null,
         actor: deletionActor,
         sourceClass: deletionSourceClass,

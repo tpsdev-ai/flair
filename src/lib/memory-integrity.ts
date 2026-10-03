@@ -3,19 +3,18 @@
  * comparison logic (flair#2213, slice 1 of #971; covers #1244's unnoticed-loss
  * risk).
  *
- * A checkpoint of the last SUCCESSFUL scan — per-tier counts AND the set of
- * Memory ids (id -> durability) — lives OUTSIDE the Harper database, under the
+ * A checkpoint — per-tier counts AND the set of
+ * Memory ids (durability and instanceToken) — lives outside Harper, under the
  * operator's flair config dir (`~/.flair/integrity-checkpoint.json`, mode 0600,
  * written atomically). `flair integrity check` scans the live corpus and
  * compares it to that checkpoint:
  *
  *   - a durable-tier id (permanent / persistent) that is GONE and has no
- *     new deletion record is an UNEXPLAINED LOSS → alert, naming the id. It never
- *     clears itself: only `--accept` advances the checkpoint while a loss is open.
- *   - a durable-tier id gone WITH a new deletion record is an ATTRIBUTED delete.
+ *     new matching deletion record is an UNEXPLAINED LOSS → alert, naming the id.
+ *     A reappearing row can make the next scan healthy; `--accept` re-baselines a loss.
+ *   - a durable-tier id gone WITH a new matching deletion record is history-backed.
  *   - an id whose durability changed is an observed TIER CHANGE.
- *   - a durable-tier count decrease not explained by those is also an alert
- *     (belt-and-braces against a count/id-set drift).
+ *   - a durable-tier count decrease beyond the id-set diff is also an alert.
  *   - a scan that cannot read the instance reports UNKNOWN, never healthy, and
  *     never overwrites the checkpoint.
  *
@@ -37,23 +36,26 @@ export function isDurableTier(tier: string | undefined | null): boolean {
 }
 
 export interface IntegrityCheckpoint {
-  version: 1;
+  version: 2;
   /** ISO timestamp of the successful scan this checkpoint records. */
   scannedAt: string;
   byDurability: Record<Tier, number>;
   /** id -> durability at the checkpoint. */
   ids: Record<string, string>;
+  instanceTokens: Record<string, string | null>;
   historyIds: string[];
 }
 
 export interface MemoryRowLite {
   id: string;
   durability: string;
+  instanceToken?: string | null;
 }
 
 export interface DeletionRecordLite {
   id: string;
   memoryId: string;
+  memoryInstanceToken?: string | null;
   durability?: string | null;
   at: string;
 }
@@ -84,13 +86,13 @@ export interface IntegrityVerdict {
   scannedAt: string;
   total: number;
   counts: Record<Tier, number>;
-  /** Durable ids gone with a deletion record (a deliberate delete). */
+  /** History-backed attributions for missing checkpointed incarnations. */
   attributedDeletes: AttributedDeletion[];
   /** Ids whose durability changed since the checkpoint. */
   tierChanges: TierChange[];
-  /** Durable ids gone with NO deletion record — the alert. */
+  /** Durable ids gone without a matching new history record. */
   losses: UnexplainedLoss[];
-  /** Durable tiers whose count dropped more than those explain, tier -> delta. */
+  /** Durable count decreases beyond the id-set diff, tier -> delta. */
   unexplainedDecrease: Record<string, number>;
   /** True when the checkpoint was advanced to this scan's state. */
   checkpointWritten: boolean;
@@ -112,8 +114,12 @@ export function tallyByDurability(rows: readonly MemoryRowLite[]): Record<Tier, 
 
 export function emptyCheckpoint(scannedAt: string, rows: readonly MemoryRowLite[], deletions: readonly DeletionRecordLite[] = []): IntegrityCheckpoint {
   const ids: Record<string, string> = Object.create(null);
-  for (const row of rows) ids[row.id] = normalizeTier(row.durability);
-  return { version: 1, scannedAt, byDurability: tallyByDurability(rows), ids, historyIds: deletions.map(d => d.id) };
+  const instanceTokens: Record<string, string | null> = Object.create(null);
+  for (const row of rows) {
+    ids[row.id] = normalizeTier(row.durability);
+    instanceTokens[row.id] = typeof row.instanceToken === "string" && row.instanceToken.length > 0 ? row.instanceToken : null;
+  }
+  return { version: 2, scannedAt, byDurability: tallyByDurability(rows), ids, instanceTokens, historyIds: deletions.map(d => d.id) };
 }
 
 /** UNKNOWN, with no checkpoint write. */
@@ -133,8 +139,7 @@ export function unknownVerdict(reason: string, scannedAt: string): IntegrityVerd
 }
 
 /**
- * Compare the live corpus (`rows`) with the checkpoint. `deletions` are the
- * deletion records the watcher could read, excluding records seen at the checkpoint.
+ * Compare the live corpus with the checkpoint; filter checkpoint-seen history here.
  */
 export function compareScan(opts: {
   checkpoint: IntegrityCheckpoint;
@@ -151,7 +156,8 @@ export function compareScan(opts: {
   const seenHistory = new Set(checkpoint.historyIds);
   for (const d of deletions) {
     if (seenHistory.has(d.id)) continue;
-    // Latest record wins; a re-deleted id is still one deletion.
+    const instanceToken = checkpoint.instanceTokens[d.memoryId];
+    if (!instanceToken || d.memoryInstanceToken !== instanceToken) continue;
     const prev = deletedTiers.get(d.memoryId);
     if (!prev || d.at > prev.at) deletedTiers.set(d.memoryId, d);
   }
@@ -175,14 +181,14 @@ export function compareScan(opts: {
     if (curTier !== cpTier) tierChanges.push({ id, from: cpTier, to: curTier });
   }
 
-  // Belt-and-braces: a durable-tier count that dropped more than the id-set
-  // diff explains (a count/id-set drift) is also an alert.
+  // Named losses, attributions and tier changes account for the id-set diff.
   const unexplainedDecrease: Record<string, number> = {};
   for (const tier of DURABLE_TIERS) {
     const attributedOut = attributedDeletes.filter((d) => d.tier === tier).length;
+    const lostOut = losses.filter((l) => l.tier === tier).length;
     const changedOut = tierChanges.filter((c) => c.from === tier && c.to !== tier).length;
     const changedIn = tierChanges.filter((c) => c.to === tier && c.from !== tier).length;
-    const explainedDrop = attributedOut + changedOut - changedIn;
+    const explainedDrop = attributedOut + lostOut + changedOut - changedIn;
     const actualDrop = checkpoint.byDurability[tier] - counts[tier];
     const unexplained = actualDrop - explainedDrop;
     if (unexplained > 0) unexplainedDecrease[tier] = unexplained;
@@ -227,16 +233,23 @@ export function readCheckpoint(path: string): CheckpointRead {
   }
   try {
     const parsed = JSON.parse(raw) as IntegrityCheckpoint;
-    if (parsed?.version !== 1 || typeof parsed.scannedAt !== "string" ||
+    if (parsed?.version !== 2 || typeof parsed.scannedAt !== "string" ||
         typeof parsed.ids !== "object" || parsed.ids === null || Array.isArray(parsed.ids) ||
         !Object.entries(parsed.ids).every(([id, tier]) => id.length > 0 && (ALL_TIERS as readonly unknown[]).includes(tier)) ||
+        typeof parsed.instanceTokens !== "object" || parsed.instanceTokens === null || Array.isArray(parsed.instanceTokens) ||
+        Object.keys(parsed.instanceTokens).length !== Object.keys(parsed.ids).length ||
+        !Object.keys(parsed.ids).every(id => Object.hasOwn(parsed.instanceTokens, id) &&
+          (parsed.instanceTokens[id] === null || (typeof parsed.instanceTokens[id] === "string" && parsed.instanceTokens[id]!.length > 0))) ||
         !Array.isArray(parsed.historyIds) || !parsed.historyIds.every(id => typeof id === "string" && id.length > 0) ||
         !parsed.byDurability || !ALL_TIERS.every(tier => Number.isSafeInteger(parsed.byDurability[tier]) && parsed.byDurability[tier] >= 0)) {
-      return { kind: "unreadable", reason: "checkpoint is not a version-1 integrity checkpoint" };
+      return { kind: "unreadable", reason: "checkpoint is not a version-2 integrity checkpoint" };
     }
     const ids: Record<string, string> = Object.create(null);
     for (const [id, tier] of Object.entries(parsed.ids)) ids[id] = tier;
     parsed.ids = ids;
+    const instanceTokens: Record<string, string | null> = Object.create(null);
+    for (const [id, instanceToken] of Object.entries(parsed.instanceTokens)) instanceTokens[id] = instanceToken;
+    parsed.instanceTokens = instanceTokens;
     return { kind: "ok", checkpoint: parsed };
   } catch (err) {
     return { kind: "unreadable", reason: `checkpoint is not valid JSON: ${err instanceof Error ? err.message : String(err)}` };
