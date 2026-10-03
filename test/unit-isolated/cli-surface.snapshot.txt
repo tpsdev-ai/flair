@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=136 options=608
+# commands=136 options=609
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -234,7 +234,7 @@ flair keys
   subcommands: prune
 
 flair keys prune
-  description: Move stale/unregistered keys to <keysDir>/.pruned/<date>/; report node-shaped orphan candidates — dry-run by default
+  description: Move stale/unregistered keys to <keysDir>/.pruned/<date>/; move an instance seed only with proof it is an orphan of the targeted instance — dry-run by default
   usage: [options]
   options:
     --apply
@@ -249,6 +249,9 @@ flair keys prune
     --port <port>
       description: Harper HTTP port (used when --instance/FLAIR_URL/FLAIR_TARGET are not set)
       attr: port
+    --data-dir <dir>
+      description: Data directory of the instance being pruned for; an instance seed moves only when its owner record names this instance (omit to list only)
+      attr: dataDir
 
 flair hook
   description: Manage ambient-memory harness SessionStart hooks (flair#745)
@@ -2948,14 +2951,15 @@ Global Options:
 
 Commands:
   prune [options]  Move stale/unregistered keys to <keysDir>/.pruned/<date>/;
-                   report node-shaped orphan candidates — dry-run by default
+                   move an instance seed only with proof it is an orphan of the
+                   targeted instance — dry-run by default
   help [command]   display help for command
 
 ----- flair keys prune -----
 Usage: flair keys prune [options]
 
-Move stale/unregistered keys to <keysDir>/.pruned/<date>/; report node-shaped
-orphan candidates — dry-run by default
+Move stale/unregistered keys to <keysDir>/.pruned/<date>/; move an instance seed
+only with proof it is an orphan of the targeted instance — dry-run by default
 
 Options:
   --apply           Actually move prunable keys (default: dry-run, prints what
@@ -2966,6 +2970,9 @@ Options:
                     FLAIR_TARGET/FLAIR_URL/config)
   --port <port>     Harper HTTP port (used when
                     --instance/FLAIR_URL/FLAIR_TARGET are not set)
+  --data-dir <dir>  Data directory of the instance being pruned for; an instance
+                    seed moves only when its owner record names this instance
+                    (omit to list only)
   -h, --help        display help for command
 
 Global Options:

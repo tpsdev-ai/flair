@@ -17,15 +17,16 @@
  */
 import { Command } from "commander";
 import { existsSync, mkdirSync, renameSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import * as render from "../render.js";
 import { loadEd25519PrivateKeyFromFile } from "../mcp-client-assertion.js";
 import { defaultAdminPassPath, defaultKeysDir, isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { probeInstanceIds, type OpsEndpoint } from "../lib/instance-identity-row.js";
+import { SEED_OWNER_SUFFIX, readSeedOwnerAt } from "../keystore.js";
 import {
   describeAgentGateFinding,
   classifyKeyFile,
-  classifyNodeKeySeed,
+  classifyOwnedNodeSeed,
   isNodeKeyId,
   partitionKeyIds,
   resolveCollisionSafeName,
@@ -44,7 +45,8 @@ export type KeysCli = {
   probeFlairReachable: (url: string, timeoutMs?: number) => Promise<boolean>;
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
-  resolveHttpPort: (opts: { port?: string | number }) => number;
+  resolveHttpPort: (opts: { port?: string | number; dataDir?: string }) => number;
+  readPortFromHarperConfig: (dataDir: string) => number | null;
 };
 
 let cli: KeysCli;
@@ -69,8 +71,11 @@ const resolveBaseUrl = (opts: { target?: string; url?: string; port?: string | n
 const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | number }): number =>
   cli.resolveOpsPort(opts);
 
-const resolveHttpPort = (opts: { port?: string | number }): number =>
+const resolveHttpPort = (opts: { port?: string | number; dataDir?: string }): number =>
   cli.resolveHttpPort(opts);
+
+const readPortFromHarperConfig = (dataDir: string): number | null =>
+  cli.readPortFromHarperConfig(dataDir);
 
 // ─── flair keys ────────────────────────────────────────────────────────────────
 // flair#734 — recoverable cleanup of stale/unregistered/invalid key files in
@@ -97,7 +102,7 @@ export interface KeysPruneEntry {
 
 /** What the Instance-table read established for the orphan check. */
 export type InstanceIdsRead =
-  | { state: "read"; ids: string[]; agentIds?: string[] | null; agentReadReason?: string }
+  | { state: "read"; ids: string[]; agentIds?: string[] | null; agentReadReason?: string; dataDir?: string }
   | { state: "unreadable"; reason: string };
 
 export interface KeysPruneResult {
@@ -157,13 +162,19 @@ export async function classifyKeysDir(
   const { nodeKeyIds } = partitionKeyIds(candidates.map((c) => c.agentId), keysDir);
   const orphanRead = nodeKeyIds.length > 0 ? await readInstanceIds() : null;
   const instanceIds = orphanRead?.state === "read" ? orphanRead.ids : null;
+  // The targeted instance's data directory — the instance identity an owner
+  // sidecar must name for a seed to be removable (flair#2200). Only a read that
+  // established one can authorize a move; `null` leaves every seed in place.
+  const targetDataDir = orphanRead?.state === "read" ? orphanRead.dataDir ?? null : null;
 
   for (const c of candidates) {
     const keyPath = join(keysDir, c.name);
 
     if (isNodeKeyId(c.agentId, keysDir)) {
-      const decision = classifyNodeKeySeed(c.agentId, instanceIds, baseUrl,
+      const ownerPath = join(keysDir, `${c.name}${SEED_OWNER_SUFFIX}`);
+      const decision = classifyOwnedNodeSeed(c.agentId, instanceIds, baseUrl,
         orphanRead?.state === "read" ? orphanRead.agentIds ?? null : null,
+        { owner: readSeedOwnerAt(ownerPath), keyPath, ownerPath, targetDataDir },
         orphanRead?.state === "read" ? orphanRead.agentReadReason : orphanRead?.reason);
       entries.push({ name: c.name, class: decision.class, reason: decision.reason, agentId: c.agentId });
       continue;
@@ -216,10 +227,13 @@ export function applyKeyPrune(
   entries: KeysPruneEntry[],
   dateStamp: string,
 ): Array<{ name: string; movedTo: string }> {
-  const prunable = entries.filter((e) =>
-    (e.class === "stale" || e.class === "invalid") &&
-    !isNodeKeyId(e.name.replace(/\.key$/, ""), keysDir),
-  );
+  const prunable = entries.filter((e) => {
+    const nodeShaped = isNodeKeyId(e.name.replace(/\.key$/, ""), keysDir);
+    // An agent-shaped key moves only as stale/invalid. A node-shaped seed moves
+    // ONLY when classifyOwnedNodeSeed proved ownership by the targeted instance
+    // (flair#2200) — never on a bare stale/invalid classification.
+    return nodeShaped ? e.class === "orphan-seed" : e.class === "stale" || e.class === "invalid";
+  });
   if (prunable.length === 0) return [];
 
   const destDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
@@ -233,6 +247,16 @@ export function applyKeyPrune(
     const from = join(keysDir, e.name);
     const to = join(destDir, destName);
     renameSync(from, to);
+    // A proven orphan instance seed carries its owner sidecar into the archive
+    // with it, so no sidecar is left beside a seed that is no longer there.
+    if (e.class === "orphan-seed") {
+      const fromOwner = join(keysDir, `${e.name}${SEED_OWNER_SUFFIX}`);
+      if (existsSync(fromOwner)) {
+        const destOwnerName = resolveCollisionSafeName(existing, `${e.name}${SEED_OWNER_SUFFIX}`);
+        existing.add(destOwnerName);
+        renameSync(fromOwner, join(destDir, destOwnerName));
+      }
+    }
     moved.push({ name: e.name, movedTo: to });
   }
   return moved;
@@ -242,12 +266,16 @@ export function applyKeyPrune(
 export function makeReadInstanceIds(deps: {
   baseUrl: string;
   port?: string | number;
+  /** The targeted instance's data directory — the instance identity the owner sidecar must name. */
+  dataDir?: string;
   resolveHttpPort: (opts: { port?: string | number }) => number;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  /** The port `dataDir`'s own Harper config records, or null when it records none. */
+  readPortFromHarperConfig?: (dataDir: string) => number | null;
   resolveAdminPass?: () => string | undefined;
   probe?: (endpoint: OpsEndpoint) => Promise<InstanceIdsRead>;
 }): () => Promise<InstanceIdsRead> {
-  const { baseUrl, port } = deps;
+  const { baseUrl, port, dataDir } = deps;
   const resolveAdminPass = deps.resolveAdminPass ?? (() => resolveLocalAdminPass(undefined));
   const probe = deps.probe ?? probeInstanceIds;
   return async () => {
@@ -272,6 +300,24 @@ export function makeReadInstanceIds(deps: {
     const opsPort = deps.resolveOpsPort({ port });
     if (opsPort !== httpPort - 1) {
       return { state: "unreadable", reason: `selected ops port ${opsPort} differs from target-derived ops port ${httpPort - 1}` };
+    }
+    // Tie the data directory to the target: a seed's owner sidecar is matched on
+    // the data directory, so the directory must be THIS instance's. The port its
+    // own Harper config records is the identity check — unreadable or different
+    // means ownership cannot be established and the caller proves nothing.
+    if (dataDir !== undefined) {
+      let recorded: number | null = null;
+      try {
+        recorded = deps.readPortFromHarperConfig?.(dataDir) ?? null;
+      } catch {
+        recorded = null;
+      }
+      if (recorded === null) {
+        return { state: "unreadable", reason: `the data directory ${dataDir} records no instance port (no Harper config), so it cannot be tied to ${baseUrl}` };
+      }
+      if (recorded !== httpPort) {
+        return { state: "unreadable", reason: `the data directory ${dataDir} serves port ${recorded}, not the targeted ${httpPort}` };
+      }
     }
     let pass: string | undefined;
     try {
@@ -311,7 +357,7 @@ export function makeReadInstanceIds(deps: {
     if (read.ids[0] !== targetId) {
       return { state: "unreadable", reason: "target/ops Instance id mismatch" };
     }
-    return read;
+    return { ...read, dataDir };
   };
 }
 
@@ -321,20 +367,37 @@ export function register(program: Command): void {
 
   keys
     .command("prune")
-    .description("Move stale/unregistered keys to <keysDir>/.pruned/<date>/; report node-shaped orphan candidates — dry-run by default")
+    .description("Move stale/unregistered keys to <keysDir>/.pruned/<date>/; move an instance seed only with proof it is an orphan of the targeted instance — dry-run by default")
     .option("--apply", "Actually move prunable keys (default: dry-run, prints what would move and why)")
     .option("--keys-dir <dir>", "Directory to scan for key files (else FLAIR_KEY_DIR, ~/.flair/keys)")
     .option("--instance <url>", "Flair instance to check registration against (else FLAIR_TARGET/FLAIR_URL/config)")
     .option("--port <port>", "Harper HTTP port (used when --instance/FLAIR_URL/FLAIR_TARGET are not set)")
+    .option("--data-dir <dir>", "Data directory of the instance being pruned for; an instance seed moves only when its owner record names this instance (omit to list only)")
     .action(async (opts) => {
       const keysDir: string = opts.keysDir ?? process.env.FLAIR_KEY_DIR ?? defaultKeysDir();
-      const baseUrl = resolveBaseUrl({ target: opts.instance, port: opts.port });
+      const dataDir = opts.dataDir ? resolve(opts.dataDir) : undefined;
       const apply = !!opts.apply;
-      const readInstanceIds = makeReadInstanceIds({ baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort });
+      // Without --data-dir the target's data directory is unknown, so no seed can
+      // be proven owned: node-shaped seeds stay report-only. With --data-dir, an
+      // explicit --instance still wins the URL, and the read ties the directory
+      // to the target by port before any ownership can be proven (flair#2200).
+      let baseUrl: string;
+      if (opts.instance) {
+        baseUrl = resolveBaseUrl({ target: opts.instance, port: opts.port });
+      } else if (dataDir !== undefined) {
+        baseUrl = `http://127.0.0.1:${resolveHttpPort({ port: opts.port, dataDir })}`;
+      } else {
+        baseUrl = resolveBaseUrl({ target: opts.instance, port: opts.port });
+      }
+      const readInstanceIds = makeReadInstanceIds({
+        baseUrl, port: opts.port, dataDir, readPortFromHarperConfig, resolveHttpPort, resolveOpsPort,
+      });
 
       console.log(`\n${render.wrap(render.c.bold, "🔑 Flair Keys Prune")}${apply ? "" : render.wrap(render.c.dim, " (dry run)")}\n`);
       console.log(`  Keys directory: ${render.wrap(render.c.dim, keysDir)}`);
-      console.log(`  Instance:       ${render.wrap(render.c.dim, baseUrl)}\n`);
+      console.log(`  Instance:       ${render.wrap(render.c.dim, baseUrl)}`);
+      if (dataDir !== undefined) console.log(`  Data directory: ${render.wrap(render.c.dim, dataDir)}`);
+      console.log("");
 
       const result = await classifyKeysDir(keysDir, baseUrl, readInstanceIds);
       if (result.aborted) {
@@ -345,13 +408,14 @@ export function register(program: Command): void {
 
       const stale = result.entries.filter((e) => e.class === "stale");
       const invalid = result.entries.filter((e) => e.class === "invalid");
+      const orphanSeeds = result.entries.filter((e) => e.class === "orphan-seed");
       const orphan = result.entries.filter((e) => e.class === "orphan-candidate");
       const unidentified = result.entries.filter((e) => e.class === "unidentified");
       const kept = result.entries.filter((e) => e.class === "keep");
       const ignored = result.entries.filter((e) => e.class === "ignored");
-      const prunable = [...stale, ...invalid];
+      const prunable = [...stale, ...invalid, ...orphanSeeds];
 
-      if (stale.length + invalid.length + orphan.length + unidentified.length + kept.length === 0) {
+      if (stale.length + invalid.length + orphanSeeds.length + orphan.length + unidentified.length + kept.length === 0) {
         console.log(`  ${render.icons.ok} No key files found in ${render.wrap(render.c.dim, keysDir)} — nothing to prune.`);
         console.log("");
         return;
@@ -359,7 +423,8 @@ export function register(program: Command): void {
 
       for (const e of prunable) {
         const icon = e.class === "invalid" ? render.icons.error : render.icons.warn;
-        console.log(`  ${icon} ${render.wrap(render.c.bold, e.name)} — ${e.class}: ${e.reason}`);
+        const label = e.class === "orphan-seed" ? "orphan instance seed" : e.class;
+        console.log(`  ${icon} ${render.wrap(render.c.bold, e.name)} — ${label}: ${e.reason}`);
       }
       for (const e of orphan) {
         console.log(`  ${render.icons.info} ${render.wrap(render.c.bold, e.name)} — orphan candidate: ${e.reason}`);
@@ -379,7 +444,7 @@ export function register(program: Command): void {
       if (!apply) {
         console.log("");
         console.log(
-          `  ${render.wrap(render.c.dim, `${prunable.length} prunable (${stale.length} stale, ${invalid.length} invalid), ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored`)}`,
+          `  ${render.wrap(render.c.dim, `${prunable.length} prunable (${stale.length} stale, ${invalid.length} invalid, ${orphanSeeds.length} orphan instance seed(s)), ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored`)}`,
         );
         if (prunable.length > 0) {
           console.log(`  ${render.wrap(render.c.dim, "Run with --apply to move prunable keys to")} ${join(keysDir, PRUNED_DIR_NAME, pruneDateStamp())}`);

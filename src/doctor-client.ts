@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
+import type { SeedOwnerRead } from "./keystore.js";
 import {
   ALL_CLIENTS,
   clientConfigPath,
@@ -2184,7 +2185,7 @@ export function resolveCollisionSafeName(existingNames: Iterable<string>, filena
   return `${filename}.${n}`;
 }
 
-export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan-candidate" | "unidentified" | "ignored";
+export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan-candidate" | "orphan-seed" | "unidentified" | "ignored";
 
 /** An unparseable keystore blob may be a live federation key (flair#1026). */
 const UNIDENTIFIED_SEED_REASON =
@@ -2262,6 +2263,94 @@ export function classifyNodeKeySeed(
   return {
     class: "orphan-candidate",
     reason: `id '${id}' is absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched); ownership cannot be proven; not removed (see #2200)`,
+  };
+}
+
+/** What prune knows about a seed's ownership when deciding whether it may move. */
+export interface SeedOwnerProof {
+  /** The seed's ownership sidecar, as read (absent / unreadable / malformed / ok). */
+  owner: SeedOwnerRead;
+  /** Absolute path of the seed file. */
+  keyPath: string;
+  /** Absolute path of the ownership sidecar. */
+  ownerPath: string;
+  /** The data directory of the TARGETED instance, or null when it could not be established. */
+  targetDataDir: string | null;
+}
+
+/**
+ * Refine a node-shaped seed's classification with its ownership sidecar
+ * (flair#2200). The seed is removable ONLY when its sidecar proves it was minted
+ * for the TARGETED instance AND the targeted instance's Instance and Agent tables
+ * do not reference it. Every other outcome — no sidecar, an unreadable or
+ * malformed one, one naming another instance (or another seed), an unreadable
+ * reference read, a registered Agent id — is reported and left in place.
+ *
+ * The data directory IS the instance identity (see cli.ts's port resolution), so
+ * a sidecar that "names the targeted instance" is one whose data directory equals
+ * the targeted instance's. The sidecar's recorded Instance id equals the seed's
+ * own id by construction; it is named in the reason, and the seed's file id is
+ * what the reference check matches. Pure — the caller supplies the parsed
+ * sidecar; no filesystem access happens here.
+ */
+export function classifyOwnedNodeSeed(
+  id: string,
+  instanceIds: readonly string[] | null,
+  baseUrl: string,
+  agentIds: readonly string[] | null,
+  proof: SeedOwnerProof,
+  unreadableReason?: string,
+): KeyPruneDecision {
+  const decision = classifyNodeKeySeed(id, instanceIds, baseUrl, agentIds, unreadableReason);
+  if (decision.class !== "orphan-candidate") return decision;
+
+  const { owner, keyPath, ownerPath, targetDataDir } = proof;
+  const base = `id '${id}' is absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched)`;
+  const leftInPlace = `${keyPath} is left in place`;
+
+  if (owner.state === "absent") {
+    return {
+      class: "orphan-candidate",
+      reason: `${base}; no owner record at ${ownerPath} — ownership cannot be proven; ${leftInPlace}. `
+        + `Remedy: if no instance uses it, remove the seed manually.`,
+    };
+  }
+  if (owner.state === "unreadable") {
+    return {
+      class: "orphan-candidate",
+      reason: `${base}; the owner record at ${ownerPath} could not be read (${owner.reason}) — ownership cannot be proven; ${leftInPlace}. `
+        + `Remedy: repair or remove the owner record, then re-run.`,
+    };
+  }
+  if (owner.state === "malformed") {
+    return {
+      class: "orphan-candidate",
+      reason: `${base}; the owner record at ${ownerPath} is malformed (${owner.reason}) — ownership cannot be proven; ${leftInPlace}. `
+        + `Remedy: repair or remove the owner record, then re-run.`,
+    };
+  }
+  if (owner.instanceId !== id) {
+    return {
+      class: "orphan-candidate",
+      reason: `${base}; the owner record at ${ownerPath} names instance '${owner.instanceId}', not the seed '${id}' — the record does not belong to this seed; ${leftInPlace}.`,
+    };
+  }
+  if (targetDataDir === null) {
+    return {
+      class: "orphan-candidate",
+      reason: `${base}; the owner record at ${ownerPath} names instance '${owner.instanceId}' (data directory ${owner.dataDir}), but the targeted instance's data directory could not be established, so ownership cannot be proven; ${leftInPlace}. `
+        + `Remedy: pass --data-dir <the targeted instance's data directory>.`,
+    };
+  }
+  if (owner.dataDir !== targetDataDir) {
+    return {
+      class: "orphan-candidate",
+      reason: `${base}; the owner record at ${ownerPath} names instance '${owner.instanceId}' (data directory ${owner.dataDir}), not the targeted instance (data directory ${targetDataDir}); ${leftInPlace}.`,
+    };
+  }
+  return {
+    class: "orphan-seed",
+    reason: `${base}; the owner record at ${ownerPath} names the targeted instance (data directory ${targetDataDir}), and its Instance table does not reference '${id}'; moved to the prune archive with --apply.`,
   };
 }
 

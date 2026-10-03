@@ -146,12 +146,26 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 
 ## Key cleanup
 
-`flair keys prune` reports node-shaped files (`flair_<hex8>.key` without `.pub`)
-as orphan candidates when absent from the ops Instance and Agent tables, after
-the sole ops Instance id matches the HTTP target's `HealthDetail.federation.instance.id`.
-An unavailable identity match or unreadable rows leave files unidentified.
-`--apply` leaves all node-shaped seeds in place: ownership cannot be proven from one target's tables;
-removal needs per-file ownership proof ([#2200](https://github.com/tpsdev-ai/flair/issues/2200)).
+`flair keys prune` classifies every `.key` file in the key directory and, with
+`--apply`, MOVES prunable keys into `<keysDir>/.pruned/<date>/` — it never
+deletes.
+
+- Agent signing keys whose seed parses are prunable when the agent is not
+  registered on the targeted instance.
+- Node-shaped instance seeds (`flair_<hex8>.key` without a `.pub`) are removed
+  only with proof of ownership. A minted instance seed records its instance id
+  and data directory in a sidecar (`<seed>.key.owner.json`). `--apply` moves a
+  seed only when the sidecar names the targeted instance's data directory and
+  the targeted instance's `Instance` table does not reference the seed. A seed
+  with no sidecar (every seed minted before this feature), an unreadable or
+  malformed sidecar, or one naming another instance is listed with the reason
+  and left in place.
+
+The targeted instance's data directory is named by `--data-dir <dir>`. Without
+it no owner record can be proven, so instance seeds stay in the report; prune
+fails safe. Prune also fails safe when the directory's recorded port does not
+match the target. An unavailable identity match or unreadable rows leave files
+unidentified.
 
 ## What about a `flair secret` CLI?
 
