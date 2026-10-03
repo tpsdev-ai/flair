@@ -227,7 +227,7 @@ export interface RunSkillVersionWriteArgs {
    * Build the write plan from the live head resolved under the lock. Returning
    * a Response refuses the write (and rolls back: nothing is written).
    */
-  plan: (head: Record<string, any> | null, shared: any) => SkillWritePlan | Response | Promise<SkillWritePlan | Response>;
+  plan: (head: Record<string, any> | null, shared: any) => SkillWritePlan | Response | null | Promise<SkillWritePlan | Response | null>;
   /** Resolve the live head under the lock. */
   head: (shared: any) => Promise<Record<string, any> | null>;
   hooks: SkillWriteHooks;
@@ -273,6 +273,7 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       prepare: async (shared: any) => {
         const head = await args.head(shared);
         const built = await args.plan(head, shared);
+        if (built === null) return null;
         if (built instanceof Response) return built;
         plan = built;
         const target = built.kind === "delete" ? built.predecessor : built.successor;
@@ -291,6 +292,7 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       },
     },
     async (shared: any) => {
+      if (plan === null) return okResponse();
       const writePlan = plan!;
       if (writePlan.kind === "delete") {
         await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);

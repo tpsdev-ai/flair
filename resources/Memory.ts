@@ -773,9 +773,10 @@ async function writeSkillCreateOrUpdate(
     /** A reserved seed id: version the write IN PLACE (same physical id). */
     inPlaceId?: string | null;
     reembedding?: boolean;
+    requestedPayload?: Record<string, any>;
   },
 ): Promise<any> {
-  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding } = args;
+  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding, requestedPayload } = args;
   const now = new Date().toISOString();
   const explicitSuccessor = !!explicitPredecessor && (!storedRow || content.supersedes !== storedRow.supersedes);
   let successorId = inPlaceId
@@ -786,6 +787,7 @@ async function writeSkillCreateOrUpdate(
   const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
   const addressedId = storedRow ? String(storedRow.id) : explicitPredecessor ? String(explicitPredecessor.id) : null;
   const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
+  let unchangedHead: Record<string, any> | null = null;
   const outcome = await runSkillVersionWrite({
     ctx,
     subjectId,
@@ -793,9 +795,14 @@ async function writeSkillCreateOrUpdate(
     head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
     plan: async (head, shared) => {
       const stale = await validateSkillSnapshots(storedRow, explicitPredecessor, content.id ?? null, shared);
-      if (stale) return stale;
       const denied = await authorizeSkillOwners(ctx, auth, [storedRow, explicitPredecessor, head ?? content], shared);
       if (denied) return denied;
+      if (inPlaceId && method === "put" && !reembedding && !explicitPredecessor && !pointer?.row &&
+        head?.id === inPlaceId && requestedPayload && skillPayloadUnchanged(requestedPayload, head)) {
+        unchangedHead = head;
+        return null;
+      }
+      if (stale) return stale;
       if ((storedRow || explicitPredecessor) && !head) return skillWriteConflict("skill_head_missing");
       if (explicitSuccessor && head?.id !== explicitPredecessor?.id) return skillWriteConflict("skill_predecessor_stale");
       if (storedRow && head?.id !== storedRow.id) return skillWriteConflict("skill_target_stale");
@@ -846,7 +853,7 @@ async function writeSkillCreateOrUpdate(
     noteMemoryUpsert(captured.row);
     noteWriteStamp(captured.row.embeddingModel);
   }
-  return { id: successorId, written: true, visibility: skillVersionVisibility(captured.row) };
+  return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
 }
 
 /** Close the live head and delete its pointer in the version transaction. */
@@ -1669,6 +1676,7 @@ export class Memory extends (databases as any).flair.Memory {
     const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedExisting.denial) return resolvedExisting.denial;
     const preExisting = resolvedExisting.row;
+    const requestedPayload = { ...content };
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
@@ -1951,7 +1959,7 @@ export class Memory extends (databases as any).flair.Memory {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
       return await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: preExisting, explicitPredecessor: preparedSkill.predecessor, method: "put", pointer,
-        reembedding,
+        reembedding, requestedPayload,
         inPlaceId: reservedId != null ? String(reservedId) : null,
       });
     }

@@ -27,6 +27,8 @@ const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { createEmbeddingStampMigration } = await import("../../resources/migrations/embedding-stamp.ts");
 const { resolveSkillManifest, resolvableSkillRows, SKILL_ROW_SELECT } = await import("../../resources/skill-manifest.ts");
 const table = databasesMock.flair.Memory;
+const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
+const { currentSeed, runSkillSeed, skillSeedRestIo } = await import("../../src/lib/skill-seed.ts");
 
 const operator = { request: { tpsAgent: "admin", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic ok" }) } };
 const adminAgent = { request: { tpsAgent: "admin", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "TPS-Ed25519 a:1:n:s" }) } };
@@ -57,6 +59,114 @@ async function manifest(agentId = "reader", own = false) {
 beforeEach(() => {
   resetHarnessState(); versions.clear(); locks.clear(); failAppend = false;
   _resetLocalInstanceIdCacheForTests();
+});
+
+test("concurrent identical reserved seed PUTs succeed without a second version", async () => {
+  const body = { ...skill(SEED_SKILL_ROW_ID, "admin") };
+  delete body.createdAt;
+  delete body.instanceToken;
+  delete body.embedding;
+  delete body.embeddingModel;
+  const results = await Promise.all([
+    writer(body.id, { ...operator, request: { ...operator.request } }).put({ ...body }),
+    writer(body.id, { ...operator, request: { ...operator.request } }).put({ ...body }),
+  ]);
+  for (const result of results) expect(result.id).toBe(body.id);
+  expect(results.map((r) => r.written).sort()).toEqual([false, true]);
+  expect(harnessState.memoryStore.size).toBe(1);
+  expect(harnessState.memoryStore.get(body.id)).toMatchObject(body);
+  expect(versions.size).toBe(1);
+  expect(versions.get(`skill:${body.id}:1`)?.kind).toBe("create");
+});
+
+test("concurrent different reserved seed PUTs refuse the stale write", async () => {
+  const body = { ...skill(SEED_SKILL_ROW_ID, "admin") };
+  const results = await Promise.all([
+    writer(body.id, { ...operator, request: { ...operator.request } }).put({ ...body }),
+    writer(body.id, { ...operator, request: { ...operator.request } }).put({ ...body, content: "different" }),
+  ]);
+  expect(results[0].id).toBe(body.id);
+  expect(results[1].status).toBe(409);
+  expect(await results[1].json()).toEqual({ error: "skill_target_changed" });
+  expect(harnessState.memoryStore.size).toBe(1);
+  expect(harnessState.memoryStore.get(body.id)?.content).toBe(body.content);
+  expect(versions.size).toBe(1);
+});
+
+test("concurrent seed helpers return ok with one row, assignment and version", async () => {
+  const assignments = new Map<string, any>();
+  const fetchImpl = (async (input: any, init: any = {}) => {
+    const [, tableName, encodedId] = new URL(String(input)).pathname.split("/");
+    const id = decodeURIComponent(encodedId);
+    const rows = tableName === "Memory" ? harnessState.memoryStore : assignments;
+    if (init.method === "PUT") {
+      const body = JSON.parse(init.body);
+      if (tableName === "Memory") {
+        const result = await writer(id, { ...operator, request: { ...operator.request } }).put(body);
+        return result instanceof Response ? result : Response.json(result);
+      }
+      rows.set(id, { ...body, id, writer: "admin", sourceClass: "operator" });
+      return Response.json({ id });
+    }
+    return rows.has(id) ? Response.json(rows.get(id)) : new Response(null, { status: 404 });
+  }) as typeof fetch;
+  const io = () => skillSeedRestIo({ baseUrl: "http://seed.invalid", user: "admin", pass: "test", fetchImpl });
+  const results = await Promise.all([runSkillSeed(io(), currentSeed()), runSkillSeed(io(), currentSeed())]);
+  expect(results.map((r) => r.kind), JSON.stringify(results)).toEqual(["ok", "ok"]);
+  expect(harnessState.memoryStore.size).toBe(1);
+  expect(assignments.size).toBe(1);
+  expect(versions.size).toBe(1);
+  expect(harnessState.memoryStore.get(SEED_SKILL_ROW_ID)?.content).toBe(currentSeed().content);
+});
+
+test("concurrent identical seed upgrades append only one update", async () => {
+  const created = await writer(SEED_SKILL_ROW_ID).put(skill(SEED_SKILL_ROW_ID, "admin"));
+  expect(created.written).toBe(true);
+  const body = { id: SEED_SKILL_ROW_ID, agentId: "admin", content: "upgraded text" };
+  const results = await Promise.all([
+    writer(body.id, { ...operator, request: { ...operator.request } }).put({ ...body }),
+    writer(body.id, { ...operator, request: { ...operator.request } }).put({ ...body }),
+  ]);
+  expect(results.map((r) => r.written).sort()).toEqual([false, true]);
+  expect(harnessState.memoryStore.size).toBe(1);
+  expect(harnessState.memoryStore.get(body.id)?.content).toBe(body.content);
+  expect([...versions.values()].map((v) => v.kind)).toEqual(["create", "update"]);
+});
+
+test.each(["content", "trigger", "visibility", "metadata", "createdAt"])("a concurrent different seed %s refuses", async (field) => {
+  const body = skill(SEED_SKILL_ROW_ID, "admin");
+  const values: Record<string, string> = { content: "different", trigger: "different", visibility: "private", metadata: '{"name":"different"}', createdAt: "2021-01-01T00:00:00.000Z" };
+  const results = await Promise.all([
+    writer(body.id, { ...operator, request: { ...operator.request } }).put({ ...body }),
+    writer(body.id, { ...operator, request: { ...operator.request } }).put({ ...body, [field]: values[field] }),
+  ]);
+  const winner = results.findIndex((r) => !(r instanceof Response));
+  expect(winner).not.toBe(-1);
+  expect(results[winner].id).toBe(body.id);
+  expect(results[1 - winner].status).toBe(409);
+  expect(harnessState.memoryStore.size).toBe(1);
+  expect(harnessState.memoryStore.get(body.id)?.[field]).toBe(winner === 0 ? body[field] : values[field]);
+  expect(versions.size).toBe(1);
+});
+
+test("an admin agent cannot no-op an identical reserved seed PUT", async () => {
+  const body = skill(SEED_SKILL_ROW_ID, "admin");
+  await writer(body.id).put({ ...body });
+  const before = harnessState.memoryStore.get(body.id);
+  const result = await writer(body.id, adminAgent).put({ ...body });
+  expect(result.status).toBe(403);
+  expect(harnessState.memoryStore.get(body.id)).toEqual(before);
+  expect(versions.size).toBe(1);
+});
+
+test("an identical reserved PUT refuses ambiguous live heads", async () => {
+  const body = skill(SEED_SKILL_ROW_ID, "admin");
+  await writer(body.id).put({ ...body });
+  harnessState.memoryStore.set("other", { ...body, id: "other", skillSubjectId: body.id });
+  const before = new Map(harnessState.memoryStore);
+  expect((await writer(body.id).put({ ...body })).status).toBe(500);
+  expect(harnessState.memoryStore).toEqual(before);
+  expect(versions.size).toBe(1);
 });
 
 test("a PUT create preserves the supplied physical id and org assignment", async () => {
