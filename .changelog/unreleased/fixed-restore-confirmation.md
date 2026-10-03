@@ -1,0 +1,1 @@
+- **Restore fails on write errors or unconfirmed archived IDs.** Closes #2215.

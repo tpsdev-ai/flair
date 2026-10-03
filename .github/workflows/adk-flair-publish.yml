@@ -1,66 +1,47 @@
 name: adk-flair — PyPI publish (OIDC trusted publishing)
 
-# Tokenless PyPI publish for the adk-flair Python package. Triggered by pushing
-# an adk-flair-v* tag. Authenticates to PyPI via OIDC trusted publishing — no
-# PyPI token lives anywhere. The tag push triggers this workflow; a maintainer
-# cuts the tag after the release PR merges to main.
+# Publish adk-flair to PyPI via OIDC trusted publishing.
+# One v* tag starts npm staging and this PyPI workflow after the release PR merges.
+# adk-flair-v* remains available for Python-only releases.
 #
-# Cut a release:
-#   git tag adk-flair-v0.1.0 && git push origin adk-flair-v0.1.0
+# Cut a release — checked, tag-absent fallback (docs/releasing.md):
+#   git ls-remote --tags origin v0.59.0  # must print nothing
+#   git tag v0.59.0 && git push origin v0.59.0
 #
 # One-time PyPI setup (pypi.org): add a Trusted Publisher pointing at
 #   owner=tpsdev-ai, repo=flair, workflow=adk-flair-publish.yml
 #   environment=adk-flair-publish
-# The `adk-flair-publish` GitHub environment must permit `adk-flair-v*` tag
-# deploys.
+# Admin: add v* to the `adk-flair-publish` environment's deployment tag policy;
+# keep adk-flair-v* and its required reviewer.
 
 on:
   push:
     tags:
+      - "v*"
       - "adk-flair-v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Fallback only: version to publish (an adk-flair-v* tag must already exist on a merged commit)"
+        description: "Fallback: version to publish from the selected ref"
         required: true
         type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: adk-flair-publish
-  cancel-in-progress: false
-
 jobs:
   publish:
     name: Build and publish adk-flair to PyPI
+    needs: resolve
     runs-on: ubuntu-latest
     environment: adk-flair-publish
+    concurrency:
+      group: adk-flair-publish-${{ needs.resolve.outputs.version }}
+      cancel-in-progress: false
     permissions:
       id-token: write   # mint the short-lived OIDC token for PyPI trusted publishing
       contents: read    # checkout
     steps:
-      - name: Resolve version
-        id: ver
-        env:
-          EVENT: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            VERSION="$INPUT_VERSION"
-          else
-            VERSION="${REF_NAME#adk-flair-v}"
-          fi
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
-            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.1.0 or 0.1.0-rc.1)."
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION"
-
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           fetch-depth: 0
@@ -77,13 +58,13 @@ jobs:
 
       - name: Verify pyproject.toml version matches the tag
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           cd packages/adk-flair
           PV="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
           if [ "$PV" != "$VERSION" ]; then
-            echo "::error::pyproject.toml version is $PV, expected $VERSION (tag adk-flair-v$VERSION)."
+            echo "::error::pyproject.toml version is $PV, expected $VERSION."
             exit 1
           fi
           echo "  ok adk-flair @ $PV"
@@ -104,10 +85,47 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: packages/adk-flair/dist
+          skip-existing: true
+
+      - name: Verify wheel and sdist on PyPI
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          RELEASE_JSON="$RUNNER_TEMP/adk-flair-pypi.json"
+          if ! curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+            --output "$RELEASE_JSON" "https://pypi.org/pypi/adk-flair/$VERSION/json"; then
+            echo "::error::PyPI lookup failed for adk-flair $VERSION."
+            exit 1
+          fi
+          python3 - "$RELEASE_JSON" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          dist = Path("packages/adk-flair/dist")
+          wheels = list(dist.glob("*.whl"))
+          sdists = list(dist.glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              sys.exit("::error::Expected one locally built wheel and one sdist.")
+          try:
+              release = json.loads(Path(sys.argv[1]).read_text())
+              published = {file["filename"]: file["digests"]["sha256"] for file in release["urls"]}
+          except (OSError, ValueError, KeyError, TypeError) as error:
+              sys.exit(f"::error::Invalid PyPI file list: {error}")
+          for artifact in wheels + sdists:
+              if artifact.name not in published:
+                  sys.exit(f"::error::Missing PyPI file: {artifact.name}")
+              digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+              if published[artifact.name] != digest:
+                  sys.exit(f"::error::SHA256 mismatch for PyPI file: {artifact.name}")
+              print(f"Verified {artifact.name}: {digest}")
+          PY
 
       - name: Summary
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           {
             echo "### 🐍 adk-flair v$VERSION published to PyPI"
@@ -115,3 +133,32 @@ jobs:
             echo "Package: [adk-flair](https://pypi.org/project/adk-flair/$VERSION/)"
             echo "Install: \`pip install adk-flair==$VERSION\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            case "$REF_NAME" in
+              adk-flair-v*) VERSION="${REF_NAME#adk-flair-v}" ;;
+              v*) VERSION="${REF_NAME#v}" ;;
+              *) echo "::error::Unexpected release tag '$REF_NAME'."; exit 1 ;;
+            esac
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.1.0 or 0.1.0-rc.1)."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
