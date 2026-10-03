@@ -30,6 +30,9 @@ async function runBackup(overrides: Record<string, Reply> = {}, options: {
     }
   }
   const script = join(home, "run.ts");
+  const opsAgentCount = (options.empty ? [] : agents).length;
+  const memByAgent = Object.fromEntries(agents.map(a => [a.id, memories.filter(m => m.agentId === a.id).map(m => ({ id: m.id, agentId: m.agentId }))]));
+  const soulByAgent = Object.fromEntries(agents.map(a => [a.id, souls.filter(s => s.agentId === a.id).map(s => ({ id: s.id, agentId: s.agentId }))]));
   writeFileSync(script, `
 import { mock } from "bun:test";
 import * as fs from "node:fs";
@@ -63,11 +66,27 @@ mock.module("node:fs", () => ({ ...fs,
   },
 }));
 const fixture = ${JSON.stringify(fixture)};
+const opsAgents = ${JSON.stringify(fixtureAgents)};
 const requests = [];
+const opsAgentCount = ${JSON.stringify(opsAgentCount)};
+const memByAgent = ${JSON.stringify(memByAgent)};
+const soulByAgent = ${JSON.stringify(soulByAgent)};
 globalThis.fetch = async (url, init) => {
   if (init.headers.Authorization !== "Basic YWRtaW46dGVzdC1wYXNz") throw new Error("incorrect auth");
   if (!init.signal) throw new Error("missing timeout signal");
   const u = new URL(url);
+  if (u.origin === "http://ops.invalid") {
+    const body = JSON.parse(String(init.body));
+    if (body.operation === "describe_table") {
+      if (body.exact_count !== true) throw new Error("exact_count must be true");
+      const count = body.table === "Agent" ? opsAgentCount : opsAgents.length ? Object.values(body.table === "Memory" ? memByAgent : soulByAgent).flat().length : 0;
+      return Response.json({ record_count: count });
+    }
+    if (body.operation === "search_by_value") {
+      return Response.json(body.table === "Agent" ? opsAgents : opsAgents.length ? Object.values(body.table === "Memory" ? memByAgent : soulByAgent).flat() : []);
+    }
+    throw new Error("unexpected ops operation " + JSON.stringify(body));
+  }
   if (u.origin !== "http://backup.invalid") throw new Error("unexpected target");
   const path = u.pathname + u.search;
   requests.push(path);
@@ -79,10 +98,14 @@ globalThis.fetch = async (url, init) => {
 };
 const { Command } = await import(${JSON.stringify(commanderPath)});
 const { bindCli, register } = await import(${JSON.stringify(modulePath)});
+const { resolveOpsTarget } = await import(${JSON.stringify(join(import.meta.dirname, "../../src/cli.ts"))});
 bindCli({
   addSharedCredentialOptions(command) { return command.option("--admin-pass <pass>").option("--admin-user <user>"); },
   applyAdminPassFile() {},
   resolveHttpPort() { throw new Error("unexpected local port resolution"); },
+  resolveOpsPort() { throw new Error("unexpected local ops port resolution"); },
+  resolveOpsTarget,
+  resolveOpsUrlFromTarget() { return "http://ops.invalid"; },
 });
 const program = new Command();
 register(program);
@@ -155,7 +178,7 @@ describe("backup fails closed (flair#2214)", () => {
       const row = table === "Agent" ? agents[0] : (table === "Memory" ? memories[4] : souls[2]);
       const result = await runBackup({ [path]: { body: [row, row] } });
       expectFailure(result, table);
-      expect(result.stderr).toContain(row.id);
+      expect(result.stderr).toContain("row 1: duplicate id");
       expect(result.stderr).toContain("duplicate");
     });
   }
@@ -165,7 +188,8 @@ describe("backup fails closed (flair#2214)", () => {
       test(`${table} rejects missing or mismatched owner ${agentId}`, async () => {
         const result = await runBackup({ [`/${table}/?agentId=kern`]: { body: [{ id: "bad-owner", agentId }] } });
         expectFailure(result, "kern");
-        expect(result.stderr).toContain("bad-owner");
+        expect(result.stderr).not.toContain("bad-owner");
+        expect(result.stderr).toContain("row 0: agentId");
         expect(result.stderr).toContain("agentId");
       });
     }
@@ -173,7 +197,8 @@ describe("backup fails closed (flair#2214)", () => {
       const firstId = table === "Memory" ? memories[0].id : souls[0].id;
       const result = await runBackup({ [`/${table}/?agentId=kern`]: { body: [{ id: firstId, agentId: "kern" }] } });
       expectFailure(result, "kern");
-      expect(result.stderr).toContain(firstId);
+      expect(result.stderr).not.toContain(firstId);
+      expect(result.stderr).toContain("row 0: duplicate id");
       expect(result.stderr).toContain("duplicate");
     });
   }

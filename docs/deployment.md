@@ -234,6 +234,8 @@ flair restore ~/flair-backup-20260405.json
 
 Always backup before upgrades.
 
+Concurrent deletes can cause `flair backup` to refuse publication on a count mismatch; pause writers and maintenance, then retry.
+
 ---
 
 ## Uninstall
