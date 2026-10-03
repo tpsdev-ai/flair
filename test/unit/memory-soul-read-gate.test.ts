@@ -35,6 +35,21 @@ let soulStore: Map<string, any>;
 // federation-edge-hardening slice 1: resources/instance-identity.ts's
 // localInstanceId() reads this via databases.flair.Instance.search().
 let instanceRow: any = null;
+let versionStore: Map<string, any>;
+const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
+const InstructionVersionBase = {
+  primaryStore: versionPrimaryStore,
+  async *search(query: any) {
+    const conditions: any[] = query?.conditions ?? [];
+    const rows = [...versionStore.values()].filter((row) => conditions.every((c) => row[c.attribute] === c.value));
+    rows.sort((a, b) => Number(b.version) - Number(a.version));
+    for (const row of rows.slice(0, query?.limit ?? rows.length)) yield row;
+  },
+  async create(record: any) {
+    if (versionStore.has(record.id)) throw new Error("Record already exists");
+    versionStore.set(record.id, { ...record });
+  },
+};
 
 class BaseSoul {
   async post(content: any) {
@@ -93,6 +108,7 @@ const databasesMock = {
         return gen();
       },
     },
+    InstructionVersion: InstructionVersionBase,
   },
 };
 
@@ -111,8 +127,24 @@ const anonCtx = () => ({ tpsAnonymous: true });
 
 beforeEach(() => {
   soulStore = new Map();
+  versionStore = new Map();
   instanceRow = null;
   _resetLocalInstanceIdCacheForTests();
+  // The append helper runs the row write and the version append in one owned
+  // transaction (resources/request-transaction.ts); this mock owns/commits one.
+  (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+    const context = ctx && typeof ctx === "object" ? ctx : {};
+    if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
+    const txn: any = { open: 1, saveCommits: false };
+    context.transaction = txn;
+    let result: any;
+    try { result = cb(txn); } catch (e) { txn.open = 0; throw e; }
+    if (result && typeof result.then === "function") {
+      return result.then((v: any) => { txn.open = 0; return v; }, (e: any) => { txn.open = 0; throw e; });
+    }
+    txn.open = 0;
+    return result;
+  };
 });
 
 // ─── Soul.allowRead — anonymous denied, any verified agent allowed (no per-agent scoping) ──

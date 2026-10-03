@@ -55,7 +55,7 @@ add("Federation", ["writer:table.put#1"], "LATCH",
 // ── GATED: Memory.ts's own post()/put() write path (calls noteWriteStamp) ──
 // The writes go through the base TABLE (`databases.flair.Memory`) with the
 // shared request context so a direct/internal caller is atomic (A1'' 0a).
-add("Memory", ["writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
+add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — noteWriteStamp (slice 1); current-space re-embed.");
 

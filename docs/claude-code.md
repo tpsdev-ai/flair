@@ -74,9 +74,11 @@ Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`
 
     ### Durability levels
 
-    - persistent — survives indefinitely. Use for lessons, decisions, preferences.
-    - standard — default. Good for session context, observations.
-    - ephemeral — auto-expires after 24h. Use for temporary notes.
+    - permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+    - persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+    - standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+    - ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+    - No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
 
 > **End of CLAUDE.md snippet.**
 
