@@ -1,0 +1,353 @@
+/**
+ * Capture core + spool (flair#2068) — the pure planning, the local spool and
+ * the background flush through Flair's normal write path.
+ *
+ * These modules did not exist on main, so this file is red there by
+ * construction. A fresh temp dir stands in for HOME and FLAIR_CAPTURE_DIR is
+ * pinned inside it on every test; the real ~/.flair is never touched.
+ */
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  CAPTURE_BOUND_CHARS,
+  buildCaptureMemoryRow,
+  captureRecordId,
+  extractDecision,
+  planPostToolUse,
+  planPostToolUseFailure,
+  planStop,
+  type PendingError,
+} from "../src/capture.ts";
+import {
+  appendRecord,
+  flushStampPath,
+  lockPath,
+  pendingPath,
+  readSpool,
+  resolveCaptureDir,
+  runCapture,
+  runCaptureFlush,
+  spoolPath,
+  CAPTURE_SPOOL_MAX_RECORDS,
+  type CaptureClient,
+} from "../src/capture-spool.ts";
+
+let home: string;
+let dir: string;
+
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "flair-capture-home-"));
+  dir = join(home, ".flair", "capture");
+});
+afterEach(() => {
+  rmSync(home, { recursive: true, force: true });
+});
+
+const SECRET = `ghp_${"a".repeat(24)}`;
+const BEARER = "Authorization: Bearer abcdefghijklmnopqrstuvwx123";
+const env = () => ({ FLAIR_AGENT_ID: "agent-a", FLAIR_CAPTURE_DIR: dir });
+
+// Payload shapes as Claude Code 2.1.287 builds them: a failed call arrives as
+// PostToolUseFailure with `error`, a successful one as PostToolUse.
+function failedBash(command: string, error = "Exit code 1\nError: boom", extra: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    session_id: "s1",
+    transcript_path: "/home/u/.claude/projects/p/s1.jsonl",
+    cwd: "/repo",
+    hook_event_name: "PostToolUseFailure",
+    tool_name: "Bash",
+    tool_input: { command, description: "run" },
+    tool_use_id: "toolu_01",
+    error,
+    is_interrupt: false,
+    duration_ms: 12,
+    ...extra,
+  });
+}
+function okBash(command: string, stderr = "") {
+  return JSON.stringify({
+    session_id: "s1",
+    transcript_path: "/home/u/.claude/projects/p/s1.jsonl",
+    cwd: "/repo",
+    hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+    tool_input: { command, description: "run" },
+    tool_use_id: "toolu_02",
+    tool_response: { stdout: "ok", stderr, interrupted: false, isImage: false },
+    duration_ms: 9,
+  });
+}
+function okWrite(filePath: string) {
+  return JSON.stringify({
+    session_id: "s1",
+    cwd: "/repo",
+    hook_event_name: "PostToolUse",
+    tool_name: "Write",
+    tool_input: { file_path: filePath, content: "fixed" },
+    tool_use_id: "toolu_03",
+    tool_response: { type: "update", filePath, content: "fixed" },
+  });
+}
+function recordingClient(rows: unknown[]): CaptureClient {
+  return { request: async (_method, _path, body) => { rows.push(body); return {}; } };
+}
+function stop(text: string) {
+  return JSON.stringify({ hook_event_name: "Stop", session_id: "s1", last_assistant_message: text });
+}
+
+describe("capture planning", () => {
+  test("a decision sentence is extracted; a turn with none produces nothing", () => {
+    expect(extractDecision("I refactored the parser and ran the tests.")).toBeNull();
+    expect(planStop(JSON.parse(stop("I refactored the parser and ran the tests.")) as never, new Date().toISOString())).toBeNull();
+    const decision = extractDecision("Decision: we will use host-a instead of host-b for the cache.");
+    expect(decision).toContain("host-a instead of host-b");
+  });
+
+  test("a failed command records a pending error, and its later fix yields one candidate", () => {
+    const t = new Date().toISOString();
+    const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo")) as never, t);
+    if (!failed) throw new Error("expected a pending error");
+    const pending: PendingError[] = [failed];
+    const fixed = planPostToolUse(JSON.parse(okBash("bun test foo")) as never, pending, t);
+    expect(fixed.action).toBe("candidate");
+    if (fixed.action !== "candidate") throw new Error("expected a candidate");
+    expect(fixed.candidate.kind).toBe("error-fix");
+    expect(fixed.candidate.content).toContain("Failed: bun test foo");
+    expect(fixed.candidate.content).toContain("boom");
+    expect(fixed.resolved).toBe(0);
+  });
+
+  test("an interrupted call, a non-Bash failure and an empty error are not pending errors", () => {
+    const t = new Date().toISOString();
+    expect(planPostToolUseFailure(JSON.parse(failedBash("bun test foo", "Interrupted by user", { is_interrupt: true })) as never, t)).toBeNull();
+    expect(planPostToolUseFailure({ ...JSON.parse(failedBash("x")), tool_name: "Write" } as never, t)).toBeNull();
+    expect(planPostToolUseFailure(JSON.parse(failedBash("bun test foo", "  ")) as never, t)).toBeNull();
+  });
+
+  test("a successful PostToolUse with stderr output is not a failure", () => {
+    expect(runCapture(okBash("git push origin main", "To github.com:o/r.git\n   abc..def  main -> main"), { env: env(), dir }).reason).toBe("not-capturable");
+    expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
+  });
+
+  test("an unrelated successful command does not pair with a pending error", () => {
+    const t = new Date().toISOString();
+    const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo")) as never, t);
+    if (!failed) throw new Error("expected a pending error");
+    const other = planPostToolUse(JSON.parse(okBash("git status")) as never, [failed], t);
+    expect(other.action).toBe("none");
+  });
+
+  test("the error excerpt keeps the bounded tail, where the cause usually is", () => {
+    const t = new Date().toISOString();
+    const long = `${"progress line\n".repeat(200)}fatal: the real cause`;
+    const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo", long)) as never, t);
+    if (!failed) throw new Error("expected a pending error");
+    expect(failed.error).toEndWith("fatal: the real cause");
+    expect(failed.error.startsWith("…")).toBe(true);
+    expect(failed.error.length).toBe(CAPTURE_BOUND_CHARS + 1);
+  });
+
+  test("a secret-shaped string is redacted before it is ever stored", () => {
+    const t = new Date().toISOString();
+    const failed = planPostToolUseFailure(JSON.parse(failedBash(`deploy --token ${SECRET}`)) as never, t);
+    if (!failed) throw new Error("expected a pending error");
+    expect(failed.command).not.toContain(SECRET);
+    expect(failed.command).toContain("[redacted]");
+  });
+});
+
+describe("capture redaction, end to end (pending file, spool file, flushed row)", () => {
+  async function flushRows(): Promise<string> {
+    const rows: unknown[] = [];
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => recordingClient(rows) });
+    expect(result.flushed).toBe(1);
+    return JSON.stringify(rows);
+  }
+
+  for (const [label, error] of [
+    ["a ghp_ token", `Exit code 1\nremote: invalid credentials for ${SECRET}`],
+    ["an Authorization: Bearer line", `Exit code 22\n> GET /api\n> ${BEARER}\n< HTTP/1.1 401`],
+  ] as const) {
+    test(`${label} in the failure error never reaches disk or Flair`, async () => {
+      const secret = label === "a ghp_ token" ? SECRET : "abcdefghijklmnopqrstuvwx123";
+      expect(runCapture(failedBash("curl api", error), { env: env(), dir }).reason).toBe("error-recorded");
+      const pending = readFileSync(pendingPath(dir, "agent-a"), "utf-8");
+      expect(pending).not.toContain(secret);
+      expect(pending).toContain("[redacted]");
+      expect(runCapture(okBash("curl api"), { env: env(), dir }).reason).toBe("appended");
+      const spool = readFileSync(spoolPath(dir, "agent-a"), "utf-8");
+      expect(spool).not.toContain(secret);
+      expect(spool).toContain("[redacted]");
+      const flushed = await flushRows();
+      expect(flushed).not.toContain(secret);
+      expect(flushed).toContain("[redacted]");
+    });
+  }
+
+  test("a secret in an Edit/Write file_path used as the fix never reaches disk or Flair", async () => {
+    const path = `/repo/${SECRET}/config.json`;
+    expect(runCapture(failedBash(`cat ${path}`, `cat: ${path}: No such file or directory`), { env: env(), dir }).reason).toBe("error-recorded");
+    const pending = readFileSync(pendingPath(dir, "agent-a"), "utf-8");
+    expect(runCapture(okWrite(path), { env: env(), dir }).reason).toBe("appended");
+    const spool = readFileSync(spoolPath(dir, "agent-a"), "utf-8");
+    expect(spool).toContain("Fixed by: /repo/[redacted]/config.json");
+    for (const text of [pending, spool, await flushRows()]) {
+      expect(text).not.toContain(SECRET);
+    }
+  });
+});
+
+describe("capture spool", () => {
+  test("one memory from an error-then-fix sequence, flushed once", async () => {
+    const kicked: string[] = [];
+    const deps = { env: env(), dir, kickFlush: () => kicked.push("x") };
+    expect(runCapture(failedBash("bun test foo"), deps).reason).toBe("error-recorded");
+    expect(runCapture(okBash("bun test foo"), deps).reason).toBe("appended");
+    expect(kicked.length).toBe(1);
+
+    const records = readSpool(dir, "agent-a");
+    expect(records.length).toBe(1);
+
+    const puts: string[] = [];
+    const client: CaptureClient = { request: async (method, path) => { puts.push(`${method} ${path}`); return {}; } };
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
+    expect(result.flushed).toBe(1);
+    expect(puts.length).toBe(1);
+    expect(puts[0]).toBe(`PUT /Memory/${captureRecordId(records[0]!.dedupKey)}`);
+    expect(readSpool(dir, "agent-a").length).toBe(0);
+  });
+
+  test("a turn that states a decision produces one memory; a turn with none produces nothing", () => {
+    expect(runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir }).reason).toBe("appended");
+    expect(runCapture(stop("I updated the README and fixed a typo."), { env: env(), dir }).reason).toBe("not-capturable");
+    expect(readSpool(dir, "agent-a").length).toBe(1);
+  });
+
+  test("capture is deduplicated: the same candidate is staged once", () => {
+    const deps = { env: env(), dir };
+    expect(runCapture(stop("Decision: prefer host-a for embeddings."), deps).reason).toBe("appended");
+    expect(runCapture(stop("Decision: prefer host-a for embeddings."), deps).reason).toBe("deduplicated");
+    expect(readSpool(dir, "agent-a").length).toBe(1);
+  });
+
+  test("the spool is bounded by record count", () => {
+    for (let i = 0; i < CAPTURE_SPOOL_MAX_RECORDS + 5; i++) {
+      appendRecord(dir, "agent-a", {
+        kind: "decision",
+        content: `decision number ${i}`,
+        dedupKey: `k${i}`,
+        provenance: { hook: "Stop", capturedAt: new Date().toISOString() },
+      });
+    }
+    expect(readSpool(dir, "agent-a").length).toBe(CAPTURE_SPOOL_MAX_RECORDS);
+  });
+
+  test("a Flair write failure leaves the record staged, bounded", async () => {
+    runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
+    const failing: CaptureClient = { request: async () => { throw new Error("Flair down"); } };
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => failing });
+    expect(result.flushed).toBe(0);
+    expect(result.remaining).toBe(1);
+    expect(readSpool(dir, "agent-a").length).toBe(1);
+  });
+
+  test("a record appended while the flush awaits Flair is kept, not overwritten", async () => {
+    runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
+    let appendedMidFlush = false;
+    const client: CaptureClient = {
+      request: async () => {
+        if (!appendedMidFlush) {
+          appendedMidFlush = true;
+          expect(runCapture(stop("Decision: we will use host-b for search."), { env: env(), dir }).reason).toBe("appended");
+        }
+        return {};
+      },
+    };
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
+    expect(result.flushed).toBe(1);
+    expect(result.remaining).toBe(1);
+    const left = readSpool(dir, "agent-a");
+    expect(left.length).toBe(1);
+    expect(left[0]!.content).toContain("host-b");
+  });
+
+  test("every spool and pending write waits for the per-agent lock", () => {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath(dir, "agent-a"), "held");
+    expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("refused");
+    expect(runCapture(failedBash("bun test foo"), { env: env(), dir }).reason).toBe("refused");
+    expect(existsSync(spoolPath(dir, "agent-a"))).toBe(false);
+    expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
+    // A lock left by a process that died holding it is broken.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockPath(dir, "agent-a"), old, old);
+    expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("appended");
+    expect(existsSync(lockPath(dir, "agent-a"))).toBe(false);
+  });
+
+  test("the flush's rewrite waits for the lock and leaves the spool intact without it", async () => {
+    runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
+    const client: CaptureClient = {
+      request: async () => {
+        writeFileSync(lockPath(dir, "agent-a"), "held");
+        return {};
+      },
+    };
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
+    expect(result.flushed).toBe(1);
+    expect(result.remaining).toBe(1);
+    expect(readSpool(dir, "agent-a").length).toBe(1);
+  });
+
+  test("a malformed payload and a missing agent id capture nothing", () => {
+    expect(runCapture("{not json", { env: env(), dir }).reason).toBe("malformed-input");
+    expect(runCapture(stop("Decision: one."), { env: { FLAIR_CAPTURE_DIR: dir }, dir }).reason).toBe("no-agent-id");
+    expect(existsSync(spoolPath(dir, "agent-a"))).toBe(false);
+  });
+
+  test("spool files are private and the agent id is required as a file id", () => {
+    runCapture(stop("Decision: prefer host-a."), { env: env(), dir });
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(spoolPath(dir, "agent-a")).mode & 0o777).toBe(0o600);
+    expect(runCapture(stop("Decision: prefer host-a."), { env: { FLAIR_AGENT_ID: "../evil", FLAIR_CAPTURE_DIR: dir }, dir }).reason).toBe("no-agent-id");
+    // The pending file is also 0600 once written.
+    runCapture(failedBash("bun test foo"), { env: env(), dir });
+    expect(statSync(pendingPath(dir, "agent-a")).mode & 0o777).toBe(0o600);
+  });
+
+  test("a redacted secret never reaches the spool", () => {
+    runCapture(stop(`Decision: rotate the token ${SECRET} now.`), { env: env(), dir });
+    const raw = readFileSync(spoolPath(dir, "agent-a"), "utf-8");
+    expect(raw).not.toContain(SECRET);
+    expect(raw).toContain("[redacted]");
+  });
+
+  test("the capture dir honours FLAIR_CAPTURE_DIR and defaults under $HOME", () => {
+    expect(resolveCaptureDir({ FLAIR_CAPTURE_DIR: "/tmp/x" })).toBe("/tmp/x");
+    expect(resolveCaptureDir({ HOME: home })).toBe(join(home, ".flair", "capture"));
+  });
+
+  test("the memory row is private, persistent and provenance-stamped", () => {
+    const row = buildCaptureMemoryRow(
+      { kind: "decision", content: "x", dedupKey: "abc", provenance: { hook: "Stop", capturedAt: "2026-10-01T00:00:00.000Z" } },
+      "agent-a",
+      new Date("2026-10-02T00:00:00.000Z"),
+    );
+    expect(row.id).toBe("cap-abc");
+    expect(row.visibility).toBe("private");
+    expect(row.durability).toBe("persistent");
+    expect(row.meta.source).toBe("claude-code-capture");
+    expect(row.createdAt).toBe("2026-10-02T00:00:00.000Z");
+  });
+
+  test("flush cooldown stamp is written per agent, privately", async () => {
+    const { claimFlushSlot } = await import("../src/capture-spool.ts");
+    expect(claimFlushSlot(dir, "agent-a", 1000, 500)).toBe(true);
+    expect(claimFlushSlot(dir, "agent-a", 1200, 500)).toBe(false);
+    expect(claimFlushSlot(dir, "agent-a", 1600, 500)).toBe(true);
+    expect(statSync(flushStampPath(dir, "agent-a")).mode & 0o777).toBe(0o600);
+  });
+});

@@ -10,7 +10,8 @@
     "flair-session-start": "dist/session-start-hook.js",
     "flair-continuity-capture": "dist/continuity-capture-hook.js",
     "flair-prompt-recall": "dist/prompt-recall-hook.js",
-    "flair-action-recall": "dist/action-recall-hook.js"
+    "flair-action-recall": "dist/action-recall-hook.js",
+    "flair-capture": "dist/capture-hook.js"
   },
   "files": [
     "dist/",
@@ -18,11 +19,11 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc --noCheck && node ../../scripts/write-action-recall-build-marker.mjs",
+    "build": "tsc --noCheck && node ../../scripts/write-hook-build-markers.mjs",
     "prebuild": "node ../../scripts/vendor-tool-descriptors.mjs packages/flair-mcp/src/tool-descriptors",
     "test": "bun test",
     "prepack": "npm run build",
-    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/mcp-shim.cjs','dist/index.js','dist/session-start-hook.js','dist/continuity-capture-hook.js','dist/prompt-recall-hook.js','dist/precompact-hook.js','dist/action-recall-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
+    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/mcp-shim.cjs','dist/index.js','dist/session-start-hook.js','dist/continuity-capture-hook.js','dist/prompt-recall-hook.js','dist/precompact-hook.js','dist/action-recall-hook.js','dist/capture-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
   },
   "publishConfig": {
     "access": "public"
