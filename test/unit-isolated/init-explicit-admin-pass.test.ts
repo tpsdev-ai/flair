@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -145,6 +146,51 @@ describe("admin credential persistence refuses unassessed stores", () => {
       expect(existsSync(join(home, ".flair", "admin-pass"))).toBe(false);
     });
   }
+
+  test("default-only columns refuse init without writing admin-pass", () => {
+    const home = tempDir("i-");
+    const dataDir = tempDir("d-");
+    mkdirSync(join(dataDir, "database", "system"), { recursive: true });
+    const result = runInit(home, dataDir, "inline", "linux", false, { columns: "['default']" });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toContain("MISSING_HDB_USER_COLUMN");
+    expect(result.stderr).toContain("Repair the system store");
+    expect(existsSync(join(home, ".flair", "admin-pass"))).toBe(false);
+  });
+
+  test("default-only system store throws and doctor counts an unassessed check", () => {
+    const home = tempDir("i-");
+    const dataDir = tempDir("d-");
+    mkdirSync(join(home, ".flair"));
+    symlinkSync(dataDir, join(home, ".flair", "data"));
+    const doctor = offlineDoctor(home, null);
+    const baseline = doctor();
+    const here = createRequire(import.meta.url);
+    const rocksPath = createRequire(here.resolve("harper")).resolve("@harperfast/rocksdb-js");
+    const { RocksDatabase } = here(rocksPath);
+    const systemDir = join(dataDir, "database", "system");
+    mkdirSync(systemDir, { recursive: true });
+    const db = RocksDatabase.open(systemDir);
+    try {
+      expect(db.columns).toEqual(["default"]);
+    } finally {
+      db.close();
+    }
+    expect(() => detectPersistedAdminUser(dataDir)).toThrow("MISSING_HDB_USER_COLUMN");
+    const observed: { status: number | null } = { status: null };
+    const output = doctor([], result => { observed.status = result.status; });
+    expect(output).toContain("not assessing the admin-pass desync");
+    expect(observed.status).toBe(1);
+    const issues = (text: string) => Number(/(\d+) issues? found/.exec(text)?.[1]);
+    expect(issues(output)).toBe(issues(baseline) + 1);
+  });
+
+  test("dangling system-store link is not treated as absent", () => {
+    const dataDir = tempDir("d-");
+    mkdirSync(join(dataDir, "database"));
+    symlinkSync(join(dataDir, "missing"), join(dataDir, "database", "system"));
+    expect(() => detectPersistedAdminUser(dataDir)).toThrow();
+  });
 
   test("explicit password has exact 0600 under restrictive umasks", () => {
     for (const umask of [0o077, 0o277]) {

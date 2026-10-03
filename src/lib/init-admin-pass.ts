@@ -27,7 +27,7 @@
 import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
 import { createRequire } from "node:module";
-import { closeSync, existsSync, openSync, statSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** Copy-pasteable recovery commands. Tests assert these strings verbatim. */
@@ -144,10 +144,7 @@ export function resolveInitAdminPasswordRefuseReason(
  * Harper 5 uses RocksDB: the whole `system` database is ONE column-family
  * database at `database/system`, and each table's primary store is a column
  * family named `<table>/` (Harper names a table's primary store with a
- * trailing slash). A persisted admin user is therefore a row in the
- * `hdb_user/` column family — not a file name. Detect it by reading THAT
- * store, using the same engine Harper wrote it with, rather than guessing
- * paths.
+ * trailing slash).
  */
 export const HARPER_SYSTEM_DB_REL = join("database", "system");
 export const HDB_USER_PRIMARY_CF = "hdb_user/";
@@ -186,7 +183,11 @@ export function countRocksAdminUsers(systemDbDir: string): number {
   } finally {
     probe.close?.();
   }
-  if (!hasUserStore) return 0;
+  if (!hasUserStore) {
+    throw new Error(
+      `MISSING_HDB_USER_COLUMN: existing system store at ${systemDbDir} lacks ${HDB_USER_PRIMARY_CF}. Repair the system store or select the correct --data-dir.`,
+    );
+  }
   const users = RocksDatabase.open(systemDbDir, { name: HDB_USER_PRIMARY_CF, readOnly: true });
   try {
     return users.getKeysCount();
@@ -195,13 +196,7 @@ export function countRocksAdminUsers(systemDbDir: string): number {
   }
 }
 
-/**
- * Harper persists the admin user by its OWN storage engine. This returns true
- * when THIS data directory holds one: the LMDB paths for older data
- * directories, and the `hdb_user/` RocksDB store for Harper 5. Config presence
- * alone is not enough — mount creates the empty `hdb_user/` store before any
- * user is added, so a config file (or an empty store) must not read as a user.
- */
+/** A populated user store is evidence that the install is not fresh. */
 export function detectPersistedAdminUser(dataDir: string): boolean {
   for (const path of [join(dataDir, "system", "hdb_user", "data.mdb"), join(dataDir, "system", "hdb_user.mdb")]) {
     try {
@@ -214,7 +209,7 @@ export function detectPersistedAdminUser(dataDir: string): boolean {
   }
   const systemDbDir = join(dataDir, HARPER_SYSTEM_DB_REL);
   try {
-    statSync(systemDbDir);
+    lstatSync(systemDbDir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;

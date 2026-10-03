@@ -8,8 +8,8 @@
   `flair init` took the fresh-install branch, the `persisted-missing-file`
   refusal never fired, and an explicit credential did not re-persist the file.
   The detector now reads the `hdb_user/` store with Harper's own engine (and
-  keeps the LMDB paths for older directories); an unreadable system store is
-  refused rather than read as "no user".
+  keeps the LMDB paths for older directories); an unreadable system store or
+  a missing `hdb_user/` column is refused rather than read as "no user".
 
   Fresh local `flair init` saves an explicit admin credential to
   `~/.flair/admin-pass` (0600) on every platform.
