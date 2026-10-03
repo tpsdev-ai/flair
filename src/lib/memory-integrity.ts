@@ -9,11 +9,11 @@
  * written atomically). `flair integrity check` scans the live corpus and
  * compares it to that checkpoint:
  *
- *   - a durable-tier id (permanent / persistent) that is missing or replaced and has no
- *     new matching deletion record is an UNEXPLAINED LOSS → alert, naming the id.
+ *   - a durable-tier id (permanent / persistent) missing or replaced with differing
+ *     nonempty tokens, without new matching deletion history, is an UNEXPLAINED LOSS.
  *     A row returning with its checkpointed token can make the next scan healthy; `--accept` re-baselines a loss.
  *   - a durable-tier id gone WITH a new matching deletion record is history-backed.
- *   - an id whose durability changed is an observed TIER CHANGE.
+ *   - a present id with changed durability reports a TIER CHANGE, including replacements.
  *   - a durable-tier count decrease beyond the id-set diff is also an alert.
  *   - a scan that cannot read the instance reports UNKNOWN, never healthy, and
  *     never overwrites the checkpoint.
@@ -170,7 +170,8 @@ export function compareScan(opts: {
   for (const [id, cpTier] of Object.entries(checkpoint.ids)) {
     const curRow = current.get(id);
     const curToken = typeof curRow?.instanceToken === "string" && curRow.instanceToken.length > 0 ? curRow.instanceToken : null;
-    const replaced = curRow !== undefined && curToken !== checkpoint.instanceTokens[id];
+    const cpToken = checkpoint.instanceTokens[id];
+    const replaced = curRow !== undefined && !!cpToken && !!curToken && curToken !== cpToken;
     if (curRow === undefined || replaced) {
       const record = deletedTiers.get(id);
       if (record) {
@@ -179,8 +180,8 @@ export function compareScan(opts: {
         losses.push({ id, tier: cpTier, ...(replaced ? { reason: "replaced" as const } : {}) });
       }
       // Non-durable losses without a record are out of the monitored set.
-      continue;
     }
+    if (curRow === undefined) continue;
     const curTier = normalizeTier(curRow.durability);
     if (curTier !== cpTier) tierChanges.push({ id, from: cpTier, to: curTier });
   }
@@ -188,8 +189,8 @@ export function compareScan(opts: {
   // Named losses, attributions and tier changes account for the id-set diff.
   const unexplainedDecrease: Record<string, number> = {};
   for (const tier of DURABLE_TIERS) {
-    const attributedOut = attributedDeletes.filter((d) => d.tier === tier).length;
-    const lostOut = losses.filter((l) => l.tier === tier).length;
+    const attributedOut = attributedDeletes.filter((d) => d.tier === tier && !current.has(d.id)).length;
+    const lostOut = losses.filter((l) => l.tier === tier && !current.has(l.id)).length;
     const changedOut = tierChanges.filter((c) => c.from === tier && c.to !== tier).length;
     const changedIn = tierChanges.filter((c) => c.to === tier && c.from !== tier).length;
     const explainedDrop = attributedOut + lostOut + changedOut - changedIn;

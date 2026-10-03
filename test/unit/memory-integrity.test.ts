@@ -201,6 +201,34 @@ describe("compareScan", () => {
 
 
 describe("checkpoint regressions", () => {
+  test("a present row needs two nonempty tokens to be a replacement", () => {
+    for (const before of [undefined, null, "", "old"]) {
+      for (const after of [undefined, null, "", "old", "new"]) {
+        const checkpoint = emptyCheckpoint("before", [{ id: "m", durability: "permanent", instanceToken: before }]);
+        const verdict = compareScan({ checkpoint, rows: [{ id: "m", durability: "permanent", instanceToken: after }], deletions: [], scannedAt: "after" });
+        const replaced = before === "old" && after === "new";
+        expect(verdict.status).toBe(replaced ? "alert" : "healthy");
+        expect(verdict.losses).toEqual(replaced ? [{ id: "m", tier: "permanent", reason: "replaced" }] : []);
+      }
+    }
+  });
+
+  test("a replacement also reports its tier change without hiding count drift", () => {
+    for (const historyBacked of [false, true]) {
+      const checkpoint = emptyCheckpoint("before", [{ id: "m", durability: "permanent", instanceToken: "old" }]);
+      const rows = [{ id: "m", durability: "persistent", instanceToken: "new" }];
+      const deletions = historyBacked ? [{ id: "d", memoryId: "m", memoryInstanceToken: "old", at: "deleted" }] : [];
+      const verdict = compareScan({ checkpoint, rows, deletions, scannedAt: "after" });
+      expect(verdict.status).toBe(historyBacked ? "healthy" : "alert");
+      expect(verdict.losses).toEqual(historyBacked ? [] : [{ id: "m", tier: "permanent", reason: "replaced" }]);
+      expect(verdict.attributedDeletes).toEqual(historyBacked ? [{ id: "m", tier: "permanent", at: "deleted" }] : []);
+      expect(verdict.tierChanges).toEqual([{ id: "m", from: "permanent", to: "persistent" }]);
+      expect(verdict.unexplainedDecrease).toEqual({});
+      checkpoint.byDurability.permanent++;
+      expect(compareScan({ checkpoint, rows, deletions, scannedAt: "after" }).unexplainedDecrease).toEqual({ permanent: 1 });
+    }
+  });
+
   test("a reappearing row makes the next scan healthy", () => {
     const rows = rowsOf([["m", "permanent"]]);
     const cp = emptyCheckpoint("before", rows);

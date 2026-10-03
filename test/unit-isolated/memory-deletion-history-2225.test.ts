@@ -1,5 +1,6 @@
 import { beforeEach, expect, test, spyOn } from "bun:test";
 import { harnessState, resetHarnessState, installMemoryHarperMock, databasesMock, mockTransaction } from "../helpers/memory-search-harness";
+import { compareScan, emptyCheckpoint } from "../../src/lib/memory-integrity";
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete process.env.FLAIR_PUBLIC;
 installMemoryHarperMock();
@@ -11,6 +12,23 @@ const resource = () => {
   return r;
 };
 beforeEach(resetHarnessState);
+
+test("an ordinary legacy PUT assigns its first token without a replaced loss", async () => {
+  const row = { id: "m", agentId: "owner", durability: "permanent", content: "A legacy memory with enough content for an ordinary update.", visibility: "shared", instanceToken: null };
+  harnessState.memoryStore.set(row.id, row);
+  const checkpoint = emptyCheckpoint("before", [row]);
+  expect(checkpoint.instanceTokens.m).toBeNull();
+  await resource().put({ ...row, content: "Updated legacy memory content with enough text for the gate." });
+  const updated = harnessState.memoryStore.get(row.id);
+  expect(updated.content).toBe("Updated legacy memory content with enough text for the gate.");
+  expect(typeof updated.instanceToken).toBe("string");
+  expect(updated.instanceToken.length).toBeGreaterThan(0);
+  const verdict = compareScan({ checkpoint, rows: [updated], deletions: [], scannedAt: "after" });
+  expect(verdict.status).toBe("healthy");
+  expect(verdict.losses).toEqual([]);
+  expect(emptyCheckpoint("after", [updated]).instanceTokens.m).toBe(updated.instanceToken);
+  expect(harnessState.deletionStore.size).toBe(0);
+});
 
 for (const writer of ["Memory.delete", "MemoryMaintenance"] as const) {
   test(`${writer} rolls back Memory and successful history on a late abort`, async () => {

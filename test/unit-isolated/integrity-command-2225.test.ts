@@ -6,6 +6,36 @@ import { tempDir } from "../helpers/temp-dir";
 import { bindIntegrityCli, register } from "../../src/commands/integrity";
 import { emptyCheckpoint } from "../../src/lib/memory-integrity";
 
+test("a legacy row's first token is healthy and adopted into the next checkpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalWrite = process.stdout.write;
+  const path = join(tempDir("flair-integrity-legacy-"), "checkpoint.json");
+  writeFileSync(path, JSON.stringify(emptyCheckpoint("baseline", [{ id: "m", durability: "permanent", instanceToken: null }])));
+  try {
+    bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
+    process.exit = ((code: number) => { throw new Error(`exit:${code}`); }) as typeof process.exit;
+    let output = "";
+    process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
+    globalThis.fetch = (async (_url: any, init: any) => {
+      const { table } = JSON.parse(init.body);
+      return new Response(JSON.stringify(table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken: "first-token" }] : []));
+    }) as typeof fetch;
+    const program = new Command();
+    register(program);
+    await expect(program.parseAsync(["integrity", "check", "--json", "--checkpoint", path, "--admin-pass", "secret"], { from: "user" })).rejects.toThrow("exit:0");
+    const verdict = JSON.parse(output);
+    expect(verdict.status).toBe("healthy");
+    expect(verdict.losses).toEqual([]);
+    expect(verdict.checkpointWritten).toBe(true);
+    expect(JSON.parse(readFileSync(path, "utf8")).instanceTokens.m).toBe("first-token");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stdout.write = originalWrite;
+  }
+});
+
 test("malformed successful Memory responses are UNKNOWN and never advance even with --accept", async () => {
   const originalFetch = globalThis.fetch;
   const originalExit = process.exit;
@@ -81,7 +111,7 @@ test("the command reads incarnation fields and reports missing or replaced named
           globalThis.fetch = (async (_url: any, init: any) => {
             const { table, get_attributes } = JSON.parse(init.body);
             expect(get_attributes).toContain(table === "Memory" ? "instanceToken" : "memoryInstanceToken");
-            return new Response(JSON.stringify(table === "Memory" ? (replaced ? [{ id: "m", durability: "permanent", instanceToken: "new" }] : []) : [{ id: "d", memoryId: "m", memoryInstanceToken, at: "deleted" }]));
+            return new Response(JSON.stringify(table === "Memory" ? (replaced ? [{ id: "m", durability: "persistent", instanceToken: "new" }] : []) : [{ id: "d", memoryId: "m", memoryInstanceToken, at: "deleted" }]));
           }) as typeof fetch;
           const program = new Command();
           register(program);
@@ -92,9 +122,11 @@ test("the command reads incarnation fields and reports missing or replaced named
             expect(verdict.status).toBe(healthy ? "healthy" : "alert");
             expect(verdict.losses).toEqual(healthy ? [] : [{ id: "m", tier: "permanent", ...(replaced ? { reason: "replaced" } : {}) }]);
             expect(verdict.unexplainedDecrease).toEqual({});
+            expect(verdict.tierChanges).toEqual(replaced ? [{ id: "m", from: "permanent", to: "persistent" }] : []);
           } else {
             expect(output).toContain(healthy ? "history-backed attribution(s)" : "UNEXPLAINED durable row loss(es)");
             if (replaced && !healthy) expect(output).toContain("m (permanent, replaced)");
+            if (replaced) expect(output).toContain("m: permanent -> persistent");
             expect(output).not.toContain("not accounted for by the id set");
             expect(output).not.toContain("deliberate delete");
           }

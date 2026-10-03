@@ -136,11 +136,11 @@ function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
 export function register(program: Command): void {
   const integrity = program
     .command("integrity")
-    .description("Detect missing or replaced checkpointed durable Memory IDs");
+    .description("Detect missing checkpointed durable Memory IDs or replacements with differing nonempty tokens");
 
   integrity
     .command("check")
-    .description("Report missing or replaced checkpointed durable IDs; rows created and lost entirely between scans are not observed")
+    .description("Report missing checkpointed durable IDs or replacements with differing nonempty tokens; rows created and lost entirely between scans are not observed")
     .option("--json", "Print the verdict as JSON")
     .option("--accept", "Advance the checkpoint even when a loss is open (re-baseline; deliberate)")
     .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)")

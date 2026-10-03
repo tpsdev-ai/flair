@@ -788,13 +788,13 @@ flair revoke
       attr: adminUser
 
 flair integrity
-  description: Detect missing or replaced checkpointed durable Memory IDs
+  description: Detect missing checkpointed durable Memory IDs or replacements with differing nonempty tokens
   usage: [options] [command]
   options: (none)
   subcommands: check
 
 flair integrity check
-  description: Report missing or replaced checkpointed durable IDs; rows created and lost entirely between scans are not observed
+  description: Report missing checkpointed durable IDs or replacements with differing nonempty tokens; rows created and lost entirely between scans are not observed
   usage: [options]
   options:
     --json
@@ -2678,7 +2678,7 @@ Commands:
   idp                                       Manage enterprise IdP configurations (XAA)
   grant [options] <from-agent> <to-agent>   Grant an agent read access to another agent's memories
   revoke [options] <from-agent> <to-agent>  Revoke a memory grant between two agents
-  integrity                                 Detect missing or replaced checkpointed durable Memory IDs
+  integrity                                 Detect missing checkpointed durable Memory IDs or replacements with differing nonempty tokens
   federation                                Manage federation (hub-and-spoke sync)
   rem                                       Memory hygiene and reflection
   status [options]                          Show Flair instance status, memory stats, and agent info
@@ -3460,7 +3460,8 @@ Global Options:
 ----- flair integrity -----
 Usage: flair integrity [options] [command]
 
-Detect missing or replaced checkpointed durable Memory IDs
+Detect missing checkpointed durable Memory IDs or replacements with differing
+nonempty tokens
 
 Options:
   -h, --help       display help for command
@@ -3469,15 +3470,16 @@ Global Options:
   -v, --version    output the version number
 
 Commands:
-  check [options]  Report missing or replaced checkpointed durable IDs; rows
-                   created and lost entirely between scans are not observed
+  check [options]  Report missing checkpointed durable IDs or replacements with
+                   differing nonempty tokens; rows created and lost entirely
+                   between scans are not observed
   help [command]   display help for command
 
 ----- flair integrity check -----
 Usage: flair integrity check [options]
 
-Report missing or replaced checkpointed durable IDs; rows created and lost
-entirely between scans are not observed
+Report missing checkpointed durable IDs or replacements with differing nonempty
+tokens; rows created and lost entirely between scans are not observed
 
 Options:
   --json               Print the verdict as JSON
