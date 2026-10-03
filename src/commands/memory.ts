@@ -1,7 +1,7 @@
 /**
  * memory.ts — `flair memory` command group (flair#1621 / epic #1618).
  *
- * Extracted from src/cli.ts with ZERO behavior change. This file owns the
+ * This file owns the
  * group's commander registration, action handlers, and group-specific
  * inline helpers (hygiene predicates). Shared CLI helpers (api,
  * resolveSigningAgentId, credential flags, --entities parse, …) stay in
@@ -17,6 +17,7 @@ import { resolveAdminUser } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
+import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
@@ -459,7 +460,6 @@ export function register(program: Command): void {
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper ops API port (default: HTTP - 1)")
     .action(async (opts: any) => {
-      const opsPort = resolveOpsPort(opts);
       const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
       if (!adminPass) {
         console.error("❌ Admin password required (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD).");
@@ -473,9 +473,11 @@ export function register(program: Command): void {
       const apply: boolean = !!opts.apply;
 
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
+      const instance = await resolveLocalDeleteInstance(opts, resolveOpsPort, opsAuth);
       async function ops(body: unknown): Promise<unknown> {
-        const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+        const res = await fetch(instance.opsUrl, {
           method: "POST",
+          redirect: "error",
           headers: { "Content-Type": "application/json", Authorization: opsAuth },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(60_000),
@@ -541,7 +543,7 @@ export function register(program: Command): void {
       let deleted = 0;
       for (const id of ids) {
         await api("DELETE", `/Memory/${encodeRecordId(id)}`, undefined, {
-          baseUrl: `http://127.0.0.1:${cli.resolveHttpPort(opts)}`, explicitAdminPass: adminPass,
+          baseUrl: instance.baseUrl, explicitAdminPass: adminPass,
           adminUser: resolveAdminUser(undefined), agentId: null,
         });
         deleted++;

@@ -9,6 +9,13 @@ installMemoryHarperMock();
 const { Memory } = await import("../../resources/Memory.ts");
 const originalFetch = globalThis.fetch;
 const originalPass = process.env.FLAIR_ADMIN_PASS;
+const originalOpsPort = process.env.FLAIR_OPS_PORT;
+let configuration: unknown;
+let opsResolutions: number;
+let httpResolutions: number;
+let requests: string[];
+let otherInstance: Map<string, typeof row>;
+let expectedBaseUrl: string;
 let deletes: string[];
 let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
@@ -17,7 +24,12 @@ const api = async (method: string, path: string, _body: any, options: any) => {
   expect(method).toBe("DELETE");
   expect(options.agentId).toBeNull();
   expect(options.explicitAdminPass).toBe("secret");
-  expect(options.baseUrl).toBe("http://127.0.0.1:19926");
+  requests.push(`${method}:${options.baseUrl}`);
+  if (options.baseUrl === "http://127.0.0.1:29926") {
+    otherInstance.delete(decodeURIComponent(path.slice("/Memory/".length)));
+    return;
+  }
+  expect(options.baseUrl).toBe(expectedBaseUrl);
   const id = decodeURIComponent(path.slice("/Memory/".length));
   deletes.push(id);
   const r: any = new (Memory as any)();
@@ -28,23 +40,38 @@ beforeEach(() => {
   resetHarnessState();
   harnessState.memoryStore.set(row.id, { ...row });
   deletes = [];
+  expectedBaseUrl = "http://127.0.0.1:19926";
+  configuration = { http: { port: "127.0.0.1:19926" }, operationsApi: { network: { port: "127.0.0.1:19925" } } };
+  opsResolutions = 0;
+  httpResolutions = 0;
+  requests = [];
+  otherInstance = new Map([[row.id, { ...row }]]);
+  delete process.env.FLAIR_OPS_PORT;
   process.env.FLAIR_ADMIN_PASS = "secret";
   log = spyOn(console, "log").mockImplementation(() => {});
   write = spyOn(process.stdout, "write").mockImplementation(() => true);
-  globalThis.fetch = (async (_url: any, init: any) => {
+  globalThis.fetch = (async (url: any, init: any) => {
+    requests.push(`POST:${url}`);
+    expect(String(url)).toBe("http://127.0.0.1:19925/");
     const b = JSON.parse(init.body);
+    if (b.operation === "get_configuration") return Response.json(configuration);
     if (b.operation === "delete" && b.table === "Memory") {
       for (const id of b.ids ?? b.hash_values ?? []) harnessState.memoryStore.delete(id);
       return Response.json({ message: "1 of 1 records deleted" });
     }
     return Response.json(b.table === "Memory" ? [...harnessState.memoryStore.values()] : b.table === "Agent" ? [{ id: "owner" }] : []);
   }) as typeof fetch;
-  bindMemory({ api, resolveBaseUrl: () => "https://remote.invalid", resolveOpsPort: () => 19925, resolveHttpPort: () => 19926,
+  const resolveOpsPort = (opts: { opsPort?: string | number }) => {
+    opsResolutions++;
+    return Number(opts.opsPort ?? process.env.FLAIR_OPS_PORT ?? 19925);
+  };
+  const resolveHttpPort = () => { httpResolutions++; return 29926; };
+  bindMemory({ api, resolveBaseUrl: () => "https://remote.invalid", resolveOpsPort, resolveHttpPort,
     addSharedCredentialOptions: (cmd: Command) => cmd, addSharedIdentityOption: (cmd: Command) => cmd,
     resolveSigningAgentId: () => ({ agentId: null, source: "none" }), applyAdminPassFile: () => {},
     parseEntitiesOptionOrExit: () => [], ENTITIES_OPTION_DESCRIPTION: "entities",
   } satisfies MemoryCli);
-  bindAgent({ api, resolveOpsPort: () => 19925, resolveHttpPort: () => 19926,
+  bindAgent({ api, resolveOpsPort, resolveHttpPort,
     b64url: () => "", privKeyPath: () => "", pubKeyPath: () => "",
     shouldShowInlineSecretWarning: () => false, resolveEffectiveOpsUrl: () => undefined,
     seedAgentViaOpsApi: async () => {}, agentRecordIsAdmin: () => false,
@@ -53,12 +80,13 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalPass === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = originalPass;
+  if (originalOpsPort === undefined) delete process.env.FLAIR_OPS_PORT; else process.env.FLAIR_OPS_PORT = originalOpsPort;
   log.mockRestore(); write.mockRestore();
 });
-async function invoke(kind: "hygiene" | "remove") {
+async function invoke(kind: "hygiene" | "remove", flags: string[] = []) {
   const cmd = new Command();
   if (kind === "hygiene") registerMemory(cmd); else registerAgent(cmd);
-  await cmd.parseAsync(kind === "hygiene" ? ["memory", "hygiene", "--apply"] : ["agent", "remove", "owner", "--force", "--keep-keys"], { from: "user" });
+  await cmd.parseAsync(kind === "hygiene" ? ["memory", "hygiene", "--apply", ...flags] : ["agent", "remove", "owner", "--force", "--keep-keys", ...flags], { from: "user" });
 }
 async function assertRecorded(kind: "hygiene" | "remove") {
   await invoke(kind);
@@ -75,3 +103,51 @@ async function assertRecorded(kind: "hygiene" | "remove") {
 }
 test("memory hygiene uses recorded deletes and propagates history failure", () => assertRecorded("hygiene"));
 test("agent remove uses recorded deletes and propagates history failure", () => assertRecorded("remove"));
+
+for (const kind of ["hygiene", "remove"] as const) {
+  for (const source of ["--ops-port", "FLAIR_OPS_PORT"] as const) {
+    test(`${kind}: ${source} scans A and deletes only A while default HTTP selects B`, async () => {
+      if (source === "FLAIR_OPS_PORT") process.env.FLAIR_OPS_PORT = "19925";
+      await invoke(kind, source === "--ops-port" ? [source, "19925"] : []);
+      expect(deletes).toEqual([row.id]);
+      expect(otherInstance.has(row.id)).toBe(true);
+      expect(requests.filter(r => r.startsWith("DELETE:"))).toEqual(["DELETE:http://127.0.0.1:19926"]);
+      expect(opsResolutions).toBe(1);
+      expect(httpResolutions).toBe(0);
+    });
+    test(`${kind}: ${source} without a matching HTTP endpoint refuses by name`, async () => {
+      configuration = { operationsApi: { network: { port: 19925 } } };
+      if (source === "FLAIR_OPS_PORT") process.env.FLAIR_OPS_PORT = "19925";
+      await expect(invoke(kind, source === "--ops-port" ? [source, "19925"] : [])).rejects.toThrow(source);
+      expect(deletes).toEqual([]);
+      expect(otherInstance.has(row.id)).toBe(true);
+      expect(requests).toEqual(["POST:http://127.0.0.1:19925/"]);
+    });
+  }
+  test(`${kind}: nonadjacent ports come from the scanned instance configuration`, async () => {
+    configuration = { http: { port: 19930 }, operationsApi: { network: { port: 19925 } } };
+    expectedBaseUrl = "http://127.0.0.1:19930";
+    await invoke(kind, ["--ops-port", "19925"]);
+    expect(deletes).toEqual([row.id]);
+    expect(otherInstance.has(row.id)).toBe(true);
+    expect(opsResolutions).toBe(1);
+    expect(httpResolutions).toBe(0);
+  });
+  for (const config of [null, { http: { port: 19926 } },
+    { http: { port: 19926 }, operationsApi: { network: { port: 29925 } } },
+    { http: { port: "remote.invalid:19926" }, operationsApi: { network: { port: 19925 } } }]) {
+    test(`${kind}: an unpaired configuration refuses before scanning or deletion: ${JSON.stringify(config)}`, async () => {
+      configuration = config;
+      await expect(invoke(kind, ["--ops-port", "19925"])).rejects.toThrow("--ops-port 19925: no matching local HTTP endpoint");
+      expect(requests).toEqual(["POST:http://127.0.0.1:19925/"]);
+      expect(otherInstance.has(row.id)).toBe(true);
+      expect(deletes).toEqual([]);
+    });
+  }
+  test(`${kind}: an explicit HTTP port from B refuses before scanning or deletion`, async () => {
+    await expect(invoke(kind, ["--ops-port", "19925", "--port", "29926"])).rejects.toThrow("--port 29926 does not match --ops-port");
+    expect(requests).toEqual(["POST:http://127.0.0.1:19925/"]);
+    expect(deletes).toEqual([]);
+    expect(otherInstance.has(row.id)).toBe(true);
+  });
+}

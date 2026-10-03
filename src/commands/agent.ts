@@ -32,6 +32,7 @@ import {
   authFetch,
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
 
 export type AgentCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -624,7 +625,6 @@ export function register(program: Command): void {
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--force", "Skip interactive confirmation (required when stdin is not a TTY)")
     .action(async (id: string, opts) => {
-      const opsPort = resolveOpsPort(opts);
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const adminUser = resolveAdminUser(opts.adminUser);
       const keysDir: string = opts.keysDir ?? defaultKeysDir();
@@ -635,10 +635,12 @@ export function register(program: Command): void {
       }
 
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+      const instance = await resolveLocalDeleteInstance(opts, resolveOpsPort, auth);
 
       async function opsPost(body: unknown): Promise<Response> {
-        return fetch(`http://127.0.0.1:${opsPort}/`, {
+        return fetch(instance.opsUrl, {
           method: "POST",
+          redirect: "error",
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
@@ -687,7 +689,7 @@ export function register(program: Command): void {
         for (const mem of (Array.isArray(memories) ? memories : [])) {
           if (!mem?.id) continue;
           await api("DELETE", `/Memory/${encodeRecordId(mem.id)}`, undefined, {
-            baseUrl: `http://127.0.0.1:${resolveHttpPort(opts)}`,
+            baseUrl: instance.baseUrl,
             explicitAdminPass: adminPass, adminUser, agentId: null,
           });
         }
