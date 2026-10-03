@@ -45,6 +45,10 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "GUARDED: FeedMemories.post calls the decision on the body id before the raw put.");
 add("Federation", ["writer:table.put#1"],
   "GUARDED: the merge skips a reserved id (seed_id_not_federated) before the put.");
+add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
+  "GUARDED: the transactional skill writer (flair#2139 S2) is reached only after Memory.post/put/delete or FeedMemories ran the reserved-id decision on the write's ids; the successor upsert and predecessor close ride the same transaction.");
+add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
+  "SERVER: a table handle (resolveSkillHead searches the live skill head).");
 
 // ── OPERATOR ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
@@ -148,7 +152,7 @@ test("each GUARDED path runs the decision before it writes", () => {
   expect(memory.match(/validateAndAuthorizeSupersedes\(content, auth, ctx\)/g)?.length).toBe(2);
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
-  const feedCheck = feed.indexOf('reservedSeedWriteDenial("Memory", [content?.id], ctx, auth)');
+  const feedCheck = feed.indexOf('reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth)');
   expect(feedCheck).toBeGreaterThan(-1);
   expect(feed.indexOf(".flair.Memory.put(")).toBeGreaterThan(feedCheck);
 

@@ -140,8 +140,7 @@ type Memory @table(database: "flair") {
                                # that producer is a follow-up); additive/nullable, existing rows carry no
                                # entities, readers tolerate absent (same pattern as Presence.activityUpdatedAt).
                                # See docs/entity-vocabulary.md.
-  skillSubjectId: String @indexed  # Nullable, server-owned skill subject for version reads.
-                               # Derivation, supersession and application-written skill history are deferred to #2246.
+  skillSubjectId: String @indexed  # Nullable, server-owned skill subject.
 }
 
 # Explicit entity-to-entity relationships with temporal validity.
@@ -430,7 +429,7 @@ type OrgSkillAssignmentHistory @table(database: "flair") {
   at: String!
 }
 
-# InstructionVersion — single-row Soul resource write history; Soul collection deletes are refused.
+# InstructionVersion — single-row Soul and skill write history; Soul collection deletes are refused.
 # REST mutation verbs are refused; reads authorize soul and skill subjects.
 # The administrator operations API is an unaudited exception.
 type InstructionVersion @table(database: "flair") @export {

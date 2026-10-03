@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=138 options=613
+# commands=138 options=616
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -279,6 +279,9 @@ flair hook install
     --continuity
       description: Wire the continuity capture hooks instead (PostToolUse + Stop — flair#1257; installing them IS the opt-in)
       attr: continuity
+    --action-recall
+      description: Wire the Claude Code PreToolUse action-recall hook instead (flair#2067)
+      attr: actionRecall
 
 flair hook uninstall
   description: Remove the Flair SessionStart hook entry — only ours, everything else in the file is left untouched
@@ -294,6 +297,9 @@ flair hook uninstall
     --continuity
       description: Remove the continuity capture hooks instead (PostToolUse + Stop — flair#1257)
       attr: continuity
+    --action-recall
+      description: Remove the Claude Code PreToolUse action-recall hook instead (flair#2067)
+      attr: actionRecall
 
 flair hook status
   description: Show whether the SessionStart hook is wired, its shape, and which Flair instance it targets
@@ -303,6 +309,9 @@ flair hook status
       description: Target harness (claude-code, codex)
       attr: harness
       default: "claude-code"
+    --action-recall
+      description: Also report the Claude Code PreToolUse action-recall hook (flair#2067)
+      attr: actionRecall
 
 flair mcp
   description: MCP client-credentials agent-auth (RFC 7523 private_key_jwt)
@@ -3034,6 +3043,8 @@ Options:
                     harness's MCP wiring, else the local default)
   --continuity      Wire the continuity capture hooks instead (PostToolUse +
                     Stop — flair#1257; installing them IS the opt-in)
+  --action-recall   Wire the Claude Code PreToolUse action-recall hook instead
+                    (flair#2067)
   -h, --help        display help for command
 
 Global Options:
@@ -3050,6 +3061,8 @@ Options:
   --dry-run         Print the exact JSON delta without writing
   --continuity      Remove the continuity capture hooks instead (PostToolUse +
                     Stop — flair#1257)
+  --action-recall   Remove the Claude Code PreToolUse action-recall hook instead
+                    (flair#2067)
   -h, --help        display help for command
 
 Global Options:
@@ -3063,6 +3076,8 @@ it targets
 
 Options:
   --harness <name>  Target harness (claude-code, codex) (default: "claude-code")
+  --action-recall   Also report the Claude Code PreToolUse action-recall hook
+                    (flair#2067)
   -h, --help        display help for command
 
 Global Options:
