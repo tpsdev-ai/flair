@@ -182,6 +182,7 @@ test("two agents: status names both counts and flags the one with no nightly dri
     agentCount: 2,
     total: 5,
     remainderCount: 0,
+    unownedCount: 0,
   });
   const warning = expiryWarning(detail);
   expect(warning).toStartWith("5 memories have expired validTo but aren't archived\n");
@@ -313,5 +314,39 @@ for (const code of ["EACCES", null]) {
     const detail = await new HealthDetail().get();
     expect(detail.rem.nightlyEnabled).toBeNull();
     expect(JSON.stringify(detail.warnings)).toContain(`${TIMER} (${code ?? "error code unavailable"})`);
+  });
+}
+
+
+test("five named agents and an unowned row do not add a remainder agent", async () => {
+  rows = Array.from({ length: 5 }, (_, i) => mem(`m${i}`, `agent-${i}`, "2000-01-01T00:00:00Z"));
+  rows.push({ id: "unowned", validTo: "2000-01-01T00:00:00Z" });
+  const detail = await new HealthDetail().get();
+  expect(detail.memories.expiredByAgent.agentCount).toBe(5);
+  expect(detail.memories.expiredByAgent.unownedCount).toBe(1);
+  const warning = expiryWarning(detail);
+  expect(warning).toContain("1 expired row(s) with no agent id");
+  expect(warning).not.toContain("more agent(s)");
+});
+
+for (const text of [
+  "# Environment=FLAIR_AGENT_ID=agent-b\nEnvironment=FLAIR_AGENT_ID=agent-a\n",
+  "Environment=FLAIR_AGENT_ID=agent-b\nEnvironment=FLAIR_AGENT_ID=agent-a\n",
+]) {
+  test(`service assignments ignore comments and use the last value: ${JSON.stringify(text)}`, async () => {
+    serviceText = text;
+    expect((await new HealthDetail().get()).memories.expiredByAgent.agents[0].nightlyDriverInstalled).toBe(true);
+  });
+}
+
+for (const text of [
+  "# Environment=FLAIR_AGENT_ID=agent-a\n",
+  "Description=FLAIR_AGENT_ID=agent-a\n",
+  "Environment=FLAIR_AGENT_ID=agent-a%I\n",
+  'Environment="FLAIR_AGENT_ID=agent-a\n',
+]) {
+  test(`ambiguous service identity reports UNKNOWN: ${JSON.stringify(text)}`, async () => {
+    serviceText = text;
+    expect((await new HealthDetail().get()).memories.expiredByAgent.agents[0].nightlyDriverInstalled).toBeNull();
   });
 }

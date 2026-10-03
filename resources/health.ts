@@ -1,3 +1,4 @@
+import { systemdAgentId } from "../src/lib/systemd-agent-id.js";
 import { Resource, databases, server, logger } from "harper";
 import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
@@ -643,10 +644,10 @@ export class HealthDetail extends Resource {
           }
           try {
             const unitText = await fsp.readFile(unitPath, "utf-8");
-            const m = plat === "darwin"
-              ? unitText.match(/<key>FLAIR_AGENT_ID<\/key>\s*<string>([^<]+)<\/string>/)
-              : unitText.match(/FLAIR_AGENT_ID=([A-Za-z0-9._-]+)/);
-            if (m) { nightlyDriverAgent = m[1].trim(); nightlyDriverAgentKnown = true; }
+            const agent = plat === "darwin"
+              ? unitText.match(/<key>FLAIR_AGENT_ID<\/key>\s*<string>([^<]+)<\/string>/)?.[1].trim() ?? null
+              : systemdAgentId(unitText);
+            if (agent) { nightlyDriverAgent = agent; nightlyDriverAgentKnown = true; }
           } catch (error) {
             probeError(unitPath, error);
           }

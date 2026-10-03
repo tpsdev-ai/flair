@@ -53,10 +53,13 @@ describe("summarizeExpiredByAgent (flair#2231)", () => {
     expect(b.agents.map((a) => a.agentId)).toEqual(["alpha", "zeta"]);
   });
 
-  test("rows without an owner are named, not dropped", () => {
+  test("rows without an owner are separate from named agents", () => {
     const b = summarizeExpiredByAgent([["", 4]], driverFor("alice"));
-    expect(b.agents[0].agentId).toBe("");
-    expect(expiredByAgentWarningLines(b)).toContain("(no agent id): 4");
+    expect(b.agents).toEqual([]);
+    expect(b.agentCount).toBe(0);
+    expect(b.unownedCount).toBe(4);
+    expect(b.total).toBe(4);
+    expect(expiredByAgentWarningLines(b)).toContain("4 expired row(s) with no agent id");
   });
 
   test("zero expired rows yields an empty, harmless breakdown", () => {
