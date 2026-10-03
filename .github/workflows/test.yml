@@ -48,15 +48,15 @@ jobs:
     name: "Unit Tests (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
-    # hung 16+ min on 2026-07-04, blocking merge on a required check. 10 min
-    # bounds a hung install/runner. The unit lane takes 279-401 s of it
-    # (measured 2026-09-29). scripts/test-unit.ts derives its keep-going lane
-    # budget from this value (CI_JOB_LIMIT_MS minus a measured 90 s reserve for
-    # the job's other steps, flair#2030); its per-step limits are fixed values
+    # hung 16+ min on 2026-07-04, blocking merge on a required check. 15 min
+    # bounds a hung install/runner. The unit lane takes 401-510 s of it
+    # (measured 2026-10-02). scripts/test-unit.ts derives its keep-going lane
+    # budget from this value (CI_JOB_LIMIT_MS minus a 120 s reserve for the
+    # job's other steps, flair#2030/#2224); its per-step limits are fixed values
     # chosen from measured step times. The summary and guards are expected to
     # print before the job is cancelled while the other steps stay in the reserve.
     # Change the two together; unit-runner.test.ts fails if they disagree.
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       # fail-fast: false — a failure on one Node major must not cancel the
       # others still running; we want to see all three results, not just the

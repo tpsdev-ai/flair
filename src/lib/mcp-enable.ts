@@ -147,6 +147,7 @@ import { join, dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
+import { writeConfirmed } from "./instance-identity-row.js";
 import { defaultReadProcessCmdline, defaultReadProcessCwd } from "./upgrade-exec-path.js";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
@@ -220,6 +221,94 @@ export function issuerOriginRefusal(issuer: string): string | null {
     `--issuer must be an absolute http(s) origin with no path (got: ${JSON.stringify(issuer)}); ` +
     `set it to the instance's public origin, e.g. https://flair.example.com. Nothing was changed.`
   );
+}
+
+/**
+ * flair#2115 — the target policy for `flair principal link|unlink|links`.
+ *
+ * These commands send the target instance's admin credential to its operations
+ * API. HTTPS is required, and an unparseable URL and the literal host classes
+ * `isLocalOrPrivateHost` lists are refused.
+ *
+ * Refusals are only ADDED relative to `checkLocalOriginRefusal`: everything
+ * that check refuses, this one refuses too.
+ */
+export function checkMappingTargetRefusal(url: string): { refused: true; message: string } | { refused: false } {
+  let host: string;
+  let protocol: string;
+  try {
+    const parsed = new URL(url);
+    host = parsed.hostname;
+    protocol = parsed.protocol;
+  } catch {
+    return { refused: true, message: mappingTargetRefusalMessage(url) };
+  }
+  if (protocol !== "https:" || host === "") return { refused: true, message: mappingTargetRefusalMessage(url) };
+  if (isLocalOrPrivateHost(host)) return { refused: true, message: mappingTargetRefusalMessage(url) };
+  return { refused: false };
+}
+
+/** The one sentence a refused target gets, whichever way it failed that test. */
+function mappingTargetRefusalMessage(url: string): string {
+  return (
+    "these commands send the target instance's admin credential to its operations API, so --instance must be an " +
+    "HTTPS URL whose host is not localhost, a .local name, or a loopback, unspecified, RFC1918, link-local or " +
+    `IPv6 unique-local address literal; '${url}' is refused. See the hosted-shape docs.`
+  );
+}
+
+/** Is `hostname` (as `URL.hostname` gives it) localhost, a .local name, or a
+ *  loopback, unspecified, RFC1918, link-local or IPv6 unique-local literal?
+ *  IPv6 literals stay bracketed in `URL.hostname`; a trailing dot is the
+ *  absolute form of the same name. */
+function isLocalOrPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.+$/, "");
+  if (host === "") return true;
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.endsWith(".local")) return true;
+  if (host.startsWith("[") && host.endsWith("]")) return isLocalOrPrivateIpv6(host.slice(1, -1));
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) return isLocalOrPrivateIpv4(ipv4.slice(1).map((part) => Number(part)));
+  return false;
+}
+
+function isLocalOrPrivateIpv4(octets: number[]): boolean {
+  const [a, b] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function isLocalOrPrivateIpv6(literal: string): boolean {
+  const addr = literal.toLowerCase();
+  // An IPv4-mapped address carries an IPv4 address in its low 32 bits; WHATWG
+  // URL normalises the dotted form to two hex groups ("::ffff:c0a8:1").
+  const mapped = addr.match(/^::ffff:([0-9a-f:.]+)$/);
+  if (mapped) {
+    const tail = mapped[1];
+    const dotted = tail.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (dotted) return isLocalOrPrivateIpv4(dotted.slice(1).map((part) => Number(part)));
+    const groups = tail.split(":");
+    if (groups.length === 2) {
+      const hi = Number.parseInt(groups[0] || "0", 16);
+      const lo = Number.parseInt(groups[1] || "0", 16);
+      if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+        return isLocalOrPrivateIpv4([(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff]);
+      }
+    }
+    return true; // an IPv4-mapped form this cannot read is not a public origin
+  }
+  if (addr === "::" || addr === "::1") return true; // unspecified, loopback
+  const first = Number.parseInt(addr.split(":")[0] || "0", 16);
+  if (Number.isNaN(first)) return true;
+  if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  return false;
 }
 
 // ─── Fabric-shape detection (secrets-mechanism default) ────────────────────
@@ -1091,6 +1180,12 @@ export type IdentityMappingParams = IdentityMappingOpsTarget & {
   principalKind: "human" | "agent";
   idpProvider: string;
   idpSubject: string;
+  /**
+   * flair#2115 — `flair principal link` maps onto a principal that already
+   * exists, so a missing one is refused by name with nothing written. Unset
+   * (the `flair mcp enable` shape) keeps the create-when-missing behaviour.
+   */
+  principalMustExist?: boolean;
 };
 
 const IDENTITY_MAPPING_TARGET_FORMS =
@@ -1139,7 +1234,8 @@ export function targetOriginRefusal(instance: string): string | undefined {
 }
 
 /** Resolve the ops target, or throw naming the field, its safe display and the
- *  accepted forms. */
+ *  accepted forms. One implementation, so every identity-mapping command sends
+ *  its ops calls to the same address (flair#2115). */
 function identityMappingOpsUrl(target: IdentityMappingOpsTarget): { url: string; hosted: boolean } {
   const { opsPortOrUrl, hostedOrigin } = target as { opsPortOrUrl?: unknown; hostedOrigin?: unknown };
   const refuse = (what: string): never => {
@@ -1252,17 +1348,11 @@ export async function provisionIdpIdentityMapping(
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
 
   // Ensure the principal Agent exists.
+  const agentQuery = mappingReadQuery("Agent", { id: params.principal });
   const findRes = await fetchImpl(opsUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({
-      operation: "search_by_value",
-      database: "flair",
-      table: "Agent",
-      search_attribute: "id",
-      search_value: params.principal,
-      get_attributes: ["id"],
-    }),
+    headers: opsHeaders(authHeader),
+    body: JSON.stringify(agentQuery),
   });
   if (!findRes.ok) {
     const text = await findRes.text().catch(() => "");
@@ -1286,9 +1376,18 @@ export async function provisionIdpIdentityMapping(
       `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
     );
   }
-  const foundAgents = await findRes.json().catch(() => []);
+  // flair#2115 — the principal is created only after a valid empty answer.
+  const foundAgents = await opsRecordList(findRes, opsUrl, agentQuery);
+  if (foundAgents.length === 0 && params.principalMustExist) {
+    throw new Error(principalMissingMessage(params.principal));
+  }
   let principalCreated = false;
-  if (!Array.isArray(foundAgents) || foundAgents.length === 0) {
+  const findCredentialsForSubject = (): Promise<any[]> =>
+    readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject);
+  const subjectCreds = await findCredentialsForSubject();
+  const activeCreds = subjectCreds.filter(isResolvableCredential);
+
+  if (foundAgents.length === 0) {
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1318,32 +1417,6 @@ export async function provisionIdpIdentityMapping(
     }
     principalCreated = true;
   }
-
-  // ── flair#1317: look SUBJECT-WIDE, not (provider, subject) ─────────────────
-  // The resolver's key is (kind, idpSubject); anything narrower here leaves
-  // credentials that dedup cannot see but resolution can.
-  const findCredentialsForSubject = async (): Promise<any[]> => {
-    const res = await fetchImpl(opsUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: authHeader },
-      body: JSON.stringify({
-        operation: "search_by_conditions",
-        database: "flair",
-        table: "Credential",
-        operator: "and",
-        conditions: [
-          { search_attribute: "kind", search_type: "equals", search_value: "idp" },
-          { search_attribute: "idpSubject", search_type: "equals", search_value: params.idpSubject },
-        ],
-        get_attributes: ["id", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"],
-      }),
-    });
-    const body = res.ok ? await res.json().catch(() => []) : [];
-    return Array.isArray(body) ? body : [];
-  };
-
-  const subjectCreds = await findCredentialsForSubject();
-  const activeCreds = subjectCreds.filter(isResolvableCredential);
 
   // Survivor: an ACTIVE same-provider credential is re-pointed (the idempotent
   // re-run and the documented same-provider link). A revoked one is never
@@ -1376,7 +1449,7 @@ export async function provisionIdpIdentityMapping(
           status: "active",
           idpProvider: params.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: reused ? undefined : now,
+          createdAt: typeof reused?.createdAt === "string" ? reused.createdAt : now,
           lastUsedAt: now,
         },
         // Retained, not deleted: the revocation stays legible in storage and in
@@ -1392,7 +1465,7 @@ export async function provisionIdpIdentityMapping(
           status: "revoked",
           idpProvider: c.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: c.createdAt,
+          createdAt: typeof c.createdAt === "string" ? c.createdAt : now,
           updatedAt: now,
         })),
       ],
@@ -1408,16 +1481,9 @@ export async function provisionIdpIdentityMapping(
   // ≠1 active credential means the resolver's answer for this subject is
   // order-dependent, so this fails LOUDLY rather than returning a mapping the
   // operator would reasonably believe is deterministic.
-  const afterCreds = (await findCredentialsForSubject()).filter(isResolvableCredential);
-  if (afterCreds.length !== 1 || afterCreds[0]?.id !== credentialId) {
-    const seen = afterCreds.map((c) => `${c?.id} → ${c?.principalId} (provider '${c?.idpProvider}')`).join("; ") || "none";
-    throw new Error(
-      `Identity mapping: the uniqueness invariant does not hold after the write — subject '${params.idpSubject}' ` +
-        `has ${afterCreds.length} active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${credentialId}). ` +
-        `Runtime resolution for this subject would be iteration-order-dependent (flair#1317). ` +
-        `Inspect the Credential table for kind:"idp" idpSubject:"${params.idpSubject}" and revoke the rows that should not resolve.`,
-    );
-  }
+  await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, {
+    id: credentialId, principalId: params.principal, idpProvider: params.idpProvider, status: "active",
+  });
 
   return {
     principalCreated,
@@ -1425,6 +1491,453 @@ export async function provisionIdpIdentityMapping(
     credentialReused: Boolean(reused),
     credentialSuperseded: superseded.length > 0,
     supersededCredentialIds: superseded.map((c) => String(c.id)),
+  };
+}
+
+// ─── flair principal link / unlink / links (flair#2115) ──────────────────────
+//
+// link maps one IdP login to a principal.
+// unlink revokes a mapping.
+// links lists current mappings.
+
+/** One current mapping, as `flair principal links` reports it. */
+export interface PrincipalMappingRow {
+  credentialId: string;
+  idpProvider: string;
+  idpSubject: string;
+}
+
+/** Where the three commands send their ops calls — the same exactly-one target
+ *  forms `provisionIdpIdentityMapping` takes (flair#2102), resolved by the same
+ *  function (`assertMappingTarget` adds these commands' target policy
+ *  first), plus the admin credentials the target's ops API requires. */
+export type PrincipalMappingBase = IdentityMappingOpsTarget & {
+  adminUser: string;
+  adminPass: string;
+  principal: string;
+};
+
+/** A mapping names one IdP subject under one provider name. */
+export type PrincipalMappingParams = PrincipalMappingBase & {
+  idpSubject: string;
+  idpProvider: string;
+};
+
+/** `flair principal links` needs the principal, not a subject. */
+export type ListPrincipalMappingsParams = PrincipalMappingBase;
+
+export interface PrincipalMappingDeps {
+  fetchImpl?: typeof fetch;
+  now?: () => string;
+}
+
+/** `flair principal link` — `replace` moves a subject already mapped elsewhere. */
+export type LinkPrincipalMappingParams = PrincipalMappingParams & { replace?: boolean };
+
+export interface LinkPrincipalMappingResult {
+  action: "linked" | "already-linked" | "replaced";
+  principal: string;
+  idpProvider: string;
+  idpSubject: string;
+  /** The principal the subject was mapped to before `replace` moved it. */
+  previousPrincipal?: string;
+  credentialId?: string;
+  credentialReused?: boolean;
+  supersededCredentialIds: string[];
+  /** What to print, in order. Empty-string entries are never produced. */
+  lines: string[];
+}
+
+export interface UnlinkPrincipalMappingResult {
+  principal: string;
+  idpSubject: string;
+  revokedCredentialIds: string[];
+  lines: string[];
+}
+
+export interface ListPrincipalMappingsResult {
+  principal: string;
+  mappings: PrincipalMappingRow[];
+  lines: string[];
+}
+
+/** The admin Basic header every ops call on this surface carries. */
+function opsHeaders(authHeader: string): Record<string, string> {
+  return { "Content-Type": "application/json", Authorization: authHeader };
+}
+
+type WrittenMapping = { id: string; principalId: string; idpProvider: string; status: "active" };
+
+type MappingReadQuery = {
+  operation: "search_by_value" | "search_by_conditions";
+  database: "flair";
+  table: "Agent" | "Credential";
+  search_attribute?: string;
+  search_value?: string;
+  operator?: "and";
+  conditions?: Array<{ search_attribute: string; search_type: "equals"; search_value: string }>;
+  get_attributes: string[];
+};
+
+function mappingReadQuery(table: MappingReadQuery["table"], equals: Record<string, string>): MappingReadQuery {
+  const fields = table === "Agent" ? ["id"] :
+    ["id", "kind", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"];
+  if (table === "Agent") {
+    return { operation: "search_by_value", database: "flair", table,
+      search_attribute: "id", search_value: equals.id, get_attributes: fields };
+  }
+  return { operation: "search_by_conditions", database: "flair", table, operator: "and",
+    conditions: Object.entries(equals).map(([search_attribute, search_value]) =>
+      ({ search_attribute, search_type: "equals", search_value })), get_attributes: fields };
+}
+
+async function opsReadRows(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  query: MappingReadQuery,
+  written?: WrittenMapping,
+  refuseAmbiguous = false,
+): Promise<any[]> {
+  const res = await fetchImpl(opsUrl, { method: "POST", headers: opsHeaders(authHeader), body: JSON.stringify(query) });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Identity mapping: the ops API read at ${opsUrl} failed (HTTP ${res.status})${text ? `: ${text}` : ""}`);
+  }
+  return opsRecordList(res, opsUrl, query, written, refuseAmbiguous);
+}
+
+async function opsRecordList(
+  res: Response, opsUrl: string, query: MappingReadQuery, written?: WrittenMapping, refuseAmbiguous = false,
+): Promise<any[]> {
+  const parsed = await res.json().catch(() => null);
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      `Identity mapping: the ops API read at ${opsUrl} did not answer with a record list; ` +
+        `verify that the target answers operations API requests there.`,
+    );
+  }
+  const predicate = query.operation === "search_by_value"
+    ? [[query.search_attribute!, query.search_value!]]
+    : query.conditions!.map(c => [c.search_attribute, c.search_value]);
+  const ids = new Set<string>();
+  const rows: any[] = [];
+  for (const [index, row] of parsed.entries()) {
+    const refuse = (reason: string): never => {
+      throw new Error(`Identity mapping: the ops API read at ${opsUrl} answered with a malformed ${query.table} record (entry ${index}): ${reason}.`);
+    };
+    if (row === null || typeof row !== "object" || Array.isArray(row)) refuse("invalid-row-shape");
+    if (!isNonEmptyString(row.id)) refuse("missing-or-invalid-id");
+    for (const [field, value] of predicate) {
+      if (!query.get_attributes.includes(field)) refuse(`predicate-attribute-not-requested:${field}`);
+      if (!Object.hasOwn(row, field) || row[field] !== value) refuse(`query-mismatch:${field}`);
+    }
+    if (ids.has(row.id)) refuse("duplicate-row-id");
+    ids.add(row.id);
+    if (query.table === "Credential" && !isNonEmptyString(row.principalId)) continue;
+    if (query.table === "Credential" &&
+        (typeof row.idpProvider !== "string" ||
+         typeof row.idpSubject !== "string" ||
+         (row.label != null && typeof row.label !== "string") ||
+         (row.status != null && typeof row.status !== "string"))) {
+      refuse("missing-or-invalid-credential-field");
+    }
+    rows.push(row);
+  }
+  if (refuseAmbiguous && query.table === "Credential" && predicate.some(([field]) => field === "idpSubject")) {
+    const principals = [...new Set(rows.filter(isResolvableCredential).map(row => row.principalId))];
+    if (principals.length > 1) {
+      throw new Error(`Identity mapping: ambiguous-prior-principals: ${principals.join(", ")} — refusing the subject read. Run flair mcp enable to heal this subject mapping.`);
+    }
+  }
+  if (written) {
+    const active = rows.filter(isResolvableCredential);
+    if (active.length !== 1 || Object.entries(written).some(([field, value]) => active[0][field] !== value)) {
+      const subject = predicate.find(([field]) => field === "idpSubject")?.[1];
+      const seen = active.map(c => `${c.id} → ${c.principalId} (provider '${c.idpProvider}')`).join("; ") || "none";
+      throw new Error(
+        `Identity mapping: post-write-mismatch — the uniqueness invariant does not hold after the write (flair#1317) — subject '${subject}' ` +
+          `has ${active.length} resolvable (principal-bearing) active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${written.id}) ` +
+          `for principal '${written.principalId}', provider '${written.idpProvider}', status 'active'. ` +
+          `Principal-less legacy rows are skipped and may remain active. ` +
+          `Inspect the Credential table for kind:"idp" idpSubject:"${subject}" and revoke the rows that should not resolve.`,
+      );
+    }
+  }
+  return rows;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value !== "";
+}
+
+async function readIdpCredentialsForSubject(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  idpSubject: string,
+  written?: WrittenMapping,
+  refuseAmbiguous = false,
+): Promise<any[]> {
+  return opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Credential", { kind: "idp", idpSubject }), written, refuseAmbiguous);
+}
+
+async function readIdpCredentialsForPrincipal(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  principal: string,
+): Promise<any[]> {
+  return opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Credential", { kind: "idp", principalId: principal }));
+}
+
+/**
+ * Refuse unless the principal exists, by name.
+ *
+ * A read that FAILED propagates: an unreadable Agent table is not an absent
+ * principal, and this check stands in front of a mapping write (flair#2115).
+ * The id is compared, not just the non-emptiness of the answer.
+ */
+async function assertPrincipalExists(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  principal: string,
+): Promise<void> {
+  const rows = await opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Agent", { id: principal }));
+  if (rows.length === 0) throw new Error(principalMissingMessage(principal));
+}
+
+/** The one refusal a missing principal gets, wherever it is checked. */
+function principalMissingMessage(principal: string): string {
+  return (
+    `No principal '${principal}' — nothing was written. Create the principal on the TARGET instance ` +
+    `(run \`flair mcp enable\` against it: it creates the principal it maps), then re-run.`
+  );
+}
+
+/**
+ * flair#2115 — `flair principal link|unlink|links` carry the target instance's
+ * admin credential to its operations API, so the target they accept is narrower
+ * than `checkLocalOriginRefusal`'s claude.ai-oriented one: a `hostedOrigin`
+ * that `checkMappingTargetRefusal` refuses is refused. The numeric
+ * `opsPortOrUrl` form names the caller's own address and is left alone.
+ *
+ * Called before the first request, so a refused target never sees one.
+ */
+function assertMappingTarget(target: IdentityMappingOpsTarget): void {
+  const { hostedOrigin } = target as { hostedOrigin?: unknown };
+  if (hostedOrigin === undefined) return;
+  const check = checkMappingTargetRefusal(String(hostedOrigin));
+  if (check.refused) throw new Error(check.message);
+}
+
+/** The exactly-one target fields, rebuilt so they can be spread into a fresh
+ *  literal (a union value cannot be spread into one). */
+function mappingTargetFields(target: IdentityMappingOpsTarget): IdentityMappingOpsTarget {
+  const t = target as { opsPortOrUrl?: unknown; hostedOrigin?: unknown };
+  return t.hostedOrigin !== undefined
+    ? { hostedOrigin: String(t.hostedOrigin) }
+    : { opsPortOrUrl: t.opsPortOrUrl as number | string };
+}
+
+/**
+ * `flair principal link` — map one IdP subject to a principal that already
+ * exists, through `provisionIdpIdentityMapping` (the `mcp enable` step).
+ *
+ * - the subject already mapped to THIS principal (no active row names another):
+ *   reported, exit 0, NO write;
+ * - the subject mapped to a DIFFERENT principal: refused by name unless
+ *   `replace` is set; with `replace`, the write re-points it and the result
+ *   names the principal it left;
+ * - a missing principal is refused by name with nothing written;
+ * - a failed read is refused: it never counts as "no mapping";
+ * - a target `checkMappingTargetRefusal` refuses is refused before any request.
+ */
+export async function linkPrincipalMapping(
+  params: LinkPrincipalMappingParams,
+  deps: PrincipalMappingDeps = {},
+): Promise<LinkPrincipalMappingResult> {
+  assertMappingTarget(params);
+  const { url: opsUrl } = identityMappingOpsUrl(params);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
+
+  // Refuse a missing requested principal before either mapping branch.
+  await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
+
+  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true)).filter(
+    isResolvableCredential,
+  );
+  const elsewhere = active.filter((c) => c?.principalId !== params.principal);
+  if (elsewhere.length > 0 && !params.replace) {
+    const current = [...new Set(elsewhere.map((c) => String(c?.principalId)))].join(", ");
+    throw new Error(
+      `IdP subject '${params.idpSubject}' is already mapped to principal '${current}', not '${params.principal}' — ` +
+        `nothing was written. Pass --replace to move it.`,
+    );
+  }
+  if (active.length > 0 && elsewhere.length === 0) {
+    const provider = String(active[0]?.idpProvider ?? params.idpProvider);
+    return {
+      action: "already-linked",
+      principal: params.principal,
+      idpProvider: provider,
+      idpSubject: params.idpSubject,
+      supersededCredentialIds: [],
+      lines: [
+        `Already linked: IdP subject '${params.idpSubject}' (provider '${provider}') → principal '${params.principal}'. No change.`,
+      ],
+    };
+  }
+  const previousPrincipal = elsewhere.length > 0 ? String(elsewhere[0]?.principalId) : undefined;
+
+  const mapping = await provisionIdpIdentityMapping(
+    {
+      ...mappingTargetFields(params),
+      adminUser: params.adminUser,
+      adminPass: params.adminPass,
+      principal: params.principal,
+      principalKind: "human",
+      idpProvider: params.idpProvider,
+      idpSubject: params.idpSubject,
+      principalMustExist: true,
+    },
+    deps,
+  );
+
+  const outcome = mapping.credentialReused ? "re-pointed" : "created";
+  const line =
+    previousPrincipal !== undefined
+      ? `Re-linked: IdP subject '${params.idpSubject}' (provider '${params.idpProvider}') was mapped to principal ` +
+        `'${previousPrincipal}'; now mapped to '${params.principal}' — Credential(kind:idp) ${outcome} (${mapping.credentialId}).` +
+        supersededCredentialNote(mapping)
+      : `Linked: IdP subject '${params.idpSubject}' (provider '${params.idpProvider}') → principal '${params.principal}' ` +
+        `— Credential(kind:idp) ${outcome} (${mapping.credentialId}).` + supersededCredentialNote(mapping);
+  return {
+    action: previousPrincipal !== undefined ? "replaced" : "linked",
+    principal: params.principal,
+    idpProvider: params.idpProvider,
+    idpSubject: params.idpSubject,
+    previousPrincipal,
+    credentialId: mapping.credentialId,
+    credentialReused: mapping.credentialReused,
+    supersededCredentialIds: mapping.supersededCredentialIds,
+    lines: [line],
+  };
+}
+
+/**
+ * `flair principal unlink` — revoke the subject's mapping to this principal.
+ * A subject not mapped to that principal or carrying a different provider
+ * name is refused before writing.
+ */
+export async function unlinkPrincipalMapping(
+  params: PrincipalMappingParams,
+  deps: PrincipalMappingDeps = {},
+): Promise<UnlinkPrincipalMappingResult> {
+  assertMappingTarget(params);
+  const { url: opsUrl } = identityMappingOpsUrl(params);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const now = (deps.now ?? (() => new Date().toISOString()))();
+  const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
+
+  await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
+
+  const active = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true)).filter(
+    isResolvableCredential,
+  );
+  const mine = active.filter((c) => c?.principalId === params.principal);
+  if (mine.length === 0) {
+    const elsewhere = [...new Set(active.map((c) => String(c?.principalId)))].join(", ");
+    throw new Error(
+      `IdP subject '${params.idpSubject}' is not mapped to principal '${params.principal}' — nothing was written.` +
+        (elsewhere ? ` It is mapped to: ${elsewhere}.` : ` It has no active Credential(kind:idp) mapping.`),
+    );
+  }
+  const providers = [...new Set(mine.map((c) => String(c?.idpProvider)))];
+  if (providers.length !== 1 || providers[0] !== params.idpProvider) {
+    throw new Error(
+      `IdP subject '${params.idpSubject}' is mapped to principal '${params.principal}' under provider ` +
+        `'${providers.join(", ")}', not '${params.idpProvider}' — nothing was written. Re-run with ` +
+        `--idp-provider ${providers[0]}.`,
+    );
+  }
+
+  const ids = mine.map((c) => String(c?.id));
+  const unconfirmedMessage = (unconfirmed: string[]) =>
+    `Identity mapping: revocation unconfirmed for Credential IDs: ${unconfirmed.join(", ")}`;
+  const res = await fetchImpl(opsUrl, {
+    method: "POST",
+    headers: opsHeaders(authHeader),
+    body: JSON.stringify({
+      operation: "update",
+      database: "flair",
+      table: "Credential",
+      records: ids.map((id) => ({ id, status: "revoked", updatedAt: now })),
+    }),
+  }).catch((err: unknown) => {
+    throw new Error(`${unconfirmedMessage(ids)} — ${err instanceof Error ? err.message : String(err)}`);
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${unconfirmedMessage(ids)} (HTTP ${res.status})${text ? `: ${text}` : ""}`);
+  }
+  const result = await res.json().catch(() => null);
+  const unconfirmed = ids.filter(id => !writeConfirmed(result, "update_hashes", id));
+  if (unconfirmed.length > 0) throw new Error(unconfirmedMessage(unconfirmed));
+  const remaining = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)
+    .catch((err: unknown) => {
+      throw new Error(`${unconfirmedMessage(ids)} — ${err instanceof Error ? err.message : String(err)}`);
+    })).filter(isResolvableCredential);
+  if (remaining.length > 0) {
+    throw new Error(`${unconfirmedMessage(remaining.map(c => c.id))} — subject '${params.idpSubject}' still has resolvable mappings.`);
+  }
+  return {
+    principal: params.principal,
+    idpSubject: params.idpSubject,
+    revokedCredentialIds: ids,
+    lines: [
+      `Unlinked: IdP subject '${params.idpSubject}' is no longer mapped to principal '${params.principal}' — ` +
+        `Credential(kind:idp) revoked (${ids.join(", ")}).`,
+    ],
+  };
+}
+
+/**
+ * `flair principal links` — the principal's current (active) IdP mappings.
+ * A missing principal is refused by name and a failed read is refused too: an
+ * empty list is reported only after a valid read with no active mapping.
+ */
+export async function listPrincipalMappings(
+  params: ListPrincipalMappingsParams,
+  deps: PrincipalMappingDeps = {},
+): Promise<ListPrincipalMappingsResult> {
+  assertMappingTarget(params);
+  const { url: opsUrl } = identityMappingOpsUrl(params);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
+
+  await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
+
+  const active = (await readIdpCredentialsForPrincipal(fetchImpl, opsUrl, authHeader, params.principal)).filter(
+    isResolvableCredential,
+  );
+  const mappings: PrincipalMappingRow[] = active.map((c) => ({
+    credentialId: String(c?.id),
+    idpProvider: String(c?.idpProvider),
+    idpSubject: String(c?.idpSubject),
+  }));
+  return {
+    principal: params.principal,
+    mappings,
+    lines:
+      mappings.length === 0
+        ? [`No IdP mappings for principal '${params.principal}'.`]
+        : mappings.map(
+            (m) =>
+              `IdP subject '${m.idpSubject}' (provider '${m.idpProvider}') → principal '${params.principal}' (${m.credentialId})`,
+          ),
   };
 }
 
@@ -1903,6 +2416,21 @@ export interface EnableMcpResult {
 }
 
 /**
+ * flair#1317/#2115 — the note a mapping reports when it revoked a prior
+ * credential for the subject. Returned with a leading space so it appends to a
+ * line, and empty when nothing was superseded. One implementation, so `flair
+ * principal link` prints it exactly as `flair mcp enable` does.
+ */
+function supersededCredentialNote(mapping: IdentityMappingResult): string {
+  return mapping.credentialSuperseded
+    ? ` SUPERSEDED: ${mapping.supersededCredentialIds.length} prior Credential(kind:idp) row(s) for this subject ` +
+      `were REVOKED, not de-duplicated — ${mapping.supersededCredentialIds.join(", ")}. ` +
+      `The revoked rows no longer resolve. Future calls for this subject use the surviving mapping. ` +
+      `Exactly one resolvable (principal-bearing) active credential remains per (kind, idpSubject). Principal-less legacy rows are skipped and may remain active.`
+    : "";
+}
+
+/**
  * Full `flair mcp enable` orchestration. No `process.exit`, no console
  * output — directly unit-testable with a mocked fetch and temp dirs, same
  * split as `grantMcpClient`/`revokeMcpClient`. Returns a step-by-step log so
@@ -2162,12 +2690,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // credential (one active credential per subject is the invariant). That is
     // a credential dying, so it is stated as such, by id: an operator must
     // never discover it later from something that stopped working.
-    const supersedeNote = mapping.credentialSuperseded
-      ? ` SUPERSEDED: ${mapping.supersededCredentialIds.length} prior Credential(kind:idp) row(s) for this subject ` +
-        `were REVOKED, not de-duplicated — ${mapping.supersededCredentialIds.join(", ")}. ` +
-        `They no longer resolve, and anything relying on them stops working. ` +
-        `Exactly one active credential per (kind, idpSubject) is the invariant that keeps resolution deterministic.`
-      : "";
+    const supersedeNote = supersededCredentialNote(mapping);
     push(true,
       `connector identity: mapped sub '${params.idpSubject}' (provider '${idpProvider}') to Agent '${principal}'; ` +
         `see docs/access-control.md for how /mcp tool calls use it. ` +

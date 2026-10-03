@@ -34,6 +34,11 @@ import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { fetchErrorLabel, redactUrl } from "./federation.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import {
+  linkPrincipalMapping,
+  unlinkPrincipalMapping,
+  listPrincipalMappings,
+} from "../lib/mcp-enable.js";
 
 export type PrincipalCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -491,5 +496,138 @@ export function register(program: Command): void {
       }
 
       console.log(`✅ Principal '${id}' trust tier set to '${tier}'`);
+    });
+
+  // ── flair principal link / unlink / links (flair#2115) ─────────────────────
+  //
+  // link maps one IdP login to an existing principal; unlink revokes a mapping;
+  // links lists the principal's current mappings.
+
+  /**
+   * The instance and admin credential these commands need: `--instance` (else
+   * FLAIR_URL) names the target, and a REMOTE target gets no local-credential
+   * fallback (`flair mcp enable`'s `--admin-pass` rule). The target policy is
+   * enforced in src/lib/mcp-enable.ts before the first request; every refusal
+   * here happens before any ops call too.
+   */
+  function mappingTarget(opts: any, command: string): { instance: string; adminUser: string; adminPass: string } {
+    const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
+    if (!instance) {
+      console.error(`Error: --instance is required (or set FLAIR_URL) — \`${command}\` operates on one specific instance.`);
+      process.exit(1);
+    }
+    const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
+    if (!adminPass) {
+      console.error(
+        "Error: --admin-pass <pass> is required for a REMOTE target " +
+          "(the command authenticates to the target instance's operations API with it).\n" +
+          "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
+          "local admin credentials, and sending them to another instance is how a local secret ends up on " +
+          "someone else's Harper. Pass the target's own admin password explicitly.",
+      );
+      process.exit(1);
+    }
+    return { instance, adminUser: resolveAdminUser(opts.adminUser), adminPass };
+  }
+
+  const MAPPING_INSTANCE_OPTION = "--instance <url>";
+  const MAPPING_INSTANCE_HELP = "Remote flair instance holding the mapping (else FLAIR_URL)";
+  const MAPPING_TARGET_HELP =
+    "Targets a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local name, or a " +
+    "loopback, unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused before any request.";
+  const MAPPING_ADMIN_PASS_HELP =
+    "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this " +
+    "machine's local credentials and are never sent to a remote instance)";
+  const MAPPING_ADMIN_USER_HELP = "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)";
+
+  principal
+    .command("link <principal>")
+    .description(
+      "Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step " +
+        "`flair mcp enable` runs, and nothing else. " + MAPPING_TARGET_HELP,
+    )
+    .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
+    .option("--idp-provider <name>", "Upstream IdP provider", "github")
+    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
+    .option("--replace", "Move a subject that is already mapped to a different principal")
+    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+    .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
+    .action(async (principalId: string, opts) => {
+      if (!opts.idpSubject) {
+        console.error("Error: --idp-subject <login> is required — it is the login the identity provider reports for this person.");
+        process.exit(1);
+      }
+      const target = mappingTarget(opts, "flair principal link");
+      try {
+        const result = await linkPrincipalMapping({
+          hostedOrigin: target.instance,
+          adminUser: target.adminUser,
+          adminPass: target.adminPass,
+          principal: principalId,
+          idpProvider: opts.idpProvider,
+          idpSubject: opts.idpSubject,
+          replace: Boolean(opts.replace),
+        });
+        for (const line of result.lines) console.log(line);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+    });
+
+  principal
+    .command("unlink <principal>")
+    .description(
+      "Revoke one IdP login's mapping; success requires confirmed updates and no resolvable subject mapping on readback. " + MAPPING_TARGET_HELP,
+    )
+    .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
+    .option("--idp-provider <name>", "Upstream IdP provider the mapping carries", "github")
+    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
+    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+    .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
+    .action(async (principalId: string, opts) => {
+      if (!opts.idpSubject) {
+        console.error("Error: --idp-subject <login> is required — it is the login the identity provider reports for this person.");
+        process.exit(1);
+      }
+      const target = mappingTarget(opts, "flair principal unlink");
+      try {
+        const result = await unlinkPrincipalMapping({
+          hostedOrigin: target.instance,
+          adminUser: target.adminUser,
+          adminPass: target.adminPass,
+          principal: principalId,
+          idpProvider: opts.idpProvider,
+          idpSubject: opts.idpSubject,
+        });
+        for (const line of result.lines) console.log(line);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+    });
+
+  principal
+    .command("links <principal>")
+    .description(
+      "List a principal's current IdP mappings on an already-enabled instance. " + MAPPING_TARGET_HELP,
+    )
+    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
+    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+    .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
+    .action(async (principalId: string, opts) => {
+      const target = mappingTarget(opts, "flair principal links");
+      try {
+        const result = await listPrincipalMappings({
+          hostedOrigin: target.instance,
+          adminUser: target.adminUser,
+          adminPass: target.adminPass,
+          principal: principalId,
+        });
+        for (const line of result.lines) console.log(line);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
     });
 }
