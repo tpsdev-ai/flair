@@ -29,7 +29,7 @@ const MUTATION_DENIED = (): Response =>
   new Response(
     JSON.stringify({
       error: "instruction_version_immutable",
-      message: "InstructionVersion records are append-only and are not writable through the REST API",
+      message: "InstructionVersion is append-only within the application; REST writes are refused",
     }),
     { status: 403, headers: { "Content-Type": "application/json" } },
   );

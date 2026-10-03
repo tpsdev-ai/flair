@@ -14,9 +14,6 @@ let versionStore: Map<string, any>;
 let lookupFails = false;
 let getBehavior: "ok" | "throw" | "empty" = "ok";
 
-// flair#2139 S1: Soul writes append one InstructionVersion row, in the write's
-// own transaction. This double provides the table (with a lock) and an owned
-// transaction so the append boundary does not turn a successful write into a 503.
 const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
 const InstructionVersionBase = {
   primaryStore: versionPrimaryStore,

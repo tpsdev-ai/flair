@@ -19,7 +19,7 @@ const classified = new Map<string, string>([
   ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#2", "Subject-type lock store — read-only handle."],
   ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#3", "Raw table handle inside the append transaction."],
   ["resources/instruction-version-record.ts:writer:table.create#1", "Application append: the old subject's tombstone on a logical-key change."],
-  ["resources/instruction-version-record.ts:writer:table.create#2", "Application append: one version row per accepted Soul resource write."],
+  ["resources/instruction-version-record.ts:writer:table.create#2", "Application append for single-row Soul resource writes."],
   ["resources/instruction-version-record.ts:writer:createHash(\"sha256\").update#1", "Hashing, not a table write; listed by the conservative sink scan."],
   ["resources/instruction-version-record.ts:writer:createHash(\"sha256\").update#2", "Hashing, not a table write; listed by the conservative sink scan."],
   ["resources/InstructionVersion.ts:alias-source:(databases as any).flair.InstructionVersion#1", "The resource class extends the table."],

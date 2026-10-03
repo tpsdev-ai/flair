@@ -71,7 +71,10 @@ class BaseSoul {
     if (pausePatch) await pausePatch();
     return rows.get(this.id);
   }
-  async delete() { this.ctx.transaction.souls.delete(this.id); }
+  async delete(target?: any) {
+    if (target?.isCollection) this.ctx.transaction.souls.clear();
+    else this.ctx.transaction.souls.delete(this.id);
+  }
 }
 const empty = { async *search() {} };
 mock.module("harper", () => ({
@@ -348,6 +351,31 @@ describe("instruction version — guard, collisions and failure injection", () =
 
 
 describe("Soul resource version snapshots", () => {
+  test("collection and unbound deletes are refused without changing rows or history", async () => {
+    const row = { id: "agent-a:role", agentId: "agent-a", key: "role", value: "before" };
+    soulStore.set(row.id, row);
+    for (const [id, target] of [
+      [undefined, { isCollection: true }],
+      [undefined, row.id],
+      [row.id, { isCollection: true }],
+    ] as const) {
+      const result = await soul(id).delete(target);
+      expect(result).toBeInstanceOf(Response);
+      expect(result.status).toBe(400);
+      expect(await result.json()).toEqual({ error: "soul_delete_requires_one_record" });
+      expect([...soulStore.values()]).toEqual([row]);
+      expect(store.size).toBe(0);
+    }
+  });
+
+  test("a bound row delete appends a tombstone", async () => {
+    const row = { id: "agent-a:role", agentId: "agent-a", key: "role", value: "before" };
+    await soul(row.id).put(row);
+    await soul(row.id).delete({ id: row.id });
+    expect(soulStore.has(row.id)).toBe(false);
+    expect([...store.values()].map((version) => version.kind)).toEqual(["create", "delete"]);
+  });
+
   test("POST generates the physical id and snapshots the whole stored row", async () => {
     const result = await soul().post({ agentId: "agent-a", key: "role", value: "v1", originatorInstanceId: "forged" });
     expect(result instanceof Response).toBe(false);

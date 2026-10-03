@@ -204,6 +204,26 @@ describe("flair#2139 S1 — every mutation verb is denied", () => {
 });
 
 describe("flair#2139 S1 — Soul lifecycle leaves a chained history", () => {
+  test("collection DELETE is refused and leaves Soul rows and history unchanged", async () => {
+    const fixtures = [A, B].map((agent) => {
+      const key = `iv-collection-${sfx}`;
+      return { id: `${agent.id}:${key}`, agentId: agent.id, key };
+    });
+    for (const row of fixtures) await createSoul(row.id, row.agentId, row.key, "retained");
+    const before = await Promise.all(fixtures.map(async (row) => ({
+      row: await soulRow(row.id), versions: await versionsOf(`${row.agentId}:${row.key}`),
+    })));
+    for (const path of ["/Soul/", `/Soul/?agentId=${encodeURIComponent(A.id)}`]) {
+      const result = await call("basic", "DELETE", path);
+      expect(result.status, result.text).toBe(400);
+      expect(JSON.parse(result.text)).toEqual({ error: "soul_delete_requires_one_record" });
+      for (const [index, row] of fixtures.entries()) {
+        expect(await soulRow(row.id)).toEqual(before[index].row);
+        expect(await versionsOf(`${row.agentId}:${row.key}`)).toEqual(before[index].versions);
+      }
+    }
+  }, 120_000);
+
   test("create, PUT, PATCH, delete and recreate leave ordered chained records, a tombstone and distinct ids", async () => {
     const key = `iv-life-${sfx}`;
     const id = `${A.id}:${key}`;

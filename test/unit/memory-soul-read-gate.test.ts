@@ -35,8 +35,6 @@ let soulStore: Map<string, any>;
 // federation-edge-hardening slice 1: resources/instance-identity.ts's
 // localInstanceId() reads this via databases.flair.Instance.search().
 let instanceRow: any = null;
-// flair#2139 S1: resources/instruction-version-record.ts's recordVersion appends
-// one InstructionVersion row per Soul write, in the write's own transaction.
 let versionStore: Map<string, any>;
 const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
 const InstructionVersionBase = {

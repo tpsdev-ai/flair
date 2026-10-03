@@ -415,7 +415,7 @@ type OrgSkillAssignmentHistory @table(database: "flair") {
   at: String!
 }
 
-# InstructionVersion — Soul resource write history (flair#2139 slice 1).
+# InstructionVersion — single-row Soul resource write history; Soul collection deletes are refused.
 # REST mutation verbs are refused; reads authorize soul subjects only.
 # The administrator operations API is an unaudited exception.
 type InstructionVersion @table(database: "flair") @export {

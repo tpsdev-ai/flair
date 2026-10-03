@@ -1,7 +1,5 @@
 /**
- * The application append helper for InstructionVersion (flair#2139 slice 1).
- * State preparation, attribution, head checks, row mutation and insert-only
- * appends share an owned transaction under a process-local subject-type lock.
+ * Transaction helper for single-row Soul resource history (flair#2139 slice 1).
  */
 import { createHash } from "node:crypto";
 import { databases } from "harper";

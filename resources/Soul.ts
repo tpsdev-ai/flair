@@ -154,6 +154,12 @@ export class Soul extends (databases as any).flair.Soul {
     const ctx = this.getContext?.();
     const { denied } = await authorizeSoulWrite(ctx);
     if (denied) return denied;
+    const rowId = this.getId?.();
+    if ((typeof rowId !== "string" && typeof rowId !== "number") || rowId === "" || this.isCollection || id?.isCollection) {
+      return new Response(JSON.stringify({ error: "soul_delete_requires_one_record" }), {
+        status: 400, headers: { "Content-Type": "application/json" },
+      });
+    }
     const outcome = await recordVersion(ctx, {
       subjectType: "soul",
       prepare: async (shared) => {
