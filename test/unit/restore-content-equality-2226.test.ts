@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { comparePreservedFields } from "../../src/lib/restore-verify.ts";
 
 const commandPath = join(import.meta.dirname, "../../src/commands/restore.ts");
 const commanderPath = join(import.meta.dirname, "../../node_modules/commander/index.js");
@@ -86,6 +87,14 @@ describe("restore verifies preserved content (#2226)", () => {
     expect(result.stderr).not.toContain("STALE");
     expect(result.stdout).not.toContain("ARCHIVED");
     expect(result.stderr).not.toContain("ARCHIVED");
+  });
+
+  test("a changed own __proto__ key in meta fails restore", async () => {
+    const archived = { id: "m1", agentId: "flint", meta: JSON.parse('{"__proto__":{"x":1}}') };
+    const restored = { ...archived, meta: JSON.parse('{"__proto__":{"x":2}}') };
+    expect(comparePreservedFields("Memory", archived, restored)).toEqual(["meta"]);
+    const archive = { version: 1, agents: [agent], souls: [], memories: [archived] };
+    refused(await run(archive, [{ method: "GET", path: "/Memory/m1", body: restored }]), "m1", "meta");
   });
 
   test("a mismatching array field is named", async () => {

@@ -263,10 +263,10 @@ flair search --agent mybot "that important thing"
 flair soul set --agent mybot --key role --value "Security reviewer" --admin-pass-file ~/.flair/admin-pass
 flair bootstrap --agent mybot --max-tokens 4000        # cold-start: soul + relevant memories
 flair backup --admin-pass-file ~/.flair/admin-pass     # logical JSON export
-flair restore ./backup.json --admin-pass <password>
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair restore ./backup.json
 ```
 
-`--admin-pass-file` is preferred over `--admin-pass`: it keeps the secret out of `ps` and your shell history.
+For commands that declare `--admin-pass-file`, prefer it over `--admin-pass` to keep the secret out of `ps` and your shell history.
 
 ### JavaScript / TypeScript
 
