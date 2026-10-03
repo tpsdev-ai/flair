@@ -1,6 +1,5 @@
 // ─── flair#2139 S2 COMPLETION (slice 2c) item 6 — in-process POST and MCP ────
-//
-// The in-process POST / MCP acceptance for skill history, driven through the
+// acceptance for skill history, driven through the
 // REAL resource boundary: the inproc-app fixture loads Flair as a sub-component
 // and invokes the shipped `TOOLS[...]` wrappers in-process (resources/
 // mcp-tools.ts), exactly as the /mcp handler does. `skill_store` is
@@ -8,8 +7,10 @@
 // update paths. Each must return the ACTUAL successor id, and the stable
 // subject must carry the chain across the changed physical ids.
 //
-// RED on #2246's head: the update paths overwrite in place / return the old id
-// and append no version.
+// This is acceptance COVERAGE, not a behaviour change: the writer response
+// already returns the successor id on #2246's head, so these cases pass there
+// too. They are kept green-on-green on purpose — the deferred work this closes
+// was the missing end-to-end acceptance through the in-process seam.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
