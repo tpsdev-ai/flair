@@ -96,7 +96,7 @@ Durability is owner-controlled, including `permanent`: owners may create, change
 
 What each tier actually guarantees:
 
-- permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.
+- permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.
 - persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).
 - standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
 - ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.

@@ -228,7 +228,7 @@ export default function (pi: ExtensionAPI) {
         Type.String({ 
           enum: ["permanent", "persistent", "standard", "ephemeral"] as const,
           description:
-            "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.\n" +
+            "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.\n" +
             "persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).\n" +
             "standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.\n" +
             "ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.\n" +

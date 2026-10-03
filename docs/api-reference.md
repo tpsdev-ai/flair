@@ -395,9 +395,7 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 
 #### Durability tiers (#2217)
 
-Every selection point — the MCP tool descriptions, the CLI `--durability` help, the SDK doc comments, the shipped skills, and the README/docs pages — states the same guarantee per tier, and none claims more than the code provides (the documentation contract test enumerates the points it checks):
-
-- permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.
+- permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.
 - persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).
 - standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
 - ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
@@ -445,7 +443,7 @@ A `hostSource`, like a client-supplied `createdAt`, is a writer claim attributed
 | `priority` | String | `critical` \| `high` \| `standard` \| `low` |
 | `metadata` | String | JSON (skill governance, etc.) |
 | `provenance` | String | Operator/internal author + `sourceClass` |
-| `durability` | String | Default `permanent` |
+| `durability` | String | POST defaults to `permanent`; PUT supplies no default |
 | `createdAt` / `updatedAt` | String | |
 | `originatorInstanceId` | String | Server-stamped write-time instance id; not client-writable through a resource write |
 

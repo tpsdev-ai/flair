@@ -1,36 +1,11 @@
-/**
- * durability-doc-contract.test.ts — flair#2217.
- *
- * The documentation contract for durability tiers. `permanent` prevents
- * routine retention removal (resources/MemoryMaintenance.ts) but supplies no
- * special flush, fsync, backup or replica acknowledgement, and an explicit
- * delete or a store failure still ends a row at any tier. The durability
- * selection points enumerated below — the MCP tool descriptions, the CLI help,
- * the SDK doc comments, the shipped skills, README and the docs — must state
- * the SAME guarantee per tier, and none may re-introduce a claim the code does
- * not provide.
- *
- * This test is a pure text contract (no imports of the modules under test), so
- * it runs unchanged against `origin/main` and reports the over-promise there:
- * the pre-#2217 README said `permanent` is "retained until explicitly deleted",
- * which the code does not guarantee.
- *
- * It fails on `origin/main` (missing canonical statements + a forbidden
- * over-promise on README) and passes once every selection point carries the
- * canonical copy.
- */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const REPO = join(import.meta.dir, "../..");
 
-/**
- * THE canonical statement, one line per tier plus the shared caveat. Copied
- * verbatim into every selection point; this literal is the contract.
- */
 const CANONICAL_TIERS: readonly string[] = [
-  "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.",
+  "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.",
   "persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).",
   "standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.",
   "ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.",
@@ -41,12 +16,6 @@ const CANONICAL_CAVEAT =
 
 const CANONICAL: readonly string[] = [...CANONICAL_TIERS, CANONICAL_CAVEAT];
 
-/**
- * Every file whose prose must carry the full canonical statement. Covers the
- * descriptor source of truth and both build-time vendored copies, the server
- * durability module, the CLI copy module and the rendered CLI-surface snapshot,
- * the SDK doc comments, the shipped skills, and the README/docs pages.
- */
 const SURFACES: readonly string[] = [
   "resources/memory-durability.ts",
   "packages/flair-tool-descriptors/src/index.ts",
@@ -58,6 +27,9 @@ const SURFACES: readonly string[] = [
   "packages/flair-client/src/types.ts",
   "packages/flair-client/src/client.ts",
   "packages/adk-flair-js/src/memory_service.ts",
+  "packages/adk-flair/src/adk_flair/memory_service.py",
+  "packages/adk-flair/README.md",
+  "src/bridges/types.ts",
   "packages/pi-flair/src/index.ts",
   "packages/openclaw-flair/index.ts",
   "packages/hermes-flair/__init__.py",
@@ -66,15 +38,9 @@ const SURFACES: readonly string[] = [
   "README.md",
   "DESIGN.md",
   "docs/api-reference.md",
+  "docs/bridges.md",
   "docs/rem.md",
   "docs/quickstart.md",
-];
-
-/** CLI commands whose `--durability` help must be rendered from the copy module. */
-const CLI_COPY_CONSUMERS: readonly string[] = [
-  "src/commands/memory.ts",
-  "src/commands/soul.ts",
-  "src/commands/search.ts",
 ];
 
 /**
@@ -111,7 +77,7 @@ function read(repoRelPath: string): string | null {
   }
 }
 
-/** Missing canonical lines in one file's text ([] means fully compliant). */
+/** Missing canonical lines in one file's text. */
 function missingCanonical(text: string): string[] {
   const flat = squash(text);
   return CANONICAL.filter((line) => !flat.includes(squash(line)));
@@ -126,6 +92,12 @@ function forbiddenHits(text: string): string[] {
   return hits;
 }
 
+function runText(cmd: string[]): string {
+  const result = Bun.spawnSync(cmd, { cwd: REPO, stdout: "pipe", stderr: "pipe" });
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  return new TextDecoder().decode(result.stdout);
+}
+
 describe("flair#2217 — durability documentation contract", () => {
   test("the canonical statement is one line per tier plus a caveat", () => {
     expect(CANONICAL_TIERS).toHaveLength(4);
@@ -135,7 +107,7 @@ describe("flair#2217 — durability documentation contract", () => {
     expect(CANONICAL_CAVEAT.length).toBeGreaterThan(0);
   });
 
-  test(`each enumerated selection point carries the canonical statement (${SURFACES.length} files)`, () => {
+  test(`each enumerated file carries the canonical statement (${SURFACES.length} files)`, () => {
     const failures: string[] = [];
     for (const file of SURFACES) {
       const text = read(file);
@@ -150,7 +122,7 @@ describe("flair#2217 — durability documentation contract", () => {
     expect(failures).toEqual([]);
   });
 
-  test("no selection point re-introduces a guarantee the code does not provide", () => {
+  test("listed files contain no forbidden durability wording", () => {
     const failures: string[] = [];
     for (const file of SURFACES) {
       const text = read(file);
@@ -162,15 +134,65 @@ describe("flair#2217 — durability documentation contract", () => {
     expect(failures).toEqual([]);
   });
 
-  test("the CLI surfaces render from the shared copy module, not their own words", () => {
-    const failures: string[] = [];
-    for (const file of CLI_COPY_CONSUMERS) {
-      const text = read(file);
-      if (text === null || !text.includes("DURABILITY_TIERS_HELP")) {
-        failures.push(`${file}: does not use DURABILITY_TIERS_HELP`);
+  test("MCP memory_store displays the canonical durability description", () => {
+    const descriptions: string[] = JSON.parse(runText([process.execPath, "-e", `
+      const descriptions = [];
+      for (const path of ${JSON.stringify([
+        "packages/flair-tool-descriptors/src/index.ts",
+        "resources/tool-descriptors/index.ts",
+        "packages/flair-mcp/src/tool-descriptors/index.ts",
+      ])}) {
+        const { TOOL_DESCRIPTORS } = await import("./" + path);
+        const tool = TOOL_DESCRIPTORS.find(t => t.name === "memory_store");
+        descriptions.push(tool.inputSchema.properties.durability.description);
       }
+      console.log(JSON.stringify(descriptions));
+    `]));
+    expect(descriptions).toHaveLength(3);
+    for (const description of descriptions) {
+      expect(missingCanonical(description)).toEqual([]);
+      expect(forbiddenHits(description)).toEqual([]);
     }
-    expect(failures).toEqual([]);
+  });
+
+  test("CLI durability options display Memory copy or Soul PUT semantics", () => {
+    const help: string[] = JSON.parse(runText([process.execPath, "-e", `
+      const { program } = await import("./src/cli.ts");
+      const { captureCommandHelp } = await import("./test/helpers/cli-surface.ts");
+      const commands = [
+        program.commands.find(c => c.name() === "memory").commands.find(c => c.name() === "add"),
+        program.commands.find(c => c.name() === "search"),
+        program.commands.find(c => c.name() === "soul").commands.find(c => c.name() === "set"),
+      ];
+      console.log(JSON.stringify(commands.map(cmd => {
+        const option = cmd.options.find(o => o.long === "--durability");
+        if (!option) throw new Error("missing durability option");
+        cmd.options = [option];
+        return captureCommandHelp(cmd);
+      })));
+    `]));
+    expect(help).toHaveLength(3);
+    for (const text of help.slice(0, 2)) {
+      expect(missingCanonical(text)).toEqual([]);
+      expect(forbiddenHits(text)).toEqual([]);
+    }
+    expect(squash(help[2])).toContain(
+      "Stored Soul label (permanent/persistent/standard/ephemeral). Soul has no expiresAt/validTo and is not scanned by MemoryMaintenance. PUT supplies no default; omitted durability is unset.",
+    );
+    expect(help[2]).not.toContain("routine maintenance");
+  });
+
+  test("Python ADK add_memory docstring displays the canonical durability copy", () => {
+    const docstring = runText(["python3", "-c", `
+import ast
+from pathlib import Path
+tree = ast.parse(Path("packages/adk-flair/src/adk_flair/memory_service.py").read_text())
+methods = [node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "add_memory"]
+assert len(methods) == 1
+print(ast.get_docstring(methods[0]) or "")
+    `]);
+    expect(missingCanonical(docstring)).toEqual([]);
+    expect(forbiddenHits(docstring)).toEqual([]);
   });
 
   test("guard the guard: the checker flags the pre-#2217 README claim", () => {

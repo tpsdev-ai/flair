@@ -1,12 +1,5 @@
-/**
- * Canonical durability copy (flair#2217) — the same four statements the
- * descriptor package, the CLI help and the docs carry, kept here so the server
- * side has a single definition to reuse. Byte-identical to
- * packages/flair-tool-descriptors/src/index.ts and src/lib/durability-copy.ts;
- * test/unit/durability-doc-contract.test.ts fails if they drift.
- */
 export const DURABILITY_TIER_GUARANTEES: readonly string[] = [
-  "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.",
+  "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.",
   "persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).",
   "standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.",
   "ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.",

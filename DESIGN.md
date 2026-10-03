@@ -17,10 +17,9 @@ Flair is built on exactly three primitives: **identity**, **memory**, **soul**.
 - **Memory** — durable, semantically searchable knowledge, tiered by durability
   (`permanent` / `persistent` / `standard` / `ephemeral`), decay- and relevance-aware on
   retrieval. Memory is what turns a stateless completion into an agent that persists
-  across restarts and harnesses. Each tier states exactly what it guarantees and what it
-  does not:
+  across restarts and harnesses. Retention, decay and bootstrap ordering by tier:
 
-  - permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.
+  - permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.
   - persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).
   - standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
   - ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.

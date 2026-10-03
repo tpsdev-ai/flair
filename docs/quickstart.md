@@ -137,9 +137,9 @@ You didn't ask for that, and it isn't a setting you have to remember. Flair deri
 | `permanent`, `persistent` | `shared` — a fact or decision worth keeping is worth the team being able to find |
 | `standard`, `ephemeral` — including a bare write with no `--durability` | `private` — working context and scratch state belong to the agent that produced them |
 
-Durability also decides retention, and each tier states exactly that (the full statement lives in [README.md](../README.md) and is repeated by every selection point):
+Retention, decay and bootstrap ordering by tier:
 
-- permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.
+- permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.
 - persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).
 - standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
 - ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.

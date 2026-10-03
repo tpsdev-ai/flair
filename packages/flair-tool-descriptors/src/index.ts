@@ -96,23 +96,9 @@ export function descriptorNames(descriptors: readonly ToolDescriptor[]): string[
   return descriptors.map((d) => d.name);
 }
 
-/**
- * Canonical durability copy (flair#2217).
- *
- * ONE statement per tier, reused verbatim by the durability selection points
- * (the MCP tool descriptions here, the CLI `--durability` help, the SDK doc
- * comments, the shipped skills, and the README/docs pages). None of them may
- * promise more than the code provides.
- *
- * `DURABILITY_TIER_GUARANTEES` is the full tier-by-tier statement;
- * `DURABILITY_CAVEAT` is the one-sentence limit that the compact tool schemas
- * (no room for the tier list) carry. The documentation contract test
- * (test/unit/durability-doc-contract.test.ts) pins these strings byte-for-byte
- * wherever they are duplicated and fails if any selection point re-introduces a
- * guarantee the code does not provide.
- */
+/** Memory tier statements and caveat used by the durability schema description. */
 export const DURABILITY_TIER_GUARANTEES: readonly string[] = [
-  "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap.",
+  "permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget.",
   "persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier).",
   "standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.",
   "ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.",

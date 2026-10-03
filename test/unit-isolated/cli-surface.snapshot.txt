@@ -1833,7 +1833,7 @@ flair memory add
       description: memory content (alias for positional arg)
       attr: content
     --durability <d>
-      description: permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap. persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them. (default standard). Also decides the default visibility when --visibility is omitted: permanent/persistent -> shared, standard/ephemeral -> private
+      description: permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them. (default standard). Also decides the default visibility when --visibility is omitted: permanent/persistent -> shared, standard/ephemeral -> private
       attr: durability
     --tags <csv>
       attr: tags
@@ -2053,7 +2053,7 @@ flair search
       attr: minScore
       default: "0"
     --durability <level>
-      description: permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap. persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them. (filter; client-side)
+      description: permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and is considered before recent rows in bootstrap, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them. (filter; client-side)
       attr: durability
     --source <name>
       description: Filter by source/agentId (client-side)
@@ -2159,7 +2159,7 @@ flair soul set
       attr: value
       mandatory: true
     --durability <d>
-      description: permanent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier); it never decays and loads first in bootstrap. persistent — routine maintenance never reaps or age-archives it (a writer-set validTo still archives it, as for every tier). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them. (default permanent — soul entries are identity, not working memory)
+      description: Stored Soul label (permanent/persistent/standard/ephemeral). Soul has no expiresAt/validTo and is not scanned by MemoryMaintenance. PUT supplies no default; omitted durability is unset.
       attr: durability
     --url <url>
       description: Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)
@@ -4762,20 +4762,22 @@ Options:
   --content <text>          memory content (alias for positional arg)
   --durability <d>          permanent — routine maintenance never reaps or
                             age-archives it (a writer-set validTo still archives
-                            it, as for every tier); it never decays and loads
-                            first in bootstrap. persistent — routine maintenance
-                            never reaps or age-archives it (a writer-set validTo
-                            still archives it, as for every tier). standard —
-                            routine maintenance archives it once its validTo
-                            passes or, as a session note, after 30 days.
-                            ephemeral — routine maintenance reaps it once its
-                            TTL (24h by default) passes. No tier adds a flush,
-                            fsync, backup or replica acknowledgement: an
-                            explicit delete (owner or admin) or a store failure
-                            can end any of them. (default standard). Also
-                            decides the default visibility when --visibility is
-                            omitted: permanent/persistent -> shared,
-                            standard/ephemeral -> private
+                            it, as for every tier); it never decays and is
+                            considered before recent rows in bootstrap, subject
+                            to scope, expiry/closure and the token budget.
+                            persistent — routine maintenance never reaps or
+                            age-archives it (a writer-set validTo still archives
+                            it, as for every tier). standard — routine
+                            maintenance archives it once its validTo passes or,
+                            as a session note, after 30 days. ephemeral —
+                            routine maintenance reaps it once its TTL (24h by
+                            default) passes. No tier adds a flush, fsync, backup
+                            or replica acknowledgement: an explicit delete
+                            (owner or admin) or a store failure can end any of
+                            them. (default standard). Also decides the default
+                            visibility when --visibility is omitted:
+                            permanent/persistent -> shared, standard/ephemeral
+                            -> private
   --tags <csv>
   --summary <text>          agent-set multi-sentence dense compression (3-tier
                             chain: subject → summary → content)
@@ -4951,17 +4953,18 @@ Options:
   --durability <level>       permanent — routine maintenance never reaps or
                              age-archives it (a writer-set validTo still
                              archives it, as for every tier); it never decays
-                             and loads first in bootstrap. persistent — routine
-                             maintenance never reaps or age-archives it (a
-                             writer-set validTo still archives it, as for every
-                             tier). standard — routine maintenance archives it
-                             once its validTo passes or, as a session note,
-                             after 30 days. ephemeral — routine maintenance
-                             reaps it once its TTL (24h by default) passes. No
-                             tier adds a flush, fsync, backup or replica
-                             acknowledgement: an explicit delete (owner or
-                             admin) or a store failure can end any of them.
-                             (filter; client-side)
+                             and is considered before recent rows in bootstrap,
+                             subject to scope, expiry/closure and the token
+                             budget. persistent — routine maintenance never
+                             reaps or age-archives it (a writer-set validTo
+                             still archives it, as for every tier). standard —
+                             routine maintenance archives it once its validTo
+                             passes or, as a session note, after 30 days.
+                             ephemeral — routine maintenance reaps it once its
+                             TTL (24h by default) passes. No tier adds a flush,
+                             fsync, backup or replica acknowledgement: an
+                             explicit delete (owner or admin) or a store failure
+                             can end any of them. (filter; client-side)
   --source <name>            Filter by source/agentId (client-side)
   --explain                  Show score breakdown (raw, composite, durability,
                              age, usage) per hit — also added to --json output
@@ -5079,20 +5082,11 @@ Options:
   --agent <id>
   --key <key>
   --value <value>
-  --durability <d>          permanent — routine maintenance never reaps or
-                            age-archives it (a writer-set validTo still archives
-                            it, as for every tier); it never decays and loads
-                            first in bootstrap. persistent — routine maintenance
-                            never reaps or age-archives it (a writer-set validTo
-                            still archives it, as for every tier). standard —
-                            routine maintenance archives it once its validTo
-                            passes or, as a session note, after 30 days.
-                            ephemeral — routine maintenance reaps it once its
-                            TTL (24h by default) passes. No tier adds a flush,
-                            fsync, backup or replica acknowledgement: an
-                            explicit delete (owner or admin) or a store failure
-                            can end any of them. (default permanent — soul
-                            entries are identity, not working memory)
+  --durability <d>          Stored Soul label
+                            (permanent/persistent/standard/ephemeral). Soul has
+                            no expiresAt/validTo and is not scanned by
+                            MemoryMaintenance. PUT supplies no default; omitted
+                            durability is unset.
   --url <url>               Flair base URL (overrides the URL resolved from
                             config; env: FLAIR_URL)
   --json                    Emit raw JSON response (also: pipe +
