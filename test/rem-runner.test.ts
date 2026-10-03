@@ -1288,8 +1288,9 @@ describe("review regressions #2230", () => {
   });
 
   for (const path of ["tagged", "untagged", "continuity"] as const) {
-    for (const returned of [true, false]) {
-      it(path + " server pause " + (returned ? "body" : "HTTP error") + " skips and stops", async () => {
+    for (const errorBody of ["rem_aborted", noBackend, "generation_failed", null]) {
+      const returned = errorBody !== null;
+      it(path + (returned ? ` successful HTTP error body ${errorBody} fails` : " HTTP 503 pause skips and stops"), async () => {
         const now = new Date();
         const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
           activeTags: path === "tagged" ? ["adk:app:alice", "adk:app:bob"] : [],
@@ -1301,7 +1302,7 @@ describe("review regressions #2230", () => {
             if (path === "continuity" && body.scope === "all") {
               return { candidates: [], count: 0, model: "fixture", gathered: 1, unreflected: 1 };
             }
-            if (returned) return { error: "rem_aborted", detail: "paused" };
+            if (returned) return { error: errorBody };
             throw new ApiHttpError(503, JSON.stringify({ error: "rem_aborted", detail: "paused" }));
           },
         });
@@ -1310,14 +1311,24 @@ describe("review regressions #2230", () => {
           if (route === "/MemoryDedupStats") dedupCalls++;
           return api(method, route, body);
         } }));
-        expect(result.status).toBe("completed");
-        expect(result.logRow.errors).toEqual([]);
-        expect(result.logRow.skips).toEqual(["distillation: aborted by operator (rem_aborted)"]);
-        expect(result.logRow.distill?.aborted).toBe(true);
         expect(result.logRow.distilledAt).toBeUndefined();
-        expect(reflectCalls).toHaveLength(path === "continuity" ? 2 : 1);
-        expect(autoPromoteCalls).toEqual([]);
-        expect(dedupCalls).toBe(0);
+        if (returned) {
+          expect(result.status).toBe("failed");
+          expect(result.logRow.skips).toEqual([]);
+          expect(result.logRow.errors).toHaveLength(path === "untagged" ? 1 : 2);
+          expect(result.logRow.errors.every((error) => error.includes(errorBody!))).toBe(true);
+          expect(readLogRows()[0].errors).toEqual(result.logRow.errors);
+          expect(result.logRow.distill?.aborted).not.toBe(true);
+          expect(reflectCalls).toHaveLength(path === "continuity" ? 3 : path === "tagged" ? 2 : 1);
+        } else {
+          expect(result.status).toBe("completed");
+          expect(result.logRow.errors).toEqual([]);
+          expect(result.logRow.skips).toEqual(["distillation: aborted by operator (rem_aborted)"]);
+          expect(result.logRow.distill?.aborted).toBe(true);
+          expect(reflectCalls).toHaveLength(path === "continuity" ? 2 : 1);
+          expect(autoPromoteCalls).toEqual([]);
+          expect(dedupCalls).toBe(0);
+        }
       });
     }
   }

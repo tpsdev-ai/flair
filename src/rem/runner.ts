@@ -872,11 +872,6 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           });
           const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
           if (obj.error) {
-            if (obj.error === "rem_aborted") {
-              pushSkipOnce("distillation: aborted by operator (rem_aborted)");
-              distillAborted = true;
-              break;
-            }
             errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
           } else {
             noteGather(obj, maxMemories);
@@ -919,10 +914,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         });
         const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
         if (obj.error) {
-          if (obj.error === "rem_aborted") {
-            pushSkipOnce("distillation: aborted by operator (rem_aborted)");
-            distillAborted = true;
-          } else errors.push(`distillation: ${describeApiError(obj.error)}`);
+          errors.push(`distillation: ${describeApiError(obj.error)}`);
         } else {
           noteGather(obj, maxMemories);
           candidates = collectStagedIds(obj);
@@ -994,11 +986,6 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           });
           const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
           if (obj.error) {
-            if (obj.error === "rem_aborted") {
-              pushSkipOnce("distillation: aborted by operator (rem_aborted)");
-              distillAborted = true;
-              break;
-            }
             errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
           } else {
             noteGather(obj, maxMemories);
