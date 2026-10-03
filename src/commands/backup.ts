@@ -17,6 +17,7 @@ export type BackupCli = {
   applyAdminPassFile: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
+  resolveOpsTarget: (opts: { opsTarget?: string }) => string | undefined;
   resolveOpsUrlFromTarget: (...args: any[]) => any;
 };
 
@@ -59,6 +60,8 @@ addSharedCredentialOptions(
     .option("--output <path>", "Output file path (default: ~/.flair/backups/flair-backup-<timestamp>.json)")
     .option("--agents <ids>", "Comma-separated agent IDs to include (default: all)")
     .option("--port <port>", "Harper HTTP port")
+    .option("--ops-target <url>", "Operations API target URL (env: FLAIR_OPS_TARGET)")
+    .option("--ops-timeout-ms <ms>", "Operations request timeout, 1–600000 ms (env: FLAIR_BACKUP_OPS_TIMEOUT_MS; default: 10000)")
     .option("--url <url>", "Flair base URL (overrides --port)"),
 ).action(async (opts: any) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
@@ -90,12 +93,18 @@ addSharedCredentialOptions(
 
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-    const opsTarget = process.env.FLAIR_OPS_TARGET;
+    const opsTarget = cli.resolveOpsTarget(opts);
     const opsUrl: string = opsTarget
       ? opsTarget.replace(/\/$/, "")
-      : opts.url
-        ? resolveOpsUrlFromTarget(opts.url)
-        : `http://127.0.0.1:${opts.port !== undefined ? resolveHttpPort(opts) - 1 : resolveOpsPort(opts)}`;
+      : opts.port !== undefined
+        ? `http://127.0.0.1:${resolveHttpPort(opts) - 1}`
+        : opts.url
+          ? resolveOpsUrlFromTarget(opts.url)
+          : `http://127.0.0.1:${resolveOpsPort(opts)}`;
+    const opsTimeoutMs = Number(opts.opsTimeoutMs ?? process.env.FLAIR_BACKUP_OPS_TIMEOUT_MS ?? 10_000);
+    if (!Number.isSafeInteger(opsTimeoutMs) || opsTimeoutMs < 1 || opsTimeoutMs > 600_000) {
+      throw new Error("--ops-timeout-ms / FLAIR_BACKUP_OPS_TIMEOUT_MS must be an integer from 1 to 600000");
+    }
 
     type Row = Record<string, unknown> & { id: string };
     const ids = { Agent: new Set<string>(), Memory: new Set<string>(), Soul: new Set<string>() };
@@ -130,18 +139,30 @@ addSharedCredentialOptions(
     }
 
     async function opsPost(body: Record<string, unknown>, context: string): Promise<unknown> {
+      const signal = AbortSignal.timeout(opsTimeoutMs);
       try {
         const res = await fetch(opsUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(10_000),
-        }).catch(() => { throw new Error("request failed"); });
+          signal,
+        }).catch((error) => {
+          if (signal.aborted || error instanceof Error && error.name === "TimeoutError") throw error;
+          throw new Error("request failed");
+        });
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }
-        return await res.json().catch(() => { throw new Error("invalid JSON response"); });
+        return await res.json().catch((error) => {
+          if (signal.aborted) throw error;
+          throw new Error("invalid JSON response");
+        });
       } catch (error) {
+        if (signal.aborted && signal.reason?.name === "TimeoutError" || error instanceof Error && error.name === "TimeoutError") {
+          const timeout = new Error(`${context}: request timed out after ${opsTimeoutMs}ms`, { cause: error });
+          timeout.name = "TimeoutError";
+          throw timeout;
+        }
         throw new Error(`${context}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }

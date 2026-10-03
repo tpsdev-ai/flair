@@ -8419,6 +8419,7 @@ bindBackupCli({
   applyAdminPassFile,
   resolveHttpPort,
   resolveOpsPort,
+  resolveOpsTarget,
   resolveOpsUrlFromTarget,
 });
 registerBackup(program);

@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=133 options=592
+# commands=133 options=594
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -2371,6 +2371,12 @@ flair backup
     --port <port>
       description: Harper HTTP port
       attr: port
+    --ops-target <url>
+      description: Operations API target URL (env: FLAIR_OPS_TARGET)
+      attr: opsTarget
+    --ops-timeout-ms <ms>
+      description: Operations request timeout, 1–600000 ms (env: FLAIR_BACKUP_OPS_TIMEOUT_MS; default: 10000)
+      attr: opsTimeoutMs
     --url <url>
       description: Flair base URL (overrides --port)
       attr: url
@@ -5303,6 +5309,9 @@ Options:
                             ~/.flair/backups/flair-backup-<timestamp>.json)
   --agents <ids>            Comma-separated agent IDs to include (default: all)
   --port <port>             Harper HTTP port
+  --ops-target <url>        Operations API target URL (env: FLAIR_OPS_TARGET)
+  --ops-timeout-ms <ms>     Operations request timeout, 1–600000 ms (env:
+                            FLAIR_BACKUP_OPS_TIMEOUT_MS; default: 10000)
   --url <url>               Flair base URL (overrides --port)
   --admin-pass <pass>       Admin password (legacy: lands in shell history and
                             the process list — prefer --admin-pass-file or
