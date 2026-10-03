@@ -151,7 +151,7 @@ jobs:
         # consulted only as DATA: condition 6 extracts its whole tree with
         # `git archive` and checks it with THIS tree's checker.
         # `persist-credentials: false`: the token must not survive in .git/config.
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
@@ -162,9 +162,9 @@ jobs:
         # interpreter this job reads the pyproject with, before any step that
         # reads it: the reader fails closed if tomllib is missing, and a floating
         # `python3` makes the decision depend on the runner's image.
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.15"
 
       - name: Assert the workflow_run trigger came from the CI workflow at the pinned path
         # A second workflow named `CI` would otherwise decide releases. Fails LOUDLY
@@ -292,7 +292,7 @@ jobs:
       - name: Check out the default branch's tree
         # A FRESH workspace, and the default branch's tree: the credential
         # isolation is this job boundary, not a restore of the decide job's tree.
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
@@ -301,9 +301,9 @@ jobs:
       - name: Pin Python (the tomllib reader the reader and PyPI use)
         # Round 4, item 3: `write` re-reads the pyproject (the re-derivation and
         # condition 10), so it pins the same interpreter BEFORE any such step.
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.15"
 
       - name: Fetch the real main
         # The re-derivation re-checks release intent against origin/main, and the
@@ -363,7 +363,7 @@ jobs:
         # fails; the tag step still runs and REFUSES `app-not-configured`.
         id: app-token
         if: steps.redecide.outputs.verdict == 'TAG'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.RELEASE_TAG_APP_ID }}
           private-key: ${{ secrets.RELEASE_TAG_APP_PRIVATE_KEY }}
