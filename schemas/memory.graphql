@@ -406,8 +406,7 @@ type OrgSkillAssignment @table(database: "flair") {
 # Deletion history for confirmed physical deletions of permanent/persistent
 # Memory rows through Memory.delete (including CLI hygiene and agent remove),
 # appended in the delete transaction. Non-durable deletes, including
-# maintenance expiry, append no history. Skill deletion closes the retained
-# row and appends none.
+# maintenance expiry, append no history.
 # No @export and no resource class: there is no direct route.
 type MemoryDeletionHistory @table(database: "flair") {
   id: ID @primaryKey               # unique per deletion record (a memory id can be deleted and re-created)

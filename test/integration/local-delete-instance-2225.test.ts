@@ -14,7 +14,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -102,7 +102,7 @@ interface CliRun {
   out: string;
 }
 
-function runCli(args: string[], home: string): CliRun {
+async function runCli(args: string[], home: string): Promise<CliRun> {
   const env: Record<string, string | undefined> = { ...process.env };
   // Strip ambient target/identity so the CLI targets this scratch instance.
   delete env.FLAIR_URL;
@@ -112,13 +112,21 @@ function runCli(args: string[], home: string): CliRun {
   env.HOME = home;
   env.FLAIR_ADMIN_USER = harper.admin.username;
   env.FLAIR_ADMIN_PASS = harper.admin.password;
-  const r = spawnSync(process.execPath, [CLI, ...args], {
-    encoding: "utf-8",
-    env: env as Record<string, string>,
-    timeout: 90_000,
-    killSignal: "SIGTERM",
+  return await new Promise<CliRun>((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, ...args], {
+      env: env as Record<string, string>,
+      timeout: 90_000,
+      killSignal: "SIGKILL",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    child.stdout.setEncoding("utf-8");
+    child.stderr.setEncoding("utf-8");
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    child.stderr.on("data", (chunk) => { out += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, out }));
   });
-  return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
 function runIntegrityCheck(home: string, port: number): { code: number | null; out: string; json: any } {
@@ -158,8 +166,8 @@ async function freeThenClosedPort(): Promise<number> {
 }
 
 /** A stub ops endpoint that reports an operations port it does not serve. */
-async function startMismatchStub(): Promise<{ port: number; deletes: number; close: () => Promise<void> }> {
-  const state = { deletes: 0 };
+async function startMismatchStub(): Promise<{ port: number; configurations: number; deletes: number; close: () => Promise<void> }> {
+  const state = { configurations: 0, deletes: 0 };
   const srv = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -171,11 +179,12 @@ async function startMismatchStub(): Promise<{ port: number; deletes: number; clo
       } catch {
         /* ignore */
       }
+      if (parsed?.operation === "get_configuration") state.configurations++;
       if (parsed?.operation === "delete") state.deletes++;
       res.writeHead(200, { "Content-Type": "application/json" });
       // The served operations port is this listener's port, but the body claims
       // a different one — the pairing does not hold.
-      res.end(JSON.stringify({ http: { port: `127.0.0.1:${port + 1000}` }, operationsApi: { network: { port: port + 1000 } } }));
+      res.end(JSON.stringify({ http: { port: `127.0.0.1:${httpPort()}` }, operationsApi: { network: { port: port === 65535 ? 65534 : port + 1 } } }));
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -185,11 +194,14 @@ async function startMismatchStub(): Promise<{ port: number; deletes: number; clo
   const port = (srv.address() as { port: number }).port;
   return {
     port,
+    get configurations() {
+      return state.configurations;
+    },
     get deletes() {
       return state.deletes;
     },
     close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
-  } as { port: number; deletes: number; close: () => Promise<void> };
+  };
 }
 
 beforeAll(async () => {
@@ -215,7 +227,7 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
     expect(base.code, base.out).toBe(0);
     expect(base.json?.status).toBe("baseline");
 
-    const run = runCli(
+    const run = await runCli(
       ["memory", "hygiene", "--apply", "--pattern", "compact-id", "--ops-port", String(opsPort())],
       home,
     );
@@ -247,7 +259,7 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
     expect(base.code, base.out).toBe(0);
     expect(base.json?.status).toBe("baseline");
 
-    const run = runCli(
+    const run = await runCli(
       ["agent", "remove", agentId, "--force", "--keep-keys", "--ops-port", String(opsPort())],
       home,
     );
@@ -265,6 +277,30 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
     expect((after.json?.attributedDeletes ?? []).map((d: any) => d.id)).toContain(memoryId);
   }, 300_000);
 
+  test.each(["memory hygiene", "agent remove"])("%s refuses a conflicting explicit HTTP port", async (command) => {
+    const home = scratchHome();
+    const agentId = `agent-conflict-${command === "memory hygiene" ? "hyg" : "remove"}`;
+    const id = `${agentId}-compact-1`;
+    await insertAgent(agentId);
+    await insertMemory({ id, agentId, content: "junk row", durability: "permanent" });
+    const before = await historyFor(id);
+    const conflictingPort = await freeThenClosedPort();
+    expect(conflictingPort).not.toBe(httpPort());
+    const args = command === "memory hygiene"
+      ? ["memory", "hygiene", "--apply", "--pattern", "compact-id"]
+      : ["agent", "remove", agentId, "--force", "--keep-keys"];
+    const run = await runCli(
+      [...args, "--ops-port", String(opsPort()), "--port", String(conflictingPort)],
+      home,
+    );
+    expect(run.code, run.out).not.toBe(0);
+    expect(run.out).toContain(
+      `--port ${conflictingPort} does not match --ops-port ${opsPort()}'s HTTP endpoint ${httpPort()}; refusing deletion`,
+    );
+    expect(await memoryExists(id)).toBe(true);
+    expect(await historyFor(id)).toEqual(before);
+  }, 300_000);
+
   test("an unreadable or unpaired configuration refuses before any delete", async () => {
     const home = scratchHome();
     const id = "agent-hyg-compact-3";
@@ -272,7 +308,7 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
 
     // (i) nothing serving the ops port: get_configuration cannot be read.
     const closed = await freeThenClosedPort();
-    const closedRun = runCli(
+    const closedRun = await runCli(
       ["memory", "hygiene", "--apply", "--pattern", "compact-id", "--ops-port", String(closed)],
       home,
     );
@@ -281,7 +317,7 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
     expect(await memoryExists(id)).toBe(true);
 
     // (ii) the instance's own HTTP port is not a paired operations endpoint.
-    const httpRun = runCli(
+    const httpRun = await runCli(
       ["memory", "hygiene", "--apply", "--pattern", "compact-id", "--ops-port", String(httpPort())],
       home,
     );
@@ -292,12 +328,13 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
     // (iii) a stub reporting an operations port it does not serve.
     const stub = await startMismatchStub();
     try {
-      const stubRun = runCli(
+      const stubRun = await runCli(
         ["memory", "hygiene", "--apply", "--pattern", "compact-id", "--ops-port", String(stub.port)],
         home,
       );
       expect(stubRun.code, stubRun.out).not.toBe(0);
-      expect(stubRun.out).toContain("refusing deletion");
+      expect(stubRun.out).toContain(`--ops-port ${stub.port}: no matching local HTTP endpoint; refusing deletion`);
+      expect(stub.configurations).toBe(1);
       expect(stub.deletes).toBe(0);
       expect(await memoryExists(id)).toBe(true);
     } finally {
