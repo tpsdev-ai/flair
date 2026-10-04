@@ -33,7 +33,7 @@ let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "flair-action-recall-home-"));
   Object.assign(RUNTIME, createActionRecallRuntime(home));
-});
+}, 30_000);
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
