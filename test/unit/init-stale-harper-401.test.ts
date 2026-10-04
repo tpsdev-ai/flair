@@ -11,7 +11,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { program, seedAgentViaOpsApi, setOccupiedListenerLookupForTests } from "../../src/cli.js";
@@ -492,10 +492,11 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     const logPath = join(scratch, "requests.log");
     mkdirSync(home);
     mkdirSync(dataDir);
+    chmodSync(dataDir, 0o700);
     mkdirSync(keysDir);
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
     const listener = await startStub(dataDir, "both", logPath, true);
-    writeFileSync(join(dataDir, "hdb.pid"), `${listener.pid}\n`);
+    writeFileSync(join(dataDir, "hdb.pid"), String(listener.pid));
     const { stdout, stderr } = await runInit([
       "--agent", "canary",
       "--port", String(listener.httpPort), "--ops-port", String(listener.opsPort),
@@ -507,7 +508,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     expect(stdout + stderr).toContain(HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT);
     expect(stdout + stderr).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
     const requests = readStubLog(logPath);
-    expect(requests.some(req => req.url === "/health" && req.authorization !== null)).toBe(true);
+    expect(requests.some(req => req.url === "/Health" && req.authorization !== null)).toBe(true);
     expect(requests.some(req => req.method === "POST" && req.authorization !== null)).toBe(true);
   }, 40_000);
 
