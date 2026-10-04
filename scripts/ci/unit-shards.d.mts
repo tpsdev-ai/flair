@@ -8,8 +8,8 @@ export function shardFiles(index: number, of: number, files?: string[]): string[
 export function coverageReport(
   allFiles: string[],
   shards: string[][],
-): { total: number; covered: number; missing: string[]; duplicated: string[]; unknown: string[] };
+): { total: number; covered: number; missing: string[]; duplicated: string[]; unknown: string[]; empty: number[] };
 export function verifyShards(
   of: number,
   files?: string[],
-): { total: number; covered: number; missing: string[]; duplicated: string[]; unknown: string[] };
+): { total: number; covered: number; missing: string[]; duplicated: string[]; unknown: string[]; empty: number[] };

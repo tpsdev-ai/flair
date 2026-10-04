@@ -124,6 +124,23 @@ describe("shared unit lane", () => {
       pkg => `packages/${pkg}/${pkg === "adk-flair-js" ? "test/unit" : "test"}`,
     ),
   ];
+  test("empty shards have no Bun arguments and skip execution", () => {
+    const dir = fixture();
+    for (const requiredRoot of requiredRoots) {
+      mkdirSync(join(dir, requiredRoot), { recursive: true });
+      writeFileSync(join(dir, requiredRoot, "sample.test.ts"), "");
+    }
+    const empty = unitPlan(dir).filter(step => step.shard !== undefined && !step.files.length);
+    expect(empty.length).toBeGreaterThan(0);
+    for (const step of empty) expect(step.args).toEqual([]);
+    const marker = join(dir, "invoked");
+    const script = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran");`;
+    const { result, logs } = captureLogs(() => runUnitSteps(empty.map(step => ({ ...step, args: ["-e", script] })), "node", dir));
+    expect(result).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    for (const step of empty) expect(logs).toContain(`${step.name}: empty shard; skipped`);
+  });
+
   for (const missingRoot of requiredRoots) {
     for (const defect of ["missing", "empty"]) {
       test(`${defect} required root ${missingRoot} fails the runner`, () => {

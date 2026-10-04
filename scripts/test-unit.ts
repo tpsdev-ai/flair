@@ -206,12 +206,7 @@ export function unitPlan(root: string): UnitStep[] {
     steps.push({
       name: `root unit tests (shard ${index + 1}/${SHARDS})`,
       cwd: root,
-      // Absolute paths: bun reads a bare path argument as a substring filter over
-      // its "./"-prefixed file paths, so a relative `test/unit/foo.test.ts` also
-      // matches `packages/<pkg>/test/unit/foo.test.ts` and runs a file outside
-      // this shard. An absolute path matches only the file it names, so a shard
-      // runs exactly the files the partition gave it.
-      args: ["test", ...files.map(file => join(root, file))],
+      args: files.length ? ["test", ...files.map(file => join(root, file))] : [],
       files: files.map(file => join(root, file)),
       timeoutMs: ROOT_STEP_TIMEOUT_MS,
       shard: { index: index + 1, of: SHARDS },
@@ -533,7 +528,7 @@ export function runUnitSteps(
     const observed = new Set([...tempBefore, ...tempEntries.flatMap(entry => entry.names)]);
     const leaked = newFlairTempNames(observed, flairTempNames(guardTempDir));
     if (reportTempDirLeaks(leaked, guardTempDir)) {
-      guardFailures.push({ kind: "guard", name: "temp-dir leak guard", detail: `new entries outside a step: ${leaked.join(", ")}` });
+      guardFailures.push({ kind: "guard", name: "temp-dir leak guard", detail: `new entries first observed at the final guard: ${leaked.join(", ")}` });
     }
   };
 
@@ -543,6 +538,11 @@ export function runUnitSteps(
   const shardTimings: Array<{ index: number; of: number; ms: number }> = [];
   let completed = 0;
   for (const [index, step] of steps.entries()) {
+    if (step.shard && !step.files.length) {
+      console.log(`\n${step.name}: empty shard; skipped`);
+      completed++;
+      continue;
+    }
     const remaining = deadline - Date.now();
     if (remaining < 1) {
       // The budget is spent before this step could start: it and every later

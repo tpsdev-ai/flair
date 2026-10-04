@@ -50,7 +50,7 @@ describe("unit-shards — discovery", () => {
       ["test", "test/unit", "test/unit/nested"].map(dir => `${dir}/sample.test.${extension}`),
     ).sort();
     expect(listUnitFiles(root)).toEqual(expected);
-    const result = spawnSync("node", [join(root, "scripts/ci/unit-shards.mjs"), "--verify"], {
+    const result = spawnSync("node", [join(root, "scripts/ci/unit-shards.mjs"), "--verify", "--of", "1"], {
       encoding: "utf8", timeout: 20_000,
     });
     expect(result.status).toBe(0);
@@ -82,19 +82,43 @@ describe("unit-shards — discovery", () => {
     }
   }
 
-  test("matches the files the shared lane's shard steps run", () => {
+  test("matches the file arguments passed to Bun by the shared lane's shard steps", () => {
     const steps = unitPlan(ROOT).filter(step => step.shard !== undefined);
     for (const step of steps) expect(step.args).toEqual(["test", ...step.files]);
     const laneFiles = steps.flatMap(step => step.args.slice(1).map(file => relative(ROOT, file))).sort();
     expect(laneFiles).toEqual(ALL);
   });
+
+  test("real Bun executes only the shard's assigned fixture files", () => {
+    const root = fixtureRoot();
+    rmSync(join(root, "test"), { recursive: true });
+    for (const file of ["test/selected.test.ts", "test/unit/selected.test.ts", "packages/flair-client/test/unit/selected.test.ts"]) {
+      mkdirSync(join(root, file, ".."), { recursive: true });
+      writeFileSync(join(root, file), `import { test } from "bun:test"; test(${JSON.stringify(`FILE:${file}`)}, () => { console.log(${JSON.stringify(`EXECUTED:${file}`)}); });`);
+    }
+    const requiredDirs = ["test/unit-isolated", ...unitPlan(ROOT).filter(step => step.cwd !== ROOT).map(step => relative(ROOT, join(step.cwd, "test"))), "packages/adk-flair-js/test/unit"];
+    for (const dir of requiredDirs) {
+      mkdirSync(join(root, dir), { recursive: true });
+      writeFileSync(join(root, dir, "placeholder.test.ts"), "");
+    }
+    const steps = unitPlan(root).filter(step => step.shard !== undefined && step.files.length);
+    for (const dir of new Set(requiredDirs)) rmSync(join(root, dir, "placeholder.test.ts"));
+    for (const step of steps) {
+      const result = spawnSync(process.execPath, step.args, { cwd: root, encoding: "utf8", timeout: 20_000 });
+      expect(result.status).toBe(0);
+      const executed = result.stdout.split("\n").filter(line => line.startsWith("EXECUTED:")).map(line => line.slice("EXECUTED:".length)).sort();
+      expect(executed).toEqual(step.files.map(file => relative(root, file)).sort());
+      expect(result.stderr).toContain(`${step.files.length} pass`);
+      expect(result.stderr).toContain("0 fail");
+    }
+  }, 30_000);
 });
 
 describe("unit-shards — assignment", () => {
   for (const of of [1, 2, 3, 4, 7]) {
     test(`${of} shards partition the discovered files`, () => {
       expect(verifyShards(of, ALL)).toEqual({
-        total: ALL.length, covered: ALL.length, missing: [], duplicated: [], unknown: [],
+        total: ALL.length, covered: ALL.length, missing: [], duplicated: [], unknown: [], empty: [],
       });
     });
   }
@@ -139,6 +163,21 @@ describe("unit-shards — CLI", () => {
       expect(result.stderr).toContain(`${defect}: ${name}`);
     });
   }
+
+  test("--verify rejects empty shards in a valid small corpus", () => {
+    const root = fixtureRoot();
+    rmSync(join(root, "test"), { recursive: true });
+    mkdirSync(join(root, "test/unit"), { recursive: true });
+    writeFileSync(join(root, "test/root.test.ts"), "");
+    writeFileSync(join(root, "test/unit/child.test.ts"), "");
+    const files = listUnitFiles(root);
+    const empty = assignShards(files, SHARDS).flatMap((files, index) => files.length ? [] : [index + 1]);
+    expect(empty.length).toBeGreaterThan(0);
+    expect(verifyShards(SHARDS, files).empty).toEqual(empty);
+    const result = spawnSync("node", [join(root, "scripts/ci/unit-shards.mjs"), "--verify"], { cwd: root, encoding: "utf8", timeout: 20_000 });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`empty shards: ${empty.join(", ")}`);
+  });
 
   test("--list-all prints the sorted corpus", () => {
     const r = run("--list-all");
