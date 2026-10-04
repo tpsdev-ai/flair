@@ -1397,6 +1397,24 @@ describe("within-org-read-open — resolveReadScope() condition shape + injectio
 });
 
 describe("Memory.delete() — ownership check uses the raw record (super.get), not the new scoped get()", () => {
+  it("refuses a parsed `.content` DELETE target before checking ownership", async () => {
+    const ownershipRead = spyOn(BaseMemory.prototype, "get");
+    try {
+      for (const actor of ["agent-owner", "agent-attacker"]) {
+        memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "keep" });
+        const m: any = makeMemory(agentCtx(actor));
+        m._targetId = "mem-1";
+        const res = await m.delete({ id: "mem-1", pathname: "/mem-1.content", property: "content" });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe("memory_id_content_suffix");
+        expect(ownershipRead).not.toHaveBeenCalled();
+        expect(await BaseMemory.get("mem-1")).toEqual({ id: "mem-1", agentId: "agent-owner", content: "keep" });
+      }
+    } finally {
+      ownershipRead.mockRestore();
+    }
+  });
+
   it("owner can still delete its own non-permanent memory", async () => {
     memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", durability: "standard" });
     const m = makeMemory(agentCtx("agent-owner"));

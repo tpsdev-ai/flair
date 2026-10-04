@@ -83,6 +83,7 @@ const reader = mkAgent("mcs-reader");
 
 const BASE = "mcs-base";
 const DEL_BASE = "mcs-del-base";
+const DEL_OTHER_BASE = "mcs-del-other-base";
 const SLASH = "mcs-slash";
 const SLASH_BASE = `${SLASH}/base`;
 
@@ -93,6 +94,7 @@ beforeAll(async () => {
   await seedAgent(harper, reader);
   await insertRow(harper, BASE, "BASE BODY");
   await insertRow(harper, DEL_BASE, "DEL BASE BODY");
+  await insertRow(harper, DEL_OTHER_BASE, "DEL OTHER BASE BODY");
   await insertRow(harper, SLASH_BASE, "SLASH BASE BODY");
 }, 240_000);
 
@@ -154,6 +156,9 @@ describe("flair#2199 — every client write path refuses an id ending in `.conte
   }
 
   it("DELETE of a `.content` address → 400 memory_id_content_suffix and the base record is not deleted", async () => {
+    const before = await authSend(harper, author, "GET", `/Memory/${DEL_BASE}`);
+    expect(before.status).toBe(200);
+    expect((await before.json()).agentId).toBe(author.id);
     const res = await authSend(harper, author, "DELETE", `/Memory/${DEL_BASE}.content`);
     const body = await res.json();
     console.log("DELETE .content:", res.status, JSON.stringify(body).slice(0, 160));
@@ -162,6 +167,16 @@ describe("flair#2199 — every client write path refuses an id ending in `.conte
     const after = await authSend(harper, author, "GET", `/Memory/${DEL_BASE}`);
     expect(after.status).toBe(200);
     expect((await after.json()).id).toBe(DEL_BASE);
+  }, 30_000);
+
+  it("non-owner DELETE of a `.content` address is refused and the base record is not deleted", async () => {
+    const res = await authSend(harper, reader, "DELETE", `/Memory/${DEL_OTHER_BASE}.content`);
+    expect([400, 403]).toContain(res.status);
+    const after = await authSend(harper, author, "GET", `/Memory/${DEL_OTHER_BASE}`);
+    expect(after.status).toBe(200);
+    const row = await after.json();
+    expect(row.id).toBe(DEL_OTHER_BASE);
+    expect(row.agentId).toBe(author.id);
   }, 30_000);
 
   it("a POST with an id that does not end in `.content` still succeeds (control)", async () => {

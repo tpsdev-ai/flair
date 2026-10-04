@@ -2017,7 +2017,8 @@ export class Memory extends (databases as any).flair.Memory {
     );
     if (seedDenial) return seedDenial;
     const contentSuffixDenial = refuseContentSuffixId(
-      [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)],
+      [id, typeof id?.pathname === "string" ? decodeURIComponent(id.pathname) : undefined,
+        ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)],
     );
     if (contentSuffixDenial) return contentSuffixDenial;
     // Read stored ownership, not the read-scoped get() response. Enforce here
