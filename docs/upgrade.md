@@ -727,11 +727,14 @@ phrasing is not on that path).
 **Engine-version break: Harper 5.2 → 5.3.** Harper 5.3's RocksDB storage format is
 one-way — a build older than 5.3 opens the bare store names and reads tables created
 under 5.3 as empty — so **data written by a 5.3 flair cannot be opened by an older
-flair**. An older flair refuses *before* its Harper is spawned: `flair start`'s
+flair**. An older flair that carries the backwards-engine guard refuses *before* its
+Harper is spawned: `flair start`'s
 backwards-engine guard reads the `engine-version.txt` stamp this release writes into
 `~/.flair/data` and, when the running engine is older than the stamp, exits non-zero
 naming both versions and the data directory, without opening the store — the data
-directory is left byte-identical. The remedy is the same as the breaks above: restore
+directory is left byte-identical. The guard sees a stamp only where this release
+writes one (`~/.flair/data`), and a release that predates the guard does not refuse.
+The remedy is the same as the breaks above: restore
 the pre-upgrade snapshot (`flair snapshot restore <path>`) or a `flair backup` export
 taken on the older version.
 

@@ -28,9 +28,9 @@
 //   3. Stop it WITHOUT deleting the data directory
 //      (`stopHarper(inst, { keepInstallDir: true })` — flair#637's harness
 //      addition to test/helpers/harper-lifecycle.ts).
-//   4. Boot the previously-published npm baseline (`@tpsdev-ai/flair@latest`
-//      on the public registry, installed fresh — same "baseline" concept as
-//      federation-mixed-version.test.ts) against THAT SAME data directory,
+//   4. Boot the previously-published npm baseline (`@tpsdev-ai/flair@0.59.0`,
+//      PINNED — the last published release running Harper 5.2; installed fresh
+//      from the public registry) against THAT SAME data directory,
 //      through the baseline's OWN CLI (`node <baseline>/dist/cli.js start`).
 //      No re-init, no `--purge`, no touching the files by hand — exactly what a
 //      real `flair stop && npm install -g @tpsdev-ai/flair@<previous> &&
@@ -80,6 +80,16 @@ import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const NODE_BIN = process.env.NODE_BIN ?? "node";
+
+// ─── Pinned baseline (flair#2147 round 5) ───────────────────────────────────
+// The baseline is PINNED, not `@latest`. `@latest` moves with each release;
+// once a release ships Harper 5.3 the baseline's engine would equal this build's
+// (5.3.1), the engine-change branch below would be skipped, and the cross-engine
+// refusal assertions would stop running. 0.59.0 is the last npm-published
+// @tpsdev-ai/flair whose `harper` dependency is 5.2.x (5.2.8) — its engine
+// differs from this build's, so the refusal path always runs. Re-pin only to a
+// still-5.2 release.
+const BASELINE_NPM_VERSION = "0.59.0";
 
 // ─── Outcome classification (flair#1050) ────────────────────────────────────
 // The restated downgrade invariant names three outcomes:
@@ -351,12 +361,12 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
       // With the default strategy that read returns null and the guard no-ops
       // (it cannot tell which engine is running), so the engine-change refusal
       // never fires. Install nested so the package carries its own Harper.
-      const proc = spawn("npm", ["install", "--install-strategy=nested", "@tpsdev-ai/flair@latest"], { cwd: baselineDir, env: sanitizedParentEnv() });
+      const proc = spawn("npm", ["install", "--install-strategy=nested", `@tpsdev-ai/flair@${BASELINE_NPM_VERSION}`], { cwd: baselineDir, env: sanitizedParentEnv() });
       let out = "";
       proc.stdout?.on("data", (d) => out += d.toString());
       proc.stderr?.on("data", (d) => out += d.toString());
       const timer = setTimeout(() => { proc.kill(); reject(new Error(`npm install timed out after ${NPM_INSTALL_TIMEOUT_MS}ms:\n${out}`)); }, NPM_INSTALL_TIMEOUT_MS);
-      proc.on("exit", (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`npm install @tpsdev-ai/flair@latest failed:\n${out}`)); });
+      proc.on("exit", (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`npm install @tpsdev-ai/flair@${BASELINE_NPM_VERSION} failed:\n${out}`)); });
       proc.on("error", (err) => { clearTimeout(timer); reject(err); });
     });
     // Linux CI has no native embedding binary for the npm-published package's
@@ -516,6 +526,10 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   // Both outcomes are valid, asserted results.
 
   test("npm baseline refuses a store written by this build (engine-version message), before Harper opens it", async () => {
+    // The pinned baseline runs Harper 5.2; this build runs 5.3.1, so the engines
+    // must differ. If they ever match the cross-engine refusal is not being
+    // exercised and this test would pass vacuously — fail loudly instead.
+    expect(engineVersionChanged).toBe(true);
     if (engineVersionChanged) {
       // The baseline was started through its OWN CLI (step 4), so flair's
       // backwards-engine guard ran BEFORE Harper. Assert the refusal, and that
@@ -581,8 +595,8 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
       throw new Error("skipped: baseline never booted — see the boot test above for the documented failure");
     }
     // GET /Presence needs a verified reader since 0.56.0 (PRESENCE_PUBLIC_ROSTER opts
-    // back in), and the npm baseline is whatever `latest` is today. Read as the
-    // baseline's admin so the check holds for every baseline version.
+    // back in), and the pinned baseline (0.59.0) is newer than that. Read as the
+    // baseline's admin so the check holds for the pinned baseline version.
     const auth = "Basic " + Buffer.from(`admin:${baseline!.admin.password}`).toString("base64");
     const res = await fetch(`${baseline!.httpURL}/Presence`, { headers: { Authorization: auth } });
     expect(res.status).toBe(200);
