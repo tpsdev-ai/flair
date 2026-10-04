@@ -82,6 +82,7 @@ import { FlairClient } from "@tpsdev-ai/flair-client";
 import { basename } from "node:path";
 import { deriveActivity, postPresenceSafe, resolvePresenceTimeoutMs, type PresencePoster } from "./presence.js";
 import { isProbeMode, readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
+import { isDirectRun } from "./is-direct-run.js";
 import {
   buildResumeHint,
   discoverResume,
@@ -92,6 +93,8 @@ import {
 import { fetchPreCompactRecord, formatPreCompactContext, resolvePreCompactLookup } from "./precompact.js";
 import { canonicalUrl, DEFAULT_FLAIR_URL } from "./action-recall.js";
 import { refreshActionRecallCache, type ActionRecallRefreshClient } from "./action-recall-refresh.js";
+
+export { isDirectRun };
 
 /** Claude Code SessionStart additionalContext hard limit (chars). */
 const MAX_CHARS = 10_000;
@@ -516,14 +519,9 @@ async function main(): Promise<void> {
 }
 
 // Only run when executed as a script, not when imported by tests.
-// import.meta.main is set by Bun and Node 22.x; fall back to an argv check
-// for runtimes that don't populate it.
 const importMeta = import.meta as ImportMeta & { main?: boolean };
 const isMain =
-  importMeta.main === true ||
-  (typeof process !== "undefined" &&
-    process.argv[1] != null &&
-    import.meta.url === `file://${process.argv[1]}`);
+  typeof process !== "undefined" && isDirectRun(import.meta.url, process.argv[1], importMeta.main);
 
 if (isMain) {
   // .catch is belt-and-suspenders; main() already swallows everything.

@@ -13,7 +13,7 @@ test("task references are optional, generic, and backwards compatible", async ()
       api: async (...args: unknown[]) => { writes.push(args); return {}; },
       resolveSigningAgentId: () => ({ agentId: "fixture", source: "flag" }),
       addSharedCredentialOptions: (c) => c, addSharedIdentityOption: (c) => c,
-      resolveBaseUrl: unused, applyAdminPassFile: unused, resolveOpsPort: unused,
+      resolveBaseUrl: unused, applyAdminPassFile: unused, resolveOpsPort: unused, resolveHttpPort: unused,
       parseEntitiesOptionOrExit: unused, ENTITIES_OPTION_DESCRIPTION: "fixture",
     });
     const program = new Command().exitOverride(); register(program);
