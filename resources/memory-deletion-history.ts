@@ -1,6 +1,4 @@
 /**
- * Memory.delete and MemoryMaintenance expiry append deletion history in the
- * row delete's transaction. Memory hygiene and agent remove use Memory.delete.
  * The watcher reads this table through the operations API.
  * No resource class or @export: there is no direct route.
  */
@@ -22,11 +20,8 @@ export interface MemoryDeletionInput {
   at?: string;
 }
 
-/**
- * Append one deletion record, joining the caller's transaction when `ctx`
- * carries one (so it commits with the Memory row delete it describes).
- */
 export async function recordMemoryDeletion(input: MemoryDeletionInput, ctx?: unknown): Promise<void> {
+  if (input.durability !== "permanent" && input.durability !== "persistent") return;
   const table = (databases as any).flair?.[MEMORY_DELETION_HISTORY_TABLE];
   if (!table?.put) {
     throw new Error(`${MEMORY_DELETION_HISTORY_TABLE} table unavailable`);

@@ -37,6 +37,7 @@ async function scan(options: Options = {}) {
       const body = JSON.parse(init.body);
       const { operation, table } = body;
       calls.push(`${operation}:${table}`);
+      if (operation === "delete") return new Response(JSON.stringify({ deleted_hashes: body.hash_values }));
       if (operation === "describe_table") {
         expect(body.exact_count).toBe(true);
         const index = countCalls[table] ?? 0;
@@ -120,5 +121,6 @@ test("exact counts bracket both searches and closed/private rows remain in the b
   expect(result.calls).toEqual([
     "describe_table:Memory", "search_by_value:Memory", "describe_table:Memory",
     "describe_table:MemoryDeletionHistory", "search_by_value:MemoryDeletionHistory", "describe_table:MemoryDeletionHistory",
+    "delete:MemoryDeletionHistory",
   ]);
 });

@@ -307,7 +307,7 @@ describe("checkpoint regressions", () => {
   test("delete, recreate, checkpoint, raw delete remains an unexplained loss", () => {
     const old = { id: "old-delete", memoryId: "recreated", memoryInstanceToken: "2026-10-01T00:00:00.000Z", at: "2099-01-01" };
     const cp = emptyCheckpoint("2026-10-02", [{ id: "recreated", durability: "permanent", instanceToken: "recreated-token" }], [old]);
-    expect(cp.historyIds).toEqual(["old-delete"]);
+    expect(cp.historyIds).toEqual([]);
     const verdict = compareScan({ checkpoint: cp, rows: [], deletions: [old], scannedAt: "2026-10-03" });
     expect(verdict.status).toBe("alert");
     expect(verdict.losses).toEqual([{ id: "recreated", tier: "permanent" }]);
@@ -320,11 +320,10 @@ describe("checkpoint regressions", () => {
     const raced = { id: "raced-delete", memoryId: "m", memoryInstanceToken: "m-token", at: "between-reads" };
     const stale = { id: "stale-delete", memoryId: "n", memoryInstanceToken: "older-n-token", at: "earlier" };
     const cp = emptyCheckpoint("before", rows, [raced, stale]);
-    expect(cp.historyIds).toEqual(["stale-delete"]);
+    expect(cp.historyIds).toEqual([]);
     const verdict = compareScan({ checkpoint: cp, rows: [rows[1]], deletions: [raced, stale], scannedAt: "after" });
     expect(verdict.status).toBe("healthy");
     expect(verdict.attributedDeletes).toEqual([{ id: "m", tier: "permanent", at: "between-reads" }]);
-    // A raw delete of n has no new history; the stale record stays seen.
     const raw = compareScan({ checkpoint: cp, rows: [], deletions: [raced, stale], scannedAt: "after" });
     expect(raw.status).toBe("alert");
     expect(raw.losses).toEqual([{ id: "n", tier: "permanent" }]);

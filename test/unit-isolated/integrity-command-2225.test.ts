@@ -23,7 +23,8 @@ test("a missing checkpointed token is replaced and never advances, even with --a
           let output = "";
           process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
           globalThis.fetch = (async (_url: any, init: any) => {
-            const { operation, table } = JSON.parse(init.body);
+            const { operation, table, hash_values } = JSON.parse(init.body);
+            if (operation === "delete") return new Response(JSON.stringify({ deleted_hashes: hash_values }));
             const rows = table === "Memory" ? [{ id: "m", durability: "permanent", instanceToken }] : deletions;
             return new Response(JSON.stringify(operation === "describe_table" ? { record_count: rows.length } : rows));
           }) as typeof fetch;
@@ -187,7 +188,8 @@ test("the command reads incarnation fields and reports missing or replaced named
           process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
           console.log = (value) => { output += String(value); };
           globalThis.fetch = (async (_url: any, init: any) => {
-            const { operation, table, get_attributes } = JSON.parse(init.body);
+            const { operation, table, get_attributes, hash_values } = JSON.parse(init.body);
+            if (operation === "delete") return new Response(JSON.stringify({ deleted_hashes: hash_values }));
             const rows = table === "Memory" ? (replaced ? [{ id: "m", durability: "persistent", instanceToken: "new" }] : []) : [{ id: "d", memoryId: "m", memoryInstanceToken, at: "deleted" }];
             if (operation === "describe_table") return new Response(JSON.stringify({ record_count: rows.length }));
             expect(get_attributes).toContain(table === "Memory" ? "instanceToken" : "memoryInstanceToken");

@@ -31,7 +31,7 @@ const checkpointPath = () => join(home, ".flair", "integrity-checkpoint.json");
 const adminAuth = () =>
   "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
 
-async function opsInsertMemory(id: string, durability: string): Promise<void> {
+async function opsInsertMemory(id: string, durability: string, expiresAt?: string): Promise<void> {
   const res = await fetch(harper.opsURL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: adminAuth() },
@@ -39,7 +39,7 @@ async function opsInsertMemory(id: string, durability: string): Promise<void> {
       operation: "insert",
       database: "flair",
       table: "Memory",
-      records: [{ id, agentId: "integrity-e2e", content: `row ${id}`, durability, instanceToken: randomUUID(), createdAt: new Date().toISOString() }],
+      records: [{ id, agentId: "integrity-e2e", content: `row ${id}`, durability, instanceToken: randomUUID(), createdAt: new Date().toISOString(), ...(expiresAt ? { expiresAt } : {}) }],
     }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -52,10 +52,24 @@ async function opsDeleteMemory(id: string): Promise<void> {
   const res = await fetch(harper.opsURL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: adminAuth() },
-    body: JSON.stringify({ operation: "delete", database: "flair", table: "Memory", ids: [id] }),
+    body: JSON.stringify({ operation: "delete", database: "flair", table: "Memory", hash_values: [id] }),
     signal: AbortSignal.timeout(15_000),
   });
   expect(res.status).toBe(200);
+  expect((await res.json()).deleted_hashes).toContain(id);
+}
+
+async function readDeletionHistory(): Promise<any[]> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+    body: JSON.stringify({ operation: "search_by_value", database: "flair", table: "MemoryDeletionHistory", search_attribute: "id", search_value: "*", get_attributes: ["id", "memoryId"] }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  expect(res.status).toBe(200);
+  const rows = await res.json();
+  expect(Array.isArray(rows)).toBe(true);
+  return rows;
 }
 
 async function restDeleteMemory(id: string): Promise<number> {
@@ -151,6 +165,28 @@ describe("flair#2213 — integrity watcher on a real Harper", () => {
     expect((r.json?.losses ?? []).length).toBe(0);
     const attributed = (r.json?.attributedDeletes ?? []).map((d: any) => d.id);
     expect(attributed).toContain("itg-legit-perm");
+    expect((await readDeletionHistory()).some(d => d.memoryId === "itg-legit-perm")).toBe(false);
+    expect(JSON.parse(readFileSync(checkpointPath(), "utf8")).historyIds).toEqual([]);
+
+    await opsInsertMemory("itg-next-delete", "persistent");
+    expect(runCheck().code).toBe(0);
+    expect([200, 204]).toContain(await restDeleteMemory("itg-next-delete"));
+    const next = runCheck();
+    expect(next.code, next.out).toBe(0);
+    expect(next.json?.attributedDeletes.map((d: any) => d.id)).toContain("itg-next-delete");
+    expect((await readDeletionHistory()).some(d => d.memoryId === "itg-next-delete")).toBe(false);
+  }, 150_000);
+
+  test("ephemeral expiry does not grow deletion history", async () => {
+    const before = await readDeletionHistory();
+    for (let i = 0; i < 40; i++) await opsInsertMemory(`itg-expired-${i}`, "ephemeral", "2000-01-01T00:00:00.000Z");
+    const res = await fetch(`${harper.httpURL}/MemoryMaintenance`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify({ agentId: "integrity-e2e" }), signal: AbortSignal.timeout(30_000),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).expired).toBe(40);
+    expect(await readDeletionHistory()).toEqual(before);
   }, 150_000);
 
   test("an unreachable instance reports UNKNOWN and never touches the checkpoint", async () => {

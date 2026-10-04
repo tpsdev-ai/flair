@@ -10,9 +10,11 @@
  */
 import { Command } from "commander";
 import { readExactTableCount } from "../lib/ops-table-count.js";
+import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { resolveHome } from "../lib/home.js";
 import {
   compareScan,
+  deletionRecordsToPrune,
   emptyCheckpoint,
   integrityCheckpointPath,
   readCheckpoint,
@@ -21,6 +23,7 @@ import {
   type DeletionRecordLite,
   type IntegrityVerdict,
   type MemoryRowLite,
+  type IntegrityCheckpoint,
 } from "../lib/memory-integrity.js";
 
 export type IntegrityCli = {
@@ -35,6 +38,23 @@ export function bindIntegrityCli(fns: IntegrityCli): void {
 }
 
 const OPS_TIMEOUT_MS = 30_000;
+
+async function pruneDeletionHistory(opsPort: number | string, auth: string, checkpoint: IntegrityCheckpoint, deletions: readonly DeletionRecordLite[]): Promise<void> {
+  const ids = deletionRecordsToPrune(checkpoint, deletions);
+  for (let offset = 0; offset < ids.length; offset += 256) {
+    const res = await fetch(opsUrl(opsPort), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ operation: "delete", database: "flair", table: "MemoryDeletionHistory", hash_values: ids.slice(offset, offset + 256) }),
+      signal: AbortSignal.timeout(OPS_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`operations API deletion history retention failed (${res.status})`);
+    const body = await res.json();
+    if (!ids.slice(offset, offset + 256).every(id => writeConfirmed(body, "deleted_hashes", id))) {
+      throw new Error("operations API deletion history retention was not confirmed");
+    }
+  }
+}
 
 function opsUrl(opsPort: number | string): string {
   return typeof opsPort === "number" ? `http://127.0.0.1:${opsPort}/` : `${String(opsPort).replace(/\/$/, "")}/`;
@@ -121,7 +141,7 @@ function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
   lines.push(`  checkpoint: ${checkpointPath}`);
   if (v.status === "unknown") {
     lines.push(`  ⚠️  UNKNOWN — scan failed: ${v.reason}`);
-    lines.push("  The checkpoint was not changed.");
+    lines.push(v.checkpointWritten ? "  checkpoint advanced before retention failed." : "  The checkpoint was not changed.");
     return lines.join("\n");
   }
   if (v.status === "baseline") {
@@ -178,6 +198,7 @@ export function register(program: Command): void {
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
       let verdict: IntegrityVerdict;
+      let checkpointWritten = false;
       try {
         const { rows, deletions } = await readCorpus(opsPort, auth);
         const read = readCheckpoint(checkpointPath);
@@ -186,18 +207,24 @@ export function register(program: Command): void {
         } else if (read.kind === "absent") {
           const cp = emptyCheckpoint(scannedAt, rows, deletions);
           writeCheckpoint(checkpointPath, cp);
+          checkpointWritten = true;
           verdict = { ...compareScan({ checkpoint: cp, rows, deletions, scannedAt }), status: "baseline", checkpointWritten: true };
+          await pruneDeletionHistory(opsPort, auth, cp, deletions);
         } else {
           verdict = compareScan({ checkpoint: read.checkpoint, rows, deletions, scannedAt });
           const missingTokenLoss = verdict.losses.some(loss => loss.reason === "replaced" &&
             rows.some(row => row.id === loss.id && !row.instanceToken));
           if (verdict.status === "healthy" || (opts.accept && !missingTokenLoss)) {
-            writeCheckpoint(checkpointPath, emptyCheckpoint(scannedAt, rows, deletions));
+            const cp = emptyCheckpoint(scannedAt, rows, deletions, read.checkpoint.historyIds);
+            writeCheckpoint(checkpointPath, cp);
+            checkpointWritten = true;
             verdict.checkpointWritten = true;
+            await pruneDeletionHistory(opsPort, auth, cp, deletions);
           }
         }
       } catch (err) {
         verdict = unknownVerdict(err instanceof Error ? err.message : String(err), scannedAt);
+        verdict.checkpointWritten = checkpointWritten;
       }
 
       if (opts.json) {

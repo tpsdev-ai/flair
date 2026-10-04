@@ -112,19 +112,25 @@ export function tallyByDurability(rows: readonly MemoryRowLite[]): Record<Tier, 
   return counts;
 }
 
-export function emptyCheckpoint(scannedAt: string, rows: readonly MemoryRowLite[], deletions: readonly DeletionRecordLite[] = []): IntegrityCheckpoint {
+export function emptyCheckpoint(scannedAt: string, rows: readonly MemoryRowLite[], deletions: readonly DeletionRecordLite[] = [], seenHistoryIds: readonly string[] = []): IntegrityCheckpoint {
   const ids: Record<string, string> = Object.create(null);
   const instanceTokens: Record<string, string | null> = Object.create(null);
   for (const row of rows) {
     ids[row.id] = normalizeTier(row.durability);
     instanceTokens[row.id] = typeof row.instanceToken === "string" && row.instanceToken.length > 0 ? row.instanceToken : null;
   }
-  // A record for a live incarnation stays unseen for the next scan.
+  const seen = new Set(seenHistoryIds);
   const historyIds = deletions
-    .filter(d => !(typeof d.memoryInstanceToken === "string" && d.memoryInstanceToken.length > 0 &&
-      Object.hasOwn(instanceTokens, d.memoryId) && instanceTokens[d.memoryId] === d.memoryInstanceToken))
+    .filter(d => seen.has(d.id) && isDurableTier(ids[d.memoryId]) &&
+      !!instanceTokens[d.memoryId] && instanceTokens[d.memoryId] === d.memoryInstanceToken)
     .map(d => d.id);
   return { version: 2, scannedAt, byDurability: tallyByDurability(rows), ids, instanceTokens, historyIds };
+}
+
+export function deletionRecordsToPrune(checkpoint: IntegrityCheckpoint, deletions: readonly DeletionRecordLite[]): string[] {
+  const seen = new Set(checkpoint.historyIds);
+  return deletions.filter(d => seen.has(d.id) || !isDurableTier(checkpoint.ids[d.memoryId]) ||
+    !checkpoint.instanceTokens[d.memoryId] || checkpoint.instanceTokens[d.memoryId] !== d.memoryInstanceToken).map(d => d.id);
 }
 
 /** UNKNOWN, with no checkpoint write. */

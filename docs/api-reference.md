@@ -510,6 +510,8 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 
 `InstructionVersion` rows are appended by Flair's in-process write path. The administrator operations API (`upsert` / `delete` under admin auth) can also write version rows, and that path is not audited by this table — a documented, deferred exception.
 
+Operations-API Memory deletes are unattributed and alert for checkpointed durable memories.
+
 ---
 
 ## See also

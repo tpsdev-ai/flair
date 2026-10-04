@@ -30,9 +30,9 @@ test("an ordinary legacy PUT assigns its first token without a replaced loss", a
   expect(harnessState.deletionStore.size).toBe(0);
 });
 
-for (const writer of ["Memory.delete", "MemoryMaintenance"] as const) {
-  test(`${writer} rolls back Memory and successful history on a late abort`, async () => {
-    const row = { id: "m", agentId: "owner", durability: writer === "Memory.delete" ? "permanent" : "ephemeral", instanceToken: "2026-10-01", expiresAt: "2000-01-01" };
+for (const durability of ["permanent", "persistent"] as const) {
+  test(`${durability} Memory.delete rolls back Memory and successful history on a late abort`, async () => {
+    const row = { id: "m", agentId: "owner", durability, instanceToken: "2026-10-01", expiresAt: "2000-01-01" };
     harnessState.memoryStore.set(row.id, row);
     const originalTransaction = (globalThis as any).transaction;
     const originalPut = databasesMock.flair.MemoryDeletionHistory.put;
@@ -53,15 +53,7 @@ for (const writer of ["Memory.delete", "MemoryMaintenance"] as const) {
       return result;
     });
     try {
-      if (writer === "Memory.delete") {
-        await expect(resource().delete(row.id)).rejects.toThrow("late abort after history");
-      } else {
-        const r: any = new (MemoryMaintenance as any)();
-        r.getContext = () => ({ request: { tpsAgent: "admin", tpsAgentIsAdmin: true } });
-        const response = await r.post({});
-        expect(response.status).toBe(500);
-        expect((await response.json()).stats.expired).toBe(0);
-      }
+      await expect(resource().delete(row.id)).rejects.toThrow("late abort after history");
       expect(historySucceeded).toBe(true);
       expect(harnessState.memoryStore.get(row.id)).toEqual(row);
       expect(harnessState.deletionStore.size).toBe(0);
@@ -77,14 +69,9 @@ for (const writer of ["Memory.delete", "MemoryMaintenance"] as const) {
     }
   });
 
-  test(`${writer} records the stored incarnation on a committed delete`, async () => {
-    harnessState.memoryStore.set("m", { id: "m", agentId: "owner", durability: writer === "Memory.delete" ? "permanent" : "ephemeral", instanceToken: "2026-10-01", expiresAt: "2000-01-01" });
-    if (writer === "Memory.delete") await resource().delete("m");
-    else {
-      const r: any = new (MemoryMaintenance as any)();
-      r.getContext = () => ({ request: { tpsAgent: "admin", tpsAgentIsAdmin: true } });
-      expect((await r.post({})).expired).toBe(1);
-    }
+  test(`${durability} Memory.delete records the stored incarnation on a committed delete`, async () => {
+    harnessState.memoryStore.set("m", { id: "m", agentId: "owner", durability, instanceToken: "2026-10-01", expiresAt: "2000-01-01" });
+    await resource().delete("m");
     expect(harnessState.memoryStore.has("m")).toBe(false);
     expect(harnessState.deletionStore.size).toBe(1);
     expect([...harnessState.deletionStore.values()][0].memoryInstanceToken).toBe("2026-10-01");
@@ -125,4 +112,35 @@ test("maintenance does not record a row removed between its scan and delete", as
     expect(result.expired).toBe(0);
     expect(harnessState.deletionStore.size).toBe(0);
   } finally { read.mockRestore(); }
+});
+
+for (const durability of ["standard", "ephemeral", null, "unexpected"]) {
+  test(`${durability} deletes do not require or grow history`, async () => {
+    harnessState.memoryStore.set("m", { id: "m", agentId: "owner", durability });
+    const history = spyOn(databasesMock.flair.MemoryDeletionHistory, "put").mockRejectedValue(new Error("history down"));
+    try {
+      await resource().delete("m");
+      expect(harnessState.memoryStore.has("m")).toBe(false);
+      expect(history).not.toHaveBeenCalled();
+      expect(harnessState.deletionStore.size).toBe(0);
+    } finally { history.mockRestore(); }
+  });
+}
+
+test("repeated ephemeral expiry batches leave no deletion history", async () => {
+  const r: any = new (MemoryMaintenance as any)();
+  r.getContext = () => ({ request: { tpsAgent: "admin", tpsAgentIsAdmin: true } });
+  const history = spyOn(databasesMock.flair.MemoryDeletionHistory, "put").mockRejectedValue(new Error("history down"));
+  try {
+    for (let batch = 0; batch < 4; batch++) {
+      for (let i = 0; i < 100; i++) {
+        const id = `expired-${batch}-${i}`;
+        harnessState.memoryStore.set(id, { id, agentId: "owner", durability: "ephemeral", instanceToken: id, expiresAt: "2000-01-01" });
+      }
+      expect((await r.post({})).expired).toBe(100);
+      expect(harnessState.memoryStore.size).toBe(0);
+      expect(harnessState.deletionStore.size).toBe(0);
+    }
+    expect(history).not.toHaveBeenCalled();
+  } finally { history.mockRestore(); }
 });
