@@ -27,9 +27,9 @@
 //     would be a different (failing) shape than production.
 //   - Teardown unloads the job BEFORE deleting HOME. KeepAlive:true means a
 //     leftover loaded job outlives the fixture directory. An exit hook
-//     unloads any still-tracked label; it does not signal by pid.
+//     attempts to unload still-tracked labels; it does not signal by pid.
 //
-// Darwin-gated via test.skipIf(!isDarwin) so Linux CI reports a skip.
+// Skipped outside Darwin and when HARPER_HTTP_URL is set.
 // NOT in the #1012 inventory (scripts/check-darwin-gated-tests.mjs skips
 // test/integration*): that inventory re-runs every file, including from a
 // 60s visibility test, and a real Harper boot does not fit. The macOS
@@ -63,15 +63,17 @@ import {
   harperPortValue,
   launchdLabel,
   launchdPlistPath,
-  LEGACY_LAUNCHD_LABEL,
   readHarperConfig,
   readSidecar,
   resolveHarperBin,
 } from "../../src/cli.ts";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.ts";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.ts";
+import { cleanupLaunchdSandbox, unloadJob, type TrackedLaunchdJob } from "../helpers/launchd-job-cleanup.ts";
 
 const isDarwin = process.platform === "darwin";
+const externalHarper = process.env.HARPER_HTTP_URL !== undefined;
+if (externalHarper) console.log("doctor-fix-launchd-darwin: skipped; HARPER_HTTP_URL is set; requires locally spawned Harper");
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI_JS = join(REPO_ROOT, "dist", "cli.js");
 const MODELS_DIR = join(REPO_ROOT, "models");
@@ -80,43 +82,8 @@ const ADMIN_PASS = "test123";
 const SEED_IDS = ["b3b-mem-1", "b3b-mem-2", "b3b-mem-3"] as const;
 const PROMPT_RE =
   /Please enter a password|readline was closed|ERR_USE_AFTER_CLOSE|Please enter a destination for Harper|\[hidden\]/i;
-// flair#1807: the child's OWN deadline + PER-CASE budgets, recounted from each
-// case body against harper-lifecycle's REAL bounds (this host cannot run the
-// file — it is darwin-gated). The child deadline must EXCEED the CLI's OWN
-// bounded readiness waits, because those waits ARE the point — there is no
-// fixed sleep to shorten. `doctor --fix`'s adopt arm chains TWO waits of up to
-// STARTUP_TIMEOUT_MS (60 s) each (awaitLaunchdJobServing, then
-// verifyAdoptServingWithWait), so a valid run can take ~120 s. A 60 s deadline
-// killed a doctor mid-run and flaked (flair#2130); the deadline is that sum + a
-// boot margin, so 180 s. A genuine hang is still bounded.
-//
-// ROUND 3: one uniform 540 s constant did not match the cases, and a hang in a
-// LATE case hit the JOB timeout first (an anonymous cancellation). Each case's
-// budget is now its own worst-case SUM + margin. Per-wait bounds used here:
-//   startHarper          = install 20 s + awaitStartup 45 s + the two
-//                          waitForHealth calls IN PARALLEL 60 s = 125 s
-//   stopHarper           = killProcess (SIGKILL 3 s) + waitForLocksFree 5 s = 8 s
-//   adminOp (ops fetch)  = 30 s    waitForHttp = its argument
-//   waitDead             = its argument    runDoctorFix/runInit = 180 s deadline
-//   launchctl list = 5 s   launchctl unload + bootout = 10 s + 10 s = 20 s
-// Helper sums:
-//   populateDataDir     = startHarper 125 + 2 x adminOp 60 + stopHarper 8 = 193 s
-//   doctorFixToManaged  = runDoctorFix 180 + waitForHttp 60 + launchctl 5 = 245 s
-//   newSandbox          = populateDataDir 193 + doctorFixToManaged 245 = 438 s
-//   snapshotBeforeFix   = waitForHttp 30 + adminOp 30 = 60 s
-//   stopManagedHarper   = unload 20 + waitDead 20 + (list 5 + lsof 5) = 50 s
-//   directSpawnDetached = waitForHttp 60 + (list 5 + lsof 5) = 70 s
-//   assertNoRebootstrap = waitForHttp 30 + adminOp 30 = 60 s
-// Cases (sum -> budget):
-//   corrupt-plist   newSandbox 438 + snapshot 60 + stop 50 + doctorFix 245
-//                   + assertManaged 20 + noRebootstrap 60 = 873 -> 900 s
-//   adopt-detached  newSandbox 438 + snapshot 60 + 10 + stop 50 + directSpawn 70
-//                   + 20 + doctorFix 245 + assertManaged 20 + noRebootstrap 60
-//                   + 2 s = 975 -> 1000 s
-//   adopt-no-pass   newSandbox 438 + snapshot 60 + 10 + stop 50 + directSpawn 70
-//                   + doctorFix 245 + assertManaged 20 + noRebootstrap 60 = 953 -> 980 s
-//   refuse-no-pass  newSandbox 438 + stop 50 + runDoctorFix 180 = 668 -> 700 s
-//   init-unchanged  newSandbox 438 + runInit 180 + assertManaged 20 = 638 -> 660 s
+// Child deadline: 180 s; case budgets: 900/1000/980/700/660 s; teardown: 180 s.
+// Empirical margins.
 const CHILD_DEADLINE_MS = 180_000;
 const CORRUPT_PLIST_CASE_BUDGET_MS = 900_000;
 const ADOPT_DETACHED_CASE_BUDGET_MS = 1_000_000;
@@ -124,8 +91,7 @@ const ADOPT_NO_PASS_CASE_BUDGET_MS = 980_000;
 const REFUSE_NO_PASS_CASE_BUDGET_MS = 700_000;
 const INIT_UNCHANGED_CASE_BUDGET_MS = 660_000;
 
-/** Jobs this file loaded. Unloaded on afterEach and on process exit. */
-const LOADED_JOBS = new Set<{ label: string; plistPath: string }>();
+const LOADED_JOBS = new Set<TrackedLaunchdJob>();
 
 /** The last CLI run (doctor --fix / init) — printed by dumpDiagnostics when a case fails. */
 interface CliRun {
@@ -545,14 +511,6 @@ function diagnosed(body: () => Promise<void>): () => Promise<void> {
   };
 }
 
-function unloadJob(label: string, plistPath: string): void {
-  spawnSync("launchctl", ["unload", plistPath], { encoding: "utf-8", timeout: 10_000 });
-  const uid = process.getuid?.();
-  if (uid !== undefined) {
-    spawnSync("launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf-8", timeout: 10_000 });
-  }
-}
-
 function trackJob(label: string, plistPath: string): void {
   LOADED_JOBS.add({ label, plistPath });
 }
@@ -561,14 +519,14 @@ function unloadTracked(): void {
   for (const job of LOADED_JOBS) {
     try {
       unloadJob(job.label, job.plistPath);
-    } catch {
-      /* best effort */
+      LOADED_JOBS.delete(job);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
     }
   }
-  LOADED_JOBS.clear();
 }
 
-if (isDarwin) {
+if (isDarwin && !externalHarper) {
   process.on("exit", unloadTracked);
 }
 
@@ -639,12 +597,7 @@ async function newSandbox(): Promise<Sandbox> {
   mkdirSync(launchAgentsDir, { recursive: true });
   const label = launchdLabel(dataDir);
   const plistPath = launchdPlistPath(label, launchAgentsDir);
-  // Track this sandbox's jobs BEFORE any CLI run (flair#2130). A run that
-  // overruns its deadline mid-way can leave a job loaded with KeepAlive, and a
-  // job left by an earlier test would otherwise survive into the next one. The
-  // legacy label is a fixed shared name, so track its plist here too.
   trackJob(label, plistPath);
-  trackJob(LEGACY_LAUNCHD_LABEL, launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir));
   const sb: Sandbox = {
     tmpHome,
     dataDir,
@@ -686,58 +639,57 @@ function refreshPortsFromConfig(sb: Sandbox): void {
 }
 
 async function teardown(sb: Sandbox): Promise<void> {
-  unloadJob(sb.label, sb.plistPath);
-  LOADED_JOBS.forEach((j) => {
-    if (j.label === sb.label) LOADED_JOBS.delete(j);
+  await cleanupLaunchdSandbox(LOADED_JOBS, sb.launchAgentsDir, async () => {
+    if (sb.direct && sb.direct.pid && isAlive(sb.direct.pid)) {
+      try {
+        process.kill(sb.direct.pid, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+      try {
+        await waitDead(sb.direct.pid, 8_000);
+      } catch {
+        try {
+          process.kill(sb.direct.pid, "SIGKILL");
+        } catch {
+          /* gone */
+        }
+      }
+    }
+    if (sb.populate) {
+      try {
+        await stopHarper(sb.populate, { keepInstallDir: true });
+      } catch {
+        /* best effort */
+      }
+    }
+    // launchd is already unloaded above, so KeepAlive cannot resurrect this pidfile kill.
+    const pid = readPidFile(sb.dataDir);
+    if (pid && isAlive(pid)) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        /* gone */
+      }
+      try {
+        await waitDead(pid, 8_000);
+      } catch {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* gone */
+        }
+      }
+    }
+    rmSync(sb.tmpHome, { recursive: true, force: true });
   });
-  if (sb.direct && sb.direct.pid && isAlive(sb.direct.pid)) {
-    try {
-      process.kill(sb.direct.pid, "SIGTERM");
-    } catch {
-      /* already gone */
-    }
-    try {
-      await waitDead(sb.direct.pid, 8_000);
-    } catch {
-      try {
-        process.kill(sb.direct.pid, "SIGKILL");
-      } catch {
-        /* gone */
-      }
-    }
-  }
-  if (sb.populate) {
-    try {
-      await stopHarper(sb.populate, { keepInstallDir: true });
-    } catch {
-      /* best effort */
-    }
-  }
-  // launchd is already unloaded above, so KeepAlive cannot resurrect this pidfile kill.
-  const pid = readPidFile(sb.dataDir);
-  if (pid && isAlive(pid)) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      /* gone */
-    }
-    try {
-      await waitDead(pid, 8_000);
-    } catch {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        /* gone */
-      }
-    }
-  }
-  rmSync(sb.tmpHome, { recursive: true, force: true });
 }
 
 afterEach(async () => {
   while (live.length) {
-    const sb = live.pop();
+    const sb = live[live.length - 1];
     if (sb) await teardown(sb);
+    live.pop();
   }
   lastCliRun = undefined;
 }, 180_000);
@@ -896,7 +848,62 @@ function assertDirectSidecar(sb: Sandbox, spawnedPid: number): void {
   });
 }
 
-test.skipIf(!isDarwin)(
+test.skipIf(!isDarwin || externalHarper)(
+  "cleanup refusal retains the fixture label and root",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    const refusedCleanup = cleanupLaunchdSandbox(LOADED_JOBS, sb.launchAgentsDir, async () => {
+      rmSync(sb.tmpHome, { recursive: true, force: true });
+    }, (label, path) => unloadJob(label, path, (args, timeout) => {
+      if (args[0] !== "print") return { status: 1, stderr: "fixture refusal" };
+      return spawnSync("launchctl", args, { encoding: "utf-8", timeout });
+    }));
+    await expect(refusedCleanup).rejects.toThrow(`launchd cleanup ${sb.label}: job is still loaded`);
+    expect([...LOADED_JOBS].some(job => job.label === sb.label)).toBe(true);
+    expect(existsSync(sb.tmpHome)).toBe(true);
+    expect(launchctlList(sb.label).code).toBe(0);
+  }),
+  900_000,
+);
+
+test.skipIf(!isDarwin || externalHarper)(
+  "inherited external Harper URL skips fixture cases",
+  async () => {
+    let requests = 0;
+    const external = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++;
+        return new Response("unexpected external request", { status: 500 });
+      },
+    });
+    try {
+      const child = Bun.spawn([process.execPath, "test", import.meta.path], {
+        cwd: REPO_ROOT,
+        env: { ...process.env, HARPER_HTTP_URL: String(external.url) },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 20_000,
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(code, stderr).toBe(0);
+      expect(stdout).toContain("HARPER_HTTP_URL is set; requires locally spawned Harper");
+      expect(stderr).toMatch(/0 pass/);
+      expect(requests).toBe(0);
+    } finally {
+      external.stop(true);
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!isDarwin || externalHarper)(
   "corrupt or missing launchd plist: doctor --fix regenerates and comes up managed",
   diagnosed(async () => {
     requireCliBuild();
@@ -921,7 +928,7 @@ test.skipIf(!isDarwin)(
   CORRUPT_PLIST_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(!isDarwin || externalHarper)(
   "detached direct-spawned instance: doctor --fix adopts into launchd, bouncing once",
   diagnosed(async () => {
     requireCliBuild();
@@ -972,7 +979,7 @@ test.skipIf(!isDarwin)(
   ADOPT_DETACHED_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(!isDarwin || externalHarper)(
   "adopt with NO pass file and a proven env credential: doctor writes the 0600 file and adopts (flair#1685)",
   diagnosed(async () => {
     requireCliBuild();
@@ -1005,7 +1012,7 @@ test.skipIf(!isDarwin)(
   ADOPT_NO_PASS_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(!isDarwin || externalHarper)(
   "regenerate with NO pass file, no live process, and no env credential: refuse and write no plist (flair#1685)",
   diagnosed(async () => {
     requireCliBuild();
@@ -1035,7 +1042,7 @@ test.skipIf(!isDarwin)(
   REFUSE_NO_PASS_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(!isDarwin || externalHarper)(
   "flair init on an already-adopted instance leaves the plist byte-identical (flair#1693)",
   diagnosed(async () => {
     requireCliBuild();

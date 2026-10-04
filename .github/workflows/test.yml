@@ -246,17 +246,7 @@ jobs:
   test-darwin-gated:
     name: Darwin-gated unit tests
     runs-on: macos-latest
-    # flair#1807 round 3 — the JOB timeout must exceed the SUM of the case
-    # budgets in doctor-fix-launchd-darwin.test.ts, plus a setup allowance, plus
-    # margin, or a hang in a LATE case is cancelled anonymously (the same class
-    # one level up from the case budgets):
-    #   per-case budgets: 900 + 1000 + 980 + 700 + 660 = 4240 s
-    #   using-flair-seed-2141 beforeAll + case budgets: 1260 s
-    #   using-flair-seed-reserved-2141 beforeAll + case budgets: 960 s
-    #   setup allowance (bun install + bun run build + build:cli +
-    #     check-darwin-gated-tests): ~240 s
-    #   embedding-model fetch: at most 180 s (its step timeout)
-    #   4240 + 1260 + 960 + 240 + 180 = 6880 s; rounded up with margin to 120 min (7200 s)
+    # Empirical job margin for the Darwin-gated tests.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
