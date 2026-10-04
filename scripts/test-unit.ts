@@ -16,6 +16,8 @@ import {
   type ServiceManagerTripwire,
 } from "../test/helpers/fake-launchctl.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
+import { SHARDS, assignShards, listUnitFiles } from "./ci/unit-shards.mjs";
+import { testFiles } from "./ci/test-files.mjs";
 
 /** The short, canonical temp base darwin unit steps run under (flair#2137). */
 export const DARWIN_TEMP_BASE = "/private/tmp";
@@ -33,6 +35,8 @@ export interface UnitStep {
   files: string[];
   /** This step's own time limit when the lane runs with limits; unset means the lane's default. */
   timeoutMs?: number;
+  /** Set on the shard steps that replace the single root unit step (flair#2258). */
+  shard?: { index: number; of: number };
 }
 
 // ── Time bounds (flair#2030, resized flair#2224) ───────────────────────────
@@ -117,24 +121,6 @@ export function newFlairTempNames(before: ReadonlySet<string>, after: ReadonlySe
   return [...after].filter((name) => !before.has(name)).sort();
 }
 
-/**
- * The temp-dir leak guard (flair#1889).
- *
- * A unit test must remove the scratch directory it creates. The lane is the only
- * place that can see all of them, so it snapshots the `flair-*` names in the OS
- * temp dir before the lane and again after it, and fails on any name that
- * APPEARED during the lane.
- *
- * It compares NAMES, not a bare count, and reports only the names that appeared:
- * a `flair-*` directory that was already there (an earlier run's leftover, which
- * this lane did not create) is not a leak this lane caused. The accepted
- * false-positive is a genuinely concurrent, unrelated process that creates a
- * `flair-*` temp dir while the lane runs — an entry carries no owner, so it
- * cannot be attributed to a process, and hiding it would mean hiding real leaks
- * too.
- *
- * @returns true when the lane leaked (and the caller must fail).
- */
 export function reportTempDirLeaks(leaked: readonly string[], dir: string = tmpdir()): boolean {
   if (!leaked.length) return false;
   const counts = new Map<string, number>();
@@ -145,7 +131,7 @@ export function reportTempDirLeaks(leaked: readonly string[], dir: string = tmpd
   }
   const prefixes = [...counts.entries()].map(([prefix, n]) => `${prefix} (${n})`).join(", ");
   console.error(
-    `Temp-dir leak guard FAILED: the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${dir}. ` +
+    `Temp-dir leak guard FAILED: ${leaked.length} new flair-* entries observed in ${dir}. ` +
       `A unit test must remove the scratch directory it creates — use tempDir() from test/helpers/temp-dir.ts, which registers the removal in the same call (flair#1889). ` +
       `New prefixes: ${prefixes}`,
   );
@@ -182,22 +168,13 @@ export function stepEnvironment(
   return env;
 }
 
-function testFiles(dir: string, recursive = true): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return recursive ? testFiles(path) : [];
-    return /\.test\.[jt]sx?$/.test(entry.name) ? [path] : [];
-  }).sort();
-}
-
 export function unitPlan(root: string): UnitStep[] {
   const requiredFiles = (dir: string, recursive = true) => {
     const files = testFiles(join(root, dir), recursive);
     if (!files.length) throw new Error(`No unit test files found in ${dir}`);
     return files;
   };
-  const rootFiles = requiredFiles("test", false);
-  const unitFiles = requiredFiles("test/unit");
+  const rootUnitFiles = listUnitFiles(root);
   const isolatedFiles = requiredFiles("test/unit-isolated");
   const steps: UnitStep[] = [{
     // flair#1683: the private descriptor package is a build-time source, not a
@@ -225,13 +202,15 @@ export function unitPlan(root: string): UnitStep[] {
     steps.push({ name: `typecheck: ${label}`, cwd: root, args: ["x", "tsc", "--noEmit", "-p", config], files: [] });
   }
   steps.push({ name: "emit server for boundary guard", cwd: root, args: ["x", "tsc", "-p", "tsconfig.json", "--noCheck"], files: [] });
-  steps.push({
-    name: "root unit tests",
-    cwd: root,
-    // Preserve CI's existing grouping; mock.module isolation is per process.
-    args: ["test", "test/unit/", ...rootFiles.map(file => relative(root, file))],
-    files: [...unitFiles, ...rootFiles],
-    timeoutMs: ROOT_STEP_TIMEOUT_MS,
+  assignShards(rootUnitFiles, SHARDS).forEach((files, index) => {
+    steps.push({
+      name: `root unit tests (shard ${index + 1}/${SHARDS})`,
+      cwd: root,
+      args: files.length ? ["test", ...files.map(file => join(root, file))] : [],
+      files: files.map(file => join(root, file)),
+      timeoutMs: ROOT_STEP_TIMEOUT_MS,
+      shard: { index: index + 1, of: SHARDS },
+    });
   });
   for (const file of isolatedFiles) {
     steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
@@ -361,14 +340,21 @@ export interface UnitLaneOptions {
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/** Why a step failed, and whether it ran past its time limit and was killed. */
+interface StepOutcome {
+  detail?: string;
+  killedAtLimit: boolean;
+}
+
 /**
  * Run one step under a fresh sandbox HOME and, when given, a time limit.
  *
- * Returns undefined when the step passed, otherwise why it failed. Every way a
- * step can fail comes back as a reason, never as an exception: its own non-zero
- * exit or signal, its time limit, a sandbox HOME that could not be created, a
- * process that could not start. The caller therefore always reaches the later
- * steps (in keep-going mode) and the end-of-lane guards.
+ * Returns an outcome whose `detail` is undefined when the step passed, otherwise
+ * why it failed, and `killedAtLimit` true when the step ran past its time limit
+ * and was killed. Every way a step can fail comes back as a reason, never as an
+ * exception: its own non-zero exit or signal, its time limit, a sandbox HOME that
+ * could not be created, a process that could not start. The caller therefore
+ * always reaches the later steps (in keep-going mode) and the end-of-lane guards.
  */
 function runStep(
   step: UnitStep,
@@ -376,7 +362,7 @@ function runStep(
   timeout: { ms: number; reason: string } | undefined,
   createSandbox: () => SandboxHome,
   tripwireDir: string,
-): string | undefined {
+): StepOutcome {
   // A fresh sandbox HOME per step: even if one step's child wrote a config,
   // the next step cannot read it back, and the real home is never the target.
   // The bunfig preload covers `bun test` children too; this also covers the
@@ -386,7 +372,7 @@ function runStep(
     sandbox = createSandbox();
   } catch (error) {
     // Never run a step without its sandbox: its HOME would be the real one.
-    return `not started: its sandbox HOME could not be created (${errorMessage(error)})`;
+    return { detail: `not started: its sandbox HOME could not be created (${errorMessage(error)})`, killedAtLimit: false };
   }
   let result: ReturnType<typeof spawnSync>;
   try {
@@ -400,19 +386,18 @@ function runStep(
       killSignal: "SIGKILL",
     });
   } catch (error) {
-    return `not started (${errorMessage(error)})`;
+    return { detail: `not started (${errorMessage(error)})`, killedAtLimit: false };
   } finally {
     sandbox.cleanup();
   }
   if (timeout && (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
-    console.error(
-      `${step.name}: ${timeout.reason}; the step was killed. A killed step cannot remove its own scratch directories, ` +
-        `so the temp-dir leak guard may name them too.`,
-    );
-    return `${timeout.reason}; killed`;
+    console.error(`${step.name}: ${timeout.reason}; step killed at the limit.`);
+    return { detail: `${timeout.reason}; step killed at the limit`, killedAtLimit: true };
   }
-  if (result.error || result.status !== 0) return result.error?.message ?? result.signal ?? `exit ${result.status}`;
-  return undefined;
+  if (result.error || result.status !== 0) {
+    return { detail: result.error?.message ?? result.signal ?? `exit ${result.status}`, killedAtLimit: false };
+  }
+  return { killedAtLimit: false };
 }
 
 /**
@@ -529,19 +514,35 @@ export function runUnitSteps(
         detail: `a real client config changed during the lane: ${changed.join(", ")} (flair#1853)`,
       });
     }
-    const leaked = newFlairTempNames(tempBefore, flairTempNames(guardTempDir));
+    for (const { step, names, killed } of tempEntries) {
+      if (killed) {
+        console.error(`Temp-dir entries first observed after ${step} (killed): ${names.join(", ")}.`);
+      } else if (reportTempDirLeaks(names, guardTempDir)) {
+        guardFailures.push({
+          kind: "guard",
+          name: "temp-dir leak guard",
+          detail: `${names.length} new flair-* entries first observed after ${step} in ${guardTempDir}: ${names.join(", ")} (flair#1889)`,
+        });
+      }
+    }
+    const observed = new Set([...tempBefore, ...tempEntries.flatMap(entry => entry.names)]);
+    const leaked = newFlairTempNames(observed, flairTempNames(guardTempDir));
     if (reportTempDirLeaks(leaked, guardTempDir)) {
-      guardFailures.push({
-        kind: "guard",
-        name: "temp-dir leak guard",
-        detail: `the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${guardTempDir} (flair#1889)`,
-      });
+      guardFailures.push({ kind: "guard", name: "temp-dir leak guard", detail: `new entries first observed at the final guard: ${leaked.join(", ")}` });
     }
   };
 
   const stepFailures: UnitLaneFailure[] = [];
+  const tempEntries: Array<{ step: string; names: string[]; killed: boolean }> = [];
+
+  const shardTimings: Array<{ index: number; of: number; ms: number }> = [];
   let completed = 0;
   for (const [index, step] of steps.entries()) {
+    if (step.shard && !step.files.length) {
+      console.log(`\n${step.name}: empty shard; skipped`);
+      completed++;
+      continue;
+    }
     const remaining = deadline - Date.now();
     if (remaining < 1) {
       // The budget is spent before this step could start: it and every later
@@ -564,12 +565,19 @@ export function runUnitSteps(
       : remaining < limit
         ? { ms: remaining, reason: `timed out: ${budgetRanOut}` }
         : { ms: limit, reason: `timed out after ${seconds(limit)}` };
-    const detail = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    const stepTempBefore = flairTempNames(guardTempDir);
+    const outcome = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    const names = newFlairTempNames(stepTempBefore, flairTempNames(guardTempDir));
+    if (names.length) tempEntries.push({ step: step.name, names, killed: outcome.killedAtLimit });
+    const detail = outcome.detail;
     // Per-step timing, printed after every step the lane attempts, pass or
     // fail (flair#2224): the budget above is sized from measured step times, so
     // the lane reports them; otherwise the next resize can only be re-derived
-    // from CI timestamps that no longer exist.
-    console.log(`${step.name}: ${seconds(Date.now() - stepStartedMs)}`);
+    // from CI timestamps that no longer exist. Each root unit shard names its
+    // own duration here (flair#2258).
+    const elapsedMs = Date.now() - stepStartedMs;
+    console.log(`${step.name}: ${seconds(elapsedMs)}`);
+    if (step.shard) shardTimings.push({ ...step.shard, ms: elapsedMs });
     // The tripwire is checked after EVERY step, whatever the step's own
     // outcome, so a call that reached it is named with the step that made it.
     const tripwireDetail = inspectTripwire();
@@ -590,6 +598,11 @@ export function runUnitSteps(
   }
 
   runGuards();
+  if (shardTimings.length) {
+    console.log(
+      `Root unit shards: ${shardTimings.map(({ index, of, ms }) => `${index}/${of} ${seconds(ms)}`).join(", ")}.`,
+    );
+  }
   const summary = `${completed} steps, ${steps.reduce((n, step) => n + step.files.length, 0)} test files`;
   if (!keepGoing) {
     // Every step passed; only a guard failure can fail the lane now.
