@@ -1,7 +1,6 @@
 /**
  * backup.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair backup`.
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
@@ -10,13 +9,16 @@ import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { flairBackupOutputPath } from "../lib/flair-paths.js";
 import * as render from "../render.js";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export type BackupCli = {
   addSharedCredentialOptions: (...args: any[]) => any;
   applyAdminPassFile: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
+  resolveOpsPort: (...args: any[]) => any;
+  resolveOpsTarget: (opts: { opsTarget?: string }) => string | undefined;
+  resolveOpsUrlFromTarget: (...args: any[]) => any;
 };
 
 let cli: BackupCli;
@@ -38,6 +40,14 @@ function resolveHttpPort(...args: any[]): any {
   return cli.resolveHttpPort(...args);
 }
 
+function resolveOpsPort(...args: any[]): any {
+  return cli.resolveOpsPort(...args);
+}
+
+function resolveOpsUrlFromTarget(...args: any[]): any {
+  return cli.resolveOpsUrlFromTarget(...args);
+}
+
 export function register(program: Command): void {
 // ─── flair backup ────────────────────────────────────────────────────────────
 
@@ -46,9 +56,12 @@ addSharedCredentialOptions(
   program
     .command("backup")
     .description("Export agents, memories, and souls to a JSON archive")
+    .addHelpText("after", "Collections are read separately and can reflect different moments.")
     .option("--output <path>", "Output file path (default: ~/.flair/backups/flair-backup-<timestamp>.json)")
     .option("--agents <ids>", "Comma-separated agent IDs to include (default: all)")
     .option("--port <port>", "Harper HTTP port")
+    .option("--ops-target <url>", "Operations API target URL (env: FLAIR_OPS_TARGET)")
+    .option("--ops-timeout-ms <ms>", "Operations request timeout, 1–600000 ms (env: FLAIR_BACKUP_OPS_TIMEOUT_MS; default: 10000)")
     .option("--url <url>", "Flair base URL (overrides --port)"),
 ).action(async (opts: any) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
@@ -80,42 +93,186 @@ addSharedCredentialOptions(
 
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-    async function adminGet(path: string): Promise<any> {
-      const res = await fetch(`${baseUrl}${path}`, {
-        headers: { Authorization: auth },
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`GET ${path} failed (${res.status}): ${text}`);
-      }
-      return res.json();
+    const opsTarget = cli.resolveOpsTarget(opts);
+    const opsUrl: string = opsTarget
+      ? opsTarget.replace(/\/$/, "")
+      : opts.port !== undefined
+        ? `http://127.0.0.1:${resolveHttpPort(opts) - 1}`
+        : opts.url
+          ? resolveOpsUrlFromTarget(opts.url)
+          : `http://127.0.0.1:${resolveOpsPort(opts)}`;
+    const opsTimeoutMs = Number(opts.opsTimeoutMs ?? process.env.FLAIR_BACKUP_OPS_TIMEOUT_MS ?? 10_000);
+    if (!Number.isSafeInteger(opsTimeoutMs) || opsTimeoutMs < 1 || opsTimeoutMs > 600_000) {
+      throw new Error("--ops-timeout-ms / FLAIR_BACKUP_OPS_TIMEOUT_MS must be an integer from 1 to 600000");
     }
+
+    type Row = Record<string, unknown> & { id: string };
+    const ids = { Agent: new Set<string>(), Memory: new Set<string>(), Soul: new Set<string>() };
+
+    async function adminGet(table: keyof typeof ids, agentId?: string): Promise<Row[]> {
+      const path = `/${table}/${agentId === undefined ? "" : `?agentId=${encodeURIComponent(agentId)}`}`;
+      const context = agentId === undefined ? table : `${table} for agent ${agentId}`;
+      try {
+        const res = await fetch(`${baseUrl}${path}`, {
+          headers: { Authorization: auth },
+          signal: AbortSignal.timeout(10_000),
+        }).catch(() => { throw new Error("request failed"); });
+        if (!res.ok) {
+          throw new Error(`GET ${path} failed (${res.status})`);
+        }
+        const rows: unknown = await res.json().catch(() => { throw new Error("invalid JSON response"); });
+        if (!Array.isArray(rows)) throw new Error("expected an array response");
+        for (const [index, row] of rows.entries()) {
+          if (!row || typeof row !== "object" || typeof row.id !== "string" || !row.id.trim()) {
+            throw new Error(`row ${index}: missing or invalid id`);
+          }
+          if (ids[table].has(row.id)) throw new Error(`row ${index}: duplicate id`);
+          if (agentId !== undefined && row.agentId !== agentId) {
+            throw new Error(`row ${index}: agentId does not match ${agentId}`);
+          }
+          ids[table].add(row.id);
+        }
+        return rows;
+      } catch (error) {
+        throw new Error(`${context}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    async function opsPost(body: Record<string, unknown>, context: string): Promise<unknown> {
+      const signal = AbortSignal.timeout(opsTimeoutMs);
+      try {
+        const res = await fetch(opsUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify(body),
+          signal,
+        }).catch((error) => {
+          if (signal.aborted || error instanceof Error && error.name === "TimeoutError") throw error;
+          throw new Error("request failed");
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        return await res.json().catch((error) => {
+          if (signal.aborted) throw error;
+          throw new Error("invalid JSON response");
+        });
+      } catch (error) {
+        if (signal.aborted && signal.reason?.name === "TimeoutError" || error instanceof Error && error.name === "TimeoutError") {
+          const timeout = new Error(`${context}: request timed out after ${opsTimeoutMs}ms`, { cause: error });
+          timeout.name = "TimeoutError";
+          throw timeout;
+        }
+        throw new Error(`${context}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    type Table = keyof typeof ids;
+    type Inventory = Map<string, unknown>;
+
+    async function rowCount(table: Table): Promise<number> {
+      const parsed: any = await opsPost(
+        { operation: "describe_table", database: "flair", table, exact_count: true },
+        `${table} row count`,
+      );
+      const n = parsed?.record_count;
+      if (!Number.isSafeInteger(n) || n < 0) {
+        throw new Error(`${table} row count via the operations API: response carried no record_count`);
+      }
+      return n;
+    }
+
+    async function inventory(table: Table): Promise<Inventory> {
+      const expected = await rowCount(table);
+      const parsed: any = await opsPost({
+        operation: "search_by_value", database: "flair", table,
+        search_attribute: "id", search_value: "*", get_attributes: table === "Agent" ? ["id"] : ["id", "agentId"],
+      }, `${table} inventory`);
+      const rows = Array.isArray(parsed) ? parsed : parsed?.results;
+      if (!Array.isArray(rows)) throw new Error(`${table} inventory: expected a row array`);
+      const result: Inventory = new Map();
+      for (const row of rows) {
+        if (!row || typeof row.id !== "string" || !row.id.trim() || result.has(row.id)) {
+          throw new Error(`${table} inventory: invalid or duplicate id`);
+        }
+        result.set(row.id, row.agentId);
+      }
+      if (result.size !== expected) {
+        throw new Error(`${table}: server reports ${expected} rows, inventory read ${result.size}`);
+      }
+      const after = await rowCount(table);
+      if (after !== expected) throw new Error(`${table}: source count changed; retry backup when writes are paused`);
+      return result;
+    }
+
+    function verifyRows(table: Table, rows: Row[], expected: Inventory, agentId?: string): void {
+      const selected = new Set([...expected].filter(([, owner]) => agentId === undefined || owner === agentId).map(([id]) => id));
+      const context = agentId === undefined ? table : `${table} for agent ${agentId}`;
+      if (rows.length !== selected.size) {
+        throw new Error(`${context}: server reports ${selected.size} rows, backup read ${rows.length}`);
+      }
+      if (rows.some(row => !selected.has(row.id))) throw new Error(`${context}: backup ids differ from inventory`);
+    }
+
+    const inventories = { Agent: await inventory("Agent"), Memory: await inventory("Memory"), Soul: await inventory("Soul") };
 
     log("Fetching agents...");
-    const allAgents: any[] = await adminGet("/Agent/");
-    const filterIds = opts.agents ? opts.agents.split(",").map((s: string) => s.trim()) : null;
-    const agents: any[] = filterIds ? allAgents.filter((a: any) => filterIds.includes(a.id)) : allAgents;
-
-    log(`Fetching memories for ${agents.length} agent(s)...`);
-    const memories: any[] = [];
-    for (const agent of agents) {
-      try {
-        const agentMemories = await adminGet(`/Memory/?agentId=${encodeURIComponent(agent.id)}`);
-        if (Array.isArray(agentMemories)) memories.push(...agentMemories);
-      } catch (err: any) {
-        console.warn(`  Warning: could not fetch memories for ${agent.id}: ${err.message}`);
+    const allAgents = await adminGet("Agent");
+    verifyRows("Agent", allAgents, inventories.Agent);
+    const filterIds: string[] | null = opts.agents ? opts.agents.split(",").map((s: string) => s.trim()) : null;
+    if (filterIds) {
+      for (const id of filterIds) {
+        if (!ids.Agent.has(id)) throw new Error(`Agent ${id || "(empty id)"}: requested agent was not returned`);
       }
     }
+    const agents = filterIds ? allAgents.filter(a => filterIds.includes(a.id)) : allAgents;
+
+    async function readOwnedRows(table: "Memory" | "Soul"): Promise<Row[]> {
+      const owners = new Set(agents.map(agent => agent.id));
+      const orphanOwners = [...inventories[table].values()].filter(owner => typeof owner !== "string" || !ids.Agent.has(owner));
+      const orphanCount = orphanOwners.length;
+      if (!filterIds) {
+        for (const owner of orphanOwners) {
+          if (typeof owner !== "string" || !owner.trim()) {
+            throw new Error(`${table}: backup refused; ${orphanCount} rows have no Agent owner; repair missing or invalid agentId values and retry`);
+          }
+          owners.add(owner);
+        }
+      }
+      const received: Row[] = [];
+      for (const owner of owners) {
+        try {
+          const rows = await adminGet(table, owner);
+          verifyRows(table, rows, inventories[table], owner);
+          received.push(...rows);
+        } catch (error) {
+          if (!filterIds && orphanCount) {
+            throw new Error(`${error instanceof Error ? error.message : String(error)}; ${orphanCount} rows have no Agent owner; repair the unreadable owner rows or pause writers and retry`);
+          }
+          throw error;
+        }
+      }
+      if (!filterIds) {
+        const expected = await rowCount(table);
+        if (received.length !== expected) {
+          throw new Error(`${table}: server reports ${expected} rows, backup read ${received.length}; ${orphanCount} rows have no Agent owner; pause writers and maintenance, then retry`);
+        }
+        verifyRows(table, received, inventories[table]);
+      }
+      return received;
+    }
+
+    log("Fetching memories...");
+    const memories = await readOwnedRows("Memory");
 
     log("Fetching souls...");
-    const souls: any[] = [];
-    for (const agent of agents) {
-      try {
-        const agentSouls = await adminGet(`/Soul/?agentId=${encodeURIComponent(agent.id)}`);
-        if (Array.isArray(agentSouls)) souls.push(...agentSouls);
-      } catch (err: any) {
-        console.warn(`  Warning: could not fetch souls for ${agent.id}: ${err.message}`);
+    const souls = await readOwnedRows("Soul");
+
+    for (const table of ["Agent", "Memory", "Soul"] as const) {
+      const after = await inventory(table);
+      const before = inventories[table];
+      if (after.size !== before.size || [...before].some(([id, owner]) => !after.has(id) || after.get(id) !== owner)) {
+        throw new Error(`${table}: source ids changed; retry backup when writes are paused`);
       }
     }
 
@@ -132,13 +289,38 @@ addSharedCredentialOptions(
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const defaultOutput = flairBackupOutputPath(timestamp);
     const outputPath: string = opts.output ?? defaultOutput;
-    mkdirSync(join(outputPath, ".."), { recursive: true });
-
-    const tmp = outputPath + ".tmp";
-    writeFileSync(tmp, JSON.stringify(backup, null, 2) + "\n", "utf-8");
-    renameSync(tmp, outputPath);
+    let stagingDir: string | undefined;
+    try {
+      mkdirSync(join(outputPath, ".."), { recursive: true });
+      stagingDir = mkdtempSync(join(outputPath, "..", ".flair-backup-"));
+      const tmp = join(stagingDir, "archive.json");
+      const serialized = JSON.stringify(backup, null, 2) + "\n";
+      writeFileSync(tmp, serialized, { encoding: "utf-8", flag: "wx", mode: 0o600 });
+      const written = readFileSync(tmp, "utf-8");
+      const archive = JSON.parse(written);
+      for (const table of ["agents", "memories", "souls"] as const) {
+        if (!Array.isArray(archive[table]) || archive[table].length !== backup[table].length) {
+          throw new Error(`${table}: archive count does not match fetched count ${backup[table].length}`);
+        }
+        for (const [index, row] of backup[table].entries()) {
+          if (archive[table][index]?.id !== row.id) {
+            throw new Error(`${table} row ${row.id}: archive id does not match fetched id`);
+          }
+          if (JSON.stringify(archive[table][index]) !== JSON.stringify(row)) {
+            throw new Error(`${table} row ${row.id}: archive contents do not match fetched row`);
+          }
+        }
+      }
+      if (written !== serialized) throw new Error("archive contents do not match fetched data");
+      renameSync(tmp, outputPath);
+    } catch (error) {
+      throw new Error(`Backup archive ${outputPath}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });
+    }
 
     log(`\n${render.icons.ok} ${render.wrap(render.c.green, "Backup complete")}`);
+    log("Collections are read separately and can reflect different moments.");
     log(render.kv("Agents", render.wrap(render.c.bold, String(agents.length))));
     log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
     log(render.kv("Souls", render.wrap(render.c.bold, String(souls.length))));

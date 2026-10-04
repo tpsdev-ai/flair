@@ -7,13 +7,14 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
+import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
-import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
+import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
-import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -37,6 +38,19 @@ import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "nod
 
 import { dirname, join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
+
+export async function readNodeSeedAdvisory(
+  input: Parameters<typeof makeReadInstanceIds>[0] & { nodeKeyIds: string[]; keysDir: string },
+): Promise<string | null> {
+  if (input.nodeKeyIds.length === 0) return null;
+  const read = await makeReadInstanceIds(input)();
+  return orphanInstanceSeedAdvisory({
+    ...input,
+    instanceIds: read.state === "read" ? read.ids : null,
+    agentIds: read.state === "read" ? read.agentIds : null,
+    unreadableReason: read.state === "read" ? read.agentReadReason : read.reason,
+  });
+}
 
 export type DoctorCli = {
   api: (...args: any[]) => any;
@@ -670,6 +684,13 @@ program
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
         issues++;
       }
+
+      if (nodeKeyIds.length > 0 && harperResponding) {
+        const advisory = await readNodeSeedAdvisory({
+          nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
+        });
+        if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
+      }
     } else {
       console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);
       console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
@@ -722,16 +743,32 @@ program
     // The remedy names the two exits: `--admin-pass-file` / `--reset-admin-pass`.
     try {
       const dataDir = defaultDataDir();
-      const finding = adminPassDesyncFinding({
-        adminPassFileExists: existsSync(defaultAdminPassPath()),
-        persistedAdminUser: detectPersistedAdminUser(dataDir),
-        dataDir,
-        adminPassPath: defaultAdminPassPath(),
-      });
-      if (finding?.flagged) {
-        console.log(`  ${render.icons.error} ${finding.message}`);
-        console.log(`     ${render.wrap(render.c.dim, finding.remedy)}`);
+      let persistedAdminUser: boolean | null;
+      try {
+        persistedAdminUser = detectPersistedAdminUser(dataDir);
+      } catch {
+        persistedAdminUser = null;
+      }
+      if (persistedAdminUser === null) {
         issues++;
+        console.log(
+          `  ${render.icons.warn} ${render.wrap(
+            render.c.yellow,
+            `could not read the Harper system database under ${dataDir} to tell whether an admin user is persisted — not assessing the admin-pass desync`,
+          )}`,
+        );
+      } else {
+        const finding = adminPassDesyncFinding({
+          adminPassFileExists: existsSync(defaultAdminPassPath()),
+          persistedAdminUser,
+          dataDir,
+          adminPassPath: defaultAdminPassPath(),
+        });
+        if (finding?.flagged) {
+          console.log(`  ${render.icons.error} ${finding.message}`);
+          console.log(`     ${render.wrap(render.c.dim, finding.remedy)}`);
+          issues++;
+        }
       }
     } catch { /* best-effort — a missing data dir is not a doctor crash */ }
 
@@ -1808,9 +1845,10 @@ program
     // pre-#722 single unauthenticated read (hidden versions, "Pass --agent"
     // hint) — there's no agent to sign as, but remote agents may still have
     // heartbeated onto this instance and identities are worth showing.
+    const presenceUrl = requestUrl(baseUrl, "/Presence");
     async function fetchAndRenderFleetPresence(headers: Record<string, string>, canSign: boolean, indent: string): Promise<void> {
       try {
-        const presRes = await fetch(`${baseUrl}/Presence`, { headers, signal: AbortSignal.timeout(5000) });
+        const presRes = await fetch(presenceUrl, { headers, signal: AbortSignal.timeout(5000) });
         if (!presRes.ok) {
           // flair#1880: GET /Presence requires a verified reader by default, so
           // a keyless (unsigned) read now gets 401. Say so plainly instead of a
@@ -1882,7 +1920,7 @@ program
           const registered = renderAgentGateHeader(gate);
           if (!registered) continue;
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
-          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/Presence", keyPath) };
+          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(presenceUrl), keyPath) };
           await fetchAndRenderFleetPresence(headers, true, "      ");
         }
       }
@@ -1906,9 +1944,10 @@ program
     // iterates only the gate-passed agents and rolls the rest into one
     // aggregate skip line. The issue COUNT is unaffected either way — gate
     // findings are counted exactly once, at gate-resolution time (step 7a).
+    const healthDetailUrl = requestUrl(baseUrl, "/HealthDetail");
     async function fetchAndRenderMigrations(headers: Record<string, string>, indent: string): Promise<void> {
       try {
-        const migRes = await fetch(`${baseUrl}/HealthDetail`, { headers, signal: AbortSignal.timeout(5000) });
+        const migRes = await fetch(healthDetailUrl, { headers, signal: AbortSignal.timeout(5000) });
         if (!migRes.ok) {
           console.log(`${indent}${render.icons.warn} Could not fetch migration state (HTTP ${migRes.status})`);
           return;
@@ -1969,7 +2008,7 @@ program
         for (const gate of passedGates) {
           renderAgentGateHeader(gate);
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
-          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/HealthDetail", keyPath) };
+          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(healthDetailUrl), keyPath) };
           await fetchAndRenderMigrations(headers, "      ");
         }
         const skipped = agentGates.length - passedGates.length;

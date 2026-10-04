@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import * as render from "../render.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type TestCli = {
   api: (...args: any[]) => any;
@@ -83,7 +84,7 @@ program
         createdAt: new Date().toISOString(),
       };
       if (agentId) body.agentId = agentId;
-      await api("PUT", `/Memory/${id}`, body, { baseUrl });
+      await api("PUT", `/Memory/${encodeRecordId(id)}`, body, { baseUrl });
       memoryId = id;
       return true;
     });
@@ -104,7 +105,7 @@ program
         console.log(`       (skipped — no id returned from write step)`);
         return true;
       }
-      await api("DELETE", `/Memory/${memoryId}`, agentId ? { agentId } : undefined, { baseUrl });
+      await api("DELETE", `/Memory/${encodeRecordId(memoryId)}`, agentId ? { agentId } : undefined, { baseUrl });
       return true;
     });
 

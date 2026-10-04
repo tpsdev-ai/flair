@@ -9,7 +9,9 @@
  *     FederationSync (Federation.ts, via verifyFederationRequestBody).
  *
  * The XAA ID-JAG `jti` record (flair#2073) uses the same `recordOnce` on its
- * own table; see `claimIdJagJti` below.
+ * own table; see `claimIdJagJti` below. The OAuth single-use record (flair#2145)
+ * uses it on one more, for claims to redeem an authorization code (`c:<sha256>`)
+ * or rotate a refresh token (`r:<sha256>`); see `claimOAuthSingleUse` below.
  *
  * The record of truth is the local `ReplayNonce` table (schemas/replay.graphql:
  * `replicate: false`, `expiration: 120`). Every Harper thread of this instance
@@ -176,13 +178,14 @@ export async function recordOnce(key: string, seenAt: number, deps: ReplayStoreD
 const LOG_INTERVAL_MS = 10_000;
 const lastLogged = new Map<string, number>();
 
-const REFUSED: Record<ReplayScope | "x", string> = {
+const REFUSED: Record<ReplayScope | "x" | "o", string> = {
   a: "TPS-Ed25519 signed request",
   f: "federation signed request",
   x: "XAA jwt-bearer grant whose assertion carries a jti",
+  o: "OAuth request that redeems an authorization code or rotates a refresh token",
 };
 
-function noteUnavailable(scope: ReplayScope | "x", err: unknown, table: string = REPLAY_TABLE): void {
+function noteUnavailable(scope: ReplayScope | "x" | "o", err: unknown, table: string = REPLAY_TABLE): void {
   const reason =
     err instanceof ReplayStoreUnavailable
       ? err.message
@@ -337,13 +340,27 @@ export const ID_JAG_REPLAY_TABLE = "IdJagReplay";
 /** First element of every jti lock key, so a jti never shares a lock key with a nonce. */
 export const ID_JAG_LOCK_NAMESPACE = "flair-replay-id-jag";
 
-function idJagReplayDeps(): ReplayStoreDeps {
+export function idJagReplayDeps(): ReplayStoreDeps {
   return {
     table: (databases as any)?.flair?.[ID_JAG_REPLAY_TABLE],
     transaction: (globalThis as any).transaction,
     name: ID_JAG_REPLAY_TABLE,
     lockNamespace: ID_JAG_LOCK_NAMESPACE,
   };
+}
+
+/**
+ * The reason `deps`' table cannot remember a key for `minRetentionMs`, or null.
+ * `basis` completes the sentence that says what the minimum covers.
+ */
+export function storeRetentionGap(deps: ReplayStoreDeps, minRetentionMs: number, basis: string): string | null {
+  const gap = replayStoreContractGap(deps);
+  if (gap) return gap;
+  const expirationMs = deps.table.expirationMS;
+  if (typeof expirationMs === "number" && expirationMs > 0 && expirationMs <= minRetentionMs) {
+    return `flair.${deps.name ?? REPLAY_TABLE} keeps rows ${expirationMs} ms, not longer than the ${minRetentionMs} ms ${basis}`;
+  }
+  return null;
 }
 
 /**
@@ -356,18 +373,60 @@ function idJagReplayDeps(): ReplayStoreDeps {
 export async function claimIdJagJti(jti: string, minRetentionMs: number, now: number = Date.now()): Promise<ReplayClaim> {
   try {
     const deps = idJagReplayDeps();
-    const gap = replayStoreContractGap(deps);
+    const gap = storeRetentionGap(deps, minRetentionMs, "an assertion can stay acceptable");
     if (gap) throw new ReplayStoreUnavailable(gap);
-    const expirationMs = deps.table.expirationMS;
-    if (typeof expirationMs === "number" && expirationMs > 0 && expirationMs <= minRetentionMs) {
-      throw new ReplayStoreUnavailable(
-        `flair.${ID_JAG_REPLAY_TABLE} keeps rows ${expirationMs} ms, not longer than the ${minRetentionMs} ms an assertion can stay acceptable`,
-      );
-    }
     // A lock miss ("contended") is refused like a stored row.
     return (await recordOnce(jti, now, deps)) === "recorded" ? "recorded" : "replay";
   } catch (err) {
     noteUnavailable("x", err, ID_JAG_REPLAY_TABLE);
+    return "unavailable";
+  }
+}
+
+// ─── OAuth single-use records (flair#2145) ─────────────────────────────────
+
+/** One row per claim to redeem a code or rotate a refresh token (schemas/oauth.graphql). */
+export const OAUTH_SINGLE_USE_TABLE = "OAuthSingleUse";
+
+/** First element of every single-use lock key, so it never collides with a nonce or a jti lock. */
+export const OAUTH_SINGLE_USE_LOCK_NAMESPACE = "flair-replay-oauth";
+
+/** Which key a single-use row records: `code` redeems an authorization code, `refresh` rotates a refresh token. */
+export type OAuthSingleUseKind = "code" | "refresh";
+
+export function oauthSingleUseDeps(): ReplayStoreDeps {
+  return {
+    table: (databases as any)?.flair?.[OAUTH_SINGLE_USE_TABLE],
+    transaction: (globalThis as any).transaction,
+    name: OAUTH_SINGLE_USE_TABLE,
+    lockNamespace: OAUTH_SINGLE_USE_LOCK_NAMESPACE,
+  };
+}
+
+/**
+ * Claim an authorization code presented for redemption (`c:<sha256>`) or a
+ * refresh token presented for rotation (`r:<sha256>`) once per instance,
+ * through `recordOnce`. Call it after the request has been validated and before
+ * the handler attempts its later write or token issuance; refuse on anything
+ * but "recorded". `sha256Hex` is the SHA-256 of the code or token, so the
+ * record holds no redeemable secret. `minRetentionMs` is the longest the code
+ * or token can be presented after its row is recorded: a table whose rows do
+ * not outlive it is unavailable.
+ */
+export async function claimOAuthSingleUse(
+  kind: OAuthSingleUseKind,
+  sha256Hex: string,
+  minRetentionMs: number,
+  now: number = Date.now(),
+): Promise<ReplayClaim> {
+  try {
+    const deps = oauthSingleUseDeps();
+    const gap = storeRetentionGap(deps, minRetentionMs, "a redeemed authorization code or refresh token can be presented");
+    if (gap) throw new ReplayStoreUnavailable(gap);
+    // A lock miss ("contended") is refused like a stored row.
+    return (await recordOnce(`${kind === "refresh" ? "r" : "c"}:${sha256Hex}`, now, deps)) === "recorded" ? "recorded" : "replay";
+  } catch (err) {
+    noteUnavailable("o", err, OAUTH_SINGLE_USE_TABLE);
     return "unavailable";
   }
 }
@@ -384,16 +443,62 @@ export function replayStoreBootGaps(deps: ReplayStoreDeps = harperReplayDeps()):
   return gaps;
 }
 
-// Once per worker thread, after the schema's tables are bound. Harper defines
-// `server.workerCount` on worker threads; unit tests and the CLI never reach it.
-if (typeof setTimeout !== "undefined" && typeof (globalThis as any).server?.workerCount === "number") {
-  setTimeout(() => {
-    try {
-      for (const gap of replayStoreBootGaps()) {
-        console.error(`[flair-replay] ReplayStoreUnavailable at boot (${gap}). Signed requests on this path are refused.`);
-      }
-    } catch (err: any) {
-      console.error(`[flair-replay] ReplayStoreUnavailable at boot: ${err?.message ?? err}`);
+/** Run during the awaited resource-module import, after graphqlSchema loads. */
+function reportAtBoot(fn: () => void): void {
+  // Harper defines `server.workerCount` on worker threads; unit tests and the
+  // CLI never reach this. The jsResource initial load awaits module imports,
+  // and the worker waits for that load before it starts listening.
+  if (typeof (globalThis as any).server?.workerCount !== "number") return;
+  try {
+    fn();
+  } catch (err: any) {
+    console.error(`[flair-replay] ReplayStoreUnavailable at boot: ${err?.message ?? err}`);
+  }
+}
+
+// Once per worker thread, after the schema's tables are bound.
+reportAtBoot(() => {
+  for (const gap of replayStoreBootGaps()) {
+    console.error(`[flair-replay] ReplayStoreUnavailable at boot (${gap}). Signed requests on this path are refused.`);
+  }
+});
+
+/**
+ * A store whose rows must outlive a minimum, reported at boot by the module
+ * that owns it (the XAA jti store, the OAuth single-use store).
+ */
+export interface ReplayStoreBootStore {
+  /** Names the store in the boot line, e.g. "XAA jti". */
+  label: string;
+  /** The store's dependencies, resolved when the report runs. */
+  deps: () => ReplayStoreDeps;
+  /** Rows must be kept longer than this. */
+  minRetentionMs: number;
+  /** What the minimum covers, for the refusal text: e.g. "an assertion can stay acceptable". */
+  retentionBasis: string;
+}
+
+/**
+ * Every gap that would refuse a request through `store` on this thread, each
+ * labelled with the store's name, or an empty list.
+ */
+export function replayStoreStoreGaps(store: ReplayStoreBootStore): string[] {
+  const gap = storeRetentionGap(store.deps(), store.minRetentionMs, store.retentionBasis);
+  return gap ? [`${store.label}: ${gap}`] : [];
+}
+
+/**
+ * Print `store`'s gaps once per worker thread at boot, beside the replay
+ * guards' (`replayStoreBootGaps`): a misconfigured table is named before the
+ * first request instead of on the first claim. Call it at module load, from the
+ * module that owns the store, while Harper awaits that resource import.
+ */
+export function reportReplayStoreGapsAtBoot(store: ReplayStoreBootStore): void {
+  reportAtBoot(() => {
+    for (const gap of replayStoreStoreGaps(store)) {
+      console.error(
+        `[flair-replay] ReplayStoreUnavailable at boot (${gap}). Requests through that store are refused until it is usable (see resources/replay-store.ts).`,
+      );
     }
-  }, 0);
+  });
 }

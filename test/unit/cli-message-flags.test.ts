@@ -50,12 +50,14 @@
 // text, and the one-to-one test fails when an entry matches no finding or more
 // than one, or a finding matches more than one entry. So a second message with an exempted flag is
 // not covered by the first one's entry, and a fixed defect's entry has to go.
-import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { describe, expect, test, spyOn } from "bun:test";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import ts from "typescript";
 import { Command } from "commander";
 import { program } from "../../src/cli";
+import { printDeployNextSteps } from "../../src/commands/deploy";
 
 const REPO = join(import.meta.dir, "..", "..");
 const SRC_DIR = join(REPO, "src");
@@ -126,57 +128,7 @@ const OTHER_COMMAND_REFERENCES: Array<Exemption & { command: string; why: string
  * command the message sends the operator to. Fix the message, then delete the
  * entry — the one-to-one test fails while an entry matches nothing.
  */
-const KNOWN_DEFECTS: Array<Exemption & { defect: string }> = [
-  {
-    file: "src/commands/agent.ts",
-    flag: "--admin-pass-from",
-    context: "agent list",
-    literal: "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env ",
-    defect: "`agent list`'s inline-password warning suggests a flag no command declares",
-  },
-  {
-    file: "src/commands/agent.ts",
-    flag: "--admin-pass-from",
-    context: "agent rotate-key",
-    literal: "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env ",
-    defect: "`agent rotate-key`'s inline-password warning suggests a flag no command declares",
-  },
-  {
-    file: "src/commands/deploy.ts",
-    flag: "--remote",
-    context: "agent add",
-    literal: "     flair agent add --remote ${…} --name my-agent",
-    defect: "`flair deploy`'s next-steps example runs `flair agent add --remote`; `agent add` declares --target",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--user",
-    context: "*",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (\"pass --user\"); `flair bridge import` declares no --user and commander rejects it as an unknown option",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--user",
-    context: "bridge import",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (the example); `flair bridge import` declares no --user",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--api-key",
-    context: "bridge import",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (the example); `flair bridge import` declares no --api-key",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--api-key",
-    context: "*",
-    literal: "pass --api-key <token> or set MEM0_API_KEY in the environment",
-    defect: "mem0 API-key hint; `flair bridge import` declares no --api-key",
-  },
-];
+const KNOWN_DEFECTS: Array<Exemption & { defect: string }> = [];
 
 const EXEMPTIONS: Exemption[] = [...OTHER_COMMAND_REFERENCES, ...KNOWN_DEFECTS];
 
@@ -742,39 +694,85 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
   // flag in the same file must fail, whether it copies the original literal
   // exactly (the entry then matches two findings) or words it differently (a
   // finding no entry covers). The unmutated file is the control.
-  const DEPLOY = "src/commands/deploy.ts";
-  const DEPLOY_ANCHOR = "      console.log(`     flair agent add --remote ${result.url} --name my-agent`);\n";
-  const duplicateRows: Array<{ name: string; extra: string; problems: RegExp[]; unexempted: string[] }> = [
-    {
-      name: "an exact copy of the exempted --remote example",
-      extra: DEPLOY_ANCHOR,
-      problems: [/^src\/commands\/deploy\.ts --remote \[agent add\] .* matches 2 findings, not exactly one$/],
-      unexempted: [],
-    },
-    {
-      name: "a differently worded second --remote example",
-      extra: "      console.log(`     flair agent add --remote ${result.url} --name other-agent`);\n",
-      problems: [],
-      unexempted: ["--remote → flair agent add"],
-    },
-  ];
-  for (const row of duplicateRows) {
-    test(`mutation: ${row.name} in ${DEPLOY} fails the exemption check`, () => {
-      const original = readFileSync(join(REPO, DEPLOY), "utf8");
-      expect(original.split(DEPLOY_ANCHOR)).toHaveLength(2); // the anchor exists, once
-      const scope = { registry, fallback: tree.fallbackFor(DEPLOY) };
-      // This file's findings against this file's exemptions only, so no other
-      // file's findings affect the rows.
-      const exemptions = EXEMPTIONS.filter((e) => e.file === DEPLOY);
-      const control = applyExemptions(scanSource(DEPLOY, original, scope).findings, exemptions);
-      expect(control).toEqual({ unexempted: [], problems: [] });
-      const mutated = original.replace(DEPLOY_ANCHOR, DEPLOY_ANCHOR + row.extra);
-      const result = applyExemptions(scanSource(DEPLOY, mutated, scope).findings, exemptions);
-      expect(result.problems).toHaveLength(row.problems.length);
-      row.problems.forEach((re, i) => expect(result.problems[i]).toMatch(re));
-      expect(result.unexempted.map((f) => `${f.flag} → ${f.checkedAgainst}`)).toEqual(row.unexempted);
-    });
-  }
+  test("flair#2123: both inline-admin-password warnings give the history-safe remedy", async () => {
+    const home = mkdtempSync(join(tmpdir(), "flair-inline-password-warning-"));
+    const warning =
+      "warning: --admin-pass passed inline. Use FLAIR_ADMIN_PASS without typing its value into a recorded " +
+      "shell line (for example, read it from the admin-pass file).";
+    const rows = [
+      ["agent", "list", "--admin-pass", "test-only-inline-pass", "--port", "2"],
+      ["agent", "rotate-key", "warning-test", "--admin-pass", "test-only-inline-pass", "--ops-port", "1", "--keys-dir", join(home, "keys")],
+    ];
+    try {
+      for (const argv of rows) {
+        const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
+        for (const key of ["FLAIR_ADMIN_PASS", "FLAIR_OPS_TARGET", "FLAIR_TARGET", "HDB_ADMIN_PASSWORD"]) delete env[key];
+        const child = Bun.spawn(["bun", join(REPO, "src/cli.ts"), ...argv], {
+          timeout: 20_000,
+          env,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+        expect(exitCode).not.toBe(0);
+        expect(stderr.split(warning)).toHaveLength(2);
+        expect(stderr).not.toContain("the FLAIR_ADMIN_PASS env to keep secrets out of shell history");
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  // flair#2124: capture the same next-steps printer the deploy action calls.
+  // Execute its example through a POSIX shell and the real commander entry point
+  // with an owner-only password file. The URL includes shell metacharacters and
+  // an embedded quote; reaching the Agent read path proves --target stayed one
+  // value through shell parsing and passed the remote credential guard.
+  test("flair#2124: the emitted deploy example reaches the Agent read path", async () => {
+    const target = "http://127.0.0.1:2/path?owner=O'Brien&mode=deploy";
+    const output: string[] = [];
+    const log = spyOn(console, "log").mockImplementation((line: unknown) => { output.push(String(line)); });
+    try {
+      printDeployNextSteps(target);
+    } finally {
+      log.mockRestore();
+    }
+    const line = output.find((l) => l.trim().startsWith("flair agent add "));
+    expect(line).toBeTruthy();
+    expect(line).toContain(`--target 'http://127.0.0.1:2/path?owner=O'\\''Brien&mode=deploy'`);
+    const accepted = registry.get("agent add");
+    expect(accepted).toBeTruthy();
+    for (const flag of line!.match(FLAG_TOKEN) ?? []) expect(accepted!.has(flag)).toBe(true);
+
+    const home = mkdtempSync(join(tmpdir(), "flair-deploy-next-steps-"));
+    const passwordFile = join(home, "admin-password");
+    const secret = "test-only-remote-admin-password";
+    try {
+      writeFileSync(passwordFile, secret + "\n", { mode: 0o600 });
+      chmodSync(passwordFile, 0o600);
+      const shellCommand = line!.trim()
+        .replace(/^flair\b/, `bun '${join(REPO, "src/cli.ts").replace(/'/g, `'\\''`)}'`)
+        .replace("/path/to/admin-password", `'${passwordFile.replace(/'/g, `'\\''`)}'`);
+      expect(shellCommand).not.toContain(secret);
+      const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
+      delete env.FLAIR_ADMIN_PASS;
+      delete env.FLAIR_OPS_TARGET;
+      const child = Bun.spawn(["/bin/sh", "-c", shellCommand], {
+        timeout: 20_000,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+      expect(exitCode).not.toBe(0);
+      expect(stderr).toContain("could not read Agent 'my-agent'");
+      expect(stderr).not.toContain("is required for agent add");
+      expect(stderr).not.toContain("command not found");
+      expect(stderr).not.toContain(secret);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   // A mutation run against the real sources: one bogus flag put back into one
   // message must be found, in the command it belongs to; the unmutated file is
@@ -789,10 +787,12 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
     },
     {
       // tier d — the enable library, reached through the `mcp` module (#2116's --ops-url sat here).
+      // flair#2115: the `principal` group's commands reach this file too now (its
+      // link/unlink/links handlers call into it), so the fallback reach is wider.
       file: "src/lib/mcp-enable.ts",
       from: "Environment, then re-run with --confirm-secrets-applied.",
       to: "Environment, then re-run with --confirm-secrets-applied-now.",
-      expected: "--confirm-secrets-applied-now → 8 commands in reach",
+      expected: "--confirm-secrets-applied-now → 18 commands in reach",
     },
   ];
   for (const row of mutationRows) {

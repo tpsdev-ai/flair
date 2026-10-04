@@ -5,7 +5,7 @@
     "": {
       "name": "@tpsdev-ai/flair",
       "dependencies": {
-        "@harperfast/oauth": "2.5.0",
+        "@harperfast/oauth": "2.9.0",
         "@types/js-yaml": "4.0.9",
         "commander": "14.0.3",
         "harper": "5.2.8",
@@ -27,7 +27,7 @@
     },
     "packages/adk-flair-js": {
       "name": "@tpsdev-ai/adk-flair",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "dependencies": {
         "@google/adk": "^1.6.0",
         "@google/genai": "^1.52.0",
@@ -52,7 +52,7 @@
     },
     "packages/flair-bench": {
       "name": "@tpsdev-ai/flair-bench",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "bin": {
         "flair-bench": "dist/cli-shim.cjs",
       },
@@ -75,24 +75,25 @@
     },
     "packages/flair-client": {
       "name": "@tpsdev-ai/flair-client",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
     "packages/flair-mcp": {
       "name": "@tpsdev-ai/flair-mcp",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "bin": {
         "flair-mcp": "dist/mcp-shim.cjs",
         "flair-precompact": "dist/precompact-hook.js",
         "flair-session-start": "dist/session-start-hook.js",
         "flair-continuity-capture": "dist/continuity-capture-hook.js",
         "flair-prompt-recall": "dist/prompt-recall-hook.js",
+        "flair-action-recall": "dist/action-recall-hook.js",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.27.1",
-        "@tpsdev-ai/flair-client": "0.58.0",
+        "@tpsdev-ai/flair-client": "0.59.0",
         "zod": "4.3.6",
       },
       "devDependencies": {
@@ -101,16 +102,16 @@
     },
     "packages/flair-tool-descriptors": {
       "name": "@tpsdev-ai/flair-tool-descriptors",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
     "packages/langgraph-flair": {
       "name": "@tpsdev-ai/langgraph-flair",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.58.0",
+        "@tpsdev-ai/flair-client": "0.59.0",
       },
       "devDependencies": {
         "@langchain/core": "1.1.48",
@@ -123,9 +124,9 @@
     },
     "packages/n8n-nodes-flair": {
       "name": "@tpsdev-ai/n8n-nodes-flair",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.58.0",
+        "@tpsdev-ai/flair-client": "0.59.0",
         "zod": "3.25.76",
       },
       "devDependencies": {
@@ -142,10 +143,10 @@
     },
     "packages/openclaw-flair": {
       "name": "@tpsdev-ai/openclaw-flair",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.58.0",
+        "@tpsdev-ai/flair-client": "0.59.0",
       },
       "devDependencies": {
         "typescript": "5.9.3",
@@ -156,10 +157,10 @@
     },
     "packages/pi-flair": {
       "name": "@tpsdev-ai/pi-flair",
-      "version": "0.58.0",
+      "version": "0.59.0",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.58.0",
+        "@tpsdev-ai/flair-client": "0.59.0",
       },
       "devDependencies": {
         "@earendil-works/pi-coding-agent": "0.84.2",
@@ -181,6 +182,7 @@
     "fastify": "^5.12.5",
     "form-data": "^4.0.6",
     "hono": "^4.13.5",
+    "http-cache-semantics": "^4.3.0",
     "ip-address": "^10.5.1",
     "joi": "^17.13.7",
     "js-yaml": "^4.3.2",
@@ -423,7 +425,7 @@
 
     "@harperfast/extended-iterable": ["@harperfast/extended-iterable@1.0.3", "", {}, "sha512-sSAYhQca3rDWtQUHSAPeO7axFIUJOI6hn1gjRC5APVE1a90tuyT8f5WIgRsFhhWA7htNkju2veB9eWL6YHi/Lw=="],
 
-    "@harperfast/oauth": ["@harperfast/oauth@2.5.0", "", { "dependencies": { "jsonwebtoken": "^9.0.2", "jwks-rsa": "^3.1.0" }, "peerDependencies": { "harper": ">=5.0.0" } }, "sha512-c/3U+m3L7pKvuoIqfuGC5PJlecr1jO/RTufDHQKd3AIP6E2sKFwz5evjv95qK7zozO7xIkKGWxdK6HE7soI6UQ=="],
+    "@harperfast/oauth": ["@harperfast/oauth@2.9.0", "", { "dependencies": { "jsonwebtoken": "^9.0.2", "jwks-rsa": "^3.1.0" }, "peerDependencies": { "harper": ">=5.0.0" } }, "sha512-RxVrtRgUWYW15D4g0RopEunVBfEoK+q/nZwPRHGlh9zoWBe1R/WNeO2XImwm16RmZIEwxOCIwRMiFh2sDfl6Mw=="],
 
     "@harperfast/rocksdb-js": ["@harperfast/rocksdb-js@2.8.0", "", { "dependencies": { "@harperfast/extended-iterable": "1.0.3", "msgpackr": "2.0.6", "ordered-binary": "1.6.1" }, "optionalDependencies": { "@harperfast/rocksdb-js-darwin-arm64": "2.8.0", "@harperfast/rocksdb-js-darwin-x64": "2.8.0", "@harperfast/rocksdb-js-linux-arm64-glibc": "2.8.0", "@harperfast/rocksdb-js-linux-arm64-musl": "2.8.0", "@harperfast/rocksdb-js-linux-x64-glibc": "2.8.0", "@harperfast/rocksdb-js-linux-x64-musl": "2.8.0", "@harperfast/rocksdb-js-win32-arm64": "2.8.0", "@harperfast/rocksdb-js-win32-x64": "2.8.0" }, "bin": { "rocksdb-js": "./bin/rocksdb-js.mjs" } }, "sha512-czswCG+1KCRMYe6XQcsh5u28IQ6EbIx9eXPQd0kmjiLbtoMjiszYE92756bZJSbDykbR2OJLOazMZg7+qfFSJA=="],
 
@@ -1471,7 +1473,7 @@
 
     "htmlparser2": ["htmlparser2@10.1.0", "", { "dependencies": { "domelementtype": "^2.3.0", "domhandler": "^5.0.3", "domutils": "^3.2.2", "entities": "^7.0.1" } }, "sha512-VTZkM9GWRAtEpveh7MSF6SjjrpNVNNVJfFup7xTY3UpFtm67foy9HDVXneLtFVt4pMz5kZtgNcvCniNFb1hlEQ=="],
 
-    "http-cache-semantics": ["http-cache-semantics@4.2.0", "", {}, "sha512-dTxcvPXqPvXBQpq5dUr6mEMJX4oIEFv6bwom3FDwKRDsuIjjJGANqhBuoAn9c1RQJIdAKav33ED65E2ys+87QQ=="],
+    "http-cache-semantics": ["http-cache-semantics@4.3.0", "", {}, "sha512-M5t5LlJpS1UHMjvwRQVdFHvPISGeLAxNcrWuJkeGh0KxsqCHZ1O3NXZU/8x7cD0BDcGW8kapxMKTvwlqrNkHkA=="],
 
     "http-errors": ["http-errors@2.0.1", "", { "dependencies": { "depd": "~2.0.0", "inherits": "~2.0.4", "setprototypeof": "~1.2.0", "statuses": "~2.0.2", "toidentifier": "~1.0.1" } }, "sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ=="],
 

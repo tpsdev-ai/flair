@@ -345,12 +345,12 @@ describe("flair#1454 — parseProcStatStartTime", () => {
 describe("flair#1454 — procStartTimeToEpochMs", () => {
   test("converts ticks-since-boot to epoch ms", () => {
     // boot at epoch 0, uptime 100s, starttime 50 ticks @ 100Hz = 500ms after boot.
-    expect(procStartTimeToEpochMs(50, 100, 100_000)).toBe(500);
+    expect(procStartTimeToEpochMs(50, 100, 100_000, 100)).toBe(500);
   });
 
   test("accounts for a nonzero boot time", () => {
     // now = 1_000_000ms, uptime 100s -> boot at 900_000ms; starttime 50 ticks -> +500ms.
-    expect(procStartTimeToEpochMs(50, 100, 1_000_000)).toBe(900_500);
+    expect(procStartTimeToEpochMs(50, 100, 1_000_000, 100)).toBe(900_500);
   });
 });
 

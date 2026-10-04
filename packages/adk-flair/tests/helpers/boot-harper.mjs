@@ -31,6 +31,7 @@
  */
 import { startHarper, stopHarper } from "../../../../test/helpers/harper-lifecycle";
 import * as crypto from "node:crypto";
+import { waitForAppLoaded } from "./app-readiness.mjs";
 
 async function main() {
   const harper = await startHarper();
@@ -103,37 +104,6 @@ async function main() {
   } catch {
     // best-effort — file may not exist or tree may already be gone
   }
-}
-
-/**
- * Poll a Flair-owned route until it returns a non-404 response, confirming
- * the Flair application is loaded and serving requests. Times out after 30s.
- */
-async function waitForAppLoaded(httpURL, timeoutMs = 30_000) {
-  const url = `${httpURL}/Memory`;
-  const deadline = Date.now() + timeoutMs;
-  let attempt = 0;
-  while (Date.now() < deadline) {
-    attempt++;
-    const elapsed = Date.now() - (deadline - timeoutMs);
-    try {
-      const res = await fetch(url, { method: "GET", signal: AbortSignal.timeout(2000) });
-      if (res.status !== 404) {
-        console.error(`[boot-harper] app loaded: ${url} → ${res.status} (attempt ${attempt}, ${elapsed}ms)`);
-        return;
-      }
-      console.error(`[boot-harper] app not yet loaded: ${url} → 404 (attempt ${attempt}, ${elapsed}ms)`);
-    } catch (err) {
-      const msg = err?.message ?? String(err);
-      console.error(`[boot-harper] app probe error: ${url} → ${msg} (attempt ${attempt}, ${elapsed}ms)`);
-    }
-    await new Promise(r => setTimeout(r, 500));
-  }
-  throw new Error(
-    `Flair application not loaded at ${httpURL} after ${timeoutMs}ms ` +
-    `(${attempt} attempts). The Flair app must be built before running ` +
-    `integration tests — Harper is up but /Memory returns 404.`,
-  );
 }
 
 // ─── Pipeline warm-up ────────────────────────────────────────────────────────

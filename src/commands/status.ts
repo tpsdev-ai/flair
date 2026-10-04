@@ -328,6 +328,39 @@ export async function discoverLocalFlairPort(originalUrl: string): Promise<numbe
 }
 
 
+/** Freshness of the newest distillation from a completed cycle with no errors or skips, observed in the server-local log tail. */
+export const DISTILL_STALE_AFTER_MS = 2 * 24 * 3600 * 1000;
+
+export interface DistillStaleness {
+  lastDistilledAt: string | null;
+  stale: boolean;
+}
+
+export function distillationStaleness(rem: {
+  lastDistilledAt?: string | null;
+  lastDistillationIncomplete?: boolean;
+  pendingCandidates?: number | null;
+  nightlyEnabled?: boolean | null;
+}, now: number = Date.now()): DistillStaleness {
+  const last = typeof rem.lastDistilledAt === "string" && rem.lastDistilledAt.length > 0
+    ? rem.lastDistilledAt
+    : null;
+  const pending = typeof rem.pendingCandidates === "number" ? rem.pendingCandidates : null;
+  const age = last ? now - new Date(last).getTime() : null;
+  const stale = pending === 0
+    && rem.nightlyEnabled !== false
+    && (rem.lastDistillationIncomplete === true || age === null || !Number.isFinite(age) || age > DISTILL_STALE_AFTER_MS);
+  return { lastDistilledAt: last, stale };
+}
+
+/** Observed server-local log-tail time and freshness. */
+export function distillStalenessLine(ds: DistillStaleness, relative: (iso: string) => string): string {
+  const base = (ds.lastDistilledAt ? relative(ds.lastDistilledAt) : "not observed") + " (server-local log tail)";
+  return ds.stale ? base + DISTILL_STALE_HINT : base;
+}
+
+const DISTILL_STALE_HINT = " — no recent complete distillation observed";
+
 export function register(program: Command): void {
   const __pkgVersion = cli.__pkgVersion;
 
@@ -625,8 +658,13 @@ const statusCmd = program
           : render.wrap(render.c.dim, "unknown");
       console.log(render.kv("Nightly", nightlyTxt));
       if (r.nightlyEnabled && r.lastNightlyAt) console.log(render.kv("Last nightly", render.relativeTime(r.lastNightlyAt)));
-      if (typeof r.pendingCandidates === "number" && r.pendingCandidates > 0) {
-        console.log(render.kv("Pending candidates", render.wrap(render.c.yellow, String(r.pendingCandidates))));
+      const ds = distillationStaleness(r);
+      if (typeof r.pendingCandidates === "number") {
+        console.log(render.kv("Pending candidates", render.wrap(ds.stale || r.pendingCandidates > 0 ? render.c.yellow : render.c.dim, String(r.pendingCandidates))));
+      }
+      if (typeof r.pendingCandidates === "number" || ds.lastDistilledAt || ds.stale) {
+        const text = distillStalenessLine(ds, render.relativeTime);
+        console.log(render.kv("Last distilled", ds.stale ? render.wrap(render.c.yellow, text) : render.wrap(render.c.dim, text)));
       }
     }
 
@@ -715,11 +753,16 @@ statusCmd
     if (r.lastNightlyAt) {
       console.log(render.kv("Last nightly", `${render.relativeTime(r.lastNightlyAt)} ${render.wrap(render.c.dim, `(${r.lastNightlyAt})`)}`, 18));
     }
+    const ds = distillationStaleness(r);
     if (typeof r.pendingCandidates === "number") {
-      const pendingColor = r.pendingCandidates > 0 ? render.c.yellow : render.c.dim;
+      const pendingColor = ds.stale || r.pendingCandidates > 0 ? render.c.yellow : render.c.dim;
       console.log(render.kv("Pending candidates", render.wrap(pendingColor, String(r.pendingCandidates)), 18));
     } else {
       console.log(render.kv("Pending candidates", render.wrap(render.c.dim, "— (schema not available)"), 18));
+    }
+    if (typeof r.pendingCandidates === "number" || ds.lastDistilledAt || ds.stale) {
+      const text = distillStalenessLine(ds, render.relativeTime);
+      console.log(render.kv("Last distilled", ds.stale ? render.wrap(render.c.yellow, text) : render.wrap(render.c.dim, text), 18));
     }
   });
 
@@ -1084,6 +1127,11 @@ statusCmd
       console.log(`Nightly:           ${nightly}`);
       if (r.lastNightlyAt) console.log(`Last nightly:      ${relativeTime(r.lastNightlyAt)} (${r.lastNightlyAt})`);
       if (typeof r.pendingCandidates === "number") console.log(`Pending candidates: ${r.pendingCandidates}`);
+      const ds = distillationStaleness(r);
+      if (typeof r.pendingCandidates === "number" || ds.lastDistilledAt || ds.stale) {
+        const base = ds.lastDistilledAt ? `${relativeTime(ds.lastDistilledAt)} (${ds.lastDistilledAt})` : "not observed";
+        console.log(`Last distilled:     ${base} (server-local log tail)${ds.stale ? DISTILL_STALE_HINT : ""}`);
+      }
     }
 
     if (healthData?.federation) {

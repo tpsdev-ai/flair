@@ -43,10 +43,10 @@ const diverged = assessTreeDivergence({
   samePath: (a, b) => a === b,
 });
 
-async function status(args: string[], baseUrl = "http://127.0.0.1:9926") {
+async function status(args: string[], baseUrl = "http://127.0.0.1:9926", rem?: Record<string, unknown>) {
   const asked: any[] = [];
   bindCli({
-    fetchHealthDetail: async () => ({ healthy: true, baseUrl, healthData: { version: "0.57.0", pid: 4242 } }),
+    fetchHealthDetail: async () => ({ healthy: true, baseUrl, healthData: { version: "0.57.0", pid: 4242, ...(rem ? { rem } : {}) } }),
     humanBytes: (n: number) => String(n),
     relativeTime: () => "t",
     resolveSigningAgentId: () => ({ agentId: undefined, source: "none" }),
@@ -63,12 +63,16 @@ async function status(args: string[], baseUrl = "http://127.0.0.1:9926") {
   });
   const program = new Command();
   register(program);
+  const savedOutput = process.env.FLAIR_OUTPUT;
+  process.env.FLAIR_OUTPUT = "human";
   const out: string[] = [];
   const spy = spyOn(console, "log").mockImplementation((...items: unknown[]) => { out.push(items.map(String).join(" ")); });
   try {
     await program.parseAsync(["status", ...args], { from: "user" });
   } finally {
     spy.mockRestore();
+    if (savedOutput === undefined) delete process.env.FLAIR_OUTPUT;
+    else process.env.FLAIR_OUTPUT = savedOutput;
   }
   return { text: out.join("\n"), asked };
 }
@@ -97,3 +101,16 @@ describe("flair status wiring (#2034)", () => {
     expect(j.installTree.remedy).toEqual(["npm i -g @tpsdev-ai/flair", "flair init", "flair restart"]);
   });
 });
+
+for (const args of [[], ["rem"], ["deep"]]) {
+  for (const pendingCandidates of [0, 3]) {
+    test(`status ${args.join(" ")} shows neutral unobserved distillation beside ${pendingCandidates} pending with nightly disabled`, async () => {
+      const { text } = await status(args, "http://127.0.0.1:9926", {
+        nightlyEnabled: false, pendingCandidates, lastDistilledAt: null,
+      });
+      const plain = text.replace(/\x1b\[[0-9;]*m/g, "");
+      expect(plain).toMatch(new RegExp(`Pending candidates:?\\s+${pendingCandidates}\\s*\\n\\s*Last distilled:?\\s+not observed \\(server-local log tail\\)`));
+      expect(plain).not.toContain("no recent complete distillation observed");
+    });
+  }
+}

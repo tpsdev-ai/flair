@@ -16,7 +16,7 @@
  * Compiled with the rest of src/ under tsconfig.check.src.json (strict).
  */
 import { Command } from "commander";
-import { resolveKeyPath, buildEd25519Auth } from "../lib/auth-resolve.js";
+import { resolveKeyPath, buildEd25519Auth, requestTarget, requestUrl } from "../lib/auth-resolve.js";
 
 export type PresenceCli = {
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
@@ -87,11 +87,12 @@ export function register(program: Command): void {
 
       // Build auth + POST
       const baseUrl = resolveBaseUrl(opts).replace(/\/$/, "");
-      const auth = buildEd25519Auth(agentId, "POST", "/Presence", keyPath);
+      const url = requestUrl(baseUrl, "/Presence");
+      const auth = buildEd25519Auth(agentId, "POST", requestTarget(url), keyPath);
       const body: Record<string, string> = { activity };
       if (task) body.currentTask = task;
 
-      const res = await fetch(`${baseUrl}/Presence`, {
+      const res = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -78,6 +78,7 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
 export const SERVER_STAMPED_MEMORY_FIELDS = Object.freeze([
   "instanceToken",
   "provenance",
+  "skillSubjectId",
 ] as const);
 
 const SERVER_STAMPED = new Set<string>(SERVER_STAMPED_MEMORY_FIELDS as readonly string[]);

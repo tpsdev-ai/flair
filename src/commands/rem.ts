@@ -11,6 +11,7 @@
  * Do not import src/cli.ts from here — that would cycle and pull the
  * non-strict entry into the strict check.
  */
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
@@ -178,6 +179,23 @@ export function describeReflectError(message: string): { kind: "no-backend" | "d
     // Not a JSON error body — network error, etc. Pass the raw message through.
   }
   return { kind: "other", text: message };
+}
+
+/** Print skips and errors; errors alone set exit 1. */
+export function summarizeNightlyOutcome(row: { errors: string[]; skips: string[] }): {
+  lines: string[];
+  exitCode: 0 | 1;
+} {
+  const lines: string[] = [];
+  if (row.errors.length > 0) {
+    lines.push("Errors:");
+    for (const e of row.errors) lines.push(`  - ${e}`);
+  }
+  if (row.skips.length > 0) {
+    lines.push("Skips:");
+    for (const s of row.skips) lines.push(`  - ${s}`);
+  }
+  return { lines, exitCode: row.errors.length > 0 ? 1 : 0 };
 }
 
 const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
@@ -616,7 +634,7 @@ export function register(program: Command): void {
           return;
         }
         // Fetch the candidate
-        const candidate = await api("GET", `/MemoryCandidate/${encodeURIComponent(candidateId)}`);
+        const candidate = await api("GET", `/MemoryCandidate/${encodeRecordId(candidateId)}`);
         const candidateData = (candidate && !candidate.error) ? candidate : null;
         const decision = decideCandidateAction(candidateData, "promote");
         if (!decision.ok) {
@@ -643,7 +661,7 @@ export function register(program: Command): void {
           const sourceIds: string[] = Array.isArray(candidate.sourceMemoryIds) ? candidate.sourceMemoryIds : [];
           for (const sid of sourceIds) {
             try {
-              const mem = await api("GET", `/Memory/${encodeURIComponent(String(sid))}`);
+              const mem = await api("GET", `/Memory/${encodeRecordId(String(sid))}`);
               if (mem && !mem.error) {
                 sourceFetches.push({ ok: true, tags: Array.isArray(mem.tags) ? mem.tags : [] });
               } else {
@@ -675,7 +693,7 @@ export function register(program: Command): void {
 
         // Memory promotion is handled by the server workflow above.
         const soulId = `${candidate.agentId}-${opts.key}`;
-        const soulWrite = await api("PUT", `/Soul/${encodeURIComponent(soulId)}`, {
+        const soulWrite = await api("PUT", `/Soul/${encodeRecordId(soulId)}`, {
           id: soulId,
           agentId: candidate.agentId,
           key: opts.key,
@@ -691,7 +709,7 @@ export function register(program: Command): void {
         }
         console.log(`✅ Wrote Soul ${soulId} (key=${opts.key})`);
         // Update the candidate row
-        const upd = await api("PUT", `/MemoryCandidate/${encodeURIComponent(candidateId)}`, {
+        const upd = await api("PUT", `/MemoryCandidate/${encodeRecordId(candidateId)}`, {
           ...candidate,
           status: "promoted",
           target: opts.to,
@@ -730,7 +748,7 @@ export function register(program: Command): void {
       const reviewerId = opts.reviewer || process.env.FLAIR_AGENT_ID || "admin";
 
       try {
-        const candidate = await api("GET", `/MemoryCandidate/${encodeURIComponent(candidateId)}`);
+        const candidate = await api("GET", `/MemoryCandidate/${encodeRecordId(candidateId)}`);
         const candidateData = (candidate && !candidate.error) ? candidate : null;
         const decision = decideCandidateAction(candidateData, "reject");
         if (!decision.ok) {
@@ -744,7 +762,7 @@ export function register(program: Command): void {
         }
 
         const decidedAt = new Date().toISOString();
-        const upd = await api("PUT", `/MemoryCandidate/${encodeURIComponent(candidateId)}`, {
+        const upd = await api("PUT", `/MemoryCandidate/${encodeRecordId(candidateId)}`, {
           ...candidate,
           status: "rejected",
           reviewerId,
@@ -916,8 +934,12 @@ export function register(program: Command): void {
         console.log(`Souls:      ${row.soulCount ?? "—"}`);
         console.log(`Pending:    ${row.pendingCandidates ?? "—"}`);
         if (typeof row.archived === "number" || typeof row.expired === "number") {
-          console.log(`Archived:   ${row.archived ?? "—"}`);
-          console.log(`Expired:    ${row.expired ?? "—"}`);
+          // #1503: `archived` counts validTo-expired and old-session rows the
+          // pass soft-archived; `expired` counts ephemeral rows past their
+          // expiresAt. Label each so "Expired: N, Archived: 0" cannot read as
+          // the same row counted on two axes.
+          console.log(`Archived:   ${row.archived ?? "—"} (validTo-expired + old sessions)`);
+          console.log(`Expired:    ${row.expired ?? "—"} (ephemeral rows past expiresAt)`);
         }
         // row.candidates populates when step 5 (distillation) was attempted
         // this cycle — see src/rem/runner.ts. Absent when dry-run skipped it.
@@ -945,10 +967,10 @@ export function register(program: Command): void {
           console.log(`\nNote: REM refused to start because /Health could not be served.`);
           console.log(`Restore /Health before retrying, or \`flair rem pause\` to stop the scheduler.`);
         }
-        if (row.errors.length > 0) {
-          console.log(`Errors:`);
-          for (const e of row.errors) console.log(`  - ${e}`);
-          process.exit(1);
+        if (row.errors.length > 0 || row.skips.length > 0) {
+          const outcome = summarizeNightlyOutcome(row);
+          for (const line of outcome.lines) console.log(line);
+          if (outcome.exitCode !== 0) process.exit(outcome.exitCode);
         }
         if (result.status === "paused") {
           console.log(`\nNote: REM is paused (sentinel ~/.flair/rem.paused or FLAIR_REM_PAUSE env).`);
