@@ -78,7 +78,7 @@ export function looksLikeSecretKey(name: string): boolean {
 }
 
 /**
- * Is this URL one only the machine serving it can reach?
+ * Does this URL name a loopback or unspecified destination?
  *
  * Deliberately a TEXT test, not a DNS lookup: this decides what gets baked into a
  * deployed artifact, and a resolver answer at deploy time is not a property of the
@@ -98,9 +98,19 @@ export function isLoopbackUrl(raw: string | null | undefined): boolean {
 }
 
 export function isLoopbackHost(host: string): boolean {
-  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  const bare = host.replace(/^\[|\]$/g, "");
+  if (!/^[0-9a-z._:-]+$/i.test(bare)) return false;
+  let h: string;
+  try {
+    // The URL parser gives one lowercase spelling per IP literal:
+    // `127.1` -> `127.0.0.1`, `[0::1]` -> `[::1]`, `[::ffff:127.0.0.1]` -> `[::ffff:7f00:1]`.
+    h = new URL(`http://${bare.includes(":") ? `[${bare}]` : bare}`).hostname.replace(/\.$/, "");
+  } catch {
+    return false;
+  }
   if (h === "localhost" || h.endsWith(".localhost")) return true;
-  if (h === "::1" || h === "0:0:0:0:0:0:0:1") return true;
+  if (h === "0.0.0.0" || h === "[::]" || h === "[::ffff:0:0]") return true;
+  if (h === "[::1]" || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(h)) return true;
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
@@ -237,7 +247,7 @@ export function planComponentEnv(
     }
     if (isLoopbackUrl(operatorValue)) {
       notices.push(
-        `${PUBLIC_URL_KEY} in ${COMPONENT_ENV_FILENAME} is a loopback address ` +
+        `${PUBLIC_URL_KEY} in ${COMPONENT_ENV_FILENAME} is a loopback or unspecified address ` +
           `(${operatorValue}). OAuth discovery and A2A discovery advertise it verbatim, so ` +
           `remote clients will be told to connect to their own machine (flair#1000).`,
       );

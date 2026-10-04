@@ -2,8 +2,9 @@
  * principal.ts — `flair principal` command group (flair#1632 / epic #1618).
  *
  * Extracted from src/cli.ts with ZERO behavior change. Owns the `principal`
- * commander registration and its `add` / `list` / `show` / `disable` /
- * `promote` handlers (1.0 identity management; Principal extends Agent).
+ * commander registration and its `add` / `list` / `show` / `enable` /
+ * `disable` / `promote` handlers (1.0 identity management; Principal extends
+ * Agent).
  *
  * SECURITY: multi-tenant / ownership scoping, admin-role checks, and the
  * ops-API trust-tier writes are moved verbatim. No auth, scope, or
@@ -29,6 +30,15 @@ import {
   resolveLocalAdminPass,
   resolveAdminUser,
 } from "../lib/auth-resolve.js";
+import { resolveOpsUrl } from "../lib/mcp-enable.js";
+import { writeConfirmed } from "../lib/instance-identity-row.js";
+import { fetchErrorLabel, redactUrl } from "./federation.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
+import {
+  linkPrincipalMapping,
+  unlinkPrincipalMapping,
+  listPrincipalMappings,
+} from "../lib/mcp-enable.js";
 
 export type PrincipalCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -54,6 +64,159 @@ const pubKeyPath = (agentId: string, keysDir: string): string => cli.pubKeyPath(
 const relativeTime = (iso: string | null | undefined): string => cli.relativeTime(iso);
 const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | number }): number =>
   cli.resolveOpsPort(opts);
+
+const PRINCIPAL_OPS_TIMEOUT_MS = 10_000;
+
+/** Only a principal that exists, a confirmed update for it, and a read-back of the requested status are success. */
+async function setPrincipalStatus(id: string, status: "active" | "deactivated", opts: {
+  instance?: string; adminPass?: string; adminUser?: string; opsPort?: string | number;
+}): Promise<void> {
+  // Match `mcp enable`: --instance wins, then FLAIR_URL. Neither of the older
+  // FLAIR_TARGET / FLAIR_OPS_TARGET variables selects this admin destination.
+  const instance = opts.instance ?? process.env.FLAIR_URL;
+  if (opts.instance !== undefined && !opts.instance.trim()) {
+    console.error("Error: --instance is empty. Pass the target instance URL or omit the flag for a local operation.");
+    process.exit(1);
+  }
+
+  const remote = Boolean(instance);
+  const targetText = instance && !instance.includes("://") ? `https://${instance}` : (instance ?? "");
+  let opsUrl: string;
+  try {
+    if (remote) {
+      const target = new URL(targetText);
+      if (!(["http:", "https:"].includes(target.protocol) && target.hostname && !target.username && !target.password)) {
+        throw new Error("invalid target");
+      }
+      // mcp enable resolves the served instance to the ops API on its host.
+      // Parse the result too: resolveOpsUrl preserves a malformed input as a
+      // string for its own caller's error path.
+      opsUrl = resolveOpsUrl(instance!);
+      const ops = new URL(opsUrl);
+      if (!["http:", "https:"].includes(ops.protocol) || !ops.hostname) throw new Error("invalid ops URL");
+    } else {
+      opsUrl = resolveOpsUrl(resolveOpsPort(opts));
+    }
+  } catch {
+    // Show only a redacted http(s) URL: other schemes can keep credential-looking text in an opaque path.
+    let shown = "<unparseable URL>";
+    try { if (["http:", "https:"].includes(new URL(targetText).protocol)) shown = redactUrl(targetText); } catch { /* placeholder */ }
+    console.error(`Error: invalid --instance target ${shown}. Pass a valid http(s) Flair instance URL and check its operations API address.`);
+    process.exit(1);
+  }
+
+  let adminPass: string | undefined;
+  if (remote) {
+    // A local env/file credential must never silently cross to another host.
+    adminPass = resolveLocalAdminPass(opts.adminPass, true);
+    if (!adminPass) {
+      console.error("Error: --admin-pass <pass> is required for a remote --instance. Pass that instance's own admin password explicitly; FLAIR_ADMIN_PASS and ~/.flair/admin-pass are local credentials.");
+      process.exit(1);
+    }
+  } else {
+    adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS;
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for a local principal update.");
+      process.exit(1);
+    }
+  }
+
+  const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
+  const safeUrl = redactUrl(opsUrl);
+  const action = status === "active" ? "enable" : "disable";
+  const remedy = `Check --instance, the target's operations API, and --admin-pass/--admin-user; then check the principal's status on that instance before retrying.`;
+  const post = async (body: Record<string, unknown>, stage: string): Promise<Response> => {
+    try {
+      return await fetch(opsUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify(body),
+        redirect: "manual",
+        signal: AbortSignal.timeout(PRINCIPAL_OPS_TIMEOUT_MS),
+      });
+    } catch (err) {
+      console.error(`Error: could not ${stage} principal at ${safeUrl} (${fetchErrorLabel(err)}). ${remedy}`);
+      process.exit(1);
+    }
+  };
+  const checkResponse = (res: Response, stage: string): void => {
+    if (res.status >= 300 && res.status < 400) {
+      console.error(`Error: ${safeUrl} redirected the ${stage}; refused to forward the admin credential. ${remedy}`);
+      process.exit(1);
+    }
+    if (!res.ok) {
+      console.error(`Error: ${safeUrl} refused the ${stage} (HTTP ${res.status}). ${remedy}`);
+      process.exit(1);
+    }
+  };
+
+  type RowRead =
+    | { kind: "found"; status: string }
+    | { kind: "absent" }
+    | { kind: "unreadable" };
+
+  // Transport/HTTP failures exit in post/checkResponse; invalid successful
+  // responses are "unreadable".
+  const readPrincipal = async (stage: string): Promise<RowRead> => {
+    const res = await post({
+      operation: "search_by_value", database: "flair", table: "Agent",
+      search_attribute: "id", search_type: "equals", search_value: id,
+      get_attributes: ["id", "status"],
+    }, stage);
+    checkResponse(res, stage);
+    let rows: unknown;
+    try { rows = await res.json(); } catch { return { kind: "unreadable" }; }
+    if (!Array.isArray(rows)) return { kind: "unreadable" };
+    if (rows.length === 0) return { kind: "absent" };
+    if (rows.length !== 1) return { kind: "unreadable" };
+    const row = rows[0] as { id?: unknown; status?: unknown };
+    if (row?.id !== id || typeof row.status !== "string") return { kind: "unreadable" };
+    return { kind: "found", status: row.status };
+  };
+
+  // Read the principal BEFORE the update. Harper answers an update for an id
+  // with no row, so existence has to come from a read, not from the update's
+  // status. An unreadable read is refused separately — never treated as absent.
+  const before = await readPrincipal(`${action} lookup`);
+  if (before.kind === "absent") {
+    console.error(`Error: no principal ${id} at ${safeUrl} — nothing to ${action}. Check the id and the target, then create it with \`flair principal add\` or name an existing principal.`);
+    process.exit(1);
+  }
+  if (before.kind === "unreadable") {
+    console.error(`Error: ${safeUrl} could not read principal ${id} before the ${action}; the read did not return the single requested record, so no change was made. ${remedy}`);
+    process.exit(1);
+  }
+
+  const updated = await post({
+    operation: "update", database: "flair", table: "Agent",
+    records: [{ id, status, updatedAt: new Date().toISOString() }],
+  }, `${action} update`);
+  checkResponse(updated, "update");
+  let updateBody: unknown;
+  try { updateBody = await updated.json(); } catch { updateBody = null; }
+  if (!writeConfirmed(updateBody, "update_hashes", id)) {
+    console.error(`Error: ${safeUrl} did not confirm the update for principal '${id}'. Check that the principal exists on the target and verify its status before retrying.`);
+    process.exit(1);
+  }
+
+  const after = await readPrincipal(`${action} read-back`);
+  const storedStatus = after.kind === "found" ? after.status : "no single record";
+  if (storedStatus !== status) {
+    console.error(`Error: ${safeUrl} did not confirm principal '${id}' is ${status}; the stored status is not ${status}. Check the principal's status on that instance.`);
+    process.exit(1);
+  }
+  console.log(`✅ Principal '${id}' ${status === "active" ? "activated" : "deactivated"} (stored status: ${storedStatus})`);
+}
+
+/** Both state verbs accept the same target and admin credentials. */
+function registerPrincipalStatusCommand(command: Command, status: "active" | "deactivated"): void {
+  command
+    .option("--admin-pass <pass>", "Admin password; required explicitly for a remote --instance")
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
+    .option("--ops-port <port>", "Harper operations API port (local target)")
+    .option("--instance <url>", "Remote Flair instance (else FLAIR_URL); its ops API is derived as in mcp enable")
+    .action(async (id: string, opts) => setPrincipalStatus(id, status, opts));
+}
 
 // ─── flair principal ─────────────────────────────────────────────────────────
 // 1.0 identity management. The Principal model extends Agent — this is the
@@ -284,7 +447,7 @@ export function register(program: Command): void {
     .description("Show principal details")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (id: string, opts) => {
-      const result = await api("GET", `/Agent/${id}`);
+      const result = await api("GET", `/Agent/${encodeRecordId(id)}`);
       const mode = render.resolveOutputMode(opts);
       if (mode === "json") {
         console.log(render.asJSON(result));
@@ -317,39 +480,14 @@ export function register(program: Command): void {
       }
     });
 
-  principal
-    .command("disable <id>")
-    .description("Deactivate a principal (revokes access, preserves data)")
-    .option("--admin-pass <pass>", "Admin password")
-    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
-    .option("--ops-port <port>", "Harper operations API port")
-    .action(async (id: string, opts) => {
-      const opsPort = resolveOpsPort(opts);
-      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-      if (!adminPass) {
-        console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
-        process.exit(1);
-      }
-
-      const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
-      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: auth },
-        body: JSON.stringify({
-          operation: "update",
-          database: "flair",
-          table: "Agent",
-          records: [{ id, status: "deactivated", updatedAt: new Date().toISOString() }],
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        console.error(`Error: ${res.status} ${text}`);
-        process.exit(1);
-      }
-
-      console.log(`✅ Principal '${id}' deactivated`);
-    });
+  registerPrincipalStatusCommand(
+    principal.command("disable <id>").description("Deactivate a principal (revokes access, preserves data)"),
+    "deactivated",
+  );
+  registerPrincipalStatusCommand(
+    principal.command("enable <id>").description("Reactivate a principal"),
+    "active",
+  );
 
   principal
     .command("promote <id> <tier>")
@@ -389,5 +527,138 @@ export function register(program: Command): void {
       }
 
       console.log(`✅ Principal '${id}' trust tier set to '${tier}'`);
+    });
+
+  // ── flair principal link / unlink / links (flair#2115) ─────────────────────
+  //
+  // link maps one IdP login to an existing principal; unlink revokes a mapping;
+  // links lists the principal's current mappings.
+
+  /**
+   * The instance and admin credential these commands need: `--instance` (else
+   * FLAIR_URL) names the target, and a REMOTE target gets no local-credential
+   * fallback (`flair mcp enable`'s `--admin-pass` rule). The target policy is
+   * enforced in src/lib/mcp-enable.ts before the first request; every refusal
+   * here happens before any ops call too.
+   */
+  function mappingTarget(opts: any, command: string): { instance: string; adminUser: string; adminPass: string } {
+    const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
+    if (!instance) {
+      console.error(`Error: --instance is required (or set FLAIR_URL) — \`${command}\` operates on one specific instance.`);
+      process.exit(1);
+    }
+    const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
+    if (!adminPass) {
+      console.error(
+        "Error: --admin-pass <pass> is required for a REMOTE target " +
+          "(the command authenticates to the target instance's operations API with it).\n" +
+          "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
+          "local admin credentials, and sending them to another instance is how a local secret ends up on " +
+          "someone else's Harper. Pass the target's own admin password explicitly.",
+      );
+      process.exit(1);
+    }
+    return { instance, adminUser: resolveAdminUser(opts.adminUser), adminPass };
+  }
+
+  const MAPPING_INSTANCE_OPTION = "--instance <url>";
+  const MAPPING_INSTANCE_HELP = "Remote flair instance holding the mapping (else FLAIR_URL)";
+  const MAPPING_TARGET_HELP =
+    "Targets a REMOTE instance: --instance must be HTTPS, and an unparseable URL, localhost, a .local name, or a " +
+    "loopback, unspecified, RFC1918, link-local or IPv6 unique-local address literal is refused before any request.";
+  const MAPPING_ADMIN_PASS_HELP =
+    "Admin password for the TARGET instance (required — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this " +
+    "machine's local credentials and are never sent to a remote instance)";
+  const MAPPING_ADMIN_USER_HELP = "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)";
+
+  principal
+    .command("link <principal>")
+    .description(
+      "Map one IdP login to an existing principal on an already-enabled instance — the identity-mapping step " +
+        "`flair mcp enable` runs, and nothing else. " + MAPPING_TARGET_HELP,
+    )
+    .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
+    .option("--idp-provider <name>", "Upstream IdP provider", "github")
+    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
+    .option("--replace", "Move a subject that is already mapped to a different principal")
+    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+    .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
+    .action(async (principalId: string, opts) => {
+      if (!opts.idpSubject) {
+        console.error("Error: --idp-subject <login> is required — it is the login the identity provider reports for this person.");
+        process.exit(1);
+      }
+      const target = mappingTarget(opts, "flair principal link");
+      try {
+        const result = await linkPrincipalMapping({
+          hostedOrigin: target.instance,
+          adminUser: target.adminUser,
+          adminPass: target.adminPass,
+          principal: principalId,
+          idpProvider: opts.idpProvider,
+          idpSubject: opts.idpSubject,
+          replace: Boolean(opts.replace),
+        });
+        for (const line of result.lines) console.log(line);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+    });
+
+  principal
+    .command("unlink <principal>")
+    .description(
+      "Revoke one IdP login's mapping; success requires confirmed updates and no resolvable subject mapping on readback. " + MAPPING_TARGET_HELP,
+    )
+    .option("--idp-subject <login>", "The login the identity provider reports for this person (GitHub: the username)")
+    .option("--idp-provider <name>", "Upstream IdP provider the mapping carries", "github")
+    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
+    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+    .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
+    .action(async (principalId: string, opts) => {
+      if (!opts.idpSubject) {
+        console.error("Error: --idp-subject <login> is required — it is the login the identity provider reports for this person.");
+        process.exit(1);
+      }
+      const target = mappingTarget(opts, "flair principal unlink");
+      try {
+        const result = await unlinkPrincipalMapping({
+          hostedOrigin: target.instance,
+          adminUser: target.adminUser,
+          adminPass: target.adminPass,
+          principal: principalId,
+          idpProvider: opts.idpProvider,
+          idpSubject: opts.idpSubject,
+        });
+        for (const line of result.lines) console.log(line);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+    });
+
+  principal
+    .command("links <principal>")
+    .description(
+      "List a principal's current IdP mappings on an already-enabled instance. " + MAPPING_TARGET_HELP,
+    )
+    .option(MAPPING_INSTANCE_OPTION, MAPPING_INSTANCE_HELP)
+    .option("--admin-pass <pass>", MAPPING_ADMIN_PASS_HELP)
+    .option("--admin-user <name>", MAPPING_ADMIN_USER_HELP)
+    .action(async (principalId: string, opts) => {
+      const target = mappingTarget(opts, "flair principal links");
+      try {
+        const result = await listPrincipalMappings({
+          hostedOrigin: target.instance,
+          adminUser: target.adminUser,
+          adminPass: target.adminPass,
+          principal: principalId,
+        });
+        for (const line of result.lines) console.log(line);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
     });
 }

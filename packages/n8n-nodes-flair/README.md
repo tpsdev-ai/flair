@@ -23,10 +23,12 @@ Full setup walkthrough, subject/sessionId patterns, and security guidance are in
 ## Credential setup
 
 1. **Base URL** — your Flair instance, e.g. `http://localhost:19926`
-2. **Agent ID** — the logical identity that will own memories written from this n8n workspace. Workflows that share an Agent ID share memory ownership.
-3. **Admin Password** — your Flair (Harper) admin password. **This grants read/write access to the entire instance.** For production with untrusted workflow inputs, wait for Ed25519 per-agent auth (planned).
+2. **Agent ID** — the memory owner and, with Agent Private Key selected, signing identity. Workflows that share an Agent ID share memory ownership.
+3. **Agent Private Key** — that agent's Ed25519 private key. Register a new agent with `flair agent add <agent-id>`, or use an existing agent's matching key; encode it with `base64 < ~/.flair/keys/<agent-id>.key`. With Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories; administrator-role agents have broader authority.
 
-The credential test hits `/Memory` (auth-required) — you'll know it works when the test succeeds.
+The credential test reads `/Memory` with the selected auth mode and reports that mode on success.
+
+**Admin Password (deprecated)** — used only with Agent Private Key empty. Requests use Harper administrator Basic authentication, including access to other agents' private memories, and each node execution warns.
 
 ## License
 

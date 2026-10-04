@@ -6,7 +6,7 @@ import { runNightlyCycle } from "../../src/rem/runner.ts";
 
 const stages = ["maintenance", "all", "adk", "continuity", "auto-promote", "dedup"];
 for (const stage of stages) {
-  for (const [label, body] of [["null", null], ["string", ""], ["number", 1], ["boolean", false], ["array", []], ["undefined", undefined], ["object", { candidates: [], count: 0, expired: 0, archived: 0, clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "fixture" }]] as const) {
+  for (const [label, body] of [["null", null], ["string", ""], ["number", 1], ["boolean", false], ["array", []], ["undefined", undefined], ["object", { candidates: [], count: 0, model: "fixture", gathered: 1, unreflected: 1, expired: 0, archived: 0, clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "fixture" }]] as const) {
     test("stage response " + stage + ": " + label, async () => {
       const root = tempDir("flair-rem-1738-");
       const logPath = join(root, "run.jsonl");
@@ -31,7 +31,7 @@ for (const stage of stages) {
             : request.scope === "all" ? "all" : "adk";
           if (selected === stage) { reached++; return body; }
           if (path === "/MemoryMaintenance") return { expired: 0, archived: 0 };
-          if (path === "/ReflectMemories") return { candidates: [] };
+          if (path === "/ReflectMemories") return { candidates: [], count: 0, model: "fixture", gathered: 1, unreflected: 1 };
           if (path === "/AutoPromoteCandidates") return { count: 0, skipped: [] };
           if (path === "/MemoryDedupStats") return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "fixture" };
           throw new Error("unexpected API call");

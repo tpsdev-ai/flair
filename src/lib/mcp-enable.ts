@@ -56,8 +56,6 @@
  *   - Sherlock: `accessTokenTtl` is explicitly 900 in the written config
  *     block, never left at the plugin's 1h default (see
  *     `buildMcpOAuthConfigBlock`).
- *   - Sherlock: the RS256 keypair comes from `crypto.generateKeyPairSync`
- *     (see `generateRsaSigningKeyPair`), never a PRNG shortcut.
  *   - Sherlock (the #741 lesson): self-verification is the exit criterion.
  *     On failure, the result names which step to re-run — never reports
  *     success on hope (see `EnableMcpResult.failedStep`). flair#756 extends
@@ -82,8 +80,8 @@
  *     ops paths" the design addendum names, not a new mechanism invented for
  *     this slice.
  *   - `FLAIR_MCP_OAUTH` (resources/mcp-oauth-flag.ts) is read from
- *     `process.env` ONLY — never YAML config — so it (and the OAuth secrets:
- *     the signing key PEM, the IdP client secret) cannot be set via
+ *     `process.env` ONLY — never YAML config — so it (and the OAuth secrets —
+ *     the IdP client secret) cannot be set via
  *     `set_configuration`. Those are delivered through the shape-aware
  *     secrets-provisioning step below (a 0600 staging file the operator
  *     applies via Fabric Studio's environment panel, or their own
@@ -93,7 +91,7 @@
  *     the flag-OFF byte-identical boot with the new config.yaml block inert.
  *   - `@harperfast/oauth`'s config field names (`mcp.issuer`, `mcp.resource`,
  *     `mcp.accessTokenTtl`, `mcp.dynamicClientRegistration.enabled`,
- *     `mcp.clientIdMetadataDocuments.allowedHosts`, `mcp.signingKeyPem`) are
+ *     `mcp.clientIdMetadataDocuments.allowedHosts`) are
  *     confirmed against the installed 2.2.0 package's source
  *     (dist/types.d.ts:38-229, dist/lib/mcp/{dcr,cimd,keyStore,token}.js).
  *   - The self-verification target, `${issuer}/.well-known/oauth-
@@ -140,14 +138,16 @@
  *     expansion.
  */
 
+import { isLoopbackUrl } from "../component-env.js";
 import { probeSecretsCapability, pushSecrets, PROCESS_ENV_TIER } from "./secrets-push.js";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync, realpathSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 
 import { join, dirname, resolve } from "node:path";
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
+import { writeConfirmed } from "./instance-identity-row.js";
 import { defaultReadProcessCmdline, defaultReadProcessCwd } from "./upgrade-exec-path.js";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
@@ -163,51 +163,156 @@ export const REQUIRED_ACCESS_TOKEN_TTL = 900;
 
 // ─── Local-origin detection (scenario addendum, binding) ───────────────────
 
-const LOCAL_ORIGIN_REFUSAL =
-  "claude.ai connectors need a public HTTPS origin; this instance is local. See the hosted-shape docs.";
+function isLocalIpv4(a: number, b: number): boolean {
+  return a === 0 || a === 10 || a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) || (a === 169 && b === 254);
+}
 
-/**
- * Is `url`'s host a local/private origin claude.ai's servers could never
- * dial into? Covers localhost, loopback, RFC1918 private ranges, link-local,
- * and `.local` mDNS. An unparseable URL is treated as local (refuse rather
- * than proceed against an origin we can't even parse).
- */
 export function isLocalOrigin(url: string): boolean {
   let hostname: string;
   try {
-    hostname = new URL(url).hostname.toLowerCase();
+    hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
   } catch {
-    return true;
+    return false;
   }
   if (hostname === "localhost" || hostname.endsWith(".localhost")) return true;
-  // WHATWG URL keeps IPv6 hosts bracketed in `.hostname` (e.g. "[::1]").
-  if (hostname === "::1" || hostname === "[::1]") return true;
   if (hostname.endsWith(".local")) return true;
-  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const a = Number(ipv4[1]);
-    const b = Number(ipv4[2]);
-    if (a === 127) return true; // loopback
-    if (a === 10) return true; // RFC1918
-    if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
-    if (a === 192 && b === 168) return true; // RFC1918
-    if (a === 169 && b === 254) return true; // link-local
-    if (a === 0) return true;
+  if (hostname.startsWith("[")) {
+    if (hostname === "[::]" || hostname === "[::1]") return true;
+    const first = parseInt(hostname.slice(1).split(":")[0] || "0", 16);
+    if ((first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80) return true;
+    const mapped = hostname.match(/^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/);
+    if (mapped) {
+      const high = parseInt(mapped[1], 16);
+      return isLocalIpv4(high >>> 8, high & 0xff);
+    }
+    return false;
   }
+  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return ipv4 !== null && isLocalIpv4(Number(ipv4[1]), Number(ipv4[2]));
+}
+
+export function checkLocalOriginRefusal(url: string):
+  { refused: true; reason: "invalid" | "local"; message: string } | { refused: false } {
+  try {
+    if (!new URL(url).hostname) throw new Error("missing host");
+  } catch {
+    return { refused: true, reason: "invalid", message: "Issuer refused: invalid URL." };
+  }
+  if (isLocalOrigin(url)) return {
+    refused: true, reason: "local",
+    message: "Issuer refused: local hostname or loopback, unspecified, reserved 0.0.0.0/8, private or link-local IP literal.",
+  };
+  return { refused: false };
+}
+
+export function issuerOriginRefusal(issuer: string): string | null {
+  let valid = false;
+  try {
+    if (/^https?:\/\/[^/?#\\\s]+\/?$/.test(issuer)) {
+      valid = issuer.replace(/\/$/, "") === new URL(issuer).origin;
+    }
+  } catch {
+    valid = false;
+  }
+  if (valid) return null;
+  return (
+    `--issuer must be an absolute http(s) origin with no path (got: ${JSON.stringify(issuer)}); ` +
+    `set it to the instance's public origin, e.g. https://flair.example.com. Nothing was changed.`
+  );
+}
+
+/**
+ * flair#2115 — the target policy for `flair principal link|unlink|links`.
+ *
+ * These commands send the target instance's admin credential to its operations
+ * API. HTTPS is required, and an unparseable URL and the literal host classes
+ * `isLocalOrPrivateHost` lists are refused.
+ *
+ * Refusals are only ADDED relative to `checkLocalOriginRefusal`: everything
+ * that check refuses, this one refuses too.
+ */
+export function checkMappingTargetRefusal(url: string): { refused: true; message: string } | { refused: false } {
+  let host: string;
+  let protocol: string;
+  try {
+    const parsed = new URL(url);
+    host = parsed.hostname;
+    protocol = parsed.protocol;
+  } catch {
+    return { refused: true, message: mappingTargetRefusalMessage(url) };
+  }
+  if (protocol !== "https:" || host === "") return { refused: true, message: mappingTargetRefusalMessage(url) };
+  if (isLocalOrPrivateHost(host)) return { refused: true, message: mappingTargetRefusalMessage(url) };
+  return { refused: false };
+}
+
+/** The one sentence a refused target gets, whichever way it failed that test. */
+function mappingTargetRefusalMessage(url: string): string {
+  return (
+    "these commands send the target instance's admin credential to its operations API, so --instance must be an " +
+    "HTTPS URL whose host is not localhost, a .local name, or a loopback, unspecified, RFC1918, link-local or " +
+    `IPv6 unique-local address literal; '${url}' is refused. See the hosted-shape docs.`
+  );
+}
+
+/** Is `hostname` (as `URL.hostname` gives it) localhost, a .local name, or a
+ *  loopback, unspecified, RFC1918, link-local or IPv6 unique-local literal?
+ *  IPv6 literals stay bracketed in `URL.hostname`; a trailing dot is the
+ *  absolute form of the same name. */
+function isLocalOrPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.+$/, "");
+  if (host === "") return true;
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.endsWith(".local")) return true;
+  if (host.startsWith("[") && host.endsWith("]")) return isLocalOrPrivateIpv6(host.slice(1, -1));
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) return isLocalOrPrivateIpv4(ipv4.slice(1).map((part) => Number(part)));
   return false;
 }
 
-/** Structural refusal check + the exact operator-facing message (scenario addendum). */
-export function checkLocalOriginRefusal(url: string): { refused: true; message: string } | { refused: false } {
-  if (isLocalOrigin(url)) return { refused: true, message: LOCAL_ORIGIN_REFUSAL };
-  return { refused: false };
+function isLocalOrPrivateIpv4(octets: number[]): boolean {
+  const [a, b] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function isLocalOrPrivateIpv6(literal: string): boolean {
+  const addr = literal.toLowerCase();
+  // An IPv4-mapped address carries an IPv4 address in its low 32 bits; WHATWG
+  // URL normalises the dotted form to two hex groups ("::ffff:c0a8:1").
+  const mapped = addr.match(/^::ffff:([0-9a-f:.]+)$/);
+  if (mapped) {
+    const tail = mapped[1];
+    const dotted = tail.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (dotted) return isLocalOrPrivateIpv4(dotted.slice(1).map((part) => Number(part)));
+    const groups = tail.split(":");
+    if (groups.length === 2) {
+      const hi = Number.parseInt(groups[0] || "0", 16);
+      const lo = Number.parseInt(groups[1] || "0", 16);
+      if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+        return isLocalOrPrivateIpv4([(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff]);
+      }
+    }
+    return true; // an IPv4-mapped form this cannot read is not a public origin
+  }
+  if (addr === "::" || addr === "::1") return true; // unspecified, loopback
+  const first = Number.parseInt(addr.split(":")[0] || "0", 16);
+  if (Number.isNaN(first)) return true;
+  if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  return false;
 }
 
 // ─── Fabric-shape detection (secrets-mechanism default) ────────────────────
 
-/** Is this a Harper Fabric-hosted origin? (`*.harperfabric.com`.) Used only
- *  to pick the secrets-provisioning mechanism's DEFAULT — always overridable
- *  via `--secrets-mechanism`. */
 export function isFabricOrigin(url: string): boolean {
   try {
     return new URL(url).hostname.toLowerCase().endsWith(".harperfabric.com");
@@ -216,44 +321,19 @@ export function isFabricOrigin(url: string): boolean {
   }
 }
 
+export function isFabricTarget(instanceUrl: string, fabric = false): boolean {
+  return fabric === true || isFabricOrigin(instanceUrl);
+}
+
+export function fabricLoopbackRefusal(instanceUrl: string, fabric = false): string | undefined {
+  if (fabric && isLoopbackUrl(instanceUrl)) return "--fabric cannot be used with a loopback or unspecified target. Remove --fabric.";
+}
+
 export type SecretsMechanism = "fabric-env-secrets" | "env-file";
 
-/**
- * Which secrets-delivery mechanism should `enable` use? The remote path is
- * primary per the scenario addendum: a recognized Fabric origin defaults to
- * `fabric-env-secrets` (Harper's encrypted env-secrets, 5.2-alpha as of this
- * writing — see the module header on why this is a DOCUMENTED procedure, not
- * an automated push: no confirmed ops-API operation for it exists in the
- * installed 5.1.17 SDK). Anything else defaults to `env-file` — the
- * documented, universally-supported fallback. Always overridable.
- */
-/**
- * ── The hostname no longer selects the mechanism (flair#1094) ───────────────
- *
- * This used to be `isFabricOrigin(url) ? "fabric-env-secrets" : "env-file"`, and
- * that was wrong in BOTH directions on the day it was replaced:
- *
- *   - `tps.dtrt.harperfabric.com` runs Harper 5.1.26 and has no secrets
- *     operations at all — measured; `set_secret` answers "Operation 'set_secret'
- *     not found", identical to an invented operation — and was selected for the
- *     automated mechanism purely because of its name.
- *   - a self-hosted Harper 5.2 with the Pro env-secrets component is fully
- *     capable and was sent down the manual Studio path for not matching.
- *
- * A hostname is not a capability, and neither is a version — the write
- * operations and the Pro decryptor that makes a `processEnv` secret reach the
- * process ship separately. `probeSecretsCapability` asks the target instead, and
- * the answer decides at provisioning time.
- *
- * What remains here is the STAGING FILE's flavour of instructions, which is
- * genuinely about where the operator will paste if we end up falling back.
- * Fabric operators paste into Studio; everyone else edits a unit file. That is a
- * UI fact about a human, not a claim about the server, so a hostname is a
- * reasonable signal for it and a wrong guess costs only slightly-off prose.
- */
-export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMechanism): SecretsMechanism {
+export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMechanism, fabric = false): SecretsMechanism {
   if (override) return override;
-  return isFabricOrigin(instanceUrl) ? "fabric-env-secrets" : "env-file";
+  return isFabricTarget(instanceUrl, fabric) ? "fabric-env-secrets" : "env-file";
 }
 
 // ─── --cimd-allowed-hosts (flair#2113) ───────────────────────────────────────
@@ -326,13 +406,8 @@ export function validateCimdAllowedHosts(entries: readonly string[]): string[] {
   return hosts;
 }
 
-/**
- * The refusal for a Fabric target, else null. `enable` writes a config.yaml
- * only on its non-Fabric branch, and this uses the same `isFabricOrigin` test
- * that picks that branch.
- */
-export function cimdAllowedHostsShapeRefusal(instanceUrl: string): string | null {
-  if (!isFabricOrigin(instanceUrl)) return null;
+export function cimdAllowedHostsShapeRefusal(instanceUrl: string, fabric = false): string | null {
+  if (!isFabricTarget(instanceUrl, fabric)) return null;
   return (
     `--cimd-allowed-hosts is refused for a Fabric instance (${new URL(instanceUrl).hostname}): ` +
     `the component reads ${CIMD_ALLOWED_HOSTS_CONFIG_KEY} from the @harperfast/oauth block of the config.yaml ` +
@@ -346,7 +421,7 @@ export function cimdAllowedHostsShapeRefusal(instanceUrl: string): string | null
  * `{ hosts }` when it is valid for this target, `{ error }` otherwise. An
  * explicit empty value is an error, never "absent".
  */
-export function cimdAllowedHostsFromFlag(raw: unknown, instanceUrl: string): { hosts?: string[]; error?: string } {
+export function cimdAllowedHostsFromFlag(raw: unknown, instanceUrl: string, fabric = false): { hosts?: string[]; error?: string } {
   if (raw === undefined) return {};
   let hosts: string[];
   try {
@@ -354,7 +429,7 @@ export function cimdAllowedHostsFromFlag(raw: unknown, instanceUrl: string): { h
   } catch (err: any) {
     return { error: err?.message ?? String(err) };
   }
-  const refusal = cimdAllowedHostsShapeRefusal(instanceUrl);
+  const refusal = cimdAllowedHostsShapeRefusal(instanceUrl, fabric);
   return refusal ? { error: refusal } : { hosts };
 }
 
@@ -374,49 +449,6 @@ export function claudeAiExcludedNote(written: readonly string[] | undefined): st
     `so while the instance uses that list, a CIMD client_id URL on claude.ai is refused. ` +
     `Re-run with claude.ai in --cimd-allowed-hosts to allow it.`
   );
-}
-
-// ─── RS256 signing keypair ───────────────────────────────────────────────────
-
-export interface RsaKeyPairPem {
-  publicKey: string;
-  privateKey: string;
-}
-
-/** RS256 signing keypair for `mcp.signingKeyPem` — `crypto.generateKeyPairSync`,
- *  never a PRNG shortcut (Sherlock's Model-2 requirement 2 implementation note). */
-export function generateRsaSigningKeyPair(): RsaKeyPairPem {
-  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  return { publicKey, privateKey };
-}
-
-export function defaultSigningKeyFilePath(): string {
-  return join(resolveHome(), ".flair", "mcp-signing-key.pem");
-}
-
-/** Write the RS256 private key PEM to a 0600 file (idempotent — reuses an
- *  existing file rather than silently rotating the signing key). */
-export function ensureSigningKeyFile(filePath?: string, deps: { generate?: () => RsaKeyPairPem } = {}): { path: string; reused: boolean } {
-  const path = filePath ?? defaultSigningKeyFilePath();
-  if (existsSync(path)) {
-    return { path, reused: true };
-  }
-  const generate = deps.generate ?? generateRsaSigningKeyPair;
-  const { privateKey } = generate();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, privateKey, { mode: 0o600 });
-  chmodSync(path, 0o600);
-  return { path, reused: false };
-}
-
-/** Read back a signing key file's PEM contents (used to fold it into the
- *  secrets bundle — never logged, never returned in an `EnableMcpResult`). */
-export function readSigningKeyFile(path: string): string {
-  return readFileSync(path, "utf-8");
 }
 
 // ─── @harperfast/oauth config block ──────────────────────────────────────────
@@ -462,6 +494,12 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         [provider]: {
           clientId: `\${${envPrefix}_CLIENT_ID}`,
           clientSecret: `\${${envPrefix}_CLIENT_SECRET}`,
+          // Since @harperfast/oauth 2.7.0 a CONFIGURED provider (both
+          // credentials set) needs a redirectUri; 2.8.1 skips an UNCONFIGURED
+          // one before that check (HarperFast/oauth#259). Same whole-token
+          // reference shape as the credentials above — set to the instance's
+          // public origin plus /oauth; the component appends '/<provider>/callback'.
+          redirectUri: `\${${envPrefix}_REDIRECT_URI}`,
         },
       },
       mcp: {
@@ -498,7 +536,8 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         // resolution still runs cimd.js's full SSRF/document-validation
         // pipeline regardless of this list.
         clientIdMetadataDocuments: { allowedHosts: cimdAllowedHosts },
-        signingKeyPem: "${FLAIR_MCP_SIGNING_KEY_PEM}",
+        // Without signingKeyPem, minting reuses a persisted key or generates
+        // and persists one if oauth.harper_oauth_mcp_keys is empty.
       },
     },
   };
@@ -536,8 +575,7 @@ function resolveLocalConfigPath(explicitPath?: string): { configPath: string | n
  * to the reference). `enabled: false` writes literal `false` — decisively off
  * regardless of environment.
  *
- * Looks for config.yaml at `explicitPath`, then `./config.yaml`, then
- * `~/.flair/config.yaml`.
+ * Uses `explicitPath` alone if given; otherwise `./config.yaml`, then `~/.flair/config.yaml`.
  */
 export function updateLocalConfigMcpEnabled(
   enabled: boolean,
@@ -554,7 +592,11 @@ export function updateLocalConfigMcpEnabled(
     return {
       ok: false,
       detail: `local config.yaml not found (tried: ${candidates.join(", ")}). ` +
-        `Set mcp.enabled: ${targetLabel} in your component config.yaml manually, then restart.`,
+        (enabled
+          ? explicitPath
+            ? `Place your component config.yaml at ${explicitPath}, then re-run with the same explicit path.`
+            : `Re-run \`flair mcp enable\` from the directory that holds your component config.yaml (or place it at ${candidates[1]}).`
+          : `Set mcp.enabled: ${targetLabel} in your component config.yaml manually, then restart.`),
     };
   }
 
@@ -953,10 +995,16 @@ export function idpCallbackUrl(issuer: string, idpProvider: string): string {
 
 export interface SecretsBundleParams {
   issuer: string;
-  signingKeyPem: string;
   idpProvider: string;
   idpClientId: string;
   idpClientSecret: string;
+}
+
+export class IdpRedirectOriginError extends Error {
+  constructor(envPrefix: string) {
+    super(`Cannot stage ${envPrefix}_CLIENT_ID and ${envPrefix}_CLIENT_SECRET: ${envPrefix}_REDIRECT_URI requires a known HTTP(S) issuer origin.`);
+    this.name = "IdpRedirectOriginError";
+  }
 }
 
 /** The full set of env vars the restarted instance needs live. Contains
@@ -964,6 +1012,14 @@ export interface SecretsBundleParams {
  *  must never fold this into a CLI-printed / `EnableMcpResult` field. */
 export function buildSecretsBundle(params: SecretsBundleParams): Record<string, string> {
   const envPrefix = `OAUTH_${params.idpProvider.toUpperCase()}`;
+  let origin: string;
+  try {
+    const url = new URL(params.issuer);
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new IdpRedirectOriginError(envPrefix);
+    origin = url.origin;
+  } catch {
+    throw new IdpRedirectOriginError(envPrefix);
+  }
   return {
     // "true" is the ONLY value both readers of this flag accept (flair#1152,
     // measured against oauth 2.5.0): flair's strict mcpOAuthEnabled() takes
@@ -974,9 +1030,9 @@ export function buildSecretsBundle(params: SecretsBundleParams): Record<string, 
     // 401s, no AS is advertised). Keep this "true".
     FLAIR_MCP_OAUTH: "true",
     FLAIR_MCP_ISSUER: params.issuer.replace(/\/+$/, ""),
-    FLAIR_MCP_SIGNING_KEY_PEM: params.signingKeyPem,
     [`${envPrefix}_CLIENT_ID`]: params.idpClientId,
     [`${envPrefix}_CLIENT_SECRET`]: params.idpClientSecret,
+    [`${envPrefix}_REDIRECT_URI`]: `${origin}/oauth`,
   };
 }
 
@@ -1014,17 +1070,16 @@ export interface SecretsProvisioningResult {
 export function provisionSecrets(
   instanceUrl: string,
   bundle: Record<string, string>,
-  opts: { mechanism?: SecretsMechanism; stagingPath?: string } = {},
+  opts: { mechanism?: SecretsMechanism; stagingPath?: string; fabric?: boolean } = {},
 ): SecretsProvisioningResult {
-  const mechanism = selectSecretsMechanism(instanceUrl, opts.mechanism);
+  const mechanism = selectSecretsMechanism(instanceUrl, opts.mechanism, opts.fabric);
   const path = opts.stagingPath ?? defaultSecretsStagingPath(instanceUrl);
   writeSecretsStagingFile(path, bundle);
   const varNames = Object.keys(bundle);
 
   const instructions =
     mechanism === "fabric-env-secrets"
-      ? `Fabric env-secrets (enc:v1) push is alpha-only as of this writing — no confirmed ops-API operation exists in the installed SDK to automate it. ` +
-        `Apply the ${varNames.length} vars staged at ${path} via Fabric Studio → Cluster Settings → Environment, then re-run with --confirm-secrets-applied.`
+      ? `Apply the ${varNames.length} vars staged at ${path} via Fabric Studio → Cluster Settings → Environment, then re-run with --confirm-secrets-applied.`
       : `Apply the ${varNames.length} vars staged at ${path} to the target instance's process environment (systemd/launchd unit, or your process manager), then re-run with --confirm-secrets-applied.`;
 
   return { mechanism, path, varNames, instructions };
@@ -1055,22 +1110,28 @@ export function provisionSecrets(
  */
 export const HOSTED_OPS_PORT = 9925;
 
+/** The served origin's host at HOSTED_OPS_PORT, or null when the origin does
+ *  not parse. A bare host name is read as https. */
+function hostedOpsUrl(servedOrigin: string): URL | null {
+  try {
+    const u = new URL(servedOrigin.includes("://") ? servedOrigin : `https://${servedOrigin}`);
+    u.port = String(HOSTED_OPS_PORT);
+    u.pathname = "/";
+    u.search = "";
+    return u;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveOpsUrl(target: number | string, explicitOpsUrl?: string): string {
   if (explicitOpsUrl) return `${explicitOpsUrl.replace(/\/+$/, "")}/`;
   if (typeof target === "number") return `http://127.0.0.1:${target}/`;
   // A string target is the SERVED origin. Its own port serves the REST surface,
   // not the ops API, so reuse the host and apply the hosted ops port.
-  try {
-    const u = new URL(target.includes("://") ? target : `https://${target}`);
-    u.port = String(HOSTED_OPS_PORT);
-    u.pathname = "/";
-    u.search = "";
-    return u.toString();
-  } catch {
-    // Unparseable — preserve the old behaviour rather than inventing a URL, and
-    // let the caller's error path name the remedy.
-    return `${target.replace(/\/+$/, "")}/`;
-  }
+  // Unparseable — preserve the old behaviour rather than inventing a URL, and
+  // let the caller's error path name the remedy.
+  return hostedOpsUrl(target)?.toString() ?? `${target.replace(/\/+$/, "")}/`;
 }
 
 function opsBaseUrl(opsPortOrUrl: number | string): string {
@@ -1081,8 +1142,31 @@ function basicAuthHeader(adminUser: string, adminPass: string): string {
   return `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 }
 
-export interface IdentityMappingParams {
-  opsPortOrUrl: number | string;
+/**
+ * Where `provisionIdpIdentityMapping` sends its ops calls: exactly one of the
+ * two fields (flair#2102).
+ */
+export type IdentityMappingOpsTarget =
+  | {
+      /**
+       * The ops API itself. A number is a port on 127.0.0.1. A string is the ops
+       * API's own canonical http(s) origin, optionally followed by `/`, used
+       * with its own host and port.
+       */
+      opsPortOrUrl: number | string;
+      hostedOrigin?: never;
+    }
+  | {
+      /**
+       * A canonical http(s) served origin, optionally followed by `/`. The ops
+       * calls go to its host at HOSTED_OPS_PORT, the address `resolveOpsUrl`
+       * gives for the same string.
+       */
+      hostedOrigin: string;
+      opsPortOrUrl?: never;
+    };
+
+export type IdentityMappingParams = IdentityMappingOpsTarget & {
   adminUser: string;
   adminPass: string;
   /** Personal-shape default per #718: one principal per instance. */
@@ -1090,6 +1174,88 @@ export interface IdentityMappingParams {
   principalKind: "human" | "agent";
   idpProvider: string;
   idpSubject: string;
+  /**
+   * flair#2115 — `flair principal link` maps onto a principal that already
+   * exists, so a missing one is refused by name with nothing written. Unset
+   * (the `flair mcp enable` shape) keeps the create-when-missing behaviour.
+   */
+  principalMustExist?: boolean;
+};
+
+const IDENTITY_MAPPING_TARGET_FORMS =
+  `Accepted, exactly one of: opsPortOrUrl as a port number (1-65535) on 127.0.0.1, or as the ops API's own ` +
+  `canonical http:// or https:// origin, optionally followed by /, with no credentials, non-root path, query or fragment, used with its own host and port; or ` +
+  `hostedOrigin as the same canonical http:// or https:// origin form, whose host is used at port ${HOSTED_OPS_PORT}. ` +
+  `The string must exactly equal its parsed URL origin or that origin followed by /. No request was sent.`;
+
+/** Show only the parsed protocol, hostname and port of a refused target. The
+ *  display is built without interpolating the raw input, and excludes its
+ *  userinfo, path, query and fragment. Parsed components can match input text.
+ *  Use the placeholder for a non-string, a parse error or an empty hostname. */
+function showOpsTarget(value: unknown): string {
+  if (typeof value !== "string") return "<unparseable value>";
+  try {
+    const u = new URL(value);
+    if (!u.hostname) return "<unparseable value>";
+    return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+  } catch {
+    return "<unparseable value>";
+  }
+}
+
+/** A URL string is accepted only when parsing leaves its origin spelling
+ *  unchanged (apart from an optional `/`). This also rejects empty ? and #. */
+function canonicalHttpOrigin(value: unknown): URL | null {
+  if (typeof value !== "string") return null;
+  try {
+    const u = new URL(value);
+    if (
+      (u.protocol === "http:" || u.protocol === "https:") &&
+      !u.username && !u.password &&
+      (value === u.origin || value === `${u.origin}/`)
+    ) return u;
+  } catch {
+    // A malformed URL is not an ops target.
+  }
+  return null;
+}
+
+export function targetOriginRefusal(instance: string): string | undefined {
+  if (canonicalHttpOrigin(instance)) return;
+  const origin = showOpsTarget(instance);
+  return "Target must be a canonical http:// or https:// origin, optionally followed by /." +
+    (canonicalHttpOrigin(origin) ? ` Use ${origin}.` : "");
+}
+
+/** Resolve the ops target, or throw naming the field, its safe display and the
+ *  accepted forms. One implementation, so every identity-mapping command sends
+ *  its ops calls to the same address (flair#2115). */
+function identityMappingOpsUrl(target: IdentityMappingOpsTarget): { url: string; hosted: boolean } {
+  const { opsPortOrUrl, hostedOrigin } = target as { opsPortOrUrl?: unknown; hostedOrigin?: unknown };
+  const refuse = (what: string): never => {
+    throw new Error(`Identity mapping: ${what}. ${IDENTITY_MAPPING_TARGET_FORMS}`);
+  };
+  if (opsPortOrUrl !== undefined && hostedOrigin !== undefined) {
+    return refuse(`got both opsPortOrUrl ${showOpsTarget(opsPortOrUrl)} and hostedOrigin ${showOpsTarget(hostedOrigin)}`);
+  }
+  if (hostedOrigin !== undefined) {
+    const u = canonicalHttpOrigin(hostedOrigin);
+    if (!u) {
+      return refuse(`cannot read hostedOrigin ${showOpsTarget(hostedOrigin)} as a served origin`);
+    }
+    return { url: resolveOpsUrl(u.origin), hosted: true };
+  }
+  if (opsPortOrUrl === undefined) return refuse("got neither opsPortOrUrl nor hostedOrigin");
+  if (typeof opsPortOrUrl === "number" && Number.isInteger(opsPortOrUrl) && opsPortOrUrl >= 1 && opsPortOrUrl <= 65535) {
+    return { url: resolveOpsUrl(opsPortOrUrl), hosted: false };
+  }
+  if (typeof opsPortOrUrl === "string") {
+    const u = canonicalHttpOrigin(opsPortOrUrl);
+    if (u) {
+      return { url: `${u.origin}/`, hosted: false };
+    }
+  }
+  return refuse(`cannot tell which ops API opsPortOrUrl ${showOpsTarget(opsPortOrUrl)} names`);
 }
 
 export interface IdentityMappingResult {
@@ -1169,23 +1335,18 @@ export async function provisionIdpIdentityMapping(
   params: IdentityMappingParams,
   deps: { fetchImpl?: typeof fetch; now?: () => string } = {},
 ): Promise<IdentityMappingResult> {
+  const target = identityMappingOpsUrl(params);
+  const opsUrl = target.url;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = (deps.now ?? (() => new Date().toISOString()))();
-  const opsUrl = opsBaseUrl(params.opsPortOrUrl);
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
 
   // Ensure the principal Agent exists.
+  const agentQuery = mappingReadQuery("Agent", { id: params.principal });
   const findRes = await fetchImpl(opsUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({
-      operation: "search_by_value",
-      database: "flair",
-      table: "Agent",
-      search_attribute: "id",
-      search_value: params.principal,
-      get_attributes: ["id"],
-    }),
+    headers: opsHeaders(authHeader),
+    body: JSON.stringify(agentQuery),
   });
   if (!findRes.ok) {
     const text = await findRes.text().catch(() => "");
@@ -1195,22 +1356,35 @@ export async function provisionIdpIdentityMapping(
     // identity is absent — and saying "failed to look up principal 'x'" sends
     // the reader to look at principals, which is where an evening goes.
     //
-    // 404 in particular almost always means the request reached the SERVED
-    // origin instead of the ops API: the flair REST component owns `/` there and
-    // answers 404. Say that, and say where the address came from: `enable` has
-    // no option to point its ops calls elsewhere (flair#2116: this hint used to
-    // name an --ops-url flag that does not exist).
+    // For `hostedOrigin`, retain the served-origin diagnosis and explain that
+    // `enable` derived the address: it has no option to point its ops calls
+    // elsewhere (flair#2116). A 404 at a caller-named opsPortOrUrl does not
+    // establish which service answered, so give that path a neutral hint.
     const hint =
       findRes.status === 404
-        ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
+        ? target.hosted
+          ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
+          : ` — opsPortOrUrl names this address; verify that the ops API answers requests at ${opsUrl}.`
         : "";
     throw new Error(
       `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
     );
   }
-  const foundAgents = await findRes.json().catch(() => []);
+  // flair#2115 — the principal is created only after a valid empty answer.
+  const foundAgents = await opsRecordList(findRes, opsUrl, agentQuery);
+  if (foundAgents.length === 0 && params.principalMustExist) {
+    throw new Error(principalMissingMessage(params.principal));
+  }
   let principalCreated = false;
-  if (!Array.isArray(foundAgents) || foundAgents.length === 0) {
+  const findCredentialsForSubject = (): Promise<any[]> =>
+    readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject);
+  const subjectCreds = await findCredentialsForSubject();
+  const activeCreds = subjectCreds.filter(isResolvableCredential);
+  // flair#2222 — retain Agent presence and the compared principal-bearing IdP fields.
+  const preflight = mappingPreflight(params.principal, params.idpSubject, foundAgents.length > 0, subjectCreds);
+
+  if (foundAgents.length === 0) {
+    await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight);
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1226,6 +1400,7 @@ export async function provisionIdpIdentityMapping(
             kind: params.principalKind,
             type: params.principalKind,
             status: "active",
+            publicKey: `idp:${params.idpProvider}:${params.idpSubject}`,
             admin: false,
             defaultTrustTier: "endorsed",
             createdAt: now,
@@ -1239,33 +1414,8 @@ export async function provisionIdpIdentityMapping(
       throw new Error(`Identity mapping: failed to create principal '${params.principal}' (HTTP ${insertRes.status}): ${text}`);
     }
     principalCreated = true;
+    preflight.principalPresent = true;
   }
-
-  // ── flair#1317: look SUBJECT-WIDE, not (provider, subject) ─────────────────
-  // The resolver's key is (kind, idpSubject); anything narrower here leaves
-  // credentials that dedup cannot see but resolution can.
-  const findCredentialsForSubject = async (): Promise<any[]> => {
-    const res = await fetchImpl(opsUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: authHeader },
-      body: JSON.stringify({
-        operation: "search_by_conditions",
-        database: "flair",
-        table: "Credential",
-        operator: "and",
-        conditions: [
-          { search_attribute: "kind", search_type: "equals", search_value: "idp" },
-          { search_attribute: "idpSubject", search_type: "equals", search_value: params.idpSubject },
-        ],
-        get_attributes: ["id", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"],
-      }),
-    });
-    const body = res.ok ? await res.json().catch(() => []) : [];
-    return Array.isArray(body) ? body : [];
-  };
-
-  const subjectCreds = await findCredentialsForSubject();
-  const activeCreds = subjectCreds.filter(isResolvableCredential);
 
   // Survivor: an ACTIVE same-provider credential is re-pointed (the idempotent
   // re-run and the documented same-provider link). A revoked one is never
@@ -1282,6 +1432,7 @@ export async function provisionIdpIdentityMapping(
   // ops-API operation is the strongest atomicity this surface can express, and
   // ordering the survivor first means even a partially-applied batch can never
   // leave the subject with ZERO resolvable credentials (the fail-open denial).
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight, principalCreated);
   const upsertRes = await fetchImpl(opsUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1298,7 +1449,7 @@ export async function provisionIdpIdentityMapping(
           status: "active",
           idpProvider: params.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: reused ? undefined : now,
+          createdAt: typeof reused?.createdAt === "string" ? reused.createdAt : now,
           lastUsedAt: now,
         },
         // Retained, not deleted: the revocation stays legible in storage and in
@@ -1314,7 +1465,7 @@ export async function provisionIdpIdentityMapping(
           status: "revoked",
           idpProvider: c.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: c.createdAt,
+          createdAt: typeof c.createdAt === "string" ? c.createdAt : now,
           updatedAt: now,
         })),
       ],
@@ -1330,16 +1481,9 @@ export async function provisionIdpIdentityMapping(
   // ≠1 active credential means the resolver's answer for this subject is
   // order-dependent, so this fails LOUDLY rather than returning a mapping the
   // operator would reasonably believe is deterministic.
-  const afterCreds = (await findCredentialsForSubject()).filter(isResolvableCredential);
-  if (afterCreds.length !== 1 || afterCreds[0]?.id !== credentialId) {
-    const seen = afterCreds.map((c) => `${c?.id} → ${c?.principalId} (provider '${c?.idpProvider}')`).join("; ") || "none";
-    throw new Error(
-      `Identity mapping: the uniqueness invariant does not hold after the write — subject '${params.idpSubject}' ` +
-        `has ${afterCreds.length} active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${credentialId}). ` +
-        `Runtime resolution for this subject would be iteration-order-dependent (flair#1317). ` +
-        `Inspect the Credential table for kind:"idp" idpSubject:"${params.idpSubject}" and revoke the rows that should not resolve.`,
-    );
-  }
+  await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, {
+    id: credentialId, principalId: params.principal, idpProvider: params.idpProvider, status: "active",
+  });
 
   return {
     principalCreated,
@@ -1347,6 +1491,536 @@ export async function provisionIdpIdentityMapping(
     credentialReused: Boolean(reused),
     credentialSuperseded: superseded.length > 0,
     supersededCredentialIds: superseded.map((c) => String(c.id)),
+  };
+}
+
+// ─── flair principal link / unlink / links (flair#2115) ──────────────────────
+//
+// link maps one IdP login to a principal.
+// unlink revokes a mapping.
+// links lists current mappings.
+
+/** One current mapping, as `flair principal links` reports it. */
+export interface PrincipalMappingRow {
+  credentialId: string;
+  idpProvider: string;
+  idpSubject: string;
+}
+
+/** Where the three commands send their ops calls — the same exactly-one target
+ *  forms `provisionIdpIdentityMapping` takes (flair#2102), resolved by the same
+ *  function (`assertMappingTarget` adds these commands' target policy
+ *  first), plus the admin credentials the target's ops API requires. */
+export type PrincipalMappingBase = IdentityMappingOpsTarget & {
+  adminUser: string;
+  adminPass: string;
+  principal: string;
+};
+
+/** A mapping names one IdP subject under one provider name. */
+export type PrincipalMappingParams = PrincipalMappingBase & {
+  idpSubject: string;
+  idpProvider: string;
+};
+
+/** `flair principal links` needs the principal, not a subject. */
+export type ListPrincipalMappingsParams = PrincipalMappingBase;
+
+export interface PrincipalMappingDeps {
+  fetchImpl?: typeof fetch;
+  now?: () => string;
+}
+
+/** `flair principal link` — `replace` moves a subject already mapped elsewhere. */
+export type LinkPrincipalMappingParams = PrincipalMappingParams & { replace?: boolean };
+
+export interface LinkPrincipalMappingResult {
+  action: "linked" | "already-linked" | "replaced";
+  principal: string;
+  idpProvider: string;
+  idpSubject: string;
+  /** The principal the subject was mapped to before `replace` moved it. */
+  previousPrincipal?: string;
+  credentialId?: string;
+  credentialReused?: boolean;
+  supersededCredentialIds: string[];
+  /** What to print, in order. Empty-string entries are never produced. */
+  lines: string[];
+}
+
+export interface UnlinkPrincipalMappingResult {
+  principal: string;
+  idpSubject: string;
+  revokedCredentialIds: string[];
+  lines: string[];
+}
+
+export interface ListPrincipalMappingsResult {
+  principal: string;
+  mappings: PrincipalMappingRow[];
+  lines: string[];
+}
+
+/** The admin Basic header every ops call on this surface carries. */
+function opsHeaders(authHeader: string): Record<string, string> {
+  return { "Content-Type": "application/json", Authorization: authHeader };
+}
+
+type WrittenMapping = { id: string; principalId: string; idpProvider: string; status: "active" };
+
+type MappingReadQuery = {
+  operation: "search_by_value" | "search_by_conditions";
+  database: "flair";
+  table: "Agent" | "Credential";
+  search_attribute?: string;
+  search_value?: string;
+  operator?: "and";
+  conditions?: Array<{ search_attribute: string; search_type: "equals"; search_value: string }>;
+  get_attributes: string[];
+};
+
+function mappingReadQuery(table: MappingReadQuery["table"], equals: Record<string, string>): MappingReadQuery {
+  const fields = table === "Agent" ? ["id"] :
+    ["id", "kind", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"];
+  if (table === "Agent") {
+    return { operation: "search_by_value", database: "flair", table,
+      search_attribute: "id", search_value: equals.id, get_attributes: fields };
+  }
+  return { operation: "search_by_conditions", database: "flair", table, operator: "and",
+    conditions: Object.entries(equals).map(([search_attribute, search_value]) =>
+      ({ search_attribute, search_type: "equals", search_value })), get_attributes: fields };
+}
+
+async function opsReadRows(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  query: MappingReadQuery,
+  written?: WrittenMapping,
+  refuseAmbiguous = false,
+): Promise<any[]> {
+  const res = await fetchImpl(opsUrl, { method: "POST", headers: opsHeaders(authHeader), body: JSON.stringify(query) });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Identity mapping: the ops API read at ${opsUrl} failed (HTTP ${res.status})${text ? `: ${text}` : ""}`);
+  }
+  return opsRecordList(res, opsUrl, query, written, refuseAmbiguous);
+}
+
+async function opsRecordList(
+  res: Response, opsUrl: string, query: MappingReadQuery, written?: WrittenMapping, refuseAmbiguous = false,
+): Promise<any[]> {
+  const parsed = await res.json().catch(() => null);
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      `Identity mapping: the ops API read at ${opsUrl} did not answer with a record list; ` +
+        `verify that the target answers operations API requests there.`,
+    );
+  }
+  const predicate = query.operation === "search_by_value"
+    ? [[query.search_attribute!, query.search_value!]]
+    : query.conditions!.map(c => [c.search_attribute, c.search_value]);
+  const ids = new Set<string>();
+  const rows: any[] = [];
+  for (const [index, row] of parsed.entries()) {
+    const refuse = (reason: string): never => {
+      throw new Error(`Identity mapping: the ops API read at ${opsUrl} answered with a malformed ${query.table} record (entry ${index}): ${reason}.`);
+    };
+    if (row === null || typeof row !== "object" || Array.isArray(row)) refuse("invalid-row-shape");
+    if (!isNonEmptyString(row.id)) refuse("missing-or-invalid-id");
+    for (const [field, value] of predicate) {
+      if (!query.get_attributes.includes(field)) refuse(`predicate-attribute-not-requested:${field}`);
+      if (!Object.hasOwn(row, field) || row[field] !== value) refuse(`query-mismatch:${field}`);
+    }
+    if (ids.has(row.id)) refuse("duplicate-row-id");
+    ids.add(row.id);
+    if (query.table === "Credential" && !isNonEmptyString(row.principalId)) continue;
+    if (query.table === "Credential" &&
+        (typeof row.idpProvider !== "string" ||
+         typeof row.idpSubject !== "string" ||
+         (row.label != null && typeof row.label !== "string") ||
+         (row.status != null && typeof row.status !== "string"))) {
+      refuse("missing-or-invalid-credential-field");
+    }
+    rows.push(row);
+  }
+  if (refuseAmbiguous && query.table === "Credential" && predicate.some(([field]) => field === "idpSubject")) {
+    const principals = [...new Set(rows.filter(isResolvableCredential).map(row => row.principalId))];
+    if (principals.length > 1) {
+      throw new Error(`Identity mapping: ambiguous-prior-principals: ${principals.join(", ")} — refusing the subject read. Run flair mcp enable to heal this subject mapping.`);
+    }
+  }
+  if (written) {
+    const active = rows.filter(isResolvableCredential);
+    if (active.length !== 1 || Object.entries(written).some(([field, value]) => active[0][field] !== value)) {
+      const subject = predicate.find(([field]) => field === "idpSubject")?.[1];
+      const seen = active.map(c => `${c.id} → ${c.principalId} (provider '${c.idpProvider}')`).join("; ") || "none";
+      throw new Error(
+        `Identity mapping: post-write-mismatch — the uniqueness invariant does not hold after the write (flair#1317) — subject '${subject}' ` +
+          `has ${active.length} resolvable (principal-bearing) active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${written.id}) ` +
+          `for principal '${written.principalId}', provider '${written.idpProvider}', status 'active'. ` +
+          `Principal-less legacy rows are skipped and may remain active. ` +
+          `Inspect the Credential table for kind:"idp" idpSubject:"${subject}" and revoke the rows that should not resolve.`,
+      );
+    }
+  }
+  return rows;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value !== "";
+}
+
+async function readIdpCredentialsForSubject(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  idpSubject: string,
+  written?: WrittenMapping,
+  refuseAmbiguous = false,
+): Promise<any[]> {
+  return opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Credential", { kind: "idp", idpSubject }), written, refuseAmbiguous);
+}
+
+async function readIdpCredentialsForPrincipal(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  principal: string,
+): Promise<any[]> {
+  return opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Credential", { kind: "idp", principalId: principal }));
+}
+
+/**
+ * Refuse unless the principal exists, by name.
+ *
+ * A read that FAILED propagates: an unreadable Agent table is not an absent
+ * principal, and this check stands in front of a mapping write (flair#2115).
+ * The id is compared, not just the non-emptiness of the answer.
+ */
+async function assertPrincipalExists(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  principal: string,
+): Promise<void> {
+  const rows = await opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Agent", { id: principal }));
+  if (rows.length === 0) throw new Error(principalMissingMessage(principal));
+}
+
+/** The one refusal a missing principal gets, wherever it is checked. */
+function principalMissingMessage(principal: string): string {
+  return (
+    `No principal '${principal}' — nothing was written. Create the principal on the TARGET instance ` +
+    `(run \`flair mcp enable\` against it: it creates the principal it maps), then re-run.`
+  );
+}
+
+// ─── flair#2222 — the pre-write re-validation bound ───────────────────────────
+//
+// These separate ops requests offer no compare-and-set or shared transaction.
+// Harper 5.2.8 accepts unknown fields (validation/validationWrapper.ts:93-94);
+// processLocalTransaction dispatches with ambient user context, preserving an
+// existing transaction (server/serverHelpers/serverUtilities.ts:120-136).
+// Re-read Agent presence and the canonicalized principal-bearing IdP fields
+// before each write. lastUsedAt is not compared. The read/write race remains.
+
+/** Agent presence and selected fields of principal-bearing IdP rows for the subject. */
+interface MappingPreflight {
+  principal: string;
+  idpSubject: string;
+  /** Expected presence, including an Agent inserted by this command. */
+  principalPresent: boolean;
+  /** canonicalSubjectRows' selected fields; principal-less rows were skipped. */
+  subjectRows: string;
+}
+
+/** Canonicalize id, kind, principalId, idpProvider, idpSubject, status, label and createdAt. */
+function canonicalSubjectRows(rows: any[]): string {
+  return JSON.stringify(
+    rows
+      .map((r) => ({
+        id: String(r?.id),
+        kind: r?.kind ?? null,
+        principalId: r?.principalId ?? null,
+        idpProvider: r?.idpProvider ?? null,
+        idpSubject: r?.idpSubject ?? null,
+        status: r?.status ?? null,
+        label: r?.label ?? null,
+        createdAt: r?.createdAt ?? null,
+      }))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  );
+}
+
+function mappingPreflight(principal: string, idpSubject: string, principalPresent: boolean, subjectRows: any[]): MappingPreflight {
+  return { principal, idpSubject, principalPresent, subjectRows: canonicalSubjectRows(subjectRows) };
+}
+
+/** Valid comparison differences refuse here; invalid changed rows can fail earlier validation
+ * with missing-or-invalid-credential-field. Both fail closed. */
+function mappingChangedMessage(principal: string, idpSubject: string, principalCreated = false): string {
+  return (
+    `Identity mapping: mapping-changed-underneath — the Agent presence or compared IdP mapping fields for principal '${principal}' ` +
+    `and IdP subject '${idpSubject}' changed on the target between this command's validation and its write. ` +
+    (principalCreated ? `Agent '${principal}' was created; no rollback was attempted. No Credential write was made. ` : `Nothing was written. `) +
+    `Re-run the command.`
+  );
+}
+
+/**
+ * Re-read the state a preflight validated and refuse if it moved.
+ *
+ * A failed read propagates: an unreadable table is not an unchanged one, and
+ * this stands in front of a write. Called immediately before each write in
+ * `provisionIdpIdentityMapping`, `linkPrincipalMapping` and
+ * `unlinkPrincipalMapping`.
+ */
+async function assertMappingUnchanged(
+  fetchImpl: typeof fetch,
+  opsUrl: string,
+  authHeader: string,
+  preflight: MappingPreflight,
+  principalCreated = false,
+): Promise<void> {
+  const agents = await opsReadRows(fetchImpl, opsUrl, authHeader, mappingReadQuery("Agent", { id: preflight.principal }));
+  if ((agents.length > 0) !== preflight.principalPresent) {
+    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject, principalCreated));
+  }
+  const rows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, preflight.idpSubject);
+  if (canonicalSubjectRows(rows) !== preflight.subjectRows) {
+    throw new Error(mappingChangedMessage(preflight.principal, preflight.idpSubject, principalCreated));
+  }
+}
+
+/**
+ * flair#2115 — `flair principal link|unlink|links` carry the target instance's
+ * admin credential to its operations API, so the target they accept is narrower
+ * than `checkLocalOriginRefusal`'s claude.ai-oriented one: a `hostedOrigin`
+ * that `checkMappingTargetRefusal` refuses is refused. The numeric
+ * `opsPortOrUrl` form names the caller's own address and is left alone.
+ *
+ * Called before the first request, so a refused target never sees one.
+ */
+function assertMappingTarget(target: IdentityMappingOpsTarget): void {
+  const { hostedOrigin } = target as { hostedOrigin?: unknown };
+  if (hostedOrigin === undefined) return;
+  const check = checkMappingTargetRefusal(String(hostedOrigin));
+  if (check.refused) throw new Error(check.message);
+}
+
+/** The exactly-one target fields, rebuilt so they can be spread into a fresh
+ *  literal (a union value cannot be spread into one). */
+function mappingTargetFields(target: IdentityMappingOpsTarget): IdentityMappingOpsTarget {
+  const t = target as { opsPortOrUrl?: unknown; hostedOrigin?: unknown };
+  return t.hostedOrigin !== undefined
+    ? { hostedOrigin: String(t.hostedOrigin) }
+    : { opsPortOrUrl: t.opsPortOrUrl as number | string };
+}
+
+/**
+ * `flair principal link` — map one IdP subject to a principal that already
+ * exists, through `provisionIdpIdentityMapping` (the `mcp enable` step).
+ *
+ * - the subject already mapped to THIS principal (no active row names another):
+ *   reported, exit 0, NO write;
+ * - the subject mapped to a DIFFERENT principal: refused by name unless
+ *   `replace` is set; with `replace`, the write re-points it and the result
+ *   names the principal it left;
+ * - a missing principal is refused by name with nothing written;
+ * - a failed read is refused: it never counts as "no mapping";
+ * - a target `checkMappingTargetRefusal` refuses is refused before any request.
+ */
+export async function linkPrincipalMapping(
+  params: LinkPrincipalMappingParams,
+  deps: PrincipalMappingDeps = {},
+): Promise<LinkPrincipalMappingResult> {
+  assertMappingTarget(params);
+  const { url: opsUrl } = identityMappingOpsUrl(params);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
+
+  // Refuse a missing requested principal before either mapping branch.
+  await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
+
+  const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
+  const active = subjectRows.filter(isResolvableCredential);
+  const elsewhere = active.filter((c) => c?.principalId !== params.principal);
+  if (elsewhere.length > 0 && !params.replace) {
+    const current = [...new Set(elsewhere.map((c) => String(c?.principalId)))].join(", ");
+    throw new Error(
+      `IdP subject '${params.idpSubject}' is already mapped to principal '${current}', not '${params.principal}' — ` +
+        `nothing was written. Pass --replace to move it.`,
+    );
+  }
+  if (active.length > 0 && elsewhere.length === 0) {
+    const provider = String(active[0]?.idpProvider ?? params.idpProvider);
+    return {
+      action: "already-linked",
+      principal: params.principal,
+      idpProvider: provider,
+      idpSubject: params.idpSubject,
+      supersededCredentialIds: [],
+      lines: [
+        `Already linked: IdP subject '${params.idpSubject}' (provider '${provider}') → principal '${params.principal}'. No change.`,
+      ],
+    };
+  }
+  const previousPrincipal = elsewhere.length > 0 ? String(elsewhere[0]?.principalId) : undefined;
+
+  // flair#2222 — the write is the shared provisioner's; re-validate the state
+  // this preflight acted on so a concurrent change refuses here, not after the
+  // provisioner has already re-read and moved on.
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, mappingPreflight(params.principal, params.idpSubject, true, subjectRows));
+
+  const mapping = await provisionIdpIdentityMapping(
+    {
+      ...mappingTargetFields(params),
+      adminUser: params.adminUser,
+      adminPass: params.adminPass,
+      principal: params.principal,
+      principalKind: "human",
+      idpProvider: params.idpProvider,
+      idpSubject: params.idpSubject,
+      principalMustExist: true,
+    },
+    deps,
+  );
+
+  const outcome = mapping.credentialReused ? "re-pointed" : "created";
+  const line =
+    previousPrincipal !== undefined
+      ? `Re-linked: IdP subject '${params.idpSubject}' (provider '${params.idpProvider}') was mapped to principal ` +
+        `'${previousPrincipal}'; now mapped to '${params.principal}' — Credential(kind:idp) ${outcome} (${mapping.credentialId}).` +
+        supersededCredentialNote(mapping)
+      : `Linked: IdP subject '${params.idpSubject}' (provider '${params.idpProvider}') → principal '${params.principal}' ` +
+        `— Credential(kind:idp) ${outcome} (${mapping.credentialId}).` + supersededCredentialNote(mapping);
+  return {
+    action: previousPrincipal !== undefined ? "replaced" : "linked",
+    principal: params.principal,
+    idpProvider: params.idpProvider,
+    idpSubject: params.idpSubject,
+    previousPrincipal,
+    credentialId: mapping.credentialId,
+    credentialReused: mapping.credentialReused,
+    supersededCredentialIds: mapping.supersededCredentialIds,
+    lines: [line],
+  };
+}
+
+/**
+ * `flair principal unlink` — revoke the subject's mapping to this principal.
+ * A subject not mapped to that principal or carrying a different provider
+ * name is refused before writing.
+ */
+export async function unlinkPrincipalMapping(
+  params: PrincipalMappingParams,
+  deps: PrincipalMappingDeps = {},
+): Promise<UnlinkPrincipalMappingResult> {
+  assertMappingTarget(params);
+  const { url: opsUrl } = identityMappingOpsUrl(params);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const now = (deps.now ?? (() => new Date().toISOString()))();
+  const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
+
+  await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
+
+  const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
+  const active = subjectRows.filter(isResolvableCredential);
+  const mine = active.filter((c) => c?.principalId === params.principal);
+  if (mine.length === 0) {
+    const elsewhere = [...new Set(active.map((c) => String(c?.principalId)))].join(", ");
+    throw new Error(
+      `IdP subject '${params.idpSubject}' is not mapped to principal '${params.principal}' — nothing was written.` +
+        (elsewhere ? ` It is mapped to: ${elsewhere}.` : ` It has no active Credential(kind:idp) mapping.`),
+    );
+  }
+  const providers = [...new Set(mine.map((c) => String(c?.idpProvider)))];
+  if (providers.length !== 1 || providers[0] !== params.idpProvider) {
+    throw new Error(
+      `IdP subject '${params.idpSubject}' is mapped to principal '${params.principal}' under provider ` +
+        `'${providers.join(", ")}', not '${params.idpProvider}' — nothing was written. Re-run with ` +
+        `--idp-provider ${providers[0]}.`,
+    );
+  }
+
+  // flair#2222 — re-validate the state this preflight acted on before revoking.
+  await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, mappingPreflight(params.principal, params.idpSubject, true, subjectRows));
+
+  const ids = mine.map((c) => String(c?.id));
+  const unconfirmedMessage = (unconfirmed: string[]) =>
+    `Identity mapping: revocation unconfirmed for Credential IDs: ${unconfirmed.join(", ")}`;
+  const res = await fetchImpl(opsUrl, {
+    method: "POST",
+    headers: opsHeaders(authHeader),
+    body: JSON.stringify({
+      operation: "update",
+      database: "flair",
+      table: "Credential",
+      records: ids.map((id) => ({ id, status: "revoked", updatedAt: now })),
+    }),
+  }).catch((err: unknown) => {
+    throw new Error(`${unconfirmedMessage(ids)} — ${err instanceof Error ? err.message : String(err)}`);
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${unconfirmedMessage(ids)} (HTTP ${res.status})${text ? `: ${text}` : ""}`);
+  }
+  const result = await res.json().catch(() => null);
+  const unconfirmed = ids.filter(id => !writeConfirmed(result, "update_hashes", id));
+  if (unconfirmed.length > 0) throw new Error(unconfirmedMessage(unconfirmed));
+  const remaining = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)
+    .catch((err: unknown) => {
+      throw new Error(`${unconfirmedMessage(ids)} — ${err instanceof Error ? err.message : String(err)}`);
+    })).filter(isResolvableCredential);
+  if (remaining.length > 0) {
+    throw new Error(`${unconfirmedMessage(remaining.map(c => c.id))} — subject '${params.idpSubject}' still has resolvable mappings.`);
+  }
+  return {
+    principal: params.principal,
+    idpSubject: params.idpSubject,
+    revokedCredentialIds: ids,
+    lines: [
+      `Unlinked: IdP subject '${params.idpSubject}' is no longer mapped to principal '${params.principal}' — ` +
+        `Credential(kind:idp) revoked (${ids.join(", ")}).`,
+    ],
+  };
+}
+
+/**
+ * `flair principal links` — the principal's current (active) IdP mappings.
+ * A missing principal is refused by name and a failed read is refused too: an
+ * empty list is reported only after a valid read with no active mapping.
+ */
+export async function listPrincipalMappings(
+  params: ListPrincipalMappingsParams,
+  deps: PrincipalMappingDeps = {},
+): Promise<ListPrincipalMappingsResult> {
+  assertMappingTarget(params);
+  const { url: opsUrl } = identityMappingOpsUrl(params);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
+
+  await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
+
+  const active = (await readIdpCredentialsForPrincipal(fetchImpl, opsUrl, authHeader, params.principal)).filter(
+    isResolvableCredential,
+  );
+  const mappings: PrincipalMappingRow[] = active.map((c) => ({
+    credentialId: String(c?.id),
+    idpProvider: String(c?.idpProvider),
+    idpSubject: String(c?.idpSubject),
+  }));
+  return {
+    principal: params.principal,
+    mappings,
+    lines:
+      mappings.length === 0
+        ? [`No IdP mappings for principal '${params.principal}'.`]
+        : mappings.map(
+            (m) =>
+              `IdP subject '${m.idpSubject}' (provider '${m.idpProvider}') → principal '${params.principal}' (${m.credentialId})`,
+          ),
   };
 }
 
@@ -1398,6 +2072,67 @@ export interface SelfVerifyResult {
   detail: string;
 }
 
+/** Fetch and parse the metadata document at an origin without assuming its
+ * `issuer` equals that origin. A target can serve a public proxy issuer. */
+async function fetchOAuthMetadata(
+  origin: string,
+  deps: { fetchImpl?: typeof fetch; redirect?: RequestRedirect } = {},
+): Promise<{ ok: true; url: string; body: any } | { ok: false; detail: string; unreachable?: true }> {
+  const url = `${origin.replace(/\/+$/, "")}/.well-known/oauth-authorization-server`;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      signal: AbortSignal.timeout(15_000),
+      ...(deps.redirect ? { redirect: deps.redirect } : {}),
+    });
+  } catch (err: any) {
+    return { ok: false, unreachable: true, detail: `could not reach ${url}: ${err?.message ?? err}` };
+  }
+  if (deps.redirect === "manual" && (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400))) {
+    return { ok: false, detail: "--instance answered with a redirect; point --instance at the instance itself." };
+  }
+  if (!res.ok) {
+    return { ok: false, detail: `${url} returned HTTP ${res.status} — is FLAIR_MCP_OAUTH actually set on the restarted instance?` };
+  }
+  try {
+    return { ok: true, url, body: await res.json() };
+  } catch {
+    return { ok: false, detail: `${url} did not return JSON` };
+  }
+}
+
+/** The MCP authorization server's token endpoint for `issuer` — the one
+ *  derivation of "the MCP token endpoint of this instance", shared by target
+ *  binding (`verifyTargetIssuer`) and public self-verification
+ *  (`selfVerifyMcpMetadata`) so both checks derive the expected token endpoint
+ *  from the same function. */
+function mcpTokenEndpoint(issuer: string): string {
+  return `${issuer.replace(/\/+$/, "")}/oauth/mcp/token`;
+}
+
+async function verifyTargetIssuer(
+  instance: string,
+  issuer: string,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<{ ok: boolean; detail: string }> {
+  const target = await fetchOAuthMetadata(instance, { ...deps, redirect: "manual" });
+  const remedy = `Check the OAuth authorization-server metadata served by --instance (${instance}), make sure the target's FLAIR_MCP_ISSUER is ${issuer}, then re-run \`flair mcp enable\`.`;
+  if (target.ok === false) return { ok: false, detail: `Cannot confirm the target's configured issuer: ${target.detail} ${remedy}` };
+  if (target.body?.issuer !== issuer) {
+    const actual = target.body?.issuer;
+    const found = typeof actual === "string" ? `names issuer=${JSON.stringify(actual)}` : `has no string issuer (got ${JSON.stringify(actual)})`;
+    return { ok: false, detail: `The target's own metadata at ${target.url} ${found}; expected ${issuer}. ${remedy}` };
+  }
+  if (target.body?.token_endpoint !== mcpTokenEndpoint(issuer)) {
+    return {
+      ok: false,
+      detail: `The target's metadata at ${target.url} has token_endpoint=${JSON.stringify(target.body?.token_endpoint)}, not the MCP authorization server's token endpoint. Check FLAIR_MCP_OAUTH and the @harperfast/oauth component on the target, then re-run \`flair mcp enable\`.`,
+    };
+  }
+  return { ok: true, detail: `Issuer ${issuer} matched the target's own OAuth authorization-server metadata at ${target.url}` };
+}
+
 /**
  * Hit the OAuth metadata endpoint from the operator's machine against the
  * PUBLIC origin — the verification that matters is the one claude.ai's
@@ -1406,37 +2141,20 @@ export interface SelfVerifyResult {
  * advertise CIMD support, is `ok: false` with a specific `detail`.
  *
  * flair#756: since CIMD is the only supported client-registration path now,
- * "the /mcp OAuth surface is properly enabled" means "and a CIMD client can
- * actually use it" — this single check is reused by `enable`'s own
- * self-verify step, `grant`/`revoke`'s workflow gate (src/cli.ts), and
- * `flair mcp status`, so all four commands agree on what "enabled" means.
+ * this checks the public metadata's issuer, MCP token endpoint, and CIMD
+ * advertisement; it does not exercise the token route or `/mcp`. The check
+ * is reused by `enable`'s self-verify step, `grant`/`revoke`'s workflow gate
+ * (src/commands/mcp.ts), and `flair mcp status`, so all four commands use the same
+ * public metadata criterion.
  */
 export async function selfVerifyMcpMetadata(
   issuer: string,
   deps: { fetchImpl?: typeof fetch } = {},
 ): Promise<SelfVerifyResult> {
-  const fetchImpl = deps.fetchImpl ?? fetch;
   const normalizedIssuer = issuer.replace(/\/+$/, "");
-  const url = `${normalizedIssuer}/.well-known/oauth-authorization-server`;
-
-  let res: Response;
-  try {
-    res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) } as RequestInit);
-  } catch (err: any) {
-    return { ok: false, unreachable: true, detail: `could not reach ${url}: ${err?.message ?? err}` };
-  }
-  if (!res.ok) {
-    return {
-      ok: false,
-      detail: `${url} returned HTTP ${res.status} — is FLAIR_MCP_OAUTH actually set on the restarted instance?`,
-    };
-  }
-  let body: any;
-  try {
-    body = await res.json();
-  } catch {
-    return { ok: false, detail: `${url} did not return JSON` };
-  }
+  const metadata = await fetchOAuthMetadata(normalizedIssuer, deps);
+  if (metadata.ok === false) return metadata;
+  const { url, body } = metadata;
   // ── The flair's-own-server check runs BEFORE the shape check (flair#1094) ──
   //
   // It used to run after, and that made the DEFAULT flag-off case misreport.
@@ -1537,6 +2255,24 @@ export async function selfVerifyMcpMetadata(
       tokenEndpoint: body.token_endpoint,
       cimdSupported: false,
       detail: `${url} answered but does not advertise CIMD support (client_id_metadata_document_supported / "none" in token_endpoint_auth_methods_supported) — is clientIdMetadataDocuments.enabled explicitly false?`,
+    };
+  }
+
+  // flair#2190: the public document must name the MCP authorization server's
+  // token endpoint exactly — the same derivation target binding requires
+  // (mcpTokenEndpoint). The flair's-own-server and CIMD checks above run
+  // first, so those cases keep their specific remedies.
+  if (body.token_endpoint !== mcpTokenEndpoint(normalizedIssuer)) {
+    return {
+      ok: false,
+      issuer: body.issuer,
+      registrationEndpoint: body.registration_endpoint,
+      tokenEndpoint: body.token_endpoint,
+      cimdSupported: true,
+      detail:
+        `Found token_endpoint=${JSON.stringify(body.token_endpoint)} in ${url}, not the MCP authorization server's ` +
+        `expected token_endpoint=${mcpTokenEndpoint(normalizedIssuer)}. This metadata cannot verify the MCP endpoint. ` +
+        `Check the public OAuth authorization-server metadata or proxy for ${normalizedIssuer}, then re-run \`flair mcp enable\`.`,
     };
   }
 
@@ -1665,13 +2401,15 @@ export async function captureBootDiscriminator(
 
 export type EnableStepName =
   | "local-origin-check"
+  | "target-shape-check"
+  | "issuer-origin-check"
   | "cimd-allowed-hosts"
-  | "signing-key"
   | "config-block"
   | "idp-credentials"
   | "secrets-provisioning"
   | "identity-mapping"
   | "local-config-update"
+  | "issuer-target-binding"
   | "fabric-operator-deploy"
   | "restart"
   | "verify-restart"
@@ -1684,8 +2422,6 @@ export interface EnableStepResult {
 }
 
 export interface EnableMcpParams {
-  /** Ops-API / restart target — the operator's machine talks TO this remote
-   *  instance. Defaults to FLAIR_URL at the CLI layer. */
   instance: string;
   /** Public origin claude.ai will use; defaults to `instance`. */
   issuer?: string;
@@ -1700,7 +2436,6 @@ export interface EnableMcpParams {
   principalKind?: "human" | "agent";
   adminUser: string;
   adminPass: string;
-  signingKeyFilePath?: string;
   secretsMechanism?: SecretsMechanism;
   secretsStagingPath?: string;
   /** flair#2113: lowercase bare hostnames ensured as
@@ -1719,6 +2454,7 @@ export interface EnableMcpParams {
    *  environment. Required (or an interactive `prompt` confirmation) before
    *  `enable` calls restart — never assumed. */
   confirmSecretsApplied?: boolean;
+  fabric?: boolean;
   /** Path to the local component config.yaml for standalone-local installs.
    *  When set, enable flips mcp.enabled to true before restarting.
    *  When unset, enable tries common locations (./config.yaml,
@@ -1729,7 +2465,6 @@ export interface EnableMcpParams {
 export interface EnableMcpDeps {
   fetchImpl?: typeof fetch;
   now?: () => string;
-  generateRsaKeyPair?: () => RsaKeyPairPem;
   /** Interactive confirmation (CLI wires readline; tests inject a stub).
    *  Only consulted when `confirmSecretsApplied` is not already true and
    *  this is not a dry run. */
@@ -1747,7 +2482,7 @@ export interface EnableMcpDeps {
 export interface EnableMcpResult {
   ok: boolean;
   dryRun: boolean;
-  refused?: { message: string };
+  refused?: { message: string; reason?: "invalid" | "local" };
   steps: EnableStepResult[];
   failedStep?: EnableStepName;
   issuer?: string;
@@ -1755,13 +2490,27 @@ export interface EnableMcpResult {
   pasteBlock?: string;
   secretsMechanism?: SecretsMechanism;
   secretsPath?: string;
-  signingKeyFilePath?: string;
   callbackUrl?: string;
   /** flair#2113: set only when this run wrote `--cimd-allowed-hosts` to
    *  `cimdAllowedHostsConfigPath` (or found it already there) — the list read
    *  back from that file. */
   cimdAllowedHosts?: string[];
   cimdAllowedHostsConfigPath?: string;
+}
+
+/**
+ * flair#1317/#2115 — the note a mapping reports when it revoked a prior
+ * credential for the subject. Returned with a leading space so it appends to a
+ * line, and empty when nothing was superseded. One implementation, so `flair
+ * principal link` prints it exactly as `flair mcp enable` does.
+ */
+function supersededCredentialNote(mapping: IdentityMappingResult): string {
+  return mapping.credentialSuperseded
+    ? ` SUPERSEDED: ${mapping.supersededCredentialIds.length} prior Credential(kind:idp) row(s) for this subject ` +
+      `were REVOKED, not de-duplicated — ${mapping.supersededCredentialIds.join(", ")}. ` +
+      `The revoked rows no longer resolve. Future calls for this subject use the surviving mapping. ` +
+      `Exactly one resolvable (principal-bearing) active credential remains per (kind, idpSubject). Principal-less legacy rows are skipped and may remain active.`
+    : "";
 }
 
 /**
@@ -1772,9 +2521,8 @@ export interface EnableMcpResult {
  * hope).
  *
  * flair#756: no DCR step anywhere in this flow — CIMD needs no
- * pre-registration, so there is nothing to do after the restart besides
- * self-verify. `self-verify` is now the ONLY live call that happens after
- * `apply-config-and-restart`.
+ * pre-registration. The target's MCP metadata issuer is
+ * checked before the public issuer metadata can count as completion.
  */
 export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {}): Promise<EnableMcpResult> {
   const steps: EnableStepResult[] = [];
@@ -1790,33 +2538,53 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   //
   // Initialised to the first step rather than left undefined so a throw before
   // any assignment cannot be attributed to an arbitrary fallback name.
-  let currentStep: EnableStepName = "local-origin-check";
+  let currentStep: EnableStepName = "target-shape-check";
   const dryRun = Boolean(params.dryRun);
   const push = (ok: boolean, detail: string) => steps.push({ step: currentStep, ok, detail });
 
+  const targetRefusal = targetOriginRefusal(params.instance) ?? fabricLoopbackRefusal(params.instance, params.fabric);
+  if (targetRefusal) {
+    currentStep = "target-shape-check";
+    push(false, targetRefusal);
+    return { ok: false, dryRun, refused: { message: targetRefusal }, steps, failedStep: "target-shape-check" };
+  }
+
   // ── Local-origin refusal (scenario addendum, binding) ─────────────────────
   currentStep = "local-origin-check";
-  const localCheck = checkLocalOriginRefusal(params.instance);
+  const rawIssuer = params.issuer ?? params.instance;
+  const issuer = rawIssuer.replace(/\/$/, "");
+  const localCheck = checkLocalOriginRefusal(issuer);
   if (localCheck.refused) {
     push(false, localCheck.message);
-    return { ok: false, dryRun, refused: { message: localCheck.message }, steps, failedStep: "local-origin-check" };
+    return { ok: false, dryRun, refused: { reason: localCheck.reason, message: localCheck.message }, steps, failedStep: "local-origin-check" };
   }
-  push(true, `${params.instance} is a public-shaped origin`);
+  push(true, `${issuer}: URL parsed; hostname/IP-literal check passed (no DNS lookup)`);
 
-  const issuer = (params.issuer ?? params.instance).replace(/\/+$/, "");
   const idpProvider = params.idpProvider ?? "github";
   const principal = params.principal ?? "self";
   const principalKind = params.principalKind ?? "human";
 
+  const fabricTarget = isFabricTarget(params.instance, params.fabric);
+
   try {
+    // ── Issuer origin (flair#2194) ────────────────────────────────────────────
+    currentStep = "issuer-origin-check";
+    const issuerIssue = issuerOriginRefusal(rawIssuer);
+    if (issuerIssue) {
+      push(false, issuerIssue);
+      return { ok: false, dryRun, refused: { message: issuerIssue }, steps, failedStep: "issuer-origin-check" };
+    }
+    push(true, `issuer ${issuer} is an absolute http(s) origin`);
+    if (!dryRun && !fabricTarget && !isLoopbackUrl(params.instance)) {
+      currentStep = "target-shape-check";
+      const message =
+        `${params.instance} is not a loopback URL or a *.harperfabric.com target. ` +
+        `For Harper Fabric behind a custom domain, use --fabric. Nothing was changed.`;
+      push(false, message);
+      return { ok: false, dryRun, refused: { message }, steps, failedStep: "target-shape-check" };
+    }
+
     // ── --cimd-allowed-hosts (flair#2113) ─────────────────────────────────────
-    // Before any step with a side effect: the hosts are validated, a Fabric
-    // target is refused, the config.yaml to edit must exist with an
-    // @harperfast/oauth mcp block, and (except under --dry-run, which skips it)
-    // the preflight match must pass. Any of these failing refuses the flag with
-    // nothing changed. The list itself is ensured
-    // at local-config-update, before the restart: written unless the file
-    // already holds that exact list, then read back.
     let cimdAllowedHosts: string[] | undefined;
     if (params.cimdAllowedHosts !== undefined) {
       currentStep = "cimd-allowed-hosts";
@@ -1829,7 +2597,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       } catch (err: any) {
         return refuse(err?.message ?? String(err));
       }
-      const shapeRefusal = cimdAllowedHostsShapeRefusal(params.instance);
+      const shapeRefusal = cimdAllowedHostsShapeRefusal(params.instance, params.fabric);
       if (shapeRefusal) return refuse(shapeRefusal);
       const current = readLocalConfigCimdAllowedHosts(params.localConfigPath);
       if (!current.ok) {
@@ -1867,25 +2635,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       }
     }
 
-    // ── RS256 signing keypair ─────────────────────────────────────────────────
-    currentStep = "signing-key";
-    // flair#2113 review: --dry-run writes no file, so it reports the key a real
-    // run would reuse or generate instead of creating one. Same path and same
-    // existence test as ensureSigningKeyFile.
-    let keyResult: { path: string; reused: boolean };
-    if (dryRun) {
-      const keyPath = params.signingKeyFilePath ?? defaultSigningKeyFilePath();
-      keyResult = { path: keyPath, reused: existsSync(keyPath) };
-      push(true,
-        keyResult.reused
-          ? `signing key found at ${keyPath}; a run without --dry-run reuses it`
-          : `no signing key at ${keyPath}; a run without --dry-run generates one there (0600). --dry-run did not create it`,
-      );
-    } else {
-      keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
-      push(true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
-    }
-
     // ── @harperfast/oauth config (flair#1136: shipped in config.yaml) ──────
     // The block ships uncommented with mcp.enabled: ${FLAIR_MCP_OAUTH}
     // (flair#1152), so the environment turns it on. This step writes nothing;
@@ -1920,8 +2669,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
 
     if (dryRun) {
       // Dry-run stops here. Under --dry-run nothing above wrote a file or made
-      // a remote call (the signing-key step only reports the key path), and
-      // nothing below this line runs.
+      // a remote call, and nothing below this line runs.
       return {
         ok: true,
         dryRun: true,
@@ -1929,31 +2677,32 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         issuer,
         resource: `${issuer}/mcp`,
         callbackUrl,
-        signingKeyFilePath: keyResult.path,
       };
     }
 
     // ── Secrets provisioning (shape-aware, never silent) ──────────────────────
-    const signingKeyPem = readSigningKeyFile(keyResult.path);
+    currentStep = "secrets-provisioning";
     const bundle = buildSecretsBundle({
       issuer,
-      signingKeyPem,
       idpProvider,
       idpClientId: params.idpClientId,
       idpClientSecret: params.idpClientSecret,
     });
-    currentStep = "secrets-provisioning";
+    if (bundle.FLAIR_MCP_ISSUER !== issuer) {
+      throw new Error(`the FLAIR_MCP_ISSUER being pushed does not equal the issuer checked (${issuer})`);
+    }
     // Stage first, unconditionally. If the push works the file is a no-op the
     // operator never opens; if anything about the push is uncertain they still
     // have the thing that always works, without a re-run. Staging costs a 0600
     // write; not staging costs an operator stranded mid-enable.
     const secretsResult = provisionSecrets(params.instance, bundle, {
       mechanism: params.secretsMechanism,
+      fabric: params.fabric,
       stagingPath: params.secretsStagingPath,
     });
 
     // Ask the TARGET whether it can take these, rather than inferring from its
-    // hostname or its version (flair#1094 — see selectSecretsMechanism's note).
+    // hostname or its version.
     // An explicit --secrets-mechanism is an operator override and is honoured
     // without a probe: they have said what they want.
     let secretsPushed = false;
@@ -2003,7 +2752,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     currentStep = "identity-mapping";
     const mapping = await provisionIdpIdentityMapping(
       {
-        opsPortOrUrl: params.instance,
+        // The instance URL is the served origin: ask for its host at the hosted
+        // ops port, the address resolveOpsUrl gives the other steps (flair#2102).
+        hostedOrigin: params.instance,
         adminUser: params.adminUser,
         adminPass: params.adminPass,
         principal,
@@ -2022,12 +2773,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // credential (one active credential per subject is the invariant). That is
     // a credential dying, so it is stated as such, by id: an operator must
     // never discover it later from something that stopped working.
-    const supersedeNote = mapping.credentialSuperseded
-      ? ` SUPERSEDED: ${mapping.supersededCredentialIds.length} prior Credential(kind:idp) row(s) for this subject ` +
-        `were REVOKED, not de-duplicated — ${mapping.supersededCredentialIds.join(", ")}. ` +
-        `They no longer resolve, and anything relying on them stops working. ` +
-        `Exactly one active credential per (kind, idpSubject) is the invariant that keeps resolution deterministic.`
-      : "";
+    const supersedeNote = supersededCredentialNote(mapping);
     push(true,
       `connector identity: mapped sub '${params.idpSubject}' (provider '${idpProvider}') to Agent '${principal}'; ` +
         `see docs/access-control.md for how /mcp tool calls use it. ` +
@@ -2044,7 +2790,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     if (!confirmed && deps.confirmPrompt) {
       confirmed = await deps.confirmPrompt(
         secretsPushed
-          ? isFabricOrigin(params.instance)
+          ? fabricTarget
             ? `The ${secretsResult.varNames.length} secrets were pushed to ${params.instance} and read back. Have you restarted the Fabric instance to load them?`
             : `The ${secretsResult.varNames.length} secrets were pushed to ${params.instance} and read back. Have you loaded them into the instance's process environment?`
           : `Have you applied the ${secretsResult.varNames.length} vars staged at ${secretsResult.path} to ${params.instance}'s environment?`,
@@ -2053,7 +2799,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     if (!confirmed) {
       push(false,
         secretsPushed
-          ? `not confirmed: the secrets were pushed to ${params.instance} and read back; ${isFabricOrigin(params.instance) ? "restart the Fabric instance" : "load them into the instance's process environment"}, then re-run \`flair mcp enable\` with --confirm-secrets-applied.`
+          ? `not confirmed: the secrets were pushed to ${params.instance} and read back; ${fabricTarget ? "restart the Fabric instance" : "load them into the instance's process environment"}, then re-run \`flair mcp enable\` with --confirm-secrets-applied.`
           : `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
       return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
@@ -2070,20 +2816,24 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     //   - Fabric: `enable` does not restart the instance; the operator applies
     //     the environment and restarts. Report the requirement LOUDLY — never
     //     report success with /mcp still dark.
-    const isFabric = isFabricOrigin(params.instance);
-
-    if (isFabric) {
+    if (fabricTarget) {
       // ── Fabric: operator-deploy requirement ──────────────────────────────
       currentStep = "fabric-operator-deploy";
       const host = new URL(params.instance).hostname;
       // flair#2116: this step used to fail unconditionally, so a re-run after
       // the operator's restart ended here with the same instructions, forever.
-      // Ask the public origin first. Only self-verify passing ends this step
-      // with success; a failed or unusable read fails it as before.
+      currentStep = "issuer-target-binding";
+      const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
+      if (!binding.ok) {
+        push(false, binding.detail);
+        return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "issuer-target-binding", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, callbackUrl };
+      }
+      currentStep = "fabric-operator-deploy";
+      // The target's metadata names the issuer. Now check the public origin.
       const live = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
       if (live.ok) {
         push(true,
-          `Fabric deployment (${host}): the /mcp OAuth surface already passes self-verify on ${issuer}. ` +
+          `Fabric deployment (${host}): ${binding.detail}; the /mcp OAuth surface already passes self-verify on ${issuer}. ` +
             `If this run changed a secret value (a new IdP client secret, for example), restart the instance so its process picks the new value up.`,
         );
         currentStep = "self-verify";
@@ -2098,7 +2848,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
           pasteBlock: buildClaudePasteBlock(resource),
           secretsMechanism: secretsResult.mechanism,
           secretsPath: secretsResult.path,
-          signingKeyFilePath: keyResult.path,
           callbackUrl,
         };
       }
@@ -2131,7 +2880,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         resource: `${issuer}/mcp`,
         secretsMechanism: secretsResult.mechanism,
         secretsPath: secretsResult.path,
-        signingKeyFilePath: keyResult.path,
         callbackUrl,
       };
     }
@@ -2139,7 +2887,27 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // ── Standalone (non-Fabric): update local config + restart ────────────
     currentStep = "local-config-update";
     const localConfigResult = updateLocalConfigMcpEnabled(true, params.localConfigPath);
-    push(localConfigResult.ok, localConfigResult.detail);
+    if (!localConfigResult.ok) {
+      // flair#2193: stop BEFORE the restart. The mcp.enabled update was not
+      // confirmed (the file may have changed), and the metadata checks below
+      // could still pass and report success.
+      const retry = params.localConfigPath
+        ? "retry the call with the same explicit path"
+        : "re-run `flair mcp enable`";
+      push(false, `${localConfigResult.detail} This command did not restart the instance. Fix the cause above, then ${retry}.`);
+      return {
+        ok: false,
+        dryRun,
+        steps,
+        failedStep: "local-config-update",
+        issuer,
+        resource: `${issuer}/mcp`,
+        secretsMechanism: secretsResult.mechanism,
+        secretsPath: secretsResult.path,
+        callbackUrl,
+      };
+    }
+    push(true, localConfigResult.detail);
 
     // flair#2113: ensure --cimd-allowed-hosts (written unless the file already
     // holds that exact list) and read it back. A failure here stops the flow
@@ -2162,7 +2930,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
           resource: `${issuer}/mcp`,
           secretsMechanism: secretsResult.mechanism,
           secretsPath: secretsResult.path,
-          signingKeyFilePath: keyResult.path,
           callbackUrl,
         };
       }
@@ -2197,8 +2964,13 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
        );
     push(true, `process restarted: pid changed ${preDiscriminator.pid} -> ${postDiscriminator.pid}`);
 
-    // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
+    // ── Match the target's issuer, then self-verify the public origin ────────
     currentStep = "self-verify";
+    const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
+    if (!binding.ok) {
+      push(false, binding.detail);
+      return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "self-verify", issuer, resource: `${issuer}/mcp`, secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path, callbackUrl, cimdAllowedHosts: writtenCimd?.hosts, cimdAllowedHostsConfigPath: writtenCimd?.path };
+    }
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {
       push(false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry.`);
@@ -2213,7 +2985,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         cimdAllowedHostsConfigPath: writtenCimd?.path,
       };
     }
-    push(true, verify.detail);
+    push(true, `${binding.detail}; ${verify.detail}`);
 
     const resource = `${issuer}/mcp`;
     return {
@@ -2225,7 +2997,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       pasteBlock: buildClaudePasteBlock(resource),
       secretsMechanism: secretsResult.mechanism,
       secretsPath: secretsResult.path,
-      signingKeyFilePath: keyResult.path,
       callbackUrl,
       cimdAllowedHosts: writtenCimd?.hosts,
       cimdAllowedHostsConfigPath: writtenCimd?.path,
@@ -2242,8 +3013,8 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // Two results for one step, and the ✓ instructs several minutes of manual
     // work in a web UI that the ✗ makes pointless. Read in order, you do the
     // work first.
-    // No `?? "signing-key"` fallback: currentStep is initialised to the first
-    // step, so there is no undefined case to invent a name for. A fallback here
+    // No fallback step NAME: currentStep is initialised to the first step, so
+    // there is no undefined case to invent a name for. A fallback here
     // would attribute a throw to a step chosen for being a plausible default —
     // the same misattribution this handler exists to prevent, one layer down.
     push(false, `unexpected error: ${err?.message ?? err}`);
@@ -2302,7 +3073,7 @@ export async function disableMcp(params: DisableMcpParams, deps: DisableMcpDeps 
   } catch (err: any) {
     return { ok: false, detail: `restart failed: ${err?.message ?? err}` };
   }
-  return { ok: true, detail: `restarted ${params.instance} — /mcp route no longer mounts (byte-identical boot)` };
+  return { ok: true, detail: `restart requested for ${params.instance}` };
 }
 
 // ─── flair mcp status ─────────────────────────────────────────────────────────
@@ -2337,12 +3108,12 @@ export interface McpStatusResult {
 }
 
 /**
- * Surfaces LIVE state (not a stale local marker): hits the same well-known
- * metadata endpoint `enable`'s self-verify step checks. A 200 with the
- * expected shape AND CIMD advertised means the surface is enabled and
- * usable by a CIMD client; anything else means disabled/unreachable/
- * misconfigured — `status` never guesses from local files alone (this is
- * the same "never report success on hope" posture as self-verify).
+ * Reports a live public-metadata check (not a stale local marker): hits the
+ * same well-known metadata endpoint `enable`'s self-verify step checks. An expected issuer,
+ * exact MCP token endpoint, CIMD advertisement and, when present, a string
+ * `registration_endpoint` verify the public metadata;
+ * they do not prove that the token route or `/mcp` is usable. `status` reports
+ * the live metadata check's result rather than guessing from local files.
  */
 export async function mcpStatus(params: McpStatusParams, deps: McpStatusDeps = {}): Promise<McpStatusResult> {
   const verify = await selfVerifyMcpMetadata(params.instance, { fetchImpl: deps.fetchImpl });

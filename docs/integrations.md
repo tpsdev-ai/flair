@@ -1,8 +1,8 @@
 # Flair integrations
 
-Where Flair already runs. Each integration can reach one shared Flair memory store; signed requests identify an agent, while other verified agents may read its non-private records, and n8n uses admin Basic auth.
+Where Flair already runs. Each integration can reach one shared Flair memory store; signed requests identify an agent, while other verified agents may read its non-private records.
 
-> **The point.** Memory can follow an agent across orchestrators. Integrations using an ordinary Ed25519 agent key can write under that identity and read their own plus other agents' non-private records. Administrator agent roles have broader authority. n8n uses Harper administrator Basic auth; stdio MCP, Pi, LangGraph, and the wake runner can also use it when no signing key resolves. Administrator Basic auth can read private records and write under any agent ID. Choose an integration with its authentication and recall behavior in mind.
+> **The point.** Memory can follow an agent across orchestrators. Integrations using an ordinary Ed25519 agent key can write under that identity and read their own plus other agents' non-private records. Administrator agent roles have broader authority. n8n signs with Agent Private Key selected; its deprecated Admin Password path uses administrator Basic only with an empty key. stdio MCP, Pi, LangGraph, and the wake runner can use administrator Basic auth when no signing key resolves. Administrator Basic auth can read private records and write under any agent ID. Choose an integration with its authentication and recall behavior in mind.
 
 ---
 
@@ -20,7 +20,7 @@ Where Flair already runs. Each integration can reach one shared Flair memory sto
 | **DeepSeek Harness** (`dsh`) | [`flair-mcp`](deepseek-harness.md) | Cordis overlay | First-party MCP bridge; tools-only, reactive recall — [dedicated page](deepseek-harness.md) |
 | **LangGraph (TS)** | [`langgraph-flair`](#langgraph-typescript) | FlairClient | FlairStore provides get, put, delete, search, and batch (limitations apply) |
 | **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin (context-engine slot left intact) |
-| **n8n** | [`n8n-nodes-flair`](#n8n) | FlairApi credential | Three nodes (chat memory, search, store) |
+| **n8n** | [`n8n-nodes-flair`](#n8n) | Ed25519 with Agent Private Key selected; deprecated administrator Basic | Three nodes (chat memory, search, store) |
 | **Hermes Agent** | [`hermes-flair`](#hermes-agent) | Ed25519 | Python `MemoryProvider` |
 | **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); with `--agent <id>` and wiring enabled, `flair init` attempts Pi wiring for `--client pi`, for detected Pi under `--client all`, or for detected Pi when `--client` is omitted; `--client none` and `--no-mcp` skip it. |
 | **Google ADK** (Python) | [`adk-flair`](../packages/adk-flair/README.md) | Ed25519 | `BaseMemoryService`; see [hosted auth](#hosted-flair-auth--your-agent-got-a-404) if you just got a 404 |
@@ -57,7 +57,7 @@ Do not "fix" a 401 or 404 by pasting the Harper admin password into the agent's 
 | Shape | What is true | What you see | What to do |
 |---|---|---|---|
 | **Record missing** | No `Agent` row for this id on **this** instance | `401 {"error":"unknown_agent"}` on every signed route | Register against the hosted URL: `flair agent add <id> --target "$FLAIR_URL" --ops-target <ops-url> --admin-pass-file <path>`. Fabric ops is not `data-port − 1` — see [quickstart-fabric.md](quickstart-fabric.md). |
-| **Key mismatch** | The id exists; the public key on the server is not the one in your keyfile | `401 {"error":"invalid_signature"}` | Same id, wrong key — copied from another host, rotated on one side only, or the env pointing at a different agent's file. Point the env at the key that matches **this** instance, or re-seed the hosted `Agent` row from the key on this machine: `flair agent add <id> --target "$FLAIR_URL" --ops-target <ops-url> --admin-pass-file <path>` (reuses the local keyfile). `flair agent rotate-key` is localhost-only. Restart the adapter so it reloads the key. |
+| **Key mismatch** | The id exists; the public key on the server is not the one in your keyfile | `401 {"error":"invalid_signature"}` | Same id, wrong key — copied from another host, rotated on one side only, or the env pointing at a different agent's file. Point the env at the key that matches **this** instance. `flair agent add` refuses an id that already exists and does not replace the stored key. On the Flair host, `flair agent rotate-key <id>` replaces the stored public key and writes the new private key on that host (it is localhost-only). The new key file must be on the adapter host before that process can sign with it. Configure that signing process to use the local file, then restart it. |
 | **Config wrong** | Identity may be fine; you are not talking to the Flair you think | Timeouts, connection errors, or **404 from Harper's catch-all** | `FLAIR_URL` must be the origin the **signing process** can open (cloud-agent localhost is the VM, not your laptop). adk-flair also needs `FLAIR_ALLOW_REMOTE_URL=1` and a raised `FLAIR_HTTP_TIMEOUT` (defaults are localhost fail-fast). A `FLAIR_URL` with a path prefix sends every request to a route that does not exist. `/Health` can be 200 while `/Memory` is still 404 if the Flair app is not loaded yet. |
 
 Clock skew is a fourth, rarer 401: `timestamp_out_of_window`.
@@ -83,7 +83,7 @@ A verified agent that is not allowed the row gets 404, never 403. Anonymous by-i
 | **Pi** | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEY_PATH` or Pi client `keyPath` | Same Ed25519 model |
 | **LangGraph** | `FLAIR_URL` | `config.agentId` (required) | Signed requests use `config.privateKey`, `config.keyPath`, or automatic key candidates (`FLAIR_KEY_DIR`, then standard paths); it does not read `FLAIR_KEY_PATH`. | Admin credentials provide a Basic-auth fallback when no key is available. |
 
-n8n still uses Harper admin Basic auth — it is not this path. See [n8n.md](n8n.md#security).
+n8n signs as its credential's Agent ID with Agent Private Key selected. See [n8n.md](n8n.md#3-create-the-credential).
 
 ---
 
@@ -201,7 +201,7 @@ Configuration via OpenClaw's standard plugin surface. See [`docs/openclaw.md`](o
 
 The FlairApi credential provides authentication.
 
-**FlairApi credential** — Harper administrator password for Basic authentication; Agent ID selects memory ownership and does not restrict the credential's instance-wide authority.
+**FlairApi credential** — with Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories. The deprecated Admin Password path uses Harper administrator Basic authentication only with an empty Agent Private Key, and warns on each node execution.
 
 Install via the standard n8n community-node UI (Settings → Community nodes → `@tpsdev-ai/n8n-nodes-flair`) or:
 

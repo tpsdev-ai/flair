@@ -83,6 +83,10 @@ export const FLAIR_AGENT_PERMISSION = {
       // no write grant. The history table has no direct REST route.
       OrgSkillAssignment:        grant(true,  false, false, false),
       OrgSkillAssignmentHistory: grant(false, false, false, false),
+      // flair#2139 S1: instruction-version history. Read only — the resource
+      // itself denies every mutation verb to every principal, and the only
+      // application writer is the in-process append helper. See resources/InstructionVersion.ts.
+      InstructionVersion: grant(true, false, false, false),
       // Federation / OAuth / IdP / internal — system + admin only; agents get none.
       Peer:          grant(false, false, false, false),
       PairingToken:  grant(false, false, false, false),

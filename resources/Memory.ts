@@ -26,6 +26,8 @@ import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./mem
 import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -55,6 +57,7 @@ import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
+import { refuseReservedSeedWrite, reservedSeedWriteDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -655,7 +658,7 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  * closeSupersededIfNeeded) already treats it as unset with no further
  * changes needed.
  */
-async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict): Promise<Response | null> {
+async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict, ctx: any): Promise<Response | null> {
   if (content.supersedes === null) {
     delete content.supersedes;
   }
@@ -664,6 +667,10 @@ async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdi
       status: 400, headers: { "Content-Type": "application/json" },
     });
   }
+  // flair#2141 S2: superseding closes the target row, so a reserved seed id
+  // needs operator authority here too (resources/seed-reservation.ts).
+  const seedDenial = reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth);
+  if (seedDenial) return seedDenial;
   if (content.supersedes && auth.kind === "agent" && !auth.isAdmin) {
     const target = await (databases as any).flair.Memory.get(content.supersedes).catch(() => null);
     if (target && target.agentId !== auth.agentId) {
@@ -749,6 +756,135 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
  * rationale. `content.originatorInstanceId == null` is no longer read here: a
  * body value is not trusted at any point.
  */
+
+/**
+ * flair#2139 S2 — write a skill create/update atomically through the
+ * transactional writer.
+ */
+async function writeSkillCreateOrUpdate(
+  args: {
+    ctx: any;
+    auth: AgentAuthVerdict;
+    content: any;
+    storedRow: Record<string, any> | null;
+    explicitPredecessor: Record<string, any> | null;
+    method: "post" | "put";
+    pointer: { row: any } | null;
+    /** A reserved seed id: version the write IN PLACE (same physical id). */
+    inPlaceId?: string | null;
+    reembedding?: boolean;
+    requestedPayload?: Record<string, any>;
+  },
+): Promise<any> {
+  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding, requestedPayload } = args;
+  const now = new Date().toISOString();
+  const explicitSuccessor = !!explicitPredecessor && (!storedRow || content.supersedes !== storedRow.supersedes);
+  let successorId = inPlaceId
+    ? inPlaceId
+    : explicitSuccessor || !storedRow
+      ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
+      : `${content.agentId}-${randomUUID()}`;
+  const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
+  const addressedId = storedRow ? String(storedRow.id) : explicitPredecessor ? String(explicitPredecessor.id) : null;
+  const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
+  let unchangedHead: Record<string, any> | null = null;
+  const outcome = await runSkillVersionWrite({
+    ctx,
+    subjectId,
+    agentId: String(content.agentId),
+    head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
+    plan: async (head, shared) => {
+      const stale = await validateSkillSnapshots(storedRow, explicitPredecessor, content.id ?? null, shared);
+      const denied = await authorizeSkillOwners(ctx, auth, [storedRow, explicitPredecessor, head ?? content], shared);
+      if (denied) return denied;
+      if (inPlaceId && method === "put" && !reembedding && !explicitPredecessor && !pointer?.row &&
+        head?.id === inPlaceId && requestedPayload && skillPayloadUnchanged(requestedPayload, head)) {
+        unchangedHead = head;
+        return null;
+      }
+      if (stale) return stale;
+      if ((storedRow || explicitPredecessor) && !head) return skillWriteConflict("skill_head_missing");
+      if (explicitSuccessor && head?.id !== explicitPredecessor?.id) return skillWriteConflict("skill_predecessor_stale");
+      if (storedRow && head?.id !== storedRow.id) return skillWriteConflict("skill_target_stale");
+      const reembedInPlace = method === "put" && reembedding && head &&
+        head.id === storedRow?.id && skillPayloadUnchanged(content, head);
+      if (reembedInPlace) successorId = String(head.id);
+      const liveHead = head;
+      const successor = buildSkillSuccessorRow({
+        base: { ...content, agentId: liveHead?.agentId ?? content.agentId }, predecessorRow: liveHead, successorId, subjectId,
+        // An in-place (reserved seed) write keeps the same physical id, so it
+        // sets no `supersedes` and closes no row.
+        supersedes: reembedInPlace ? head.supersedes ?? null : inPlaceId || !liveHead ? null : String(liveHead.id), now,
+      });
+      if (reembedInPlace) {
+        successor.instanceToken = typeof head.instanceToken === "string" && head.instanceToken.length > 0
+          ? head.instanceToken : content.instanceToken;
+      }
+      await applyOriginatorInstanceId(successor, liveHead);
+      applyFederationBookkeeping(successor, liveHead);
+      captured.row = successor;
+      const value = typeof successor.content === "string" ? successor.content : null;
+      const visibility = skillVersionVisibility(successor);
+      if (inPlaceId || reembedInPlace) {
+        return liveHead
+          ? { kind: "update", predecessor: null, successor, closePatch: {}, value, visibility }
+          : { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+      }
+      if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+      captured.closed = liveHead;
+      return { kind: "update", predecessor: liveHead, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility };
+    },
+    hooks: {
+      ...defaultSkillHooks,
+      pointer: async (shared) => {
+        if (captured.closed) {
+          const denial = await deletePointerRow(String(captured.closed.id), shared);
+          if (denial) return denial;
+        }
+        return pointer?.row
+          ? persistPointerRow({ ...pointer.row, memoryId: successorId, memoryInstanceToken: captured.row?.instanceToken }, shared)
+          : null;
+      },
+    },
+  });
+  if (!outcome.ok) return outcome.response;
+  if (captured.closed) noteMemoryDelete(String(captured.closed.id));
+  if (captured.row) {
+    noteMemoryUpsert(captured.row);
+    noteWriteStamp(captured.row.embeddingModel);
+  }
+  return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
+}
+
+/** Close the live head and delete its pointer in the version transaction. */
+async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record: Record<string, any> }): Promise<any> {
+  const { ctx, auth, record } = args;
+  let closedId = "";
+  const now = new Date().toISOString();
+  const subjectId = String(record.skillSubjectId ?? record.id);
+  const outcome = await runSkillVersionWrite({
+    ctx,
+    subjectId,
+    agentId: String(record.agentId),
+    head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
+    plan: async (head, shared) => {
+      const stale = await validateSkillSnapshots(record, null, String(record.id), shared);
+      if (stale) return stale;
+      const denied = await authorizeSkillOwners(ctx, auth, [record, head], shared);
+      if (denied) return denied;
+      if (!head) return skillWriteConflict("skill_head_missing");
+      const liveHead = head;
+      closedId = String(liveHead.id);
+      return { kind: "delete", predecessor: liveHead, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead) };
+    },
+    hooks: { ...defaultSkillHooks, pointer: async (shared) => deletePointerRow(closedId, shared) },
+  });
+  if (!outcome.ok) return outcome.response;
+  noteMemoryDelete(closedId);
+  return new Response(JSON.stringify({ id: closedId, deleted: true }), {
+    status: 200, headers: { "Content-Type": "application/json" },
+  });
+}
 
 export class Memory extends (databases as any).flair.Memory {
   /**
@@ -933,6 +1069,10 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // Rate limiting — use authenticated agent ID, not client-supplied body field
@@ -973,6 +1113,11 @@ export class Memory extends (databases as any).flair.Memory {
       const attr = stampAttribution(auth, content, RECORD_TYPES.Memory.ownerField, RECORD_TYPES.Memory.attribution.post, "forbidden: cannot write memory owned by another agent");
       if (attr.denied) return attr.denied;
     }
+
+    const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
+    const preparedSkill = await prepareSkillBody(content, postStored);
+    if (preparedSkill instanceof Response) return preparedSkill;
+    content = preparedSkill.content;
 
     // flair#744 slice A: citation-on-write — consume-and-strip, same
     // discipline as `claimedClient` below. Pull the optional
@@ -1103,7 +1248,7 @@ export class Memory extends (databases as any).flair.Memory {
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with put() — see validateAndAuthorizeSupersedes doc).
-    const supersedesError = await validateAndAuthorizeSupersedes(content, auth);
+    const supersedesError = await validateAndAuthorizeSupersedes(content, auth, ctx);
     if (supersedesError) return supersedesError;
 
     // Temporal validity: validFrom defaults to now, validTo left null for active facts.
@@ -1224,6 +1369,13 @@ export class Memory extends (databases as any).flair.Memory {
     // Pinned by test/unit/memory-host-source.test.ts (r20-post) — RED if this
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
+    if (isSkillWrite(content)) {
+      const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
+      return await writeSkillCreateOrUpdate({
+        ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
+        inPlaceId: reservedId != null ? String(reservedId) : null,
+      });
+    }
     // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
     // transaction. With a request context they join its open transaction; with
     // NO context (an internal direct call, e.g. new Memory().post(...))
@@ -1282,6 +1434,10 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   async patch(content: any, query?: any) {
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // flair#1383 — patch() routes past put(), so it needs its own refuse.
@@ -1407,6 +1563,11 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async put(content: any) {
+    const reembedding = content?.embedding === null && content?.embeddingModel === null;
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
@@ -1512,6 +1673,14 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
+    const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
+    if (resolvedExisting.denial) return resolvedExisting.denial;
+    const preExisting = resolvedExisting.row;
+    const requestedPayload = { ...content };
+    const preparedSkill = await prepareSkillBody(content, preExisting);
+    if (preparedSkill instanceof Response) return preparedSkill;
+    content = preparedSkill.content;
+
     // flair#744 slice A: citation-on-write — same consume-and-strip
     // discipline as post() above. Strip BEFORE anything else touches
     // `content` so it is never persisted on the row; recorded post-commit
@@ -1550,25 +1719,6 @@ export class Memory extends (databases as any).flair.Memory {
     content.archived = content.archived ?? false;
     content.createdAt = content.createdAt ?? now;
 
-    // Fetch the pre-existing record (if any) ONCE — reused below both to
-    // decide whether this PUT is a fresh create (dedup gate applies, default
-    // visibility stamped) or an update/patch (dedup-bypassed, visibility left
-    // untouched). See the dedup-gate block further down for why an existing
-    // id skips the gate; the SAME "does a record already exist" check gates
-    // the visibility default (Layer 1 part A): patchRecord/supersede-
-    // close all route through put() with a MERGED
-    // `{...existing, ...patch}` payload, and must never have their stored
-    // visibility overwritten by a default recomputed from that merged content
-    // — only a genuinely NEW id gets the default stamped.
-    // The row is resolved by the URL-BOUND target id, never the request body's
-    // `id`: Harper writes to the URL target and rewrites the row's primary key
-    // to it, so a body id names a row this PUT does NOT land on. A body id that
-    // disagrees with the target, or a lookup that FAILS, refuses the write — a
-    // failed read must never look like "no record". See
-    // resources/originator-instance.ts's resolveStoredRow.
-    const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
-    if (resolvedExisting.denial) return resolvedExisting.denial;
-    const preExisting = resolvedExisting.row;
 
     // Preserve stored visibility on updates before applying write policy
     // (only the two writable values; the guards below see the result).
@@ -1658,7 +1808,7 @@ export class Memory extends (databases as any).flair.Memory {
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
     // this too: it's the only HTTP-reachable create path).
-    const supersedesError = await validateAndAuthorizeSupersedes(content, auth);
+    const supersedesError = await validateAndAuthorizeSupersedes(content, auth, ctx);
     if (supersedesError) return supersedesError;
     if (content.supersedes && !content.validFrom) {
       content.validFrom = content.createdAt;
@@ -1805,6 +1955,14 @@ export class Memory extends (databases as any).flair.Memory {
     // Pinned by test/unit/memory-host-source.test.ts (r20-put) — RED if this
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
+    if (isSkillWrite(content)) {
+      const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
+      return await writeSkillCreateOrUpdate({
+        ctx, auth, content, storedRow: preExisting, explicitPredecessor: preparedSkill.predecessor, method: "put", pointer,
+        reembedding, requestedPayload,
+        inPlaceId: reservedId != null ? String(reservedId) : null,
+      });
+    }
     // A1' item 2 (adjudication 0a): share ONE transaction with the pointer row
     // (see post()). The shared helper's owned-transaction branch is pinned by
     // test/unit/memory-host-source.test.ts (r20-atomic, which drives POST);
@@ -1845,12 +2003,24 @@ export class Memory extends (databases as any).flair.Memory {
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = reservedSeedWriteDenial(
+      "Memory", [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], ctx, auth,
+    );
+    if (seedDenial) return seedDenial;
     // Read stored ownership, not the read-scoped get() response. Enforce here
     // as well as middleware so MCP/in-process callers have the same policy.
     const record = await super.get(id);
     if (auth.kind === "agent" && !auth.isAdmin &&
         isForbiddenOwnerMutation(record, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
       return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
+    }
+
+    const reservedSeed = [id, (this as any).getId?.(), ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)]
+      .some((candidate) => isReservedSeedId("Memory", candidate));
+    if (!reservedSeed && rowIsSkill(record)) {
+      return await writeSkillDelete({ ctx, auth, record });
     }
     // Durability controls retention, not the owner's authority to delete.
     // A1' item 2 (adjudication 0a/0c): the Memory delete and its pointer

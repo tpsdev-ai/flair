@@ -150,8 +150,9 @@ Pushing the `vX.Y.Z` tag triggers the [`release-publish`](.github/workflows/rele
 workflow: it authenticates to npm with a short-lived **OIDC** token (no stored `NPM_TOKEN`),
 builds, and submits all packages to npm **staging** with provenance. They are **not live**
 until a maintainer reviews the staged tarballs and **approves them on npmjs.com with 2FA** —
-that approval is the release gate. Tagging needs only repo push access (no npm creds, no
-`Actions: write`).
+that approval is the release gate.
+The same tag starts the `adk-flair` PyPI workflow, subject to its version check and
+`adk-flair-publish` environment approval.
 
 Phase 1 assembles every `.changelog/unreleased/` fragment into a `## [X.Y.Z]` section of
 `CHANGELOG.md` and deletes the fragments — there is nothing to promote by hand. It refuses

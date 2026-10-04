@@ -1,204 +1,149 @@
-/**
- * Unit tests for the boot readiness gate in boot-harper.mjs.
- *
- * The gate verifies that the Flair application is actually loaded — not just
- * that Harper's /health returns 200. A half-booted instance (server up, app
- * absent) must fail loudly rather than handing tests a 404-serving URL.
- */
-import { test, expect, afterEach } from "bun:test";
-import { createServer } from "node:http";
-import type { Server } from "node:http";
-import { writeFileSync, unlinkSync, existsSync, rmSync } from "node:fs";
+import { test, expect, mock } from "bun:test";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { writeFileSync, readFileSync, mkdtempSync, unlinkSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import { bootEphemeralHarper } from "../helpers/live-flair";
+import { waitForAppLoaded } from "../../../adk-flair/tests/helpers/app-readiness.mjs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const TEST_TIMEOUT_MS = 5_000;
+const PROCESS_WAIT_TIMEOUT_MS = 2_000;
+const PROCESS_POLL_INTERVAL_MS = 10;
+const MOCK_LIFETIME_TIMEOUT_MS = 10_000;
+const MOCK_TEARDOWN_TIMEOUT_MS = 2_000;
+const BOOT_CONFIG_TIMEOUT_MS = 10;
+const BOOT_ASSERTION_TIMEOUT_MS = 100;
+const APP_TEST_TIMEOUT_MS = 2_000;
+const APP_TEST_PROBE_TIMEOUT_MS = 10;
 
-/**
- * Replicated from boot-harper.mjs — kept in sync manually.
- * Polls a Flair-owned route until it returns non-404 or times out.
- */
-async function waitForAppLoaded(
-  httpURL: string,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const url = `${httpURL}/Memory`;
-  const deadline = Date.now() + timeoutMs;
-  let attempt = 0;
-  while (Date.now() < deadline) {
-    attempt++;
-    try {
-      const res = await fetch(url, {
-        method: "GET",
-        signal: AbortSignal.timeout(1000),
-      });
-      if (res.status !== 404) {
-        return;
-      }
-    } catch {
-      // connection refused / timeout — keep polling
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(
-    `Flair application not loaded at ${httpURL} after ${timeoutMs}ms ` +
-      `(${attempt} attempts). The Flair app must be built before running ` +
-      `integration tests — Harper is up but /Memory returns 404.`,
-  );
+function readiness(request: (...args: any[]) => Promise<any>) {
+  let clock = 0;
+  const sleep = mock(async (ms: number) => { clock += ms; });
+  return { request: mock(request), now: () => clock, sleep, probeTimeoutMs: APP_TEST_PROBE_TIMEOUT_MS };
 }
 
-/** Start a mock server on an ephemeral port. */
-function startMock(
-  handler: (req: { url?: string }, res: { statusCode: number; end: (body?: string) => void }) => void,
-): Promise<{ server: Server; url: string }> {
-  return new Promise((resolve) => {
-    const server = createServer(handler as any);
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (!addr || typeof addr === "string") {
-        throw new Error("failed to get server address");
-      }
-      resolve({ server, url: `http://127.0.0.1:${addr.port}` });
-    });
-  });
+for (const status of [200, 405]) {
+  test(`waitForAppLoaded resolves when /Memory returns ${status}`, async () => {
+    const deps = readiness(async () => ({ status }));
+    await waitForAppLoaded("http://fixture.invalid", APP_TEST_TIMEOUT_MS, deps);
+    expect(deps.request).toHaveBeenCalledTimes(1);
+    expect(deps.request.mock.calls[0][0]).toBe("http://fixture.invalid/Memory");
+    expect(deps.request.mock.calls[0][1].method).toBe("GET");
+    expect(deps.sleep).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT_MS);
 }
-
-test("waitForAppLoaded resolves when /Memory returns non-404", async () => {
-  const { server, url } = await startMock((_req, res) => {
-    res.statusCode = 405; // Method Not Allowed — app is loaded, just wrong method
-    res.end();
-  });
-
-  try {
-    await waitForAppLoaded(url, 3_000);
-    // Should not throw
-  } finally {
-    server.close();
-  }
-});
-
-test("waitForAppLoaded resolves when /Memory returns 200", async () => {
-  const { server, url } = await startMock((_req, res) => {
-    res.statusCode = 200;
-    res.end("[]");
-  });
-
-  try {
-    await waitForAppLoaded(url, 3_000);
-  } finally {
-    server.close();
-  }
-});
 
 test("waitForAppLoaded throws when /Memory returns 404 (app not loaded)", async () => {
-  const { server, url } = await startMock((_req, res) => {
-    if (_req.url === "/health") {
-      res.statusCode = 200;
-      res.end("OK");
-    } else {
-      // Harper's catch-all when no app handles the route
-      res.statusCode = 404;
-      res.end("Not Found");
-    }
-  });
-
-  try {
-    await expect(waitForAppLoaded(url, 2_000)).rejects.toThrow(
-      "Flair application not loaded",
-    );
-  } finally {
-    server.close();
-  }
-});
+  const deps = readiness(async () => ({ status: 404 }));
+  await expect(waitForAppLoaded("http://fixture.invalid", APP_TEST_TIMEOUT_MS, deps))
+    .rejects.toThrow("after 2000ms (4 attempts)");
+  expect(deps.now()).toBe(APP_TEST_TIMEOUT_MS);
+}, TEST_TIMEOUT_MS);
 
 test("waitForAppLoaded throws when server is unreachable", async () => {
-  // Use a port that nothing is listening on
-  await expect(waitForAppLoaded("http://127.0.0.1:1", 1_000)).rejects.toThrow(
-    "Flair application not loaded",
-  );
-});
+  const deps = readiness(async () => { throw new Error("ECONNREFUSED"); });
+  await expect(waitForAppLoaded("http://fixture.invalid", APP_TEST_TIMEOUT_MS, deps))
+    .rejects.toThrow("Flair application not loaded");
+  expect(deps.request).toHaveBeenCalledTimes(4);
+}, TEST_TIMEOUT_MS);
 
 test("waitForAppLoaded eventually resolves when app loads after delay", async () => {
-  let callCount = 0;
-  const { server, url } = await startMock((_req, res) => {
-    callCount++;
-    if (callCount <= 3) {
-      // First 3 calls: app not loaded yet
-      res.statusCode = 404;
-      res.end("Not Found");
-    } else {
-      // App loads on 4th call
-      res.statusCode = 200;
-      res.end("[]");
-    }
+  let calls = 0;
+  const deps = readiness(async () => ({ status: ++calls <= 3 ? 404 : 200 }));
+  await waitForAppLoaded("http://fixture.invalid", APP_TEST_TIMEOUT_MS, deps);
+  expect(calls).toBe(4);
+  expect(deps.sleep).toHaveBeenCalledTimes(3);
+}, TEST_TIMEOUT_MS);
+
+test("waitForAppLoaded aborts an unfinished probe", async () => {
+  const deps = readiness((_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  }));
+  await expect(waitForAppLoaded("http://fixture.invalid", APP_TEST_TIMEOUT_MS, deps))
+    .rejects.toThrow("Flair application not loaded");
+  expect(deps.request).toHaveBeenCalledTimes(4);
+}, TEST_TIMEOUT_MS);
+
+test("waitForAppLoaded does not sleep past its deadline", async () => {
+  const deps = readiness(async () => ({ status: 404 }));
+  await expect(waitForAppLoaded("http://fixture.invalid", 1, deps)).rejects.toThrow("after 1ms");
+  expect(deps.now()).toBe(1);
+}, TEST_TIMEOUT_MS);
+
+async function within<T>(name: string, promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${name} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+function bootProcess() {
+  const proc = new EventEmitter() as ChildProcess;
+  proc.stdout = new PassThrough() as any;
+  proc.stderr = new PassThrough() as any;
+  proc.kill = mock(() => true);
+  return proc;
+}
+
+test("bootEphemeralHarper rejects and kills a helper that never emits config", async () => {
+  const proc = bootProcess();
+  const spawnProcess = mock(() => proc) as unknown as typeof spawn;
+  try {
+    await expect(within("boot helper timeout rejection",
+      bootEphemeralHarper("unused.mjs", BOOT_CONFIG_TIMEOUT_MS, "node", spawnProcess), BOOT_ASSERTION_TIMEOUT_MS))
+      .rejects.toThrow("boot-harper timed out");
+    expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+  } finally {
+    proc.stdout?.destroy();
+    proc.stderr?.destroy();
+  }
+}, TEST_TIMEOUT_MS);
+
+test("bootEphemeralHarper rejects when a helper exits without config", async () => {
+  const proc = bootProcess();
+  const spawnProcess = mock(() => proc) as unknown as typeof spawn;
+  const result = bootEphemeralHarper("unused.mjs", BOOT_CONFIG_TIMEOUT_MS, "node", spawnProcess);
+  proc.emit("exit", 0);
+  await expect(within("boot helper early-exit rejection", result, BOOT_ASSERTION_TIMEOUT_MS)).rejects.toThrow("before config");
+  proc.stdout?.destroy();
+  proc.stderr?.destroy();
+}, TEST_TIMEOUT_MS);
+
+async function waitUntil(name: string, predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + PROCESS_WAIT_TIMEOUT_MS;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`${name} timed out after ${PROCESS_WAIT_TIMEOUT_MS}ms`);
+    await new Promise(resolve => setTimeout(resolve, PROCESS_POLL_INTERVAL_MS));
+  }
+}
+
+function waitForExit(proc: ChildProcess, name: string): Promise<void> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); proc.off("exit", onExit); proc.off("error", onError); };
+    const onExit = () => { cleanup(); resolve(); };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`${name} timed out`)); }, PROCESS_WAIT_TIMEOUT_MS);
+    proc.once("exit", onExit);
+    proc.once("error", onError);
   });
-
-  try {
-    await waitForAppLoaded(url, 5_000);
-    expect(callCount).toBeGreaterThanOrEqual(4);
-  } finally {
-    server.close();
-  }
-});
-
-// ─── Booter timeout (flair#1119) ────────────────────────────────────────────
-// The booter must never burn the per-test timeout. When the helper script
-// never emits the JSON config line, bootEphemeralHarper must reject within
-// its budget, kill the process, and leave no zombie.
-
-test("bootEphemeralHarper rejects within budget when helper never emits config", async () => {
-  // Create a temporary script that sleeps — never emits the JSON config line.
-  const sleeperPath = join(tmpdir(), `adk-flair-test-sleeper-${process.pid}.mjs`);
-  writeFileSync(sleeperPath, [
-    "#!/usr/bin/env node",
-    "// Sleeper: never emits JSON config — used to test boot timeout",
-    "setTimeout(() => {}, 120_000); // sleep 120s, well past the test budget",
-  ].join("\n"), "utf-8");
-
-  const cleanup = () => {
-    try { unlinkSync(sleeperPath); } catch {}
-  };
-
-  try {
-    const start = Date.now();
-    let err: Error | null = null;
-
-    try {
-      await bootEphemeralHarper(sleeperPath, 3_000);
-    } catch (e) {
-      err = e as Error;
-    }
-
-    const elapsed = Date.now() - start;
-
-    // Must have rejected
-    expect(err).not.toBeNull();
-    expect(err!.message).toMatch(/timed out/);
-
-    // Must reject within budget + reasonable margin (process-spawn overhead)
-    expect(elapsed).toBeLessThan(10_000);
-
-    // Verify no zombie: the process group should be killed.
-    // We can't easily check for zombies in a cross-platform way, but the
-    // timeout handler does `process.kill(-proc.pid, "SIGKILL")` which
-    // kills the entire process group. The fact that the promise rejected
-    // (rather than hanging) confirms the timeout fired and killed the
-    // process — otherwise the promise would still be pending.
-  } finally {
-    cleanup();
-  }
-});
+}
 
 // ─── Recovery contract (flair#1121) ─────────────────────────────────────────
 // The JSON line must include rootPath and harperPid so callers can recover
 // from an interrupted teardown.
 
-/** Spawn a mock script that prints a JSON line and exits. Returns the parsed
- *  config and the child process. */
 async function spawnMockBootHelper(jsonFields: Record<string, unknown>): Promise<{
   config: Record<string, unknown>;
   proc: ChildProcess;
@@ -208,20 +153,20 @@ async function spawnMockBootHelper(jsonFields: Record<string, unknown>): Promise
   writeFileSync(scriptPath, [
     "#!/usr/bin/env node",
     `process.stdout.write(${JSON.stringify(jsonLine)} + "\\n");`,
-    "// block until stdin closes",
     "process.stdin.on('end', () => process.exit(0));",
   ].join("\n"), "utf-8");
 
   return new Promise((resolve, reject) => {
     const proc = spawn(process.execPath, [scriptPath], {
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: PROCESS_WAIT_TIMEOUT_MS,
     });
     let stdout = "";
     const timeout = setTimeout(() => {
       try { proc.kill("SIGKILL"); } catch {}
       try { unlinkSync(scriptPath); } catch {}
       reject(new Error("mock boot helper timed out"));
-    }, 10_000);
+    }, PROCESS_WAIT_TIMEOUT_MS);
 
     proc.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -269,10 +214,11 @@ test("JSON line includes rootPath and harperPid", async () => {
     expect(config.httpURL).toBe("http://127.0.0.1:19926");
     expect(config.opsURL).toBe("http://127.0.0.1:19925");
   } finally {
-    proc.stdin?.end();
-    try { proc.kill("SIGKILL"); } catch {}
+    const exited = waitForExit(proc, "JSON helper exit");
+    proc.kill("SIGKILL");
+    await exited;
   }
-});
+}, TEST_TIMEOUT_MS);
 
 test("JSON line with null harperPid (external mode) still includes the field", async () => {
   const { config, proc } = await spawnMockBootHelper({
@@ -290,10 +236,11 @@ test("JSON line with null harperPid (external mode) still includes the field", a
     expect(config.rootPath).toBe("");
     expect(config.harperPid).toBeNull();
   } finally {
-    proc.stdin?.end();
-    try { proc.kill("SIGKILL"); } catch {}
+    const exited = waitForExit(proc, "JSON helper exit");
+    proc.kill("SIGKILL");
+    await exited;
   }
-});
+}, TEST_TIMEOUT_MS);
 
 // ─── Source-level assertion (mutation-checkable) ───────────────────────────
 // Directly verifies the boot-harper.mjs source emits rootPath + harperPid in
@@ -314,42 +261,23 @@ test("boot-harper.mjs source emits rootPath and harperPid in config object", () 
   expect(source).toMatch(/harperPid:\s*harper\.process\?\.pid/);
 });
 
-// ─── Recovery-path test (flair#1121) ───────────────────────────────────────
-// Simulates the recovery contract: a wrapper that emits rootPath + harperPid,
-// then blocks until stdin closes. We SIGKILL it mid-teardown and exercise the
-// documented recovery path using the emitted fields.
-//
-// This is a mock test — it does NOT boot a real Harper. The real-Harper
-// integration test is too slow for CI (Harper warm-up >300s on cold runners).
-// The contract under test is the JSON line format + the recovery procedure,
-// both of which are exercised here.
-
-test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", async () => {
-  const rootPath = join(tmpdir(), `flair-test-recovery-${process.pid}`);
-  const { mkdir, writeFile } = await import("node:fs/promises");
-
-  // Create a mock install tree with a fake hdb.pid (simulating an orphaned Harper)
-  await mkdir(rootPath, { recursive: true });
-  await writeFile(join(rootPath, "hdb.pid"), String(process.pid), "utf-8");
-
-  // Spawn a mock wrapper that:
-  // 1. Prints the JSON line with rootPath + harperPid
-  // 2. Spawns a child process (simulating Harper)
-  // 3. Blocks until stdin closes, then "tears down" (kills child, removes tree)
-  const mockScript = join(tmpdir(), `adk-flair-test-recovery-mock-${process.pid}.mjs`);
+function writeRecoveryMock(rootPath: string): string {
+  const mockScript = join(rootPath, "recovery-mock.mjs");
   writeFileSync(mockScript, [
     "import { spawn } from 'node:child_process';",
-    "import { rm } from 'node:fs/promises';",
+    "import { writeFileSync, rmSync } from 'node:fs';",
+    "import { join } from 'node:path';",
     "",
     `const ROOT = ${JSON.stringify(rootPath)};`,
+    "const parentPid = process.ppid;",
     "",
-    "// Spawn a mock Harper child (just sleeps)",
-    "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300_000)'], {",
+    `const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, ${MOCK_LIFETIME_TIMEOUT_MS})'], {`,
     "  stdio: 'ignore',",
     "  detached: true,",
+    `  timeout: ${MOCK_LIFETIME_TIMEOUT_MS},`,
     "});",
+    "writeFileSync(join(ROOT, 'mock-child.pid'), String(child.pid));",
     "",
-    "// Emit the JSON config line",
     "const config = {",
     "  httpURL: 'http://127.0.0.1:19926',",
     "  opsURL: 'http://127.0.0.1:19925',",
@@ -362,26 +290,92 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
     "};",
     "process.stdout.write(JSON.stringify(config) + '\\n');",
     "",
-    "// Block until stdin closes (teardown signal)",
-    "await new Promise(r => process.stdin.on('end', r));",
-    "",
-    "// Teardown: kill child, then remove tree",
-    "try { child.kill('SIGTERM'); }",
-    "catch {}",
-    "// Simulate slow teardown — this is where SIGKILL catches us",
-    "await new Promise(r => setTimeout(r, 5000));",
+    "const reason = await new Promise(resolve => {",
+    "  let settled = false;",
+    "  const finish = value => {",
+    "    if (settled) return;",
+    "    settled = true;",
+    "    clearInterval(parentCheck);",
+    "    clearTimeout(deadline);",
+    "    resolve(value);",
+    "  };",
+    "  const parentCheck = setInterval(() => {",
+    "    if (process.ppid !== parentPid) finish('parent');",
+    `  }, ${PROCESS_POLL_INTERVAL_MS});`,
+    `  const deadline = setTimeout(() => finish('deadline'), ${MOCK_LIFETIME_TIMEOUT_MS});`,
+    "  if (process.env.RECOVERY_MOCK_IGNORE_STDIN !== '1') {",
+    "    process.stdin.once('end', () => finish('stdin'));",
+    "    process.stdin.resume();",
+    "  }",
+    "});",
+    "if (reason === 'stdin') {",
+    "  process.stdout.write(JSON.stringify({ teardown: 'started' }) + '\\n');",
+    `  await new Promise(r => setTimeout(r, ${MOCK_TEARDOWN_TIMEOUT_MS}));`,
+    "}",
     "try { child.kill('SIGKILL'); } catch {}",
-    "await rm(ROOT, { recursive: true, force: true });",
+    "rmSync(ROOT, { recursive: true, force: true });",
+    "if (process.env.RECOVERY_MOCK_EXIT_FILE) {",
+    "  writeFileSync(process.env.RECOVERY_MOCK_EXIT_FILE, reason);",
+    "}",
+    "process.exit(0);",
   ].join("\n"), "utf-8");
+  return mockScript;
+}
 
-  const cleanupMockScript = () => {
-    try { unlinkSync(mockScript); } catch {}
-  };
+function killPid(pid: number | undefined): void {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) return;
+  try { process.kill(pid, "SIGKILL"); } catch {}
+}
+
+function processRunning(
+  pid: number,
+  platform = process.platform,
+  readStat = (value: number) => readFileSync(`/proc/${value}/stat`, "utf-8"),
+): boolean {
+  if (platform === "linux") {
+    try {
+      const stat = readStat(pid);
+      return stat[stat.lastIndexOf(")") + 2] !== "Z";
+    } catch (error: any) {
+      if (error.code === "ENOENT" || error.code === "ESRCH") return false;
+      throw error;
+    }
+  }
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+for (const code of ["ENOENT", "ESRCH"]) {
+  test(`processRunning treats disappearing /proc (${code}) as exited`, () => {
+    expect(processRunning(42, "linux", () => { throw Object.assign(new Error("gone"), { code }); })).toBe(false);
+  });
+}
+
+test("processRunning treats a Linux zombie as exited", () => {
+  expect(processRunning(42, "linux", () => "42 (mock child) Z")).toBe(false);
+});
+
+test("processRunning propagates an unreadable Linux process state", () => {
+  expect(() => processRunning(42, "linux", () => { throw Object.assign(new Error("unreadable"), { code: "EACCES" }); }))
+    .toThrow("unreadable");
+});
+
+function recordedMockPid(rootPath: string, name: string): number | undefined {
+  try { return Number(readFileSync(join(rootPath, name), "utf-8")); }
+  catch { return undefined; }
+}
+
+test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", async () => {
+  const rootPath = mkdtempSync(join(tmpdir(), "flair-test-recovery-"));
+  writeFileSync(join(rootPath, "hdb.pid"), String(process.pid), "utf-8");
+  const mockScript = writeRecoveryMock(rootPath);
+  let wrapper: ChildProcess | undefined;
+  let harperPid: number | undefined;
 
   try {
     // ── Spawn the mock wrapper ──────────────────────────────────────────
-    const wrapper = spawn(process.execPath, [mockScript], {
+    wrapper = spawn("node", [mockScript], {
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: TEST_TIMEOUT_MS,
     });
 
     // Read the JSON line
@@ -390,7 +384,7 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
       const timeout = setTimeout(() => {
         try { wrapper.kill("SIGKILL"); } catch {}
         reject(new Error("mock wrapper timed out"));
-      }, 30_000);
+      }, PROCESS_WAIT_TIMEOUT_MS);
 
       wrapper.stdout?.on("data", (chunk: Buffer) => {
         stdout += chunk.toString();
@@ -415,7 +409,7 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
       });
     });
 
-    const harperPid = config.harperPid as number;
+    harperPid = config.harperPid as number;
     expect(config.rootPath).toBe(rootPath);
     expect(typeof harperPid).toBe("number");
     expect(harperPid).toBeGreaterThan(0);
@@ -430,27 +424,53 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
     expect(existsSync(join(rootPath, "hdb.pid"))).toBe(true);
 
     // ── SIGKILL the wrapper mid-teardown ────────────────────────────────
-    wrapper.stdin?.end(); // trigger teardown
-    await new Promise(r => setTimeout(r, 100)); // tiny window for teardown to start
-    try { wrapper.kill("SIGKILL"); } catch {}
-
-    // Wait for wrapper to exit
-    await new Promise<void>(r => {
-      wrapper.on("exit", () => r());
-      setTimeout(r, 5000);
+    await new Promise<void>((resolve, reject) => {
+      let stdout = "";
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("mock wrapper did not report teardown start within its timeout"));
+      }, PROCESS_WAIT_TIMEOUT_MS);
+      const onData = (chunk: Buffer) => {
+        stdout += chunk.toString();
+        let end: number;
+        while ((end = stdout.indexOf("\n")) !== -1) {
+          const line = stdout.slice(0, end);
+          stdout = stdout.slice(end + 1);
+          try {
+            if (JSON.parse(line).teardown === "started") {
+              cleanup();
+              resolve();
+              return;
+            }
+          } catch {}
+        }
+      };
+      const onExit = () => {
+        cleanup();
+        reject(new Error("mock wrapper exited before teardown start marker"));
+      };
+      const cleanup = () => {
+        clearTimeout(timeout);
+        wrapper!.stdout?.off("data", onData);
+        wrapper!.off("exit", onExit);
+      };
+      wrapper!.stdout?.on("data", onData);
+      wrapper!.once("exit", onExit);
+      wrapper!.stdin?.end();
     });
+    const exited = waitForExit(wrapper, "killed recovery wrapper exit");
+    wrapper.kill("SIGKILL");
+    await exited;
 
     // ── The mock Harper child should still be alive (orphaned) ──────────
-    // (The wrapper's teardown has a 5s sleep before killing the child,
-    // so our SIGKILL catches it before the child is killed.)
     try { process.kill(harperPid, 0); childAlive = true; } catch { childAlive = false; }
-    // The child may or may not survive depending on timing — either is valid
+    expect(childAlive).toBe(true);
 
     // ── Exercise the documented recovery path ───────────────────────────
     // 1. Kill by explicit harperPid
     if (childAlive) {
       try { process.kill(harperPid, "SIGKILL"); } catch {}
-      await new Promise(r => setTimeout(r, 1000));
+      await waitUntil("orphaned Harper child exit", () => !processRunning(harperPid!));
     }
 
     // 2. Remove the tree by rootPath
@@ -459,13 +479,79 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
     }
 
     // ── Verify: no process, no tree ─────────────────────────────────────
-    let stillAlive = true;
-    try { process.kill(harperPid, 0); } catch { stillAlive = false; }
-    expect(stillAlive).toBe(false);
+    expect(processRunning(harperPid)).toBe(false);
     expect(existsSync(rootPath)).toBe(false);
   } finally {
-    cleanupMockScript();
-    // Best-effort cleanup in case the test failed mid-way
+    killPid(wrapper?.pid);
+    killPid(harperPid ?? recordedMockPid(rootPath, "mock-child.pid"));
     try { rmSync(rootPath, { recursive: true, force: true, maxRetries: 2 }); } catch {}
   }
-}, 60_000);
+}, TEST_TIMEOUT_MS);
+
+test("recovery mock exits when its parent disappears", async () => {
+  const rootPath = mkdtempSync(join(tmpdir(), "flair-test-parent-exit-"));
+  const exitFile = `${rootPath}.exit`;
+  const mockScript = writeRecoveryMock(rootPath);
+  const launcherCode = [
+    "const { spawn } = require('node:child_process');",
+    "const { writeFileSync } = require('node:fs');",
+    "const wrapper = spawn(process.execPath, [process.argv[1]], {",
+    "  stdio: ['pipe', 'pipe', 'pipe'],",
+    "  detached: true,",
+    `  timeout: ${TEST_TIMEOUT_MS},`,
+    "  env: { ...process.env, RECOVERY_MOCK_IGNORE_STDIN: '1', RECOVERY_MOCK_EXIT_FILE: process.argv[2] },",
+    "});",
+    "writeFileSync(process.argv[3], String(wrapper.pid));",
+    "let stdout = '';",
+    "wrapper.stdout.on('data', chunk => {",
+    "  stdout += chunk.toString();",
+    "  const end = stdout.indexOf('\\n');",
+    "  if (end < 0) return;",
+    "  const config = JSON.parse(stdout.slice(0, end));",
+    "  process.stdout.write(JSON.stringify({ wrapperPid: wrapper.pid, harperPid: config.harperPid }) + '\\n', () => process.exit(0));",
+    "});",
+    "wrapper.on('error', error => { console.error(error); process.exit(1); });",
+  ].join("\n");
+  let launcher: ChildProcess | undefined;
+  let wrapperPid: number | undefined;
+  let harperPid: number | undefined;
+  let launcherStderr = "";
+
+  try {
+    launcher = spawn("node", ["-e", launcherCode, mockScript, exitFile, join(rootPath, "mock-wrapper.pid")], {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: TEST_TIMEOUT_MS,
+    });
+    launcher.stderr?.on("data", (chunk: Buffer) => { launcherStderr += chunk.toString(); });
+    const pids = await new Promise<{ wrapperPid: number; harperPid: number }>((resolve, reject) => {
+      let stdout = "";
+      const deadline = setTimeout(() => reject(new Error("launcher did not report mock PIDs")), PROCESS_WAIT_TIMEOUT_MS);
+      launcher!.stdout?.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        const end = stdout.indexOf("\n");
+        if (end < 0) return;
+        clearTimeout(deadline);
+        resolve(JSON.parse(stdout.slice(0, end)));
+      });
+      launcher!.on("error", error => { clearTimeout(deadline); reject(error); });
+      launcher!.on("exit", code => {
+        if (code !== 0) { clearTimeout(deadline); reject(new Error(`launcher exited ${code}`)); }
+      });
+    });
+    wrapperPid = pids.wrapperPid;
+    harperPid = pids.harperPid;
+    expect(wrapperPid).toBeGreaterThan(0);
+    expect(harperPid).toBeGreaterThan(0);
+
+    await waitUntil(`parent-exit marker; launcher stderr: ${launcherStderr}`, () => existsSync(exitFile));
+    expect(readFileSync(exitFile, "utf-8")).toBe("parent");
+    expect(existsSync(rootPath)).toBe(false);
+    await waitUntil("parentless recovery wrapper exit", () => !processRunning(wrapperPid!));
+  } finally {
+    killPid(launcher?.pid);
+    killPid(wrapperPid ?? recordedMockPid(rootPath, "mock-wrapper.pid"));
+    killPid(harperPid ?? recordedMockPid(rootPath, "mock-child.pid"));
+    try { rmSync(rootPath, { recursive: true, force: true }); } catch {}
+    try { unlinkSync(exitFile); } catch {}
+  }
+}, TEST_TIMEOUT_MS);

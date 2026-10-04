@@ -165,7 +165,8 @@ describe("flair workspace set", () => {
 
     const { server, url } = await startMockServer((req, body, res) => {
       expect(req.method).toBe("PUT");
-      expect(req.url).toBe(`/WorkspaceState/${agentId}:cp7-coord`);
+      // The id is one encoded path segment (#1970); Harper decodes it to the same record.
+      expect(req.url).toBe(`/WorkspaceState/${encodeURIComponent(`${agentId}:cp7-coord`)}`);
       const parsed = JSON.parse(body);
       expect(parsed.id).toBe(`${agentId}:cp7-coord`);
       expect(parsed.ref).toBe("cp7-coord");

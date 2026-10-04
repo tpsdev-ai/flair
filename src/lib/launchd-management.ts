@@ -444,9 +444,20 @@ export function pickInstancePid(input: {
   pidFilePid: number | null;
   isAlive: (pid: number) => boolean;
   listeningPids: number[];
+  /**
+   * flair#2056: the caller's check on the pidfile pid
+   * (resolveInstanceServingPid: a Harper-shaped command line and no
+   * disagreeing flair#1454 sidecar). When given, a live pidfile pid is
+   * returned only if it answers true; otherwise the first port listener is
+   * returned, if there is one, and that can be the same pid. Omitted by
+   * callers that have not gathered this evidence.
+   */
+  isPidFileEvidence?: (pid: number) => boolean;
 }): number | null {
-  const { pidFilePid, isAlive, listeningPids } = input;
-  if (pidFilePid !== null && isAlive(pidFilePid)) return pidFilePid;
+  const { pidFilePid, isAlive, listeningPids, isPidFileEvidence } = input;
+  if (pidFilePid !== null && isAlive(pidFilePid) && (isPidFileEvidence === undefined || isPidFileEvidence(pidFilePid))) {
+    return pidFilePid;
+  }
   return listeningPids.length > 0 ? listeningPids[0] : null;
 }
 

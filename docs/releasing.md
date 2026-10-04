@@ -15,13 +15,8 @@ The staging tag is an **immutable property of the staged package** (`npm help st
 re-staging the same version under a different tag requires `npm stage reject` first.
 There is no "fix the stage in place" — you reject it and re-cut the next patch.
 
-> `flair-bench` is version-bumped and tagged in lockstep with the other 7, and stages in
-> its own step in CI for [historical reasons](#flair-bench-bootstrap-one-time-done). That
-> step is no longer allowed to fail: every already-published package must stage
-> for a release to pass.
-
 ```
- merge release PR ──▶ push tag v0.11.0 ──▶ CI stages all packages (tag: staged)
+ merge release PR ──▶ auto-tag v0.11.0 ──▶ CI stages all packages (tag: staged)
                                                                           │
                                                   maintainer reviews + approves (2FA)
                                                                           ▼
@@ -35,12 +30,10 @@ There is no "fix the stage in place" — you reject it and re-cut the next patch
                                                                   latest moves
 ```
 
-Pushing a `vX.Y.Z` tag triggers the release. This replaces the old "run
-`release.sh --publish` from a laptop logged into npm" flow. Nothing publishes without
-a human 2FA approval, and every package ships with a provenance attestation (public
-repo → verifiable build origin). The person who tags the release does **not** need npm
-credentials or `Actions: write` — only repo push access; the only privileged step is
-the maintainer's 2FA approval.
+One `vX.Y.Z` tag starts npm staging and the `adk-flair` PyPI workflow.
+PyPI requires the matching `packages/adk-flair/pyproject.toml` version and approval
+in the `adk-flair-publish` environment. `adk-flair-vX.Y.Z` remains available for
+Python-only releases; `workflow_dispatch` remains the manual fallback.
 
 ## Cutting a release
 
@@ -50,8 +43,10 @@ the maintainer's 2FA approval.
 ./scripts/release.sh 0.11.0
 ```
 
-This assembles the changelog, bumps every workspace package to the version, aligns
-internal deps, refreshes `bun.lock`, builds, tests, and opens a `release: v0.11.0` PR.
+This assembles the changelog, bumps the lockstep release packages (listed in
+`scripts/release.sh`) to the version, aligns internal deps, refreshes `bun.lock`, builds,
+tests, and opens a `release: v0.11.0` PR. The Cursor workspaces (`packages/cursor-flair`
+and `packages/cursor-wake-runner`) keep their own versions.
 Review and merge it (CI green + K&S approval) the same as any other PR.
 
 **Nothing about the version is bumped by hand.** The version is declared outside
@@ -84,7 +79,7 @@ fragment directory is empty (nothing to release) or when someone hand-wrote an e
 ### Phase 2 — tag the release
 
 After a release PR merges to `main`, [Release auto-tag](../.github/workflows/release-auto-tag.yml)
-normally creates its tag after a successful push CI run, subject to the release checks.
+normally creates its tag after a successful push CI run on `main`, subject to the release checks.
 If an allowlisted advisory job fails that CI run, the immediate path is skipped and
 nightly recovery makes the tag instead. It runs at **04:23 UTC daily**, so expect up
 to **24 hours plus run time**. It uses completed CI runs regardless of their overall
@@ -92,21 +87,21 @@ conclusion and tolerates only exact names in [the advisory allowlist](../.github
 All other release conditions must pass, and it targets the version still declared
 on `main`, so a newer version supersedes a missed release.
 
-To tag by hand, push the version tag:
+If Release auto-tag refused, resolve what it reports; do not tag by hand. If it did not
+run, a repository admin tags by hand (a ruleset restricts creating `v*` tags) once the
+checks it applies pass. The first command must print nothing:
 
 ```bash
+git ls-remote --tags origin v0.11.0
 git checkout main && git pull
 git tag v0.11.0 && git push origin v0.11.0
 ```
 
-> The [`release-auto-tag`](../.github/workflows/release-auto-tag.yml) workflow
-> normally pushes this tag for you once a release PR merges green (see
-> [#1928](https://github.com/tpsdev-ai/flair/issues/1928)); the hand-push above is
-> the manual fallback. When the release commit's tree carries
+> When the release commit's tree carries
 > `packages/adk-flair/pyproject.toml` whose `[project].version` equals the version
 > being tagged, the auto-tagger ALSO creates `adk-flair-v<version>` from the same
-> commit — so the PyPI publish run then needs only the environment gate its owner
-> keeps or drops (no hand-pushed `adk-flair-v` tag).
+> commit. PyPI runs serialize per version, upload missing artifacts after the guards pass,
+> and verify both filenames and SHA256 digests; lookup errors fail the run.
 >
 > The project version is read with Python's `tomllib` — the SAME reader
 > `.github/workflows/adk-flair-publish.yml` decides with — by handing the file to
@@ -179,11 +174,11 @@ workflow, which:
 3. Verifies every lockstep package's `package.json` is at that version.
 4. Builds every package.
 5. Runs `npm stage publish` for each lockstep package in dependency order
-   (flair-client first), then `flair-bench` in its own step. Any lockstep package
+   (flair-client first). Any lockstep package
    failing to stage fails the release.
 
 It authenticates via OIDC — no secrets, and it does **not** create or move any tag (the
-tag you pushed is the trigger). Watch the run; when it's green, the packages are staged
+tag is the trigger). Watch the run; when it's green, the packages are staged
 but **not yet live**.
 
 In parallel — and **independent of the npm staging approval** — a `github-release` job
@@ -360,10 +355,6 @@ published; since flair#1683 it is a
 
 ### `flair-bench` bootstrap (one-time, done)
 
-**Nothing to do here.** This section is kept because the next brand-new package added to
-the release set will hit the same wall, and because it explains why `flair-bench` still
-stages in its own workflow step.
-
 `flair-bench` (added 2026-07-12, flair#702) was wired into the version-bump/tag flow
 (`scripts/release.sh`, `release-publish.yml`'s version-check) alongside the other 7 before
 it existed on npm at all. That is a chicken-and-egg: `npm stage publish` categorically
@@ -394,6 +385,12 @@ reviewers** — the human gate is the npm staging approval, not a GitHub deploym
 review. Because the release is triggered by a tag push, its deployment policy must allow
 **`v*` tags** (Settings → Environments → `release` → Deployment branches and tags →
 Selected branches and tags → add tag rule `v*`).
+
+### GitHub `adk-flair-publish` environment
+
+Repository admin: add the tag rule `v*` under Settings → Environments →
+`adk-flair-publish` → Deployment branches and tags → Selected branches and tags.
+Keep `adk-flair-v*` and the required reviewer. No tag-creation ruleset change is needed.
 
 ### Required status checks (ruleset)
 

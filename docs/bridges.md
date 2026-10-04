@@ -47,6 +47,12 @@ interface BridgeMemory {
 }
 ```
 
+- permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+- persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+- standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+- ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+- No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
+
 **Required on import:** `content` and (`agentId` or the `--agent` flag).
 
 **Flair-owned, never set by a bridge:** `contentHash`, `embedding`, `embeddingModel`, `retrievalCount`, `lastRetrieved`, `promotionStatus`, `_safetyFlags`, any `*By` audit field. These are computed on ingest; if a bridge emits them they're ignored.
@@ -73,6 +79,9 @@ Common runtime options for `import`:
 | `--port <port>` | Harper HTTP port |
 | `--url <url>` | Flair base URL (overrides `--port`) |
 | `--key <path>` | Ed25519 private key path (default: resolved from agent) |
+| `--user <id>` | Foreign-system user id for bridges that import one user (e.g. mem0); YAML imports do not use it |
+| `--base-url <url>` | HTTP(S) base URL of the foreign API for API bridges (e.g. a self-hosted mem0); an explicit empty or invalid mem0 URL is refused |
+| `--api-key-file <path>` | For API bridges that declare an `apiKey` option, read the key from a file with no group/world permissions (`chmod 600` recommended). YAML imports refuse this flag. For mem0, `MEM0_API_KEY` is the alternative; the key is never a flag value. |
 
 ## Your first import (worked example: agentic-stack)
 

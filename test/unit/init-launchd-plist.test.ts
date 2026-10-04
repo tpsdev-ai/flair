@@ -28,21 +28,31 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  lstatSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
   existsSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   buildLaunchdPlist,
+  registerInitLaunchdService,
+  setLaunchdMigrationLintForTests,
   writeInitLaunchdPlist,
   type LaunchdPlistOptions,
   type WriteInitLaunchdPlistOptions,
 } from "../../src/cli.ts";
 import { resolveHome } from "../../src/lib/home.ts";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
+
+const CLI_JS = join(__dirname, "..", "..", "dist", "cli.js");
 
 let tmp: string;
 let savedFlairPass: string | undefined;
@@ -304,4 +314,87 @@ describe("writeInitLaunchdPlist — re-points an adopted plist at this CLI's tre
     if (result.kind === "not-repointed") expect(result.detail).toContain("separately managed");
     expect(readFileSync(opts.plistPath, "utf-8")).toBe(before);
   });
+});
+
+describe("registerInitLaunchdService — symlink preflight (#2085)", () => {
+  async function runWithPlistPath(path: string) {
+    return registerInitLaunchdService({
+      dataDir: DATA_DIR,
+      port: 9926,
+      plistDir: tmp,
+      write: baseOptions({ plistPath: path }),
+    });
+  }
+
+  test("refuses an existing plist symlink without replacing it or changing its target", async () => {
+    const path = baseOptions().plistPath;
+    const target = join(tmp, "prior.xml");
+    const prior = plistFor(DATA_DIR);
+    writeFileSync(target, prior, { mode: 0o600 });
+    symlinkSync(target, path);
+
+    const result = await runWithPlistPath(path);
+
+    expect(result.kind).toBe("skipped");
+    const message = result.lines.map((line) => line.text).join("\n");
+    expect(message).toContain(`${path} is a symbolic link`);
+    expect(message).toContain(`Fix: move or remove the symbolic link at ${path}`);
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(path)).toBe(target);
+    expect(readFileSync(target, "utf-8")).toBe(prior);
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  test("refuses a dangling plist symlink as present and leaves it intact", async () => {
+    const path = baseOptions().plistPath;
+    const target = join(tmp, "missing.xml");
+    symlinkSync(target, path);
+    expect(existsSync(path)).toBe(false);
+
+    const result = await runWithPlistPath(path);
+
+    expect(result.kind).toBe("skipped");
+    const message = result.lines.map((line) => line.text).join("\n");
+    expect(message).toContain(`${path} is a symbolic link`);
+    expect(message).toContain(`Fix: move or remove the symbolic link at ${path}`);
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(path)).toBe(target);
+    expect(existsSync(target)).toBe(false);
+  });
+});
+
+describe("registerInitLaunchdService — rollback permissions (#2085)", () => {
+  test("restores a 01644 prior plist under umask 077 after validation refuses it", () => {
+    // Bun's chmod and fchmod drop the sticky bit; the published CLI runs on Node.
+    ensureCliBuild();
+    const opts = baseOptions();
+    const prior = plistFor(DATA_DIR).replace("start-flair-with-admin-pass.sh", "prior-launcher.sh");
+    writeFileSync(opts.plistPath, prior);
+    writePassFile(opts.adminPassPath!, "PLACEHOLDER-existing-pass");
+
+    const script = `
+      import { chmodSync, statSync } from "node:fs";
+      import { registerInitLaunchdService, setLaunchdMigrationLintForTests } from ${JSON.stringify(pathToFileURL(CLI_JS).href)};
+      const [plistDir, dataDir, write] = [process.argv[1], process.argv[2], JSON.parse(process.argv[3])];
+      chmodSync(write.plistPath, 0o1644);
+      const before = statSync(write.plistPath).mode & 0o7777;
+      process.umask(0o077);
+      setLaunchdMigrationLintForTests(() => "injected validation refusal");
+      const result = await registerInitLaunchdService({ dataDir, port: 9926, plistDir, write });
+      const after = statSync(write.plistPath).mode & 0o7777;
+      process.stdout.write(JSON.stringify({ kind: result.kind, text: result.lines.map((line) => line.text).join("\\n"), before, after }));
+    `;
+    const child = spawnSync("node", ["--input-type=module", "-e", script, tmp, DATA_DIR, JSON.stringify(opts)], {
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
+    if (child.status !== 0) throw new Error(`node exited ${child.status}: ${child.stderr}`);
+    const result = JSON.parse(child.stdout);
+
+    expect(result.before).toBe(0o1644);
+    expect(result.kind).toBe("skipped");
+    expect(result.text).toContain("the prior plist bytes and mode");
+    expect(readFileSync(opts.plistPath, "utf-8")).toBe(prior);
+    expect(result.after).toBe(0o1644);
+  }, 120_000);
 });

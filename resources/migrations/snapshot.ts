@@ -75,6 +75,7 @@ export function createMigrationSnapshot(opts: CreateMigrationSnapshotOpts, deps:
   const now = deps.now();
   const iso = now.toISOString().replace(/[:.]/g, "-");
   const dir = join(deps.snapshotRoot, `${sanitizeIdPart(opts.migrationId)}-${iso}`);
+  ensureSecureDir(deps.snapshotRoot);
   ensureSecureDir(dir);
 
   const manifest = {

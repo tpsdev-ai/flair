@@ -12,6 +12,8 @@ import {
   CLAUDE_MD_BOOTSTRAP_MARKER,
   SESSION_START_HOOK_MARKER,
   classifyKeyFile,
+  classifyNodeKeySeed,
+  orphanInstanceSeedAdvisory,
   resolveCollisionSafeName,
   pruneDateStamp,
   PRUNED_DIR_NAME,
@@ -456,6 +458,62 @@ describe("classifyKeyFile", () => {
     const d = classifyKeyFile("local", true, { state: "registered" }, BASE_URL);
     expect(d.class).not.toBe("stale");
     expect(d.class).not.toBe("invalid");
+  });
+});
+
+describe("classifyNodeKeySeed", () => {
+  const BASE_URL = "http://127.0.0.1:19926";
+  const NODE = "flair_1111aaaa";
+
+  it("neither checked target table names the id → class 'orphan-candidate'", () => {
+    const d = classifyNodeKeySeed(NODE, [], BASE_URL, []);
+    expect(d.class).toBe("orphan-candidate");
+    expect(d.reason).toContain(NODE);
+    expect(d.reason).toContain(BASE_URL);
+  });
+
+  it("an Instance row names the id → class 'keep' (named by the checked target table; kept)", () => {
+    const d = classifyNodeKeySeed(NODE, [NODE], BASE_URL, []);
+    expect(d.class).toBe("keep");
+    expect(d.class).not.toBe("orphan-candidate");
+  });
+
+  it("Instance rows NOT read (null) → 'unidentified', NEVER 'orphan'", () => {
+    const d = classifyNodeKeySeed(NODE, null, BASE_URL);
+    expect(d.class).toBe("unidentified");
+    expect(d.class).not.toBe("orphan-candidate");
+    expect(d.class).not.toBe("keep");
+    expect(d.reason).toBe(
+      "Instance reference check unavailable; node-shaped seed left in place",
+    );
+  });
+});
+
+describe("orphanInstanceSeedAdvisory (flair#1925)", () => {
+  const KEYS = "/home/u/.flair/keys";
+
+  it("counts candidates in the checked target tables without naming a command", () => {
+    const line = orphanInstanceSeedAdvisory({
+      nodeKeyIds: ["flair_1111aaaa", "flair_2222bbbb"],
+      instanceIds: ["flair_2222bbbb"],
+      keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [],
+    });
+    expect(line).toContain("1 orphan candidate(s)");
+    expect(line).not.toContain("flair keys prune");
+    expect(line).toContain("#2200");
+    expect(line).toContain(KEYS);
+  });
+
+  it("no orphans → no line", () => {
+    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: ["flair_1111aaaa"], instanceIds: ["flair_1111aaaa"], keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [] })).toBeNull();
+  });
+
+  it("no node-shaped seed → no line (and no read was needed)", () => {
+    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: [], instanceIds: [], keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [] })).toBeNull();
+  });
+
+  it("Instance rows NOT read → an unreadable advisory", () => {
+    expect(orphanInstanceSeedAdvisory({ nodeKeyIds: ["flair_1111aaaa"], instanceIds: null, keysDir: KEYS, baseUrl: "http://127.0.0.1:19926", agentIds: [] })).toContain("Instance reference check unavailable");
   });
 });
 

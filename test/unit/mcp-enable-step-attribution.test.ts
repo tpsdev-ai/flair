@@ -81,12 +81,12 @@ describe("enableMcp — the failed step is the one that ran, not the one before 
 // ─── The gap a review called "sufficient" ────────────────────────────────────
 //
 // The first version of this fix set `currentStep` before the four ASYNC
-// operations only. Four steps run before that — local-origin-check, signing-key,
-// config-block, idp-credentials — during which `currentStep` was undefined and
-// the catch fell back to the literal "signing-key".
+// operations only. Steps run before that — local-origin-check, config-block,
+// idp-credentials — during which `currentStep` was undefined and the catch
+// fell back to a literal step name.
 //
-// So a throw during idp-credentials would have been reported as a signing-key
-// failure: the same defect class this PR fixes, with a different wrong answer.
+// So a throw during idp-credentials would have been reported against another
+// step: the same defect class this PR fixes, with a different wrong answer.
 // A partial fix for a defect class is how the class survives.
 describe("every step sets the tracker — no window attributes a throw elsewhere", () => {
   const src = readFileSync(

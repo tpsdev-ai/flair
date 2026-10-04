@@ -384,7 +384,8 @@ describe("local init admin password handling", () => {
   });
 
   afterEach(() => {
-    process.env = oldEnv;
+    for (const key of Object.keys(process.env)) if (!(key in oldEnv)) delete process.env[key];
+    for (const [key, value] of Object.entries(oldEnv)) process.env[key] = value;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -420,7 +421,10 @@ describe("local init admin password handling", () => {
     );
 
     const adminPassPath = join(tmpDir, ".flair", "admin-pass");
-    expect(existsSync(adminPassPath)).toBe(false); // Because we provided password via env, not generated
+    // flair#2210: init persists the explicit credential on every platform (0600, exactly as given).
+    expect(existsSync(adminPassPath)).toBe(true);
+    expect(readFileSync(adminPassPath, "utf8")).toBe(testPass + "\n");
+    expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
     // The admin password should not be printed
     expect(stdout).not.toContain(testPass);
     // flair#1807: measured, a full `flair init --skip-start --skip-soul` run on
@@ -436,7 +440,10 @@ describe("local init admin password handling", () => {
     );
 
     const adminPassPath = join(tmpDir, ".flair", "admin-pass");
-    expect(existsSync(adminPassPath)).toBe(false); // Not generated
+    // flair#2210: init persists the explicit credential on every platform (0600, exactly as given).
+    expect(existsSync(adminPassPath)).toBe(true);
+    expect(readFileSync(adminPassPath, "utf8")).toBe(testPass + "\n");
+    expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
     // The password should not be in stdout
     expect(stdout).not.toContain(testPass);
     // But a warning should be in stderr about inline admin pass

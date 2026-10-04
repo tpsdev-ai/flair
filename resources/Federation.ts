@@ -21,6 +21,7 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance } from "./instance-create-lock.js";
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
+import { isReservedSeedId } from "./seed-reservation.js";
 import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -29,12 +30,14 @@ import {
   classifyRecord,
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
+  inboundChangesExistingPrincipalStatus,
   type FederationSyncTable,
 } from "./federation-classify.js";
 export {
   classifyRecord,
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
+  inboundChangesExistingPrincipalStatus,
   recordSignatureVersion,
   PRINCIPAL_OWNING_TABLES,
   FEDERATION_TABLE_POLICY,
@@ -828,6 +831,19 @@ export class FederationSync extends Resource {
           continue;
         }
 
+        // ── flair#2108: skip an inbound Agent record whose `status` differs
+        // from an existing local principal's stored value, whether or not it
+        // would win the last-write-wins merge below. The federation path
+        // carries no verified administrator authority for that principal (the
+        // batch is signed, and a record signature may also be present; neither
+        // is an admin claim). The whole record is skipped rather than merged
+        // with a pinned status, so the merge stays atomic and the other fields
+        // in the record do not land either.
+        if (inboundChangesExistingPrincipalStatus(record, local)) {
+          recordSkip("agent_status_not_federated");
+          continue;
+        }
+
         const mergedData = mergeRecord(local, record);
 
         // ── flair#1940 A1'' item 8: the SAME declared-attribute whitelist the
@@ -847,6 +863,13 @@ export class FederationSync extends Resource {
         // gate. Skip it: skills are written locally via skill_store, never synced.
         if (record.table === "Memory" && isSkillWrite(mergedData)) {
           recordSkip("skill_not_federated");
+          continue;
+        }
+
+        // flair#2141 S2: the merge skips a row on the seed's fixed id
+        // (resources/seed-reservation.ts), whatever its tags.
+        if (isReservedSeedId(record.table, record.id)) {
+          recordSkip("seed_id_not_federated");
           continue;
         }
 

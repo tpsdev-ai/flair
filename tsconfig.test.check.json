@@ -14,6 +14,9 @@
       "bun-types"
     ],
     "paths": {
+      "@tpsdev-ai/flair-client": [
+        "./packages/flair-client/src/index.ts"
+      ],
       "harper": [
         "./types/harper.d.ts"
       ]

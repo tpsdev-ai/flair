@@ -130,6 +130,7 @@ registered identities.
        github:
          clientId: ${OAUTH_GITHUB_CLIENT_ID}
          clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
+         redirectUri: ${OAUTH_GITHUB_REDIRECT_URI}   # this instance's public origin + /oauth; the plugin appends '/github/callback'. Since @harperfast/oauth 2.7.0 a CONFIGURED provider needs it (2.8.1 skips an unconfigured one first — HarperFast/oauth#259)
      mcp:
        enabled: ${FLAIR_MCP_OAUTH}          # whole-token env reference (flair#1152) — the choice lives in the ENVIRONMENT, so a re-packed deploy can't revert it
        issuer: ${FLAIR_MCP_ISSUER}          # pin to your public origin — REQUIRED
@@ -144,7 +145,8 @@ registered identities.
          allowedHosts:                        # CIMD is the only supported client-registration path
            - claude.ai
            - claude.com
-       signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}    # pin in clusters
+       # signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}  # Optional pin; add this line and stage the variable.
+       # Without a pin, minting reuses a persisted key or generates and persists one if the key table is empty.
    ```
 
    **DCR is not supported; clients connect via CIMD (Client ID Metadata
@@ -162,6 +164,9 @@ registered identities.
      same var accepts only "true"/"false" and deletes anything else, so `1`
      gives you a guarded `/mcp` with no authorization server behind it).
    - `FLAIR_MCP_ISSUER=https://your-public-origin` (or `FLAIR_PUBLIC_URL`).
+   - `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET` and
+     `OAUTH_GITHUB_REDIRECT_URI=https://your-public-origin/oauth` — staged by
+     `flair mcp enable` using `--issuer` (default: `--instance`).
    - `FLAIR_MCP_JIT_PROVISION=1` — ONLY if you want unknown subjects
      auto-provisioned (default OFF; pre-provision Agent+Credential otherwise).
 

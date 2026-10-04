@@ -274,6 +274,49 @@ export function isStartTimeMatch(actualMs: number, recordedMs: number, tolerance
 }
 
 /**
+ * Does a flair#1454 sidecar's `startTimeMs` agree with a process's start
+ * second (flair#2056)? `startSecondMs` is the start time truncated to a whole
+ * second, in epoch ms. macOS reads the second `ps -o lstart=` reports; Linux
+ * derives it from `/proc` with a verified tick rate. They agree when they are
+ * within 2000 ms of each other, compared in milliseconds: a start
+ * second of 12 s against a sidecar of 14.5 s is 2500 ms and does not agree.
+ */
+export function sidecarStartAgrees(startSecondMs: number, sidecarStartMs: number): boolean {
+  return Math.abs(sidecarStartMs - startSecondMs) <= 2000;
+}
+
+/** A Harper entry path under an install tree: `…/node_modules/[@<scope>/]harper/dist/bin/harper.js`. */
+const HARPER_ENTRY_PATH = /(^|\/)node_modules\/(@[^/]+\/)?harper\/dist\/bin\/harper\.js$/;
+/** The relative entry Harper's own restart forks, from its package directory (LAUNCH_SERVICE_SCRIPTS.MAIN). */
+const HARPER_RESTART_ENTRY = "dist/bin/harper.js";
+
+/**
+ * Is this a Harper-shaped command line (flair#2056)? It shows what the process
+ * was started with, not that it serves anything.
+ *
+ * The first argument's basename is `node` or `bun`, and the second is a Harper
+ * entry path: `…/node_modules/harper/dist/bin/harper.js` or
+ * `…/node_modules/@<scope>/harper/dist/bin/harper.js` (what `flair start`, the
+ * launchd launcher and a systemd unit pass), or `dist/bin/harper.js` (what
+ * Harper's own restart forks). A second argument starting with `-`, or a Harper
+ * path in a later argument, does not match.
+ *
+ * `cmdline` is `/proc/<pid>/cmdline` (NUL-separated: the arguments exactly) or
+ * the line `ps -o command=` reports (arguments joined by spaces; split here on
+ * whitespace). From the `ps` line this does not establish which argument is the
+ * script: an argument containing a space can produce a matching line.
+ */
+export function isHarperProcessCommandLine(cmdline: string): boolean {
+  const args = cmdline.includes("\u0000") ? cmdline.split("\u0000") : cmdline.trim().split(/\s+/);
+  if (args.length < 2) return false;
+  const exe = args[0].split("/").pop();
+  if (exe !== "node" && exe !== "bun") return false;
+  const second = args[1];
+  if (second.startsWith("-")) return false;
+  return second === HARPER_RESTART_ENTRY || HARPER_ENTRY_PATH.test(second);
+}
+
+/**
  * Parse `/proc/<pid>/stat` field 22 (starttime, in clock ticks).
  *
  * Field 2 (comm) is parenthesised and may itself contain spaces and `)`
@@ -300,7 +343,7 @@ export function procStartTimeToEpochMs(
   starttimeTicks: number,
   uptimeSeconds: number,
   nowMs: number,
-  clkTck = 100,
+  clkTck: number,
 ): number {
   const bootTimeMs = nowMs - uptimeSeconds * 1000;
   return bootTimeMs + (starttimeTicks / clkTck) * 1000;

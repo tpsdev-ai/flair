@@ -25,25 +25,98 @@ ADMIN_PASS_FILE="$1"
 NODE="$2"
 HARPER_BIN="$3"
 
-# flair#2040: never start a SECOND instance on a data directory that a live
-# process already serves. `flair init`, and a `flair start`/`doctor --fix` that
-# fell back to a direct start, leave the instance running outside launchd with
-# this plist on disk (RunAtLoad + KeepAlive). When launchd later starts the job
-# — at the next console login, say — Harper's own "already running" check
-# (hdb.pid) would refuse, but only AFTER it has loaded its config and applied
-# HARPER_SET_CONFIG to the data directory's config state. Refuse here, before
-# Harper runs at all: no config load, no hdb.pid write, no port bind, no store
-# open, and the admin password is never read. Exit 0 — a deliberate no-op, not a
-# crash. KeepAlive makes launchd retry after its throttle interval (10 s by
-# default); once the direct process has exited, the next attempt starts Harper
-# and launchd owns the instance.
-# Mirrors Harper's getHdbPid(): a pid that is ours, 1, or not alive is no
-# evidence. ROOTPATH comes from the plist's EnvironmentVariables.
+# flair#2056: is "$1", the command line `ps -o command=` reports (arguments
+# joined by spaces), Harper-shaped? Its first word's basename is `node` or
+# `bun`, and its second word is a Harper entry path:
+# `…/node_modules/harper/dist/bin/harper.js`,
+# `…/node_modules/@<scope>/harper/dist/bin/harper.js` or `dist/bin/harper.js`
+# (what Harper's own restart forks). A second word starting with `-`, or a
+# Harper path in a later word, does not match. Because ps joins arguments with
+# spaces, this does not establish which argument is the script: an argument
+# containing a space can produce a matching line. Nor does it show that the
+# process serves anything. The CLI's check is isHarperProcessCommandLine in
+# src/lib/daemon-liveness.ts.
+is_harper_command() {
+  HC_LINE="$1"
+  HC_LINE="${HC_LINE#"${HC_LINE%%[! ]*}"}"
+  case "$HC_LINE" in *" "*) ;; *) return 1 ;; esac
+  HC_EXE="${HC_LINE%% *}"
+  HC_REST="${HC_LINE#* }"
+  HC_REST="${HC_REST#"${HC_REST%%[! ]*}"}"
+  HC_SCRIPT="${HC_REST%% *}"
+  case "${HC_EXE##*/}" in node|bun) ;; *) return 1 ;; esac
+  case "$HC_SCRIPT" in
+    -*) return 1 ;;
+    dist/bin/harper.js) return 0 ;;
+    */harper/dist/bin/harper.js) ;;
+    *) return 1 ;;
+  esac
+  HC_DIR="${HC_SCRIPT%/harper/dist/bin/harper.js}"
+  case "$HC_DIR" in node_modules|*/node_modules) return 0 ;; esac
+  HC_SCOPE="${HC_DIR##*/}"
+  HC_DIR="${HC_DIR%/*}"
+  case "$HC_SCOPE" in @?*) ;; *) return 1 ;; esac
+  case "$HC_DIR" in node_modules|*/node_modules) return 0 ;; esac
+  return 1
+}
+
+# flair#2040 / flair#2056: do not start a second Harper on a data directory
+# whose hdb.pid names a live process with a Harper-shaped command line (see
+# is_harper_command above for what that does and does not establish). `kill -0`
+# alone proves only that SOME process has the pid: if a direct process dies and
+# leaves hdb.pid behind, another process can later get that pid, and a refusal
+# on `kill -0` alone would make every KeepAlive retry exit 0 without ever
+# starting Flair.
+#
+# So the launcher refuses only when the command line `ps -o command=` reports
+# for the live pid is Harper-shaped. A flair#1454 sidecar
+# (`flair-daemon.json`) is not required: an instance started by a pre-sidecar
+# flair, or the instance this launcher execs (Harper writes no sidecar), has
+# none. A sidecar disagrees when it names a different pid, or a startTimeMs more
+# than 2000 ms from the start second `ps -o lstart=` reports (ps reports whole
+# seconds, so a process started at 12.9 s is compared as 12 s). When the
+# sidecar disagrees, the launcher does not refuse and continues its normal
+# start.
+#
+# Exit 0 on the refusal: a deliberate no-op, not a crash. KeepAlive retries
+# after its throttle interval; once that process has exited, a retry does not
+# refuse.
 if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
   LIVE_PID="$(tr -cd '0-9' < "$ROOTPATH/hdb.pid" 2>/dev/null || true)"
   if [ -n "$LIVE_PID" ] && [ "$LIVE_PID" != "$$" ] && [ "$LIVE_PID" -gt 1 ] 2>/dev/null && kill -0 "$LIVE_PID" 2>/dev/null; then
-    echo "start-flair-with-admin-pass: $ROOTPATH is already served by pid $LIVE_PID (not started by this launchd job); not starting a second instance. launchd retries after its throttle interval and starts Flair once that process has exited." >&2
-    exit 0
+    DISAGREE=0
+    SIDE="$ROOTPATH/flair-daemon.json"
+    if [ -f "$SIDE" ]; then
+      SIDE_PID="$(grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$SIDE" 2>/dev/null | grep -o '[0-9][0-9]*$' || true)"
+      SIDE_START="$(grep -o '"startTimeMs"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$SIDE" 2>/dev/null | grep -o '[0-9][0-9]*$' || true)"
+      # Shell arithmetic reads a leading 0 as octal: drop leading zeros, and
+      # leave the sidecar unused when nothing is left or more than 15 digits are.
+      SIDE_START="${SIDE_START#"${SIDE_START%%[!0]*}"}"
+      case "$SIDE_START" in ????????????????*) SIDE_START="" ;; esac
+      if [ -n "$SIDE_PID" ] && [ -n "$SIDE_START" ]; then
+        if [ "$SIDE_PID" != "$LIVE_PID" ]; then
+          DISAGREE=1
+        else
+          LSTART="$(ps -o lstart= -p "$LIVE_PID" 2>/dev/null || true)"
+          ACT_S=""
+          case "$(uname -s)" in
+            Darwin) if [ -n "$LSTART" ]; then ACT_S="$(date -j -f "%a %b %e %T %Y" "$LSTART" +%s 2>/dev/null || true)"; fi ;;
+            *)      if [ -n "$LSTART" ]; then ACT_S="$(date -d "$LSTART" +%s 2>/dev/null || true)"; fi ;;
+          esac
+          if [ -n "$ACT_S" ]; then
+            # Milliseconds against the start second in milliseconds: a start
+            # second of 12 s against a sidecar of 14.5 s is 2500 ms.
+            DIFF_MS=$((SIDE_START - ACT_S * 1000))
+            if [ "$DIFF_MS" -lt 0 ]; then DIFF_MS=$((0 - DIFF_MS)); fi
+            if [ "$DIFF_MS" -gt 2000 ]; then DISAGREE=1; fi
+          fi
+        fi
+      fi
+    fi
+    if [ "$DISAGREE" = "0" ] && is_harper_command "$(ps -o command= -p "$LIVE_PID" 2>/dev/null || true)"; then
+      echo "start-flair-with-admin-pass: $ROOTPATH/hdb.pid names pid $LIVE_PID, whose command line as ps reports it is node or bun followed by a Harper entry path; not starting a second instance. launchd retries after its throttle interval." >&2
+      exit 0
+    fi
   fi
 fi
 

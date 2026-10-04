@@ -88,6 +88,12 @@ FlairMemoryService(
 
 ### Explicit durability and visibility (opt-in)
 
+- permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+- persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+- standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+- ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+- No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
+
 The `add_memory()` method accepts optional `durability` and `visibility` keyword
 args that let application code control how memories persist and who can read them:
 
@@ -208,7 +214,7 @@ for registration, once.
 | Shape | What is true | What you see | What to do |
 |---|---|---|---|
 | **Record missing** | No `Agent` row for `FLAIR_AGENT_ID` on this `FLAIR_URL` | `401 {"error":"unknown_agent"}` on every signed call (`add_memory`, search, list) | `flair agent add` with `--target` / `--ops-target` as above. `flair agent list` is localhost-only — it cannot see the hosted registry. |
-| **Key mismatch** | The id exists; the public key on the server is not the key in `FLAIR_KEYFILE` | `401 {"error":"invalid_signature"}` | Same id, wrong file — copied from another host, rotated on one side only, or `FLAIR_KEYFILE` pointing at a different agent's key. Point `FLAIR_KEYFILE` at the key that matches this instance, or re-seed the hosted row from this machine's key (`flair agent add my-adk-app --target "$FLAIR_URL" --ops-target <ops-url> --admin-pass-file <path>` reuses the local file). `flair agent rotate-key` is localhost-only. Restart the ADK process so it reloads the key. |
+| **Key mismatch** | The id exists; the public key on the server is not the key in `FLAIR_KEYFILE` | `401 {"error":"invalid_signature"}` | Same id, wrong file — copied from another host, rotated on one side only, or `FLAIR_KEYFILE` pointing at a different agent's key. Point `FLAIR_KEYFILE` at the key that matches this instance. On the Flair host, `flair agent rotate-key <id>` replaces the stored key and writes the new private key there (localhost-only). Put that file on this host and point `FLAIR_KEYFILE` at it. Restart the ADK process so it reloads the key. |
 | **Config wrong** | Identity may be fine; you are not hitting the Flair you think | Timeouts, `ConnectError`, or **404 from Harper's catch-all** | Confirm `FLAIR_ALLOW_REMOTE_URL=1`, a raised `FLAIR_HTTP_TIMEOUT`, and a `FLAIR_URL` with **no path prefix**. Cloud-agent localhost is the VM, not your laptop. `/Health` can be 200 while `/Memory` is still 404 if the Flair app is not loaded yet. |
 
 Clock skew is a fourth, rarer 401: `timestamp_out_of_window`.

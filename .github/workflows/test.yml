@@ -48,15 +48,15 @@ jobs:
     name: "Unit Tests (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
-    # hung 16+ min on 2026-07-04, blocking merge on a required check. 10 min
-    # bounds a hung install/runner. The unit lane takes 279-401 s of it
-    # (measured 2026-09-29). scripts/test-unit.ts derives its keep-going lane
-    # budget from this value (CI_JOB_LIMIT_MS minus a measured 90 s reserve for
-    # the job's other steps, flair#2030); its per-step limits are fixed values
+    # hung 16+ min on 2026-07-04, blocking merge on a required check. 15 min
+    # bounds a hung install/runner. The unit lane takes 401-510 s of it
+    # (measured 2026-10-02). scripts/test-unit.ts derives its keep-going lane
+    # budget from this value (CI_JOB_LIMIT_MS minus a 120 s reserve for the
+    # job's other steps, flair#2030/#2224); its per-step limits are fixed values
     # chosen from measured step times. The summary and guards are expected to
     # print before the job is cancelled while the other steps stay in the reserve.
     # Change the two together; unit-runner.test.ts fails if they disagree.
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       # fail-fast: false — a failure on one Node major must not cancel the
       # others still running; we want to see all three results, not just the
@@ -157,6 +157,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Verify root unit shard coverage
+        run: node scripts/ci/unit-shards.mjs --verify
       - name: Shared unit lane (root, isolated and workspace tests)
         # --keep-going (flair#2030): keep attempting later steps until the lane budget
         # runs out and report every failure (and any unrun step) in one
@@ -249,10 +251,13 @@ jobs:
     # margin, or a hang in a LATE case is cancelled anonymously (the same class
     # one level up from the case budgets):
     #   per-case budgets: 660 + 760 + 740 + 450 + 420 = 3030 s
+    #   using-flair-seed-2141 beforeAll + case budgets: 1260 s
+    #   using-flair-seed-reserved-2141 beforeAll + case budgets: 960 s
     #   setup allowance (bun install + bun run build + build:cli +
     #     check-darwin-gated-tests): ~240 s
-    #   3030 + 240 = 3270 s; rounded up with margin to 60 min (3600 s)
-    timeout-minutes: 60
+    #   embedding-model fetch: at most 180 s (its step timeout)
+    #   3030 + 1260 + 960 + 240 + 180 = 5670 s; rounded up with margin to 100 min (6000 s)
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -273,6 +278,19 @@ jobs:
         run: bun run build && bun run build:cli
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
+      # flair#2141 S2 — `flair init` seeds a skill row, and the instance embeds
+      # it as it writes it, so the init case below is this job's first embed.
+      # Test instances read FLAIR_MODELS_DIR=<repo>/models. Without a model
+      # there, they may download it during embedding, delaying the init case.
+      # Same pinned fetch as other lanes that embed (flair#715).
+      # After the unit step, so <cwd>/models is absent
+      # while the darwin-gated unit tests run.
+      - name: Pre-download embedding model
+        # Bounded so a stalled download cannot spend the case budgets above.
+        timeout-minutes: 3
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      - name: using-flair seed acceptance (flair#2141)
+        run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
       - name: Real-launchd doctor --fix integration (flair#1581)
         run: bun test test/integration/doctor-fix-launchd-darwin.test.ts
 
@@ -452,20 +470,27 @@ jobs:
           retention-days: 7
 
   test-integration:
-    name: Integration Tests
+    name: Integration Tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
-    # 30, not 20 (#948). This is headroom, NOT the fix — the fix is dropping
-    # `--with-deps` from the Playwright step below, which removed this job's
-    # dependency on the Ubuntu apt mirror. Kept deliberately generous because
-    # the dominant cost here is `Run integration tests`: ~12 min when this
-    # comment was first written (2026-07-28), grown to 26m49s by 2026-08-21 —
-    # the whole job hit 29m58s and sibling runs were timeout-cancelled at
-    # 30m10s (#1320). The fix was the #1290/#1299/#1320 pattern: move the
-    # heaviest real-Harper-boot suites into test/integration-heavy/ (own job
-    # below), which put the projected job back at ~17m30s. If total job time
-    # starts creeping toward this number again, the integration suite is what
-    # to look at — raising this would just hide the trend.
-    timeout-minutes: 30
+    # Sharded (#2149, #2131). Before: ONE job ran the whole suite ~16-26 min
+    # against a 30-minute cap — main dfe01f0d 16m16s (`Run integration tests`
+    # alone 13m45s), three other recent runs 23m2s / 24m38s / 26m1s, and PR
+    # #2148 was cancelled at 30m17s with 0 failures. After (measured on this
+    # PR's run at 216cbb99): shard 1/3 7m41s, shard 2/3 11m47s, shard 3/3
+    # 11m44s — every shard under half the old 30-minute cap. A first run at cap
+    # 15 cut shard 2 during its Docker step (its `Run integration tests` step
+    # alone 10m17s) and the gate failed, as designed, because a cancelled shard
+    # is not a success; the cap below is 25. Each shard runs the same
+    # steps on its share of test/integration/*.test.ts
+    # (scripts/ci/integration-shards.mjs), and the final job named
+    # `Integration Tests` (below) requires every shard to succeed.
+    timeout-minutes: 25
+    strategy:
+      # fail-fast: false — one failed shard does not cancel the others; the
+      # aggregate job below fails unless each one succeeded.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -510,6 +535,8 @@ jobs:
         run: bun add --no-save @node-llama-cpp/linux-x64@3
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli
+      - name: Build flair-client
+        run: cd packages/flair-client && bun run build
       - name: Verify critical exports in dist
         run: |
           echo "Checking embeddings-provider exports..."
@@ -523,6 +550,10 @@ jobs:
         # hours with zero code at fault; a bare HF curl had already flaked
         # this job before that, #463/#465).
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      - name: Verify the shards cover every integration file
+        # Coverage gate (#2149): fails unless the shards partition the full
+        # list, so a new file can never run in no shard.
+        run: node scripts/ci/integration-shards.mjs --verify --of ${{ strategy.job-total }}
       - name: Run integration tests (native Harper spawn)
         # No HARPER_HTTP_URL — harper-lifecycle spawns Harper from node_modules
         # per the npm-installed harper. Avoids the Docker
@@ -536,13 +567,21 @@ jobs:
         # ${{ ... }} shell-injection.
         env:
           INTEGRATION_REPEATS: ${{ github.event.inputs.integration_repeats || '1' }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           repeats="${INTEGRATION_REPEATS}"
           case "$repeats" in ''|*[!0-9]*) repeats=1 ;; esac
+          files=$(node scripts/ci/integration-shards.mjs --shard "$SHARD" --of "$SHARDS")
+          if [ -z "$files" ]; then
+            echo "::error::shard ${SHARD}/${SHARDS} selected no files"
+            exit 1
+          fi
+          echo "Shard ${SHARD}/${SHARDS}: $(echo "$files" | wc -l) file(s)"
           echo "Running integration suite ${repeats}x"
           for i in $(seq 1 "${repeats}"); do
-            echo "::group::integration attempt ${i}/${repeats}"
-            bun test $(find test/integration -name '*.test.ts' | sort)
+            echo "::group::integration attempt ${i}/${repeats} (shard ${SHARD}/${SHARDS})"
+            bun test $files
             echo "::endgroup::"
           done
       # adk-flair-js integration tests exercise the Flair application through
@@ -693,6 +732,27 @@ jobs:
         env:
           FLAIR_URL: http://localhost:9926
           FLAIR_ADMIN_PASS: admin123
+
+  # flair#2149 / #2131: the required check. The shard matrix above runs the
+  # suite; this job keeps the check name EXACTLY `Integration Tests` so the
+  # ruleset is unchanged. It reads `needs.test-integration.result` explicitly,
+  # because a SKIPPED job reports success — a shard that was skipped or cancelled
+  # must fail this gate, not pass it. The matrix result is `success` only when
+  # every shard succeeded.
+  test-integration-gate:
+    name: Integration Tests
+    needs: [test-integration]
+    runs-on: ubuntu-latest
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Require every integration shard to succeed
+        run: |
+          echo "test-integration matrix result: ${{ needs.test-integration.result }}"
+          if [ "${{ needs.test-integration.result }}" != "success" ]; then
+            echo "::error::One or more Integration Tests shards did not succeed"
+            exit 1
+          fi
 
   test-integration-heavy:
     name: Integration Tests (heavy)

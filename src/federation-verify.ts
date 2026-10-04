@@ -19,6 +19,7 @@
  * Do NOT always exit 0 — a verified-wrong reachable peer still fails.
  */
 
+import { encodeRecordId } from "./lib/record-id-path.js";
 import { validatePeerEndpoint } from "./fleet-verify.js";
 import {
   DEFAULT_INTERVAL_SECONDS,
@@ -343,7 +344,7 @@ export async function runFederationVerify(
   const memId = `${opts.agentId}-${clock.now()}-fed-verify`;
   const writtenAt = new Date(clock.now()).toISOString();
   try {
-    await deps.api("PUT", `/Memory/${encodeURIComponent(memId)}`, {
+    await deps.api("PUT", `/Memory/${encodeRecordId(memId)}`, {
       id: memId,
       agentId: opts.agentId,
       content: `${opts.tag} — federation verify probe written at ${writtenAt}`,
@@ -595,7 +596,7 @@ export async function runFederationVerify(
     // peer SemanticSearch (archived not_equal true) stops returning it.
     if (pushed) {
       try {
-        await deps.api("PUT", `/Memory/${encodeURIComponent(memId)}`, {
+        await deps.api("PUT", `/Memory/${encodeRecordId(memId)}`, {
           id: memId,
           agentId: opts.agentId,
           content: `${opts.tag} — federation verify probe written at ${writtenAt}`,
@@ -619,7 +620,7 @@ export async function runFederationVerify(
       }
     }
     try {
-      await deps.api("DELETE", `/Memory/${encodeURIComponent(memId)}`, undefined, apiOpts);
+      await deps.api("DELETE", `/Memory/${encodeRecordId(memId)}`, undefined, apiOpts);
       cleanedUp = true;
       log(`4. Cleanup: deleted local memory ${memId}`);
     } catch {
