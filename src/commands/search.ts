@@ -10,6 +10,7 @@ import { Command } from "commander";
 import { buildEd25519Auth, requestTarget, requestUrl, resolveKeyPath } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
 import { join } from "node:path";
+import { DURABILITY_CAVEAT } from "../lib/durability-copy.js";
 
 export type SearchCli = {
   resolveBaseUrl: (...args: any[]) => any;
@@ -162,7 +163,7 @@ program
   .option("--scoring <mode>", "Scoring mode: raw (default) uses cosine similarity/BM25 only; composite re-ranks by durability/recency/retrieval (measurably hurts precision as of flair#623 — opt-in only)", "raw")
   .option("--min-score <n>", "Drop results below this score (0..1)", "0")
   // Client-side filters (applied after server response)
-  .option("--durability <level>", "Filter to permanent|persistent|standard|ephemeral (client-side)")
+  .option("--durability <level>", `Filter results by durability (permanent/persistent/standard/ephemeral; comma-separated; client-side). ${DURABILITY_CAVEAT}`)
   .option("--source <name>", "Filter by source/agentId (client-side)")
   // Output modes
   .option("--explain", "Show score breakdown (raw, composite, durability, age, usage) per hit — also added to --json output as _explain")

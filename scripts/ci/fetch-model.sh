@@ -61,7 +61,12 @@ HF_REPO="${FETCH_MODEL_HF_REPO:-nomic-ai/nomic-embed-text-v1.5-GGUF}"
 DEST_PATH="${DEST_DIR}/${MODEL_FILENAME}"
 
 sha256_of() {
-  sha256sum "$1" | awk '{ print $1 }'
+  # macOS lanes: `shasum -a 256` where no `sha256sum` is on PATH.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
 }
 
 verify() {
@@ -77,7 +82,9 @@ verify() {
 download() {
   local url="$1" label="$2"
   echo "fetch-model.sh: attempting ${label}: ${url}"
-  if curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+  # --speed-limit/--speed-time abort an attempt whose transfer stays below 1024 bytes per second for 60 seconds,
+  # so a stalled or crawling download fails and is retried instead of hanging the lane.
+  if curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
       "$url" -o "${DEST_PATH}.partial"; then
     mv "${DEST_PATH}.partial" "$DEST_PATH"
     return 0

@@ -59,7 +59,10 @@
  *      lives, and reordering would silently relocate it (costing a
  *      re-detect pass and orphaning the existing audit record) on instances
  *      that have no problem at all. This fix is about instances where the
- *      cycle cannot run, not about relocating ones where it can.
+ *      cycle cannot run, not about relocating ones where it can. The
+ *      default wins ahead of `ROOTPATH` when usable, regardless of which
+ *      instance runs; an absent or unusable default loses. Set
+ *      `FLAIR_MIGRATION_DATA_DIR` to separate custom migration state.
  *   4. `ROOTPATH` — Harper's real root path. The rescue candidate: it is
  *      writable by definition on a running instance (Harper is writing its
  *      own databases there), so a shape whose `homedir()` is unusable still
@@ -71,11 +74,10 @@
  *      instead of the environment leaves candidate 4 empty — this covers
  *      that case without guessing.
  *
- * "Usable" is probed by DOING THE REAL OPERATION the runner would do —
- * create `<dir>/.migrations` at 0700 and check it is writable — not by a
- * proxy check that could disagree with it. The probe is idempotent and, on
- * a healthy instance, is satisfied by the first candidate without touching
- * the others.
+ * The probe creates only `.migrations` non-recursively inside an existing
+ * candidate. It refuses symlinks present at the probe at either path.
+ * Node offers no openat-style handle; a swap after the check is not prevented.
+ * The first usable candidate wins.
  *
  * If NO candidate is usable, `resolveWritableMigrationDataDir` returns
  * `dataDir: null` WITH the per-candidate reasons, and the boot path turns
@@ -84,9 +86,9 @@
  * `flair quality`'s `instance.migrationsClean`. An instance that cannot run
  * migrations now says so; that silence was the actual defect.
  */
-import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Explicit operator override for the migration data dir (see module doc). */
@@ -153,17 +155,29 @@ export interface DataDirProbe {
   reason?: string;
 }
 
-/**
- * Probes a candidate by performing the exact operation the runner's lock
- * acquisition performs (`mkdir -p <dir>/.migrations` at 0700), then
- * confirming the result is writable. Idempotent: on an already-working
- * instance this is a no-op stat/mkdir against a directory that already
- * exists.
- */
+/** Requires an existing directory, then creates only its `.migrations` child. */
 export function probeMigrationDataDir(dir: string): DataDirProbe {
+  try {
+    if (!lstatSync(resolve(dir)).isDirectory()) {
+      return { dir, ok: false, reason: "not a directory" };
+    }
+  } catch (err) {
+    return {
+      dir,
+      ok: false,
+      reason: `${(err as Error)?.message ?? String(err)}: cannot confirm the candidate is an existing directory — refusing to create it`,
+    };
+  }
   const owned = join(dir, MIGRATIONS_SUBDIR);
   try {
-    mkdirSync(owned, { recursive: true, mode: 0o700 });
+    try {
+      mkdirSync(owned, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    if (!lstatSync(owned).isDirectory()) {
+      return { dir, ok: false, reason: ".migrations is not a directory" };
+    }
     accessSync(owned, constants.W_OK | constants.X_OK);
     return { dir, ok: true };
   } catch (err) {

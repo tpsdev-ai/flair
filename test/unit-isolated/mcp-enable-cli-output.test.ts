@@ -24,9 +24,10 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import yaml from "js-yaml";
 import { program } from "../../src/cli.ts";
-import { generateRsaSigningKeyPair } from "../../src/lib/mcp-enable.ts";
+import { generateKeyPairSync } from "node:crypto";
 
 const REPO_CONFIG = join(import.meta.dir, "..", "..", "config.yaml");
+const TARGET = "http://127.0.0.1:9926";
 const HOST = "flair.example.com";
 const ISSUER = `https://${HOST}`;
 
@@ -37,9 +38,9 @@ interface RunResult {
   foreign: string[];
   configAfter: string;
   configBefore: string;
-  /** Did the run leave a signing key or a secrets staging file in the temp dir? */
-  keyWritten: boolean;
+  /** Did the run leave a secrets staging file in the temp dir? */
   secretsWritten: boolean;
+  keyWritten: boolean;
   secretSets: string[];
   secretReads: string[];
 }
@@ -71,7 +72,13 @@ async function runEnable(
   const credentials: any[] = [];
   const secretSets: string[] = [];
   const secretReads: string[] = [];
-  const pushPublicKey = options.pushSecrets ? generateRsaSigningKeyPair().publicKey : undefined;
+  const pushPublicKey = options.pushSecrets
+    ? generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      }).publicKey
+    : undefined;
   try {
     // Give the child a moment to exist before the target check reads its cwd.
     await new Promise((r) => setTimeout(r, 150));
@@ -79,7 +86,7 @@ async function runEnable(
     process.env.HOME = join(tmp, "home");
     globalThis.fetch = (async (url: any, init?: RequestInit) => {
       const u = new URL(String(url));
-      if (u.hostname !== HOST) {
+      if (u.hostname !== HOST && u.hostname !== "127.0.0.1") {
         foreign.push(String(url));
         return new Response("refused by test", { status: 599 });
       }
@@ -132,12 +139,12 @@ async function runEnable(
     try {
       await program.parseAsync([
         "node", "flair", "mcp", "enable",
-        "--instance", ISSUER,
+        "--instance", TARGET,
+        "--issuer", ISSUER,
         "--idp-client-id", "client-id",
         "--idp-client-secret", "client-secret",
         "--idp-subject", "octocat",
         "--admin-pass", "pw",
-        "--signing-key-file", join(tmp, "signing-key.pem"),
         "--secrets-path", join(tmp, "secrets.env"),
         ...(options.pushSecrets ? [] : ["--secrets-mechanism", "env-file"]),
         ...(options.confirmed === false ? [] : ["--confirm-secrets-applied"]),
@@ -153,8 +160,8 @@ async function runEnable(
       foreign,
       configAfter: readFileSync(configPath, "utf-8"),
       configBefore: config,
-      keyWritten: existsSync(join(tmp, "signing-key.pem")),
       secretsWritten: existsSync(join(tmp, "secrets.env")),
+      keyWritten: existsSync(join(tmp, "key.pem")) || existsSync(join(tmp, "home", ".flair", "mcp-signing-key.pem")),
       secretSets,
       secretReads,
     };
@@ -185,7 +192,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.foreign).toEqual([]);
     expect(r.exit).toBeNull();
     expect(r.out).toContain("The OAuth metadata check passed.");
-    expect(r.out).toContain(`Issuer ${ISSUER} matched the target's own OAuth authorization-server metadata at ${ISSUER}/.well-known/oauth-authorization-server`);
+    expect(r.out).toContain(`Issuer ${ISSUER} matched the target's own OAuth authorization-server metadata at ${TARGET}/.well-known/oauth-authorization-server`);
     expect(r.out).toContain("The /mcp route itself was not probed.");
     expect(r.out).toContain("connector identity: mapped sub 'octocat' (provider 'github') to Agent 'self'; see docs/access-control.md for how /mcp tool calls use it.");
     expect(r.out).not.toContain("every /mcp call reads and writes AS");
@@ -228,20 +235,19 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.out).not.toContain("claude.ai is not in");
   }, 20000);
 
-  test("--dry-run, with and without the flag: writes no signing key, staged secrets or config change, and says where a key would be generated", async () => {
+  test("--dry-run, with and without the flag: writes no staged secrets or config change, and mentions no signing key", async () => {
     for (const flag of [[], ["--cimd-allowed-hosts", "flair.example.com"]]) {
       const r = await runEnable(SHIPPED, ["--dry-run", ...flag], true);
       expect(r.foreign).toEqual([]);
       expect(r.exit).toBeNull();
-      expect(r.out).toContain("a run without --dry-run generates one there (0600). --dry-run did not create it");
       expect(r.out).toContain("dry-run: no remote calls were made.");
-      expect(r.keyWritten).toBe(false);
+      expect(r.out).not.toContain("signing key");
       expect(r.secretsWritten).toBe(false);
       expect(r.configAfter).toBe(r.configBefore);
     }
   }, 20000);
 
-  test("the target runs on another host: the command exits 1, prints the refusal, and writes no signing key, staged secrets or config change", async () => {
+  test("the target runs on another host: the command exits 1, prints the refusal, and writes no staged secrets or config change", async () => {
     const r = await runEnable(SHIPPED, ["--cimd-allowed-hosts", "flair.example.com"], false);
     expect(r.foreign).toEqual([]);
     expect(r.exit).toBe("process.exit(1)");
@@ -249,7 +255,6 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.out).toContain("another-host");
     expect(r.out).not.toContain("The OAuth metadata check passed.");
     expect(r.configAfter).toBe(r.configBefore);
-    expect(r.keyWritten).toBe(false);
     expect(r.secretsWritten).toBe(false);
   }, 20000);
 
@@ -258,7 +263,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.exit).toBe("process.exit(1)");
     expect(r.secretSets.length).toBeGreaterThan(0);
     expect(r.secretReads).toEqual(r.secretSets);
-    expect(r.out).toContain(`the secrets were pushed to ${ISSUER} and read back; load them into the instance's process environment`);
+    expect(r.out).toContain(`the secrets were pushed to ${TARGET} and read back; load them into the instance's process environment`);
     expect(r.out).not.toContain("apply the staged secrets");
     expect(r.out).not.toContain("once the staged secrets are live");
   }, 20000);
@@ -267,6 +272,20 @@ describe("flair mcp enable — the printed success claims only what was checked"
     const r = await runEnable(SHIPPED, [], true, { confirmed: false });
     expect(r.exit).toBe("process.exit(1)");
     expect(r.secretSets).toEqual([]);
-    expect(r.out).toContain(`not applied: pass --confirm-secrets-applied once the staged secrets are live on ${ISSUER}`);
+    expect(r.out).toContain(`not applied: pass --confirm-secrets-applied once the staged secrets are live on ${TARGET}`);
   }, 20000);
 });
+
+for (const instance of [ISSUER, TARGET]) {
+  test.each([false, true])(`--fabric refuses --cimd-allowed-hosts for ${instance} before writes (dryRun=%s)`, async (dryRun) => {
+    const r = await runEnable(SHIPPED, ["--instance", instance, "--fabric", "--cimd-allowed-hosts", "claude.ai", ...(dryRun ? ["--dry-run"] : [])], true);
+    expect(r.exit).toBe("process.exit(1)");
+    expect(r.err).toContain(instance === TARGET
+      ? "--fabric cannot be used with a loopback or unspecified target" : "refused for a Fabric instance");
+    expect(r.out).toBe("");
+    expect(r.configAfter).toBe(r.configBefore);
+    expect(r.keyWritten).toBe(false);
+    expect(r.secretsWritten).toBe(false);
+    expect(r.secretSets).toEqual([]);
+  });
+}

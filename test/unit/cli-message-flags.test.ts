@@ -128,36 +128,7 @@ const OTHER_COMMAND_REFERENCES: Array<Exemption & { command: string; why: string
  * command the message sends the operator to. Fix the message, then delete the
  * entry — the one-to-one test fails while an entry matches nothing.
  */
-const KNOWN_DEFECTS: Array<Exemption & { defect: string }> = [
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--user",
-    context: "*",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (\"pass --user\"); `flair bridge import` declares no --user and commander rejects it as an unknown option",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--user",
-    context: "bridge import",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (the example); `flair bridge import` declares no --user",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--api-key",
-    context: "bridge import",
-    literal: "pass --user <id>; example: flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>",
-    defect: "mem0 import hint (the example); `flair bridge import` declares no --api-key",
-  },
-  {
-    file: "src/bridges/builtins/mem0.ts",
-    flag: "--api-key",
-    context: "*",
-    literal: "pass --api-key <token> or set MEM0_API_KEY in the environment",
-    defect: "mem0 API-key hint; `flair bridge import` declares no --api-key",
-  },
-];
+const KNOWN_DEFECTS: Array<Exemption & { defect: string }> = [];
 
 const EXEMPTIONS: Exemption[] = [...OTHER_COMMAND_REFERENCES, ...KNOWN_DEFECTS];
 
@@ -816,10 +787,12 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
     },
     {
       // tier d — the enable library, reached through the `mcp` module (#2116's --ops-url sat here).
+      // flair#2115: the `principal` group's commands reach this file too now (its
+      // link/unlink/links handlers call into it), so the fallback reach is wider.
       file: "src/lib/mcp-enable.ts",
       from: "Environment, then re-run with --confirm-secrets-applied.",
       to: "Environment, then re-run with --confirm-secrets-applied-now.",
-      expected: "--confirm-secrets-applied-now → 15 commands in reach",
+      expected: "--confirm-secrets-applied-now → 18 commands in reach",
     },
   ];
   for (const row of mutationRows) {

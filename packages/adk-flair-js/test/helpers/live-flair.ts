@@ -313,11 +313,13 @@ const BOOT_TIMEOUT_MS = 60_000;
 export async function bootEphemeralHarper(
   helperPath?: string,
   timeoutMs?: number,
+  runtime = findNodeBin(),
+  spawnProcess: typeof spawn = spawn,
 ): Promise<{
   config: HarperConfig;
   proc: ChildProcess;
 }> {
-  const nodeBin = findNodeBin();
+  const nodeBin = runtime;
   if (!nodeBin) {
     throw new Error("No Node.js/bun runtime available");
   }
@@ -344,7 +346,7 @@ export async function bootEphemeralHarper(
   }
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(nodeBin, [bootScript], {
+    const proc = spawnProcess(nodeBin, [bootScript], {
       cwd: REPO_ROOT,
       stdio: ["pipe", "pipe", "pipe"],
       env,
@@ -357,10 +359,9 @@ export async function bootEphemeralHarper(
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      // Kill the entire process group so Harper children are reaped too.
-      // Negative PID signals the process group.
       try {
         if (proc.pid) process.kill(-proc.pid, "SIGKILL");
+        else proc.kill("SIGKILL");
       } catch {
         proc.kill("SIGKILL");
       }
@@ -405,11 +406,7 @@ export async function bootEphemeralHarper(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      if (code !== null && code !== 0) {
-        reject(
-          new Error(`boot-harper exited ${code}: ${stderr.slice(0, 500)}`),
-        );
-      }
+      reject(new Error(`boot-harper exited ${code} before config: ${stderr.slice(0, 500)}`));
     });
   });
 }

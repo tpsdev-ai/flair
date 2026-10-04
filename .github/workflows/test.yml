@@ -48,15 +48,15 @@ jobs:
     name: "Unit Tests (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
-    # hung 16+ min on 2026-07-04, blocking merge on a required check. 10 min
-    # bounds a hung install/runner. The unit lane takes 279-401 s of it
-    # (measured 2026-09-29). scripts/test-unit.ts derives its keep-going lane
-    # budget from this value (CI_JOB_LIMIT_MS minus a measured 90 s reserve for
-    # the job's other steps, flair#2030); its per-step limits are fixed values
+    # hung 16+ min on 2026-07-04, blocking merge on a required check. 15 min
+    # bounds a hung install/runner. The unit lane takes 401-510 s of it
+    # (measured 2026-10-02). scripts/test-unit.ts derives its keep-going lane
+    # budget from this value (CI_JOB_LIMIT_MS minus a 120 s reserve for the
+    # job's other steps, flair#2030/#2224); its per-step limits are fixed values
     # chosen from measured step times. The summary and guards are expected to
     # print before the job is cancelled while the other steps stay in the reserve.
     # Change the two together; unit-runner.test.ts fails if they disagree.
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       # fail-fast: false — a failure on one Node major must not cancel the
       # others still running; we want to see all three results, not just the
@@ -157,6 +157,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Verify root unit shard coverage
+        run: node scripts/ci/unit-shards.mjs --verify
       - name: Shared unit lane (root, isolated and workspace tests)
         # --keep-going (flair#2030): keep attempting later steps until the lane budget
         # runs out and report every failure (and any unrun step) in one
@@ -244,9 +246,7 @@ jobs:
   test-darwin-gated:
     name: Darwin-gated unit tests
     runs-on: macos-latest
-    # Integration case budgets: 750 + 850 + 830 + 540 + 510 = 3480 s.
-    # With a 240 s setup allowance, 70 min leaves 480 s for other steps.
-    timeout-minutes: 70
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -267,6 +267,19 @@ jobs:
         run: bun run build && bun run build:cli
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
+      # flair#2141 S2 — `flair init` seeds a skill row, and the instance embeds
+      # it as it writes it, so the init case below is this job's first embed.
+      # Test instances read FLAIR_MODELS_DIR=<repo>/models. Without a model
+      # there, they may download it during embedding, delaying the init case.
+      # Same pinned fetch as other lanes that embed (flair#715).
+      # After the unit step, so <cwd>/models is absent
+      # while the darwin-gated unit tests run.
+      - name: Pre-download embedding model
+        # Bounded so a stalled download cannot spend the case budgets above.
+        timeout-minutes: 3
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      - name: using-flair seed acceptance (flair#2141)
+        run: bun test test/integration/using-flair-seed-2141.test.ts test/integration/using-flair-seed-reserved-2141.test.ts
       - name: Real-launchd doctor --fix integration (flair#1581)
         run: bun test test/integration/doctor-fix-launchd-darwin.test.ts
 
@@ -511,6 +524,8 @@ jobs:
         run: bun add --no-save @node-llama-cpp/linux-x64@3
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli
+      - name: Build flair-client
+        run: cd packages/flair-client && bun run build
       - name: Verify critical exports in dist
         run: |
           echo "Checking embeddings-provider exports..."

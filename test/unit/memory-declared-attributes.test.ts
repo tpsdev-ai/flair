@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   DECLARED_MEMORY_ATTRIBUTES,
+  SERVER_STAMPED_MEMORY_FIELDS,
   isDeclaredMemoryAttribute,
   stripUndeclaredMemoryAttributes,
 } from "../../resources/memory-declared-attributes.ts";
@@ -65,4 +66,9 @@ describe("A1' — declared attributes only", () => {
     expect(stripUndeclaredMemoryAttributes(null)).toEqual([]); // assertion: no throw
     expect(stripUndeclaredMemoryAttributes("nope")).toEqual([]); // assertion: no throw
   });
+});
+
+
+test("the server-stamped Memory field list includes skillSubjectId", () => {
+  expect([...SERVER_STAMPED_MEMORY_FIELDS]).toEqual(["instanceToken", "provenance", "skillSubjectId"]);
 });

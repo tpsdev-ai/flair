@@ -3,8 +3,8 @@
  *
  * Extracted from src/cli.ts with ZERO behavior change. This file owns the
  * group's commander registration (list / import / export / test / scaffold /
- * roundtrip) and its action handlers, plus the two group-specific inline error
- * printers (`printBridgeError`, `printTrustError`). All bridge runtime logic
+ * roundtrip) and its action handlers, plus the group-specific error formatter
+ * and printer (`formatBridgeErrorLines`, `printBridgeError`). All bridge runtime logic
  * still lives under src/bridges/. Two shared cli.ts-local helpers
  * (`api`, `resolveHttpPort`) are bound before register().
  *
@@ -14,7 +14,8 @@
  */
 import { Command } from "commander";
 import * as render from "../render.js";
-import { resolveKeyPath, buildEd25519Auth, requestTarget, requestUrl } from "../lib/auth-resolve.js";
+import { resolveKeyPath, buildEd25519Auth, readSecretFileSecure, requestTarget, requestUrl } from "../lib/auth-resolve.js";
+import type { BridgeOptionSpec } from "../bridges/types.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type BridgeCli = {
@@ -34,6 +35,127 @@ const api = (method: string, path: string, body?: any, options?: any): Promise<a
 
 const resolveHttpPort = (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create"): number =>
   cli.resolveHttpPort(opts, mode);
+
+function redactBridgeSecret(value: string, secret: string): string {
+  if (!secret) return value;
+  const forms = new Set<string>();
+  for (let form = secret; form.length <= value.length && !forms.has(form); form = JSON.stringify(form).slice(1, -1)) {
+    forms.add(form);
+  }
+  try {
+    forms.add(encodeURIComponent(secret));
+  } catch {}
+  if (!forms.size) return value;
+  const pattern = [...forms].sort((a, b) => b.length - a.length)
+    .map((form) => form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return value.replace(new RegExp(pattern, "g"), "[REDACTED]");
+}
+
+/** Serialize first, then redact so object keys and values share one boundary. */
+export function serializeBridgeLogLine(event: unknown, secret: string): string {
+  return redactBridgeSecret(JSON.stringify(event), secret);
+}
+
+type TrustErrorDetail = {
+  bridge?: string;
+  got?: string;
+  hint?: string;
+  context?: Record<string, string>;
+};
+
+function formatTrustErrorLines(detail: TrustErrorDetail, secret: string): string[] {
+  const lines: string[] = [];
+  const write = (line = ""): void => { lines.push(line); };
+  const name = detail.bridge ?? "(unknown)";
+  const ctx = detail.context ?? {};
+  const reapprove = `  flair bridge allow ${name}`;
+  const bar = "─".repeat(60);
+
+  const header = (title: string) => {
+    write();
+    write(`⚠ ${title} — ${name}`);
+    write(bar);
+  };
+
+  const footer = (label: string) => {
+    write();
+    write(`${label}:`);
+    write(reapprove);
+    write();
+  };
+
+  switch (detail.got) {
+    case "not-allowed":
+      header("Approval required");
+      write("This bridge is an npm code plugin — it runs arbitrary JavaScript.");
+      write("First-use approval is required before Flair will execute it.");
+      footer("Approve it with");
+      break;
+
+    case "path-mismatch":
+      header("Trust check failed: package location changed");
+      write("A different package with the same name was discovered. This is how");
+      write("local squatting attacks present — a planted `node_modules/flair-bridge-*`");
+      write("in an unrelated project tree.");
+      write();
+      write(`  approved: ${ctx.approvedPath ?? "(unknown)"}`);
+      write(`            version ${ctx.approvedVersion ?? "?"} at ${ctx.approvedAt ?? "?"}`);
+      write(`  now:      ${ctx.observedPath ?? "(unknown)"}`);
+      footer("If the new location is intentional, re-approve");
+      break;
+
+    case "digest-mismatch":
+      header("Trust check failed: package contents changed");
+      write("The package.json at the approved location has changed since you");
+      write("approved this bridge. This fires on every upgrade — it's a trust");
+      write("event, not an error. If the update is intentional, re-approve.");
+      write();
+      write(`  location:          ${ctx.packagePath ?? "(unknown)"}`);
+      write(`  approved version:  ${ctx.approvedVersion ?? "?"}   (at ${ctx.approvedAt ?? "?"})`);
+      write(`  approved digest:   sha256:${(ctx.approvedDigest ?? "").slice(0, 16)}…`);
+      write(`  observed digest:   sha256:${(ctx.observedDigest ?? "").slice(0, 16)}…`);
+      footer("Re-approve");
+      break;
+
+    case "entry-incomplete":
+      header("Trust check failed: approval record is incomplete");
+      write("The allow-list entry for this bridge is missing a location or digest.");
+      write("This usually means the record was created by a pre-fix Flair version");
+      write("(0.6.0 / 0.6.1) that only stored the name. Re-approve to upgrade.");
+      footer("Re-approve");
+      break;
+
+    case "package-missing":
+      header("Trust check failed: approved package missing on disk");
+      write("The package location recorded at allow-time is no longer readable.");
+      write();
+      write(`  approved at:  ${ctx.approvedPath ?? "(unknown)"}`);
+      write(`  discovered:   ${ctx.discoveredPath ?? "(unknown)"}`);
+      footer("Reinstall the package, then re-approve");
+      break;
+
+    default:
+      // Unknown trust sub-reason — fall back to the raw structured print.
+      write(`Bridge error (trust): ${detail.hint ?? detail.got ?? "unknown"}`);
+      write(JSON.stringify(detail, null, 2));
+  }
+
+  return lines.map((line) => redactBridgeSecret(line, secret));
+}
+
+export function formatBridgeErrorLines(err: unknown, secret = ""): string[] {
+  const detail = (err as { detail?: Record<string, unknown> })?.detail;
+  if (detail && typeof detail === "object") {
+    if ((detail as any).field === "(trust)") {
+      return formatTrustErrorLines(detail as TrustErrorDetail, secret);
+    }
+    return [
+      redactBridgeSecret(`Bridge error: ${(detail as any).hint ?? (err as Error).message}`, secret),
+      redactBridgeSecret(JSON.stringify(detail, null, 2), secret),
+    ];
+  }
+  return [redactBridgeSecret(`Bridge error: ${(err as Error).message ?? String(err)}`, secret)];
+}
 
 /** Register the `flair bridge` command group. */
 export function register(program: Command): void {
@@ -133,6 +255,9 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair base URL (overrides --port)")
     .option("--key <path>", "Ed25519 private key path (default: resolved from agent)")
     .option("--source <path>", "Source directory (for directory-based imports like markdown)")
+    .option("--user <id>", "Foreign-system user id for bridges that import one user (e.g. mem0)")
+    .option("--base-url <url>", "Base URL of the foreign API for API bridges (e.g. a self-hosted mem0)")
+    .option("--api-key-file <path>", "For API bridges with an apiKey option, read the key from a file that has no group/world permissions (chmod 600 recommended); or, if the bridge declares an environment variable, set that instead (e.g. MEM0_API_KEY).")
     .action(async (name: string, srcArg: string | undefined, opts) => {
       const agentId: string | undefined = opts.agent ?? process.env.FLAIR_AGENT_ID;
       const cwd: string = opts.cwd ?? srcArg ?? process.cwd();
@@ -151,11 +276,14 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
+      let bridgeApiKey = name === "mem0" ? process.env.MEM0_API_KEY ?? "" : "";
+      const safe = (value: string): string => redactBridgeSecret(value, bridgeApiKey);
+
       let loaded;
       try {
         loaded = await loadBridge(target);
       } catch (err: any) {
-        printBridgeError(err);
+        printBridgeError(err, bridgeApiKey);
         process.exit(1);
       }
 
@@ -166,9 +294,15 @@ export function register(program: Command): void {
       // for an empty or dry-run import, and including a bare trailing "?" or "#"
       // (new URL reports those as an empty search/hash, but the join would drop
       // the base's path). The route's own query string is what gets signed. #1970.
-      const parsedBase = new URL(baseUrl);
+      let parsedBase: URL;
+      try {
+        parsedBase = new URL(baseUrl);
+      } catch {
+        console.error(safe("Bridge import failed: the Flair base URL must be a valid URL."));
+        process.exit(1);
+      }
       if (parsedBase.href.includes("?") || parsedBase.href.includes("#")) {
-        console.error(`Bridge import failed: refusing base URL "${baseUrl}": a Flair base URL must not carry a query string or fragment.`);
+        console.error(safe(`Bridge import failed: refusing base URL "${baseUrl}": a Flair base URL must not carry a query string or fragment.`));
         process.exit(1);
       }
       // Routes join against the PARSED base, which new URL() has normalized (for
@@ -176,7 +310,10 @@ export function register(program: Command): void {
       // base names.
       const joinBase = `${parsedBase.href.replace(/\/+$/, "")}/`;
 
-      const ctx = makeContext({ bridge: name });
+      const ctx = makeContext({
+        bridge: name,
+        emit: (event) => process.stderr.write(serializeBridgeLogLine(event, bridgeApiKey) + "\n"),
+      });
 
       // Memory POST: Ed25519-signed when an agent key is available, fall back
       // to the shared `api()` helper otherwise. Mirrors how `flair memory add`
@@ -202,8 +339,7 @@ export function register(program: Command): void {
           body: JSON.stringify(body),
         });
         if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(`PUT ${signedPath} → ${res.status}: ${text || res.statusText}`);
+          throw new Error(`PUT /Memory → HTTP ${res.status}: Flair rejected the write`);
         }
       };
 
@@ -215,9 +351,9 @@ export function register(program: Command): void {
         if (ev.type === "done") {
           const noun = (n: number): string => `${n} ${n === 1 ? "memory" : "memories"}`;
           if (opts.dryRun) {
-            console.log(`\n${target.name}: would import ${noun(ev.total)}. Re-run without --dry-run to write to Flair.`);
+            console.log(safe(`\n${target.name}: would import ${noun(ev.total)}. Re-run without --dry-run to write to Flair.`));
           } else {
-            console.log(`\n${target.name}: imported ${ev.imported}/${ev.total} memories${ev.skipped > 0 ? ` (${ev.skipped} skipped)` : ""}.`);
+            console.log(safe(`\n${target.name}: imported ${ev.imported}/${ev.total} memories${ev.skipped > 0 ? ` (${ev.skipped} skipped)` : ""}.`));
           }
           return;
         }
@@ -226,14 +362,17 @@ export function register(program: Command): void {
         lastReportedAt = now;
         lastReportedOrdinal = ev.ordinal;
         if (ev.type === "memory-imported") {
-          process.stdout.write(`\r  ${ev.ordinal} imported (${ev.foreignId ?? ev.flairId})`.padEnd(80));
+          process.stdout.write(safe(`\r  ${ev.ordinal} imported (${ev.foreignId ?? ev.flairId})`.padEnd(80)));
         } else if (ev.type === "memory-skipped") {
-          process.stdout.write(`\r  ${ev.ordinal} skipped (${ev.reason})`.padEnd(80));
+          process.stdout.write(safe(`\r  ${ev.ordinal} skipped (${ev.reason})`.padEnd(80)));
         }
       };
 
       try {
         if (loaded.kind === "yaml") {
+          if (opts.apiKeyFile !== undefined) {
+            throw new Error("--api-key-file requires an API bridge with an apiKey option; YAML imports cannot use it");
+          }
           await runImport({
             bridgeName: target.name,
             descriptor: loaded.descriptor,
@@ -248,12 +387,35 @@ export function register(program: Command): void {
           // Code plugin: invoke bridge.import(opts, ctx) directly; the plugin
           // returns an AsyncIterable of BridgeMemory that runImport processes.
           if (!loaded.plugin.import) {
-            console.error(`Bridge "${name}" is a code plugin without an import() function — can only export through it.`);
+            console.error(safe(`Bridge "${name}" is a code plugin without an import() function — can only export through it.`));
             process.exit(1);
           }
-          // Code-plugin options: pass through all --X flags as a single object.
-          // The plugin's declared `options` descriptor validates what it actually cares about.
+          // Code-plugin options: start from the parsed flags, then use only
+          // the declared `env` entries as fallbacks. The CLI does not apply
+          // descriptor `default` or `required` entries here:
+          //   - an option no flag set falls back to the env var it names
+          //     (`BridgeOptionSpec.env`, e.g. MEM0_API_KEY);
+          //   - `--api-key-file` fills a declared `apiKey` option, read here so
+          //     the secret never appears in argv (group/world access refused).
           const pluginOpts: Record<string, unknown> = { ...opts };
+          const declaredOptions: Record<string, BridgeOptionSpec> = loaded.plugin.options ?? {};
+          if (opts.apiKeyFile !== undefined) {
+            if (!declaredOptions.apiKey) {
+              throw new Error("--api-key-file requires an API bridge with an apiKey option");
+            }
+            if (typeof opts.apiKeyFile !== "string" || opts.apiKeyFile.trim() === "") {
+              throw new Error("--api-key-file requires a non-empty path");
+            }
+          }
+          for (const [key, spec] of Object.entries(declaredOptions)) {
+            if (pluginOpts[key] === undefined && spec.env && process.env[spec.env] !== undefined) {
+              pluginOpts[key] = process.env[spec.env];
+            }
+          }
+          if (opts.apiKeyFile !== undefined) {
+            pluginOpts.apiKey = readSecretFileSecure(opts.apiKeyFile, "--api-key-file");
+          }
+          if (typeof pluginOpts.apiKey === "string") bridgeApiKey = pluginOpts.apiKey;
           const source = loaded.plugin.import(pluginOpts, ctx);
           await runImport({
             bridgeName: target.name,
@@ -268,10 +430,10 @@ export function register(program: Command): void {
         }
       } catch (err: any) {
         if (err instanceof BridgeRuntimeError) {
-          printBridgeError(err);
+          printBridgeError(err, bridgeApiKey);
           process.exit(1);
         }
-        console.error(`Bridge import failed: ${err?.message ?? err}`);
+        console.error(safe(`Bridge import failed: ${err?.message ?? err}`));
         process.exit(1);
       }
     });
@@ -577,99 +739,9 @@ export function register(program: Command): void {
       }
     });
 
-  function printBridgeError(err: unknown): void {
+  function printBridgeError(err: unknown, secret = ""): void {
     // Pretty-print BridgeRuntimeError as the structured shape from §10 of the
-    // spec, plus a one-line human summary so the operator gets both.
-    const detail = (err as { detail?: Record<string, unknown> })?.detail;
-    if (detail && typeof detail === "object") {
-      // Trust-check failures get a dedicated, operator-facing rendering.
-      // Dumping the full spec-§10 JSON is useful when an operator is
-      // debugging a broken YAML descriptor; for trust errors it buries the
-      // one thing that matters — the command to re-approve.
-      if ((detail as any).field === "(trust)") {
-        printTrustError(detail as any);
-        return;
-      }
-      console.error(`Bridge error: ${(detail as any).hint ?? (err as Error).message}`);
-      console.error(JSON.stringify(detail, null, 2));
-    } else {
-      console.error(`Bridge error: ${(err as Error).message ?? String(err)}`);
-    }
-  }
-
-  function printTrustError(detail: { bridge?: string; got?: string; context?: Record<string, string> }): void {
-    const name = detail.bridge ?? "(unknown)";
-    const ctx = detail.context ?? {};
-    const reapprove = `  flair bridge allow ${name}`;
-    const bar = "─".repeat(60);
-
-    const header = (title: string) => {
-      console.error("");
-      console.error(`⚠ ${title} — ${name}`);
-      console.error(bar);
-    };
-
-    const footer = (label: string) => {
-      console.error("");
-      console.error(`${label}:`);
-      console.error(reapprove);
-      console.error("");
-    };
-
-    switch (detail.got) {
-      case "not-allowed":
-        header("Approval required");
-        console.error("This bridge is an npm code plugin — it runs arbitrary JavaScript.");
-        console.error("First-use approval is required before Flair will execute it.");
-        footer("Approve it with");
-        return;
-
-      case "path-mismatch":
-        header("Trust check failed: package location changed");
-        console.error("A different package with the same name was discovered. This is how");
-        console.error("local squatting attacks present — a planted `node_modules/flair-bridge-*`");
-        console.error("in an unrelated project tree.");
-        console.error("");
-        console.error(`  approved: ${ctx.approvedPath ?? "(unknown)"}`);
-        console.error(`            version ${ctx.approvedVersion ?? "?"} at ${ctx.approvedAt ?? "?"}`);
-        console.error(`  now:      ${ctx.observedPath ?? "(unknown)"}`);
-        footer("If the new location is intentional, re-approve");
-        return;
-
-      case "digest-mismatch":
-        header("Trust check failed: package contents changed");
-        console.error("The package.json at the approved location has changed since you");
-        console.error("approved this bridge. This fires on every upgrade — it's a trust");
-        console.error("event, not an error. If the update is intentional, re-approve.");
-        console.error("");
-        console.error(`  location:          ${ctx.packagePath ?? "(unknown)"}`);
-        console.error(`  approved version:  ${ctx.approvedVersion ?? "?"}   (at ${ctx.approvedAt ?? "?"})`);
-        console.error(`  approved digest:   sha256:${(ctx.approvedDigest ?? "").slice(0, 16)}…`);
-        console.error(`  observed digest:   sha256:${(ctx.observedDigest ?? "").slice(0, 16)}…`);
-        footer("Re-approve");
-        return;
-
-      case "entry-incomplete":
-        header("Trust check failed: approval record is incomplete");
-        console.error("The allow-list entry for this bridge is missing a location or digest.");
-        console.error("This usually means the record was created by a pre-fix Flair version");
-        console.error("(0.6.0 / 0.6.1) that only stored the name. Re-approve to upgrade.");
-        footer("Re-approve");
-        return;
-
-      case "package-missing":
-        header("Trust check failed: approved package missing on disk");
-        console.error("The package location recorded at allow-time is no longer readable.");
-        console.error("");
-        console.error(`  approved at:  ${ctx.approvedPath ?? "(unknown)"}`);
-        console.error(`  discovered:   ${ctx.discoveredPath ?? "(unknown)"}`);
-        footer("Reinstall the package, then re-approve");
-        return;
-
-      default:
-        // Unknown trust sub-reason — fall back to the raw structured print.
-        console.error(`Bridge error (trust): ${(detail as any).hint ?? detail.got ?? "unknown"}`);
-        console.error(JSON.stringify(detail, null, 2));
-    }
+    // spec. Trust failures retain their dedicated operator-facing rendering.
+    for (const line of formatBridgeErrorLines(err, secret)) console.error(line);
   }
 }

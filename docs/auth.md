@@ -12,19 +12,13 @@ Different surfaces authenticate differently. The model in one place:
 | **CLI / SDK clients** (`flair`, `flair-client`) | Ed25519 agent keys; administrator Basic on supported paths | Ordinary signed agents: own writes; own and org-wide non-private reads | Administrator agent roles and Basic credentials have broader authority. |
 | **MCP server** (`@tpsdev-ai/flair-mcp`) | Ed25519 agent key; configured administrator Basic fallback | Ordinary signed agents: own writes; own and org-wide non-private reads | The key is auto-resolved from `~/.flair/keys/<agent>.key`; Basic is used when no key resolves and administrator credentials are configured. |
 | **OpenClaw / pi / Hermes plugins** | Ed25519 agent keys; Pi can use configured administrator Basic fallback | Ordinary signed agents: own writes; own and org-wide non-private reads | OpenClaw identity comes from host context; Pi requires `FLAIR_AGENT_ID`; Hermes defaults to `hermes`. |
-| **`n8n-nodes-flair`** | **Harper admin-password Basic auth** | ⚠️ **Whole instance, read + write, including `private`** | The admin credential bypasses agent scoping entirely — every workflow gets read/write on the *entire* memory store, including other agents' `private`-marked memories, not just the org-wide non-private pool an Ed25519 identity would see. |
+| **`n8n-nodes-flair`** | **Ed25519 with Agent Private Key selected**; deprecated administrator Basic | Ordinary signed agents: own writes; own and org-wide non-private reads | The deprecated **Admin Password** authenticates as the Harper administrator (whole instance, including `private`) when Agent Private Key is empty. |
 
 **The default, secure path is Ed25519 per-agent** (see below): each agent holds its own key and signs every request. For ordinary signed agents, this enforces write ownership: they can write only their own records and read their own plus other agents' non-private records. Administrator credentials and administrator agent roles have broader authority, including access to private records. The hard access boundary is the **federation edge** (a separate Flair instance / org), not reads within an instance. See [SECURITY.md](../SECURITY.md) for the full model. Use Ed25519 per-agent everywhere you can regardless — it's still what makes writes and identity trustworthy.
 
-### Known limitation — n8n uses admin-password Basic auth
+### n8n: agent-key signing, with the admin password deprecated
 
-The `n8n-nodes-flair` community node authenticates with the Harper **admin password** (Basic auth), which bypasses agent scoping entirely — not just the org-wide non-private reads an Ed25519 identity already gets. Concretely, an n8n workflow using the admin credential can write memories under *any* agent's identity (no per-agent write isolation) and can read *every* memory including ones marked `visibility: private` (which stay owner-only under normal Ed25519 auth). This is acceptable only when **all** of the following hold:
-
-- The n8n instance is single-tenant and operator-controlled.
-- Workflow inputs are trusted (your own CRM, your own webhook source).
-- Write-forgery and full read access (including `private` memories) are acceptable for the use case.
-
-If any of those don't hold, use Flair's CLI / SDK clients (which support per-agent Ed25519 today) and wait for the n8n credential to gain Ed25519 per-agent auth (planned). Full guidance in [docs/n8n.md](n8n.md#security).
+With **Agent Private Key** selected, `n8n-nodes-flair` signs as the credential's Agent ID. Ordinary agents write their own memories and read their own plus other agents' non-private memories. The deprecated **Admin Password** path uses Harper administrator Basic authentication only with an empty Agent Private Key, and warns on each node execution. See [n8n setup](n8n.md#3-create-the-credential).
 
 ## Ed25519 Agent Auth (Default)
 
@@ -324,9 +318,9 @@ Ed25519 keys, including admin-agent keys, and MCP/OAuth delegation cannot create
 update, patch or delete Soul. A missing context does not grant Soul authority.
 This distinguishes credential classes; an administrator password is still a
 privileged secret, not proof that a human typed the request. Keep it out of
-agent-runtime environments. The n8n adapter currently uses admin Basic credentials
-and therefore retains operator-level access; it needs separate runtime credentials
-to receive the runtime restriction. Existing verified Soul reads are unchanged.
+agent-runtime environments. The n8n adapter uses agent signing when Agent Private
+Key is selected; its deprecated Admin Password path uses administrator Basic
+authentication. Existing verified Soul reads are unchanged.
 
 For an explicit operator edit:
 

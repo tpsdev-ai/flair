@@ -49,7 +49,7 @@ export function register(program: Command): void {
     .requiredOption("--agent <id>")
     .requiredOption("--key <key>")
     .requiredOption("--value <value>")
-    .option("--durability <d>", "permanent|persistent|standard|ephemeral (default permanent — soul entries are identity, not working memory)")
+    .option("--durability <d>", "Stored Soul label (permanent/persistent/standard/ephemeral). Soul has no expiresAt/validTo and is not scanned by MemoryMaintenance. PUT supplies no default; omitted durability is unset.")
     .option("--url <url>", "Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts: any) => {

@@ -57,15 +57,16 @@ const ok = (call: Call) => new Response(JSON.stringify(call.body.operation === "
 const remote = ["--instance", "https://flair.example.com", "--admin-pass", "target-pass"];
 
 describe("principal state command, socket-free", () => {
-  test("explicit instance and credential beat ambient targets; both requests are bounded and manual-redirect", async () => {
+  test("explicit instance and credential beat ambient targets; requests are bounded and manual-redirect", async () => {
     const result = await invoke("disable", remote, ok, {
       FLAIR_URL: "https://wrong.example", FLAIR_TARGET: "https://wrong.example", FLAIR_OPS_TARGET: "https://wrong.example", FLAIR_ADMIN_PASS: "local-pass",
     });
     expect(result.exited).toBe(false);
-    expect(result.calls.map((c) => c.url)).toEqual(["https://flair.example.com:9925/", "https://flair.example.com:9925/"]);
+    expect(result.calls.map((c) => c.url)).toEqual(Array(3).fill("https://flair.example.com:9925/"));
     expect(result.calls[0].init.headers).toMatchObject({ Authorization: `Basic ${Buffer.from("admin:target-pass").toString("base64")}` });
     expect(result.calls.every((c) => c.init.redirect === "manual" && c.init.signal instanceof AbortSignal)).toBe(true);
-    expect(result.calls[1].body.search_value).toBe("alice");
+    expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
+    expect(result.calls[2].body.search_value).toBe("alice");
     expect(result.logs).toContain("deactivated");
   });
 
@@ -73,7 +74,8 @@ describe("principal state command, socket-free", () => {
     const result = await invoke("enable", remote, (call) => new Response(JSON.stringify(call.body.operation === "update"
       ? { update_hashes: ["alice"] } : [{ id: "alice", status: "active" }])));
     expect(result.exited).toBe(false);
-    expect(result.calls[0].body.records[0].status).toBe("active");
+    expect(result.calls[1].body.records[0].status).toBe("active");
+    expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
     expect(result.logs).toContain("activated");
   });
 
@@ -92,29 +94,30 @@ describe("principal state command, socket-free", () => {
   });
 
   test("redirect refuses before the read-back", async () => {
-    const result = await invoke("disable", remote, () => new Response(null, { status: 307, headers: { Location: "https://wrong.example" } }));
+    const result = await invoke("disable", remote, (call, index) => index === 0 ? ok(call) : new Response(null, { status: 307, headers: { Location: "https://wrong.example" } }));
     expect(result.exited).toBe(true);
-    expect(result.calls).toHaveLength(1);
-    expect(result.errors).toContain("redirected");
+    expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update"]);
+    expect(result.errors).toContain("redirected the update");
     expect(result.logs).not.toContain("deactivated");
   });
 
   test("HTTP denial omits the response body and names the credential remedy", async () => {
-    const result = await invoke("disable", remote, () => new Response('{"error":"secret-response-token"}', { status: 401 }));
+    const result = await invoke("disable", remote, (call, index) => index === 0 ? ok(call) : new Response('{"error":"secret-response-token"}', { status: 401 }));
     expect(result.exited).toBe(true);
-    expect(result.calls).toHaveLength(1);
-    expect(result.errors).toContain("HTTP 401");
+    expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update"]);
+    expect(result.errors).toContain("refused the update (HTTP 401)");
     expect(result.errors).toContain("--admin-pass");
     expect(result.errors).not.toContain("secret-response-token");
   });
 
   for (const body of ["", "[]", '{"error":"secret-response-token"}']) {
     test(`empty or error update result ${JSON.stringify(body)} refuses`, async () => {
-      const result = await invoke("disable", remote, () => new Response(body));
+      const result = await invoke("disable", remote, (call, index) => index === 0 ? ok(call) : new Response(body));
       expect(result.exited).toBe(true);
-      expect(result.calls).toHaveLength(1);
+      expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update"]);
       expect(result.logs).not.toContain("deactivated");
       expect(result.errors).not.toContain("secret-response-token");
+      expect(result.errors).toContain("did not confirm the update");
     });
   }
 
@@ -122,16 +125,30 @@ describe("principal state command, socket-free", () => {
     const result = await invoke("disable", remote, (call) => new Response(JSON.stringify(call.body.operation === "update"
       ? { update_hashes: ["alice"] } : [{ id: "alice", status: "active" }])));
     expect(result.exited).toBe(true);
-    expect(result.calls).toHaveLength(2);
-    expect(result.errors).toContain("Check its status");
+    expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
+    expect(result.errors).toContain("the stored status is not deactivated");
     expect(result.logs).not.toContain("deactivated");
   });
 
+  for (const [verb, status] of [["disable", "deactivated"], ["enable", "active"]] as const) {
+    test(`${verb}: an unexpected read-back status never appears in output`, async () => {
+      const result = await invoke(verb, remote, (call, index) => index < 2 ? ok(call)
+        : new Response(JSON.stringify([{ id: "alice", status: "secret-response-token" }])));
+      expect(result.exited).toBe(true);
+      expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
+      expect(result.calls[1].body.records[0]).toMatchObject({ id: "alice", status });
+      expect(result.errors).toContain(`the stored status is not ${status}. Check the principal's status on that instance`);
+      expect(result.errors + result.logs).not.toContain("secret-response-token");
+      expect(result.logs).toBe("");
+    });
+  }
+
   test("a matching state for another principal refuses success", async () => {
-    const result = await invoke("disable", remote, (call) => new Response(JSON.stringify(call.body.operation === "update"
+    const result = await invoke("disable", remote, (call, index) => index === 0 ? ok(call) : new Response(JSON.stringify(call.body.operation === "update"
       ? { update_hashes: ["alice"] } : [{ id: "mallory", status: "deactivated" }])));
     expect(result.exited).toBe(true);
-    expect(result.calls).toHaveLength(2);
+    expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
+    expect(result.errors).toContain("the stored status is not deactivated");
     expect(result.logs).not.toContain("deactivated");
   });
 
@@ -165,6 +182,8 @@ describe("principal state command, socket-free", () => {
       throw err;
     });
     expect(result.exited).toBe(true);
+    expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value"]);
+    expect(result.errors).toContain("could not disable lookup");
     expect(result.errors).toContain("ECONNREFUSED");
     expect(result.errors).not.toContain("topsecret");
     expect(result.errors).not.toContain("user:pass");

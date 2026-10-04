@@ -1,7 +1,7 @@
-import { existsSync, readdirSync } from "node:fs";
+import { chownSync, existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 // Sandbox HOME for every child step, and the guard that fails the lane if a
 // real client config changed anyway (flair#1853). Importing sandbox-home also
@@ -16,6 +16,17 @@ import {
   type ServiceManagerTripwire,
 } from "../test/helpers/fake-launchctl.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
+import { SHARDS, assignShards, listUnitFiles } from "./ci/unit-shards.mjs";
+import { testFiles } from "./ci/test-files.mjs";
+
+/** The short, canonical temp base darwin unit steps run under (flair#2137). */
+export const DARWIN_TEMP_BASE = "/private/tmp";
+
+export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined {
+  const override = env.FLAIR_UNIT_TEMP_BASE?.trim();
+  if (override) return override;
+  return platform === "darwin" ? DARWIN_TEMP_BASE : undefined;
+}
 
 export interface UnitStep {
   name: string;
@@ -24,22 +35,28 @@ export interface UnitStep {
   files: string[];
   /** This step's own time limit when the lane runs with limits; unset means the lane's default. */
   timeoutMs?: number;
+  /** Set on the shard steps that replace the single root unit step (flair#2258). */
+  shard?: { index: number; of: number };
 }
 
-// ── Time bounds (flair#2030) ────────────────────────────────────────────────
+// ── Time bounds (flair#2030, resized flair#2224) ───────────────────────────
 //
 // A hung step must not take the rest of the lane with it. Without a bound, the
 // CI job's own limit cancels the job mid-step, and neither the later steps, the
 // final summary nor the end-of-lane guards ever run. Every number below is
 // derived from that job: `.github/workflows/test.yml`, job `test-unit`,
-// `timeout-minutes: 10`. Measured on the 51 green `Unit Tests (node N)` legs of
-// 17 CI runs, 2026-09-28 21:52Z to 2026-09-29 03:53Z:
+// `timeout-minutes: 15`. Measured on 22 recent `Unit Tests (node N)` legs
+// (2026-10-02) plus a local run on the same tree:
 //   - the job's own steps outside the lane (setup before it, the skip-count
-//     check and post steps after it): at most 53 s;
-//   - the whole lane: 279–401 s;
-//   - `root unit tests`, the one long step: at most 266 s, and every other
-//     step at most 30 s, in the seven legs timed step by step (the slowest
-//     lane among them).
+//     check and post steps after it): at most 53 s (2026-09-29);
+//   - the whole lane: 401–510 s, and 456 s locally;
+//   - `root unit tests`, the one long step: 252–327 s (280 s locally);
+//   - every other step at most 33 s; in that
+//     set the median is 1–2 s.
+// The budget is whole-lane headroom: about 1.53× the slowest measured lane
+// (510 s), still subject to each step's own limit below; the old 510 s
+// budget sat at that worst lane's length and killed whichever late step was running
+// on a busy runner (flair#2224: `flair-mcp` on #2220, `adk-flair-js` on main).
 // unit-runner.test.ts pins the job limit and re-checks the arithmetic, so a
 // change to either side fails there first.
 //
@@ -48,30 +65,31 @@ export interface UnitStep {
 // time-limited: these numbers describe a CI runner, and a slower machine must
 // not turn a slow step into a failure.
 
-/** The CI job limit the lane has to report inside (`timeout-minutes: 10`). */
-export const CI_JOB_LIMIT_MS = 10 * 60_000;
-/** Reserved for the job's own steps outside the lane: 53 s measured, 37 s spare. */
-export const CI_OUTSIDE_LANE_MS = 90_000;
+/** The CI job limit the lane has to report inside (`timeout-minutes: 15`). */
+export const CI_JOB_LIMIT_MS = 15 * 60_000;
+/** Reserved for the job's own steps outside the lane: 53 s measured, 67 s spare. */
+export const CI_OUTSIDE_LANE_MS = 120_000;
 /**
- * Keep-going's whole-lane budget: 600 − 90 = 510 s. A step still running when
- * it runs out is killed and every later step is reported as not run, so the
- * summary and both guards are expected to print before the job limit however
- * many steps hang, provided the job's steps outside the lane stay within the
- * reserve above (an observed margin, not a bound on workflow setup).
+ * Keep-going's whole-lane budget: 900 − 120 = 780 s, about 1.53× the slowest
+ * measured lane (510 s). A step still running when it runs out is killed and every later
+ * step is reported as not run, so the summary and both guards are expected to
+ * print before the job limit however many steps hang, provided the job's steps
+ * outside the lane stay within the reserve above (an observed margin, not a
+ * bound on workflow setup).
  */
 export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
 /**
- * The default per-step limit: 90 s, 3× the slowest ordinary step. One hung step
- * costs at most that, so the rest of the slowest lane still runs inside the
- * budget (401 + 90 = 491 s ≤ 510 s).
+ * The default per-step limit: 100 s, 3× the slowest ordinary step (33 s). One
+ * hung step costs at most that, so the rest of the slowest lane still runs
+ * inside the budget (510 + 100 = 610 s ≤ 780 s).
  */
-export const STEP_TIMEOUT_MS = 90_000;
+export const STEP_TIMEOUT_MS = 100_000;
 /**
- * `root unit tests`' own limit: 360 s, 1.35× its slowest measured run. If it
- * hangs, the other ~135 s of the lane still fits (135 + 360 = 495 s ≤ 510 s). A
- * real root step that slow would already put the job within ~50 s of its limit.
+ * `root unit tests`' own limit: 450 s, 1.37× its slowest measured run (327 s).
+ * If it hangs, the other ~183 s of the lane still fits (183 + 450 = 633 s ≤
+ * 780 s).
  */
-export const ROOT_STEP_TIMEOUT_MS = 360_000;
+export const ROOT_STEP_TIMEOUT_MS = 450_000;
 
 /** The time limits a lane runs under (flair#2030). */
 export interface UnitLaneLimits {
@@ -103,24 +121,6 @@ export function newFlairTempNames(before: ReadonlySet<string>, after: ReadonlySe
   return [...after].filter((name) => !before.has(name)).sort();
 }
 
-/**
- * The temp-dir leak guard (flair#1889).
- *
- * A unit test must remove the scratch directory it creates. The lane is the only
- * place that can see all of them, so it snapshots the `flair-*` names in the OS
- * temp dir before the lane and again after it, and fails on any name that
- * APPEARED during the lane.
- *
- * It compares NAMES, not a bare count, and reports only the names that appeared:
- * a `flair-*` directory that was already there (an earlier run's leftover, which
- * this lane did not create) is not a leak this lane caused. The accepted
- * false-positive is a genuinely concurrent, unrelated process that creates a
- * `flair-*` temp dir while the lane runs — an entry carries no owner, so it
- * cannot be attributed to a process, and hiding it would mean hiding real leaks
- * too.
- *
- * @returns true when the lane leaked (and the caller must fail).
- */
 export function reportTempDirLeaks(leaked: readonly string[], dir: string = tmpdir()): boolean {
   if (!leaked.length) return false;
   const counts = new Map<string, number>();
@@ -131,7 +131,7 @@ export function reportTempDirLeaks(leaked: readonly string[], dir: string = tmpd
   }
   const prefixes = [...counts.entries()].map(([prefix, n]) => `${prefix} (${n})`).join(", ");
   console.error(
-    `Temp-dir leak guard FAILED: the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${dir}. ` +
+    `Temp-dir leak guard FAILED: ${leaked.length} new flair-* entries observed in ${dir}. ` +
       `A unit test must remove the scratch directory it creates — use tempDir() from test/helpers/temp-dir.ts, which registers the removal in the same call (flair#1889). ` +
       `New prefixes: ${prefixes}`,
   );
@@ -163,16 +163,9 @@ export function stepEnvironment(
   tripwireDir: string,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...unitEnvironment(source), ...sandbox.env };
+  if (source.FLAIR_UNIT_TEMP_ROOT) env.FLAIR_UNIT_TEMP_ROOT = source.FLAIR_UNIT_TEMP_ROOT;
   env.PATH = `${tripwireDir}:${env.PATH ?? ""}`;
   return env;
-}
-
-function testFiles(dir: string, recursive = true): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return recursive ? testFiles(path) : [];
-    return /\.test\.[jt]sx?$/.test(entry.name) ? [path] : [];
-  }).sort();
 }
 
 export function unitPlan(root: string): UnitStep[] {
@@ -181,8 +174,7 @@ export function unitPlan(root: string): UnitStep[] {
     if (!files.length) throw new Error(`No unit test files found in ${dir}`);
     return files;
   };
-  const rootFiles = requiredFiles("test", false);
-  const unitFiles = requiredFiles("test/unit");
+  const rootUnitFiles = listUnitFiles(root);
   const isolatedFiles = requiredFiles("test/unit-isolated");
   const steps: UnitStep[] = [{
     // flair#1683: the private descriptor package is a build-time source, not a
@@ -210,13 +202,15 @@ export function unitPlan(root: string): UnitStep[] {
     steps.push({ name: `typecheck: ${label}`, cwd: root, args: ["x", "tsc", "--noEmit", "-p", config], files: [] });
   }
   steps.push({ name: "emit server for boundary guard", cwd: root, args: ["x", "tsc", "-p", "tsconfig.json", "--noCheck"], files: [] });
-  steps.push({
-    name: "root unit tests",
-    cwd: root,
-    // Preserve CI's existing grouping; mock.module isolation is per process.
-    args: ["test", "test/unit/", ...rootFiles.map(file => relative(root, file))],
-    files: [...unitFiles, ...rootFiles],
-    timeoutMs: ROOT_STEP_TIMEOUT_MS,
+  assignShards(rootUnitFiles, SHARDS).forEach((files, index) => {
+    steps.push({
+      name: `root unit tests (shard ${index + 1}/${SHARDS})`,
+      cwd: root,
+      args: files.length ? ["test", ...files.map(file => join(root, file))] : [],
+      files: files.map(file => join(root, file)),
+      timeoutMs: ROOT_STEP_TIMEOUT_MS,
+      shard: { index: index + 1, of: SHARDS },
+    });
   });
   for (const file of isolatedFiles) {
     steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
@@ -346,14 +340,21 @@ export interface UnitLaneOptions {
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/** Why a step failed, and whether it ran past its time limit and was killed. */
+interface StepOutcome {
+  detail?: string;
+  killedAtLimit: boolean;
+}
+
 /**
  * Run one step under a fresh sandbox HOME and, when given, a time limit.
  *
- * Returns undefined when the step passed, otherwise why it failed. Every way a
- * step can fail comes back as a reason, never as an exception: its own non-zero
- * exit or signal, its time limit, a sandbox HOME that could not be created, a
- * process that could not start. The caller therefore always reaches the later
- * steps (in keep-going mode) and the end-of-lane guards.
+ * Returns an outcome whose `detail` is undefined when the step passed, otherwise
+ * why it failed, and `killedAtLimit` true when the step ran past its time limit
+ * and was killed. Every way a step can fail comes back as a reason, never as an
+ * exception: its own non-zero exit or signal, its time limit, a sandbox HOME that
+ * could not be created, a process that could not start. The caller therefore
+ * always reaches the later steps (in keep-going mode) and the end-of-lane guards.
  */
 function runStep(
   step: UnitStep,
@@ -361,7 +362,7 @@ function runStep(
   timeout: { ms: number; reason: string } | undefined,
   createSandbox: () => SandboxHome,
   tripwireDir: string,
-): string | undefined {
+): StepOutcome {
   // A fresh sandbox HOME per step: even if one step's child wrote a config,
   // the next step cannot read it back, and the real home is never the target.
   // The bunfig preload covers `bun test` children too; this also covers the
@@ -371,7 +372,7 @@ function runStep(
     sandbox = createSandbox();
   } catch (error) {
     // Never run a step without its sandbox: its HOME would be the real one.
-    return `not started: its sandbox HOME could not be created (${errorMessage(error)})`;
+    return { detail: `not started: its sandbox HOME could not be created (${errorMessage(error)})`, killedAtLimit: false };
   }
   let result: ReturnType<typeof spawnSync>;
   try {
@@ -385,19 +386,18 @@ function runStep(
       killSignal: "SIGKILL",
     });
   } catch (error) {
-    return `not started (${errorMessage(error)})`;
+    return { detail: `not started (${errorMessage(error)})`, killedAtLimit: false };
   } finally {
     sandbox.cleanup();
   }
   if (timeout && (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
-    console.error(
-      `${step.name}: ${timeout.reason}; the step was killed. A killed step cannot remove its own scratch directories, ` +
-        `so the temp-dir leak guard may name them too.`,
-    );
-    return `${timeout.reason}; killed`;
+    console.error(`${step.name}: ${timeout.reason}; step killed at the limit.`);
+    return { detail: `${timeout.reason}; step killed at the limit`, killedAtLimit: true };
   }
-  if (result.error || result.status !== 0) return result.error?.message ?? result.signal ?? `exit ${result.status}`;
-  return undefined;
+  if (result.error || result.status !== 0) {
+    return { detail: result.error?.message ?? result.signal ?? `exit ${result.status}`, killedAtLimit: false };
+  }
+  return { killedAtLimit: false };
 }
 
 /**
@@ -427,6 +427,25 @@ export function runUnitSteps(
   options: UnitLaneOptions = {},
 ): number {
   const { keepGoing = false, limits, createSandbox = createSandboxHome } = options;
+  const previousTmpdir = process.env.TMPDIR;
+  const previousTempRoot = process.env.FLAIR_UNIT_TEMP_ROOT;
+  const tempBase = unitTempBase(process.platform, process.env);
+  const callerTempRoot = realpathSync(tmpdir());
+  const reuseTempRoot = !process.env.FLAIR_UNIT_TEMP_BASE?.trim() && (
+    previousTempRoot === callerTempRoot ||
+    (process.platform === "darwin" && dirname(callerTempRoot) === DARWIN_TEMP_BASE && /^f[a-zA-Z0-9]{6}$/.test(basename(callerTempRoot)))
+  );
+  const ownsTempRoot = !reuseTempRoot && tempBase !== undefined;
+  const laneTempRoot = ownsTempRoot && tempBase !== undefined
+    ? realpathSync(mkdtempSync(join(tempBase, "f")))
+    : callerTempRoot;
+  if (ownsTempRoot && process.getuid && process.getgid) {
+    chownSync(laneTempRoot, process.getuid(), process.getgid());
+  }
+  // Steps inherit TMPDIR even where the caller left it unset, so the leak guard
+  // scans the root they write to.
+  process.env.TMPDIR = laneTempRoot;
+  process.env.FLAIR_UNIT_TEMP_ROOT = laneTempRoot;
   const laneBudgetMs = limits?.laneBudgetMs;
   const deadline = laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
   const budgetRanOut = `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
@@ -440,6 +459,11 @@ export function runUnitSteps(
   const ownsTripwire = options.tripwire === undefined;
   const finish = (code: number): number => {
     if (ownsTripwire) tripwire.cleanup();
+    if (previousTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpdir;
+    if (previousTempRoot === undefined) delete process.env.FLAIR_UNIT_TEMP_ROOT;
+    else process.env.FLAIR_UNIT_TEMP_ROOT = previousTempRoot;
+    if (ownsTempRoot) rmSync(laneTempRoot, { recursive: true, force: true });
     return code;
   };
   // Read the tripwire log after a step. A nonempty log is a step failure naming
@@ -469,7 +493,8 @@ export function runUnitSteps(
   // ever touching the real one (flair#1853 round 3).
   const before = snapshotClientConfigs(guardHome);
   // The temp-dir leak guard's `before` snapshot (flair#1889).
-  const tempBefore = flairTempNames();
+  const guardTempDir = laneTempRoot;
+  const tempBefore = flairTempNames(guardTempDir);
 
   // Both guards run ONCE, at the END (flair#2030). Collecting their failures in
   // the same list as step failures is what lets keep-going report them in one
@@ -489,19 +514,35 @@ export function runUnitSteps(
         detail: `a real client config changed during the lane: ${changed.join(", ")} (flair#1853)`,
       });
     }
-    const leaked = newFlairTempNames(tempBefore, flairTempNames());
-    if (reportTempDirLeaks(leaked)) {
-      guardFailures.push({
-        kind: "guard",
-        name: "temp-dir leak guard",
-        detail: `the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${tmpdir()} (flair#1889)`,
-      });
+    for (const { step, names, killed } of tempEntries) {
+      if (killed) {
+        console.error(`Temp-dir entries first observed after ${step} (killed): ${names.join(", ")}.`);
+      } else if (reportTempDirLeaks(names, guardTempDir)) {
+        guardFailures.push({
+          kind: "guard",
+          name: "temp-dir leak guard",
+          detail: `${names.length} new flair-* entries first observed after ${step} in ${guardTempDir}: ${names.join(", ")} (flair#1889)`,
+        });
+      }
+    }
+    const observed = new Set([...tempBefore, ...tempEntries.flatMap(entry => entry.names)]);
+    const leaked = newFlairTempNames(observed, flairTempNames(guardTempDir));
+    if (reportTempDirLeaks(leaked, guardTempDir)) {
+      guardFailures.push({ kind: "guard", name: "temp-dir leak guard", detail: `new entries first observed at the final guard: ${leaked.join(", ")}` });
     }
   };
 
   const stepFailures: UnitLaneFailure[] = [];
+  const tempEntries: Array<{ step: string; names: string[]; killed: boolean }> = [];
+
+  const shardTimings: Array<{ index: number; of: number; ms: number }> = [];
   let completed = 0;
   for (const [index, step] of steps.entries()) {
+    if (step.shard && !step.files.length) {
+      console.log(`\n${step.name}: empty shard; skipped`);
+      completed++;
+      continue;
+    }
     const remaining = deadline - Date.now();
     if (remaining < 1) {
       // The budget is spent before this step could start: it and every later
@@ -517,13 +558,26 @@ export function runUnitSteps(
       break;
     }
     console.log(`\n${step.name}${step.files.length ? ` (${step.files.length} files)` : ""}`);
+    const stepStartedMs = Date.now();
     const limit = limits && (step.timeoutMs ?? limits.stepTimeoutMs);
     const timeout = limit === undefined
       ? undefined
       : remaining < limit
         ? { ms: remaining, reason: `timed out: ${budgetRanOut}` }
         : { ms: limit, reason: `timed out after ${seconds(limit)}` };
-    const detail = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    const stepTempBefore = flairTempNames(guardTempDir);
+    const outcome = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    const names = newFlairTempNames(stepTempBefore, flairTempNames(guardTempDir));
+    if (names.length) tempEntries.push({ step: step.name, names, killed: outcome.killedAtLimit });
+    const detail = outcome.detail;
+    // Per-step timing, printed after every step the lane attempts, pass or
+    // fail (flair#2224): the budget above is sized from measured step times, so
+    // the lane reports them; otherwise the next resize can only be re-derived
+    // from CI timestamps that no longer exist. Each root unit shard names its
+    // own duration here (flair#2258).
+    const elapsedMs = Date.now() - stepStartedMs;
+    console.log(`${step.name}: ${seconds(elapsedMs)}`);
+    if (step.shard) shardTimings.push({ ...step.shard, ms: elapsedMs });
     // The tripwire is checked after EVERY step, whatever the step's own
     // outcome, so a call that reached it is named with the step that made it.
     const tripwireDetail = inspectTripwire();
@@ -544,6 +598,11 @@ export function runUnitSteps(
   }
 
   runGuards();
+  if (shardTimings.length) {
+    console.log(
+      `Root unit shards: ${shardTimings.map(({ index, of, ms }) => `${index}/${of} ${seconds(ms)}`).join(", ")}.`,
+    );
+  }
   const summary = `${completed} steps, ${steps.reduce((n, step) => n + step.files.length, 0)} test files`;
   if (!keepGoing) {
     // Every step passed; only a guard failure can fail the lane now.

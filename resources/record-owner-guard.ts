@@ -123,6 +123,8 @@ export const OWNER_GUARD_EXEMPT: Readonly<Record<string, string>> = Object.freez
   // writes stamp `authorId` from the authenticated principal; direct resource
   // reads permit admins and trusted internal callers.
   MemoryHostSource: "REST writes refused; application writes stamp authorId; direct reads limited to admins and trusted internal callers",
+  // Application append-only history; REST writes are refused.
+  InstructionVersion: "application append-only; REST writes refused",
 });
 
 /** The verbs that can mutate a record, and therefore need the rule applied. */
