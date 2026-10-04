@@ -13,10 +13,10 @@ export const HTTP_PORT = 20991;
 export const OPS_PORT = 20990;
 const OWN_PID = 4242;
 
-type Scenario = "own" | "own-launchd" | "foreign-launchd" | "free" | "missing-free" | "missing-listener" | "unknown" | "missing-error" | "missing-real-free" | "spawned" | "child-dead" | "other-child" | "post-unknown" | "root-mismatch" | "root-missing" | "install-race" | "owner-unknown" | "proc-mismatch" | "real-decoy" | "child-starting" | "lsof-child" | "lsof-empty" | "lsof-unknown";
+type Scenario = "own" | "own-stopped" | "own-stopped-real-free" | "own-launchd" | "foreign-launchd" | "free" | "missing-free" | "missing-listener" | "unknown" | "missing-error" | "missing-real-free" | "spawned" | "child-dead" | "other-child" | "post-unknown" | "root-mismatch" | "root-missing" | "install-race" | "owner-unknown" | "proc-mismatch" | "real-decoy" | "child-starting" | "lsof-child" | "lsof-empty" | "lsof-unknown";
 
 interface Event {
-  kind: "probe" | "fetch" | "auth" | "tcp" | "closed" | "child-alive";
+  kind: "probe" | "fetch" | "auth" | "tcp" | "closed" | "child-alive" | "stopped" | "attribution";
   host?: string;
   port?: number;
   url?: string;
@@ -28,7 +28,7 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
   const actions = join(home, "actions.json");
   writeFileSync(events, "");
   writeFileSync(actions, JSON.stringify([]));
-  if (["own", "own-launchd", "foreign-launchd"].includes(scenario)) {
+  if (["own", "own-stopped", "own-stopped-real-free", "own-launchd", "foreign-launchd"].includes(scenario)) {
     const dataDir = join(home, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
@@ -53,6 +53,8 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
     let decoy;
     const realFetch = globalThis.fetch;
     let installed = false;
+    let stopped = false;
+    let httpProbes = 0;
     const procRoot = join(${JSON.stringify(home)}, "proc");
     const attribution = await import(${JSON.stringify(SPAWN_ATTRIBUTION)});
     const track = attribution.trackInitChild;
@@ -76,14 +78,22 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
         else if (running && ${scenario === "post-unknown"}) socket.emit("timeout");
         else if (running && ${scenario === "child-starting"} && startupProbes++ === 0) socket.emit("error", Object.assign(new Error("starting"), { code: "ECONNREFUSED" }));
         else if (running) socket.emit("connect");
+        else if (${["own", "own-launchd", "foreign-launchd"].includes(scenario)} && (port === ${HTTP_PORT} || ${scenario === "own"})) socket.emit("connect");
+        else if (${scenario.startsWith("own-stopped")} && ((port === ${HTTP_PORT} && httpProbes === 1) || port === ${OPS_PORT})) socket.emit("connect");
         else if (port === ${probePort} && ${scenario === "missing-listener"}) socket.emit("connect");
         else if (port === ${probePort} && ${scenario === "unknown"}) socket.emit("timeout");
         else socket.emit("error", Object.assign(new Error("fixture"), { code: ${JSON.stringify(scenario === "missing-error" ? "EACCES" : "ECONNREFUSED")} }));
       });
       return socket;
     };
-    mock.module(${JSON.stringify(TCP_PROBE)}, () => ({ ...probe, localPortState: (port, host) =>
-      !running && ${scenario === "missing-real-free"} ? readPort(port, host) : readPort(port, host, connect) }));
+    mock.module(${JSON.stringify(TCP_PROBE)}, () => ({ ...probe, localPortState: (port, host) => {
+      if (port === ${HTTP_PORT} && ${scenario.startsWith("own-stopped")}) {
+        stopped = ++httpProbes > 1;
+        if (stopped) log({ kind: "stopped", port });
+      }
+      return (!running && ${scenario === "missing-real-free"}) || (stopped && ${scenario === "own-stopped-real-free"})
+        ? readPort(port, host) : readPort(port, host, connect);
+    } }));
     mock.module("node:child_process", () => ({ ...childProcess, spawn: (command, args, options) => {
       const actions = JSON.parse(readFileSync(actionsPath, "utf8"));
       actions.push(args[1]);
@@ -132,20 +142,20 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
       harperBin: () => "fixture-harper.js",
       registerInitLaunchdService: async () => ({ kind: "managed", lines: [] }),
       repointMainServiceUnit: () => ({ kind: "unchanged" }),
-      resolveInstanceServingPid: ${["own", "own-launchd", "foreign-launchd"].includes(scenario) ? `() => ${OWN_PID}` : "fns.resolveInstanceServingPid"},
+      resolveInstanceServingPid: ${["own", "own-stopped", "own-stopped-real-free", "own-launchd", "foreign-launchd"].includes(scenario) ? `() => { log({ kind: "attribution" }); return ${OWN_PID}; }` : "fns.resolveInstanceServingPid"},
     }) }));
     const stored = new Map();
     globalThis.fetch = async (url, options = {}) => {
       if (running && ${scenario === "real-decoy"} && String(url).includes(":" + ${probePort} + "/")) return realFetch(url, options);
       const authorized = new Headers(options.headers).get("Authorization") !== null;
       log({ kind: authorized ? "auth" : "fetch", url: String(url) });
-      if ((!running && ${!["own", "own-launchd", "foreign-launchd"].includes(scenario)}) || (${["own-launchd", "foreign-launchd"].includes(scenario)} && String(url).includes(":" + ${OPS_PORT} + "/"))) throw new Error("released port");
+      if ((!running && ${!["own", "own-stopped", "own-stopped-real-free", "own-launchd", "foreign-launchd"].includes(scenario)}) || (${["own-launchd", "foreign-launchd"].includes(scenario)} && String(url).includes(":" + ${OPS_PORT} + "/"))) throw new Error("released port");
       if (options.method === "PUT") stored.set(String(url), { id: decodeURIComponent(String(url).split("/").pop()), ...JSON.parse(options.body) });
       return new Response(JSON.stringify(stored.get(String(url)) ?? {}), { status: stored.has(String(url)) || /\\/health$/i.test(String(url)) ? 200 : 404 });
     };
     const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
     setOccupiedListenerLookupForTests({
-      pids: (port) => { log({ kind: "probe", port }); return running && ${scenario === "lsof-child"} ? [ownChild.pid] : running && ${scenario === "lsof-empty"} ? [] : running && ${scenario === "other-child"} ? [ownChild.pid + 1] : ${scenario === "own" ? `[${OWN_PID}]` : ["own-launchd", "foreign-launchd"].includes(scenario) ? `port === ${HTTP_PORT} ? [${scenario === "own-launchd" ? OWN_PID : OWN_PID + 1}] : []` : scenario === "free" ? "[]" : "null"}; },
+      pids: (port) => { log({ kind: "probe", port }); return running && ${scenario === "lsof-child"} ? [ownChild.pid] : running && ${scenario === "lsof-empty"} ? [] : running && ${scenario === "other-child"} ? [ownChild.pid + 1] : ${["own", "own-stopped", "own-stopped-real-free"].includes(scenario) ? `stopped ? [] : [${OWN_PID}]` : ["own-launchd", "foreign-launchd"].includes(scenario) ? `port === ${HTTP_PORT} ? [${scenario === "own-launchd" ? OWN_PID : OWN_PID + 1}] : []` : scenario === "free" ? "[]" : "null"}; },
       rootPath: () => ({ rootPath: null, environReadable: false }),
     });
     const realExit = process.exit;

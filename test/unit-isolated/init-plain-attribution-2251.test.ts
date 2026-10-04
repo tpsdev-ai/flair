@@ -32,12 +32,12 @@ test("a simulated listener whose injected PID differs from the PID file refuses 
   const { result, events, actions } = runPlain("foreign-launchd");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(1);
-  expect(result.stderr).toContain("not attributed to this data directory");
+  expect(result.stderr).toContain("attribution to this data directory was not confirmed");
   const refusal = result.stderr.split("\n").find(line => line.startsWith("Refusing init"));
   expect(refusal).toContain(`port ${HTTP_PORT}`);
-  expect(refusal).toContain("answered /health with HTTP 200");
-  expect(refusal).toContain("/.flair/data");
-  expect(refusal?.match(/not attributed to this data directory/g)).toHaveLength(1);
+  expect(refusal).toContain("pid 4243");
+  expect(refusal).not.toMatch(/listener|answered|waiting|ownership/);
+  expect(refusal?.match(/attribution to this data directory was not confirmed/g)).toHaveLength(1);
   expect(result.stderr).not.toContain("send its admin password to a process it did not start");
   expect(actions).toEqual([]);
   expect(events.some(e => e.kind === "auth")).toBe(false);
@@ -57,12 +57,12 @@ test("injected free ports enter the simulated install and run branches", () => {
   expect(firstAuth).toBeGreaterThan(opsProbe);
 }, 30_000);
 
-test("a failed lsof probe and connect timeout remain unknown: init refuses and starts nothing", () => {
+test("an injected null PID result and a simulated connect timeout refuse before start", () => {
   const { result, events, actions } = runPlain("unknown");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(1);
-  expect(result.stderr).toContain(`could not read the listener on port ${HTTP_PORT}`);
-  expect(result.stderr).toContain("unknown");
+  expect(result.stderr).toContain(`port ${HTTP_PORT}: TCP probe was inconclusive`);
+  expect(result.stderr).toContain("TCP probe was inconclusive");
   expect(actions).toEqual([]);
   expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
@@ -87,7 +87,7 @@ for (const scenario of ["missing-listener", "missing-error"] as const) {
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain("Refusing init");
     expect(result.stderr).toContain(`port ${HTTP_PORT}`);
-    expect(result.stderr).toContain(scenario === "missing-listener" ? "not attributed" : "unknown");
+    expect(result.stderr).toContain(scenario === "missing-listener" ? "attribution to this data directory was not confirmed" : "TCP probe was inconclusive");
     expect(actions).toEqual([]);
     expect(events.some(e => e.kind === "auth")).toBe(false);
     expect(events.some(e => e.kind === "closed")).toBe(true);
@@ -129,7 +129,7 @@ test("a simulated listener reported after the simulated install refuses before s
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(1);
   expect(actions).toEqual(["install"]);
-  expect(result.stderr).toContain("no longer free");
+  expect(result.stderr).toContain("pre-start port check failed");
   expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
 
@@ -145,6 +145,20 @@ for (const scenario of ["lsof-child", "lsof-empty", "lsof-unknown"] as const) {
     const { result, events } = runPlain(scenario);
     expect(result.status, result.stdout + result.stderr).toBe(scenario === "lsof-child" ? 0 : 1);
     expect(events.some(e => e.kind === "auth")).toBe(scenario === "lsof-child");
-    if (scenario !== "lsof-child") expect(result.stderr).toContain("not attributed");
+    if (scenario !== "lsof-child") expect(result.stderr).toContain("attribution to this data directory was not confirmed");
+  }, 30_000);
+}
+
+for (const scenario of ["own-stopped", "own-stopped-real-free"] as const) {
+  test(`a simulated instance stops before the credential gate: ${scenario}`, () => {
+    const { result, events, actions } = runPlain(scenario);
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toMatch(new RegExp(`port ${HTTP_PORT}(, pid 4242)?: TCP readiness check failed`));
+    expect(result.stderr).not.toMatch(/has a listener|occupied|not attributed|attribution to this data directory/);
+    expect(actions).toEqual([]);
+    expect(events.some(e => e.kind === "auth")).toBe(false);
+    const stopped = events.findIndex(e => e.kind === "stopped");
+    expect(stopped).toBeGreaterThan(-1);
+    expect(events.slice(stopped).some(e => e.kind === "attribution")).toBe(false);
   }, 30_000);
 }

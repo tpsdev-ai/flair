@@ -11,7 +11,7 @@ for (const port of [HTTP_PORT, OPS_PORT]) {
     expect(actions).toEqual(["install", "run"]);
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stderr).toContain(`port ${port}`);
-    expect(result.stderr).toContain("not attributed");
+    expect(result.stderr).toContain("attribution to this data directory was not confirmed");
     expect(events.some(e => e.kind === "child-alive")).toBe(true);
     expect(events.some(e => e.kind === "auth" && e.url?.includes(`:${port}/`))).toBe(false);
   }, 30_000);

@@ -222,6 +222,7 @@ export function initAdminPassRefusalMessage(
   opts: {
     dataDir?: string;
     httpPort?: number;
+    pid?: number;
     adminPassPath?: string;
     socketPath?: string;
     /**
@@ -235,8 +236,9 @@ export function initAdminPassRefusalMessage(
 ): string {
   if (reason === "foreign-instance") {
     const port = opts.httpPort ?? 19926;
+    const pid = opts.pid === undefined ? "" : `, pid ${opts.pid}`;
     const head =
-      `A listener on port ${port} is not attributed to this data directory's instance and this data directory has no persisted admin user.`;
+      `Refusing init: port ${port}${pid}: no persisted admin user in this data directory.`;
     if (opts.offerFlairStop === false) return head;
     return (
       `${head} Stop that process before initializing a new instance:\n  ${INIT_STOP_FOREIGN_COMMAND}`

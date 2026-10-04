@@ -19,24 +19,24 @@ function procFixture(table: "tcp" | "tcp6", inodes: number[], owned: number[], s
 }
 
 for (const table of ["tcp", "tcp6"] as const) {
-  test(`positive ${table} inode ownership attributes the child`, () => {
+  test(`synthetic /proc ${table} rows and matching fd links attribute the simulated child`, () => {
     expect(initChildOwnsProcPort(123, 20999, procFixture(table, [700], [700]))).toBe(true);
   });
-  test(`${table} mismatched owner refuses`, () => {
+  test(`synthetic /proc ${table} rows and mismatched fd links refuse`, () => {
     expect(initChildOwnsProcPort(123, 20999, procFixture(table, [700], [800]))).toBe(false);
   });
-  test(`${table} another listener on the same port refuses`, () => {
+  test(`synthetic /proc ${table} rows with an extra socket inode refuse`, () => {
     expect(initChildOwnsProcPort(123, 20999, procFixture(table, [700, 701], [700]))).toBe(false);
   });
 }
 
-test("unknown proc evidence refuses", () => {
+test("missing or empty synthetic /proc evidence refuses", () => {
   expect(initChildOwnsProcPort(123, 20999, tempDir("init-proc-unknown-"))).toBe(false);
   expect(initChildOwnsProcPort(123, 20999, procFixture("tcp", [], []))).toBe(false);
   expect(initChildOwnsProcPort(456, 20999, procFixture("tcp", [700], [700]))).toBe(false);
 });
 
-test("non-listening sockets and another port do not attribute the child", () => {
+test("synthetic /proc rows with a non-listening state or another port do not attribute the simulated child", () => {
   expect(initChildOwnsProcPort(123, 20999, procFixture("tcp", [700], [700], "01"))).toBe(false);
   expect(initChildOwnsProcPort(123, 21000, procFixture("tcp", [700], [700]))).toBe(false);
 });

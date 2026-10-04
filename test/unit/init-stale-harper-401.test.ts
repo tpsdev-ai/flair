@@ -20,9 +20,7 @@ import { listenerRootPathOnPlatform } from "../../src/lib/init-listener-environ.
 import { parseNullSeparatedEnviron, extractRootPath } from "../../src/lib/daemon-liveness.js";
 import {
   describeOccupiedListener,
-  DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD,
   foreignOccupiedListenerDetail,
-  HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT,
   listenerFromLookup,
   occupiedListenerAuthFailure,
   stableAnsweredHolder,
@@ -339,8 +337,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     const requests = readStubLog(logPath);
 
     expect(output).toContain("Refusing init");
-    expect(output).toContain("not attributed");
-    expect(output).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
+    expect(output).toContain("attribution to this data directory was not confirmed");
     expect(output).not.toContain("Waiting for Harper health check");
     expect(output).not.toContain("Operations API insert failed");
     expect(output).not.toContain("admin password will not match");
@@ -475,7 +472,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     expect(code).not.toBe(0);
     expect(output).toContain("Refusing init");
     expect(output).toContain(`port ${decoyPort === "http" ? httpHolder.httpPort : opsHolder.opsPort}`);
-    expect(output).toContain("not attributed to this data directory");
+    expect(output).toContain("attribution to this data directory was not confirmed");
     expect(output).toContain("Remedy:");
     const decoyRequests = readStubLog(decoyPort === "http" ? httpLog : opsLog);
     expect(decoyRequests.length).toBeGreaterThan(0);
@@ -505,8 +502,6 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     ], isolatedEnv(home));
     expect(stdout + stderr).not.toContain("Refusing init");
     expect(stdout + stderr).toContain("Operations API insert failed (401)");
-    expect(stdout + stderr).toContain(HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT);
-    expect(stdout + stderr).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
     const requests = readStubLog(logPath);
     expect(requests.some(req => req.url === "/Health" && req.authorization !== null)).toBe(true);
     expect(requests.some(req => req.method === "POST" && req.authorization !== null)).toBe(true);
@@ -552,8 +547,6 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       expect(msg).toContain("Login failed");
       expect(msg).toContain("pid 42");
       expect(msg).toContain("/var/stale-harper");
-      expect(msg).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
-      expect(msg).toContain(HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT);
       expect(msg).toContain("kill 42");
       expect(msg).not.toContain("flair stop");
       expect(msg).not.toContain("wrong password");
@@ -586,7 +579,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       throw new Error("expected seed to throw");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      expect(msg).toContain("a process not attributed to this data directory's instance");
+      expect(msg).toContain("admin authentication failed");
       expect(msg).not.toContain("pid 42");
       expect(msg).not.toContain("pid 99");
       expect(msg).not.toContain("/var/before");
@@ -614,7 +607,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       throw new Error("expected seed to throw");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      expect(msg).toContain("a process not attributed to this data directory's instance");
+      expect(msg).toContain("admin authentication failed");
       expect(msg).not.toContain("pid 42");
       expect(msg).not.toContain("pid 43");
       expect(msg).not.toContain("kill 42");
@@ -628,20 +621,18 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
 });
 
 describe("occupied-listener messages (flair#1749)", () => {
-  test("nothing readable is the unattributed fallback, with no kill and no flair stop", () => {
+  test("injected empty PID lookup yields an authentication failure with no kill or flair stop", () => {
     const msg = occupiedListenerAuthFailure({
       lead: "Operations API insert failed (401): ",
       bodyText: '{"error":"Login failed"}',
       listener: { ...listenerBase, port: 19925 },
     });
-    expect(msg).toContain("a process not attributed to this data directory's instance");
-    expect(msg).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
-    expect(msg).toContain(HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT);
+    expect(msg).toContain("admin authentication failed");
     expect(msg).not.toContain("flair stop");
     expect(msg).not.toMatch(/\bkill \d+/);
     expect(msg).not.toContain("wrong password");
     expect(describeOccupiedListener({ pids: [], dataDirs: [] })).toBe(
-      "a process not attributed to this data directory's instance",
+      "",
     );
   });
 
@@ -655,7 +646,7 @@ describe("occupied-listener messages (flair#1749)", () => {
     expect(msg).toContain("kill 42");
   });
 
-  test("a holder change and several holders stay unattributed", () => {
+  test("injected changing or multiple PIDs are omitted", () => {
     const changed = stableAnsweredHolder(
       { port: 19925, pids: [111], dataDirs: ["/old"] },
       { port: 19925, pids: [222], dataDirs: ["/new"] },
@@ -676,7 +667,7 @@ describe("occupied-listener messages (flair#1749)", () => {
       bodyText: "Login failed",
       listener: changed,
     });
-    expect(msg).toContain("a process not attributed to this data directory's instance");
+    expect(msg).toContain("admin authentication failed");
     expect(msg).not.toContain("pid 111");
     expect(msg).not.toContain("kill 111");
     expect(msg).not.toMatch(/\bkill \d+/);
@@ -700,21 +691,17 @@ describe("occupied-listener messages (flair#1749)", () => {
     expect(notice).toContain("pid 7");
     expect(notice).toContain("/data/other");
     expect(notice).toContain("/data/this-init");
-    expect(notice).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
-    expect(notice).toContain("will not send its admin password");
+    expect(notice).toContain("data directory does not match /data/this-init");
     expect(notice).toContain("kill 7");
     expect(notice).not.toContain("flair stop");
     expect(notice).not.toContain("will not match");
     expect(notice).not.toContain("wrong password");
   });
 
-  test("the up-front refusal qualifies a foreign directory and does not offer flair stop", () => {
+  test("the remedy uses the injected PID and directory without flair stop", () => {
     const msg = foreignOccupiedListenerDetail(
       { port: 19926, pids: [7], dataDirs: ["/data/other"] },
-      "/data/this-init",
     );
-    expect(msg).toContain("pid 7");
-    expect(msg).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
     expect(msg).toContain("kill 7");
     expect(msg).not.toContain("flair stop");
     expect(msg).not.toContain("will not match");
@@ -724,7 +711,7 @@ describe("occupied-listener messages (flair#1749)", () => {
     const who = describeOccupiedListener({ pids: [7, 8], dataDirs: ["/data/other"] });
     expect(who).not.toContain("pid 7");
     expect(who).not.toContain("pid 8");
-    expect(who).toContain("a process not attributed to this data directory's instance");
+    expect(who).toBe("");
     const msg = occupiedListenerAuthFailure({
       lead: "Operations API insert failed (401): ",
       bodyText: "Login failed",

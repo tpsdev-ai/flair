@@ -8,6 +8,7 @@ import { tempDir } from "../helpers/temp-dir.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const CLI = pathToFileURL(join(ROOT, "dist/cli.js")).href;
+const TCP_PROBE = pathToFileURL(join(ROOT, "dist/lib/init-tcp-probe.js")).href;
 const INIT = pathToFileURL(join(ROOT, "dist/commands/init.js")).href;
 const PASSWORD = "own-listener-password";
 
@@ -32,6 +33,7 @@ function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "declared"
     import { spawn } from "node:child_process";
     import { appendFileSync, writeFileSync } from "node:fs";
     import { once } from "node:events";
+    mock.module(${JSON.stringify(TCP_PROBE)}, () => ({ localPortState: async () => "listening" }));
     const child = spawn("node", ${JSON.stringify(proof === "unrelated" ? ["-e", "console.log('ready'); setTimeout(() => {}, 60000)"] : [entry, "run", "."])}, { stdio: ["ignore", "pipe", "ignore"] });
     await once(child.stdout, "data");
     try {
@@ -77,7 +79,7 @@ function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "declared"
 }
 
 for (const skipStart of [false, true]) {
-  test(`injected listener PID matching the PID file passes the gate, skip-start=${skipStart}`, () => {
+  test(`injected listening probe and PID matching the PID file pass the gate, skip-start=${skipStart}`, () => {
     const result = runInit("own", skipStart);
     expect(result.error).toBeUndefined();
     expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -90,7 +92,7 @@ for (const skipStart of [false, true]) {
       const result = runInit(proof, skipStart);
       expect(result.error).toBeUndefined();
       expect(result.status, result.stdout + result.stderr).toBe(1);
-      expect(result.stderr).toContain("not attributed");
+      expect(result.stderr).toContain("attribution to this data directory was not confirmed");
       expect(result.requests.length).toBeGreaterThan(0);
       expect(result.requests.every(r => r.authorization === null)).toBe(true);
       expect(existsSync(join(result.home, ".flair", "admin-pass"))).toBe(false);
