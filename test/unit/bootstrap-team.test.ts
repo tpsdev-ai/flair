@@ -1,12 +1,13 @@
-// Unit tests for the MemoryBootstrap "## Team" roster helpers (PR #549 review
-// findings: injection hardening on teammate ids + pre-1.0 compat coverage).
+// Unit tests for the MemoryBootstrap roster helpers (PR #549 review findings:
+// pre-1.0 compat coverage) and the flair#2141 S3a fixed directory hint that
+// replaced the unbounded "## Team" roster line.
 //
 // These exercise the real shipped logic via the Harper-free lib — importing
 // MemoryBootstrap.ts directly pulls in the Harper runtime (`databases` /
 // `Resource`, storage init) and can't run outside a live Harper.
 
 import { describe, test, expect } from "bun:test";
-import { isTeammate, formatTeamLine } from "../../resources/memory-bootstrap-lib.ts";
+import { isTeammate, DIRECTORY_HINT_TEXT, directoryHint } from "../../resources/memory-bootstrap-lib.ts";
 
 describe("isTeammate", () => {
   test("excludes the caller's own record", () => {
@@ -34,38 +35,20 @@ describe("isTeammate", () => {
   });
 });
 
-describe("formatTeamLine", () => {
-  test("empty roster produces no line", () => {
-    expect(formatTeamLine([])).toBeNull();
+describe("directoryHint", () => {
+  test("is a fixed, non-empty string", () => {
+    expect(typeof directoryHint()).toBe("string");
+    expect(directoryHint().length).toBeGreaterThan(0);
   });
 
-  test("singular phrasing for exactly one teammate", () => {
-    const line = formatTeamLine(["anvil"]);
-    expect(line).toContain("1 other agent shares this Flair office");
-    expect(line).not.toContain("agents share");
+  test("is constant — the same bytes on every call (no per-agent data)", () => {
+    expect(directoryHint()).toBe(directoryHint());
+    expect(directoryHint()).toBe(DIRECTORY_HINT_TEXT);
   });
 
-  test("plural phrasing for more than one teammate", () => {
-    const line = formatTeamLine(["anvil", "kern", "sherlock"]);
-    expect(line).toContain("3 other agents share this Flair office");
-  });
-
-  test("teammate ids pass through wrapUntrusted in the output", () => {
-    const line = formatTeamLine(["anvil"]);
-    expect(line).not.toBeNull();
-    expect(line).toContain("[⚠️ SAFETY:");
-    expect(line).toContain("[/SAFETY]");
-    expect(line).toContain("anvil");
-  });
-
-  test("the trusted instructional text is NOT inside the safety wrapper", () => {
-    const line = formatTeamLine(["anvil"]);
-    expect(line).not.toBeNull();
-    // The nudge sentence should appear after the closing [/SAFETY] marker,
-    // i.e. outside the untrusted block — only the id list is wrapped.
-    const safetyEnd = line!.indexOf("[/SAFETY]");
-    const nudgeStart = line!.indexOf("Before deep-diving an unfamiliar problem");
-    expect(safetyEnd).toBeGreaterThan(-1);
-    expect(nudgeStart).toBeGreaterThan(safetyEnd);
+  test("names the discovery surface, not an inline roster", () => {
+    expect(directoryHint()).toContain("team_directory");
+    expect(directoryHint()).toContain("GET /TeamDirectory");
+    expect(directoryHint()).toContain("active agents with published tps-mail addresses");
   });
 });

@@ -521,7 +521,7 @@ export type RecordTypeName = keyof typeof RECORD_TYPES;
 //   skill_search    — skill-tagged Memory recall (flair#1546), rides SemanticSearch
 //   skill_get       — full skill read by id (flair#1546), rides Memory.get
 //
-export const COMPOSITE_MCP_TOOLS = ["bootstrap", "attention", "record_usage", "memory_basement", "memory_restore", "skill_store", "skill_search", "skill_get"] as const;
+export const COMPOSITE_MCP_TOOLS = ["bootstrap", "attention", "record_usage", "memory_basement", "memory_restore", "skill_store", "skill_search", "skill_get", "team_directory"] as const;
 
 export type CompositeMcpTool = (typeof COMPOSITE_MCP_TOOLS)[number];
 

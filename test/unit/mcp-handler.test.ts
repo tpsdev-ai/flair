@@ -237,8 +237,8 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 17 curated tools", () => {
-  it("returns exactly 17, matching the flair-mcp surface plus attention (flair#677) + record_usage (flair#683) + memory_basement/memory_restore (flair#1472) + skill_store (flair#1542) + skill_search/skill_get (flair#1546), no raw CRUD mutators", async () => {
+describe("tools/list — exactly the 18 curated tools", () => {
+  it("returns the pinned tool names", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
@@ -260,6 +260,7 @@ describe("tools/list — exactly the 17 curated tools", () => {
       "skill_store",
       "soul_get",
       "soul_set",
+      "team_directory",
     ]);
     // No raw create_/delete_ resource mutators leaked in. (memory_update
     // itself is a curated semantic tool, not a raw `update_<resource>`
