@@ -18,7 +18,7 @@ import {
   type InstanceIdentityRow,
 } from "../src/lib/instance-identity-row.js";
 import { readAllInstanceRows } from "./instance-identity-rows.js";
-import { findOrCreateInstance } from "./instance-create-lock.js";
+import { findOrCreateInstance, storeInstanceSeed } from "./instance-create-lock.js";
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
 import { isReservedSeedId } from "./seed-reservation.js";
@@ -353,10 +353,7 @@ export class FederationInstance extends Resource {
         // method returns — the earlier BLOCKED finding, flair#1897 slice 1).
         put: (row) => withDetachedTxnAsync((this as any).getContext?.(), () => (databases as any).flair.Instance.put(row)),
         setSeed: (createdId, seed) =>
-          withDetachedTxnAsync((this as any).getContext?.(), async () => {
-            const { keystore } = await import("../src/keystore.js");
-            keystore.setPrivateKeySeed(createdId, seed);
-          }),
+          withDetachedTxnAsync((this as any).getContext?.(), () => storeInstanceSeed(createdId, seed)),
         seedPresent: async (rowId) => {
           try {
             const { keystore } = await import("../src/keystore.js");

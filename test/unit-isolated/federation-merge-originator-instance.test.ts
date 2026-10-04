@@ -93,6 +93,10 @@ let senderSeed!: Uint8Array;
 mock.module("../../src/keystore.ts", () => ({
   keystore: { getPrivateKeySeed: () => senderSeed },
   keyPath: () => { throw new Error("round-trip fixture must use the in-memory key"); },
+  // flair#2200: the mint path records a seed's owner via these exports.
+  recordSeedOwner: () => {},
+  readSeedOwnerAt: () => ({ state: "absent" }),
+  SEED_OWNER_SUFFIX: ".owner.json",
 }));
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
