@@ -20,10 +20,14 @@ import { existsSync, mkdirSync, renameSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import * as render from "../render.js";
 import { loadEd25519PrivateKeyFromFile } from "../mcp-client-assertion.js";
-import { defaultKeysDir } from "../lib/auth-resolve.js";
+import { defaultAdminPassPath, defaultKeysDir, isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { probeInstanceIds, type OpsEndpoint } from "../lib/instance-identity-row.js";
 import {
   describeAgentGateFinding,
   classifyKeyFile,
+  classifyNodeKeySeed,
+  isNodeKeyId,
+  partitionKeyIds,
   resolveCollisionSafeName,
   pruneDateStamp,
   PRUNED_DIR_NAME,
@@ -39,6 +43,8 @@ export type KeysCli = {
   ) => Promise<{ state: AgentGateState; detail?: string }>;
   probeFlairReachable: (url: string, timeoutMs?: number) => Promise<boolean>;
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
+  resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveHttpPort: (opts: { port?: string | number }) => number;
 };
 
 let cli: KeysCli;
@@ -59,6 +65,12 @@ const probeFlairReachable = (url: string, timeoutMs?: number): Promise<boolean> 
 
 const resolveBaseUrl = (opts: { target?: string; url?: string; port?: string | number }): string =>
   cli.resolveBaseUrl(opts);
+
+const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | number }): number =>
+  cli.resolveOpsPort(opts);
+
+const resolveHttpPort = (opts: { port?: string | number }): number =>
+  cli.resolveHttpPort(opts);
 
 // ─── flair keys ────────────────────────────────────────────────────────────────
 // flair#734 — recoverable cleanup of stale/unregistered/invalid key files in
@@ -83,6 +95,11 @@ export interface KeysPruneEntry {
   agentId?: string;
 }
 
+/** What the Instance-table read established for the orphan check. */
+export type InstanceIdsRead =
+  | { state: "read"; ids: string[]; agentIds?: string[] | null; agentReadReason?: string }
+  | { state: "unreadable"; reason: string };
+
 export interface KeysPruneResult {
   /** True when the configured instance could not be confirmed reachable —
    *  the WHOLE run stops the moment this happens, before classifying
@@ -90,6 +107,8 @@ export interface KeysPruneResult {
   aborted: boolean;
   abortReason?: string;
   entries: KeysPruneEntry[];
+  /** Null when no node-shaped seed needed a reference check. */
+  orphanRead: InstanceIdsRead | null;
 }
 
 /** Best-effort seed-validity check for a `.key` file: does it parse via any
@@ -107,27 +126,13 @@ function isValidPrivateKeySeedFile(keyPath: string): boolean {
   }
 }
 
-/**
- * Classify every entry in `keysDir` for `flair keys prune`. Pure READ —
- * never writes or moves anything; see applyKeyPrune below for the actual
- * move. Directories (including keysDir's own `.pruned` archive, PRUNED_DIR_NAME)
- * and files not ending in `.key` are "ignored" without any network call.
- * `.key` files with an unparseable seed are "unidentified" without a network
- * call either — reported, never pruned (flair#1026). Only a `.key` file that
- * DOES parse triggers a signed `GET /Agent/:id` against `baseUrl`
- * (checkAgentRegistered above, the exact same check doctor's registration
- * gate uses).
- *
- * If that check EVER reports "unreachable" — the instance couldn't be
- * confirmed up for that key — the WHOLE run aborts immediately
- * (`aborted: true`, `entries: []`, short-circuiting the loop): never
- * classify anything, prunable or not, while registration state can't be
- * verified. A missing keysDir is treated as "nothing to classify" (fresh
- * install), not an error — matches `flair doctor`'s own "Keys directory
- * missing" being a separate, non-fatal finding.
- */
-export async function classifyKeysDir(keysDir: string, baseUrl: string): Promise<KeysPruneResult> {
-  if (!existsSync(keysDir)) return { aborted: false, entries: [] };
+/** Classify files without moving them; node-shaped seeds are report-only (#2200). */
+export async function classifyKeysDir(
+  keysDir: string,
+  baseUrl: string,
+  readInstanceIds: () => Promise<InstanceIdsRead>,
+): Promise<KeysPruneResult> {
+  if (!existsSync(keysDir)) return { aborted: false, entries: [], orphanRead: null };
 
   const dirents = readdirSync(keysDir, { withFileTypes: true });
   const entries: KeysPruneEntry[] = [];
@@ -149,8 +154,21 @@ export async function classifyKeysDir(keysDir: string, baseUrl: string): Promise
     candidates.push({ name: d.name, agentId: d.name.slice(0, -".key".length) });
   }
 
+  const { nodeKeyIds } = partitionKeyIds(candidates.map((c) => c.agentId), keysDir);
+  const orphanRead = nodeKeyIds.length > 0 ? await readInstanceIds() : null;
+  const instanceIds = orphanRead?.state === "read" ? orphanRead.ids : null;
+
   for (const c of candidates) {
     const keyPath = join(keysDir, c.name);
+
+    if (isNodeKeyId(c.agentId, keysDir)) {
+      const decision = classifyNodeKeySeed(c.agentId, instanceIds, baseUrl,
+        orphanRead?.state === "read" ? orphanRead.agentIds ?? null : null,
+        orphanRead?.state === "read" ? orphanRead.agentReadReason : orphanRead?.reason);
+      entries.push({ name: c.name, class: decision.class, reason: decision.reason, agentId: c.agentId });
+      continue;
+    }
+
     if (!isValidPrivateKeySeedFile(keyPath)) {
       const decision = classifyKeyFile(c.agentId, false, null, baseUrl);
       entries.push({ name: c.name, class: decision.class, reason: decision.reason, agentId: c.agentId });
@@ -166,6 +184,7 @@ export async function classifyKeysDir(keysDir: string, baseUrl: string): Promise
           `${reg.detail ? ` (${reg.detail})` : ""} — aborting; nothing was classified or moved. ` +
           `Pass --instance <url> to target a different instance.`,
         entries: [],
+        orphanRead,
       };
     }
     // flair#1023 added "key-unreadable". It cannot occur here — this key's
@@ -178,11 +197,11 @@ export async function classifyKeysDir(keysDir: string, baseUrl: string): Promise
     entries.push({ name: c.name, class: decision.class, reason: decision.reason, agentId: c.agentId });
   }
 
-  return { aborted: false, entries };
+  return { aborted: false, entries, orphanRead };
 }
 
 /**
- * Move every "stale" or "invalid" entry from `keysDir` into
+ * Move non-node-shaped "stale" or "invalid" entries from `keysDir` into
  * `<keysDir>/.pruned/<dateStamp>/`, creating the archive dir as needed —
  * MOVE, never delete, so a bad classification is always recoverable. Only
  * ever called with entries classifyKeysDir already decided are prunable; a
@@ -197,7 +216,10 @@ export function applyKeyPrune(
   entries: KeysPruneEntry[],
   dateStamp: string,
 ): Array<{ name: string; movedTo: string }> {
-  const prunable = entries.filter((e) => e.class === "stale" || e.class === "invalid");
+  const prunable = entries.filter((e) =>
+    (e.class === "stale" || e.class === "invalid") &&
+    !isNodeKeyId(e.name.replace(/\.key$/, ""), keysDir),
+  );
   if (prunable.length === 0) return [];
 
   const destDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
@@ -216,13 +238,90 @@ export function applyKeyPrune(
   return moved;
 }
 
+/** Require the HTTP target's Instance id to match the sole ops Instance id. */
+export function makeReadInstanceIds(deps: {
+  baseUrl: string;
+  port?: string | number;
+  resolveHttpPort: (opts: { port?: string | number }) => number;
+  resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveAdminPass?: () => string | undefined;
+  probe?: (endpoint: OpsEndpoint) => Promise<InstanceIdsRead>;
+}): () => Promise<InstanceIdsRead> {
+  const { baseUrl, port } = deps;
+  const resolveAdminPass = deps.resolveAdminPass ?? (() => resolveLocalAdminPass(undefined));
+  const probe = deps.probe ?? probeInstanceIds;
+  return async () => {
+    let target: URL;
+    try { target = new URL(baseUrl); } catch {
+      return { state: "unreadable", reason: "invalid target URL" };
+    }
+    if (!isLocalBase(baseUrl)) {
+      return {
+        state: "unreadable",
+        reason: `the Instance rows are read through the local ops API, and ${baseUrl} is not on this host`,
+      };
+    }
+    if (target.protocol !== "http:" || target.username || target.password ||
+        target.pathname !== "/" || target.search || target.hash) {
+      return { state: "unreadable", reason: "target is not a direct local HTTP endpoint" };
+    }
+    const httpPort = Number(target.port || 80);
+    if (httpPort !== deps.resolveHttpPort({ port })) {
+      return { state: "unreadable", reason: `the ops port for ${baseUrl} is not known on this host` };
+    }
+    const opsPort = deps.resolveOpsPort({ port });
+    if (opsPort !== httpPort - 1) {
+      return { state: "unreadable", reason: `selected ops port ${opsPort} differs from target-derived ops port ${httpPort - 1}` };
+    }
+    let pass: string | undefined;
+    try {
+      pass = resolveAdminPass();
+    } catch (err: unknown) {
+      return { state: "unreadable", reason: err instanceof Error ? err.message : String(err) };
+    }
+    if (!pass?.trim()) {
+      return { state: "unreadable", reason: `no local admin credential at ${defaultAdminPassPath()} to read the Instance rows with` };
+    }
+    const credentials = { user: resolveAdminUser(undefined), pass };
+    let targetId: string;
+    try {
+      const response = await fetch(new URL("/HealthDetail", target).href, {
+        method: "GET",
+        headers: { Authorization: `Basic ${Buffer.from(`${credentials.user}:${pass}`).toString("base64")}` },
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const instance = (await response.json())?.federation?.instance;
+      if (instance?.multiple || instance?.unreadable || typeof instance?.id !== "string" || !instance.id.trim()) {
+        throw new Error("HealthDetail returned no single Instance id");
+      }
+      targetId = instance.id;
+    } catch (err: unknown) {
+      return { state: "unreadable", reason: `target identity unreadable (${err instanceof Error ? err.message : String(err)})` };
+    }
+    const read = await probe({
+      opsUrl: `http://127.0.0.1:${opsPort}`,
+      credentials,
+    });
+    if (read.state === "unreadable") return read;
+    if (read.ids.length !== 1) {
+      return { state: "unreadable", reason: "ops identity unreadable: expected a single Instance id" };
+    }
+    if (read.ids[0] !== targetId) {
+      return { state: "unreadable", reason: "target/ops Instance id mismatch" };
+    }
+    return read;
+  };
+}
+
 /** Register the `flair keys` command group (flair#1629). */
 export function register(program: Command): void {
   const keys = program.command("keys").description("Manage Ed25519 key files in the key directory");
 
   keys
     .command("prune")
-    .description("Move stale/unregistered/invalid keys to <keysDir>/.pruned/<date>/ — dry-run by default")
+    .description("Move stale/unregistered keys to <keysDir>/.pruned/<date>/; report node-shaped orphan candidates — dry-run by default")
     .option("--apply", "Actually move prunable keys (default: dry-run, prints what would move and why)")
     .option("--keys-dir <dir>", "Directory to scan for key files (else FLAIR_KEY_DIR, ~/.flair/keys)")
     .option("--instance <url>", "Flair instance to check registration against (else FLAIR_TARGET/FLAIR_URL/config)")
@@ -231,12 +330,13 @@ export function register(program: Command): void {
       const keysDir: string = opts.keysDir ?? process.env.FLAIR_KEY_DIR ?? defaultKeysDir();
       const baseUrl = resolveBaseUrl({ target: opts.instance, port: opts.port });
       const apply = !!opts.apply;
+      const readInstanceIds = makeReadInstanceIds({ baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort });
 
       console.log(`\n${render.wrap(render.c.bold, "🔑 Flair Keys Prune")}${apply ? "" : render.wrap(render.c.dim, " (dry run)")}\n`);
       console.log(`  Keys directory: ${render.wrap(render.c.dim, keysDir)}`);
       console.log(`  Instance:       ${render.wrap(render.c.dim, baseUrl)}\n`);
 
-      const result = await classifyKeysDir(keysDir, baseUrl);
+      const result = await classifyKeysDir(keysDir, baseUrl, readInstanceIds);
       if (result.aborted) {
         console.error(`  ${render.icons.error} ${result.abortReason}`);
         console.log("");
@@ -245,12 +345,13 @@ export function register(program: Command): void {
 
       const stale = result.entries.filter((e) => e.class === "stale");
       const invalid = result.entries.filter((e) => e.class === "invalid");
+      const orphan = result.entries.filter((e) => e.class === "orphan-candidate");
       const unidentified = result.entries.filter((e) => e.class === "unidentified");
       const kept = result.entries.filter((e) => e.class === "keep");
       const ignored = result.entries.filter((e) => e.class === "ignored");
       const prunable = [...stale, ...invalid];
 
-      if (stale.length + invalid.length + unidentified.length + kept.length === 0) {
+      if (stale.length + invalid.length + orphan.length + unidentified.length + kept.length === 0) {
         console.log(`  ${render.icons.ok} No key files found in ${render.wrap(render.c.dim, keysDir)} — nothing to prune.`);
         console.log("");
         return;
@@ -260,17 +361,25 @@ export function register(program: Command): void {
         const icon = e.class === "invalid" ? render.icons.error : render.icons.warn;
         console.log(`  ${icon} ${render.wrap(render.c.bold, e.name)} — ${e.class}: ${e.reason}`);
       }
+      for (const e of orphan) {
+        console.log(`  ${render.icons.info} ${render.wrap(render.c.bold, e.name)} — orphan candidate: ${e.reason}`);
+      }
       for (const e of unidentified) {
         console.log(`  ${render.icons.warn} ${render.wrap(render.c.bold, e.name)} — unidentified: ${e.reason}`);
       }
       for (const e of kept) {
-        console.log(`  ${render.icons.ok} ${e.name} — registered, keeping`);
+        console.log(`  ${render.icons.ok} ${render.wrap(render.c.bold, e.name)} — ${e.reason}`);
+      }
+      if (result.orphanRead?.state === "unreadable") {
+        console.log(
+          `  ${render.icons.warn} ${render.wrap(render.c.yellow, `Instance reference check unavailable (${result.orphanRead.reason}) — no orphan candidates determined.`)}`,
+        );
       }
 
       if (!apply) {
         console.log("");
         console.log(
-          `  ${render.wrap(render.c.dim, `${prunable.length} prunable (${stale.length} stale, ${invalid.length} invalid), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored`)}`,
+          `  ${render.wrap(render.c.dim, `${prunable.length} prunable (${stale.length} stale, ${invalid.length} invalid), ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored`)}`,
         );
         if (prunable.length > 0) {
           console.log(`  ${render.wrap(render.c.dim, "Run with --apply to move prunable keys to")} ${join(keysDir, PRUNED_DIR_NAME, pruneDateStamp())}`);
@@ -284,6 +393,6 @@ export function register(program: Command): void {
       for (const m of moved) {
         console.log(`  ${render.icons.ok} moved ${m.name} -> ${m.movedTo}`);
       }
-      console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored\n`);
+      console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored\n`);
     });
 }

@@ -53,7 +53,7 @@ test("the shared unit lane emits server modules before checking the boundary", (
   const plan = unitPlan(root);
   const emit = plan.findIndex(s => s.name === "emit server for boundary guard");
   expect(emit).toBeGreaterThanOrEqual(0);
-  expect(emit).toBeLessThan(plan.findIndex(s => s.name === "root unit tests"));
+  expect(emit).toBeLessThan(plan.findIndex(s => s.shard !== undefined));
   expect(plan[emit]!.args).toEqual(["x", "tsc", "-p", "tsconfig.json", "--noCheck"]);
 });
 

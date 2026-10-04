@@ -46,6 +46,7 @@ export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
   "originatorInstanceId",
   "metadata",
   "entities",
+  "skillSubjectId",
 ] as const);
 
 /** Pre-existing UNDECLARED attributes the codebase deliberately stores on a

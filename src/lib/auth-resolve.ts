@@ -331,6 +331,22 @@ export function buildEd25519Auth(agentId: string, method: string, path: string, 
   return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
 }
 
+/** Join a Flair route to an optional base path before signing or sending it. */
+export function requestUrl(baseUrl: string, path: string): URL {
+  const base = new URL(baseUrl);
+  if (base.search || base.hash || /[?#]$/.test(baseUrl)) {
+    throw new Error("Flair base URL must not contain a query or fragment");
+  }
+  const route = new URL(path, base.origin);
+  base.pathname = `${base.pathname.replace(/\/+$/, "")}${route.pathname}`;
+  base.search = route.search;
+  return base;
+}
+
+export function requestTarget(url: URL): string {
+  return `${url.pathname}${url.search}`;
+}
+
 // ─── Key-load failures, told apart from transport failures (flair#1023) ─────
 //
 // An unparseable key file used to reach callers as a bare Error out of
@@ -433,7 +449,10 @@ export function describeKeyLoadFailure(keyPath: string, kind: KeyLoadFailureKind
  *
  * Throws {@link KeyLoadError} if the key could not be loaded — a failure that
  * provably happened BEFORE any byte hit the network, so no caller need guess
- * whether the instance is reachable. Anything else thrown here is transport.
+ * whether the instance is reachable. A URL that cannot be built is refused
+ * before signing or sending. `fetch` can fail before transport (for example,
+ * request construction can reject an invalid header) or during transport;
+ * failures are not classified here.
  */
 export async function authFetch(
   baseUrl: string,
@@ -443,15 +462,16 @@ export async function authFetch(
   path: string,
   body?: unknown,
 ): Promise<Response> {
+  const url = requestUrl(baseUrl, path);
   let auth: string;
   try {
-    auth = buildEd25519Auth(agentId, method, path, keyPath);
+    auth = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
   } catch (err: unknown) {
     throw KeyLoadError.from(keyPath, err);
   }
   const headers: Record<string, string> = { Authorization: auth };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  return fetch(`${baseUrl}${path}`, {
+  return fetch(url.href, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -477,14 +497,13 @@ export function isLocalBase(base: string): boolean {
  * 403 hint text.
  */
 export async function sendJsonRequest(
-  baseUrl: string,
+  url: URL,
   method: string,
-  path: string,
   body: unknown,
   authHeader: string | undefined,
   isLocal: boolean,
 ): Promise<any> {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await fetch(url.href, {
     method,
     headers: {
       "content-type": "application/json",
@@ -523,9 +542,8 @@ export async function sendJsonRequest(
  * no-credentials error rather than a floor-specific one.
  */
 export async function tryAgentKeyFloor(
-  baseUrl: string,
+  url: URL,
   method: string,
-  path: string,
   body: unknown,
   keysDir: string,
 ): Promise<any> {
@@ -535,13 +553,13 @@ export async function tryAgentKeyFloor(
   } catch {
     // No keys dir at all — nothing to fall back to.
   }
-  const isLocal = isLocalBase(baseUrl);
+  const isLocal = isLocalBase(url.origin);
   for (const kf of keyFiles) {
     const agentId = kf.replace(/\.key$/, "");
     const keyPath = join(keysDir, kf);
     try {
-      const authHeader = buildEd25519Auth(agentId, method, path, keyPath);
-      return await sendJsonRequest(baseUrl, method, path, body, authHeader, isLocal);
+      const authHeader = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
+      return await sendJsonRequest(url, method, body, authHeader, isLocal);
     } catch {
       // This key didn't work (unregistered, bad signature, network blip on
       // this one attempt) — try the next one.
@@ -690,6 +708,8 @@ export async function authedRequest(
   body: unknown,
   opts: AuthedRequestOptions,
 ): Promise<any> {
+  const url = requestUrl(opts.baseUrl, path);
+  const signedPath = requestTarget(url);
   const isLocal = opts.isLocal ?? isLocalBase(opts.baseUrl);
   const keysDir = opts.keysDir ?? defaultKeysDir();
   // One username for every Basic tier: flag > FLAIR_ADMIN_USER env > "admin"
@@ -706,7 +726,7 @@ export async function authedRequest(
     credSource = "explicit-admin";
   } else if (opts.explicitKeyPath && opts.agentId) {
     try {
-      authHeader = buildEd25519Auth(opts.agentId, method, path, opts.explicitKeyPath);
+      authHeader = buildEd25519Auth(opts.agentId, method, signedPath, opts.explicitKeyPath);
       credSource = "explicit-key";
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -729,7 +749,7 @@ export async function authedRequest(
         `or the local admin-pass file.`
       );
     }
-    authHeader = buildEd25519Auth(opts.agentId, method, path, keyPath);
+    authHeader = buildEd25519Auth(opts.agentId, method, signedPath, keyPath);
     credSource = "flag-agent";
   }
 
@@ -752,7 +772,7 @@ export async function authedRequest(
     const keyPath = resolveKeyPath(opts.agentId);
     if (keyPath) {
       try {
-        authHeader = buildEd25519Auth(opts.agentId, method, path, keyPath);
+        authHeader = buildEd25519Auth(opts.agentId, method, signedPath, keyPath);
         credSource = "pinned-agent";
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -793,13 +813,13 @@ export async function authedRequest(
   }
 
   try {
-    return await sendJsonRequest(opts.baseUrl, method, path, body, authHeader, isLocal);
+    return await sendJsonRequest(url, method, body, authHeader, isLocal);
   } catch (err: unknown) {
     // Tier 5 — the floor. Only engages when NOTHING above resolved to
     // anything sendable (see module header for why a rejected credential
     // does not retry here).
     if (err instanceof ApiHttpError && err.noCredentials) {
-      const floorResult = await tryAgentKeyFloor(opts.baseUrl, method, path, body, keysDir);
+      const floorResult = await tryAgentKeyFloor(url, method, body, keysDir);
       if (floorResult !== undefined) return floorResult;
     }
     throw err;

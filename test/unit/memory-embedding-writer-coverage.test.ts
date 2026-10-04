@@ -55,7 +55,7 @@ add("Federation", ["writer:table.put#1"], "LATCH",
 // ── GATED: Memory.ts's own post()/put() write path (calls noteWriteStamp) ──
 // The writes go through the base TABLE (`databases.flair.Memory`) with the
 // shared request context so a direct/internal caller is atomic (A1'' 0a).
-add("Memory", ["writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
+add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — noteWriteStamp (slice 1); current-space re-embed.");
 
@@ -74,6 +74,10 @@ add("migrations/visibility-backfill", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"], "ECHO",
   "Test-only migration backfill of existing rows.");
+add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
+  "Memory computes or retains embeddings before this writer; FeedMemories does not compute embeddings.");
+add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
+  "flair#2139 S2 skill predecessor close: read-modify-write re-writes the existing row's own stamp.");
 
 // ── NON_EMBED: writes no stamp, or a partial update/patch/delete ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",

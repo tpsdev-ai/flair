@@ -419,6 +419,14 @@ describe("resolveOpsPort", () => {
     expect(result).toBe(17000);
   });
 
+  test("uses local config over the resolved HTTP port fallback", () => {
+    delete process.env.FLAIR_OPS_PORT;
+    process.env.FLAIR_URL = "http://127.0.0.1:20000";
+    mkdirSync(join(tmpHome, ".flair"), { recursive: true });
+    writeFileSync(join(tmpHome, ".flair", "config.yaml"), "port: 19000\nopsPort: 16000\n");
+    expect(resolveOpsPort({})).toBe(16000);
+  });
+
   test("opsPort is httpPort - 1 when explicit port is set and no FLAIR_OPS_PORT", () => {
     delete process.env.FLAIR_OPS_PORT;
     delete process.env.FLAIR_URL;
@@ -437,6 +445,27 @@ describe("resolveOpsPort", () => {
     delete process.env.FLAIR_OPS_PORT;
     const result = resolveOpsPort({ port: "10000", opsPort: "8888" });
     expect(result).toBe(8888);
+  });
+
+  test("invalid explicit --ops-port refuses with a remedy instead of falling through", () => {
+    process.env.FLAIR_OPS_PORT = "17000";
+    const oldExit = process.exit;
+    const oldError = console.error;
+    const errors: string[] = [];
+    try {
+      process.exit = ((code?: number) => { throw new Error(`__ops_port_exit__:${code}`); }) as typeof process.exit;
+      console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
+      for (const value of ["not-a-port", "0", "1.5", "65536"]) {
+        errors.length = 0;
+        expect(() => resolveOpsPort({ opsPort: value })).toThrow("__ops_port_exit__:1");
+        expect(errors.join("\n")).toContain("invalid --ops-port");
+        expect(errors.join("\n")).toContain("integer from 1 to 65535");
+        expect(errors.join("\n")).toContain("omit --ops-port");
+      }
+    } finally {
+      process.exit = oldExit;
+      console.error = oldError;
+    }
   });
 
   test("returns a positive integer in all code paths", () => {

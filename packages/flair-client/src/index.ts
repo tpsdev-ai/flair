@@ -2,6 +2,7 @@ export { FlairClient, FlairError, canonicalRelationshipId, encodeRecordId } from
 export {
   loadPrivateKey,
   loadPrivateKeyBounded,
+  loadPrivateKeyString,
   resolveKeyPath,
   signRequest,
   inspectKeyLookup,

@@ -164,8 +164,13 @@ export const LAST_ASSISTANT_MAX_CHARS = 300;
  *  cannot stretch it. */
 export const PRECOMPACT_DEDUP_WINDOW_MS = 5 * 60_000;
 
-/** What a redacted secret is replaced with. */
-export const REDACTED = "[redacted]";
+import { redactSecrets } from "./secret-redaction.js";
+
+/** Re-exported from ./secret-redaction.ts (flair#2067): the credential
+ *  patterns moved there so the PreToolUse action-recall cache redacts with the
+ *  SAME patterns as the pre-compaction record instead of a second, drifting
+ *  copy. */
+export { REDACTED, redactSecrets } from "./secret-redaction.js";
 
 /** The line appended when the record had to be cut to its bound. */
 export const RECORD_CUT_MARKER = "… (cut to fit the record bound)";
@@ -222,106 +227,6 @@ const ONE_LINE_RE = /[\n\r\v\f\u0085\u2028\u2029\u0000-\u0009\u000e-\u001f\u007f
 
 function oneLine(text: string): string {
   return text.replace(ONE_LINE_RE, " ").replace(/\s+/g, " ").trim();
-}
-
-// ── redaction ───────────────────────────────────────────────────────────────
-
-/**
- * Authorization-style values, redacted WHOLE: everything after the label or
- * scheme word through the end of its line, whatever its characters (a
- * credential can be any length and alphabet, and a scheme like Digest carries
- * quoted parameters). The line ends at the first character of THE LINE-BREAK
- * SET (above), the same breaks the quoted display splits on, so the line after
- * a value is never consumed with it. The label or scheme word and one space stay; a value
- * that is already exactly the placeholder is left alone, so redacting twice
- * changes nothing. Applied in this order, before SECRET_PATTERNS:
- *   - an `Authorization` / `Proxy-Authorization` label (any case, then an
- *     optional quote and `:` or `=`), whatever scheme follows;
- *   - the scheme word `Bearer` (any case);
- *   - the scheme word `Basic` or `BASIC`. The lower-case word "basic" is
- *     ordinary English and is left alone unless an Authorization label
- *     precedes it.
- * This also cuts prose that merely uses the words ("use Bearer tokens here"
- * keeps "use Bearer" and loses the rest of its line); that direction is the
- * safe one. Each pattern is a literal word, a bounded or single-class run,
- * then the rest of one line, so it stays linear on long input.
- */
-const AUTHORIZATION_PATTERNS: readonly RegExp[] = [
-  /\b((?:proxy-)?authorization["']?[ \t]*[:=])([^\n\r\v\f\u0085\u2028\u2029]*)/gi,
-  /\b(bearer)[ \t]+([^\n\r\v\f\u0085\u2028\u2029]*)/gi,
-  /\b(Basic|BASIC)[ \t]+([^\n\r\v\f\u0085\u2028\u2029]*)/g,
-];
-
-/**
- * Credential shapes replaced in the record's free text before it is stored.
- * They cover the families the auto-capture filter in packages/pi-flair
- * detects (sk-, ghp_, pat_, Bearer, PEM private keys) and more, but they are
- * NOT a superset of that filter: pi-flair flags those prefixes followed by
- * any number of characters, with no word boundary, while each token shape
- * here needs the prefix to start a word and a minimum run of the characters
- * that pattern allows, so ordinary words are not caught (16 after sk- or
- * pat_, 20 letters and digits after ghp_ and the other gh?_ prefixes). A
- * shorter run is left as written: "ghp_a.b", "pat_ab" and "sk-abc123", which
- * pi-flair flags, are left as written here. A character a pattern does not
- * allow ends its match: pat_ allows dots, so a long enough dotted pat_ value
- * is redacted whole, while a ghp_ value with a dot is redacted up to the dot
- * when the part before it is long enough, and not at all otherwise. The test
- * "redaction limits, prefix by prefix" (test/unit/continuity-precompact.test.ts)
- * pins every case docs/claude-code.md states.
- * Every quantifier is bounded or runs over a single character class, so no
- * pattern backtracks badly on long input.
- *
- * Best effort by design: a secret with no recognizable shape (a bare
- * password in prose, a random string with no prefix) is NOT recognized. THE
- * TRADE (flair#2086): token-prefix patterns start at a word boundary and
- * require their pattern-specific minimum suffix length. The new Stripe
- * [sr]k_(live|test)_ form needs 16+ letters or digits, hf_ and gsk_ need
- * 20+, and pypi- needs 16+ letters, digits, underscores or hyphens. The
- * credential-name pattern needs a name followed by : or = and a nonempty
- * value; a bare `token` is untouched.
- * Text that satisfies these shapes can be redacted even when it is not a
- * secret. That over-redaction is preferred to leaving a matching secret in
- * the record, which is bounded and private regardless.
- */
-const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
-  // PEM private key blocks (RSA/EC/OPENSSH/ENCRYPTED/…) and the PGP
-  // "PRIVATE KEY BLOCK" form, whole, or to the end of the text when unterminated.
-  [/-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----([\s\S]*?)(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g, REDACTED],
-  // Credentials in a URL's userinfo: scheme://user:password@host.
-  [/\b([a-z][a-z0-9+.-]{0,20}:\/\/)[^\s/:@]{1,256}:[^\s/@]{1,256}@/gi, `$1${REDACTED}@`],
-  // name=value / name: value where the name says it is a credential.
-  [
-    /\b([A-Za-z0-9_.-]{0,40}(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]{0,40})(\s{0,4}[:=]\s{0,4})("[^"\n]{1,512}"|'[^'\n]{1,512}'|[^\s"',;]{1,512})/gi,
-    `$1$2${REDACTED}`,
-  ],
-  // Token shapes with a recognizable prefix.
-  [/\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}/g, REDACTED], // OpenAI / Anthropic style keys
-  [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, REDACTED], // GitHub tokens
-  [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, REDACTED], // GitHub fine-grained PATs
-  [/\bglpat-[A-Za-z0-9_-]{20,}/g, REDACTED], // GitLab PATs
-  [/\bxox[abposr]-[A-Za-z0-9-]{10,}/g, REDACTED], // Slack tokens
-  [/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, REDACTED], // AWS access key ids
-  [/\bAIza[A-Za-z0-9_-]{30,}/g, REDACTED], // Google API keys
-  [/\bnpm_[A-Za-z0-9]{36}\b/g, REDACTED], // npm tokens
-  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED], // Stripe secret/restricted keys
-  [/\bhf_[A-Za-z0-9]{20,}/g, REDACTED], // Hugging Face tokens
-  [/\bgsk_[A-Za-z0-9]{20,}/g, REDACTED], // Groq keys
-  [/\bpypi-[A-Za-z0-9_-]{16,}/g, REDACTED], // PyPI tokens
-  [/\bpat_[A-Za-z0-9_.-]{16,}/g, REDACTED], // generic PATs (pi-flair's pattern)
-  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED], // JWTs
-];
-
-/** Replace every recognized credential shape in `text` with REDACTED. */
-export function redactSecrets(text: string): string {
-  let out = text;
-  for (const pattern of AUTHORIZATION_PATTERNS) {
-    out = out.replace(pattern, (whole: string, head: string, value: string) => {
-      const v = value.trim();
-      return v === "" || v === REDACTED ? whole : `${head} ${REDACTED}`;
-    });
-  }
-  for (const [pattern, replacement] of SECRET_PATTERNS) out = out.replace(pattern, replacement);
-  return out;
 }
 
 // ── transcript tail ─────────────────────────────────────────────────────────

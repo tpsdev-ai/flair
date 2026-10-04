@@ -86,6 +86,37 @@ function assertBasicAuthTransportAllowed(target: string, base: string): void {
  * present, else link the two signals by hand — honouring an already-aborted
  * input and forwarding the abort reason.
  */
+/**
+ * Read a fetch response body, refusing to buffer more than `maxBytes`.
+ * Opt-in (flair#2067): only callers that pass `maxResponseBytes` take this
+ * path; everyone else keeps `res.text()`. A body that exceeds the cap throws
+ * after cancelling the stream, so the caller sees an error rather than a
+ * truncated parse.
+ */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let total = 0;
+  let out = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`flair-client: response body exceeds ${maxBytes} bytes`);
+      }
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+  } finally {
+    reader.releaseLock?.();
+  }
+  return out;
+}
+
 function anySignal(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
   const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
   if (typeof any === "function") return { signal: any.call(AbortSignal, [a, b]), cleanup: () => {} };
@@ -133,6 +164,7 @@ export class FlairClient {
   private lastKeyLookup: KeyLookupState | undefined;
   private timeoutMs: number;
   private basicAuth: string | null = null;
+  private authMode: "auto" | "basic";
 
   constructor(config: FlairClientConfig) {
     // Every env fallback below goes through readEnvOrUnset (flair#1254): a
@@ -141,7 +173,8 @@ export class FlairClient {
     // reads as UNSET, so the existing defaults apply instead of the literal
     // winning the `??`/`||` chain and poisoning the connection.
     this.url = (config.url ?? readEnvOrUnset("FLAIR_URL") ?? DEFAULT_URL).replace(/\/$/, "");
-    this.agentId = config.agentId || readEnvOrUnset("FLAIR_AGENT_ID") || "";
+    this.agentId = config.agentId === undefined ? readEnvOrUnset("FLAIR_AGENT_ID") || "" : config.agentId;
+    this.authMode = config.authMode ?? "auto";
     this.keyPath = config.keyPath;
     if (config.privateKey !== undefined) {
       this.rawPrivateKey = config.privateKey;
@@ -160,6 +193,7 @@ export class FlairClient {
   }
 
   private async resolveKey(): Promise<KeyObject | null> {
+    if (this.authMode === "basic") return null;
     // Cache a FOUND key only. A miss must be retried on the next request —
     // flair#1271: `flair agent add` can write ~/.flair/keys/<id>.key after
     // this client was constructed (or after an earlier probe), and a cached
@@ -241,8 +275,11 @@ export class FlairClient {
     method: string,
     path: string,
     body?: unknown,
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; maxResponseBytes?: number } = {},
   ): Promise<T> {
+    if (opts.maxResponseBytes !== undefined && (!Number.isFinite(opts.maxResponseBytes) || opts.maxResponseBytes <= 0)) {
+      throw new RangeError("flair-client: invalid maxResponseBytes; expected a finite positive number");
+    }
     if (!path.startsWith("/")) {
       throw new Error('flair-client: a request path must start with "/"');
     }
@@ -291,11 +328,15 @@ export class FlairClient {
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: combined.signal,
       });
+      const text = opts.maxResponseBytes !== undefined
+        ? await readBodyCapped(res, opts.maxResponseBytes)
+        : await res.text().catch((err: unknown) => {
+          if (res.ok) throw err;
+          return "";
+        });
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
         throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);
       }
-      const text = await res.text();
       return text ? JSON.parse(text) : ({} as T);
     } finally {
       // Remove any listeners on the caller's long-lived signal on EVERY path —
@@ -330,6 +371,14 @@ export class FlairClient {
 
 // ─── Memory API ─────────────────────────────────────────────────────────────
 
+function mergeMetadata(existing: string | null | undefined, patch: Record<string, unknown>): string {
+  const parsed: unknown = existing == null ? {} : JSON.parse(existing);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("flair-client: metadata must be a JSON object");
+  }
+  return JSON.stringify({ ...parsed, ...patch });
+}
+
 class MemoryApi {
   constructor(private client: FlairClient) {}
 
@@ -347,9 +396,13 @@ class MemoryApi {
   async write(content: string, opts: {
     id?: string;
     type?: MemoryType;
+    /**
+     * Retention tier (default standard). permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
+     */
     durability?: Durability;
     tags?: string[];
     subject?: string;
+    metadata?: Record<string, unknown>;
     /** Writer-controlled sharing intent. Omit to let the
      *  server apply its durability-keyed default (permanent/persistent →
      *  shared, standard/ephemeral → private) — only forwarded when the
@@ -390,6 +443,7 @@ class MemoryApi {
     // the server's durability-keyed default (Memory.post/put) is the one
     // source of truth for the default, never duplicated here.
     if (opts.visibility !== undefined) record.visibility = opts.visibility;
+    if (opts.metadata !== undefined) record.metadata = JSON.stringify(opts.metadata);
     // Passthrough hints — the server strips these before persisting; they are
     // never stored on the record itself.
     if (opts.dedup !== undefined) record.dedup = opts.dedup;
@@ -435,16 +489,18 @@ class MemoryApi {
    * MemoryGrant from that owner — otherwise it denies the request (cross-agent
    * write).
    */
-  async update(id: string, content: string, opts: { preserveHistory?: boolean; usedMemoryIds?: string[] } = {}): Promise<Memory> {
+  async update(id: string, content: string, opts: { preserveHistory?: boolean; usedMemoryIds?: string[]; metadata?: Record<string, unknown> } = {}): Promise<Memory> {
     const existing = await this.get(id);
     if (!existing) {
       throw new FlairError("PUT", `/Memory/${encodeRecordId(id)}`, 404, `memory ${id} not found`);
     }
+    const metadata = opts.metadata === undefined ? existing.metadata : mergeMetadata(existing.metadata, opts.metadata);
 
     if (opts.preserveHistory) {
       const newId = `${this.client.agentId}-${crypto.randomUUID()}`;
       const record: Record<string, unknown> = {
         ...existing,
+        ...(metadata !== undefined ? { metadata } : {}),
         id: newId,
         content,
         supersedes: id,
@@ -488,6 +544,7 @@ class MemoryApi {
     }
 
     const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
+    if (metadata !== undefined) merged.metadata = metadata;
     delete merged.embedding;
     delete merged.embeddingModel;
     delete merged.deduped;

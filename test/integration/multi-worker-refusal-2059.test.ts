@@ -2,16 +2,31 @@ import { describe, test, beforeAll, afterAll, expect } from "bun:test";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { probeFlairHealth } from "../../src/lib/doctor-run.js";
 
-const priorOAuth = { flag: process.env.FLAIR_MCP_OAUTH, issuer: process.env.FLAIR_MCP_ISSUER };
+const priorOAuth = {
+  flag: process.env.FLAIR_MCP_OAUTH,
+  issuer: process.env.FLAIR_MCP_ISSUER,
+  clientId: process.env.OAUTH_GITHUB_CLIENT_ID,
+  clientSecret: process.env.OAUTH_GITHUB_CLIENT_SECRET,
+  redirectUri: process.env.OAUTH_GITHUB_REDIRECT_URI,
+};
 beforeAll(() => {
   process.env.FLAIR_MCP_OAUTH = "true";
   process.env.FLAIR_MCP_ISSUER = "https://multi-worker-2059.flair.test";
+  // This fixture configures a provider so protected-resource discovery is available.
+  process.env.OAUTH_GITHUB_CLIENT_ID = "multi-worker-2059-client";
+  process.env.OAUTH_GITHUB_CLIENT_SECRET = "multi-worker-2059-secret";
+  process.env.OAUTH_GITHUB_REDIRECT_URI = "https://multi-worker-2059.flair.test/oauth";
 });
 afterAll(() => {
-  if (priorOAuth.flag === undefined) delete process.env.FLAIR_MCP_OAUTH;
-  else process.env.FLAIR_MCP_OAUTH = priorOAuth.flag;
-  if (priorOAuth.issuer === undefined) delete process.env.FLAIR_MCP_ISSUER;
-  else process.env.FLAIR_MCP_ISSUER = priorOAuth.issuer;
+  const restore = (key: string, prior: string | undefined) => {
+    if (prior === undefined) delete process.env[key];
+    else process.env[key] = prior;
+  };
+  restore("FLAIR_MCP_OAUTH", priorOAuth.flag);
+  restore("FLAIR_MCP_ISSUER", priorOAuth.issuer);
+  restore("OAUTH_GITHUB_CLIENT_ID", priorOAuth.clientId);
+  restore("OAUTH_GITHUB_CLIENT_SECRET", priorOAuth.clientSecret);
+  restore("OAUTH_GITHUB_REDIRECT_URI", priorOAuth.redirectUri);
 });
 
 function basicHeader(harper: HarperInstance): string {

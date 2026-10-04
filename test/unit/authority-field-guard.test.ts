@@ -91,6 +91,9 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/migrations/visibility-backfill.ts", via: "alias-source", needle: "put(backfillRow)", kind: "echo" },
   { file: "resources/migrations/synthetic-test-migration.ts", via: "alias-source", needle: "put(synthRow)", kind: "echo" },
   { file: "resources/MemoryReindex.ts", via: "alias-source", needle: "_reindex: true", kind: "admin-restate" },
+  // Memory guards submitted authority fields; FeedMemories also strips successor stamps.
+  { file: "resources/skill-version-write.ts", via: "direct-put", needle: "put(successor, shared)", kind: "trusted-stamp" },
+  { file: "resources/skill-version-write.ts", via: "direct-put", needle: "put(closed, shared)", kind: "echo" },
 ];
 
 function walkTs(dir: string): string[] {

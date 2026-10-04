@@ -56,6 +56,29 @@ describe("FlairClient", () => {
     expect(client.agentId).toBe("mybot");
   });
 
+  test("an omitted agentId uses FLAIR_AGENT_ID", async () => {
+    process.env.FLAIR_AGENT_ID = "ambient-agent";
+    const { privateKey } = generateKeyPairSync("ed25519");
+    for (const config of [{}, { agentId: undefined }]) {
+      const client = new FlairClient({ ...config, privateKey });
+      expect(client.agentId).toBe("ambient-agent");
+      await client.request("GET", "/Memory");
+    }
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    for (const [, init] of (mockFetch as any).mock.calls) {
+      expect(init.headers.Authorization).toStartWith("TPS-Ed25519 ambient-agent:");
+    }
+  });
+
+  test("an explicit empty agentId does not use FLAIR_AGENT_ID", () => {
+    process.env.FLAIR_AGENT_ID = "ambient-agent";
+    for (const agentId of ["", " \t ", "explicit-agent"]) {
+      const client = new FlairClient({ agentId });
+      expect(client.agentId).toBe(agentId);
+    }
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   // ─── flair#718 authorship-provenance ───────────────────────────────────────
   describe("claimedClient (flair#718 authorship-provenance)", () => {
     test("absent by default — neither config nor FLAIR_CLIENT set", () => {

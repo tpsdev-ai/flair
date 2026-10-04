@@ -90,6 +90,37 @@ read-back described under [One mapping per login](#one-mapping-per-login)
 passed. The command stops before restarting the instance, reports the
 `secrets-provisioning` step as not applied, and exits non-zero.
 
+### Link or unlink one login
+
+`flair principal link` does only the mapping step, on an instance that is
+already enabled:
+
+```bash
+flair principal link alice --instance https://flair.example.com \
+  --idp-subject alice --admin-pass "$TARGET_ADMIN_PASS"
+```
+
+The principal must already exist: a missing one is refused by name. A subject
+already mapped to that principal is reported with nothing written; a subject
+mapped to a different principal is refused unless `--replace` moves it, which
+prints the prior principal and any superseded credential. More than one active
+principal mapped to the subject is refused before writing.
+`--instance` (else `FLAIR_URL`) must be HTTPS: these commands
+send the target's admin credential to its operations API, which on a hosted
+instance is the instance host at port 9925. <!-- docs-freshness-allow: hosted operations API port, not the data port -->
+An unparseable URL, `localhost`, a `.local` name, or a loopback, unspecified,
+RFC1918, link-local or IPv6 unique-local address literal is refused before any
+request, and a REMOTE target gets no `--admin-pass` fallback (the rule
+`flair mcp enable` applies).
+
+`flair principal unlink <principal> --idp-subject <login>` defaults to provider
+`github`; pass `--idp-provider <name>` for a different provider. Unlink reports
+success only after confirmed updates and no resolvable subject mapping on
+readback. With `FLAIR_MCP_JIT_PROVISION` on, a known tool call after an
+unmapped login may provision a new principal.
+`flair principal links <principal>` lists a principal's current mappings, and
+both take the same `--instance` and `--admin-pass`.
+
 ### One mapping per login
 
 `flair mcp enable` and the resolver both count a login's `idp` credential unless
@@ -105,11 +136,9 @@ name:
 - If the login has a credential that is not `revoked` under a different
   provider name, the run revokes it (the row stays, with status `revoked`) and
   prints its id after `SUPERSEDED:`.
-- After writing, it reads the login's credentials back and fails unless exactly
-  one of them is not `revoked` and that one is the credential it wrote. It does
-  not compare the principal that credential names: `bootstrap`'s `agentId` (see
-  [Check who you are](#check-who-you-are)) shows which principal the login
-  resolves to.
+- After writing, it requires exactly one resolvable (principal-bearing) active
+  credential matching the written id and principal.
+  Principal-less legacy rows are skipped and may remain active.
 
 ### Just-in-time provisioning
 
@@ -165,17 +194,20 @@ instead (see below).
   `client_id` before it sends the person to the identity provider; the person
   continues from there.
 - **Public clients with PKCE.** The document of an app that signs people in
-  must declare `token_endpoint_auth_method: none`, or leave the field out. Any
-  other value is refused with `invalid_client`. Every authorization request must
-  carry a PKCE `code_challenge` with method `S256`. With the shipped
-  `config.yaml`, the server's metadata advertises `none`, `client_secret_basic`
-  and `client_secret_post` as token endpoint auth methods (the last two apply
-  only to registered clients) and does not advertise `private_key_jwt`. Setting
+  may declare its token endpoint auth method. With the shipped `config.yaml` it
+  must be `token_endpoint_auth_method: none`, or the field left out; any other
+  value is refused with `invalid_client`. Every authorization request must
+  carry a PKCE `code_challenge` with method `S256`. With MCP enabled and a
+  provider configured, the shipped server advertises `none`,
+  `client_secret_basic` and `client_secret_post` as token endpoint auth methods (the last two apply only to registered clients)
+  and does not advertise `private_key_jwt`. Setting
   `mcp.clientCredentials.enabled: true`, which turns on the headless grant,
   changes the metadata: it then also lists `private_key_jwt`, the
-  `client_credentials` grant type and `EdDSA` as the assertion signing
-  algorithm. The document of an app that signs people in is still refused
-  unless it declares `none` or leaves the field out.
+  `client_credentials` grant type and `RS256`, `ES256` and `EdDSA` as the
+  assertion signing algorithms. Setting
+  `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true` also lists
+  `private_key_jwt` and those three algorithms. With either setting, a document
+  may declare `private_key_jwt` (with usable keys) instead of `none`.
 
 ### Changing the list
 
@@ -216,19 +248,31 @@ an upgrade replaces that file, run the command again or edit the file.
 
 ### ChatGPT
 
-ChatGPT's published metadata document, `https://chatgpt.com/oauth/client.json`,
-declares `token_endpoint_auth_method: private_key_jwt`. The `@harperfast/oauth`
-version Flair pins, 2.5.0, accepts only `none` in the metadata document of an
-app that signs people in, so ChatGPT's CIMD client is refused on 2.5.0 even with
-`chatgpt.com` on the list. A sign-in that presents that document gets HTTP 400,
-error `invalid_client`, and the description
-`token_endpoint_auth_method 'private_key_jwt' is not supported for interactive CIMD clients; use 'none'`.
-Stored registrations are a separate path (see [2. Which apps](#2-which-apps)),
-and registration of new clients is off.
+With MCP enabled and a provider configured, admitting ChatGPT's CIMD client
+requires `chatgpt.com` in `mcp.clientIdMetadataDocuments.allowedHosts` and
+`mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true`. ChatGPT's assertion
+uses the token-endpoint URL as its audience, so the pinned `@harperfast/oauth`
+2.9.0 also requires this exception in the deployed `config.yaml`:
 
-> **Upstream:** verification of `private_key_jwt` for interactive clients is in
-> progress upstream in
-> [HarperFast/oauth#245](https://github.com/HarperFast/oauth/pull/245).
+```yaml
+'@harperfast/oauth':
+  mcp:
+    clientIdMetadataDocuments:
+      allowedHosts:
+        - claude.ai
+        - claude.com
+        - chatgpt.com
+      privateKeyJwt:
+        enabled: true
+        tokenEndpointAudience:
+          clientIds:
+            - https://chatgpt.com/oauth/client.json
+          expiresAt: '2026-11-01T00:00:00Z'
+```
+
+Use the exact client ID and an operator-chosen future ISO 8601 `expiresAt`;
+the exception stops accepting the token-endpoint audience at that expiry.
+Restart Flair after editing the configuration.
 
 ## 3. What they can touch
 
@@ -269,24 +313,57 @@ A connection acts as its principal:
 
 ### Revoking access
 
-Deactivate the principal, on the Flair host, with `FLAIR_ADMIN_PASS` set or
-`--admin-pass`:
+Deactivate or reactivate a local principal with `FLAIR_ADMIN_PASS` set or
+`--admin-pass` (and neither `--instance` nor `FLAIR_URL` set):
 
 ```bash
 flair principal disable alice
+flair principal enable alice
 ```
 
-When the operations API accepts the update, it prints
-`✅ Principal 'alice' deactivated`.
+For a principal on a remote instance, pass the instance URL and its admin
+password explicitly. These commands share two precedence and credential rules
+with `flair mcp enable`: an explicit `--instance` wins over `FLAIR_URL`, and a
+remote operation requires an explicit `--admin-pass`. The principal commands accept
+explicit loopback targets; `flair mcp enable` accepts loopback or unspecified targets
+for the local restart but refuses local issuers.
 
-- It sends an `update` to the operations API at `127.0.0.1` on the machine it
-  runs on (port from `--ops-port`, `FLAIR_OPS_PORT` or the local Flair config).
-  It has no option for a remote instance.
-- The update sets the principal's `status` to `deactivated`, and its
-  `updatedAt`, and nothing else: the principal's memories and its login mapping
-  stay. The operations API of Harper 5.2.8, the version Flair pins, also accepts
-  an update for an id that has no record, so the ✅ line does not show that the
-  principal exists.
+```bash
+flair principal disable alice \
+  --instance https://flair.example.com \
+  --admin-pass "$TARGET_ADMIN_PASS"
+flair principal enable alice \
+  --instance https://flair.example.com \
+  --admin-pass "$TARGET_ADMIN_PASS"
+```
+
+Set `TARGET_ADMIN_PASS` to that instance's admin password before running the
+remote example. A success line appears only after the command reads `alice`,
+the operations API names it in the update result, and a read-back shows the
+requested status; the line reports that read-back status.
+
+- On the local path it sends an `update` to the operations API at `127.0.0.1`
+  on the machine it runs on. The port precedence is a valid explicit
+  `--ops-port`, then `FLAIR_OPS_PORT`, then `opsPort` in the local Flair config,
+  then one less than the resolved HTTP port. An invalid explicit `--ops-port`
+  is refused with a remedy; it never falls through to a lower-precedence port.
+- With `--instance` (or `FLAIR_URL`) it sends the same `update` to the ops API
+  derived from that served instance URL, using the `flair mcp enable` hosted
+  operations port convention. A remote target requires an explicit
+  `--admin-pass`: `FLAIR_ADMIN_PASS` and `~/.flair/admin-pass` are
+  this machine's local credentials and are never sent to another instance.
+  `FLAIR_TARGET` and `FLAIR_OPS_TARGET` do not select a principal target.
+  Redirects, unconfirmed results, and requests that fail or time out are
+  refused with a non-zero exit. Diagnostics omit URL userinfo, query values,
+  and unexpected response values; an unparseable target is printed only as
+  `<unparseable URL>`.
+- Disable sets the principal's `status` to `deactivated`; enable sets it to
+  `active`. Both update its `updatedAt` and nothing else: the principal's
+  memories and its login mapping stay. Harper can accept an update for an id
+  that has no record, so the command reads the principal first and refuses
+  `no principal <id>` before any update when no row exists; a read that fails
+  or returns an unreadable body is refused as unverified rather than as
+  missing.
 - Flair reads the principal's status on every `tools/call` for a known tool, and
   refuses those calls for a deactivated principal, including calls that carry a
   token issued before the change:
@@ -299,8 +376,8 @@ When the operations API accepts the update, it prints
   401 `{"error":"principal_deactivated"}`.
 - Disabling does not revoke OAuth tokens: they stay valid until they expire,
   and their tool calls are refused. Setting the status back to `active`
-  restores access for tokens that are still valid. There is no
-  `flair principal enable` command.
+  restores access for tokens that are still valid. `flair principal enable`
+  sets the status to `active`.
 
 To close `/mcp` for everyone, unset `FLAIR_MCP_OAUTH` in the instance's
 environment (or set it to `0`) and restart the instance; `flair mcp disable`
@@ -339,7 +416,9 @@ instance's admin password.
 
 Create a GitHub OAuth app whose callback URL is
 `https://flair.example.com/oauth/github/callback` (the command prints this URL
-too). Then run:
+too). The command stages `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET`
+and `OAUTH_GITHUB_REDIRECT_URI=<public-origin>/oauth` using `--issuer`
+(default: `--instance`). Then run:
 
 ```bash
 flair mcp enable \
@@ -352,8 +431,6 @@ flair mcp enable \
 When it finishes, it prints each step it ran, marked ✓ or ✗. The steps that
 act:
 
-- `signing-key` creates `~/.flair/mcp-signing-key.pem` (or the
-  `--signing-key-file` path), or reuses the file if it exists.
 - `idp-credentials` checks that the OAuth app's client id and secret are
   present; in a terminal, the command prompts for them before the steps run.
 - `secrets-provisioning` always stages the secrets the instance needs in a local
@@ -441,7 +518,6 @@ shares her connector's memories.
 
 **How to choose:** use one principal when both apps should see the same private
 memories. Keep two when you want to revoke or audit them separately.
-ChatGPT's CIMD client cannot be the second app yet; see [ChatGPT](#chatgpt).
 
 **Check:** `bootstrap` in each app returns the `agentId` you chose.
 **Revoke:** `flair principal disable` for the principal you want to stop.
