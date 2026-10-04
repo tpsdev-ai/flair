@@ -31,13 +31,18 @@
 //   4. Boot the previously-published npm baseline (`@tpsdev-ai/flair@latest`
 //      on the public registry, installed fresh — same "baseline" concept as
 //      federation-mixed-version.test.ts) against THAT SAME data directory,
-//      via `startHarper({ installDir: <the current build's dir> })`. No
-//      re-init, no `--purge`, no touching the files by hand — exactly what a
+//      through the baseline's OWN CLI (`node <baseline>/dist/cli.js start`).
+//      No re-init, no `--purge`, no touching the files by hand — exactly what a
 //      real `flair stop && npm install -g @tpsdev-ai/flair@<previous> &&
-//      flair start` downgrade does.
+//      flair start` downgrade does. Driving the CLI (not `startHarper`) is
+//      load-bearing: flair's backwards-engine guard lives in `flair start` and
+//      runs BEFORE Harper is spawned, so an engine change is refused before the
+//      older Harper can open — and modify — the newer store (flair#1047).
 //   5. If it boots: read the memory and presence rows back through the
 //      baseline's own HTTP surface — a clean boot that can't actually see
 //      its own data isn't "downgrade works", it's a different failure mode.
+//      If it refuses (the engine changed): assert the refusal names the engine
+//      change, and that the data directory is byte-identical afterward.
 //
 // ─── Either outcome is a valid, asserted result ────────────────────────────
 // Green here is a real claim ("downgrade to <baseline> is safe") that
@@ -67,6 +72,8 @@
 // test/helpers/harper-lifecycle.ts, which both files share for real.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -182,10 +189,38 @@ async function runFlairCli(
   });
 }
 
-function instanceEnv(inst: HarperInstance): Record<string, string> {
+/** Like runFlairCli, but a NON-ZERO exit resolves with the captured output
+ *  instead of rejecting — the refusal of the baseline start is an asserted
+ *  outcome, not a setup error. A timeout still rejects: a hang is the distinct,
+ *  forbidden failure mode the invariant calls out. */
+async function runFlairCliRaw(
+  cliPath: string,
+  args: string[],
+  env: Record<string, string>,
+  timeoutMs = CLI_TIMEOUT_MS,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return await new Promise((resolve, reject) => {
+    const proc = spawn(NODE_BIN, [cliPath, ...args], { env });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      reject(new Error(
+        `flair CLI timed out after ${timeoutMs}ms (HANG, not a refusal): ${args.join(" ")}\n` +
+        `--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
+      ));
+    }, timeoutMs);
+    proc.on("exit", (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
+function instanceEnv(inst: HarperInstance, home: string = inst.installDir): Record<string, string> {
   return {
     ...sanitizedParentEnv(),
-    HOME: inst.installDir,
+    HOME: home,
     FLAIR_URL: inst.httpURL,
     FLAIR_ADMIN_PASS: inst.admin.password,
     // Defence in depth for CLI spawns only. This does NOT fix the baseline
@@ -232,14 +267,43 @@ async function fetchAgentMemories(inst: HarperInstance, agentId: string): Promis
   return await res.json() as any[];
 }
 
+/** Recursively hash every regular file under `dir` (relative path + sha256),
+ *  sorted. Proves the refused downgrade start left the data directory
+ *  byte-identical — the whole point of refusing BEFORE Harper opens it. */
+function hashDataDir(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (rel: string): void => {
+    const abs = join(dir, rel);
+    for (const name of readdirSync(abs).sort()) {
+      const childRel = rel ? join(rel, name) : name;
+      const childAbs = join(dir, childRel);
+      const st = statSync(childAbs);
+      if (st.isDirectory()) walk(childRel);
+      else if (st.isFile()) {
+        const h = createHash("sha256").update(readFileSync(childAbs)).digest("hex");
+        out.push(`${childRel} ${h}`);
+      }
+    }
+  };
+  walk("");
+  return out.sort();
+}
+
 describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]", () => {
   let priorConfirmDowngrade: string | undefined;
   let baselineDir: string;
   let pkgDirBaseline: string;
   let cliPathBaseline: string;
   let cliPathCurrent: string;
+  let homeRoot: string;
   let dataDir: string | undefined;
   let current: HarperInstance | null = null;
+  /** The baseline's `flair start` refusal (engine-changed branch), captured —
+   *  not thrown — so the test can assert on it. */
+  let baselineStart: { code: number | null; stdout: string; stderr: string } | null = null;
+  /** Data-dir file hashes (relative path + sha256) around the refused start. */
+  let dataDirHashBefore: string[] | null = null;
+  let dataDirHashAfter: string[] | null = null;
   let baseline: HarperInstance | null = null;
   let memoryMarker: string;
   /** Set when the baseline fails to boot — captured, not thrown, so the
@@ -281,7 +345,13 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
       proc.on("error", reject);
     });
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn("npm", ["install", "@tpsdev-ai/flair@latest"], { cwd: baselineDir, env: sanitizedParentEnv() });
+      // npm HOISTS by default — `harper` lands at the project root, not inside
+      // the flair package — and the published baseline's backwards-engine guard
+      // reads the version from the flair package's OWN `node_modules/harper`.
+      // With the default strategy that read returns null and the guard no-ops
+      // (it cannot tell which engine is running), so the engine-change refusal
+      // never fires. Install nested so the package carries its own Harper.
+      const proc = spawn("npm", ["install", "--install-strategy=nested", "@tpsdev-ai/flair@latest"], { cwd: baselineDir, env: sanitizedParentEnv() });
       let out = "";
       proc.stdout?.on("data", (d) => out += d.toString());
       proc.stderr?.on("data", (d) => out += d.toString());
@@ -295,7 +365,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     // component doesn't crash at boot.
     if (process.platform === "linux") {
       await new Promise<void>((resolve, reject) => {
-        const proc = spawn("npm", ["install", "--no-save", "@node-llama-cpp/linux-x64@3"], { cwd: baselineDir, env: sanitizedParentEnv() });
+        const proc = spawn("npm", ["install", "--install-strategy=nested", "--no-save", "@node-llama-cpp/linux-x64@3"], { cwd: baselineDir, env: sanitizedParentEnv() });
         let out = "";
         proc.stdout?.on("data", (d) => out += d.toString());
         proc.stderr?.on("data", (d) => out += d.toString());
@@ -308,9 +378,18 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     cliPathCurrent = join(process.cwd(), "dist", "cli.js");
 
     // ── 2. Boot the CURRENT BUILD against a fresh data dir ─────────────────
-    current = await startHarper();
-    dataDir = current.installDir;
-    const currentEnv = instanceEnv(current);
+    //
+    // Layout is load-bearing: the store MUST sit at `$HOME/.flair/data`. The
+    // published baseline's backwards-engine guard — and `flair start` itself —
+    // resolves the store as `flairDataDir()` = `$HOME/.flair/data`; a bare
+    // Harper root that only ROOTPATH names would leave that guard reading a
+    // directory this build never wrote. So HOME is a throwaway root and the
+    // store is its `.flair/data`.
+    homeRoot = await mkdtemp(join(tmpdir(), "flair-downgrade-home-"));
+    dataDir = join(homeRoot, ".flair", "data");
+    mkdirSync(dataDir, { recursive: true });
+    current = await startHarper({ installDir: dataDir, homeDir: homeRoot });
+    const currentEnv = instanceEnv(current, homeRoot);
     const currentPort = String(new URL(current.httpURL).port);
     const currentOpsPort = String(new URL(current.opsURL).port);
 
@@ -343,7 +422,6 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     // engine version changed. This drives the branching in the test
     // assertions below: same engine → current assertions (boot + readable);
     // engine changed → refusal or pre-stamp boot.
-    const { readFileSync, existsSync } = await import("node:fs");
     for (const pkgName of ["harper", "@harperfast/harper"]) {
       const pkgPath = join(pkgDirBaseline, "node_modules", ...pkgName.split("/"), "package.json");
       if (existsSync(pkgPath)) {
@@ -370,12 +448,34 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     }
 
     // ── 4. Boot the npm baseline against the SAME data dir ─────────────────
-    // Captured, not awaited-and-thrown: a boot failure here is one of the two
-    // valid outcomes this suite exists to distinguish, not a setup error.
-    try {
-      baseline = await startHarper({ cwd: pkgDirBaseline, harperBinDir: baselineDir, installDir: dataDir });
-    } catch (err) {
-      baselineBootError = err as Error;
+    //
+    // Two paths, chosen by whether the engine moved:
+    //
+    //   - Engine CHANGED: drive the baseline's OWN CLI (`flair start`). Its
+    //     backwards-engine guard runs BEFORE Harper is spawned, so the older
+    //     engine never opens the newer store (flair#1047). Capture the refusal
+    //     and hash the data dir before/after; the guard firing must leave it
+    //     byte-identical. `startHarper` would bypass the guard entirely (it
+    //     spawns Harper directly) — the very path that let an older Harper
+    //     MODIFY 11 database files before its installer refused (flair#637).
+    //   - Engine SAME: no guard to run; boot through `startHarper` and assert
+    //     the store is served and readable.
+    if (engineVersionChanged) {
+      const baselineEnv = instanceEnv(current!, homeRoot);
+      dataDirHashBefore = hashDataDir(dataDir!);
+      baselineStart = await runFlairCliRaw(
+        cliPathBaseline,
+        ["start", "--port", String(new URL(current!.httpURL).port)],
+        baselineEnv,
+        CLI_TIMEOUT_MS,
+      );
+      dataDirHashAfter = hashDataDir(dataDir!);
+    } else {
+      try {
+        baseline = await startHarper({ cwd: pkgDirBaseline, harperBinDir: pkgDirBaseline, installDir: dataDir, homeDir: homeRoot });
+      } catch (err) {
+        baselineBootError = err as Error;
+      }
     }
   }, SETUP_TIMEOUT_MS);
 
@@ -390,7 +490,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     // stopHarper(baseline) will not remove it — this suite owns and removes
     // the shared dir itself, once, regardless of which side last touched it.
     if (baseline) await stopHarper(baseline);
-    if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
+    if (homeRoot) await rm(homeRoot, { recursive: true, force: true, maxRetries: 4 });
     if (baselineDir) await rm(baselineDir, { recursive: true, force: true });
   }, 120_000);
 
@@ -415,44 +515,30 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   // the transition case before the first stamp-carrying release ships).
   // Both outcomes are valid, asserted results.
 
-  test("npm baseline boots against data written by the current build, or refuses with engine-version message", async () => {
+  test("npm baseline refuses a store written by this build (engine-version message), before Harper opens it", async () => {
     if (engineVersionChanged) {
-      // Engine version changed — either outcome is valid.
-      if (baselineBootError) {
-        const msg = baselineBootError.message;
-
-        // Distinguish refusal (prompt non-zero exit) from hang (timeout).
-        // A hang is the silent-bad-outcome case the invariant forbids.
-        assertBaselineDidNotHang(baselineBootError);
-
-        // Baseline refused to boot. Two loud forms are valid:
-        //   - Flair's engine-version stamp (names Harper + data directory)
-        //   - Harper itself: 5.2.7 writes LZ4 that 5.2.0 cannot open
-        //     ("LZ4 not supported in this build"). The stamp check does not
-        //     run here — this suite boots Harper via startHarper, not
-        //     `flair start`. Do not require the stamp phrasing.
-        const stampRefusal = msg.includes("Harper") && msg.includes("data directory");
-        const lz4Refusal = isLz4LoudRefusal(msg);
-        if (!stampRefusal && !lz4Refusal) {
-          throw new Error(
-            `Engine version changed and baseline refused to boot, but the refusal ` +
-            `is neither the engine-version stamp nor Harper's LZ4 storage break — ` +
-            `unexpected failure mode:\n${msg}`,
-          );
-        }
-        // Refusal is the expected outcome for a stamp-capable baseline.
-        // The test passes — this is the "loud refusal" branch of the invariant.
-        return;
-      }
-      // Baseline booted successfully — pre-stamp baseline (transition case).
-      // Fall through to the normal boot assertion below.
+      // The baseline was started through its OWN CLI (step 4), so flair's
+      // backwards-engine guard ran BEFORE Harper. Assert the refusal, and that
+      // the store was left untouched — a refusal that still modified the data
+      // directory is the silent bad outcome this suite forbids.
+      expect(baselineStart).not.toBeNull();
+      expect(baselineStart!.code).not.toBe(0);
+      const output = `${baselineStart!.stdout}\n${baselineStart!.stderr}`;
+      // Flair's OWN guard message, not Harper's installer refusal.
+      expect(output).toContain("the data directory was written by a newer Harper engine");
+      expect(output).toContain("was last written by Harper");
+      expect(output).toMatch(/newer/);
+      // Byte-identical: refusing BEFORE Harper means zero files change.
+      expect(dataDirHashBefore).not.toBeNull();
+      expect(dataDirHashBefore!.length).toBeGreaterThan(0);
+      expect(dataDirHashAfter).toEqual(dataDirHashBefore);
+      return;
     }
 
     if (baselineBootError) {
-      // Even if version strings failed to resolve, Harper 5.2.7 → 5.2.0 is
-      // a documented LZ4 storage break (docs/upgrade.md). Loud and prompt.
-      // Hang first: startHarper timeouts append the Harper log, so LZ4 can
-      // appear on a hung baseline. A timeout is hung, not refusal.
+      // Same engine — a Harper storage break (LZ4) is the documented loud
+      // refusal. Hang first: startHarper timeouts append the Harper log, so LZ4
+      // can appear on a hung baseline. A timeout is hung, not refusal.
       assertBaselineDidNotHang(baselineBootError);
       if (isLz4LoudRefusal(baselineBootError.message)) {
         return;
@@ -469,13 +555,14 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("memory written by the current build is readable via the npm baseline after downgrade", async () => {
-    assertBaselineDidNotHang(baselineBootError);
-    if (baselineBootError && (engineVersionChanged || isLz4LoudRefusal(baselineBootError.message))) {
+    if (engineVersionChanged) {
       // Baseline refused — the "loud refusal" branch of the invariant.
       // Data readability is not expected; the recovery path is the snapshot.
       return;
     }
+    assertBaselineDidNotHang(baselineBootError);
     if (baselineBootError) {
+      if (isLz4LoudRefusal(baselineBootError.message)) return;
       throw new Error("skipped: baseline never booted — see the boot test above for the documented failure");
     }
     const rows = await fetchAgentMemories(baseline!, AGENT_ID);
@@ -483,12 +570,14 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("presence written by the current build is readable via the npm baseline after downgrade", async () => {
-    assertBaselineDidNotHang(baselineBootError);
-    if (baselineBootError && (engineVersionChanged || isLz4LoudRefusal(baselineBootError.message))) {
+    if (engineVersionChanged) {
       // Baseline refused — the "loud refusal" branch of the invariant.
+      // Data readability is not expected; the recovery path is the snapshot.
       return;
     }
+    assertBaselineDidNotHang(baselineBootError);
     if (baselineBootError) {
+      if (isLz4LoudRefusal(baselineBootError.message)) return;
       throw new Error("skipped: baseline never booted — see the boot test above for the documented failure");
     }
     // GET /Presence needs a verified reader since 0.56.0 (PRESENCE_PUBLIC_ROSTER opts

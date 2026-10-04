@@ -6,6 +6,10 @@ const { makeTable } = require("../../node_modules/harper/dist/resources/Table.js
 const databases = require("../../node_modules/harper/dist/resources/databases.js");
 const { ResourceBridge } = require("../../node_modules/harper/dist/dataLayer/harperBridge/ResourceBridge.js");
 
+// A stand-in path for the fake primary store: makeTable keys its storage
+// reclamation handler on it but this fixture opens no database.
+const FIXTURE_STORE_PATH = "/tmp/flair-memory-projection-fixture";
+
 async function main() {
   const { query, rows } = JSON.parse(readFileSync(0, "utf8"));
   const schema = readFileSync(require.resolve("../../schemas/memory.graphql"), "utf8");
@@ -14,7 +18,10 @@ async function main() {
   const attributes = [...body.matchAll(/^  (\w+):/gm)].map(([, name]) => ({ name, attribute: name }));
   const table = makeTable({
     tableName: "Memory", databaseName: "flair", primaryKey: "id", attributes,
-    indices: {}, schemaDefined: true, primaryStore: { encoder: { structPrototype: {} } },
+    indices: {}, schemaDefined: true,
+    // Harper 5.3's makeTable reads `primaryStore.rootStore.path` and
+    // `primaryStore.path` at construction, so the fake store carries both.
+    primaryStore: { encoder: { structPrototype: {} }, path: FIXTURE_STORE_PATH, rootStore: { path: FIXTURE_STORE_PATH } },
   });
   databases.getDatabases = () => ({ flair: { Memory: table } });
   table.search = (request) => {
