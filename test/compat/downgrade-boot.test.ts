@@ -18,7 +18,7 @@
 //     promptly, naming both versions and a remedy) — the stamp-capable path —
 //     or boots successfully (pre-stamp baseline, the transition case).
 //
-// Scenario (mirrors a real operator downgrade exactly — no shortcuts):
+// Scenario (mirrors a real operator downgrade; uses npm's nested install strategy):
 //   1. Boot the CURRENT BUILD (this worktree's own `dist/`, via
 //      `startHarper()` — same mechanism test/integration/*.test.ts and
 //      test/compat/federation-mixed-version.test.ts use) against a FRESH,
@@ -532,7 +532,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     if (engineVersionChanged) {
       // The baseline was started through its OWN CLI (step 4), so flair's
       // backwards-engine guard ran BEFORE Harper. Assert the refusal, and that
-      // the store was left untouched — a refusal that still modified the data
+      // regular-file paths and contents are unchanged — a refusal that still modified the data
       // directory is the silent bad outcome this suite forbids.
       expect(baselineStart).not.toBeNull();
       expect(baselineStart!.code).not.toBe(0);
@@ -541,7 +541,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
       expect(output).toContain("the data directory was written by a newer Harper engine");
       expect(output).toContain("was last written by Harper");
       expect(output).toMatch(/newer/);
-      // Byte-identical: refusing BEFORE Harper means zero files change.
+      // Regular-file paths and contents unchanged.
       expect(dataDirHashBefore).not.toBeNull();
       expect(dataDirHashBefore!.length).toBeGreaterThan(0);
       expect(dataDirHashAfter).toEqual(dataDirHashBefore);
