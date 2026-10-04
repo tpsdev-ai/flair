@@ -3,6 +3,7 @@ import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+import { classifyDaemonState } from "../../src/lib/daemon-liveness.ts";
 
 const started = Date.now();
 mock.module("../../src/lib/process-start-time.js", () => ({
@@ -17,7 +18,7 @@ const { gatherDaemonEvidence, program } = await import("../../src/cli.ts");
 const savedHome = process.env.HOME;
 afterEach(() => { process.env.HOME = savedHome; });
 
-test("Harper's SIGTERM handler removes the pid before a timed-out stop restores it", async () => {
+test("start attempts a replacement after Harper's SIGTERM handler removes the pid and the process exits", async () => {
   const home = tempDir("s");
   const dataDir = join(home, ".flair", "data");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -55,9 +56,9 @@ setInterval(() => {}, 1000);
     }
     const port = 19995;
     writeFileSync(join(dataDir, "flair-daemon.json"), JSON.stringify({ pid: child.pid, port, startTimeMs: started, flairVersion: "test" }));
-    let gone = false;
+    let portRefused = false;
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
-      if (gone) throw Object.assign(new Error("refused"), { cause: { code: "ECONNREFUSED" } });
+      if (portRefused) throw Object.assign(new Error("refused"), { cause: { code: "ECONNREFUSED" } });
       return new Response(JSON.stringify({ ok: true, version: "test", searchReady: true }));
     }) as unknown as typeof fetch);
     let elapsed = 0;
@@ -70,14 +71,17 @@ setInterval(() => {}, 1000);
     await expect(program.parseAsync(["node", "flair", "stop", "--port", String(port)]))
       .rejects.toThrow(`Process ${child.pid} did not exit within 60000ms`);
     expect(readFileSync(removed, "utf8")).toBe("true");
-    expect(readFileSync(pidfile, "utf8")).toBe(String(child.pid));
+    expect(existsSync(pidfile)).toBe(false);
     expect(child.exitCode).toBeNull();
+    portRefused = true;
+    expect(classifyDaemonState(await gatherDaemonEvidence(port, dataDir), { port, dataDir }).state).toBe("DISAGREEMENT");
     child.kill("SIGKILL");
     await child.exited;
-    gone = true;
     const evidence = await gatherDaemonEvidence(port, dataDir);
     expect(evidence.pidLiveness).toEqual({ kind: "gone" });
     expect(evidence.health).toEqual({ kind: "refused" });
+    expect(evidence.pidfile).toEqual({ kind: "absent" });
+    expect(classifyDaemonState(evidence, { port, dataDir }).state).toBe("NOT_RUNNING");
     await expect(program.parseAsync(["node", "flair", "start", "--port", String(port)]))
       .rejects.toThrow("replacement spawn reached");
   } finally {

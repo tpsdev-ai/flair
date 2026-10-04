@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+import { classifyDaemonState } from "../../src/lib/daemon-liveness.ts";
 
 let home = tempDir("flair-adopt-deadline-");
 let dataDir = join(home, ".flair", "data");
@@ -213,7 +214,7 @@ test("a direct process surviving SIGTERM consumes only the shared 60s stop deadl
   expect(healthChecks).toEqual([]);
   expect(finalProbeTimeouts).toEqual([]);
   expect(signals).toEqual(["SIGTERM"]);
-  expect(readFileSync(join(dataDir, "hdb.pid"), "utf8")).toBe(String(pid));
+  expect(existsSync(join(dataDir, "hdb.pid"))).toBe(false);
 });
 
 test("a slow identity read is bounded before the shared deadline", async () => {
@@ -323,14 +324,14 @@ test("a liveness probe reaching the deadline does not start another sleep", asyn
 });
 
 
-test("timed-out stop retains its pid for start after the process exits", async () => {
+test("start attempts a replacement after a timed-out stop with no pidfile once the process exits", async () => {
   Object.defineProperty(process, "platform", { value: "linux" });
   const log = spyOn(console, "log").mockImplementation(() => {});
   try {
     await expect(program.parseAsync(["node", "flair", "stop", "--port", String(port)]))
       .rejects.toThrow(`Process ${pid} did not exit within 60000ms`);
     expect(elapsed).toBe(60_000);
-    expect(readFileSync(join(dataDir, "hdb.pid"), "utf8")).toBe(String(pid));
+    expect(existsSync(join(dataDir, "hdb.pid"))).toBe(false);
     expect(readFileSync(join(dataDir, "flair-daemon.json"), "utf8")).toContain(String(pid));
     exitsOnTerm = true;
     const evidence = await gatherDaemonEvidence(port, dataDir);
@@ -355,6 +356,7 @@ for (const code of ["EPERM", "EINVAL"]) {
   test(`ordinary stop retains the pid when liveness reports ${code}`, async () => {
     Object.defineProperty(process, "platform", { value: "linux" });
     pollError = code;
+    pidOnTerm = String(pid);
     try {
       await expect(program.parseAsync(["node", "flair", "stop", "--port", String(port)]))
         .rejects.toThrow(`Process ${pid} did not exit within 60000ms`);
@@ -373,4 +375,25 @@ test("ordinary health probing retains ECONNREFUSED from fetch's abort handler", 
   const evidence = await gatherDaemonEvidence(port, dataDir);
   expect(evidence.pidLiveness).toEqual({ kind: "gone" });
   expect(evidence.health).toEqual({ kind: "refused" });
+});
+
+for (const [code, expected] of [[undefined, "DISAGREEMENT"], ["EPERM", "DISAGREEMENT"], ["EINVAL", "UNKNOWN"]] as const) {
+  test(`missing pidfile with last-known pid liveness ${code ?? "alive"} yields ${expected}`, async () => {
+    signalled = true;
+    pollError = code;
+    rmSync(join(dataDir, "hdb.pid"));
+    const evidence = await gatherDaemonEvidence(port, dataDir);
+    expect(evidence.health).toEqual({ kind: "refused" });
+    expect(classifyDaemonState(evidence, { port, dataDir }).state).toBe(expected);
+    expect(existsSync(join(dataDir, "hdb.pid"))).toBe(false);
+  });
+}
+
+test("missing pidfile with an unreadable sidecar yields UNKNOWN", async () => {
+  rmSync(join(dataDir, "hdb.pid"));
+  writeFileSync(join(dataDir, "flair-daemon.json"), "invalid");
+  signalled = true;
+  const evidence = await gatherDaemonEvidence(port, dataDir);
+  expect(evidence.health).toEqual({ kind: "refused" });
+  expect(classifyDaemonState(evidence, { port, dataDir }).state).toBe("UNKNOWN");
 });

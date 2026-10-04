@@ -3246,25 +3246,14 @@ function isProcessAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-function preserveStopPidfile(dataDir: string, pid: number): string | null {
-  try {
-    writeFileSync(join(dataDir, "hdb.pid"), String(pid), { flag: "wx", mode: 0o600 });
-    return null;
-  } catch (err: any) {
-    if (err?.code === "EEXIST") return null;
-    return `Could not preserve the stop pid record: ${err?.code ?? err?.message}`;
-  }
-}
-
-async function waitForProcessExit(pid: number, timeoutMs: number, dataDir?: string): Promise<void> {
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (probePidLiveness(pid).kind === "gone") return;
     await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
   }
   if (probePidLiveness(pid).kind === "gone") return;
-  const preservationError = dataDir ? preserveStopPidfile(dataDir, pid) : null;
-  throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms${preservationError ? `. ${preservationError}` : ""}`);
+  throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms`);
 }
 
 function readHarperPid(dataDir: string): number | null {
@@ -5276,8 +5265,11 @@ function inspectServingFlairPackage(pid: number): boolean | null {
 export async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
   const dataDirUnsafe = checkDataDirSafe(dataDir);
   const pidfile = readPidfile(dataDir);
-  const pidLiveness = pidfile.kind === "present" ? probePidLiveness(pidfile.pid) : null;
   let sidecar = readSidecar(dataDir);
+  const lastKnownPid = pidfile.kind === "absent" && sidecar.kind === "present" ? sidecar.pid : undefined;
+  const pidLiveness = pidfile.kind === "present" ? probePidLiveness(pidfile.pid)
+    : lastKnownPid !== undefined ? probePidLiveness(lastKnownPid)
+    : pidfile.kind === "absent" && sidecar.kind === "unreadable" ? { kind: "unknown" as const, reason: sidecar.reason } : null;
 
   // flair#2055: a sidecar that names a pid which is CONFIRMED gone is STALE, not
   // a disagreement with hdb.pid. After `flair stop` ended a directly started
@@ -5362,7 +5354,7 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
     sidecar,
     readStartTime: readProcessStartTimeMs,
   });
-  return { dataDirUnsafe, pidfile, pidLiveness, identity, health };
+  return { dataDirUnsafe, pidfile, lastKnownPid, pidLiveness, identity, health };
 }
 
 /**
@@ -7753,9 +7745,7 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
     }
     if (Date.now() >= stopDeadline) {
       const liveness = probePidLiveness(state.pid);
-      const preservationError = liveness.kind === "gone" ? null : preserveStopPidfile(dataDir, state.pid);
       const result = timeoutResult(`waiting for direct Harper process ${state.pid} to exit`);
-      if (result.kind === "failed" && preservationError) result.detail += ` ${preservationError}.`;
       const identityDetail = identityObservedAt < stopDeadline
         ? `${identity.kind}, observed at ${new Date(identityObservedAt).toISOString()}`
         : "not observed before the deadline";
