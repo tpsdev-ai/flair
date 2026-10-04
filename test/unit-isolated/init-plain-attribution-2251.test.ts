@@ -1,143 +1,8 @@
 import { beforeAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.ts";
-import { tempDir } from "../helpers/temp-dir.ts";
-
-const ROOT = resolve(import.meta.dir, "../..");
-const CLI = pathToFileURL(join(ROOT, "dist/cli.js")).href;
-const INIT = pathToFileURL(join(ROOT, "dist/commands/init.js")).href;
-const TCP_PROBE = pathToFileURL(join(ROOT, "dist/lib/init-tcp-probe.js")).href;
-const HTTP_PORT = 20991;
-const OPS_PORT = 20990;
-const OWN_PID = 4242;
+import { HTTP_PORT, OPS_PORT, runPlain } from "../helpers/init-plain-attribution-fixture.ts";
 
 beforeAll(() => ensureCliBuild(), 120_000);
-
-type Scenario = "own" | "own-launchd" | "foreign-launchd" | "free" | "missing-free" | "missing-listener" | "unknown" | "missing-error" | "missing-real-free" | "spawned" | "child-dead" | "other-child" | "post-unknown" | "root-mismatch" | "root-missing" | "install-race";
-
-interface Event {
-  kind: "probe" | "fetch" | "auth" | "tcp" | "closed";
-  host?: string;
-  port?: number;
-  url?: string;
-}
-
-function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
-  const home = tempDir("ipa-");
-  const events = join(home, "events.jsonl");
-  const actions = join(home, "actions.json");
-  writeFileSync(events, "");
-  writeFileSync(actions, JSON.stringify([]));
-  if (["own", "own-launchd", "foreign-launchd"].includes(scenario)) {
-    const dataDir = join(home, ".flair", "data");
-    mkdirSync(dataDir, { recursive: true });
-    writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
-  }
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
-  ));
-  Object.assign(env, { HOME: home, USERPROFILE: home, FLAIR_ADMIN_PASS: "plain-attribution-password" });
-  const script = `
-    import { mock } from "bun:test";
-    import * as childProcess from "node:child_process";
-    const realSpawn = childProcess.spawn;
-    import { EventEmitter } from "node:events";
-    import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
-    import { join } from "node:path";
-    const events = ${JSON.stringify(events)};
-    const actionsPath = ${JSON.stringify(actions)};
-    const log = event => appendFileSync(events, JSON.stringify(event) + "\\n");
-    let running = false;
-    let ownChild;
-    let installed = false;
-    const probe = await import(${JSON.stringify(TCP_PROBE)});
-    const readPort = probe.localPortState;
-    const connect = ({ host, port }) => {
-      log({ kind: "tcp", port, host });
-      const socket = new EventEmitter();
-      socket.setTimeout = () => {};
-      socket.destroy = () => { log({ kind: "closed", port }); };
-      queueMicrotask(() => {
-        if (installed && !running && ${scenario === "install-race"}) socket.emit("connect");
-        else if (running && ${["spawned", "child-dead", "other-child", "root-mismatch", "root-missing"].includes(scenario)}) socket.emit("connect");
-        else if (running && ${scenario === "post-unknown"}) socket.emit("timeout");
-        else if (port === ${probePort} && ${scenario === "missing-listener"}) socket.emit("connect");
-        else if (port === ${probePort} && ${scenario === "unknown"}) socket.emit("timeout");
-        else socket.emit("error", Object.assign(new Error("fixture"), { code: ${JSON.stringify(scenario === "missing-error" ? "EACCES" : "ECONNREFUSED")} }));
-      });
-      return socket;
-    };
-    if (${scenario !== "missing-real-free"}) mock.module(${JSON.stringify(TCP_PROBE)}, () => ({ ...probe, localPortState: (port, host) => readPort(port, host, connect) }));
-    mock.module("node:child_process", () => ({ ...childProcess, spawn: (command, args, options) => {
-      const actions = JSON.parse(readFileSync(actionsPath, "utf8"));
-      actions.push(args[1]);
-      writeFileSync(actionsPath, JSON.stringify(actions));
-      const proc = new EventEmitter();
-      proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter();
-      proc.unref = () => {}; proc.kill = () => {};
-      if (args[1] === "install") {
-        installed = true;
-        writeFileSync(join(options.env.ROOTPATH, "harper-config.yaml"), "rootPath: " + options.env.ROOTPATH + "\\n");
-        queueMicrotask(() => proc.emit("exit", 0));
-      } else if (args[1] === "run") {
-        ownChild = realSpawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore", env: options.env });
-        running = true;
-        if (${scenario === "child-dead"}) {
-          ownChild.kill("SIGKILL");
-          ownChild.emit("exit", 1);
-          ownChild.exitCode = 1;
-        }
-        return ownChild;
-      } else {
-        throw new Error("unexpected spawn");
-      }
-      return proc;
-    } }));
-    if (${["root-mismatch", "root-missing"].includes(scenario)}) mock.module(${JSON.stringify(pathToFileURL(join(ROOT, "dist/lib/init-listener-environ.js")).href)}, () => ({ readInitListenerRootPath: () => ({ environReadable: true, rootPath: ${scenario === "root-missing" ? "null" : '"/other/data"'} }) }));
-    const init = await import(${JSON.stringify(INIT)});
-    const bindCli = init.bindCli;
-    mock.module(${JSON.stringify(INIT)}, () => ({ ...init, bindCli: fns => bindCli({ ...fns,
-      harperBin: () => "fixture-harper.js",
-      registerInitLaunchdService: async () => ({ kind: "managed", lines: [] }),
-      repointMainServiceUnit: () => ({ kind: "unchanged" }),
-      resolveInstanceServingPid: ${["own", "own-launchd", "foreign-launchd"].includes(scenario) ? `() => ${OWN_PID}` : "fns.resolveInstanceServingPid"},
-    }) }));
-    const stored = new Map();
-    globalThis.fetch = async (url, options = {}) => {
-      const authorized = new Headers(options.headers).get("Authorization") !== null;
-      log({ kind: authorized ? "auth" : "fetch", url: String(url) });
-      if ((!running && ${!["own", "own-launchd", "foreign-launchd"].includes(scenario)}) || (${["own-launchd", "foreign-launchd"].includes(scenario)} && String(url).includes(":" + ${OPS_PORT} + "/"))) throw new Error("released port");
-      if (options.method === "PUT") stored.set(String(url), { id: decodeURIComponent(String(url).split("/").pop()), ...JSON.parse(options.body) });
-      return new Response(JSON.stringify(stored.get(String(url)) ?? {}), { status: stored.has(String(url)) || /\\/health$/i.test(String(url)) ? 200 : 404 });
-    };
-    const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
-    setOccupiedListenerLookupForTests({
-      pids: (port) => { log({ kind: "probe", port }); return running && ${scenario === "other-child"} ? [ownChild.pid + 1] : ${scenario === "own" ? `[${OWN_PID}]` : ["own-launchd", "foreign-launchd"].includes(scenario) ? `port === ${HTTP_PORT} ? [${scenario === "own-launchd" ? OWN_PID : OWN_PID + 1}] : []` : scenario === "free" ? "[]" : "null"}; },
-      rootPath: () => ({ rootPath: null, environReadable: false }),
-    });
-    const realExit = process.exit;
-    process.exit = code => { throw Object.assign(new Error("fixture exit"), { exitCode: code }); };
-    try {
-    await program.parseAsync(${JSON.stringify([
-      "init", "--port", String(HTTP_PORT), "--ops-port", String(OPS_PORT),
-      "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
-    ])}, { from: "user" });
-    } catch (error) {
-      if (typeof error.exitCode !== "number") throw error;
-      process.exitCode = error.exitCode;
-    } finally {
-      ownChild?.kill("SIGKILL");
-    }
-    writeFileSync(actionsPath, JSON.stringify(JSON.parse(readFileSync(actionsPath, "utf8"))));
-    realExit(process.exitCode ?? 0);
-  `;
-  const result = spawnSync("bun", ["--eval", script], { cwd: home, env, encoding: "utf8", timeout: 25_000 });
-  const eventList: Event[] = readFileSync(events, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
-  return { result, home, events: eventList, actions: JSON.parse(readFileSync(actions, "utf8")) as string[] };
-}
 
 test("re-init on this data directory's own adopted instance succeeds and attributes both ports", () => {
   const { result, events } = runPlain("own");
@@ -248,7 +113,7 @@ test("missing lsof with real refused TCP connections still initializes", () => {
   expect(actions).toEqual(["install", "run"]);
 }, 30_000);
 
-for (const scenario of ["spawned", "child-dead", "other-child", "post-unknown", "root-mismatch", "root-missing"] as const) {
+for (const scenario of ["spawned", "child-dead", "other-child", "post-unknown", "root-mismatch", "root-missing", "owner-unknown", "proc-mismatch"] as const) {
   test(`post-start attribution with missing lsof: ${scenario}`, () => {
     const { result, events, actions } = runPlain(scenario);
     expect(result.error).toBeUndefined();
@@ -267,3 +132,19 @@ test("a listener appearing during install refuses before spawn or credentials", 
   expect(result.stderr).toContain("no longer free");
   expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
+
+test("init waits for the child listener before sending credentials", () => {
+  const { result, events } = runPlain("child-starting");
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  const firstAuth = events.findIndex(e => e.kind === "auth");
+  expect(events.slice(0, firstAuth).filter(e => e.kind === "tcp" && e.port === HTTP_PORT).length).toBeGreaterThanOrEqual(4);
+}, 30_000);
+
+for (const scenario of ["lsof-child", "lsof-empty", "lsof-unknown"] as const) {
+  test(`macOS child attribution: ${scenario}`, () => {
+    const { result, events } = runPlain(scenario);
+    expect(result.status, result.stdout + result.stderr).toBe(scenario === "lsof-child" ? 0 : 1);
+    expect(events.some(e => e.kind === "auth")).toBe(scenario === "lsof-child");
+    if (scenario !== "lsof-child") expect(result.stderr).toContain("not attributed");
+  }, 30_000);
+}

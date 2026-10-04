@@ -8,6 +8,8 @@ import { tempDir } from "../helpers/temp-dir.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const CLI = pathToFileURL(join(ROOT, "dist/cli.js")).href;
+const TCP_PROBE = pathToFileURL(join(ROOT, "dist/lib/init-tcp-probe.js")).href;
+const ATTRIBUTION = pathToFileURL(join(ROOT, "dist/lib/init-spawn-attribution.js")).href;
 const INIT = pathToFileURL(join(ROOT, "dist/commands/init.js")).href;
 
 beforeAll(() => ensureCliBuild(), 120_000);
@@ -52,6 +54,12 @@ for (const { skipStart, occupied } of [
         else throw new Error("unexpected spawn");
         return proc;
       } }));
+      mock.module(${JSON.stringify(TCP_PROBE)}, () => ({ localPortState: async () => running || ${occupied} ? "listening" : "free" }));
+      const attribution = await import(${JSON.stringify(ATTRIBUTION)});
+      const track = attribution.trackInitChild;
+      mock.module(${JSON.stringify(ATTRIBUTION)}, () => ({ ...attribution,
+        trackInitChild: child => track(child, { platform: "darwin" }),
+      }));
       const init = await import(${JSON.stringify(INIT)});
       const bindCli = init.bindCli;
       mock.module(${JSON.stringify(INIT)}, () => ({ ...init, bindCli: fns => bindCli({ ...fns,
@@ -70,7 +78,7 @@ for (const { skipStart, occupied } of [
         return new Response(JSON.stringify(stored.get(String(url)) ?? {}), { status: stored.has(String(url)) ? 200 : 404 });
       };
       const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
-      setOccupiedListenerLookupForTests({ pids: () => { if (${occupied}) return [42]; return []; }, rootPath: () => ({ rootPath: null, environReadable: false }) });
+      setOccupiedListenerLookupForTests({ pids: () => { if (${occupied}) return [42]; return running ? [ownChild.pid] : []; }, rootPath: () => ({ rootPath: null, environReadable: false }) });
       await program.parseAsync(${JSON.stringify(["init", "--port", "20991", "--ops-port", "20990", "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", ...(skipStart ? ["--skip-start"] : [])])}, { from: "user" });
       writeFileSync(${JSON.stringify(log)}, JSON.stringify(actions));
       ownChild?.kill("SIGKILL");

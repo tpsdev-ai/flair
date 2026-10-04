@@ -434,13 +434,12 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     expect(children[0]?.exitCode).toBe(null);
   }, CASE_BUDGET_MS);
 
-  test("the operations 401 does not name the HTTP pid", async () => {
-    const hasLsof = (() => {
-      try { execFileSync("lsof", ["-v"], { stdio: "ignore" }); return true; }
-      catch (e: any) { return e?.code !== "ENOENT"; }
-    })();
-    // Plain init refuses a port it cannot probe, so this 401 path needs lsof.
-    if (!hasLsof) return;
+  const operationsFixtureSupported = process.platform === "linux" && (() => {
+    try { execFileSync("lsof", ["-v"], { stdio: "ignore" }); return true; }
+    catch (e: any) { return e?.code !== "ENOENT"; }
+  })();
+  if (!operationsFixtureSupported) console.info("Skipping operations 401 listener attribution: requires Linux ROOTPATH and lsof.");
+  test.skipIf(!operationsFixtureSupported)("the operations 401 does not name the HTTP pid (requires Linux ROOTPATH and lsof)", async () => {
     scratch = mkdtempSync(join(tmpdir(), "flair-1749-"));
     const home = join(scratch, "home");
     const dataDir = join(scratch, "data");

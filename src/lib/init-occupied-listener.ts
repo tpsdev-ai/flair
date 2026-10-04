@@ -45,8 +45,7 @@ export interface OccupiedHarperListener {
   dataDirs: string[];
   /**
    * Whether the pid read succeeded. False (or absent) means the probe failed
-   * (no lsof), which is UNKNOWN — not "no listener". A caller that decides a
-   * port is free treats unknown as not-free.
+   * (no lsof), which is UNKNOWN — not "no listener".
    */
   pidsKnown?: boolean;
 }

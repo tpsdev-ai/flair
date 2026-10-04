@@ -651,7 +651,7 @@ program
         listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
         (listener.dataDirs.length === 1 ||
           cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
-      const attributed = installedAttributed || ownChild?.attributes(listener, dataDir, freeBeforeSpawn);
+      const attributed = ownChild ? ownChild.attributes(listener, dataDir, freeBeforeSpawn) : installedAttributed;
       if (attributed) return;
       console.error(`Refusing init: port ${listener.port} ${answered}; its listener is not attributed to this data directory (${dataDir}).`);
       console.error(foreignOccupiedListenerDetail(listener, dataDir));
@@ -659,10 +659,17 @@ program
       process.exit(1);
     };
     const attributeBeforeCredential = async (port: number, host: string): Promise<void> => {
-      const listener = readOccupiedListener(port);
-      const state = await localPortState(port, host);
+      const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+      let listener = readOccupiedListener(port);
+      let state = await localPortState(port, host);
+      while (ownChild && state === "free" && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        listener = readOccupiedListener(port);
+        state = await localPortState(port, host);
+      }
+      if (state === "listening") listener = readOccupiedListener(port);
       if (state === "unknown") refuseUnknownListener(listener);
-      if (state === "listening" && listener.pidsKnown && listener.pids.length === 0) refuseUnknownListener(listener);
+      if (ownChild && state === "free") refuseUnattributedListener({ ...listener, pids: [], dataDirs: [] }, "has no responding listener");
       refuseUnattributedListener(listener, "is awaiting an authenticated request");
     };
     const refuseUnknownListener = (listener: OccupiedHarperListener): void => {
