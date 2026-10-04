@@ -80,18 +80,11 @@ export function isZeroRowNoOpEvent(event: {
 }
 
 /**
- * The fixed, budgeted team-directory discovery hint (flair#2141 S3a).
- *
- * Replaces the old unbounded "## Team" roster line, which listed every
- * teammate id inline — a cost that grew with the size of the office. The roster
- * is now discovered through the team-directory resolver (the `team_directory`
- * MCP tool, `GET /TeamDirectory`, and the flair client), so bootstrap carries a
- * FIXED pointer instead of an open-ended list. Constant text: no caller data, no
- * per-agent cost, included even when prose and soul are disabled.
+ * Fixed-size hint for agents with published contacts (flair#2141 S3a).
  */
 export const DIRECTORY_HINT_TEXT =
   "Need a teammate? Call the `team_directory` tool (MCP) or `GET /TeamDirectory` " +
-  "for this office's active agents and their published tps-mail addresses.";
+  "for this office's active agents with published tps-mail addresses.";
 
 export function directoryHint(): string {
   return DIRECTORY_HINT_TEXT;

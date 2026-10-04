@@ -131,8 +131,8 @@ describe("MCP surface tripwire — RECORD_TYPES.mcp + COMPOSITE_MCP_TOOLS vs. re
     });
   });
 
-  describe("golden value: the complete 18-tool tools/list surface is pinned", () => {
-    it("sorted TOOLS keys deep-equal the pinned list (tools/list byte-identical)", () => {
+  describe("the tool names are pinned", () => {
+    it("sorted TOOLS keys deep-equal the pinned list", () => {
       expect(SHIPPED_TOOL_NAMES).toEqual([
         "attention",
         "bootstrap",
@@ -258,4 +258,3 @@ describe("MCP surface tripwire — derived set == descriptor set (flair#1580)", 
     expect([...ADAPTER_TOOL_NAMES].sort()).toEqual(descriptorNames(STDIO_TOOL_DESCRIPTORS).sort());
   });
 });
-

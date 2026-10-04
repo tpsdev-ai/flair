@@ -47,7 +47,7 @@ import { localInstanceId } from "./instance-identity.js";
 export const TEAM_DIRECTORY_PLATFORM = "tps-mail";
 /** Maximum entries any single page returns, regardless of a larger `limit`. */
 export const TEAM_DIRECTORY_MAX_ENTRIES = 50;
-/** Maximum UTF-8 bytes of any returned string (agentId, name, email). */
+/** Maximum UTF-8 bytes of agentId, name and email. */
 export const TEAM_DIRECTORY_MAX_STRING_BYTES = 256;
 /** Maximum serialized bytes of the whole response. */
 export const TEAM_DIRECTORY_MAX_RESPONSE_BYTES = 64 * 1024;
@@ -111,7 +111,7 @@ export function isActiveAgentPrincipal(record: { id?: unknown; kind?: unknown; s
   return true;
 }
 
-/** A publication stamp is valid when it is a non-empty ISO string that parses. */
+/** A publication stamp is valid when it is a parseable date string. */
 export function isValidPublicationStamp(value: unknown): value is string {
   if (typeof value !== "string" || value === "") return false;
   return Number.isFinite(Date.parse(value));
@@ -205,7 +205,16 @@ async function collectEntries(): Promise<TeamDirectoryEntry[] | Response> {
     return unavailable("team_directory_contact_store_unavailable");
   }
 
-  return [...byAgent.values()].sort((a, b) => a.agentId.localeCompare(b.agentId));
+  return [...byAgent.values()].sort((a, b) => compareAgentIds(a.agentId, b.agentId));
+}
+
+function compareAgentIds(a: string, b: string): number {
+  const left = Array.from(a), right = Array.from(b);
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    const difference = left[i].codePointAt(0)! - right[i].codePointAt(0)!;
+    if (difference !== 0) return difference;
+  }
+  return left.length - right.length;
 }
 
 /** Drop the fewest trailing entries needed to fit the serialized response cap. */
@@ -256,7 +265,7 @@ export async function resolveTeamDirectory(
   }
 
   const cursor = typeof query.cursor === "string" && query.cursor !== "" ? query.cursor : null;
-  if (cursor) candidates = candidates.filter((e) => e.agentId > cursor);
+  if (cursor) candidates = candidates.filter((e) => compareAgentIds(e.agentId, cursor) > 0);
 
   // Reauthorize each page: this call already re-ran the reader gate and the
   // fresh Agent read above, so a revoked reader never receives a later page.

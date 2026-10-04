@@ -1792,8 +1792,6 @@ export class BootstrapMemories extends Resource {
       // never absent, so "empty" is distinguishable from "unsupported").
       agentId,
       ...(taskRetrievalHint ? { taskRetrievalHint } : {}),
-      // flair#2141 S3a — fixed, budgeted team-directory discovery hint. This field
-      // is always present; the team section line only when a roster exists.
       directoryHint: directoryHint(),
       scope: scopeInfo,
       soul: soulMap,
@@ -1831,9 +1829,7 @@ export class BootstrapMemories extends Resource {
       sections: {
         soul: sections.soul.length,
         skills: sections.skills.length,
-        // flair#2141 S3a — `team` is now the fixed directory-hint line (1 when a
-        // roster exists, 0 otherwise); the roster itself is discovered through
-        // the team-directory resolver, not enumerated here.
+        // Fixed directory hint when a roster exists.
         team: sections.team.length,
         permanent: sections.permanent.length,
         recent: sections.recent.length,

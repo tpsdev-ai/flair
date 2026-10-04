@@ -49,5 +49,6 @@ describe("directoryHint", () => {
   test("names the discovery surface, not an inline roster", () => {
     expect(directoryHint()).toContain("team_directory");
     expect(directoryHint()).toContain("GET /TeamDirectory");
+    expect(directoryHint()).toContain("active agents with published tps-mail addresses");
   });
 });

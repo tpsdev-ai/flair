@@ -18,7 +18,7 @@ gating gaps.
   Streamable HTTP: `initialize` / `tools/list` / `tools/call` / `ping`. On
   `tools/call` it resolves the verified token `sub` → a flair `Agent`, then
   dispatches to the curated tool.
-- `resources/mcp-tools.ts` — the 18 tools in `resources/mcp-tools.ts`, each a thin wrapper over the existing resource handler
+- `resources/mcp-tools.ts` — the 18 tools in `resources/mcp-tools.ts`, delegating to resource handlers or the team-directory resolver
   (Memory / SemanticSearch / BootstrapMemories / Soul / WorkspaceState /
   OrgEvent / AttentionQuery / RecordUsage / the team-directory resolver). No raw CRUD surface — the only path to the datastore through `/mcp`
   is one of the 18 tools in `resources/mcp-tools.ts`. Curated **by construction**.

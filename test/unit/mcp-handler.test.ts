@@ -238,7 +238,7 @@ afterAll(() => {
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
 describe("tools/list — exactly the 18 curated tools", () => {
-  it("returns exactly 18, matching the flair-mcp surface plus attention (flair#677) + record_usage (flair#683) + memory_basement/memory_restore (flair#1472) + skill_store (flair#1542) + skill_search/skill_get (flair#1546) + team_directory (flair#2141), no raw CRUD mutators", async () => {
+  it("returns the pinned tool names", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();

@@ -194,6 +194,24 @@ describe("filtering happens before pagination", () => {
 });
 
 describe("caps and pagination", () => {
+  it("pages mixed-case IDs without omissions or duplicates", async () => {
+    addAgent("reader");
+    for (const id of ["a", "A", "b", "B", "\u{10000}", "\uE000"]) {
+      addAgent(id);
+      addContact(id, { agentId: id, email: `${id}@example.test`, directoryPublishedAt: "2026-10-01T00:00:00.000Z" });
+    }
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 6; i++) {
+      const page = (await resolveTeamDirectory(agentCtx("reader"), { limit: 1, cursor })) as any;
+      expect(page.entries).toHaveLength(1);
+      ids.push(page.entries[0].agentId);
+      expect(page.hasMore).toBe(i < 5);
+      expect(page.nextCursor).toBe(i < 5 ? page.entries[0].agentId : null);
+      cursor = page.nextCursor;
+    }
+    expect(ids).toEqual(["A", "B", "a", "b", "\uE000", "\u{10000}"]);
+  });
   it("caps entries at 50 and pages with a stable cursor", async () => {
     addAgent("reader");
     for (let i = 0; i < 60; i++) {
@@ -240,17 +258,37 @@ describe("caps and pagination", () => {
     expect(utf8Bytes(res.entries[0].name)).toBe(TEAM_DIRECTORY_MAX_STRING_BYTES);
   });
 
-  it("keeps the serialized response under the 64 KiB cap", async () => {
+  it("trims an over-cap candidate and resumes at the last returned entry", async () => {
     addAgent("reader");
-    // ~200-byte emails × 50 entries is under 64 KiB, so this exercises the
-    // normal path; the clamp is additionally unit-tested by the pure cap value.
+    const candidate = [];
     for (let i = 0; i < 50; i++) {
       const id = `agent-${String(i).padStart(2, "0")}`;
-      addAgent(id, { name: "n".repeat(200) });
-      addContact(`c-${i}`, { agentId: id, email: `${id}@example.test`, directoryPublishedAt: "2026-10-01T00:00:00.000Z" });
+      const name = "\u0001".repeat(256);
+      const email = "\u0002".repeat(256);
+      const publishedAt = "2026-10-01T00:00:00.000Z";
+      addAgent(id, { name });
+      addContact(`c-${i}`, { agentId: id, email, directoryPublishedAt: publishedAt });
+      candidate.push({ agentId: id, name, email, publishedAt, platform: TEAM_DIRECTORY_PLATFORM, homeInstanceId: null });
     }
+    expect(utf8Bytes(JSON.stringify({ entries: candidate, nextCursor: null, hasMore: false, limit: 50, generatedAt: "2026-10-01T00:00:00.000Z" })))
+      .toBeGreaterThan(65_536);
     const res = (await resolveTeamDirectory(agentCtx("reader"), { limit: 50 })) as any;
     expect(utf8Bytes(JSON.stringify(res))).toBeLessThanOrEqual(TEAM_DIRECTORY_MAX_RESPONSE_BYTES);
+    expect(res.entries.length).toBeGreaterThan(0);
+    expect(res.entries.length).toBeLessThan(50);
+    expect(res.hasMore).toBe(true);
+    expect(res.nextCursor).toBe(res.entries.at(-1).agentId);
+    const ids = res.entries.map((entry: any) => entry.agentId);
+    let page = res;
+    for (let i = 0; page.hasMore && i < 50; i++) {
+      page = await resolveTeamDirectory(agentCtx("reader"), { limit: 50, cursor: page.nextCursor });
+      expect(page.entries.length).toBeGreaterThan(0);
+      expect(utf8Bytes(JSON.stringify(page))).toBeLessThanOrEqual(TEAM_DIRECTORY_MAX_RESPONSE_BYTES);
+      ids.push(...page.entries.map((entry: any) => entry.agentId));
+    }
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+    expect(ids).toEqual(candidate.map((entry) => entry.agentId));
   });
 });
 

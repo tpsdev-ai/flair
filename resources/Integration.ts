@@ -199,7 +199,7 @@ export class Integration extends (databases as any).flair.Integration {
       const pub = await resolvePublicationStamp(this, content, null, true);
       if (pub.denial) return pub.denial;
       const now = new Date().toISOString();
-      const record: any = { ...content, createdAt: typeof content?.createdAt === "string" ? content.createdAt : now, updatedAt: now };
+      const record: any = { ...content, createdAt: now, updatedAt: now };
       if (pub.stamp !== undefined) record[DIRECTORY_STAMP_FIELD] = pub.stamp;
       return super.post(record, context);
     });
@@ -221,7 +221,7 @@ export class Integration extends (databases as any).flair.Integration {
       if (!stored.row) return NOT_FOUND();
       const pub = await resolvePublicationStamp(this, content, stored.row, false);
       if (pub.denial) return pub.denial;
-      const changes: any = { ...content, updatedAt: new Date().toISOString() };
+      const changes: any = { ...content, createdAt: stored.row.createdAt, updatedAt: new Date().toISOString() };
       if (pub.stamp !== undefined) changes[DIRECTORY_STAMP_FIELD] = pub.stamp;
       return super.patch(changes, query);
     });
@@ -249,7 +249,7 @@ export class Integration extends (databases as any).flair.Integration {
       const now = new Date().toISOString();
       const record: any = {
         ...content,
-        createdAt: typeof stored.row?.createdAt === "string" ? stored.row.createdAt : now,
+        createdAt: stored.row ? stored.row.createdAt : now,
         updatedAt: now,
       };
       if (pub.stamp !== undefined) record[DIRECTORY_STAMP_FIELD] = pub.stamp;

@@ -1,6 +1,5 @@
 /**
- * peer-status.ts — the ONE `Peer.status` vocabulary, used by the federation
- * CLI rendering (flair#2141 S3a).
+ * Peer.status vocabulary used by the CLI and pinned to the schema by tests.
  *
  * `Peer.status` (schemas/federation.graphql) is a federation MEMBERSHIP state,
  * not a heartbeat:

@@ -110,6 +110,31 @@ beforeEach(() => {
   (globalThis as any).transaction = async (ctx: any, cb: any) => cb(ctx ?? {});
 });
 
+describe("Integration timestamps", () => {
+  for (const verb of ["post", "put", "patch"] as const) {
+    it(`${verb} ignores caller timestamps and preserves stored createdAt on update`, async () => {
+      const forged = "1999-01-01T00:00:00.000Z";
+      const createdAt = "2026-09-01T00:00:00.000Z";
+      if (verb !== "post") integrationStore.set("int-1", { id: "int-1", agentId: "agent-a", createdAt });
+      const i = makeIntegration(operatorCtx(), "int-1");
+      const before = Date.now();
+      const res = await i[verb]({
+        id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "a@example.test",
+        createdAt: forged, updatedAt: forged, directoryPublishedAt: forged,
+      });
+      const after = Date.now();
+      expect(res instanceof Response).toBe(false);
+      const row = integrationStore.get("int-1");
+      expect(row.createdAt).not.toBe(forged);
+      if (verb !== "post") expect(row.createdAt).toBe(createdAt);
+      for (const field of verb === "post" ? ["createdAt", "updatedAt", "directoryPublishedAt"] : ["updatedAt", "directoryPublishedAt"]) {
+        expect(Date.parse(row[field])).toBeGreaterThanOrEqual(before);
+        expect(Date.parse(row[field])).toBeLessThanOrEqual(after);
+      }
+    });
+  }
+});
+
 describe("Integration.allowRead — closes the anonymous GET /Integration/<id> and describe leak", () => {
   it("anonymous is denied", async () => {
     const i = makeIntegration(anonCtx());
