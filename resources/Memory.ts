@@ -1114,6 +1114,14 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
+    // flair#2263: a URL-bound POST (POST /Memory/<id>) addresses that id; when
+    // the body omits `id`, thread the URL target in before the skill body is
+    // classified, mirroring put().
+    const postUrlTargetId = (this as any).getId?.();
+    if (content && typeof content === "object" && content.id === undefined &&
+      (typeof postUrlTargetId === "string" || typeof postUrlTargetId === "number")) {
+      content.id = postUrlTargetId;
+    }
     const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
@@ -1677,6 +1685,17 @@ export class Memory extends (databases as any).flair.Memory {
     if (resolvedExisting.denial) return resolvedExisting.denial;
     const preExisting = resolvedExisting.row;
     const requestedPayload = { ...content };
+    // flair#2263: the URL-bound target is the write target for a skill body that
+    // omits `id`, exactly as resolveStoredRow's read above uses it. A body `id`
+    // that disagrees with the address is already refused, so a body id present
+    // here equals the target; when absent, thread the target id in so the skill
+    // create's successor and the under-lock stale-snapshot check use the id this
+    // write lands on.
+    const urlTargetId = (this as any).getId?.();
+    if (content && typeof content === "object" && content.id === undefined &&
+      (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
+      content.id = urlTargetId;
+    }
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
