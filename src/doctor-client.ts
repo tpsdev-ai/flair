@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
+import type { SeedOwnerRead } from "./keystore.js";
 import {
   ALL_CLIENTS,
   clientConfigPath,
@@ -2240,7 +2241,7 @@ export function resolveCollisionSafeName(existingNames: Iterable<string>, filena
   return `${filename}.${n}`;
 }
 
-export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan-candidate" | "unidentified" | "ignored";
+export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan-candidate" | "orphan-seed" | "unidentified" | "ignored";
 
 /** An unparseable keystore blob may be a live federation key (flair#1026). */
 const UNIDENTIFIED_SEED_REASON =
@@ -2321,6 +2322,80 @@ export function classifyNodeKeySeed(
   };
 }
 
+/** Unauthenticated sidecar metadata for reporting. */
+export interface SeedOwnerProof {
+  /** The seed's ownership sidecar, as read (absent / unreadable / malformed / ok). */
+  owner: SeedOwnerRead;
+  /** Absolute path of the seed file. */
+  keyPath: string;
+  /** Absolute path of the ownership sidecar. */
+  ownerPath: string;
+  /** The data directory of the TARGETED instance, or null when it could not be established. */
+  targetDataDir: string | null;
+}
+
+/** Sidecars are unauthenticated metadata; node-shaped candidates stay unidentified. */
+export function classifyOwnedNodeSeed(
+  id: string,
+  instanceIds: readonly string[] | null,
+  baseUrl: string,
+  agentIds: readonly string[] | null,
+  proof: SeedOwnerProof,
+  unreadableReason?: string,
+): KeyPruneDecision {
+  const decision = classifyNodeKeySeed(id, instanceIds, baseUrl, agentIds, unreadableReason);
+  if (decision.class !== "orphan-candidate") return decision;
+
+  const { owner, keyPath, ownerPath, targetDataDir } = proof;
+  const base = `id '${id}' is absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched)`;
+  const leftInPlace = `${keyPath} is left in place`;
+
+  if (owner.state === "absent") {
+    return {
+      class: "unidentified",
+      reason: `${base}; no owner record at ${ownerPath} — ownership cannot be proven; ${leftInPlace}. `
+        + `Remedy: if no instance uses it, remove the seed manually.`,
+    };
+  }
+  if (owner.state === "unreadable") {
+    return {
+      class: "unidentified",
+      reason: `${base}; the owner record at ${ownerPath} could not be read (${owner.reason}) — ownership cannot be proven; ${leftInPlace}. `
+        + `Remedy: check all instances before manual cleanup.`,
+    };
+  }
+  if (owner.state === "malformed") {
+    return {
+      class: "unidentified",
+      reason: `${base}; the owner record at ${ownerPath} is malformed (${owner.reason}) — ownership cannot be proven; ${leftInPlace}. `
+        + `Remedy: check all instances before manual cleanup.`,
+    };
+  }
+  if (owner.instanceId !== id) {
+    return {
+      class: "unidentified",
+      reason: `${base}; the owner record at ${ownerPath} names instance '${owner.instanceId}', not the seed '${id}' — the record does not belong to this seed; ${leftInPlace}.`,
+    };
+  }
+  if (targetDataDir === null) {
+    return {
+      class: "unidentified",
+      reason: `${base}; the owner record at ${ownerPath} names instance '${owner.instanceId}' (data directory ${owner.dataDir}), but the targeted instance's data directory could not be established, so ownership cannot be proven; ${leftInPlace}. `
+        + `Remedy: check all instances before manual cleanup.`,
+    };
+  }
+  if (owner.dataDir !== targetDataDir) {
+    return {
+      class: "unidentified",
+      reason: `${base}; the owner record at ${ownerPath} names instance '${owner.instanceId}' (data directory ${owner.dataDir}), not the targeted instance (data directory ${targetDataDir}); ${leftInPlace}.`,
+    };
+  }
+  return {
+    class: "unidentified",
+    reason: `${base}; the owner record at ${ownerPath} is unauthenticated; file type and ownership cannot be proven; ${leftInPlace}.`,
+  };
+}
+
 export function orphanInstanceSeedAdvisory(input: {
   nodeKeyIds: readonly string[];
   instanceIds: readonly string[] | null;
@@ -2339,42 +2414,10 @@ export function orphanInstanceSeedAdvisory(input: {
   return `${candidates} orphan candidate(s) in ${keysDir}, absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched); ownership cannot be proven; not removed (see #2200)`;
 }
 
-// ── Node-scoped federation keys vs agent signing keys (flair#1193) ─────────
-//
-// `~/.flair/keys/` is a namespace shared by two writers with two file shapes:
-//
-//   • agent Ed25519 signing keys — a 32-byte raw seed at `<name>.key`, ALWAYS
-//     written together with a sibling `<name>.pub` (see the keypair write in
-//     src/cli.ts: the seed and the public key are emitted in the same block).
-//   • node-scoped federation keys — `flair_<hex8>.key`, an AES-256-GCM
-//     keystore blob written by FileKeyStore during Fabric provisioning
-//     (flair#1026). The id is minted as `flair_${randomBytes(4).toString("hex")}`
-//     in resources/Federation.ts, and NO `.pub` is ever written for it.
-//
-// Nothing used to tell them apart, so doctor tried to Ed25519-parse the node
-// blob — a "DECODER routines::unsupported" warning that reads as agent-auth
-// breakage when agent auth is fine — and `doctor --fix` could infer the node
-// id as the sole "agent" and wire it as a connector identity, authenticating
-// as a phantom, unregistered node whose key cannot sign (flair#1193).
-//
-// The guard is STRUCTURAL, not a parse attempt: a node id matches
-// `flair_<hex8>` AND has no sibling `.pub`. We deliberately do NOT classify by
-// parsing the file and treating a decode failure as "must be a node key" —
-// that is the exact fails-open move flair#1026 warns against (a genuinely
-// corrupt agent key would be misread as a node key and silently skipped).
-// A real agent always has a `.pub`; a node key never does, so `.pub` presence
-// is the primary, falsifiable signal and classification never depends on the
-// parse-failure of the thing being classified.
-
-/** The shape a Fabric node id always has: `flair_` + 8 lowercase hex chars. */
+/** Node-shaped file ids. */
 const NODE_KEY_ID_RE = /^flair_[0-9a-f]{8}$/;
 
-/**
- * True iff `id` names a node-scoped federation key rather than an agent
- * signing key: it is shaped like a node id AND has no sibling `<id>.pub` in
- * `keysDir`. Both conditions are required — an agent that happened to be named
- * `flair_deadbeef` would still have a `.pub`, so it is never misclassified.
- */
+/** Match node-shaped ids without a sibling .pub; file type is unproven. */
 export function isNodeKeyId(id: string, keysDir: string): boolean {
   if (!NODE_KEY_ID_RE.test(id)) return false;
   return !existsSync(join(keysDir, `${id}.pub`));
