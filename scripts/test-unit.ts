@@ -16,10 +16,8 @@ import {
   type ServiceManagerTripwire,
 } from "../test/helpers/fake-launchctl.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
-// The deterministic root-unit file shards (flair#2258). The lane splits its
-// `root unit tests` step into these shards; the CI job runs the module's
-// `--verify` gate so a file can never run in no shard.
 import { SHARDS, assignShards, listUnitFiles } from "./ci/unit-shards.mjs";
+import { testFiles } from "./ci/test-files.mjs";
 
 /** The short, canonical temp base darwin unit steps run under (flair#2137). */
 export const DARWIN_TEMP_BASE = "/private/tmp";
@@ -123,24 +121,6 @@ export function newFlairTempNames(before: ReadonlySet<string>, after: ReadonlySe
   return [...after].filter((name) => !before.has(name)).sort();
 }
 
-/**
- * The temp-dir leak guard (flair#1889).
- *
- * A unit test must remove the scratch directory it creates. The lane is the only
- * place that can see all of them, so it snapshots the `flair-*` names in the OS
- * temp dir before the lane and again after it, and fails on any name that
- * APPEARED during the lane.
- *
- * It compares NAMES, not a bare count, and reports only the names that appeared:
- * a `flair-*` directory that was already there (an earlier run's leftover, which
- * this lane did not create) is not a leak this lane caused. The accepted
- * false-positive is a genuinely concurrent, unrelated process that creates a
- * `flair-*` temp dir while the lane runs — an entry carries no owner, so it
- * cannot be attributed to a process, and hiding it would mean hiding real leaks
- * too.
- *
- * @returns true when the lane leaked (and the caller must fail).
- */
 export function reportTempDirLeaks(leaked: readonly string[], dir: string = tmpdir()): boolean {
   if (!leaked.length) return false;
   const counts = new Map<string, number>();
@@ -188,22 +168,12 @@ export function stepEnvironment(
   return env;
 }
 
-function testFiles(dir: string, recursive = true): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return recursive ? testFiles(path) : [];
-    return /\.test\.[jt]sx?$/.test(entry.name) ? [path] : [];
-  }).sort();
-}
-
 export function unitPlan(root: string): UnitStep[] {
   const requiredFiles = (dir: string, recursive = true) => {
     const files = testFiles(join(root, dir), recursive);
     if (!files.length) throw new Error(`No unit test files found in ${dir}`);
     return files;
   };
-  // The root unit corpus, from the same module the CI job's coverage gate reads
-  // (flair#2258): every test/unit/** file plus every root-level test/*.test.ts.
   const rootUnitFiles = listUnitFiles(root);
   if (!rootUnitFiles.length) throw new Error("No unit test files found in test");
   const isolatedFiles = requiredFiles("test/unit-isolated");
@@ -233,11 +203,6 @@ export function unitPlan(root: string): UnitStep[] {
     steps.push({ name: `typecheck: ${label}`, cwd: root, args: ["x", "tsc", "--noEmit", "-p", config], files: [] });
   }
   steps.push({ name: "emit server for boundary guard", cwd: root, args: ["x", "tsc", "-p", "tsconfig.json", "--noCheck"], files: [] });
-  // root unit tests, sharded by file (flair#2258). The partition is
-  // deterministic — every file lands in exactly one shard — and each shard
-  // keeps this step's own 450 s limit while running well under it, so a
-  // shard killed at the limit is a genuinely hung shard rather than the
-  // ordinary variance of one long step. mock.module isolation is per process.
   assignShards(rootUnitFiles, SHARDS).forEach((files, index) => {
     steps.push({
       name: `root unit tests (shard ${index + 1}/${SHARDS})`,
@@ -432,11 +397,8 @@ function runStep(
     sandbox.cleanup();
   }
   if (timeout && (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
-    console.error(
-      `${step.name}: ${timeout.reason}; step killed at the limit. A killed step cannot remove its own scratch directories, ` +
-        `so the temp-dir leak guard's result is not attributable.`,
-    );
-    return { detail: `${timeout.reason}; step killed at the limit; leak-guard result not attributable`, killedAtLimit: true };
+    console.error(`${step.name}: ${timeout.reason}; step killed at the limit.`);
+    return { detail: `${timeout.reason}; step killed at the limit`, killedAtLimit: true };
   }
   if (result.error || result.status !== 0) {
     return { detail: result.error?.message ?? result.signal ?? `exit ${result.status}`, killedAtLimit: false };
@@ -558,32 +520,27 @@ export function runUnitSteps(
         detail: `a real client config changed during the lane: ${changed.join(", ")} (flair#1853)`,
       });
     }
-    const leaked = newFlairTempNames(tempBefore, flairTempNames(guardTempDir));
-    if (leaked.length && killedAtLimit) {
-      // A step killed at its limit cannot remove its own scratch directories, so
-      // any flair-* entry left behind cannot be told apart from a genuine test
-      // leak. The killed step is already the one attributed failure (flair#2258),
-      // so the guard does not add a second, unattributable failure.
-      console.error(
-        `Temp-dir leak guard: ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} appeared, ` +
-          `but a step was killed at the limit, so the result is not attributable (flair#2258).`,
-      );
-    } else if (reportTempDirLeaks(leaked, guardTempDir)) {
-      guardFailures.push({
-        kind: "guard",
-        name: "temp-dir leak guard",
-        detail: `the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${guardTempDir} (flair#1889)`,
-      });
+    for (const { step, names, killed } of tempEntries) {
+      if (killed) {
+        console.error(`Temp-dir entries from ${step}: not attributable after the step was killed: ${names.join(", ")}.`);
+      } else if (reportTempDirLeaks(names, guardTempDir)) {
+        guardFailures.push({
+          kind: "guard",
+          name: "temp-dir leak guard",
+          detail: `${step} left ${names.length} new flair-* entries in ${guardTempDir}: ${names.join(", ")} (flair#1889)`,
+        });
+      }
+    }
+    const observed = new Set([...tempBefore, ...tempEntries.flatMap(entry => entry.names)]);
+    const leaked = newFlairTempNames(observed, flairTempNames(guardTempDir));
+    if (reportTempDirLeaks(leaked, guardTempDir)) {
+      guardFailures.push({ kind: "guard", name: "temp-dir leak guard", detail: `new entries outside a step: ${leaked.join(", ")}` });
     }
   };
 
   const stepFailures: UnitLaneFailure[] = [];
-  // A step that ran past its time limit and was killed (flair#2258): its scratch
-  // directories are the leak guard's, but cannot be attributed to it, so the
-  // guard is not reported as a second failure.
-  let killedAtLimit = false;
-  // Each root unit shard's own duration, reported together so drift toward the
-  // limit is visible before it fails runs.
+  const tempEntries: Array<{ step: string; names: string[]; killed: boolean }> = [];
+
   const shardTimings: Array<{ index: number; of: number; ms: number }> = [];
   let completed = 0;
   for (const [index, step] of steps.entries()) {
@@ -609,9 +566,11 @@ export function runUnitSteps(
       : remaining < limit
         ? { ms: remaining, reason: `timed out: ${budgetRanOut}` }
         : { ms: limit, reason: `timed out after ${seconds(limit)}` };
+    const stepTempBefore = flairTempNames(guardTempDir);
     const outcome = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    const names = newFlairTempNames(stepTempBefore, flairTempNames(guardTempDir));
+    if (names.length) tempEntries.push({ step: step.name, names, killed: outcome.killedAtLimit });
     const detail = outcome.detail;
-    if (outcome.killedAtLimit) killedAtLimit = true;
     // Per-step timing, printed after every step the lane attempts, pass or
     // fail (flair#2224): the budget above is sized from measured step times, so
     // the lane reports them; otherwise the next resize can only be re-derived

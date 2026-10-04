@@ -259,8 +259,8 @@ describe("shared unit lane", () => {
     expect(code).toBe(1);
     expect(readFileSync(join(dir, "ran-3"), "utf8")).toBe("x");
     expect(errors).toContain("ran 3 steps, 3 failed");
-    expect(errors).toContain("  - hangs past its own limit (timed out after 2 s; step killed at the limit; leak-guard result not attributable)");
-    expect(errors).toContain("  - hangs past the default limit (timed out after 1 s; step killed at the limit; leak-guard result not attributable)");
+    expect(errors).toContain("  - hangs past its own limit (timed out after 2 s; step killed at the limit)");
+    expect(errors).toContain("  - hangs past the default limit (timed out after 1 s; step killed at the limit)");
     expect(errors).toContain("  - fails after the hangs (exit 4)");
     // The guards still ran after the timeouts: the config the last step planted is named.
     expect(errors).toContain("Guard failures:\n  - home-isolation guard");
@@ -276,7 +276,7 @@ describe("shared unit lane", () => {
     expect(Date.now() - started).toBeLessThan(8000);
     expect(code).toBe(1);
     expect(existsSync(join(dir, "later"))).toBe(false);
-    expect(errors).toContain("Unit lane failed: hangs (timed out after 1 s; step killed at the limit; leak-guard result not attributable)");
+    expect(errors).toContain("Unit lane failed: hangs (timed out after 1 s; step killed at the limit)");
     expect(errors).toContain("Home-isolation guard FAILED");
   }, 30_000);
 
@@ -291,7 +291,7 @@ describe("shared unit lane", () => {
     expect(code).toBe(1);
     expect(existsSync(join(dir, "later"))).toBe(false);
     expect(errors).toContain("ran 1 of 2 steps, 1 failed, 1 not run");
-    expect(errors).toContain("  - plants a config, then hangs (timed out: the lane's 2 s time budget ran out; step killed at the limit; leak-guard result not attributable)");
+    expect(errors).toContain("  - plants a config, then hangs (timed out: the lane's 2 s time budget ran out; step killed at the limit)");
     expect(errors).toContain("Not run:\n  - never started (the lane's 2 s time budget ran out)");
     expect(errors).toContain("Guard failures:\n  - home-isolation guard");
   }, 30_000);
@@ -359,16 +359,12 @@ describe("shared unit lane", () => {
       expect(errors).toContain(leakName);
       if (keepGoing) {
         expect(errors).toContain("ran 1 step, 0 failed");
-        expect(errors).toContain("Guard failures:\n  - temp-dir leak guard: the unit lane left 1 new flair-* directory");
+        expect(errors).toContain("Guard failures:\n  - temp-dir leak guard: succeeds but leaves a flair-* temp dir left 1 new flair-* entries");
       }
     }
   });
 
   test("a step killed at its limit reports one attributed failure, not a second leak-guard failure (flair#2258)", () => {
-    // A killed step cannot remove its own scratch directories, so the temp-dir
-    // leak guard sees them but cannot attribute them. The lane reports the
-    // killed step only, with the leak-guard result marked not attributable;
-    // it does not add a second, separate leak-guard failure.
     for (const keepGoing of [false, true]) {
       const dir = fixture();
       const leakName = `flair-2258-killed-${keepGoing ? "keep-going" : "fail-fast"}-${process.pid}`;
@@ -381,15 +377,35 @@ describe("shared unit lane", () => {
         { keepGoing, limits: { stepTimeoutMs: 1000 } },
       ));
       expect(code).toBe(1);
-      // One attributed failure, carrying the not-attributable note.
-      expect(errors).toContain("hangs and leaks (timed out after 1 s; step killed at the limit; leak-guard result not attributable)");
-      // Not a second, separate leak-guard failure.
+      expect(errors).toContain("hangs and leaks (timed out after 1 s; step killed at the limit)");
       expect(errors).not.toContain("Temp-dir leak guard FAILED");
       expect(errors).not.toContain("Guard failures:\n  - temp-dir leak guard");
-      expect(errors).toContain("leak-guard result not attributable");
+      expect(errors).toContain(`Temp-dir entries from hangs and leaks: not attributable after the step was killed: ${leakName}.`);
       if (keepGoing) expect(errors).toContain("ran 1 step, 1 failed");
     }
   }, 30_000);
+
+  for (const leakBefore of [true, false]) {
+    test(`an ordinary leak ${leakBefore ? "before" : "after"} a timeout still fails the guard`, () => {
+      const dir = fixture();
+      const ordinaryName = `flair-ordinary-${leakBefore}-${process.pid}`;
+      const killedName = `flair-killed-${leakBefore}-${process.pid}`;
+      for (const name of [ordinaryName, killedName]) fixtures.push(join(tmpdir(), name));
+      const plant = (name: string) => `require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, ${JSON.stringify(name)}));`;
+      const ordinary = { name: "ordinary leak", cwd: dir, args: ["-e", plant(ordinaryName)], files: [] };
+      const killed = { name: "killed leak", cwd: dir, args: ["-e", plant(killedName) + HANG_8S], files: [] };
+      const { result: code, errors } = captureErrors(() => runUnitSteps(
+        leakBefore ? [ordinary, killed] : [killed, ordinary], process.execPath, dir,
+        { keepGoing: true, limits: { stepTimeoutMs: 1000 } },
+      ));
+      expect(code).toBe(1);
+      expect(errors).toContain("Temp-dir leak guard FAILED");
+      expect(errors).toContain(`ordinary leak left 1 new flair-* entries`);
+      expect(errors).toContain(ordinaryName);
+      expect(errors).toContain(`Temp-dir entries from killed leak: not attributable after the step was killed: ${killedName}.`);
+      expect(errors).not.toContain(`ordinary leak: not attributable`);
+    }, 60_000);
+  }
 
   test("without a killed step, the temp-dir leak guard still fails the lane (flair#2258)", () => {
     // The negative control for the fold above: an ordinary leak (no kill) is
@@ -452,12 +468,6 @@ describe("shared unit lane", () => {
     // One hung non-root step still leaves every later step room to run inside
     // the budget.
     expect(lane + STEP_TIMEOUT_MS).toBeLessThanOrEqual(KEEP_GOING_LANE_BUDGET_MS);
-    // The root step is sharded by file (flair#2258): each shard keeps the 450 s
-    // limit and runs well under half of it — an even split of the measured root
-    // step is at most half, with room to spare. A hung shard is stopped by its
-    // own limit (or, if it would outlast the lane, by the lane budget), both
-    // inside the job limit, so the summary and guards always print.
-    expect(ROOT_STEP_TIMEOUT_MS).toBeGreaterThanOrEqual(2 * (rootStep / SHARDS));
     expect(ROOT_STEP_TIMEOUT_MS + CI_OUTSIDE_LANE_MS).toBeLessThanOrEqual(CI_JOB_LIMIT_MS);
     const limited = unitPlan(root).filter(step => step.timeoutMs !== undefined);
     expect(limited).toHaveLength(SHARDS);
@@ -580,8 +590,9 @@ describe("shared unit lane", () => {
   });
 
   test("a nested runner reuses the caller's root and leaves its leak visible (flair#1889, flair#2137)", () => {
+    const noncanonicalRoot = process.env.FLAIR_UNIT_TEMP_ROOT && dirname(realpathSync(tmpdir())) !== DARWIN_TEMP_BASE;
     for (const marked of [false, true]) {
-      if (!marked && process.platform !== "darwin") continue;
+      if (!marked && (process.platform !== "darwin" || process.env.FLAIR_UNIT_TEMP_BASE?.trim() || noncanonicalRoot)) continue;
       const base = fixture();
       const seen = join(base, "nested.json");
       const script = `

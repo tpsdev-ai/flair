@@ -157,10 +157,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
-      - name: Verify the root unit shards cover every file
-        # Coverage gate (flair#2258): fails unless the shards partition the full
-        # root unit corpus, so a new file can never run in no shard. The shard
-        # count is the lane's own constant (scripts/ci/unit-shards.mjs).
+      - name: Verify root unit shard coverage
         run: node scripts/ci/unit-shards.mjs --verify
       - name: Shared unit lane (root, isolated and workspace tests)
         # --keep-going (flair#2030): keep attempting later steps until the lane budget

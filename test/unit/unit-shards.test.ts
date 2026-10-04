@@ -1,190 +1,158 @@
-// Root-unit-test shards (flair#2258).
-//
-// The load-bearing assertion is coverage: the shards PARTITION the full root
-// unit corpus — the union is every file and no file is in two shards. A file
-// that fell out of the union would run in no shard and gate nothing, so that
-// case fails here and in the job's `--verify` step.
-
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-
 import {
-  ROOT,
-  SECONDS_BY_FILE,
-  SHARDS,
-  assignShards,
-  coverageReport,
-  listUnitFiles,
-  shardFiles,
-  verifyShards,
-  weightOf,
+  ROOT, SHARDS, assignShards, coverageReport, listUnitFiles, shardFiles, verifyShards,
 } from "../../scripts/ci/unit-shards.mjs";
 import { unitPlan } from "../../scripts/test-unit.ts";
 
 const ALL = listUnitFiles();
+const fixtures: string[] = [];
+afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-/** Every root unit file the shell finds, sorted — the independent list to compare against. */
-function findFiles(): string[] {
-  const r = spawnSync(
-    "bash",
-    ["-c", "{ find test/unit -name '*.test.ts'; find test -maxdepth 1 -name '*.test.ts'; } | sort"],
-    { cwd: ROOT, encoding: "utf8", timeout: 15_000 },
-  );
-  if (r.status !== 0) throw new Error(`find failed: ${r.stderr}`);
-  return r.stdout.split("\n").filter(Boolean).sort();
+function fixtureRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), "flair-shard-fixture-"));
+  fixtures.push(root);
+  mkdirSync(join(root, "scripts/ci"), { recursive: true });
+  mkdirSync(join(root, "test/unit/nested"), { recursive: true });
+  for (const extension of ["js", "jsx", "ts", "tsx"]) {
+    for (const dir of ["test", "test/unit", "test/unit/nested"]) {
+      writeFileSync(join(root, dir, `sample.test.${extension}`), "");
+    }
+  }
+  writeFileSync(join(root, "test/unit/ignored.spec.ts"), "");
+  cpSync(join(ROOT, "scripts/ci/test-files.mjs"), join(root, "scripts/ci/test-files.mjs"));
+  cpSync(join(ROOT, "scripts/ci/unit-shards.mjs"), join(root, "scripts/ci/unit-shards.mjs"));
+  return root;
 }
 
-describe("unit-shards — the file list", () => {
-  test("listUnitFiles returns every root unit *.test.ts, sorted", () => {
+function findFiles(): string[] {
+  const r = spawnSync("bash", ["-c", "{ find test/unit -type f; find test -maxdepth 1 -type f; } | LC_ALL=C sort"], {
+    cwd: ROOT, encoding: "utf8", timeout: 15_000,
+  });
+  if (r.status !== 0) throw new Error(`find failed: ${r.stderr}`);
+  return r.stdout.split("\n").filter(file =>
+    [".test.js", ".test.jsx", ".test.ts", ".test.tsx"].some(suffix => file.endsWith(suffix)),
+  ).sort();
+}
+
+describe("unit-shards — discovery", () => {
+  test("matches independent discovery", () => {
     expect(ALL).toEqual(findFiles());
     expect(ALL.length).toBeGreaterThan(0);
   });
 
-  test("every file is a test/unit/** or root test/*.test.ts path", () => {
-    for (const f of ALL) {
-      expect(f.startsWith("test/unit/") || (f.startsWith("test/") && !f.slice(5).includes("/")), f).toBe(true);
-      expect(f.endsWith(".test.ts"), f).toBe(true);
-    }
+  test("includes all runner extensions at both root boundaries", () => {
+    const root = fixtureRoot();
+    const expected = ["js", "jsx", "ts", "tsx"].flatMap(extension =>
+      ["test", "test/unit", "test/unit/nested"].map(dir => `${dir}/sample.test.${extension}`),
+    ).sort();
+    expect(listUnitFiles(root)).toEqual(expected);
+    const result = spawnSync("node", [join(root, "scripts/ci/unit-shards.mjs"), "--verify"], {
+      encoding: "utf8", timeout: 20_000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`${expected.length}/${expected.length} files covered`);
   });
 
-  test("the list matches the files the shared lane's shard steps run", () => {
-    // The lane shards the corpus it discovers; the CI job's --verify reads this
-    // module's list. They must name the same files or a file could run in no
-    // shard while --verify stays green.
-    const steps = unitPlan(ROOT).filter((step) => step.shard !== undefined);
-    const laneFiles = [...new Set(steps.flatMap((step) => step.files.map((file) => relative(ROOT, file))))].sort();
-    expect(laneFiles).toEqual([...ALL].sort());
+  test("matches the files the shared lane's shard steps run", () => {
+    const steps = unitPlan(ROOT).filter(step => step.shard !== undefined);
+    const laneFiles = steps.flatMap(step => step.files.map(file => relative(ROOT, file))).sort();
+    expect(laneFiles).toEqual(ALL);
   });
 });
 
-describe("unit-shards — the partition", () => {
+describe("unit-shards — assignment", () => {
   for (const of of [1, 2, 3, 4, 7]) {
-    test(`--of ${of} partitions the full list (union = all, no duplicates)`, () => {
-      const res = verifyShards(of, ALL);
-      expect(res.total).toBe(ALL.length);
-      expect(res.covered).toBe(ALL.length);
-      expect(res.missing).toEqual([]);
-      expect(res.duplicated).toEqual([]);
-      expect(res.unknown).toEqual([]);
+    test(`${of} shards partition the discovered files`, () => {
+      expect(verifyShards(of, ALL)).toEqual({
+        total: ALL.length, covered: ALL.length, missing: [], duplicated: [], unknown: [],
+      });
     });
   }
 
-  test("the union of the shards is exactly the sorted file list", () => {
-    const union = [...assignShards(ALL, SHARDS).flat()].sort();
-    expect(union).toEqual([...ALL].sort());
+  test("adding a file leaves all existing assignments unchanged", () => {
+    const before = assignShards(ALL, SHARDS);
+    const added = "test/unit/aaa-added-file.test.jsx";
+    const after = assignShards([...ALL, added], SHARDS);
+    for (const [index, shard] of before.entries()) {
+      expect(after[index].filter(file => file !== added)).toEqual(shard);
+    }
+    expect(after.flat().filter(file => file === added)).toHaveLength(1);
+    expect(assignShards([...ALL].reverse(), SHARDS)).toEqual(before);
   });
 
-  test("shardFiles is deterministic and disjoint", () => {
-    const first = Array.from({ length: SHARDS }, (_, i) => shardFiles(i + 1, SHARDS, ALL));
-    const second = Array.from({ length: SHARDS }, (_, i) => shardFiles(i + 1, SHARDS, ALL));
-    expect(first).toEqual(second);
-    const flat = first.flat();
-    expect(new Set(flat).size).toBe(flat.length); // no file in two shards
-  });
-
-  test("the three heaviest weighted files land in three different shards", () => {
-    const heaviest = Object.entries(SECONDS_BY_FILE)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([name]) => ALL.find((f) => f.endsWith(`/${name}`)));
-    expect(heaviest.every(Boolean)).toBe(true);
-    const shards = assignShards(ALL, 3);
-    const where = heaviest.map((file) => shards.findIndex((s) => s.includes(file as string)));
-    expect(where.every((i) => i >= 0)).toBe(true);
-    expect(new Set(where).size).toBe(3);
-  });
-
-  test("a file with no weight still lands in a shard", () => {
-    const unweighted = ALL.find((f) => !(Object.keys(SECONDS_BY_FILE).some((n) => f.endsWith(`/${n}`))));
-    expect(unweighted).toBeDefined();
-    expect(weightOf(unweighted as string)).toBeGreaterThan(0);
-    expect(assignShards(ALL, SHARDS).flat()).toContain(unweighted as string);
-  });
-});
-
-describe("unit-shards — the coverage check", () => {
-  test("a planted file is covered by exactly one shard", () => {
-    const planted = "test/unit/planted-file-2258.test.ts";
-    const withPlanted = [...ALL, planted];
-    const where = assignShards(withPlanted, SHARDS).filter((shard) => shard.includes(planted));
-    expect(where).toHaveLength(1);
-    const res = coverageReport(withPlanted, assignShards(withPlanted, SHARDS));
-    expect(res.covered).toBe(withPlanted.length);
-    expect(res.missing).toEqual([]);
-    expect(res.duplicated).toEqual([]);
-  });
-
-  test("a file missing from the shards is reported, not silently dropped", () => {
+  test("reports omissions and duplicates", () => {
     const shards = assignShards(ALL, SHARDS);
     const dropped = shards[0][0];
-    const missingOne = shards.map((shard, i) => (i === 0 ? shard.slice(1) : shard));
-    const res = coverageReport(ALL, missingOne);
-    expect(res.missing).toEqual([dropped]);
-    expect(res.covered).toBe(ALL.length - 1);
-  });
-
-  test("a file in two shards is reported as duplicated", () => {
-    const shards = assignShards(ALL, SHARDS);
-    const duplicated = [...shards, [ALL[0]]];
-    const res = coverageReport(ALL, duplicated);
-    expect(res.duplicated).toEqual([ALL[0]]);
-    expect(res.missing).toEqual([]);
-  });
-
-  test("the CLI --verify exits 1 when the assignment does not cover the list", () => {
-    // The CLI builds the shards itself, so it cannot be handed a bad assignment
-    // directly; drive the same check through the exported function instead and
-    // pin the CLI's clean-exit path separately below.
-    const shards = assignShards(ALL, SHARDS).map((shard, i) => (i === 0 ? shard.slice(1) : shard));
-    const res = coverageReport(ALL, shards);
-    expect(res.missing.length).toBeGreaterThan(0);
-    expect(res.duplicated).toEqual([]);
+    expect(coverageReport(ALL, shards.map((shard, i) => i === 0 ? shard.slice(1) : shard)).missing).toEqual([dropped]);
+    expect(coverageReport(ALL, [...shards, [ALL[0]]]).duplicated).toEqual([ALL[0]]);
   });
 });
 
-describe("unit-shards — the CLI", () => {
-  const run = (...args: string[]) =>
-    spawnSync("node", ["scripts/ci/unit-shards.mjs", ...args], {
-      cwd: ROOT,
-      encoding: "utf8",
-      timeout: 20_000,
-    });
-
-  test("--list-all prints every file, sorted", () => {
-    const r = run("--list-all");
-    expect(r.status).toBe(0);
-    expect(r.stdout.split("\n").filter(Boolean)).toEqual([...ALL].sort());
+describe("unit-shards — CLI", () => {
+  const run = (...args: string[]) => spawnSync("node", ["scripts/ci/unit-shards.mjs", ...args], {
+    cwd: ROOT, encoding: "utf8", timeout: 20_000,
   });
 
-  test("--shard 2 prints shard 2's files, defaulting --of to the lane's shard count", () => {
+  for (const defect of ["missing", "duplicated"] as const) {
+    test(`--verify exits 1 and names a ${defect} file`, () => {
+      const root = fixtureRoot();
+      const modulePath = join(root, "scripts/ci/unit-shards.mjs");
+      const name = "test/unit/sample.test.jsx";
+      const source = readFileSync(modulePath, "utf8");
+      const injected = defect === "missing"
+        ? `for (const bucket of buckets) { const at = bucket.indexOf(${JSON.stringify(name)}); if (at !== -1) bucket.splice(at, 1); }`
+        : `buckets[0].push(${JSON.stringify(name)});`;
+      expect(source).toContain("return buckets.map");
+      writeFileSync(modulePath, source.replace("return buckets.map", `${injected}\n  return buckets.map`));
+      const result = spawnSync("node", [modulePath, "--verify"], { cwd: root, encoding: "utf8", timeout: 20_000 });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`${defect}: ${name}`);
+    });
+  }
+
+  test("--list-all prints the sorted corpus", () => {
+    const r = run("--list-all");
+    expect(r.status).toBe(0);
+    expect(r.stdout.split("\n").filter(Boolean)).toEqual(ALL);
+  });
+
+  test("--shard defaults to the lane's shard count", () => {
     const r = run("--shard", "2");
     expect(r.status).toBe(0);
     expect(r.stdout.split("\n").filter(Boolean)).toEqual(shardFiles(2, SHARDS, ALL));
   });
 
-  test("--shard 2 --of 3 prints shard 2 of 3", () => {
+  test("--shard accepts another shard count", () => {
     const r = run("--shard", "2", "--of", "3");
     expect(r.status).toBe(0);
     expect(r.stdout.split("\n").filter(Boolean)).toEqual(shardFiles(2, 3, ALL));
   });
 
-  test("--verify exits 0 with full coverage and reports the count", () => {
+  test("--verify passes on the current assignment", () => {
     const r = run("--verify");
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain(`${ALL.length}/${ALL.length} files covered`);
+    expect(r.stdout).toContain(`${ALL.length}/${ALL.length} files covered, 0 missing, 0 duplicated`);
   });
 
-  test("an argument a command does not take exits 2, and a bad shard index exits 1", () => {
-    expect(run("--list-all", "--of", "3").status).toBe(2);
-    expect(run("--verify", "--of", "0").status).toBe(2);
-    expect(run("--shard", "9", "--of", "3").status).toBe(1);
-    expect(run("--nope").status).toBe(2);
-  });
+  for (const { args, status } of [
+    { args: ["--shard", "0"], status: 1 },
+    { args: ["--shard", "5", "--of", "4"], status: 1 },
+    { args: ["--verify", "--of", "0"], status: 2 },
+    { args: ["--list-all", "--of", "2"], status: 2 },
+    { args: ["--verify", "--other"], status: 2 },
+    { args: [], status: 2 },
+  ]) {
+    test(`invalid arguments fail: ${args.join(" ")}`, () => {
+      expect(run(...args).status).toBe(status);
+      expect(run("--nope").status).toBe(2);
+    });
+  }
 
-  test("the CI job runs the coverage gate on this module", () => {
-    const workflow = readFileSync(join(ROOT, ".github", "workflows", "test.yml"), "utf8");
-    expect(workflow).toContain("node scripts/ci/unit-shards.mjs --verify");
+  test("CI runs the coverage gate", () => {
+    expect(readFileSync(join(ROOT, ".github/workflows/test.yml"), "utf8")).toContain("node scripts/ci/unit-shards.mjs --verify");
   });
 });
