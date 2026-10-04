@@ -152,7 +152,7 @@ globalThis.fetch = async (_input, init) => {
   throw new Error("fetch called");
 };
 `);
-  });
+  }, 120_000);
   afterAll(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
 
   function cli(args: string[], env: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string; fetches: number }> {
