@@ -89,16 +89,14 @@ for (const skipStart of [false, true]) {
     test(`re-init with ${proof} proof, skip-start=${skipStart}`, () => {
       const result = runInit(proof, skipStart);
       expect(result.error).toBeUndefined();
-      if (!skipStart && proof !== "foreign") {
-        expect(result.status, result.stdout + result.stderr).toBe(0);
-        expect(result.requests.some(r => r.authorization !== null)).toBe(true);
-        return;
-      }
+      // Both paths attribute a listener before sending a credential; every
+      // proof here is unattributed, so plain init refuses exactly as
+      // --skip-start does (flair#2251).
       expect(result.status, result.stdout + result.stderr).toBe(1);
-      expect(result.stderr).toContain(skipStart ? "not attributed" : "different data directory");
+      expect(result.stderr).toContain("not attributed");
       expect(result.requests.length).toBeGreaterThan(0);
       expect(result.requests.every(r => r.authorization === null)).toBe(true);
-      expect(existsSync(join(result.home, ".flair", "admin-pass"))).toBe(!skipStart);
+      expect(existsSync(join(result.home, ".flair", "admin-pass"))).toBe(false);
     }, 30_000);
   }
 }

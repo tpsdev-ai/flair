@@ -18,8 +18,7 @@
  * That pre-auth observation is a single read. It is not the operations-port
  * 401 check. A 401 names a pid only when the read before the insert and the
  * read after the 401 are the same sole PID. Several holders, or a holder
- * that changed during the request, stay "a Harper instance this init did
- * not start".
+ * that changed during the request, stay unattributed.
  *
  * These messages do not offer `flair stop`. `flair stop` cannot be promised
  * to act on this listener. The remedy is `kill <pid>` when one process is
@@ -44,6 +43,11 @@ export interface OccupiedHarperListener {
    * could not read a directory — that is not a foreign data directory.
    */
   dataDirs: string[];
+  /**
+   * Whether the pid read succeeded. False (or absent) means the probe failed
+   * (no lsof), which is UNKNOWN — not "no listener".
+   */
+  pidsKnown?: boolean;
 }
 
 /** Pid list and ROOTPATH reads for one observation. Tests inject both. */
@@ -57,13 +61,14 @@ export interface OccupiedListenerLookup {
  * so it cannot become a pre-auth refusal. Does not decide `flair stop`.
  */
 export function listenerFromLookup(port: number, lookup: OccupiedListenerLookup): OccupiedHarperListener {
-  const pids = lookup.pids(port) ?? [];
+  const read = lookup.pids(port);
+  const pids = read ?? [];
   const dataDirs: string[] = [];
   for (const pid of pids) {
-    const read = lookup.rootPath(pid);
-    if (read.environReadable && read.rootPath && !dataDirs.includes(read.rootPath)) dataDirs.push(read.rootPath);
+    const root = lookup.rootPath(pid);
+    if (root.environReadable && root.rootPath && !dataDirs.includes(root.rootPath)) dataDirs.push(root.rootPath);
   }
-  return { port, pids, dataDirs };
+  return { port, pids, dataDirs, pidsKnown: read !== null };
 }
 
 /**
@@ -93,16 +98,17 @@ export function stableAnsweredHolder(
     after.pids.length === 1 &&
     before.pids[0] === after.pids[0];
   if (!sameSingle) {
-    return { port: after.port, pids: [], dataDirs: [] };
+    return { port: after.port, pids: [], dataDirs: [], pidsKnown: after.pidsKnown };
   }
   return {
     port: after.port,
     pids: [after.pids[0]],
     dataDirs: after.dataDirs,
+    pidsKnown: after.pidsKnown,
   };
 }
 
-const UNATTRIBUTED = "a Harper instance this init did not start";
+const UNATTRIBUTED = "a Harper instance not attributed to this data directory";
 
 /**
  * Name the listener for an operator. A pid is included only when exactly one
@@ -168,7 +174,7 @@ export function foreignOccupiedListenerDetail(
 ): string {
   const lines = [
     `The process listening on port ${listener.port} is ${describeOccupiedListener(listener)}.`,
-    `This init will not send its admin password to a process it did not start.`,
+    `This init will not send its admin password to an unattributed process.`,
   ];
   if (expectedDataDir && foreignDataDirs(expectedDataDir, listener.dataDirs).length > 0) {
     lines.push(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);

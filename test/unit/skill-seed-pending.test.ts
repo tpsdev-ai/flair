@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { markSkillSeedPending, reconcilePendingSkillSeed, skillSeedPendingPath } from "../../src/lib/skill-seed-pending.js";
 import type { SkillSeedOutcome } from "../../src/lib/skill-seed.js";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
@@ -50,8 +51,26 @@ describe("local --skip-start seed handoff", () => {
     const dataDir = join(home, "custom data");
     const root = resolve(import.meta.dirname, "..", "..");
     try {
-      const run = spawnSync("node", [join(root, "dist", "cli.js"), "init", "--skip-start", "--no-mcp", "--skip-soul",
-        "--data-dir", dataDir, "--port", "44473", "--admin-pass", "test-only-password"], {
+      const argv = ["init", "--skip-start", "--no-mcp", "--skip-soul",
+        "--data-dir", dataDir, "--port", "44473", "--admin-pass", "test-only-password"];
+      const script = `
+        import net from "node:net";
+        import { EventEmitter } from "node:events";
+        import { syncBuiltinESMExports } from "node:module";
+        net.createConnection = () => {
+          const socket = new EventEmitter();
+          socket.setTimeout = () => {};
+          socket.destroy = () => {};
+          queueMicrotask(() => socket.emit("error", Object.assign(new Error("fixture stopped"), { code: "ECONNREFUSED" })));
+          return socket;
+        };
+        syncBuiltinESMExports();
+        globalThis.fetch = async () => { throw new Error("fixture stopped"); };
+        const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(pathToFileURL(join(root, "dist", "cli.js")).href)});
+        setOccupiedListenerLookupForTests({ pids: () => [], rootPath: () => ({ rootPath: null, environReadable: false }) });
+        await program.parseAsync(${JSON.stringify(argv)}, { from: "user" });
+      `;
+      const run = spawnSync("node", ["--input-type=module", "-e", script], {
         cwd: root, encoding: "utf8", timeout: 30_000,
         env: { ...process.env, HOME: home, FLAIR_TARGET: "", FLAIR_OPS_TARGET: "" },
       });
