@@ -696,11 +696,11 @@ This used to be aspirational — nobody had actually checked. `test/compat/downg
 now checks it for real, nightly, alongside the mixed-version federation suite (both run
 from `.github/workflows/federation-compat.yml`'s `bun test test/compat/`): it boots the
 current build, writes a memory and a presence row, stops it *without* wiping the data
-directory, then starts the last **npm-published** `@tpsdev-ai/flair` against that exact
-same directory through its OWN CLI and either confirms it comes up healthy and can read
-both rows back (same engine), or — when the Harper engine moved — confirms the older
-CLI's backwards-engine guard refuses the store *before* Harper is spawned, naming the
-engine change, and leaves the data directory byte-identical.
+directory, then starts a pinned pre-5.3 release (`@tpsdev-ai/flair` 0.59.0) against that
+exact same directory through its OWN CLI. The test requires the two Harper engines to
+differ, and confirms the older CLI's backwards-engine guard refuses the store *before*
+Harper is spawned, naming the engine change, and leaves the regular files in the data
+directory unchanged.
 
 **The guarantee is now restated (flair#1050):** there is never a silent bad outcome.
 Either the old binary boots and serves the corpus correctly, **or** it refuses to start
@@ -726,14 +726,13 @@ phrasing is not on that path).
 
 **Engine-version break: Harper 5.2 → 5.3.** Harper 5.3's RocksDB storage format is
 one-way — a build older than 5.3 opens the bare store names and reads tables created
-under 5.3 as empty — so **data written by a 5.3 flair cannot be opened by an older
-flair**. An older flair that carries the backwards-engine guard refuses *before* its
-Harper is spawned: `flair start`'s
-backwards-engine guard reads the `engine-version.txt` stamp this release writes into
-`~/.flair/data` and, when the running engine is older than the stamp, exits non-zero
-naming both versions and the data directory, without opening the store — the data
-directory is left byte-identical. The guard sees a stamp only where this release
-writes one (`~/.flair/data`), and a release that predates the guard does not refuse.
+under 5.3 as empty — so an older flair **cannot safely read or serve data written by a
+5.3 flair**. This release attempts to write an `engine-version.txt` stamp into
+`~/.flair/data` at boot; the write is best effort. When the stamp is present, an older
+flair that carries the backwards-engine guard refuses *before* its Harper is spawned:
+`flair start` exits non-zero naming both versions and the data directory, without
+opening the store. Without a readable stamp, or in a release that predates the guard,
+there is no refusal.
 The remedy is the same as the breaks above: restore
 the pre-upgrade snapshot (`flair snapshot restore <path>`) or a `flair backup` export
 taken on the older version.

@@ -42,7 +42,7 @@
 //      baseline's own HTTP surface — a clean boot that can't actually see
 //      its own data isn't "downgrade works", it's a different failure mode.
 //      If it refuses (the engine changed): assert the refusal names the engine
-//      change, and that the data directory is byte-identical afterward.
+//      change, and that regular-file paths and contents are unchanged afterward.
 //
 // ─── Either outcome is a valid, asserted result ────────────────────────────
 // Green here is a real claim ("downgrade to <baseline> is safe") that
@@ -278,8 +278,7 @@ async function fetchAgentMemories(inst: HarperInstance, agentId: string): Promis
 }
 
 /** Recursively hash every regular file under `dir` (relative path + sha256),
- *  sorted. Proves the refused downgrade start left the data directory
- *  byte-identical — the whole point of refusing BEFORE Harper opens it. */
+ *  sorted. Compares regular-file paths and contents only. */
 function hashDataDir(dir: string): string[] {
   const out: string[] = [];
   const walk = (rel: string): void => {
@@ -464,8 +463,8 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     //   - Engine CHANGED: drive the baseline's OWN CLI (`flair start`). Its
     //     backwards-engine guard runs BEFORE Harper is spawned, so the older
     //     engine never opens the newer store (flair#1047). Capture the refusal
-    //     and hash the data dir before/after; the guard firing must leave it
-    //     byte-identical. `startHarper` would bypass the guard entirely (it
+    //     and hash the data dir before/after; its regular-file
+    //     paths and contents must be unchanged.`startHarper` would bypass the guard entirely (it
     //     spawns Harper directly) — the very path that let an older Harper
     //     MODIFY 11 database files before its installer refused (flair#637).
     //   - Engine SAME: no guard to run; boot through `startHarper` and assert
