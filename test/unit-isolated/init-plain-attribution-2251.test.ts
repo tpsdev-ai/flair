@@ -16,7 +16,7 @@ const OWN_PID = 4242;
 
 beforeAll(() => ensureCliBuild(), 120_000);
 
-type Scenario = "own" | "free" | "missing-free" | "missing-listener" | "unknown" | "missing-error" | "missing-real-free";
+type Scenario = "own" | "free" | "missing-free" | "missing-listener" | "unknown" | "missing-error" | "missing-real-free" | "spawned" | "child-dead" | "other-child" | "post-unknown" | "root-mismatch" | "root-missing" | "install-race";
 
 interface Event {
   kind: "probe" | "fetch" | "auth" | "tcp" | "closed";
@@ -43,6 +43,7 @@ function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
   const script = `
     import { mock } from "bun:test";
     import * as childProcess from "node:child_process";
+    const realSpawn = childProcess.spawn;
     import { EventEmitter } from "node:events";
     import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
     import { join } from "node:path";
@@ -50,6 +51,8 @@ function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
     const actionsPath = ${JSON.stringify(actions)};
     const log = event => appendFileSync(events, JSON.stringify(event) + "\\n");
     let running = false;
+    let ownChild;
+    let installed = false;
     const probe = await import(${JSON.stringify(TCP_PROBE)});
     const readPort = probe.localPortState;
     const connect = ({ host, port }) => {
@@ -58,7 +61,10 @@ function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
       socket.setTimeout = () => {};
       socket.destroy = () => { log({ kind: "closed", port }); };
       queueMicrotask(() => {
-        if (port === ${probePort} && ${scenario === "missing-listener"}) socket.emit("connect");
+        if (installed && !running && ${scenario === "install-race"}) socket.emit("connect");
+        else if (running && ${["spawned", "child-dead", "other-child", "root-mismatch", "root-missing"].includes(scenario)}) socket.emit("connect");
+        else if (running && ${scenario === "post-unknown"}) socket.emit("timeout");
+        else if (port === ${probePort} && ${scenario === "missing-listener"}) socket.emit("connect");
         else if (port === ${probePort} && ${scenario === "unknown"}) socket.emit("timeout");
         else socket.emit("error", Object.assign(new Error("fixture"), { code: ${JSON.stringify(scenario === "missing-error" ? "EACCES" : "ECONNREFUSED")} }));
       });
@@ -73,15 +79,24 @@ function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
       proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter();
       proc.unref = () => {}; proc.kill = () => {};
       if (args[1] === "install") {
+        installed = true;
         writeFileSync(join(options.env.ROOTPATH, "harper-config.yaml"), "rootPath: " + options.env.ROOTPATH + "\\n");
         queueMicrotask(() => proc.emit("exit", 0));
       } else if (args[1] === "run") {
+        ownChild = realSpawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore", env: options.env });
         running = true;
+        if (${scenario === "child-dead"}) {
+          ownChild.kill("SIGKILL");
+          ownChild.emit("exit", 1);
+          ownChild.exitCode = 1;
+        }
+        return ownChild;
       } else {
         throw new Error("unexpected spawn");
       }
       return proc;
     } }));
+    if (${["root-mismatch", "root-missing"].includes(scenario)}) mock.module(${JSON.stringify(pathToFileURL(join(ROOT, "dist/lib/init-listener-environ.js")).href)}, () => ({ readInitListenerRootPath: () => ({ environReadable: true, rootPath: ${scenario === "root-missing" ? "null" : '"/other/data"'} }) }));
     const init = await import(${JSON.stringify(INIT)});
     const bindCli = init.bindCli;
     mock.module(${JSON.stringify(INIT)}, () => ({ ...init, bindCli: fns => bindCli({ ...fns,
@@ -100,14 +115,24 @@ function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
     };
     const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
     setOccupiedListenerLookupForTests({
-      pids: (port) => { log({ kind: "probe", port }); return ${scenario === "own" ? `[${OWN_PID}]` : scenario === "free" ? "[]" : "null"}; },
+      pids: (port) => { log({ kind: "probe", port }); return running && ${scenario === "other-child"} ? [ownChild.pid + 1] : ${scenario === "own" ? `[${OWN_PID}]` : scenario === "free" ? "[]" : "null"}; },
       rootPath: () => ({ rootPath: null, environReadable: false }),
     });
+    const realExit = process.exit;
+    process.exit = code => { throw Object.assign(new Error("fixture exit"), { exitCode: code }); };
+    try {
     await program.parseAsync(${JSON.stringify([
       "init", "--port", String(HTTP_PORT), "--ops-port", String(OPS_PORT),
       "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
     ])}, { from: "user" });
+    } catch (error) {
+      if (typeof error.exitCode !== "number") throw error;
+      process.exitCode = error.exitCode;
+    } finally {
+      ownChild?.kill("SIGKILL");
+    }
     writeFileSync(actionsPath, JSON.stringify(JSON.parse(readFileSync(actionsPath, "utf8"))));
+    realExit(process.exitCode ?? 0);
   `;
   const result = spawnSync("bun", ["--eval", script], { cwd: home, env, encoding: "utf8", timeout: 25_000 });
   const eventList: Event[] = readFileSync(events, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
@@ -158,7 +183,7 @@ test("missing lsof with ECONNREFUSED on both ports installs and starts before se
   expect(result.status, result.stdout + result.stderr).toBe(0);
   expect(result.stdout).toContain("Flair initialized");
   expect(actions).toEqual(["install", "run"]);
-  expect(events.filter(e => e.kind === "tcp")).toEqual([
+  expect(events.filter(e => e.kind === "tcp").slice(0, 2)).toEqual([
     { kind: "tcp", port: HTTP_PORT, host: "127.0.0.1" },
     { kind: "tcp", port: OPS_PORT, host: "127.0.0.1" },
   ]);
@@ -196,4 +221,24 @@ test("missing lsof with real refused TCP connections still initializes", () => {
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(0);
   expect(actions).toEqual(["install", "run"]);
+}, 30_000);
+
+for (const scenario of ["spawned", "child-dead", "other-child", "post-unknown", "root-mismatch", "root-missing"] as const) {
+  test(`post-start attribution with missing lsof: ${scenario}`, () => {
+    const { result, events, actions } = runPlain(scenario);
+    expect(result.error).toBeUndefined();
+    expect(actions).toEqual(["install", "run"]);
+    expect(result.status, result.stdout + result.stderr).toBe(scenario === "spawned" ? 0 : 1);
+    expect(events.some(e => e.kind === "auth")).toBe(scenario === "spawned");
+    if (scenario !== "spawned") expect(result.stderr).toContain("Refusing init");
+  }, 30_000);
+}
+
+test("a listener appearing during install refuses before spawn or credentials", () => {
+  const { result, events, actions } = runPlain("install-race");
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  expect(actions).toEqual(["install"]);
+  expect(result.stderr).toContain("no longer free");
+  expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);

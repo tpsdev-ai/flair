@@ -33,6 +33,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 
 import { join, resolve } from "node:path";
 import { localPortState } from "../lib/init-tcp-probe.js";
+import { trackInitChild } from "../lib/init-spawn-attribution.js";
 import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
@@ -643,23 +644,29 @@ program
       process.exit(1);
     }
     let alreadyRunning = false;
-    // One listener probe, re-used by both paths. The pid/owner proof is
-    // #2248's: exactly one pid, every readable ROOTPATH this init's data dir,
-    // and — when no ROOTPATH could be read (the macOS launchd case) — the
-    // instance's own serving pid from hdb.pid equal to that pid. Anything else
-    // is unattributed, and init refuses before sending a credential. Used by
-    // --skip-start and by plain init alike (flair#2251).
+    let ownChild: ReturnType<typeof trackInitChild> | undefined;
+    let launchdManaged = false;
+    const freeBeforeSpawn = new Set<number>();
     const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
-      const attributed = harperConfigPath(dataDir) !== null &&
+      const installedAttributed = harperConfigPath(dataDir) !== null &&
         listener.pids.length === 1 &&
         listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
         (listener.dataDirs.length === 1 ||
           cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
+      const attributed = ownChild?.attributes(listener, dataDir, freeBeforeSpawn) ||
+        ((!ownChild || launchdManaged) && installedAttributed);
       if (attributed) return;
       console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
       console.error(foreignOccupiedListenerDetail(listener, dataDir));
       console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
       process.exit(1);
+    };
+    const attributeBeforeCredential = async (port: number, host: string): Promise<void> => {
+      const listener = readOccupiedListener(port);
+      const state = await localPortState(port, host);
+      if (state === "unknown") refuseUnknownListener(listener);
+      if (state === "listening" && listener.pidsKnown && listener.pids.length === 0) refuseUnknownListener(listener);
+      refuseUnattributedListener(listener, "is awaiting an authenticated request");
     };
     const refuseUnknownListener = (listener: OccupiedHarperListener): void => {
       console.error(`Refusing init: could not read the listener on port ${listener.port} (the listener probes were inconclusive) — an unreadable probe is unknown, not a free port.`);
@@ -1004,7 +1011,18 @@ program
         // count are set via HARPER_SET_CONFIG — no need for dev mode.
         if (willStart) {
           console.log(`Starting Harper on port ${httpPort}...`);
+          for (const [port, host] of [[httpPort, httpBind.host], [opsPort, opsBindHost]] as const) {
+            const listener = readOccupiedListener(port);
+            const state = await localPortState(port, host);
+            if (state === "unknown") refuseUnknownListener(listener);
+            if (listener.pids.length > 0 || state !== "free") {
+              console.error(`Refusing init: port ${port} is no longer free before Harper start.`);
+              process.exit(1);
+            }
+            freeBeforeSpawn.add(port);
+          }
           const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
+          ownChild = trackInitChild(proc);
           proc.unref();
           // flair#1454: write the identity sidecar immediately after spawn so
           // `flair stop` and `flair status` can classify this daemon's state
@@ -1016,7 +1034,9 @@ program
 
     if (!opts.skipStart) {
       console.log("Waiting for Harper health check...");
-      await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+      await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS,
+        () => attributeBeforeCredential(httpPort, httpBind.host));
+      await attributeBeforeCredential(opsPort, opsBindHost);
       console.log("Harper is healthy ✓");
 
       // flair#763: the socket now exists — apply its file mode (+ chgrp for the
@@ -1125,6 +1145,7 @@ program
           }
           const launchdExit = initLaunchdExitCode(launchdStep.kind);
           if (launchdExit !== 0) process.exit(launchdExit);
+          launchdManaged = launchdStep.kind === "managed";
         }
       }
 
@@ -1224,6 +1245,7 @@ program
         }
         return;
       }
+      await attributeBeforeCredential(httpPort, httpBind.host);
       await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);
       clearSkillSeedPending(dataDir);
     };
@@ -1263,6 +1285,7 @@ program
         // and that 401 keeps the credential hint.
         console.log(`Seeding agent '${agentId}' via operations API...`);
         const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
+        await attributeBeforeCredential(opsPort, opsBindHost);
         await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
         console.log(`Agent '${agentId}' registered ✓`);
 

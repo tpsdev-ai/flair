@@ -27,12 +27,14 @@ for (const { skipStart, occupied } of [
     const script = `
       import { mock } from "bun:test";
       import * as childProcess from "node:child_process";
-      import { EventEmitter } from "node:events";
+      const realSpawn = childProcess.spawn;
+    import { EventEmitter } from "node:events";
       import { appendFileSync, existsSync, writeFileSync } from "node:fs";
       import { join } from "node:path";
       const actions = [];
       writeFileSync(${JSON.stringify(log)}, JSON.stringify(actions));
       let running = false;
+      let ownChild;
       mock.module("node:child_process", () => ({ ...childProcess, spawn: (command, args, options) => {
         actions.push(args[1]);
         writeFileSync(${JSON.stringify(log)}, JSON.stringify(actions));
@@ -42,7 +44,11 @@ for (const { skipStart, occupied } of [
         if (args[1] === "install") {
           writeFileSync(join(options.env.ROOTPATH, "harper-config.yaml"), "rootPath: " + options.env.ROOTPATH + "\\n");
           queueMicrotask(() => proc.emit("exit", 0));
-        } else if (args[1] === "run") running = true;
+        } else if (args[1] === "run") {
+          ownChild = realSpawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore", env: options.env });
+          running = true;
+          return ownChild;
+        }
         else throw new Error("unexpected spawn");
         return proc;
       } }));
@@ -67,6 +73,7 @@ for (const { skipStart, occupied } of [
       setOccupiedListenerLookupForTests({ pids: () => { if (${occupied}) return [42]; return []; }, rootPath: () => ({ rootPath: null, environReadable: false }) });
       await program.parseAsync(${JSON.stringify(["init", "--port", "20991", "--ops-port", "20990", "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", ...(skipStart ? ["--skip-start"] : [])])}, { from: "user" });
       writeFileSync(${JSON.stringify(log)}, JSON.stringify(actions));
+      ownChild?.kill("SIGKILL");
       process.exit(0);
     `;
     const result = spawnSync("bun", ["--eval", script], { cwd: home, env, encoding: "utf8", timeout: 20_000 });

@@ -2674,12 +2674,13 @@ export function isCredentialOnlyFailure(result: ProbeResult): boolean {
   return result.healthy === true && result.authFailureKind === "credentials";
 }
 
-async function waitForHealth(httpPort: number, adminUser: string, adminPass: string, timeoutMs: number): Promise<void> {
+async function waitForHealth(httpPort: number, adminUser: string, adminPass: string, timeoutMs: number, beforeRequest?: () => Promise<void>): Promise<void> {
   const url = `http://127.0.0.1:${httpPort}/Health`;
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   while (Date.now() < deadline) {
     attempt++;
+    await beforeRequest?.();
     try {
       const res = await fetch(url, {
         headers: { Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}` },
