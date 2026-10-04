@@ -3246,13 +3246,25 @@ function isProcessAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+function preserveStopPidfile(dataDir: string, pid: number): string | null {
+  try {
+    writeFileSync(join(dataDir, "hdb.pid"), String(pid), { flag: "wx", mode: 0o600 });
+    return null;
+  } catch (err: any) {
+    if (err?.code === "EEXIST") return null;
+    return `Could not preserve the stop pid record: ${err?.code ?? err?.message}`;
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number, dataDir?: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try { process.kill(pid, 0); } catch { return; }
+    if (probePidLiveness(pid).kind === "gone") return;
     await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
   }
-  throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms`);
+  if (probePidLiveness(pid).kind === "gone") return;
+  const preservationError = dataDir ? preserveStopPidfile(dataDir, pid) : null;
+  throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms${preservationError ? `. ${preservationError}` : ""}`);
 }
 
 function readHarperPid(dataDir: string): number | null {
@@ -5133,7 +5145,19 @@ function probePidLiveness(pid: number): PidLiveness {
  * body is flair's /Health shape. A decoy that answers 200 is `foreign`,
  * not healed.
  */
-async function probeHealth(port: number, deadline = Infinity): Promise<HealthResult> {
+async function probeHealth(port: number): Promise<HealthResult> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(2000) });
+    let body: unknown;
+    try { body = await res.json(); } catch { body = null; }
+    return classifyHealthProbe({ kind: "response", status: res.status, body });
+  } catch (err: any) {
+    const code = err?.cause?.code ?? err?.code;
+    return classifyHealthProbe({ kind: "network-error", code });
+  }
+}
+
+async function probeHealthBeforeDeadline(port: number, deadline: number): Promise<HealthResult> {
   const timeoutMs = Math.min(2000, deadline - Date.now());
   if (timeoutMs <= 0) return { kind: "unreachable" };
   const controller = new AbortController();
@@ -7728,7 +7752,9 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
     }
     if (Date.now() >= stopDeadline) {
       const liveness = probePidLiveness(state.pid);
+      const preservationError = liveness.kind === "gone" ? null : preserveStopPidfile(dataDir, state.pid);
       const result = timeoutResult(`waiting for direct Harper process ${state.pid} to exit`);
+      if (result.kind === "failed" && preservationError) result.detail += ` ${preservationError}.`;
       const identityDetail = identityObservedAt < stopDeadline
         ? `${identity.kind}, observed at ${new Date(identityObservedAt).toISOString()}`
         : "not observed before the deadline";
@@ -7740,7 +7766,7 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
   if (stateDecision !== "proceed") return stateDecision;
   let health: HealthResult = { kind: "unreachable" };
   while (Date.now() < stopDeadline) {
-    health = await probeHealth(port, stopDeadline);
+    health = await probeHealthBeforeDeadline(port, stopDeadline);
     if (Date.now() >= stopDeadline) break;
     if (health.kind === "refused") break;
     const remaining = stopDeadline - Date.now();

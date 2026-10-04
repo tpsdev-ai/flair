@@ -20,13 +20,14 @@ let signalled = false;
 let exitsOnTerm = false;
 let idleJobLoaded = false;
 let signalError: string | undefined;
+let pidOnTerm: string | undefined;
 let pollError: string | undefined;
 let goneAtDeadline = false;
 let deadlineDuringLiveness = false;
 let identityAfterTerm: number | null = started;
 let identityReadMs = 0;
 let finalProbe: "timeout" | "error" | "garbage" | "self" | "empty" | "whitespace" | "exit1" | "exit1-stderr" | "exit1-stdout" | "exit1-signal" | "exit1-error" | "exit0-error" = "empty";
-let healthAfterTerm: "refused" | "hang" | "late-refused" = "refused";
+let healthAfterTerm: "refused" | "hang" | "late-refused" | "refuse-on-abort" = "refused";
 let accelerateProbe = false;
 const identityChecks: number[] = [];
 const identityBudgets: number[] = [];
@@ -106,6 +107,7 @@ const kill = spyOn(process, "kill").mockImplementation(((target: number, signal:
     signalled = true;
     signals.push(signal);
     rmSync(join(dataDir, "hdb.pid"), { force: true });
+    if (pidOnTerm) writeFileSync(join(dataDir, "hdb.pid"), pidOnTerm);
     if (signalError) throw Object.assign(new Error("signal failed"), { code: signalError });
   } else if (signalled) {
     if (deadlineDuringLiveness) elapsed = 60_000;
@@ -114,9 +116,14 @@ const kill = spyOn(process, "kill").mockImplementation(((target: number, signal:
   }
   return true;
 }) as typeof process.kill);
-const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (_input: unknown, options: RequestInit) => {
   if (signalled) {
     healthChecks.push(elapsed);
+    if (healthAfterTerm === "refuse-on-abort") {
+      return new Promise((_resolve, reject) => options.signal!.addEventListener("abort", () => {
+        reject(Object.assign(new Error("refused"), { cause: { code: "ECONNREFUSED" } }));
+      }, { once: true }));
+    }
     if (healthAfterTerm === "hang") {
       accelerateProbe = true;
       return { json: () => new Promise(() => {}), status: 200 };
@@ -128,7 +135,7 @@ const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
     headers: { "content-type": "application/json" },
   });
 }) as unknown as typeof fetch);
-const { buildRepairPlist, launchdLabel, launchdPlistPath, repairLaunchdManagement } = await import("../../src/cli.ts");
+const { buildRepairPlist, launchdLabel, launchdPlistPath, repairLaunchdManagement, program, gatherDaemonEvidence } = await import("../../src/cli.ts");
 
 afterAll(() => {
   kill.mockRestore();
@@ -144,7 +151,7 @@ let sleep: ReturnType<typeof spyOn>;
 let plistPath: string;
 let plist: string;
 beforeEach(() => {
-  home = tempDir("flair-adopt-deadline-");
+  home = tempDir("s");
   dataDir = join(home, ".flair", "data");
   agentsDir = join(home, "Library", "LaunchAgents");
   process.env.HOME = home;
@@ -155,7 +162,7 @@ beforeEach(() => {
   signalled = false;
   exitsOnTerm = false;
   idleJobLoaded = false;
-  signalError = pollError = undefined;
+  signalError = pollError = pidOnTerm = undefined;
   goneAtDeadline = false;
   deadlineDuringLiveness = false;
   identityAfterTerm = started;
@@ -206,6 +213,7 @@ test("a direct process surviving SIGTERM consumes only the shared 60s stop deadl
   expect(healthChecks).toEqual([]);
   expect(finalProbeTimeouts).toEqual([]);
   expect(signals).toEqual(["SIGTERM"]);
+  expect(readFileSync(join(dataDir, "hdb.pid"), "utf8")).toBe(String(pid));
 });
 
 test("a slow identity read is bounded before the shared deadline", async () => {
@@ -312,4 +320,57 @@ test("a liveness probe reaching the deadline does not start another sleep", asyn
   expect(elapsed).toBe(60_000);
   expect(sleep.mock.calls.filter((call: unknown[]) => Number(call[1]) <= 500)).toEqual([]);
   expect(identityChecks).toEqual([0]);
+});
+
+
+test("timed-out stop retains its pid for start after the process exits", async () => {
+  Object.defineProperty(process, "platform", { value: "linux" });
+  const log = spyOn(console, "log").mockImplementation(() => {});
+  try {
+    await expect(program.parseAsync(["node", "flair", "stop", "--port", String(port)]))
+      .rejects.toThrow(`Process ${pid} did not exit within 60000ms`);
+    expect(elapsed).toBe(60_000);
+    expect(readFileSync(join(dataDir, "hdb.pid"), "utf8")).toBe(String(pid));
+    expect(readFileSync(join(dataDir, "flair-daemon.json"), "utf8")).toContain(String(pid));
+    exitsOnTerm = true;
+    const evidence = await gatherDaemonEvidence(port, dataDir);
+    expect(evidence.pidLiveness).toEqual({ kind: "gone" });
+    expect(evidence.health).toEqual({ kind: "refused" });
+    await expect(program.parseAsync(["node", "flair", "start", "--port", String(port)]))
+      .rejects.toThrow("unexpected process spawn");
+  } finally {
+    log.mockRestore();
+    Object.defineProperty(process, "platform", { value: "darwin" });
+  }
+});
+
+
+test("a stop timeout leaves an existing replacement pid record alone", async () => {
+  pidOnTerm = "424243";
+  await failedStop();
+  expect(readFileSync(join(dataDir, "hdb.pid"), "utf8")).toBe(pidOnTerm);
+});
+
+for (const code of ["EPERM", "EINVAL"]) {
+  test(`ordinary stop retains the pid when liveness reports ${code}`, async () => {
+    Object.defineProperty(process, "platform", { value: "linux" });
+    pollError = code;
+    try {
+      await expect(program.parseAsync(["node", "flair", "stop", "--port", String(port)]))
+        .rejects.toThrow(`Process ${pid} did not exit within 60000ms`);
+      expect(readFileSync(join(dataDir, "hdb.pid"), "utf8")).toBe(String(pid));
+      expect(readFileSync(join(dataDir, "flair-daemon.json"), "utf8")).toContain(String(pid));
+    } finally {
+      Object.defineProperty(process, "platform", { value: "darwin" });
+    }
+  });
+}
+
+
+test("ordinary health probing retains ECONNREFUSED from fetch's abort handler", async () => {
+  signalled = exitsOnTerm = true;
+  healthAfterTerm = "refuse-on-abort";
+  const evidence = await gatherDaemonEvidence(port, dataDir);
+  expect(evidence.pidLiveness).toEqual({ kind: "gone" });
+  expect(evidence.health).toEqual({ kind: "refused" });
 });

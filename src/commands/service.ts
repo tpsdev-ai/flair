@@ -288,7 +288,7 @@ program
             process.exit(1);
           }
         }
-        await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
+        await waitForProcessExit(pid, STARTUP_TIMEOUT_MS, dataDir);
         // flair#2055: once the process is CONFIRMED gone, drop the identity
         // sidecar — a leftover naming the stopped pid is what makes a later
         // instance under another supervisor refuse. Gated on a fresh
