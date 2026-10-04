@@ -152,13 +152,17 @@ describe("flair#2199 — Memory resource writes and feed POST refuse an id endin
     for (const state of ["existing", "missing"]) {
       it(`${method} with a suffix only in the URL and a ${state} base row → 400 memory_id_content_suffix without writing rows`, async () => {
         const id = `mcs-${method.toLowerCase()}-url-${state}`;
+        // Harper 5.2's hash-search validator requires `get_attributes`
+        // (dataLayer/harperBridge/ResourceBridge searchByHash → searchValidator
+        // 'hashes'); without it the op answers 500 "'get_attributes' is required".
         const readRows = async () => {
           const res = await adminOp(harper, {
             operation: "search_by_hash", database: "flair", table: "Memory",
-            hash_values: [id, `${id}.content`],
+            hash_values: [id, `${id}.content`], get_attributes: ["*"],
           });
-          expect(res.status).toBe(200);
-          return res.json();
+          const text = await res.text();
+          expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+          return JSON.parse(text);
         };
         const before = await readRows();
         expect(before.length).toBe(state === "existing" ? 1 : 0);
