@@ -1,14 +1,3 @@
-// flair#2251 — plain `flair init` attributes a listener on the configured
-// HTTP/ops ports to THIS data directory's own instance before it sends any
-// admin credential, and treats a failed lsof probe as unknown, not as free.
-//
-// The three scenarios each exercise the built CLI with an injected listener
-// lookup:
-//   own     — this data directory's own adopted (launchd-style) instance:
-//             no ROOTPATH is readable, the pid proof accepts it, init proceeds.
-//   free    — a fresh HOME with just-released ports: the probe reads an empty
-//             listener, init installs and starts.
-//   unknown — the probe fails: init refuses rather than starting as if free.
 import { beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -20,21 +9,23 @@ import { tempDir } from "../helpers/temp-dir.ts";
 const ROOT = resolve(import.meta.dir, "../..");
 const CLI = pathToFileURL(join(ROOT, "dist/cli.js")).href;
 const INIT = pathToFileURL(join(ROOT, "dist/commands/init.js")).href;
+const TCP_PROBE = pathToFileURL(join(ROOT, "dist/lib/init-tcp-probe.js")).href;
 const HTTP_PORT = 20991;
 const OPS_PORT = 20990;
 const OWN_PID = 4242;
 
 beforeAll(() => ensureCliBuild(), 120_000);
 
-type Scenario = "own" | "free" | "unknown";
+type Scenario = "own" | "free" | "missing-free" | "missing-listener" | "unknown" | "missing-error" | "missing-real-free";
 
 interface Event {
-  kind: "probe" | "fetch" | "auth";
+  kind: "probe" | "fetch" | "auth" | "tcp" | "closed";
+  host?: string;
   port?: number;
   url?: string;
 }
 
-function runPlain(scenario: Scenario) {
+function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
   const home = tempDir("ipa-");
   const events = join(home, "events.jsonl");
   const actions = join(home, "actions.json");
@@ -59,6 +50,21 @@ function runPlain(scenario: Scenario) {
     const actionsPath = ${JSON.stringify(actions)};
     const log = event => appendFileSync(events, JSON.stringify(event) + "\\n");
     let running = false;
+    const probe = await import(${JSON.stringify(TCP_PROBE)});
+    const readPort = probe.localPortState;
+    const connect = ({ host, port }) => {
+      log({ kind: "tcp", port, host });
+      const socket = new EventEmitter();
+      socket.setTimeout = () => {};
+      socket.destroy = () => { log({ kind: "closed", port }); };
+      queueMicrotask(() => {
+        if (port === ${probePort} && ${scenario === "missing-listener"}) socket.emit("connect");
+        else if (port === ${probePort} && ${scenario === "unknown"}) socket.emit("timeout");
+        else socket.emit("error", Object.assign(new Error("fixture"), { code: ${JSON.stringify(scenario === "missing-error" ? "EACCES" : "ECONNREFUSED")} }));
+      });
+      return socket;
+    };
+    if (${scenario !== "missing-real-free"}) mock.module(${JSON.stringify(TCP_PROBE)}, () => ({ ...probe, localPortState: (port, host) => readPort(port, host, connect) }));
     mock.module("node:child_process", () => ({ ...childProcess, spawn: (command, args, options) => {
       const actions = JSON.parse(readFileSync(actionsPath, "utf8"));
       actions.push(args[1]);
@@ -136,7 +142,7 @@ test("the from-scratch flow with just-released ports still succeeds and probes f
   expect(firstAuth).toBeGreaterThan(opsProbe);
 }, 30_000);
 
-test("a failed lsof probe is unknown, not a free port: init refuses and starts nothing", () => {
+test("a failed lsof probe and connect timeout remain unknown: init refuses and starts nothing", () => {
   const { result, events, actions } = runPlain("unknown");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(1);
@@ -144,4 +150,50 @@ test("a failed lsof probe is unknown, not a free port: init refuses and starts n
   expect(result.stderr).toContain("unknown");
   expect(actions).toEqual([]);
   expect(events.some(e => e.kind === "auth")).toBe(false);
+}, 30_000);
+
+test("missing lsof with ECONNREFUSED on both ports installs and starts before sending credentials", () => {
+  const { result, events, actions } = runPlain("missing-free");
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  expect(result.stdout).toContain("Flair initialized");
+  expect(actions).toEqual(["install", "run"]);
+  expect(events.filter(e => e.kind === "tcp")).toEqual([
+    { kind: "tcp", port: HTTP_PORT, host: "127.0.0.1" },
+    { kind: "tcp", port: OPS_PORT, host: "127.0.0.1" },
+  ]);
+  expect(events.findIndex(e => e.kind === "auth")).toBeGreaterThan(events.findIndex(e => e.kind === "closed" && e.port === OPS_PORT));
+}, 30_000);
+
+for (const scenario of ["missing-listener", "missing-error"] as const) {
+  test(`missing lsof with ${scenario} refuses before credentials or start`, () => {
+    const { result, events, actions } = runPlain(scenario);
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toContain("Refusing init");
+    expect(result.stderr).toContain(`port ${HTTP_PORT}`);
+    expect(result.stderr).toContain(scenario === "missing-listener" ? "not attributed" : "unknown");
+    expect(actions).toEqual([]);
+    expect(events.some(e => e.kind === "auth")).toBe(false);
+    expect(events.some(e => e.kind === "closed")).toBe(true);
+  }, 30_000);
+}
+
+
+for (const scenario of ["missing-listener", "unknown"] as const) {
+  test(`missing lsof with operations port ${scenario} refuses before credentials`, () => {
+    const { result, events, actions } = runPlain(scenario, OPS_PORT);
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toContain(`port ${OPS_PORT}`);
+    expect(actions).toEqual([]);
+    expect(events.some(e => e.kind === "auth")).toBe(false);
+  }, 30_000);
+}
+
+test("missing lsof with real refused TCP connections still initializes", () => {
+  const { result, actions } = runPlain("missing-real-free");
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  expect(actions).toEqual(["install", "run"]);
 }, 30_000);

@@ -32,7 +32,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { join, resolve } from "node:path";
-import { createConnection } from "node:net";
+import { localPortState } from "../lib/init-tcp-probe.js";
 import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
@@ -90,19 +90,6 @@ export type InitCli = {
   STARTUP_TIMEOUT_MS: any;
 };
 
-async function localPortAcceptsTcp(port: number): Promise<boolean> {
-  return new Promise((resolveConnected) => {
-    const socket = createConnection({ host: "127.0.0.1", port });
-    const finish = (connected: boolean): void => {
-      socket.destroy();
-      resolveConnected(connected);
-    };
-    socket.setTimeout(1000);
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
-    socket.once("timeout", () => finish(false));
-  });
-}
 
 let cli: InitCli;
 
@@ -674,12 +661,9 @@ program
       console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
       process.exit(1);
     };
-    // A failed lsof probe is not a free port (flair#2251). Plain init would
-    // otherwise start Harper against — and send credentials to — a port it
-    // could not read, so an unreadable probe refuses rather than proceeding.
     const refuseUnknownListener = (listener: OccupiedHarperListener): void => {
-      console.error(`Refusing init: could not read the listener on port ${listener.port} (the lsof probe failed) — an unreadable probe is unknown, not a free port.`);
-      console.error("Remedy: make lsof available on PATH, free that port, or choose --port and --ops-port for this data directory, then rerun init.");
+      console.error(`Refusing init: could not read the listener on port ${listener.port} (the listener probes were inconclusive) — an unreadable probe is unknown, not a free port.`);
+      console.error("Remedy: restore listener-probe access or choose --port and --ops-port for this data directory, then rerun init.");
       process.exit(1);
     };
     if (opts.skipStart && !agentId) {
@@ -692,38 +676,12 @@ program
         }
       } catch {}
       const httpListener = readOccupiedListener(httpPort);
-      alreadyRunning ||= httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort);
+      const httpState = await localPortState(httpPort, httpBind.host);
+      alreadyRunning ||= httpListener.pids.length > 0 || httpState === "listening";
       if (alreadyRunning) {
         refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
         console.log(`Harper already running on port ${httpPort} — skipping start`);
-      }
-      const opsListener = readOccupiedListener(opsPort);
-      let opsAnswer: number | undefined;
-      try {
-        const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
-        if (res.status > 0) opsAnswer = res.status;
-      } catch {}
-      if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
-        refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
-      }
-    } else if (!opts.skipStart) {
-      // Plain init: attribute any listener on the configured HTTP/ops ports to
-      // this data directory's own instance BEFORE any admin credential is sent
-      // (flair#2251). An unattributed listener refuses by name; a listener
-      // probe that failed is unknown, never free.
-      let healthStatus: number | undefined;
-      try {
-        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
-        if (res.status > 0) {
-          alreadyRunning = true;
-          healthStatus = res.status;
-        }
-      } catch { /* not running */ }
-      const httpListener = readOccupiedListener(httpPort);
-      if (alreadyRunning || httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort)) {
-        refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
-        alreadyRunning = true;
-      } else if (!httpListener.pidsKnown) {
+      } else if (httpState === "unknown") {
         refuseUnknownListener(httpListener);
       }
       const opsListener = readOccupiedListener(opsPort);
@@ -732,9 +690,39 @@ program
         const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
         if (res.status > 0) opsAnswer = res.status;
       } catch {}
-      if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
+      const opsState = await localPortState(opsPort, opsBindHost);
+      if (opsAnswer !== undefined || opsListener.pids.length > 0 || opsState === "listening") {
         refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
-      } else if (!opsListener.pidsKnown) {
+      } else if (opsState === "unknown") {
+        refuseUnknownListener(opsListener);
+      }
+    } else if (!opts.skipStart) {
+      let healthStatus: number | undefined;
+      try {
+        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) {
+          alreadyRunning = true;
+          healthStatus = res.status;
+        }
+      } catch {}
+      const httpListener = readOccupiedListener(httpPort);
+      const httpState = await localPortState(httpPort, httpBind.host);
+      if (alreadyRunning || httpListener.pids.length > 0 || httpState === "listening") {
+        refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
+        alreadyRunning = true;
+      } else if (httpState === "unknown") {
+        refuseUnknownListener(httpListener);
+      }
+      const opsListener = readOccupiedListener(opsPort);
+      let opsAnswer: number | undefined;
+      try {
+        const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) opsAnswer = res.status;
+      } catch {}
+      const opsState = await localPortState(opsPort, opsBindHost);
+      if (opsAnswer !== undefined || opsListener.pids.length > 0 || opsState === "listening") {
+        refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
+      } else if (opsState === "unknown") {
         refuseUnknownListener(opsListener);
       }
     }

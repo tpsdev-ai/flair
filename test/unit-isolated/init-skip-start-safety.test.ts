@@ -33,6 +33,19 @@ function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "
     "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", ...args];
   const script = `
     const { appendFileSync } = await import("node:fs");
+    const { EventEmitter } = await import("node:events");
+    const net = await import("node:net");
+    net.default.createConnection = ({ port }) => {
+      const socket = new EventEmitter();
+      socket.setTimeout = () => {};
+      socket.destroy = () => {};
+      queueMicrotask(() => {
+        if (port === ${HTTP_PORT} ? ${httpOccupied} : ${occupied}) socket.emit("connect");
+        else socket.emit("error", Object.assign(new Error("fixture stopped"), { code: "ECONNREFUSED" }));
+      });
+      return socket;
+    };
+    (await import("node:module")).syncBuiltinESMExports();
     globalThis.fetch = async (url, options = {}) => {
       appendFileSync(${JSON.stringify(f.log)}, JSON.stringify({ url: String(url), authorization: new Headers(options.headers).get("Authorization") }) + "\\n");
       if (String(url).includes(":${HTTP_PORT}/") ? !${httpOccupied} : !${occupied}) throw new Error("fixture stopped");

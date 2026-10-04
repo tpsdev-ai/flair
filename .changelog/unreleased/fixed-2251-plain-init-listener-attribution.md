@@ -2,5 +2,4 @@
   credential.** It reuses the pid/owner proof `--skip-start` already applies:
   a listener on the configured HTTP or operations port is accepted only when it
   is this data directory's own instance, and is otherwise refused by name and
-  receives no credential. A failed `lsof` probe is reported as unknown rather
-  than treated as a free port.
+  receives no credential.
