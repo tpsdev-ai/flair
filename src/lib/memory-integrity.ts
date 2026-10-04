@@ -14,8 +14,8 @@
  *   - a durable-tier id gone WITH a new matching deletion record is history-backed.
  *   - a present id with changed durability reports a TIER CHANGE, including replacements.
  *   - a durable-tier count decrease beyond the id-set diff is also an alert.
- *   - a scan that cannot read the instance reports UNKNOWN, never healthy, and
- *     never overwrites the checkpoint.
+ *   - a scan that cannot read the corpus or checkpoint reports UNKNOWN, never
+ *     healthy, and leaves the checkpoint unchanged.
  *
  * This module compares scans and reads and writes checkpoints.
  */

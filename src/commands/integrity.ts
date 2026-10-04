@@ -3,7 +3,8 @@
  *
  * Operator-invoked, one-shot: compare the live Memory corpus over the operations
  * API with the checkpoint. `--json` for machines, human output
- * otherwise. A read failure reports UNKNOWN and never overwrites the checkpoint.
+ * otherwise. A corpus or checkpoint read failure reports UNKNOWN and leaves the
+ * checkpoint unchanged.
  *
  * Command group lives here (flair#2213), bound via bindIntegrityCli() the same
  * way the other extracted command groups are.

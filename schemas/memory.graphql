@@ -403,8 +403,11 @@ type OrgSkillAssignment @table(database: "flair") {
   sourceClass: String!             # operator | internal
 }
 
-# Deletion history for Memory.delete (including CLI hygiene and agent remove)
-# and MemoryMaintenance expiry, appended in the row delete's transaction.
+# Deletion history for confirmed physical deletions of permanent/persistent
+# Memory rows through Memory.delete (including CLI hygiene and agent remove),
+# appended in the delete transaction. Non-durable deletes, including
+# maintenance expiry, append no history. Skill deletion closes the retained
+# row and appends none.
 # No @export and no resource class: there is no direct route.
 type MemoryDeletionHistory @table(database: "flair") {
   id: ID @primaryKey               # unique per deletion record (a memory id can be deleted and re-created)
