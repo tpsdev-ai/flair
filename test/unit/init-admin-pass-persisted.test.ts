@@ -219,7 +219,7 @@ describe("refusal names the exact recovery command", () => {
   test("foreign-instance names flair stop verbatim", () => {
     const msg = initAdminPassRefusalMessage("foreign-instance", { httpPort: 19926 });
     expect(msg).toContain(INIT_STOP_FOREIGN_COMMAND);
-    expect(msg).toContain("port 19926: no persisted admin user in this data directory");
+    expect(msg).toContain("port 19926: persisted admin user was not detected in this data directory");
     expect(msg).not.toMatch(/listener|attribut|ownership|waiting/);
   });
 

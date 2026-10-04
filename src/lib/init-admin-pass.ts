@@ -238,7 +238,7 @@ export function initAdminPassRefusalMessage(
     const port = opts.httpPort ?? 19926;
     const pid = opts.pid === undefined ? "" : `, pid ${opts.pid}`;
     const head =
-      `Refusing init: port ${port}${pid}: no persisted admin user in this data directory.`;
+      `Refusing init: port ${port}${pid}: persisted admin user was not detected in this data directory.`;
     if (opts.offerFlairStop === false) return head;
     return (
       `${head} Stop that process before initializing a new instance:\n  ${INIT_STOP_FOREIGN_COMMAND}`

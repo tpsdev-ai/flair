@@ -1,5 +1,3 @@
-import { canonicalLexicalPath } from "./daemon-liveness.js";
-
 /** What init could read about the process holding one specific port. */
 export interface OccupiedHarperListener {
   /** The port this attribution was read from. */
@@ -80,29 +78,6 @@ export function stableAnsweredHolder(
   };
 }
 
-export function describeOccupiedListener(listener: Pick<OccupiedHarperListener, "pids" | "dataDirs">): string {
-  return listener.pids.length === 1 ? `pid ${listener.pids[0]}` : "";
-}
-
-function foreignDataDirs(expectedDataDir: string, dataDirs: readonly string[]): string[] {
-  const expected = canonicalLexicalPath(expectedDataDir);
-  return dataDirs.filter((dir) => canonicalLexicalPath(dir) !== expected);
-}
-
-export function staleHarperBeforeAuthNotice(
-  expectedDataDir: string,
-  listener: OccupiedHarperListener,
-): string | null {
-  const foreign = foreignDataDirs(expectedDataDir, listener.dataDirs);
-  if (foreign.length === 0) return null;
-  const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
-  const lines = [
-    `Refusing init: port ${listener.port}${pid}: data directory does not match ${expectedDataDir}.`,
-  ];
-  appendRemedy(lines, listener);
-  return lines.join("\n");
-}
-
 export function foreignOccupiedListenerDetail(listener: OccupiedHarperListener): string {
   const lines: string[] = [];
   appendRemedy(lines, listener);
@@ -121,7 +96,7 @@ export function occupiedListenerAuthFailure(input: {
     `${input.lead}${input.bodyText}`,
     `  Port ${input.listener.port}${pid}: admin authentication failed.`,
   ];
-  appendRemedy(lines, input.listener);
+  lines.push("Remedy: check the admin password for this data directory, then rerun init.");
   return lines.join("\n");
 }
 

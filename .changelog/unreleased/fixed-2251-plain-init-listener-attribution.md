@@ -1,1 +1,1 @@
-- **Plain `flair init` refuses listeners without matching PID-file or spawned-child socket evidence before sending an admin credential.**
+- **Plain local `flair init` refuses listeners without matching PID-file or spawned-child socket evidence before sending an admin credential.**

@@ -152,12 +152,12 @@ while (Date.now() < deadline) {
   running = alive();
   state = await localPortState(port, '127.0.0.1');
   if (!running && state === 'free') {
-    console.log(`Harper PID ${pid} exited; port ${port} refuses TCP connections`);
+    console.log(`Harper PID ${pid} exited; 127.0.0.1:${port} refuses TCP connections`);
     process.exit(0);
   }
   await delay(250);
 }
-throw new Error(`Harper teardown timed out: PID ${pid} ${running ? 'still running' : 'exited'}; port ${port} is ${state}`);
+throw new Error(`Harper teardown timed out: PID ${pid} ${running ? 'still running' : 'exited'}; 127.0.0.1:${port} is ${state}`);
 NODE
 
 # Create a fresh home and run from /tmp (NOT the flair package dir)

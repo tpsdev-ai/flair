@@ -1,14 +1,3 @@
-/**
- * flair#1749 — `flair init` and a Harper it did not start.
- *
- * The pre-auth check is one read. It names a different data directory only
- * when that read returned one, and the stub's health request carries no
- * Authorization. The lookup in those tests is injected, so they do not call
- * the host's lsof, /proc, or ps. An operations-port 401 is a different
- * check: the same sole PID before the insert and after the 401. These
- * messages do not offer `flair stop`. The self-started seed keeps today's
- * credential hint. Init does not signal a process it did not start.
- */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -19,12 +8,10 @@ import { flairDataDir } from "../../src/lib/flair-paths.js";
 import { listenerRootPathOnPlatform } from "../../src/lib/init-listener-environ.js";
 import { parseNullSeparatedEnviron, extractRootPath } from "../../src/lib/daemon-liveness.js";
 import {
-  describeOccupiedListener,
   foreignOccupiedListenerDetail,
   listenerFromLookup,
   occupiedListenerAuthFailure,
   stableAnsweredHolder,
-  staleHarperBeforeAuthNotice,
   type OccupiedHarperListener,
 } from "../../src/lib/init-occupied-listener.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
@@ -527,7 +514,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     }
   });
 
-  test("seed against a verified operations holder does not blame credentials", async () => {
+  test("operations 401 with an injected stable PID gives a credential remedy", async () => {
     const orig = globalThis.fetch;
     globalThis.fetch = loginFailedFetch();
     const listener: OccupiedHarperListener = {
@@ -546,8 +533,11 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       expect(msg).toContain("Operations API insert failed (401)");
       expect(msg).toContain("Login failed");
       expect(msg).toContain("pid 42");
-      expect(msg).toContain("/var/stale-harper");
-      expect(msg).toContain("kill 42");
+      expect(msg).toContain("check the admin password for this data directory");
+      expect(msg).not.toContain("/var/stale-harper");
+      expect(msg).not.toContain("kill 42");
+      expect(msg).not.toContain("free the port");
+      expect(msg).not.toContain("choose --port");
       expect(msg).not.toContain("flair stop");
       expect(msg).not.toContain("wrong password");
       expect(msg).not.toContain("admin credentials differ");
@@ -631,9 +621,6 @@ describe("occupied-listener messages (flair#1749)", () => {
     expect(msg).not.toContain("flair stop");
     expect(msg).not.toMatch(/\bkill \d+/);
     expect(msg).not.toContain("wrong password");
-    expect(describeOccupiedListener({ pids: [], dataDirs: [] })).toBe(
-      "",
-    );
   });
 
   test("the 401 message names one stable holder and does not offer flair stop", () => {
@@ -643,7 +630,10 @@ describe("occupied-listener messages (flair#1749)", () => {
       listener: { port: 19925, pids: [42], dataDirs: ["/var/still-there"] },
     });
     expect(msg).not.toContain("flair stop");
-    expect(msg).toContain("kill 42");
+    expect(msg).toContain("pid 42");
+    expect(msg).toContain("check the admin password for this data directory");
+    expect(msg).not.toContain("kill 42");
+    expect(msg).not.toContain("free the port");
   });
 
   test("injected changing or multiple PIDs are omitted", () => {
@@ -673,31 +663,6 @@ describe("occupied-listener messages (flair#1749)", () => {
     expect(msg).not.toMatch(/\bkill \d+/);
   });
 
-  test("a matching data directory is not announced before auth", () => {
-    const notice = staleHarperBeforeAuthNotice("/data/this-init", {
-      ...listenerBase,
-      pids: [7],
-      dataDirs: ["/data/this-init"],
-    });
-    expect(notice).toBe(null);
-  });
-
-  test("a different data directory is named before auth and does not claim the passwords differ", () => {
-    const notice = staleHarperBeforeAuthNotice("/data/this-init", {
-      port: 19926,
-      pids: [7],
-      dataDirs: ["/data/other"],
-    });
-    expect(notice).toContain("pid 7");
-    expect(notice).toContain("/data/other");
-    expect(notice).toContain("/data/this-init");
-    expect(notice).toContain("data directory does not match /data/this-init");
-    expect(notice).toContain("kill 7");
-    expect(notice).not.toContain("flair stop");
-    expect(notice).not.toContain("will not match");
-    expect(notice).not.toContain("wrong password");
-  });
-
   test("the remedy uses the injected PID and directory without flair stop", () => {
     const msg = foreignOccupiedListenerDetail(
       { port: 19926, pids: [7], dataDirs: ["/data/other"] },
@@ -708,10 +673,6 @@ describe("occupied-listener messages (flair#1749)", () => {
   });
 
   test("several pids are not named and are not a kill list", () => {
-    const who = describeOccupiedListener({ pids: [7, 8], dataDirs: ["/data/other"] });
-    expect(who).not.toContain("pid 7");
-    expect(who).not.toContain("pid 8");
-    expect(who).toBe("");
     const msg = occupiedListenerAuthFailure({
       lead: "Operations API insert failed (401): ",
       bodyText: "Login failed",
@@ -729,24 +690,6 @@ describe("init ROOTPATH lookup (flair#1749)", () => {
     expect(rootPath).toBe(path);
     const read = listenerRootPathOnPlatform("linux", () => ({ rootPath, environReadable: true }));
     expect(read.rootPath).toBe(path);
-    expect(staleHarperBeforeAuthNotice(path, {
-      port: 19926,
-      pids: [7],
-      dataDirs: [read.rootPath!],
-    })).toBe(null);
-  });
-
-  test("an injected readable ROOTPATH is the pre-auth directory", () => {
-    const listener = listenerFromLookup(19926, {
-      pids: () => [9],
-      rootPath: () => ({ rootPath: "/data/stale", environReadable: true }),
-    });
-    const notice = staleHarperBeforeAuthNotice("/data/this-init", listener);
-    expect(notice).toContain("/data/stale");
-    expect(notice).toContain("pid 9");
-    expect(notice).toContain("kill 9");
-    expect(notice).not.toContain("flair stop");
-    expect(notice).not.toContain("a process not attributed to this data directory's instance");
   });
 
   test("an unavailable ROOTPATH lookup is not a foreign directory", () => {
@@ -762,7 +705,6 @@ describe("init ROOTPATH lookup (flair#1749)", () => {
       rootPath: () => darwin,
     });
     expect(listener.dataDirs).toEqual([]);
-    expect(staleHarperBeforeAuthNotice("/data/this-init", listener)).toBe(null);
     const src = readFileSync(join(import.meta.dir, "..", "..", "src", "lib", "init-listener-environ.ts"), "utf-8");
     expect(src).not.toContain("execFileSync");
     expect(src).not.toMatch(/["']ps["']/);

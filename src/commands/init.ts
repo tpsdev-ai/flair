@@ -38,7 +38,6 @@ import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
 import {
-  commandArg,
   foreignOccupiedListenerDetail,
   type OccupiedHarperListener,
   type OperationsPortAttribution,
@@ -702,7 +701,7 @@ program
     const refuseUnknownListener = (listener: OccupiedHarperListener): void => {
       const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
       console.error(`Refusing init: port ${listener.port}${pid}: TCP probe was inconclusive.`);
-      console.error("Remedy: restore TCP-probe access or choose --port and --ops-port for this data directory, then rerun init.");
+      console.error("Remedy: check TCP connectivity, then rerun init.");
       process.exit(1);
     };
     if (opts.skipStart && !agentId) {

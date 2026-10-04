@@ -54,7 +54,7 @@ test("teardown waits for both the recorded PID and TCP refusal without lsof", ()
   const result = run("delayed");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stderr).toBe(0);
-  expect(result.stdout).toContain("Harper PID 4242 exited; port 9926 refuses TCP connections");
+  expect(result.stdout).toContain("Harper PID 4242 exited; 127.0.0.1:9926 refuses TCP connections");
 }, 10_000);
 
 for (const scenario of ["live-pid", "occupied", "unknown"] as const) {
@@ -63,7 +63,7 @@ for (const scenario of ["live-pid", "occupied", "unknown"] as const) {
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Harper teardown timed out");
-    expect(result.stderr).toContain(scenario === "live-pid" ? "still running" : `port 9926 is ${scenario === "occupied" ? "listening" : "unknown"}`);
+    expect(result.stderr).toContain(scenario === "live-pid" ? "still running" : `127.0.0.1:9926 is ${scenario === "occupied" ? "listening" : "unknown"}`);
     expect(result.stdout).not.toContain("refuses TCP");
   }, 10_000);
 }
