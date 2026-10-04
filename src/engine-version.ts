@@ -22,9 +22,10 @@ import { join, resolve } from "node:path";
 
 import { fetchDeclaredDependencies } from "./lib/npm-registry.js";
 import { resolveHome } from "./lib/home.js";
+import { ENGINE_VERSION_STAMP } from "./engine-version-contract.js";
 
 /** Filename of the engine-version stamp inside the data directory. */
-export const ENGINE_VERSION_STAMP = "engine-version.txt";
+export { ENGINE_VERSION_STAMP };
 
 /** Root directory for pre-upgrade snapshots (~/.flair/upgrade-snapshots). */
 export const UPGRADE_SNAPSHOT_ROOT = resolve(resolveHome(), ".flair", "upgrade-snapshots");

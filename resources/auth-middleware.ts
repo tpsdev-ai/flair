@@ -230,8 +230,10 @@ server.http(async (request: any, nextLayer: any) => {
   // OrgEvents) — those must be authenticated. Narrowing to GET-only
   // closes the P0 where any caller could forge OrgEvents as any agent
   // and read all internal Beads issues unauthenticated.
+  const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
+  const isTpsEd25519 = /^TPS-Ed25519(?:\s|$)/.test(header);
   const isA2APath = url.pathname === "/a2a" || url.pathname === "/A2AAdapter" || url.pathname.startsWith("/A2AAdapter/");
-  if (
+  if (!isTpsEd25519 && (
     url.pathname === "/health" ||
     url.pathname === "/Health" ||
     (request.method === "GET" && isA2APath) ||
@@ -257,12 +259,7 @@ server.http(async (request: any, nextLayer: any) => {
     // onto the default chain.
     url.pathname === "/.well-known/oauth-authorization-server" ||
     url.pathname === "/OAuthMetadata"
-  ) return nextLayer(request);
-
-  // Read the Authorization header ONCE, up front — the super_user branch below
-  // needs it too (hoisted from its former position just after the branch as part
-  // of the flair#610 belt-and-suspenders check).
-  const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
+  )) return nextLayer(request);
 
   // If Harper has already authorized this request (e.g. Basic admin, or
   // authorizeLocal=true on localhost), trust Harper's auth decision and pass
@@ -279,7 +276,7 @@ server.http(async (request: any, nextLayer: any) => {
   // live vector today — but it keeps the trust decision from ever hinging on
   // ambient elevation alone. (The root-cause gate lives in resolveAgentAuth; see
   // agent-auth.ts hasCredentialEvidence.)
-  if (header && request.user?.role?.permission?.super_user === true) {
+  if (!isTpsEd25519 && header && request.user?.role?.permission?.super_user === true) {
     const username = request.user.username ?? "admin";
     // Deactivation guard — same predicate as the Ed25519 path.
     // A deactivated principal must not receive a tpsAgent annotation, even
@@ -399,6 +396,7 @@ server.http(async (request: any, nextLayer: any) => {
   const parsed = parseTpsEd25519Header(header);
 
   if (!parsed) {
+    if (isTpsEd25519) return new Response(JSON.stringify({ error: "invalid_authorization_header" }), { status: 401 });
     // For browser-accessible admin pages, emit `WWW-Authenticate: Basic` so
     // the browser shows a native auth dialog instead of a bare 401 page.
     // JSON API endpoints don't get this — they should keep the structured
@@ -472,15 +470,6 @@ server.http(async (request: any, nextLayer: any) => {
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
-  // Grant Harper-level permissions for the cryptographically-verified agent by
-  // setting request.user directly. Setting request.user is the supported
-  // extension path (and the only one that works post-5.0.9: Harper resolves
-  // request.user from the Authorization header BEFORE this middleware runs, and
-  // a TPS-Ed25519 header matches no Basic/Bearer strategy, so request.user
-  // arrives null — see #456). getUser(name, null) looks up the record WITHOUT
-  // password validation, safe here because the Ed25519 signature already proved
-  // identity cryptographically.
-  //
   // RESHAPE (auth-rbac) — THE FLIP: per-agent DE-ELEVATION. A cryptographically-
   // verified NON-admin agent resolves to the least-privilege `flair-agent` user,
   // NOT admin super_user. The flair_agent role grants exactly the table CRUD agents

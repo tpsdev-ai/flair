@@ -8,7 +8,7 @@ const { Request } = require("../../node_modules/harper/dist/server/serverHelpers
 async function main() {
   const input = JSON.parse(readFileSync(0, "utf8"));
   const request = new Request({
-    method: "GET", url: "/Presence", headers: input.headers, socket: { server: {} },
+    method: input.method ?? "GET", url: input.url ?? "/Presence", headers: input.headers, socket: { server: {} },
   }, { on() {} });
   request.user = input.user;
   const result = await authentication(request, () =>
