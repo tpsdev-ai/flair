@@ -384,7 +384,8 @@ describe("local init admin password handling", () => {
   });
 
   afterEach(() => {
-    process.env = oldEnv;
+    for (const key of Object.keys(process.env)) if (!(key in oldEnv)) delete process.env[key];
+    for (const [key, value] of Object.entries(oldEnv)) process.env[key] = value;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

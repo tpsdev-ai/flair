@@ -218,6 +218,7 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
   test("a concurrent double run leaves one row and one assignment", async () => {
     await ops({ operation: "delete", database: "flair", table: "Memory", ids: [SEED_SKILL_ID] });
     await ops({ operation: "delete", database: "flair", table: "OrgSkillAssignment", ids: [SEED_ASSIGNMENT_ID] });
+    const versionsBefore = await ops({ operation: "search_by_value", database: "flair", table: "InstructionVersion", search_attribute: "subjectId", search_value: SEED_SKILL_ID, get_attributes: ["id"] });
     const [a, b] = await Promise.all([
       runSkillSeed(skillSeedRestIo(restOpts()), currentSeed()),
       runSkillSeed(skillSeedRestIo(restOpts()), currentSeed()),
@@ -230,6 +231,8 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
     expect((await assignmentRows()).length).toBe(1);
     const all = await ops({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "content", search_value: USING_FLAIR_SKILL_CONTENT, get_attributes: ["id"] });
     expect((all ?? []).filter((r: any) => r.id === SEED_SKILL_ID).length).toBe(1);
+    const versionsAfter = await ops({ operation: "search_by_value", database: "flair", table: "InstructionVersion", search_attribute: "subjectId", search_value: SEED_SKILL_ID, get_attributes: ["id"] });
+    expect(versionsAfter.length).toBe(versionsBefore.length + 1);
   }, 30_000);
 
   test("an operator-owned row that is archived or private fails `flair init` before either seed row is written", async () => {
