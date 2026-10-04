@@ -168,6 +168,11 @@ test("a listener differing from the own launchd PID refuses before credentials",
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(1);
   expect(result.stderr).toContain("not attributed to this data directory");
+  const refusal = result.stderr.split("\n").find(line => line.startsWith("Refusing init"));
+  expect(refusal).toContain(`port ${HTTP_PORT}`);
+  expect(refusal).toContain("answered /health with HTTP 200");
+  expect(refusal).toContain("/.flair/data");
+  expect(refusal?.match(/not attributed to this data directory/g)).toHaveLength(1);
   expect(result.stderr).not.toContain("send its admin password to a process it did not start");
   expect(actions).toEqual([]);
   expect(events.some(e => e.kind === "auth")).toBe(false);

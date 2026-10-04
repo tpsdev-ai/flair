@@ -2,18 +2,19 @@
 # test-from-scratch.sh — validates the full flair experience from zero
 #
 # Dumps Harper log on failure for debugging.
-trap '
+dump_logs() {
   echo ""
   echo "=== Harper stdout/stderr log ==="
   cat "$HOME/.flair/data/harper.log" 2>/dev/null || echo "(no flair log found)"
   echo "=== HDB log ==="
-  find "$HOME" /tmp -name "hdb.log" 2>/dev/null | head -3 | while read f; do echo "--- $f ---"; tail -100 "$f"; done
+  find "$HOME" /tmp -name "hdb.log" 2>/dev/null | head -3 | while IFS= read -r f; do echo "--- $f ---"; tail -100 "$f"; done
   echo "=== RUN_HDB_APP check ==="
   echo "config.yaml exists at /app: $(ls -la /app/config.yaml 2>&1)"
   echo "schemas dir: $(ls /app/schemas/ 2>&1)"
   echo "dist/resources: $(ls /app/dist/resources/ 2>&1)"
   echo "=== end ==="
-' ERR
+}
+trap dump_logs ERR
 #
 # Steps:
 #   1. flair init --agent-id testbot --admin-pass test123
@@ -31,7 +32,8 @@ ADMIN_PASS="test123"
 PORT="9926"
 
 # Use temp home to keep keys/data isolated
-export HOME="$(mktemp -d)"
+HOME="$(mktemp -d)"
+export HOME
 export FLAIR_KEY_DIR="$HOME/.flair/keys"
 
 echo "=== Flair from-scratch validation ==="
@@ -116,22 +118,51 @@ echo "[5/5] ✓ backup file valid: $BACKUP_FILE"
 echo ""
 echo "[6/7] Testing flair init from a different working directory..."
 
-# Kill previous Harper and wait for port to fully release
-pkill -f "harper" 2>/dev/null || true
-sleep 5
+node --input-type=module - "$HOME/.flair/data" "$PORT" <<'NODE'
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { localPortState } from '/app/dist/lib/init-tcp-probe.js';
 
-# Verify port is free before continuing
-for i in $(seq 1 10); do
-  if ! lsof -ti :${PORT} > /dev/null 2>&1; then
-    echo "Port ${PORT} is free (${i}s)"
-    break
-  fi
-  [ "$i" -eq 10 ] && { echo "WARN: Port ${PORT} still in use after 10s"; }
-  sleep 1
-done
+const [dataDir, portText] = process.argv.slice(2);
+const pidText = readFileSync(join(dataDir, 'hdb.pid'), 'utf8').trim();
+const pid = Number(pidText);
+if (!/^\d+$/.test(pidText) || !Number.isSafeInteger(pid) || pid <= 1) {
+  throw new Error(`Invalid Harper PID in ${dataDir}/hdb.pid`);
+}
+const port = Number(portText);
+const deadline = Date.now() + 30_000;
+const alive = () => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
+};
+try {
+  process.kill(pid, 'SIGTERM');
+} catch (error) {
+  if (error.code !== 'ESRCH') throw error;
+}
+let running = true;
+let state = 'unknown';
+while (Date.now() < deadline) {
+  running = alive();
+  state = await localPortState(port, '127.0.0.1');
+  if (!running && state === 'free') {
+    console.log(`Harper PID ${pid} exited; port ${port} refuses TCP connections`);
+    process.exit(0);
+  }
+  await delay(250);
+}
+throw new Error(`Harper teardown timed out: PID ${pid} ${running ? 'still running' : 'exited'}; port ${port} is ${state}`);
+NODE
 
 # Create a fresh home and run from /tmp (NOT the flair package dir)
-export HOME2="$(mktemp -d)"
+HOME2="$(mktemp -d)"
+export HOME2
 cd /tmp
 HOME="$HOME2" $FLAIR init \
   --agent-id userbot \

@@ -40,7 +40,6 @@ import { resolveHome } from "../lib/home.js";
 import {
   commandArg,
   foreignOccupiedListenerDetail,
-  describeOccupiedListener,
   type OccupiedHarperListener,
   type OperationsPortAttribution,
 } from "../lib/init-occupied-listener.js";
@@ -654,7 +653,7 @@ program
           cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
       const attributed = installedAttributed || ownChild?.attributes(listener, dataDir, freeBeforeSpawn);
       if (attributed) return;
-      console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to this data directory (${dataDir}).`);
+      console.error(`Refusing init: port ${listener.port} ${answered}; its listener is not attributed to this data directory (${dataDir}).`);
       console.error(foreignOccupiedListenerDetail(listener, dataDir));
       console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
       process.exit(1);
