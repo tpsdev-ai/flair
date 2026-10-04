@@ -18,6 +18,7 @@ import {
   unitPlan,
   unitTempBase,
 } from "../../scripts/test-unit.ts";
+import { SHARDS } from "../../scripts/ci/unit-shards.mjs";
 
 const root = join(import.meta.dir, "../..");
 const fixtures: string[] = [];
@@ -84,9 +85,16 @@ describe("shared unit lane", () => {
 
   test("includes root tests and isolates every global mock file, with no integration tests", () => {
     const steps = unitPlan(root);
-    const rootUnit = steps.find(step => step.name === "root unit tests");
-    expect(rootUnit?.files.some(file => file.endsWith("/test/data-scoping.test.ts"))).toBe(true);
-    expect(steps.findIndex(step => step.name === "vendor tool descriptors")).toBeLessThan(steps.findIndex(step => step.name === "root unit tests"));
+    const shardSteps = steps.filter(step => step.shard !== undefined);
+    // The single root unit step is replaced by one step per shard (flair#2258).
+    expect(shardSteps).toHaveLength(SHARDS);
+    expect(shardSteps.map(step => step.shard)).toEqual(
+      Array.from({ length: SHARDS }, (_, i) => ({ index: i + 1, of: SHARDS })),
+    );
+    const rootUnitFiles = shardSteps.flatMap(step => step.files);
+    expect(rootUnitFiles.some(file => file.endsWith("/test/data-scoping.test.ts"))).toBe(true);
+    expect(new Set(rootUnitFiles).size).toBe(rootUnitFiles.length);
+    expect(steps.findIndex(step => step.name === "vendor tool descriptors")).toBeLessThan(steps.findIndex(step => step.shard !== undefined));
     expect(steps.findIndex(step => step.name === "vendor tool descriptors")).toBeLessThan(steps.findIndex(step => step.name === "flair-mcp unit tests"));
     const isolated = steps.filter(step => step.files.some(file => file.includes("/unit-isolated/")));
     expect(isolated.length).toBeGreaterThan(0);
@@ -251,8 +259,8 @@ describe("shared unit lane", () => {
     expect(code).toBe(1);
     expect(readFileSync(join(dir, "ran-3"), "utf8")).toBe("x");
     expect(errors).toContain("ran 3 steps, 3 failed");
-    expect(errors).toContain("  - hangs past its own limit (timed out after 2 s; killed)");
-    expect(errors).toContain("  - hangs past the default limit (timed out after 1 s; killed)");
+    expect(errors).toContain("  - hangs past its own limit (timed out after 2 s; step killed at the limit; leak-guard result not attributable)");
+    expect(errors).toContain("  - hangs past the default limit (timed out after 1 s; step killed at the limit; leak-guard result not attributable)");
     expect(errors).toContain("  - fails after the hangs (exit 4)");
     // The guards still ran after the timeouts: the config the last step planted is named.
     expect(errors).toContain("Guard failures:\n  - home-isolation guard");
@@ -268,7 +276,7 @@ describe("shared unit lane", () => {
     expect(Date.now() - started).toBeLessThan(8000);
     expect(code).toBe(1);
     expect(existsSync(join(dir, "later"))).toBe(false);
-    expect(errors).toContain("Unit lane failed: hangs (timed out after 1 s; killed)");
+    expect(errors).toContain("Unit lane failed: hangs (timed out after 1 s; step killed at the limit; leak-guard result not attributable)");
     expect(errors).toContain("Home-isolation guard FAILED");
   }, 30_000);
 
@@ -283,7 +291,7 @@ describe("shared unit lane", () => {
     expect(code).toBe(1);
     expect(existsSync(join(dir, "later"))).toBe(false);
     expect(errors).toContain("ran 1 of 2 steps, 1 failed, 1 not run");
-    expect(errors).toContain("  - plants a config, then hangs (timed out: the lane's 2 s time budget ran out; killed)");
+    expect(errors).toContain("  - plants a config, then hangs (timed out: the lane's 2 s time budget ran out; step killed at the limit; leak-guard result not attributable)");
     expect(errors).toContain("Not run:\n  - never started (the lane's 2 s time budget ran out)");
     expect(errors).toContain("Guard failures:\n  - home-isolation guard");
   }, 30_000);
@@ -356,6 +364,49 @@ describe("shared unit lane", () => {
     }
   });
 
+  test("a step killed at its limit reports one attributed failure, not a second leak-guard failure (flair#2258)", () => {
+    // A killed step cannot remove its own scratch directories, so the temp-dir
+    // leak guard sees them but cannot attribute them. The lane reports the
+    // killed step only, with the leak-guard result marked not attributable;
+    // it does not add a second, separate leak-guard failure.
+    for (const keepGoing of [false, true]) {
+      const dir = fixture();
+      const leakName = `flair-2258-killed-${keepGoing ? "keep-going" : "fail-fast"}-${process.pid}`;
+      fixtures.push(join(process.env.TMPDIR ?? tmpdir(), leakName)); // removed when a nested lane reused the caller's root
+      const script = `require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, ${JSON.stringify(leakName)})); ${HANG_8S}`;
+      const { result: code, errors } = captureErrors(() => runUnitSteps(
+        [{ name: "hangs and leaks", cwd: dir, args: ["-e", script], files: [] }],
+        process.execPath,
+        dir,
+        { keepGoing, limits: { stepTimeoutMs: 1000 } },
+      ));
+      expect(code).toBe(1);
+      // One attributed failure, carrying the not-attributable note.
+      expect(errors).toContain("hangs and leaks (timed out after 1 s; step killed at the limit; leak-guard result not attributable)");
+      // Not a second, separate leak-guard failure.
+      expect(errors).not.toContain("Temp-dir leak guard FAILED");
+      expect(errors).not.toContain("Guard failures:\n  - temp-dir leak guard");
+      expect(errors).toContain("leak-guard result not attributable");
+      if (keepGoing) expect(errors).toContain("ran 1 step, 1 failed");
+    }
+  }, 30_000);
+
+  test("without a killed step, the temp-dir leak guard still fails the lane (flair#2258)", () => {
+    // The negative control for the fold above: an ordinary leak (no kill) is
+    // still a named guard failure, so the fold cannot hide every leak.
+    const home = fixture();
+    const leakName = `flair-2258-ordinary-leak-${process.pid}`;
+    fixtures.push(join(process.env.TMPDIR ?? tmpdir(), leakName));
+    const { result: code, errors } = captureErrors(() => runUnitSteps(
+      [{ name: "leaks but passes", cwd: home, args: ["-e", `require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, ${JSON.stringify(leakName)}))`], files: [] }],
+      process.execPath,
+      home,
+    ));
+    expect(code).toBe(1);
+    expect(errors).toContain("Temp-dir leak guard FAILED");
+    expect(errors).not.toContain("leak-guard result not attributable");
+  });
+
   test("the runner's arguments: --fail-fast overrides CI, --list runs nothing, contradictions are refused (flair#2030)", () => {
     const ci = { CI: "true" };
     expect(parseUnitLaneArgs([], {})).toEqual({ list: false, keepGoing: false });
@@ -398,12 +449,22 @@ describe("shared unit lane", () => {
     // The whole-lane budget carries at least 1.5× headroom over the slowest
     // measured lane (flair#2224); each step's own limit still applies.
     expect(KEEP_GOING_LANE_BUDGET_MS).toBeGreaterThanOrEqual(1.5 * lane);
-    // One hung step, wherever it is, still leaves every later step room to run
-    // inside the budget.
+    // One hung non-root step still leaves every later step room to run inside
+    // the budget.
     expect(lane + STEP_TIMEOUT_MS).toBeLessThanOrEqual(KEEP_GOING_LANE_BUDGET_MS);
-    expect(lane - rootStep + ROOT_STEP_TIMEOUT_MS).toBeLessThanOrEqual(KEEP_GOING_LANE_BUDGET_MS);
+    // The root step is sharded by file (flair#2258): each shard keeps the 450 s
+    // limit and runs well under half of it — an even split of the measured root
+    // step is at most half, with room to spare. A hung shard is stopped by its
+    // own limit (or, if it would outlast the lane, by the lane budget), both
+    // inside the job limit, so the summary and guards always print.
+    expect(ROOT_STEP_TIMEOUT_MS).toBeGreaterThanOrEqual(2 * (rootStep / SHARDS));
+    expect(ROOT_STEP_TIMEOUT_MS + CI_OUTSIDE_LANE_MS).toBeLessThanOrEqual(CI_JOB_LIMIT_MS);
     const limited = unitPlan(root).filter(step => step.timeoutMs !== undefined);
-    expect(limited.map(step => [step.name, step.timeoutMs])).toEqual([["root unit tests", ROOT_STEP_TIMEOUT_MS]]);
+    expect(limited).toHaveLength(SHARDS);
+    for (const step of limited) {
+      expect(step.timeoutMs).toBe(ROOT_STEP_TIMEOUT_MS);
+      expect(step.name).toMatch(/^root unit tests \(shard \d+\/\d+\)$/);
+    }
   });
 
   test("every step that runs reports its own duration (flair#2224)", () => {

@@ -16,6 +16,10 @@ import {
   type ServiceManagerTripwire,
 } from "../test/helpers/fake-launchctl.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
+// The deterministic root-unit file shards (flair#2258). The lane splits its
+// `root unit tests` step into these shards; the CI job runs the module's
+// `--verify` gate so a file can never run in no shard.
+import { SHARDS, assignShards, listUnitFiles } from "./ci/unit-shards.mjs";
 
 /** The short, canonical temp base darwin unit steps run under (flair#2137). */
 export const DARWIN_TEMP_BASE = "/private/tmp";
@@ -33,6 +37,8 @@ export interface UnitStep {
   files: string[];
   /** This step's own time limit when the lane runs with limits; unset means the lane's default. */
   timeoutMs?: number;
+  /** Set on the shard steps that replace the single root unit step (flair#2258). */
+  shard?: { index: number; of: number };
 }
 
 // ── Time bounds (flair#2030, resized flair#2224) ───────────────────────────
@@ -196,8 +202,10 @@ export function unitPlan(root: string): UnitStep[] {
     if (!files.length) throw new Error(`No unit test files found in ${dir}`);
     return files;
   };
-  const rootFiles = requiredFiles("test", false);
-  const unitFiles = requiredFiles("test/unit");
+  // The root unit corpus, from the same module the CI job's coverage gate reads
+  // (flair#2258): every test/unit/** file plus every root-level test/*.test.ts.
+  const rootUnitFiles = listUnitFiles(root);
+  if (!rootUnitFiles.length) throw new Error("No unit test files found in test");
   const isolatedFiles = requiredFiles("test/unit-isolated");
   const steps: UnitStep[] = [{
     // flair#1683: the private descriptor package is a build-time source, not a
@@ -225,13 +233,25 @@ export function unitPlan(root: string): UnitStep[] {
     steps.push({ name: `typecheck: ${label}`, cwd: root, args: ["x", "tsc", "--noEmit", "-p", config], files: [] });
   }
   steps.push({ name: "emit server for boundary guard", cwd: root, args: ["x", "tsc", "-p", "tsconfig.json", "--noCheck"], files: [] });
-  steps.push({
-    name: "root unit tests",
-    cwd: root,
-    // Preserve CI's existing grouping; mock.module isolation is per process.
-    args: ["test", "test/unit/", ...rootFiles.map(file => relative(root, file))],
-    files: [...unitFiles, ...rootFiles],
-    timeoutMs: ROOT_STEP_TIMEOUT_MS,
+  // root unit tests, sharded by file (flair#2258). The partition is
+  // deterministic — every file lands in exactly one shard — and each shard
+  // keeps this step's own 450 s limit while running well under it, so a
+  // shard killed at the limit is a genuinely hung shard rather than the
+  // ordinary variance of one long step. mock.module isolation is per process.
+  assignShards(rootUnitFiles, SHARDS).forEach((files, index) => {
+    steps.push({
+      name: `root unit tests (shard ${index + 1}/${SHARDS})`,
+      cwd: root,
+      // Absolute paths: bun reads a bare path argument as a substring filter over
+      // its "./"-prefixed file paths, so a relative `test/unit/foo.test.ts` also
+      // matches `packages/<pkg>/test/unit/foo.test.ts` and runs a file outside
+      // this shard. An absolute path matches only the file it names, so a shard
+      // runs exactly the files the partition gave it.
+      args: ["test", ...files.map(file => join(root, file))],
+      files: files.map(file => join(root, file)),
+      timeoutMs: ROOT_STEP_TIMEOUT_MS,
+      shard: { index: index + 1, of: SHARDS },
+    });
   });
   for (const file of isolatedFiles) {
     steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
@@ -361,14 +381,21 @@ export interface UnitLaneOptions {
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/** Why a step failed, and whether it ran past its time limit and was killed. */
+interface StepOutcome {
+  detail?: string;
+  killedAtLimit: boolean;
+}
+
 /**
  * Run one step under a fresh sandbox HOME and, when given, a time limit.
  *
- * Returns undefined when the step passed, otherwise why it failed. Every way a
- * step can fail comes back as a reason, never as an exception: its own non-zero
- * exit or signal, its time limit, a sandbox HOME that could not be created, a
- * process that could not start. The caller therefore always reaches the later
- * steps (in keep-going mode) and the end-of-lane guards.
+ * Returns an outcome whose `detail` is undefined when the step passed, otherwise
+ * why it failed, and `killedAtLimit` true when the step ran past its time limit
+ * and was killed. Every way a step can fail comes back as a reason, never as an
+ * exception: its own non-zero exit or signal, its time limit, a sandbox HOME that
+ * could not be created, a process that could not start. The caller therefore
+ * always reaches the later steps (in keep-going mode) and the end-of-lane guards.
  */
 function runStep(
   step: UnitStep,
@@ -376,7 +403,7 @@ function runStep(
   timeout: { ms: number; reason: string } | undefined,
   createSandbox: () => SandboxHome,
   tripwireDir: string,
-): string | undefined {
+): StepOutcome {
   // A fresh sandbox HOME per step: even if one step's child wrote a config,
   // the next step cannot read it back, and the real home is never the target.
   // The bunfig preload covers `bun test` children too; this also covers the
@@ -386,7 +413,7 @@ function runStep(
     sandbox = createSandbox();
   } catch (error) {
     // Never run a step without its sandbox: its HOME would be the real one.
-    return `not started: its sandbox HOME could not be created (${errorMessage(error)})`;
+    return { detail: `not started: its sandbox HOME could not be created (${errorMessage(error)})`, killedAtLimit: false };
   }
   let result: ReturnType<typeof spawnSync>;
   try {
@@ -400,19 +427,21 @@ function runStep(
       killSignal: "SIGKILL",
     });
   } catch (error) {
-    return `not started (${errorMessage(error)})`;
+    return { detail: `not started (${errorMessage(error)})`, killedAtLimit: false };
   } finally {
     sandbox.cleanup();
   }
   if (timeout && (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
     console.error(
-      `${step.name}: ${timeout.reason}; the step was killed. A killed step cannot remove its own scratch directories, ` +
-        `so the temp-dir leak guard may name them too.`,
+      `${step.name}: ${timeout.reason}; step killed at the limit. A killed step cannot remove its own scratch directories, ` +
+        `so the temp-dir leak guard's result is not attributable.`,
     );
-    return `${timeout.reason}; killed`;
+    return { detail: `${timeout.reason}; step killed at the limit; leak-guard result not attributable`, killedAtLimit: true };
   }
-  if (result.error || result.status !== 0) return result.error?.message ?? result.signal ?? `exit ${result.status}`;
-  return undefined;
+  if (result.error || result.status !== 0) {
+    return { detail: result.error?.message ?? result.signal ?? `exit ${result.status}`, killedAtLimit: false };
+  }
+  return { killedAtLimit: false };
 }
 
 /**
@@ -530,7 +559,16 @@ export function runUnitSteps(
       });
     }
     const leaked = newFlairTempNames(tempBefore, flairTempNames(guardTempDir));
-    if (reportTempDirLeaks(leaked, guardTempDir)) {
+    if (leaked.length && killedAtLimit) {
+      // A step killed at its limit cannot remove its own scratch directories, so
+      // any flair-* entry left behind cannot be told apart from a genuine test
+      // leak. The killed step is already the one attributed failure (flair#2258),
+      // so the guard does not add a second, unattributable failure.
+      console.error(
+        `Temp-dir leak guard: ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} appeared, ` +
+          `but a step was killed at the limit, so the result is not attributable (flair#2258).`,
+      );
+    } else if (reportTempDirLeaks(leaked, guardTempDir)) {
       guardFailures.push({
         kind: "guard",
         name: "temp-dir leak guard",
@@ -540,6 +578,13 @@ export function runUnitSteps(
   };
 
   const stepFailures: UnitLaneFailure[] = [];
+  // A step that ran past its time limit and was killed (flair#2258): its scratch
+  // directories are the leak guard's, but cannot be attributed to it, so the
+  // guard is not reported as a second failure.
+  let killedAtLimit = false;
+  // Each root unit shard's own duration, reported together so drift toward the
+  // limit is visible before it fails runs.
+  const shardTimings: Array<{ index: number; of: number; ms: number }> = [];
   let completed = 0;
   for (const [index, step] of steps.entries()) {
     const remaining = deadline - Date.now();
@@ -564,12 +609,17 @@ export function runUnitSteps(
       : remaining < limit
         ? { ms: remaining, reason: `timed out: ${budgetRanOut}` }
         : { ms: limit, reason: `timed out after ${seconds(limit)}` };
-    const detail = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    const outcome = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    const detail = outcome.detail;
+    if (outcome.killedAtLimit) killedAtLimit = true;
     // Per-step timing, printed after every step the lane attempts, pass or
     // fail (flair#2224): the budget above is sized from measured step times, so
     // the lane reports them; otherwise the next resize can only be re-derived
-    // from CI timestamps that no longer exist.
-    console.log(`${step.name}: ${seconds(Date.now() - stepStartedMs)}`);
+    // from CI timestamps that no longer exist. Each root unit shard names its
+    // own duration here (flair#2258).
+    const elapsedMs = Date.now() - stepStartedMs;
+    console.log(`${step.name}: ${seconds(elapsedMs)}`);
+    if (step.shard) shardTimings.push({ ...step.shard, ms: elapsedMs });
     // The tripwire is checked after EVERY step, whatever the step's own
     // outcome, so a call that reached it is named with the step that made it.
     const tripwireDetail = inspectTripwire();
@@ -590,6 +640,11 @@ export function runUnitSteps(
   }
 
   runGuards();
+  if (shardTimings.length) {
+    console.log(
+      `Root unit shards: ${shardTimings.map(({ index, of, ms }) => `${index}/${of} ${seconds(ms)}`).join(", ")}.`,
+    );
+  }
   const summary = `${completed} steps, ${steps.reduce((n, step) => n + step.files.length, 0)} test files`;
   if (!keepGoing) {
     // Every step passed; only a guard failure can fail the lane now.
