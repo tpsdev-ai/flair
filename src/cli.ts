@@ -168,7 +168,7 @@ import {
   classifyPlist,
   planLaunchdRepair,
   mapRepairThrow,
-  decideAdoptStopWithWait,
+  decideAdoptStop,
   verifyAdoptServingWithWait,
   awaitLaunchdJobServing,
   judgeLaunchdJobServing,
@@ -482,6 +482,10 @@ import {
   bindCli as bindGrantCli,
   register as registerGrant,
 } from "./commands/grant.js";
+import {
+  bindIntegrityCli,
+  register as registerIntegrity,
+} from "./commands/integrity.js";
 import { resolveHome } from "./lib/home.js";
 import { FLAIR_AGENT_PERMISSION } from "./lib/flair-agent-role.js";
 
@@ -547,6 +551,7 @@ const FABRIC_OPS_PORT = 9925;
 // DEFAULT_ADMIN_USER + resolveAdminUser (flag > FLAIR_ADMIN_USER env > "admin")
 // live in src/lib/auth-resolve.ts — imported above (flair#1345).
 const STARTUP_TIMEOUT_MS = 60_000;
+const ADOPT_STOP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 
 // flair#670 — single-host default for the Harper ops API bind address.
@@ -3248,9 +3253,10 @@ function isProcessAlive(pid: number): boolean {
 async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try { process.kill(pid, 0); } catch { return; }
+    if (probePidLiveness(pid).kind === "gone") return;
     await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
   }
+  if (probePidLiveness(pid).kind === "gone") return;
   throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms`);
 }
 
@@ -4750,6 +4756,15 @@ bindGrantCli({
 });
 registerGrant(program);
 
+// ─── flair integrity ──────────────────────────────────────────────────────────
+// Command group lives in src/commands/integrity.ts (flair#2213). Bind shared
+// helpers first so the extracted module never imports this file.
+bindIntegrityCli({
+  resolveOpsPort,
+  resolveAdminUser,
+});
+registerIntegrity(program);
+
 // ─── flair federation ────────────────────────────────────────────────────────
 // Command group lives in src/commands/federation.ts (flair#1620). Bind shared
 // helpers first so the extracted module never imports this file.
@@ -5137,18 +5152,38 @@ async function probeHealth(port: number): Promise<HealthResult> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(2000) });
     let body: unknown;
-    try {
-      body = await res.json();
-    } catch {
-      body = null;
-    }
+    try { body = await res.json(); } catch { body = null; }
     return classifyHealthProbe({ kind: "response", status: res.status, body });
   } catch (err: any) {
-    // Node's undici fetch reports ECONNREFUSED on `err.cause.code`; Bun reports
-    // `ConnectionRefused` on `err.code`. Both mean "nothing is listening".
     const code = err?.cause?.code ?? err?.code;
     return classifyHealthProbe({ kind: "network-error", code });
   }
+}
+
+async function probeHealthBeforeDeadline(port: number, deadline: number): Promise<HealthResult> {
+  const timeoutMs = Math.min(2000, deadline - Date.now());
+  if (timeoutMs <= 0) return { kind: "unreachable" };
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<HealthResult>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve({ kind: "unreachable" });
+    }, timeoutMs);
+  });
+  const observe = async (): Promise<HealthResult> => {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: controller.signal });
+      let body: unknown;
+      try { body = await res.json(); } catch { body = null; }
+      return classifyHealthProbe({ kind: "response", status: res.status, body });
+    } catch (err: any) {
+      const code = err?.cause?.code ?? err?.code;
+      return classifyHealthProbe({ kind: "network-error", code });
+    }
+  };
+  try { return await Promise.race([observe(), timeout]); }
+  finally { clearTimeout(timer!); }
 }
 
 /**
@@ -5243,8 +5278,11 @@ function inspectServingFlairPackage(pid: number): boolean | null {
 export async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
   const dataDirUnsafe = checkDataDirSafe(dataDir);
   const pidfile = readPidfile(dataDir);
-  const pidLiveness = pidfile.kind === "present" ? probePidLiveness(pidfile.pid) : null;
   let sidecar = readSidecar(dataDir);
+  const lastKnownPid = pidfile.kind === "absent" && sidecar.kind === "present" ? sidecar.pid : undefined;
+  const pidLiveness = pidfile.kind === "present" ? probePidLiveness(pidfile.pid)
+    : lastKnownPid !== undefined ? probePidLiveness(lastKnownPid)
+    : pidfile.kind === "absent" && sidecar.kind === "unreadable" ? { kind: "unknown" as const, reason: sidecar.reason } : null;
 
   // flair#2055: a sidecar that names a pid which is CONFIRMED gone is STALE, not
   // a disagreement with hdb.pid. After `flair stop` ended a directly started
@@ -5329,7 +5367,7 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
     sidecar,
     readStartTime: readProcessStartTimeMs,
   });
-  return { dataDirUnsafe, pidfile, pidLiveness, identity, health };
+  return { dataDirUnsafe, pidfile, lastKnownPid, pidLiveness, identity, health };
 }
 
 /**
@@ -5682,7 +5720,7 @@ function resolveInstanceServingPid(
   let listeningPids: number[] = [];
   try {
     listeningPids = deps.findListeningPids?.(port)
-      ?? listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+      ?? listeningPidsOnPort(port, () => execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], { encoding: "utf-8", timeout: 2_000, killSignal: "SIGKILL" }));
   } catch { /* lsof unavailable — the PID file may still answer */ }
   // flair#2056: the `hdb.pid` pid is used as PID-file evidence only when it is
   // alive, its command line passes isHarperProcessCommandLine (node or bun
@@ -7113,10 +7151,7 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
  * TWO PHASES (flair#2040). The rule for this handoff: the running instance
  * is not stopped, and no launchd job is unloaded, until every check that can
  * be made about the replacement from THIS session has passed; an UNKNOWN
- * answer is a failed check, never a pass. Every failure after that point is
- * followed by an attempt to bring back what was running, and the result
- * reports the state the instance was left in — including when that state
- * could not be established.
+ * answer is a failed check, never a pass.
  *
  *   1. PREPARE (prepareLaunchdRepair) — reads and validation; the running
  *      instance and launchd are untouched:
@@ -7146,14 +7181,7 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
  *      its port does not answer, and verify STRICTLY: Flair's /Health answers
  *      ok and launchd's pid is the IDENTIFIED serving pid
  *      (judgeLaunchdJobServing), and on adopt the serving pid
- *      changed and the old one is dead (flair#1684/#1685). ANY failure here
- *      goes through restoreAfterFailedRepair.
- *
- * The preflight cannot PROVE a bootstrap will succeed — only loading something
- * proves that — which is why phase 2 restores rather than assumes.
- *
- * Never reports success on a direct start or an unattributed process. Every
- * throw becomes a named result, never a crash mid-report.
+ *      changed and the old one is dead (flair#1684/#1685).
  */
 async function repairLaunchdManagement(dataDir: string, port: number): Promise<LaunchdRepairResult> {
   const { plan, plistPath, isLegacy, config } = planLaunchdRepairFor(dataDir, port);
@@ -7475,7 +7503,6 @@ interface RepairProgress {
   loaded: boolean;
 }
 
-/** Phase 2: the bounce, with restore on any failure. */
 async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRepairResult> {
   const done: RepairProgress = { unloadedPrior: false, stopped: false, wrotePlist: false, removedLegacy: false, wroteConfig: false, loaded: false };
   try {
@@ -7495,9 +7522,14 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     //    job does not collide on the port. The captured pid is the evidence the
     //    verify uses to prove the serving pid CHANGED.
     if (p.arm === "adopt") {
-      done.stopped = true;
       const stop = await stopDirectProcessForAdopt(p.port, p.dataDir);
-      if (stop) throw new Error(stop.kind === "failed" || stop.kind === "refused" ? stop.detail : "the direct process could not be stopped");
+      if (stop) {
+        if (done.unloadedPrior && (stop.kind === "failed" || stop.kind === "refused")) {
+          stop.detail += " Previously loaded launchd jobs were unloaded.";
+        }
+        return stop;
+      }
+      done.stopped = true;
     }
     // 3. Write the validated plist (pass-file mode, no secret: 0644).
     done.wrotePlist = true;
@@ -7701,28 +7733,85 @@ async function restoreAfterFailedRepair(
 async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise<LaunchdRepairResult | null> {
   const evidence = await gatherDaemonEvidence(port, dataDir);
   const state = classifyDaemonState(evidence, { port, dataDir });
-  // SIGTERM + wait for exit for a verified live pid (RUNNING or WEDGED — a
-  // wedged daemon is recovery, not a recycled-pid gamble).
-  if (state.state === "RUNNING" || state.state === "WEDGED") {
-    try { process.kill(state.pid, "SIGTERM"); } catch { /* already gone */ }
-    try { await waitForProcessExit(state.pid, STARTUP_TIMEOUT_MS); } catch { /* best-effort — the port check below surfaces the real problem */ }
-  }
-  // flair#1827: poll the post-stop health until the port is provably free — a
-  // single observation that caught the listener mid-release flaked with "port
-  // not confirmed free". decideAdoptStop is UNCHANGED; it decides on the final
-  // observation, and a timeout names the wait and the last probe.
-  const decision = await decideAdoptStopWithWait(state, {
-    observe: () => probeHealth(port),
-    deadlineMs: STARTUP_TIMEOUT_MS,
+  const stopDeadline = Date.now() + ADOPT_STOP_TIMEOUT_MS;
+  const timeoutResult = (stage: string): LaunchdRepairResult => ({
+    kind: "failed",
+    detail: `Timed out after ${ADOPT_STOP_TIMEOUT_MS}ms ${stage} for ${dataDir}. No replacement launchd job was loaded.`,
+    remedy: [`Inspect ${dataDir}/log/hdb.log; run flair doctor --fix after resolving the stop failure`],
   });
-  if (decision.decision !== "proceed") return decision.decision;
-  // Belt-and-suspenders: lsof confirms no TCP listener remains before the
-  // caller loads the plist. probeHealth "refused" (ECONNREFUSED) already means
-  // nothing is listening, but a port that is BOUND yet refuses connections
-  // (backlog-full, or a non-HTTP listener) would still EADDRINUSE on load —
-  // this catches that rare case the HTTP probe cannot see.
-  const { execSync } = await import("node:child_process");
-  const listeners = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+  if (state.state === "RUNNING" || state.state === "WEDGED") {
+    let signalResult = "SIGTERM sent";
+    try { process.kill(state.pid, "SIGTERM"); }
+    catch (err: any) {
+      signalResult = err?.code === "ESRCH" ? "SIGTERM found no process (ESRCH)" : `SIGTERM failed (${err?.code ?? "unknown error"})`;
+    }
+    const identity = verifyIdentity({
+      pidfilePid: state.pid,
+      sidecar: evidence.identity.kind === "verified" ? readSidecar(dataDir) : { kind: "absent" },
+      readStartTime: (pid) => readProcessStartTimeMs(pid, Math.min(stopDeadline, Date.now() + 2_000)),
+    });
+    const identityObservedAt = Date.now();
+    while (Date.now() < stopDeadline && probePidLiveness(state.pid).kind !== "gone") {
+      const remaining = stopDeadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise((r) => setTimeout(r, Math.min(HEALTH_POLL_INTERVAL_MS, remaining)));
+    }
+    if (Date.now() >= stopDeadline) {
+      const liveness = probePidLiveness(state.pid);
+      const result = timeoutResult(`waiting for direct Harper process ${state.pid} to exit`);
+      const identityDetail = identityObservedAt < stopDeadline
+        ? `${identity.kind}, observed at ${new Date(identityObservedAt).toISOString()}`
+        : "not observed before the deadline";
+      if (result.kind === "failed") result.detail += ` ${signalResult}; not observed to exit before the deadline (liveness: ${liveness.kind}; identity: ${identityDetail}).`;
+      return result;
+    }
+  }
+  const stateDecision = decideAdoptStop(state, { kind: "refused" });
+  if (stateDecision !== "proceed") return stateDecision;
+  let health: HealthResult = { kind: "unreachable" };
+  while (Date.now() < stopDeadline) {
+    health = await probeHealthBeforeDeadline(port, stopDeadline);
+    if (Date.now() >= stopDeadline) break;
+    if (health.kind === "refused") break;
+    const remaining = stopDeadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((r) => setTimeout(r, Math.min(250, remaining)));
+  }
+  if (Date.now() >= stopDeadline) return timeoutResult(`waiting for port ${port} to free (last health probe: ${health.kind})`);
+  const decision = decideAdoptStop(state, health);
+  if (decision !== "proceed") return decision;
+  const listenerTimeout = Math.min(2_000, stopDeadline - Date.now());
+  if (listenerTimeout <= 0) return timeoutResult(`checking the final listener on port ${port}`);
+  let output: string;
+  let noMatch = false;
+  try {
+    output = execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], {
+      encoding: "utf-8", timeout: listenerTimeout, killSignal: "SIGKILL",
+    });
+  } catch (err: any) {
+    if (err?.status === 1 && !err?.error && !err?.code && !err?.signal &&
+        typeof err?.stdout === "string" && err.stdout.trim() === "" &&
+        typeof err?.stderr === "string" && err.stderr.trim() === "") {
+      output = "";
+      noMatch = true;
+    } else {
+      return {
+        kind: "failed",
+        detail: `Final listener probe failed for port ${port} (${err?.code ?? err?.signal ?? err?.status ?? "unknown error"}). No replacement launchd job was loaded.`,
+        remedy: ["Check lsof; run flair doctor --fix after resolving the probe failure"],
+      };
+    }
+  }
+  if (Date.now() >= stopDeadline) return timeoutResult(`checking the final listener on port ${port}`);
+  if (noMatch) return null;
+  if (typeof output !== "string" || output.trim() === "") {
+    return { kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] };
+  }
+  const lines = output.trim().split("\n");
+  if (lines.some((line) => !/^[1-9][0-9]*$/.test(line.trim()) || !Number.isSafeInteger(Number(line.trim())))) {
+    return { kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] };
+  }
+  const listeners = lines.map(Number);
   if (listeners.length > 0) {
     return {
       kind: "failed",
@@ -8367,6 +8456,7 @@ bindMemoryCli({
   addSharedCredentialOptions,
   addSharedIdentityOption,
   resolveOpsPort,
+  resolveHttpPort,
   parseEntitiesOptionOrExit,
   ENTITIES_OPTION_DESCRIPTION,
 });

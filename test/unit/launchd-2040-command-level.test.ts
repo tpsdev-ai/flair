@@ -5,13 +5,9 @@
 // session: `launchctl print gui/<uid>` → 125), leaving Flair down; and `flair
 // init` printed a check mark for a job it never loaded.
 //
-// The rule these tests pin: no command stops, unloads or replaces a running
-// instance before it has checked everything it can about the replacement from
-// this session, and every failure after a stop brings back what was running and
-// says what state it left. Each case drives the REAL executor — doctor's
+// Each case drives the REAL executor — doctor's
 // `repairLaunchdManagement`, init's `registerInitLaunchdService`, and the
-// `flair start` command itself — not a helper, so removing a gate from the
-// executor turns a test red (see the mutation table in the PR).
+// `flair start` command itself.
 //
 // SAFETY — this host may run a real Flair under launchd:
 //
@@ -20,7 +16,7 @@
 //     real launchd. The shim's bootstrap "starts the job" by spawning the stub
 //     below; its bootout "stops the job" by signalling the pid IT recorded.
 //   - Harper is a stub: `node_modules/harper/dist/bin/harper.js` inside a copied
-//     package tree (`.flair2040-probe-*` in the repo, removed after each test),
+//     package tree under the temporary directory, removed after each test,
 //     so every start path — launchd's, the direct fallback, the restore — spawns
 //     the stub, never a database. The stub answers Flair's /Health on 127.0.0.1,
 //     writes hdb.pid, opens `<dataDir>/operations-server`, and logs SIGTERM.
@@ -38,7 +34,7 @@
 // "darwin"`. Linux CI reports these as skipped (flair#1012); the darwin
 // unit lane executes them.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -90,7 +86,7 @@ if (startDelayMs > 0) setTimeout(serve, startDelayMs); else serve();
 process.on("SIGTERM", () => {
   appendFileSync(join(root, "signals.log"), "SIGTERM " + process.pid + "\\n");
   try { if (readFileSync(join(root, "hdb.pid"), "utf-8").trim() === String(process.pid)) rmSync(join(root, "hdb.pid")); } catch {}
-  process.exit(0);
+  if (!process.env.STUB_HOLD_ON_SIGTERM) process.exit(0);
 });
 `;
 
@@ -188,6 +184,7 @@ interface Fixture {
 }
 
 let fx: Fixture;
+let fixtureReady = false;
 const cleanupDirs: string[] = [];
 
 async function freePort(): Promise<number> {
@@ -223,7 +220,7 @@ function setupFixture(port: number): Fixture {
   for (const d of ["loaded", "pid", "bootstrap-fail", "bootout-fail", "kickstart-fail", "bootstrap-no-spawn", "print-fail"]) mkdirSync(join(state, d), { recursive: true });
 
   // A package tree whose Harper is the stub (see the file header).
-  const probe = mkdtempSync(join(repoRoot, ".flair2040-probe-"));
+  const probe = mkdtempSync(join(tmpdir(), "fl2040p-"));
   cleanupDirs.push(probe);
   cpSync(join(repoRoot, "src"), join(probe, "src"), { recursive: true });
   cpSync(join(repoRoot, "templates"), join(probe, "templates"), { recursive: true });
@@ -231,6 +228,11 @@ function setupFixture(port: number): Fixture {
   const stubHarper = join(probe, "node_modules", "harper", "dist", "bin", "harper.js");
   mkdirSync(join(probe, "node_modules", "harper", "dist", "bin"), { recursive: true });
   writeFileSync(stubHarper, STUB_HARPER);
+  for (const entry of readdirSync(join(repoRoot, "node_modules"))) {
+    if (entry !== "harper") symlinkSync(join(repoRoot, "node_modules", entry), join(probe, "node_modules", entry));
+  }
+  symlinkSync(join(repoRoot, "packages"), join(probe, "packages"));
+  cpSync(join(repoRoot, "package.json"), join(probe, "package.json"));
   writeFileSync(
     join(probe, "drive.ts"),
     [
@@ -332,12 +334,12 @@ function childEnv(): Record<string, string> {
 }
 
 /** The instance serving before the command runs: a stub started DIRECTLY (not by launchd). */
-async function startDirectStub(): Promise<number> {
+async function startDirectStub(envOverride: Record<string, string> = {}): Promise<number> {
   const proc = Bun.spawn([process.execPath, fx.stubHarper, "run", "."], {
     // cwd = a flair worktree + ROOTPATH, so the liveness machine can attribute
     // it (same arrangement as launchd-management-reporting.test.ts).
     cwd: repoRoot,
-    env: { ...childEnv(), ROOTPATH: fx.dataDir, HTTP_PORT: `127.0.0.1:${fx.port}` },
+    env: { ...childEnv(), ROOTPATH: fx.dataDir, HTTP_PORT: `127.0.0.1:${fx.port}`, ...envOverride },
     stdout: "ignore",
     stderr: "ignore",
   });
@@ -406,11 +408,13 @@ async function drive(
   what: "repair" | "init" | "startleg",
   input: unknown,
   envOverride: Record<string, string> = {},
+  timeoutMs = 100_000,
 ): Promise<{ result: any; stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn([process.execPath, join(fx.probe, "drive.ts"), what, JSON.stringify(input)], {
     cwd: fx.probe,
     env: { ...childEnv(), ...envOverride },
-    timeout: 100_000,
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -418,8 +422,8 @@ async function drive(
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
   const line = stdout.split("\n").find((l) => l.startsWith("RESULT "));
-  if (!line) throw new Error(`driver produced no RESULT.\nstdout:\n${stdout}\nstderr:\n${stderr}`);
-  return { result: JSON.parse(line.slice("RESULT ".length)), stdout, stderr, exitCode };
+  expect(line, `driver produced no RESULT.\nstdout:\n${stdout}\nstderr:\n${stderr}`).toBeDefined();
+  return { result: JSON.parse(line!.slice("RESULT ".length)), stdout, stderr, exitCode };
 }
 
 /**
@@ -532,20 +536,23 @@ async function explainOnFailure(
 }
 
 beforeEach(async () => {
+  fixtureReady = false;
   fx = setupFixture(await freePort());
+  fixtureReady = true;
 });
 
 afterEach(() => {
   // Only stubs this file started: every stub logs its own pid, and each is
   // checked to be running the stub script before it is signalled.
-  for (const pid of stubStarts()) {
-    const cmd = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf-8" }).stdout ?? "";
+  for (const pid of fixtureReady ? stubStarts() : []) {
+    const cmd = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf-8", timeout: 1_000, killSignal: "SIGKILL" }).stdout ?? "";
     if (cmd.includes(fx.stubHarper)) {
       try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
     }
   }
+  fixtureReady = false;
   for (const dir of cleanupDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+}, 30_000);
 
 // ─── doctor --fix: repairLaunchdManagement ─────────────────────────────────
 
@@ -622,6 +629,28 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
       expect(mutatingCalls()).toEqual([]);
     },
     60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "SIGTERM removes the pidfile but leaves the direct process serving: repair reports the exit wait (#2205)",
+    async () => {
+      const plistBytes = passFilePlist(fx.label);
+      writeFileSync(fx.plistPath, plistBytes);
+      const pid = await startDirectStub({ STUB_HOLD_ON_SIGTERM: "1" });
+      const run = await drive("repair", { dataDir: fx.dataDir, port: fx.port }, {}, 90_000);
+      expect(run.result.kind).toBe("failed");
+      expect(run.result.detail).toContain(`waiting for direct Harper process ${pid}`);
+      expect(run.result.detail).toContain("not observed to exit before the deadline");
+      expect(run.result.remedy.join(" ")).toContain("run flair doctor --fix after resolving the stop failure");
+      expect(signals()).toBe(`SIGTERM ${pid}\n`);
+      expect(hdbPid()).toBeNull();
+      expect(alive(pid)).toBe(true);
+      expect(await healthy()).toBe(true);
+      expect(stubStarts()).toEqual([pid]);
+      expect(mutatingCalls()).toEqual([]);
+      expect(readFileSync(fx.plistPath, "utf-8")).toBe(plistBytes);
+    },
+    100_000,
   );
 
   test.skipIf(!isDarwin)(
