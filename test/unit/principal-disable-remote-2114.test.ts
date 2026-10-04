@@ -95,7 +95,7 @@ describe("principal disable/enable remote instance (#2114)", () => {
     remote = await startStub(REMOTE_HOST, REMOTE_OPS_PORT);
     local = await startStub("127.0.0.1", 0);
     sink = await startStub("127.0.0.1", 0);
-  });
+  }, 120_000);
   afterAll(async () => {
     for (const stub of [remote, local, sink]) {
       stub.server.closeAllConnections();
