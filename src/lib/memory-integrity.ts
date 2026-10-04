@@ -133,7 +133,7 @@ export function deletionRecordsToPrune(checkpoint: IntegrityCheckpoint, deletion
     !checkpoint.instanceTokens[d.memoryId] || checkpoint.instanceTokens[d.memoryId] !== d.memoryInstanceToken).map(d => d.id);
 }
 
-/** UNKNOWN, with no checkpoint write. */
+/** UNKNOWN; `checkpointWritten` defaults to false. */
 export function unknownVerdict(reason: string, scannedAt: string): IntegrityVerdict {
   return {
     status: "unknown",

@@ -1,6 +1,6 @@
 /**
  * memory-integrity.test.ts — the out-of-store watcher's checkpoint and
- * comparison logic (flair#2213), pure and Harper-free.
+ * comparison logic (flair#2213), Harper-free checkpoint I/O and comparison tests.
  *
  * The live behaviour (a real ephemeral Harper, an ops-API delete beneath Flair,
  * a restart) is in test/integration/memory-integrity-watcher.test.ts.
@@ -203,7 +203,7 @@ describe("compareScan", () => {
     expect(v.unexplainedDecrease).toEqual({ permanent: 2 });
   });
 
-  test("a failed read is UNKNOWN with no checkpoint write", () => {
+  test("unknownVerdict defaults checkpointWritten to false", () => {
     const v = unknownVerdict("connection refused", "2026-10-02T01:00:00.000Z");
     expect(v.status).toBe("unknown");
     expect(v.checkpointWritten).toBe(false);
