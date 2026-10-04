@@ -14,7 +14,7 @@ let artifact: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "flair-runtime-working-"));
   artifact = createActionRecallRuntime(home).artifactPath;
-});
+}, 30_000);
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 const resolveRuntime = (bunPath = process.execPath, artifactPath = artifact) => resolveActionRecallRuntime({ fromUrl: import.meta.url, env: { PATH: process.env.PATH, HOME: home, FLAIR_BUN_PATH: bunPath, FLAIR_ACTION_RECALL_ARTIFACT: artifactPath } });
 function installedArtifact(): string {

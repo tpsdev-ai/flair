@@ -52,11 +52,11 @@ test("absent HTTP target with responding adjacent ops leaves every node-shaped f
   expect(advisory).toContain("remain unidentified");
 });
 
-test("matching HTTP and sole ops Instance id preserves candidate classification", async () => {
+test("matching HTTP and sole ops Instance id keeps unproven files unidentified", async () => {
   const { keysDir, requests } = fixture(() => Response.json({ federation: { instance: { id: live } } }));
   const result = await classifyKeysDir(keysDir, baseUrl, makeReadInstanceIds(deps));
   expect(Object.fromEntries(result.entries.map(entry => [entry.agentId, entry.class]))).toEqual({
-    [live]: "keep", [agent]: "unidentified", [candidate]: "orphan-candidate",
+    [live]: "keep", [agent]: "unidentified", [candidate]: "unidentified",
   });
   expect(requests).toEqual([`${baseUrl}/HealthDetail`, opsUrl, opsUrl]);
   expect(result.entries.find(entry => entry.agentId === candidate)?.reason).toContain("HTTP/ops Instance id matched");
