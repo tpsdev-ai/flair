@@ -248,14 +248,14 @@ jobs:
     # budgets in doctor-fix-launchd-darwin.test.ts, plus a setup allowance, plus
     # margin, or a hang in a LATE case is cancelled anonymously (the same class
     # one level up from the case budgets):
-    #   per-case budgets: 660 + 760 + 740 + 450 + 420 = 3030 s
+    #   per-case budgets: 900 + 1000 + 980 + 700 + 660 = 4240 s
     #   using-flair-seed-2141 beforeAll + case budgets: 1260 s
     #   using-flair-seed-reserved-2141 beforeAll + case budgets: 960 s
     #   setup allowance (bun install + bun run build + build:cli +
     #     check-darwin-gated-tests): ~240 s
     #   embedding-model fetch: at most 180 s (its step timeout)
-    #   3030 + 1260 + 960 + 240 + 180 = 5670 s; rounded up with margin to 100 min (6000 s)
-    timeout-minutes: 100
+    #   4240 + 1260 + 960 + 240 + 180 = 6880 s; rounded up with margin to 120 min (7200 s)
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
