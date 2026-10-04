@@ -154,7 +154,7 @@ describe("flair#1940 round 17 — a non-admin Memory read drops the caller's sel
     expect(req.url).toBe("/Memory/?offset=1&limit=2"); // assertion: collection select stripped, options kept
   });
 
-  it("leaves a non-GET request untouched", async () => {
+  it("leaves a POST request untouched", async () => {
     const mw = await loadMiddleware();
     const req = makeRequest("/Memory/x?select(id)", "POST");
     await mw(req, nextLayer);
@@ -170,6 +170,18 @@ describe("flair#1940 round 17 — a non-admin Memory read drops the caller's sel
       const body = await res.json();
       expect(body.error, given).toBe("ambiguous_memory_id");
     }
+  });
+
+  it("flair#2199: HEAD refuses an encoded-slash id before a declared suffix with no body", async () => {
+    const mw = await loadMiddleware();
+    const next = mock(nextLayer);
+    const req = makeRequest("/Memory/a%2Fb.content", "HEAD");
+    const res: Response = await mw(req, next);
+    expect(res.status).toBe(400);
+    expect(res.body).toBeNull();
+    expect(req.url).toBe("/Memory/a%2Fb.content");
+    expect(memoryGetCalls).toBe(0);
+    expect(next).not.toHaveBeenCalled();
   });
 
   it("flair#2199: still routes an encoded-slash id with no declared suffix, dropping the selection", async () => {

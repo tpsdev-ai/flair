@@ -797,14 +797,14 @@ server.http(async (request: any, nextLayer: any) => {
   // contract, applied in `Memory.get`/`Memory.search`). The by-id
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
-  if (!request.tpsAgentIsAdmin && method === "GET" && isMemoryReadPath(url.pathname)) {
+  if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(url.pathname)) {
     // flair#2199: an id segment carrying an encoded `/` before a declared
     // property suffix is ambiguous — the suffix could be part of the id or a
     // selector on a slash-containing id. Refuse it instead of rewriting the
     // path, so a non-admin read is never answered from a record other than the
     // id the path names.
     if (isAmbiguousEncodedSlashSelector(request.url)) {
-      return new Response(JSON.stringify({
+      return new Response(method === "HEAD" ? null : JSON.stringify({
         error: "ambiguous_memory_id",
         message: `a Memory request whose id segment contains an encoded '/' before a "${MEMORY_CONTENT_SELECTOR_SUFFIX}" (or other property) suffix is refused: the suffix cannot be told from part of the id`,
       }), { status: 400, headers: { "content-type": "application/json" } });

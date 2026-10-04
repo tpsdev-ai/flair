@@ -121,6 +121,12 @@ describe("flair#2199 — an encoded `/` before a declared suffix is refused, nev
     expect(body.id).toBeUndefined(); // assertion: no record was served
   }, 30_000);
 
+  it("a non-admin HEAD of `/Memory/<a>%2F<b>.content` returns 400 with no body", async () => {
+    const res = await authSend(harper, reader, "HEAD", `/Memory/${SLASH}%2Fbase.content`);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("");
+  }, 30_000);
+
   it("refuses the lowercase `%2f` spelling too", async () => {
     const res = await authSend(harper, reader, "GET", `/Memory/${SLASH}%2fbase.content`);
     const body = await res.json();
