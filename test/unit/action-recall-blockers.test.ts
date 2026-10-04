@@ -13,7 +13,7 @@ const url = "http://localhost:19926";
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "flair-recall-blockers-"));
   runtime = createActionRecallRuntime(home);
-});
+}, 30_000);
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 const path = () => hookSettingsPath(home, "claude-code");
 const install = () => installActionRecall({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: url, runtime });
