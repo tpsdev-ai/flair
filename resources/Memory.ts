@@ -54,6 +54,7 @@ import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
+import { recordMemoryDeletion } from "./memory-deletion-history.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
@@ -2032,16 +2033,33 @@ export class Memory extends (databases as any).flair.Memory {
     // owned here can use the synchronous hook after the shared write returns.
     // Capture ownership before the helper changes the context's transaction.
     const requestOwnsTransaction = isJoinableTransaction(ctx);
+    const deletionActor = auth.kind === "agent" ? auth.agentId : null;
+    const deletionSourceClass: "agent" | "admin" | "internal" =
+      auth.kind === "internal" ? "internal" : auth.isAdmin ? "admin" : "agent";
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
-      const d = await (databases as any).flair.Memory.delete(id, c);
       const deletedId = typeof id === "string" ? id : record?.id;
-      if (typeof deletedId === "string" && deletedId.length > 0) {
-        const pointerDenial = await deletePointerRow(deletedId, c);
-        if (pointerDenial) return pointerDenial;
+      if (typeof deletedId !== "string" || !deletedId) return false;
+      const stored = await (databases as any).flair.Memory.get(deletedId, c);
+      if (!stored) return false;
+      if (auth.kind === "agent" && !auth.isAdmin &&
+          isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+        return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
       }
+      const d = await (databases as any).flair.Memory.delete(deletedId, c);
+      if (d !== true) throw new Error("Memory row delete was not confirmed");
+      const pointerDenial = await deletePointerRow(deletedId, c);
+      if (pointerDenial) return pointerDenial;
+      await recordMemoryDeletion({
+        memoryId: deletedId,
+        memoryInstanceToken: stored.instanceToken ?? null,
+        durability: stored.durability ?? null,
+        actor: deletionActor,
+        sourceClass: deletionSourceClass,
+      }, c);
       return d;
     });
     if (deleteResult instanceof Response) return deleteResult;
+    if (deleteResult === false) return false;
     // Use the RESOLVED deleted id (a by-record delete carries only `id`, so the
     // stored row's id is the fallback). An owned transaction has committed;
     // a request-owned write waits for the committed change feed instead.
