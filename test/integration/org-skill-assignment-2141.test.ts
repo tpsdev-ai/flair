@@ -326,6 +326,33 @@ describe("flair#2141 S1 — bootstrap over REST resolves org assignments", () =>
     expect(dangling.map((d: any) => `${d.scope}:${d.decision}`)).toEqual(["org:unresolved"]);
   }, 60_000);
 
+  test("an assignment to s1 follows the next update to s2 and checks current visibility", async () => {
+    const name = `osa-later-ref-${sfx}`;
+    const root = `osa-lineage-root-${sfx}`;
+    const body = { id: root, agentId: OWNER, content: "v1", trigger: "when assigned", tags: ["skill"], durability: "persistent", visibility: "shared", metadata: JSON.stringify({ name }) };
+    expect((await call("basic", "PUT", `/Memory/${root}`, body)).status).toBeLessThan(300);
+    const first = await call("basic", "PUT", `/Memory/${root}`, { ...body, content: "v2" });
+    expect(first.status, first.text).toBeLessThan(300);
+    const s1 = JSON.parse(first.text).id;
+    expect(s1).not.toBe(root);
+    const assignment = await createViaOperator(name, s1);
+    try {
+      expect((await bootstrap(AGENT, {})).skills.filter((s: any) => s.name === name).map((s: any) => s.skillId)).toEqual([s1]);
+      const second = await call("basic", "PUT", `/Memory/${s1}`, { id: s1, content: "v3" });
+      expect(second.status, second.text).toBeLessThan(300);
+      const s2 = JSON.parse(second.text).id;
+      expect(s2).not.toBe(s1);
+      expect((await bootstrap(AGENT, {})).skills.filter((s: any) => s.name === name).map((s: any) => s.skillId)).toEqual([s2]);
+      const tightened = await call("basic", "PUT", `/Memory/${s2}`, { id: s2, visibility: "private" });
+      expect(tightened.status, tightened.text).toBeLessThan(300);
+      const denied = await bootstrap(AGENT, {});
+      expect(denied.skills.filter((s: any) => s.name === name)).toEqual([]);
+      expect(denied.skillDiagnostics.filter((d: any) => d.name === name).map((d: any) => d.decision)).toEqual(["unresolved"]);
+    } finally {
+      expect((await call("basic", "DELETE", `/OrgSkillAssignment/${assignment}`)).status).toBeLessThan(300);
+    }
+  }, 120_000);
+
   test("a higher-priority own assignment wins and the org assignment is superseded", async () => {
     const res = await bootstrap(PRI, {});
     expect(res.skills.filter((s: any) => s.name === ORG_NAME)).toEqual([

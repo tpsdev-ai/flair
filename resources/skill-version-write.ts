@@ -2,13 +2,14 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { recordVersion, type RecordVersionOutcome } from "./instruction-version-record.js";
+import { recordVersion, readHead, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
 import { SKILL_TAG, enforceSkillDurability, skillEmbedText } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { skillWriteSource } from "./skill-write-policy.js";
 import type { AgentAuthVerdict } from "./agent-auth.js";
 import { FORBIDDEN } from "./record-type-kit.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
+import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
 function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
@@ -25,6 +26,47 @@ export function skillVersionVisibility(row: any): string {
   const v = row?.visibility;
   if (v === PRIVATE_VISIBILITY || v === SHARED_VISIBILITY) return v;
   return defaultVisibilityForDurability(row?.durability);
+}
+
+export async function closedSkillPayloadReadable(
+  row: Record<string, any> | null | undefined,
+  readerId: string,
+  read: { headOf?: (subjectId: string) => Promise<Record<string, any> | null>; memoryGet?: (id: string) => Promise<any> } = {},
+): Promise<boolean> {
+  if (!row || typeof row !== "object" || !rowIsSkill(row)) return true;
+  if (isOpenLiveRow(row)) return true;
+  if (!skillRefReadable({ agentId: row.agentId, visibility: row.visibility }, readerId)) return false;
+  const subjectId = typeof row.skillSubjectId === "string" && row.skillSubjectId.length > 0
+    ? row.skillSubjectId
+    : String(row.id);
+  const headOf = read.headOf ?? ((sid: string) => readHead(SKILL_SUBJECT_TYPE, sid));
+  let versionHead: Record<string, any> | null;
+  try {
+    versionHead = await headOf(subjectId);
+  } catch {
+    return false;
+  }
+  if (!versionHead || versionHead.subjectType !== SKILL_SUBJECT_TYPE || versionHead.subjectId !== subjectId) return false;
+  if (!skillRefReadable(versionHead, versionHead.agentId)) return false;
+  if (versionHead.kind === "delete") {
+    return versionHead.memoryId === null && skillRefReadable(versionHead, readerId);
+  }
+  if (versionHead.kind !== "create" && versionHead.kind !== "update") return false;
+  if (typeof versionHead.memoryId !== "string" || versionHead.memoryId.length === 0) return false;
+  const memoryGet = read.memoryGet ?? ((id: string) => (databases as any).flair?.Memory?.get(id));
+  let live: any;
+  try {
+    live = await memoryGet(versionHead.memoryId);
+  } catch {
+    return false;
+  }
+  if (!live || live.id !== versionHead.memoryId || live.skillSubjectId !== subjectId) return false;
+  if (live.agentId !== versionHead.agentId || !rowIsSkill(live) || live.archived === true) return false;
+  for (const end of [live.validTo, live.expiresAt]) {
+    if (end == null) continue;
+    if (typeof end !== "string" || !(Date.parse(end) > Date.now())) return false;
+  }
+  return skillRefReadable({ agentId: live.agentId, visibility: live.visibility }, readerId);
 }
 
 /**
@@ -66,6 +108,7 @@ function okResponse(): Response {
 function isOpenLiveRow(row: Record<string, any> | null | undefined): boolean {
   if (!row || typeof row !== "object") return false;
   if (row.archived === true) return false;
+  if (row.expiresAt != null && (typeof row.expiresAt !== "string" || !(Date.parse(row.expiresAt) > Date.now()))) return false;
   if (typeof row.validTo === "string" && row.validTo.length > 0) return false;
   return true;
 }
@@ -266,6 +309,7 @@ export function captureCreatedFlag(ctx: any): () => void {
 
 async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promise<RecordVersionOutcome> {
   let plan: SkillWritePlan | null = null;
+  let owner = "";
   return recordVersion(
     args.ctx,
     {
@@ -277,6 +321,7 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
         if (built instanceof Response) return built;
         plan = built;
         const target = built.kind === "delete" ? built.predecessor : built.successor;
+        owner = String(target.agentId);
         return {
           subjectType: "skill" as const,
           subjectId: args.subjectId,
@@ -295,13 +340,17 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       if (plan === null) return okResponse();
       const writePlan = plan!;
       if (writePlan.kind === "delete") {
+        maybeThrowSkillWriteFault("close", owner);
         await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
       } else {
+        maybeThrowSkillWriteFault("successor", owner);
         await args.hooks.createSuccessor!(writePlan.successor, shared);
         if (writePlan.predecessor) {
+          maybeThrowSkillWriteFault("close", owner);
           await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
         }
       }
+      maybeThrowSkillWriteFault("pointer", owner);
       const pointerDenial = await args.hooks.pointer?.(shared);
       if (pointerDenial) return pointerDenial;
       return okResponse();
