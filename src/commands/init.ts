@@ -666,6 +666,7 @@ program
     let alreadyRunning = false;
     let ownChild: ReturnType<typeof trackInitChild> | undefined;
     const freeBeforeSpawn = new Set<number>();
+    const NO_LISTENER_FOUND = "no listener found";
     const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
       const installedAttributed = harperConfigPath(dataDir) !== null &&
         listener.pids.length === 1 &&
@@ -674,8 +675,12 @@ program
         cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0];
       const attributed = ownChild ? ownChild.attributes(listener, dataDir, freeBeforeSpawn) : installedAttributed;
       if (attributed) return;
-      console.error(`Refusing init: port ${listener.port} ${answered}; its listener is not attributed to this data directory (${dataDir}).`);
-      console.error(foreignOccupiedListenerDetail(listener, dataDir));
+      if (answered === NO_LISTENER_FOUND) {
+        console.error(`Refusing init: init's child was not attributed to this data directory's instance (${dataDir}); no listener was found on port ${listener.port}.`);
+      } else {
+        console.error(`Refusing init: port ${listener.port} ${answered}; it was not attributed to this data directory's instance (${dataDir}).`);
+        console.error(foreignOccupiedListenerDetail(listener, dataDir));
+      }
       console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
       process.exit(1);
     };
@@ -690,8 +695,8 @@ program
       }
       if (state === "listening") listener = readOccupiedListener(port);
       if (state === "unknown") refuseUnknownListener(listener);
-      if (ownChild && state === "free") refuseUnattributedListener({ ...listener, pids: [], dataDirs: [] }, "has no responding listener");
-      refuseUnattributedListener(listener, "is awaiting an authenticated request");
+      if (ownChild && state === "free") refuseUnattributedListener({ ...listener, pids: [], dataDirs: [] }, NO_LISTENER_FOUND);
+      refuseUnattributedListener(listener, "has a listener");
     };
     const refuseUnknownListener = (listener: OccupiedHarperListener): void => {
       console.error(`Refusing init: could not read the listener on port ${listener.port} (the listener probes were inconclusive) — an unreadable probe is unknown, not a free port.`);

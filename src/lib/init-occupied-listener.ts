@@ -107,7 +107,7 @@ export function stableAnsweredHolder(
   };
 }
 
-const UNATTRIBUTED = "a Harper instance not attributed to this data directory";
+const UNATTRIBUTED = "a process not attributed to this data directory's instance";
 
 /**
  * Name the listener for an operator. A pid is included only when exactly one

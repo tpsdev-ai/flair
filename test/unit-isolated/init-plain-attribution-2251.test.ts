@@ -18,7 +18,7 @@ test("injected matching PID and PID file pass both port gates", () => {
   expect(firstAuth).toBeGreaterThan(opsProbe);
 }, 30_000);
 
-test("injected launchd PID and PID file pass the HTTP gate with an unused operations port", () => {
+test("simulated launchd-style injected PID and PID file pass the HTTP gate with an unused operations port", () => {
   const { result, events, actions } = runPlain("own-launchd");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -28,7 +28,7 @@ test("injected launchd PID and PID file pass the HTTP gate with an unused operat
   expect(events.some(e => e.kind === "auth" && e.url?.includes(`:${OPS_PORT}/`))).toBe(false);
 }, 30_000);
 
-test("a listener differing from the own launchd PID refuses before credentials", () => {
+test("a simulated listener whose injected PID differs from the PID file refuses before credentials", () => {
   const { result, events, actions } = runPlain("foreign-launchd");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(1);
@@ -43,7 +43,7 @@ test("a listener differing from the own launchd PID refuses before credentials",
   expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
 
-test("injected free ports enter the install and run branches", () => {
+test("injected free ports enter the simulated install and run branches", () => {
   const { result, events, actions } = runPlain("free");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -67,7 +67,7 @@ test("a failed lsof probe and connect timeout remain unknown: init refuses and s
   expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
 
-test("missing lsof with ECONNREFUSED on both ports installs and starts before sending credentials", () => {
+test("simulated missing lsof and simulated ECONNREFUSED on both ports reach the simulated install and run before credentials", () => {
   const { result, events, actions } = runPlain("missing-free");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -81,7 +81,7 @@ test("missing lsof with ECONNREFUSED on both ports installs and starts before se
 }, 30_000);
 
 for (const scenario of ["missing-listener", "missing-error"] as const) {
-  test(`missing lsof with ${scenario} refuses before credentials or start`, () => {
+  test(`simulated missing lsof with ${scenario} refuses before credentials or start`, () => {
     const { result, events, actions } = runPlain(scenario);
     expect(result.error).toBeUndefined();
     expect(result.status, result.stdout + result.stderr).toBe(1);
@@ -96,7 +96,7 @@ for (const scenario of ["missing-listener", "missing-error"] as const) {
 
 
 for (const scenario of ["missing-listener", "unknown"] as const) {
-  test(`missing lsof with operations port ${scenario} refuses before credentials`, () => {
+  test(`simulated missing lsof with operations port ${scenario} refuses before credentials`, () => {
     const { result, events, actions } = runPlain(scenario, OPS_PORT);
     expect(result.error).toBeUndefined();
     expect(result.status, result.stdout + result.stderr).toBe(1);
@@ -106,7 +106,7 @@ for (const scenario of ["missing-listener", "unknown"] as const) {
   }, 30_000);
 }
 
-test("missing lsof with real refused TCP connections still initializes", () => {
+test("simulated missing lsof with real refused TCP connections reaches the simulated install and run", () => {
   const { result, actions } = runPlain("missing-real-free");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -114,7 +114,7 @@ test("missing lsof with real refused TCP connections still initializes", () => {
 }, 30_000);
 
 for (const scenario of ["spawned", "child-dead", "other-child", "post-unknown", "root-mismatch", "root-missing", "owner-unknown", "proc-mismatch"] as const) {
-  test(`post-start attribution with missing lsof: ${scenario}`, () => {
+  test(`post-start attribution with simulated missing lsof:${scenario}`, () => {
     const { result, events, actions } = runPlain(scenario);
     expect(result.error).toBeUndefined();
     expect(actions).toEqual(["install", "run"]);
@@ -124,7 +124,7 @@ for (const scenario of ["spawned", "child-dead", "other-child", "post-unknown", 
   }, 30_000);
 }
 
-test("a listener appearing during install refuses before spawn or credentials", () => {
+test("a simulated listener reported after the simulated install refuses before spawn or credentials", () => {
   const { result, events, actions } = runPlain("install-race");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(1);
@@ -133,7 +133,7 @@ test("a listener appearing during install refuses before spawn or credentials", 
   expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
 
-test("init waits for the child listener before sending credentials", () => {
+test("init polls simulated TCP readiness of the child before sending credentials", () => {
   const { result, events } = runPlain("child-starting");
   expect(result.status, result.stdout + result.stderr).toBe(0);
   const firstAuth = events.findIndex(e => e.kind === "auth");
@@ -141,7 +141,7 @@ test("init waits for the child listener before sending credentials", () => {
 }, 30_000);
 
 for (const scenario of ["lsof-child", "lsof-empty", "lsof-unknown"] as const) {
-  test(`macOS child attribution: ${scenario}`, () => {
+  test(`simulated macOS-branch child attribution:${scenario}`, () => {
     const { result, events } = runPlain(scenario);
     expect(result.status, result.stdout + result.stderr).toBe(scenario === "lsof-child" ? 0 : 1);
     expect(events.some(e => e.kind === "auth")).toBe(scenario === "lsof-child");

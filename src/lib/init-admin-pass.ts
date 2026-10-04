@@ -236,7 +236,7 @@ export function initAdminPassRefusalMessage(
   if (reason === "foreign-instance") {
     const port = opts.httpPort ?? 19926;
     const head =
-      `A Harper instance is already answering on port ${port} and this data directory has no persisted admin user.`;
+      `A listener on port ${port} is not attributed to this data directory's instance and this data directory has no persisted admin user.`;
     if (opts.offerFlairStop === false) return head;
     return (
       `${head} Stop that process before initializing a new instance:\n  ${INIT_STOP_FOREIGN_COMMAND}`
