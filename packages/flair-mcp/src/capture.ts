@@ -178,9 +178,20 @@ function toolInputRecord(input: CaptureHookInput): Record<string, unknown> {
 }
 
 function provenanceFor(input: CaptureHookInput, hook: CaptureHookName, capturedAt: string, tool?: string): CaptureProvenance {
-  const sessionId = asNonEmptyString(input.session_id) ?? undefined;
-  const cwd = asNonEmptyString(input.cwd) ?? undefined;
-  return { hook, ...(tool ? { tool } : {}), ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), capturedAt };
+  const sessionId = asNonEmptyString(input.session_id);
+  const cwd = asNonEmptyString(input.cwd);
+  // Provenance strings are captured strings too: a credential-shaped session id
+  // or cwd is redacted and hard-bounded with the SAME discipline as the memory
+  // content, BEFORE it is returned — so it never reaches the spool record or the
+  // Flair row (flair#2068 round 2). A field the harness did not send stays
+  // absent, exactly as before.
+  return {
+    hook,
+    ...(tool ? { tool } : {}),
+    ...(sessionId ? { sessionId: cleanCaptureText(sessionId) } : {}),
+    ...(cwd ? { cwd: cleanCaptureText(cwd) } : {}),
+    capturedAt,
+  };
 }
 
 /**
@@ -354,7 +365,10 @@ export function buildCaptureMemoryRow(candidate: CaptureCandidate, agentId: stri
       dedupKey: candidate.dedupKey,
       capturedAt: candidate.provenance.capturedAt,
       ...(candidate.provenance.tool ? { tool: candidate.provenance.tool } : {}),
-      ...(candidate.provenance.sessionId ? { sessionId: candidate.provenance.sessionId } : {}),
+      // Redacted and bounded again here, so the row carries no credential-shaped
+      // session id even if a caller hands this builder a raw candidate
+      // (flair#2068 round 2).
+      ...(candidate.provenance.sessionId ? { sessionId: cleanCaptureText(candidate.provenance.sessionId) } : {}),
     },
     createdAt: now.toISOString(),
   };

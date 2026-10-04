@@ -189,4 +189,39 @@ describe("flair hook install --capture", () => {
     writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
     expect(captureHookStatus(home, "claude-code").state).toBe("stale");
   });
+
+  it("status names an event whose command differs, and reports not installed", () => {
+    install();
+    const config = settings();
+    config.hooks.PostToolUse[0].hooks[0].command = config.hooks.PostToolUse[0].hooks[0].command.replace("FLAIR_AGENT_ID=me", "FLAIR_AGENT_ID=other");
+    writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+    const observed = captureHookStatus(home, "claude-code");
+    expect(observed.installed).toBe(false);
+    expect(observed.state).toBe("stale");
+    expect(observed.problems.some((problem) => problem.includes("PostToolUse") && problem.includes("different"))).toBe(true);
+  });
+
+  it("status names a missing event", () => {
+    install();
+    const config = settings();
+    delete config.hooks.PostToolUseFailure;
+    writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+    const observed = captureHookStatus(home, "claude-code");
+    expect(observed.state).toBe("partial");
+    expect(observed.problems).toContain("PostToolUseFailure missing");
+  });
+
+  it("uninstall removes every matching capture entry for each event, including duplicates", () => {
+    install();
+    const config = settings();
+    config.hooks.PostToolUse.push(JSON.parse(JSON.stringify(config.hooks.PostToolUse[0])));
+    config.hooks.Stop[0].hooks.push({ type: "command", command: config.hooks.Stop[0].hooks[0].command });
+    writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+    const removed = uninstallCaptureHooks({ homeDir: home, harness: "claude-code" });
+    expect(removed.ok).toBe(true);
+    const after = settings();
+    expect(after.hooks?.PostToolUse ?? []).toEqual([]);
+    expect(after.hooks?.Stop ?? []).toEqual([]);
+    expect(after.hooks?.PostToolUseFailure ?? []).toEqual([]);
+  });
 });

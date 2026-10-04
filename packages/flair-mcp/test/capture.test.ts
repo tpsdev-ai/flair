@@ -198,6 +198,37 @@ describe("capture redaction, end to end (pending file, spool file, flushed row)"
       expect(text).not.toContain(SECRET);
     }
   });
+
+  test("a secret-shaped cwd and session_id are redacted in the spool record and the flushed row", async () => {
+    const payload = JSON.stringify({
+      hook_event_name: "Stop",
+      session_id: `sess-${SECRET}`,
+      cwd: `/work/${SECRET}/repo`,
+      last_assistant_message: "Decision: prefer host-a for embeddings.",
+    });
+    expect(runCapture(payload, { env: env(), dir }).reason).toBe("appended");
+    const spool = readFileSync(spoolPath(dir, "agent-a"), "utf-8");
+    expect(spool).not.toContain(SECRET);
+    expect(spool).toContain("[redacted]");
+    const provenance = (JSON.parse(spool) as { records: Array<{ provenance: { sessionId?: string; cwd?: string } }> }).records[0]!.provenance;
+    expect(provenance.sessionId).toContain("[redacted]");
+    expect(provenance.cwd).toContain("[redacted]");
+
+    const rows: any[] = [];
+    const outcome = await runCaptureFlush({ env: env(), dir, makeClient: () => recordingClient(rows) });
+    expect(outcome.flushed).toBe(1);
+    expect(rows[0].meta.sessionId).toContain("[redacted]");
+    expect(JSON.stringify(rows)).not.toContain(SECRET);
+  });
+
+  test("the row builder redacts a credential-shaped sessionId it is handed", () => {
+    const row = buildCaptureMemoryRow(
+      { kind: "decision", content: "x", dedupKey: "abc", provenance: { hook: "Stop", capturedAt: "2026-10-01T00:00:00.000Z", sessionId: `s1-${SECRET}` } },
+      "agent-a",
+    );
+    expect(row.meta.sessionId).toContain("[redacted]");
+    expect(row.meta.sessionId).not.toContain(SECRET);
+  });
 });
 
 describe("capture spool", () => {

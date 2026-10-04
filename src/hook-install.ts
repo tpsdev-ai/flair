@@ -1651,6 +1651,10 @@ export interface CaptureStatus {
   installed: boolean;
   state: "installed" | "absent" | "partial" | "stale";
   runtimeFailure?: string;
+  /** Events that are missing, or whose wired command or matcher is not the
+   *  expected capture hook (flair#2068 round 2). Empty only when all three
+   *  events are wired as expected. */
+  problems: string[];
 }
 
 function noCaptureActions(): Record<CaptureHookEvent, HookDeltaAction> {
@@ -1672,6 +1676,24 @@ function findCaptureEntry(config: any, event: CaptureHookEvent): { group: any; h
     }
   }
   return null;
+}
+
+/** The command the wired capture events agree on (the most common one; ties go
+ *  to the earliest event). Empty when none is present. */
+function expectedCaptureCommand(commands: ReadonlyArray<string | null>): string {
+  const counts = new Map<string, number>();
+  for (const command of commands) {
+    if (command !== null) counts.set(command, (counts.get(command) ?? 0) + 1);
+  }
+  let best = "";
+  let bestCount = 0;
+  for (const [command, count] of counts) {
+    if (count > bestCount) {
+      best = command;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 interface CaptureDelta {
@@ -1712,18 +1734,33 @@ export function computeCaptureHookInstall(config: any, runtime: ActionRecallRunt
   return { changed, newConfig, actions };
 }
 
-/** Pure removal of the capture hooks. */
+/** Pure removal of the capture hooks. Removes EVERY matching entry for each
+ *  event (a duplicate — a second install, or a hand-copied entry — is ours too),
+ *  then prunes any group / event array / `hooks` key left empty. */
 export function computeCaptureHookRemoval(config: any): CaptureDelta {
   const newConfig = deepClone(config ?? {});
   const actions = noCaptureActions();
   for (const event of CAPTURE_HOOK_EVENTS) {
-    const existing = findCaptureEntry(newConfig, event);
-    if (!existing) continue;
-    const groups = newConfig.hooks[event];
-    groups[existing.groupIndex].hooks.splice(existing.hookIndex, 1);
-    if (groups[existing.groupIndex].hooks.length === 0) groups.splice(existing.groupIndex, 1);
-    if (groups.length === 0) delete newConfig.hooks[event];
+    const groups = newConfig.hooks?.[event];
+    if (!Array.isArray(groups)) continue;
+    let removedAny = false;
+    const kept: any[] = [];
+    for (const group of groups) {
+      const isGroup = group && typeof group === "object" && Array.isArray(group.hooks);
+      if (isGroup) {
+        const before = group.hooks.length;
+        group.hooks = group.hooks.filter((hook: any) => !isFlairCaptureCommand(hook?.command));
+        if (group.hooks.length !== before) removedAny = true;
+      }
+      if (!isGroup || group.hooks.length > 0) kept.push(group);
+    }
+    if (!removedAny) continue;
     actions[event] = "remove";
+    if (kept.length > 0) newConfig.hooks[event] = kept;
+    else delete newConfig.hooks[event];
+  }
+  if (newConfig.hooks && typeof newConfig.hooks === "object" && Object.keys(newConfig.hooks).length === 0) {
+    delete newConfig.hooks;
   }
   return { changed: CAPTURE_HOOK_EVENTS.some((event) => actions[event] !== "noop"), newConfig, actions };
 }
@@ -1880,24 +1917,44 @@ export function uninstallCaptureHooks(opts: UninstallHookOptions): CaptureMutati
   return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
 }
 
-/** Read-only capture status — reports both entries and re-probes the runtime. */
+/** Read-only capture status — installed only when all three events carry the
+ *  expected capture command; names any event that is missing or different. */
 export function captureHookStatus(homeDir: string, harness: Harness): CaptureStatus {
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   const config = read.parsed ?? {};
   const entries = CAPTURE_HOOK_EVENTS.map((event) => findCaptureEntry(config, event));
-  const presentCount = entries.filter(Boolean).length;
-  if (presentCount === 0) return { path, harness, installed: false, state: "absent" };
-  if (presentCount < CAPTURE_HOOK_EVENTS.length) return { path, harness, installed: false, state: "partial" };
-  const first = entries[0]!;
-  const command = first.group.hooks[first.hookIndex]?.command;
-  const runtimeFailure = captureCommandFailure(command);
+  const commands = CAPTURE_HOOK_EVENTS.map((event, i) => {
+    const entry = entries[i];
+    if (!entry) return null;
+    const command = entry.group.hooks[entry.hookIndex]?.command;
+    return typeof command === "string" ? command : "";
+  });
+  const problems: string[] = [];
+  const presentCount = commands.filter((command) => command !== null).length;
+  if (presentCount === 0) return { path, harness, installed: false, state: "absent", problems };
+  // The expected command is the one the wired events agree on; an event whose
+  // command differs from it is named below (flair#2068 round 2).
+  const expected = expectedCaptureCommand(commands);
+  for (const [i, event] of CAPTURE_HOOK_EVENTS.entries()) {
+    if (commands[i] === null) problems.push(`${event} missing`);
+    else if (commands[i] !== expected) problems.push(`${event} carries a different command`);
+  }
+  if (presentCount < CAPTURE_HOOK_EVENTS.length) {
+    return { path, harness, installed: false, state: "partial", problems };
+  }
   const matcherOk = CAPTURE_HOOK_EVENTS.every((event, i) => {
     const want = CAPTURE_HOOK_MATCHERS[event];
-    return want === null || entries[i]!.group.matcher === want;
+    if (want === null) return true;
+    const matcher = entries[i]!.group.matcher;
+    if (matcher === want) return true;
+    problems.push(`${event} matcher is '${typeof matcher === "string" ? matcher : "(none)"}', expected '${want}'`);
+    return false;
   });
-  if (runtimeFailure || !matcherOk) {
-    return { path, harness, installed: false, state: "stale", ...(runtimeFailure ? { runtimeFailure } : {}) };
+  const runtimeFailure = captureCommandFailure(expected);
+  if (runtimeFailure) problems.push(runtimeFailure);
+  if (runtimeFailure || !matcherOk || problems.length > 0) {
+    return { path, harness, installed: false, state: "stale", ...(runtimeFailure ? { runtimeFailure } : {}), problems };
   }
-  return { path, harness, installed: true, state: "installed" };
+  return { path, harness, installed: true, state: "installed", problems };
 }
