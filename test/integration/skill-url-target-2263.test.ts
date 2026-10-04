@@ -1,8 +1,6 @@
 // ─── flair#2263 — a skill PUT whose id is only in the URL ───────────────────
 //
-// `PUT /Memory/<X>` with a skill body that omits `id` writes at X, exactly as
-// the stored-row lookup already reads. This suite drives real REST PUTs against
-// a real Harper.
+// Skill creates whose bodies omit `id` use the URL id. Updates retain the lineage and follow the existing successor or reserved-id rules; the locked stale check compares the addressed row.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
@@ -94,7 +92,7 @@ afterAll(async () => {
 });
 
 describe("flair#2263 — the URL-bound id is the skill write target", () => {
-  test("PUT /Memory/<X> with a skill body that has only the URL id lands at X, and an identical retry resolves that same skill", async () => {
+  test("PUT /Memory/<X> with a skill body that has only the URL id creates at X, and an identical retry writes a successor id with supersedes X and skillSubjectId X", async () => {
     const id = nextId("skill");
     const body = { agentId: A.id, content: "url-only skill", trigger: "when the url names the id", tags: ["skill"], durability: "persistent" };
 
@@ -119,7 +117,7 @@ describe("flair#2263 — the URL-bound id is the skill write target", () => {
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create", "update"]);
   }, 180_000);
 
-  test("POST /Memory/<X> with a skill body that has only the URL id lands at X, and an identical retry supersedes that same skill", async () => {
+  test("POST /Memory/<X> with a skill body that has only the URL id creates at X, and an identical retry writes a successor id with supersedes X and skillSubjectId X", async () => {
     const id = nextId("post-skill");
     const body = { agentId: A.id, content: "url-only post skill", trigger: "when the url names the id on post", tags: ["skill"], durability: "persistent" };
 
