@@ -63,6 +63,7 @@ import {
   harperPortValue,
   launchdLabel,
   launchdPlistPath,
+  LEGACY_LAUNCHD_LABEL,
   readHarperConfig,
   readSidecar,
   resolveHarperBin,
@@ -81,8 +82,13 @@ const PROMPT_RE =
   /Please enter a password|readline was closed|ERR_USE_AFTER_CLOSE|Please enter a destination for Harper|\[hidden\]/i;
 // flair#1807: the child's OWN deadline + PER-CASE budgets, recounted from each
 // case body against harper-lifecycle's REAL bounds (this host cannot run the
-// file — it is darwin-gated). Deadline = max observed ~30.6 s + margin, rounded
-// to 60 s (main's manual kill was 180 s; main's case budget was 240 s).
+// file — it is darwin-gated). The child deadline must EXCEED the CLI's OWN
+// bounded readiness waits, because those waits ARE the point — there is no
+// fixed sleep to shorten. `doctor --fix`'s adopt arm chains TWO waits of up to
+// STARTUP_TIMEOUT_MS (60 s) each (awaitLaunchdJobServing, then
+// verifyAdoptServingWithWait), so a valid run can take ~120 s. A 60 s deadline
+// killed a doctor mid-run and flaked (flair#2130); the deadline is that sum + a
+// boot margin, so 180 s. A genuine hang is still bounded.
 //
 // ROUND 3: one uniform 540 s constant did not match the cases, and a hang in a
 // LATE case hit the JOB timeout first (an anonymous cancellation). Each case's
@@ -91,32 +97,32 @@ const PROMPT_RE =
 //                          waitForHealth calls IN PARALLEL 60 s = 125 s
 //   stopHarper           = killProcess (SIGKILL 3 s) + waitForLocksFree 5 s = 8 s
 //   adminOp (ops fetch)  = 30 s    waitForHttp = its argument
-//   waitDead             = its argument    runDoctorFix/runInit = 60 s deadline
+//   waitDead             = its argument    runDoctorFix/runInit = 180 s deadline
 //   launchctl list = 5 s   launchctl unload + bootout = 10 s + 10 s = 20 s
 // Helper sums:
 //   populateDataDir     = startHarper 125 + 2 x adminOp 60 + stopHarper 8 = 193 s
-//   doctorFixToManaged  = runDoctorFix 60 + waitForHttp 60 + launchctl 5 = 125 s
-//   newSandbox          = populateDataDir 193 + doctorFixToManaged 125 = 318 s
+//   doctorFixToManaged  = runDoctorFix 180 + waitForHttp 60 + launchctl 5 = 245 s
+//   newSandbox          = populateDataDir 193 + doctorFixToManaged 245 = 438 s
 //   snapshotBeforeFix   = waitForHttp 30 + adminOp 30 = 60 s
 //   stopManagedHarper   = unload 20 + waitDead 20 + (list 5 + lsof 5) = 50 s
 //   directSpawnDetached = waitForHttp 60 + (list 5 + lsof 5) = 70 s
 //   assertNoRebootstrap = waitForHttp 30 + adminOp 30 = 60 s
 // Cases (sum -> budget):
-//   corrupt-plist   newSandbox 318 + snapshot 60 + stop 50 + doctorFix 125
-//                   + assertManaged 20 + noRebootstrap 60 = 633 -> 660 s
-//   adopt-detached  newSandbox 318 + snapshot 60 + 10 + stop 50 + directSpawn 70
-//                   + 20 + doctorFix 125 + assertManaged 20 + noRebootstrap 60
-//                   + 2 s = 735 -> 760 s
-//   adopt-no-pass   newSandbox 318 + snapshot 60 + 10 + stop 50 + directSpawn 70
-//                   + doctorFix 125 + assertManaged 20 + noRebootstrap 60 = 713 -> 740 s
-//   refuse-no-pass  newSandbox 318 + stop 50 + runDoctorFix 60 = 428 -> 450 s
-//   init-unchanged  newSandbox 318 + runInit 60 + assertManaged 20 = 398 -> 420 s
-const CHILD_DEADLINE_MS = 60_000;
-const CORRUPT_PLIST_CASE_BUDGET_MS = 660_000;
-const ADOPT_DETACHED_CASE_BUDGET_MS = 760_000;
-const ADOPT_NO_PASS_CASE_BUDGET_MS = 740_000;
-const REFUSE_NO_PASS_CASE_BUDGET_MS = 450_000;
-const INIT_UNCHANGED_CASE_BUDGET_MS = 420_000;
+//   corrupt-plist   newSandbox 438 + snapshot 60 + stop 50 + doctorFix 245
+//                   + assertManaged 20 + noRebootstrap 60 = 873 -> 900 s
+//   adopt-detached  newSandbox 438 + snapshot 60 + 10 + stop 50 + directSpawn 70
+//                   + 20 + doctorFix 245 + assertManaged 20 + noRebootstrap 60
+//                   + 2 s = 975 -> 1000 s
+//   adopt-no-pass   newSandbox 438 + snapshot 60 + 10 + stop 50 + directSpawn 70
+//                   + doctorFix 245 + assertManaged 20 + noRebootstrap 60 = 953 -> 980 s
+//   refuse-no-pass  newSandbox 438 + stop 50 + runDoctorFix 180 = 668 -> 700 s
+//   init-unchanged  newSandbox 438 + runInit 180 + assertManaged 20 = 638 -> 660 s
+const CHILD_DEADLINE_MS = 180_000;
+const CORRUPT_PLIST_CASE_BUDGET_MS = 900_000;
+const ADOPT_DETACHED_CASE_BUDGET_MS = 1_000_000;
+const ADOPT_NO_PASS_CASE_BUDGET_MS = 980_000;
+const REFUSE_NO_PASS_CASE_BUDGET_MS = 700_000;
+const INIT_UNCHANGED_CASE_BUDGET_MS = 660_000;
 
 /** Jobs this file loaded. Unloaded on afterEach and on process exit. */
 const LOADED_JOBS = new Set<{ label: string; plistPath: string }>();
@@ -614,7 +620,6 @@ async function populateDataDir(sb: Sandbox): Promise<void> {
 
 async function doctorFixToManaged(sb: Sandbox): Promise<{ stdout: string; stderr: string }> {
   const result = await runDoctorFix(sb.tmpHome, sb.httpPort);
-  trackJob(sb.label, sb.plistPath);
   await waitForHttp(sb.httpURL, 60_000);
   const after = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
   if (after.state !== "managed") {
@@ -634,6 +639,12 @@ async function newSandbox(): Promise<Sandbox> {
   mkdirSync(launchAgentsDir, { recursive: true });
   const label = launchdLabel(dataDir);
   const plistPath = launchdPlistPath(label, launchAgentsDir);
+  // Track this sandbox's jobs BEFORE any CLI run (flair#2130). A run that
+  // overruns its deadline mid-way can leave a job loaded with KeepAlive, and a
+  // job left by an earlier test would otherwise survive into the next one. The
+  // legacy label is a fixed shared name, so track its plist here too.
+  trackJob(label, plistPath);
+  trackJob(LEGACY_LAUNCHD_LABEL, launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir));
   const sb: Sandbox = {
     tmpHome,
     dataDir,
@@ -729,7 +740,7 @@ afterEach(async () => {
     if (sb) await teardown(sb);
   }
   lastCliRun = undefined;
-});
+}, 180_000);
 
 function assertNoPrompt(log: string, cliOut: string): void {
   expect(log, `StandardErrorPath contained a readline/prompt:\n${log}`).not.toMatch(PROMPT_RE);
