@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -14,10 +13,11 @@ export const SHARDS = 4;
 
 export function listUnitFiles(root = ROOT) {
   const found = [];
-  const unitDir = join(root, "test", "unit");
-  const testDir = join(root, "test");
-  if (existsSync(unitDir)) found.push(...testFiles(unitDir).map(file => relative(root, file)));
-  if (existsSync(testDir)) found.push(...testFiles(testDir, false).map(file => relative(root, file)));
+  for (const [dir, recursive] of [["test", false], ["test/unit", true]]) {
+    const files = testFiles(join(root, dir), recursive);
+    if (!files.length) throw new Error(`No unit test files found in ${dir}`);
+    found.push(...files.map(file => relative(root, file)));
+  }
   return found.sort();
 }
 

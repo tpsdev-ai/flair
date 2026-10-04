@@ -131,7 +131,7 @@ export function reportTempDirLeaks(leaked: readonly string[], dir: string = tmpd
   }
   const prefixes = [...counts.entries()].map(([prefix, n]) => `${prefix} (${n})`).join(", ");
   console.error(
-    `Temp-dir leak guard FAILED: the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${dir}. ` +
+    `Temp-dir leak guard FAILED: ${leaked.length} new flair-* entries observed in ${dir}. ` +
       `A unit test must remove the scratch directory it creates — use tempDir() from test/helpers/temp-dir.ts, which registers the removal in the same call (flair#1889). ` +
       `New prefixes: ${prefixes}`,
   );
@@ -175,7 +175,6 @@ export function unitPlan(root: string): UnitStep[] {
     return files;
   };
   const rootUnitFiles = listUnitFiles(root);
-  if (!rootUnitFiles.length) throw new Error("No unit test files found in test");
   const isolatedFiles = requiredFiles("test/unit-isolated");
   const steps: UnitStep[] = [{
     // flair#1683: the private descriptor package is a build-time source, not a
@@ -522,12 +521,12 @@ export function runUnitSteps(
     }
     for (const { step, names, killed } of tempEntries) {
       if (killed) {
-        console.error(`Temp-dir entries from ${step}: not attributable after the step was killed: ${names.join(", ")}.`);
+        console.error(`Temp-dir entries first observed after ${step} (killed): ${names.join(", ")}.`);
       } else if (reportTempDirLeaks(names, guardTempDir)) {
         guardFailures.push({
           kind: "guard",
           name: "temp-dir leak guard",
-          detail: `${step} left ${names.length} new flair-* entries in ${guardTempDir}: ${names.join(", ")} (flair#1889)`,
+          detail: `${names.length} new flair-* entries first observed after ${step} in ${guardTempDir}: ${names.join(", ")} (flair#1889)`,
         });
       }
     }

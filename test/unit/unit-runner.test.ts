@@ -118,6 +118,28 @@ describe("shared unit lane", () => {
     expect(() => unitPlan(dir)).toThrow("No unit test files found in test");
   });
 
+  const requiredRoots = [
+    "test", "test/unit", "test/unit-isolated",
+    ...["flair-tool-descriptors", "flair-mcp", "flair-client", "langgraph-flair", "n8n-nodes-flair", "openclaw-flair", "pi-flair", "flair-bench", "adk-flair-js", "cursor-wake-runner"].map(
+      pkg => `packages/${pkg}/${pkg === "adk-flair-js" ? "test/unit" : "test"}`,
+    ),
+  ];
+  for (const missingRoot of requiredRoots) {
+    for (const defect of ["missing", "empty"]) {
+      test(`${defect} required root ${missingRoot} fails the runner`, () => {
+        const dir = fixture();
+        for (const requiredRoot of requiredRoots) {
+          mkdirSync(join(dir, requiredRoot), { recursive: true });
+          writeFileSync(join(dir, requiredRoot, "sample.test.ts"), "");
+        }
+        expect(() => unitPlan(dir)).not.toThrow();
+        if (defect === "missing") rmSync(join(dir, missingRoot), { recursive: true });
+        else rmSync(join(dir, missingRoot, "sample.test.ts"));
+        expect(() => unitPlan(dir)).toThrow();
+      });
+    }
+  }
+
   test("runs steps in fresh processes", () => {
     const dir = fixture();
     writeFileSync(join(dir, "pids.js"), 'require("node:fs").appendFileSync("pids", process.pid + "\\n");');
@@ -359,7 +381,7 @@ describe("shared unit lane", () => {
       expect(errors).toContain(leakName);
       if (keepGoing) {
         expect(errors).toContain("ran 1 step, 0 failed");
-        expect(errors).toContain("Guard failures:\n  - temp-dir leak guard: succeeds but leaves a flair-* temp dir left 1 new flair-* entries");
+        expect(errors).toContain("Guard failures:\n  - temp-dir leak guard: 1 new flair-* entries first observed after succeeds but leaves a flair-* temp dir");
       }
     }
   });
@@ -380,7 +402,7 @@ describe("shared unit lane", () => {
       expect(errors).toContain("hangs and leaks (timed out after 1 s; step killed at the limit)");
       expect(errors).not.toContain("Temp-dir leak guard FAILED");
       expect(errors).not.toContain("Guard failures:\n  - temp-dir leak guard");
-      expect(errors).toContain(`Temp-dir entries from hangs and leaks: not attributable after the step was killed: ${leakName}.`);
+      expect(errors).toContain(`Temp-dir entries first observed after hangs and leaks (killed): ${leakName}.`);
       if (keepGoing) expect(errors).toContain("ran 1 step, 1 failed");
     }
   }, 30_000);
@@ -400,9 +422,9 @@ describe("shared unit lane", () => {
       ));
       expect(code).toBe(1);
       expect(errors).toContain("Temp-dir leak guard FAILED");
-      expect(errors).toContain(`ordinary leak left 1 new flair-* entries`);
+      expect(errors).toContain(`1 new flair-* entries first observed after ordinary leak`);
       expect(errors).toContain(ordinaryName);
-      expect(errors).toContain(`Temp-dir entries from killed leak: not attributable after the step was killed: ${killedName}.`);
+      expect(errors).toContain(`Temp-dir entries first observed after killed leak (killed): ${killedName}.`);
       expect(errors).not.toContain(`ordinary leak: not attributable`);
     }, 60_000);
   }
@@ -465,8 +487,6 @@ describe("shared unit lane", () => {
     // The whole-lane budget carries at least 1.5× headroom over the slowest
     // measured lane (flair#2224); each step's own limit still applies.
     expect(KEEP_GOING_LANE_BUDGET_MS).toBeGreaterThanOrEqual(1.5 * lane);
-    // One hung non-root step still leaves every later step room to run inside
-    // the budget.
     expect(lane + STEP_TIMEOUT_MS).toBeLessThanOrEqual(KEEP_GOING_LANE_BUDGET_MS);
     expect(ROOT_STEP_TIMEOUT_MS + CI_OUTSIDE_LANE_MS).toBeLessThanOrEqual(CI_JOB_LIMIT_MS);
     const limited = unitPlan(root).filter(step => step.timeoutMs !== undefined);

@@ -57,9 +57,35 @@ describe("unit-shards — discovery", () => {
     expect(result.stdout).toContain(`${expected.length}/${expected.length} files covered`);
   });
 
+  for (const dir of ["test", "test/unit"]) {
+    for (const defect of ["missing", "empty"]) {
+      test(`${defect} ${dir} fails discovery and the coverage gate`, () => {
+        const root = fixtureRoot();
+        if (dir === "test/unit") {
+          rmSync(join(root, dir), { recursive: true });
+          if (defect === "empty") mkdirSync(join(root, dir));
+        } else if (defect === "missing") {
+          rmSync(join(root, dir), { recursive: true });
+        } else {
+          for (const extension of ["js", "jsx", "ts", "tsx"]) {
+            rmSync(join(root, dir, `sample.test.${extension}`));
+          }
+        }
+        expect(() => listUnitFiles(root)).toThrow();
+        const result = spawnSync("node", [join(root, "scripts/ci/unit-shards.mjs"), "--verify"], {
+          cwd: root, encoding: "utf8", timeout: 20_000,
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(dir);
+        expect(result.stdout).not.toContain("files covered");
+      });
+    }
+  }
+
   test("matches the files the shared lane's shard steps run", () => {
     const steps = unitPlan(ROOT).filter(step => step.shard !== undefined);
-    const laneFiles = steps.flatMap(step => step.files.map(file => relative(ROOT, file))).sort();
+    for (const step of steps) expect(step.args).toEqual(["test", ...step.files]);
+    const laneFiles = steps.flatMap(step => step.args.slice(1).map(file => relative(ROOT, file))).sort();
     expect(laneFiles).toEqual(ALL);
   });
 });
