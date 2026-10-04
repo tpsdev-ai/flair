@@ -4657,6 +4657,7 @@ bindInitCli({
   seedAgentViaOpsApi,
   seedFederationInstanceViaOpsApi,
   readOccupiedListener,
+  resolveInstanceServingPid,
   shouldShowInlineSecretWarning,
   verifyAuditLog,
   verifySemanticSearch,

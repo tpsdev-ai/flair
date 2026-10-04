@@ -1,7 +1,7 @@
-import { existsSync, readdirSync } from "node:fs";
+import { chownSync, existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 // Sandbox HOME for every child step, and the guard that fails the lane if a
 // real client config changed anyway (flair#1853). Importing sandbox-home also
@@ -16,6 +16,15 @@ import {
   type ServiceManagerTripwire,
 } from "../test/helpers/fake-launchctl.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
+
+/** The short, canonical temp base darwin unit steps run under (flair#2137). */
+export const DARWIN_TEMP_BASE = "/private/tmp";
+
+export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined {
+  const override = env.FLAIR_UNIT_TEMP_BASE?.trim();
+  if (override) return override;
+  return platform === "darwin" ? DARWIN_TEMP_BASE : undefined;
+}
 
 export interface UnitStep {
   name: string;
@@ -168,6 +177,7 @@ export function stepEnvironment(
   tripwireDir: string,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...unitEnvironment(source), ...sandbox.env };
+  if (source.FLAIR_UNIT_TEMP_ROOT) env.FLAIR_UNIT_TEMP_ROOT = source.FLAIR_UNIT_TEMP_ROOT;
   env.PATH = `${tripwireDir}:${env.PATH ?? ""}`;
   return env;
 }
@@ -432,6 +442,25 @@ export function runUnitSteps(
   options: UnitLaneOptions = {},
 ): number {
   const { keepGoing = false, limits, createSandbox = createSandboxHome } = options;
+  const previousTmpdir = process.env.TMPDIR;
+  const previousTempRoot = process.env.FLAIR_UNIT_TEMP_ROOT;
+  const tempBase = unitTempBase(process.platform, process.env);
+  const callerTempRoot = realpathSync(tmpdir());
+  const reuseTempRoot = !process.env.FLAIR_UNIT_TEMP_BASE?.trim() && (
+    previousTempRoot === callerTempRoot ||
+    (process.platform === "darwin" && dirname(callerTempRoot) === DARWIN_TEMP_BASE && /^f[a-zA-Z0-9]{6}$/.test(basename(callerTempRoot)))
+  );
+  const ownsTempRoot = !reuseTempRoot && tempBase !== undefined;
+  const laneTempRoot = ownsTempRoot && tempBase !== undefined
+    ? realpathSync(mkdtempSync(join(tempBase, "f")))
+    : callerTempRoot;
+  if (ownsTempRoot && process.getuid && process.getgid) {
+    chownSync(laneTempRoot, process.getuid(), process.getgid());
+  }
+  // Steps inherit TMPDIR even where the caller left it unset, so the leak guard
+  // scans the root they write to.
+  process.env.TMPDIR = laneTempRoot;
+  process.env.FLAIR_UNIT_TEMP_ROOT = laneTempRoot;
   const laneBudgetMs = limits?.laneBudgetMs;
   const deadline = laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
   const budgetRanOut = `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
@@ -445,6 +474,11 @@ export function runUnitSteps(
   const ownsTripwire = options.tripwire === undefined;
   const finish = (code: number): number => {
     if (ownsTripwire) tripwire.cleanup();
+    if (previousTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpdir;
+    if (previousTempRoot === undefined) delete process.env.FLAIR_UNIT_TEMP_ROOT;
+    else process.env.FLAIR_UNIT_TEMP_ROOT = previousTempRoot;
+    if (ownsTempRoot) rmSync(laneTempRoot, { recursive: true, force: true });
     return code;
   };
   // Read the tripwire log after a step. A nonempty log is a step failure naming
@@ -474,7 +508,8 @@ export function runUnitSteps(
   // ever touching the real one (flair#1853 round 3).
   const before = snapshotClientConfigs(guardHome);
   // The temp-dir leak guard's `before` snapshot (flair#1889).
-  const tempBefore = flairTempNames();
+  const guardTempDir = laneTempRoot;
+  const tempBefore = flairTempNames(guardTempDir);
 
   // Both guards run ONCE, at the END (flair#2030). Collecting their failures in
   // the same list as step failures is what lets keep-going report them in one
@@ -494,12 +529,12 @@ export function runUnitSteps(
         detail: `a real client config changed during the lane: ${changed.join(", ")} (flair#1853)`,
       });
     }
-    const leaked = newFlairTempNames(tempBefore, flairTempNames());
-    if (reportTempDirLeaks(leaked)) {
+    const leaked = newFlairTempNames(tempBefore, flairTempNames(guardTempDir));
+    if (reportTempDirLeaks(leaked, guardTempDir)) {
       guardFailures.push({
         kind: "guard",
         name: "temp-dir leak guard",
-        detail: `the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${tmpdir()} (flair#1889)`,
+        detail: `the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${guardTempDir} (flair#1889)`,
       });
     }
   };

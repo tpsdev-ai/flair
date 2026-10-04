@@ -4,8 +4,7 @@
  * Linux reads `/proc/<pid>/environ` (NUL-separated, so a space in the path
  * stays part of the value). macOS `ps -E` output does not separate arguments
  * from the environment, so it cannot establish ROOTPATH. On macOS, and on
- * any failed read, the directory is unavailable. Init must not refuse
- * before auth from a directory it cannot read, and must not invent one.
+ * any failed read, the directory is unavailable.
  *
  * Daemon sidecar recovery keeps its own reader. This module is init's.
  */
