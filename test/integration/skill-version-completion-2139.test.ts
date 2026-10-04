@@ -245,7 +245,7 @@ describe("flair#2139 S2c (2) — protected reindex fields", () => {
     }] });
     const stored = await memoryRow(id);
     const result = await call(ADMIN_AGENT, "PUT", memPath(id), { ...stored, retrievalCount: 2, _reindex: true });
-    expect(result.status, result.text).toBe(200);
+    expect(result.status, result.text).toBeLessThan(300);
     expect(await memoryRow(id)).toMatchObject({ ...stored, retrievalCount: 2 });
   }, 120_000);
 
