@@ -696,7 +696,7 @@ This used to be aspirational — nobody had actually checked. `test/compat/downg
 now checks it for real, nightly, alongside the mixed-version federation suite (both run
 from `.github/workflows/federation-compat.yml`'s `bun test test/compat/`): it boots the
 current build, writes a memory and a presence row, stops it *without* wiping the data
-directory, then starts a pinned pre-5.3 release (`@tpsdev-ai/flair` 0.59.0) against that
+directory, then starts a pinned earlier Flair release that uses the previous storage engine (`@tpsdev-ai/flair` 0.59.0) against that
 exact same directory through its OWN CLI. The test requires the two Harper engines to
 differ, and confirms the older CLI's backwards-engine guard refuses the store *before*
 Harper is spawned, naming the engine change, and leaves the regular files in the data
