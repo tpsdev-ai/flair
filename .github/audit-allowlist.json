@@ -36,6 +36,22 @@
   },
   "entries": [
     {
+      "ghsa": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "severity": "high",
+      "class": "no-patch-published",
+      "sources": [
+        "bun",
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> micromatch -> braces; harper -> fast-glob -> micromatch -> braces; adk-flair-js -> @google/adk -> (@mikro-orm/core | @mikro-orm/reflection) -> globby -> fast-glob -> micromatch -> braces (bun workspace only)",
+      "reason": "Offline registry-cache inspection on 2026-10-03 found latest braces 3.0.3 and no version outside <=3.0.3; no safe version override exists in that snapshot. Harper's npm-shrinkwrap also pins braces 3.0.3. Runtime discovery reaches braces through fast-glob's pattern expansion (node_modules/.bun/fast-glob@3.3.3/node_modules/fast-glob/out/utils/pattern.js:137): Harper passes component config source/ignore patterns (node_modules/harper/dist/components/ComponentV1.js:225), loadEnv config patterns (node_modules/harper/dist/config/componentEnvPrepass.js:144,162), and configured/local project-directory paths (node_modules/harper/dist/components/operations.js:55,60,63). Flair's shipped patterns are fixed (.env, schemas/*.graphql, dist/resources/*.js; config.yaml:4,6,8). Request-time matching uses configured patterns, not the URL as a pattern (node_modules/harper/dist/server/static.js:79); isMatch and scan delegate to picomatch, not braces (node_modules/.bun/micromatch@4.0.8/node_modules/micromatch/index.js:128,408). No request-to-braces-pattern path was found in Flair; configuration or project-directory writers remain a DoS risk. The ADK adapter imports SDK types only (packages/adk-flair-js/src/memory_service.ts:15). Short exception pending an upstream patch.",
+      "added": "2026-10-03",
+      "expires": "2026-10-17",
+      "removeWhen": "A braces release outside this advisory's vulnerable range is published, a harper release whose npm-shrinkwrap resolves it is adopted, and every bun path resolves it (or those paths are removed); re-check config and filesystem pattern inputs before renewal."
+    },
+    {
       "ghsa": "GHSA-83w8-p2f5-377r",
       "package": "@fastify/static",
       "severity": "high",
@@ -586,6 +602,22 @@
       "added": "2026-09-30",
       "expires": "2026-11-29",
       "removeWhen": "flair's harper dependency moves to 5.3.0 or later (harper 5.3.0's shrinkwrap resolves moment 2.31.0), or flair stops depending on harper"
+    },
+    {
+      "ghsa": "GHSA-86w9-cpqp-85rv",
+      "package": "node-forge",
+      "severity": "high",
+      "class": "no-patch-published",
+      "sources": [
+        "bun",
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> node-forge",
+      "reason": "Added 2026-10-02. No fixed node-forge release exists: 1.4.0 is the latest and is inside the affected range (<=1.4.0). node-forge is a transitive dependency: it reaches flair only through harper (harper 5.2.8 depends on node-forge ^1.3.1); flair's own code does not import it. harper uses it only in dist/security/keys.js, to create, sign, parse and PEM-encode certificates and keys; it does not call node-forge's RSA signature verification, the path this advisory affects. As a no-patch-published entry, the gate blocks it once npm's latest tag for node-forge points at a release outside the affected range (when the audit can reach the registry); it expires on 2026-10-16 either way.",
+      "added": "2026-10-02",
+      "expires": "2026-10-16",
+      "removeWhen": "npm's latest node-forge release is outside the affected range (the gate then blocks this entry): reassess; a maintainer removes the entry once harper resolves a fixed release or drops node-forge"
     }
   ]
 }

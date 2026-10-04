@@ -41,6 +41,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -55,12 +56,15 @@ import {
   parseLaunchctlList,
   pickInstancePid,
 } from "../../src/lib/launchd-management.ts";
+import { readProcessStartTimeMs } from "../../src/lib/process-start-time.ts";
+import { verifyIdentity } from "../../src/lib/daemon-liveness.ts";
 import {
   buildDirectSpawnEnv,
   harperPortValue,
   launchdLabel,
   launchdPlistPath,
   readHarperConfig,
+  readSidecar,
   resolveHarperBin,
 } from "../../src/cli.ts";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.ts";
@@ -830,10 +834,55 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
   proc.unref();
   sb.direct = proc;
   if (!proc.pid) throw new Error("direct spawn produced no pid");
+  // flair writes a flair#1454 identity sidecar whenever IT starts Harper
+  // directly (`flair start`/`flair init`); this spawn bypasses flair, so write
+  // a production-shaped sidecar immediately after spawn, before the health
+  // wait, as service.ts does. Without it, doctor can self-heal only with a
+  // safe data dir, a live pidfile PID, flair-identified /Health, and no known
+  // port-owner or worktree mismatch (unavailable evidence is permitted).
+  // If self-heal does not fire here, doctor refuses to adopt with "no identity
+  // sidecar" — the observed signature (flair#2130).
+  writeDirectSidecar(sb, proc.pid);
   await waitForHttp(sb.httpURL, 60_000);
-  const serving = instancePid(sb.dataDir, sb.httpPort);
-  if (serving === null) throw new Error("direct-spawned Harper is up but the serving PID is unreadable");
-  return serving;
+  const listenerPids = [...new Set(listeningPids(sb.httpPort))].sort((a, b) => a - b);
+  expect(listenerPids, "the HTTP port's listener PID set must be exactly the direct-spawned PID before doctor --fix").toEqual([proc.pid]);
+  assertDirectSidecar(sb, proc.pid);
+  return proc.pid;
+}
+
+/** A production-shaped flair#1454 sidecar for the fixture's direct spawn. */
+function writeDirectSidecar(sb: Sandbox, pid: number): void {
+  const sidecar = {
+    pid,
+    startTimeMs: Date.now(),
+    port: sb.httpPort,
+    flairVersion: "test",
+  };
+  const tmp = join(sb.dataDir, `.flair-daemon.json.${process.pid}.tmp`);
+  writeFileSync(tmp, `${JSON.stringify(sidecar, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+  renameSync(tmp, join(sb.dataDir, "flair-daemon.json"));
+  chmodSync(join(sb.dataDir, "flair-daemon.json"), 0o600);
+}
+
+/** Pin the sidecar before doctor can reconstruct one from a missing file. */
+function assertDirectSidecar(sb: Sandbox, spawnedPid: number): void {
+  const sidecarPath = join(sb.dataDir, "flair-daemon.json");
+  const sidecar = readSidecar(sb.dataDir);
+  expect(sidecar, "direct spawn must write its own sidecar before doctor --fix").toMatchObject({
+    kind: "present",
+    pid: spawnedPid,
+    port: sb.httpPort,
+    flairVersion: "test",
+  });
+  expect(statSync(sidecarPath).mode & 0o777, "direct sidecar must be 0600").toBe(0o600);
+  expect(verifyIdentity({
+    pidfilePid: readPidFile(sb.dataDir),
+    sidecar,
+    readStartTime: readProcessStartTimeMs,
+  }), "pidfile and sidecar must identify the spawned process with a matching start time before doctor --fix").toEqual({
+    kind: "verified",
+    pid: spawnedPid,
+  });
 }
 
 test.skipIf(!isDarwin)(

@@ -64,7 +64,7 @@ Full walkthrough with expected output at every step: **[docs/quickstart.md](docs
 Two MCP paths, on purpose. A client on this machine and a remote connector are different trust situations, and each has its own mechanism. The write-up that joins them is [docs/mcp-clients.md — Two MCP paths](docs/mcp-clients.md#two-mcp-paths).
 
 - **Local client: the `npx` stdio adapter.** `@tpsdev-ai/flair-mcp` is a separate package and is not installed globally. `flair init --agent <id>` attempts to wire detected clients when wiring is enabled, using `npx -y @tpsdev-ai/flair-mcp@<version>` pinned to the CLI's version. The adapter sends requests to `FLAIR_URL`, signing with an Ed25519 key when one resolves and otherwise using configured administrator Basic credentials when available. Loopback HTTP is the right scheme on this machine (the default is `http://127.0.0.1:19926`). A remote `FLAIR_URL` should use HTTPS. This is the path for Claude Code, Cursor, Codex, Gemini, and every other local MCP client.
-- **Remote client: native `/mcp`.** A JSON-RPC endpoint inside the server, OAuth bearer, exposing the curated tools that the JSON-RPC `tools/list` method on `/mcp` returns. It is off by default: an unset `FLAIR_MCP_OAUTH` leaves `/mcp` unregistered; a truthy flag and a configured issuer make Flair attempt to mount it, while only the literal value `true` also enables the OAuth component. `true` is the value that turns on both Flair's route and the OAuth component; `1`, `yes`, and `on` leave the component off and every call 401s. OAuth client-metadata is fetched over HTTPS and refuses a private, loopback, or link-local host, and `flair mcp enable` refuses a local origin (localhost, loopback, RFC1918, IPv4 link-local, `.local`). Remote connectors need a publicly reachable HTTPS origin; `flair mcp enable` refuses local origins, but route registration itself does not enforce a public HTTPS issuer.
+- **Remote client: native `/mcp`.** A JSON-RPC endpoint inside the server, OAuth bearer, exposing the curated tools that the JSON-RPC `tools/list` method on `/mcp` returns. It is off by default: an unset `FLAIR_MCP_OAUTH` leaves `/mcp` unregistered; a truthy flag and a configured issuer make Flair attempt to mount it, while only the literal value `true` also enables the OAuth component. `true` is the value that turns on both Flair's route and the OAuth component; `1`, `yes`, and `on` leave the component off and every call 401s. OAuth client-metadata is fetched over HTTPS and refuses a private, loopback, or link-local host. Remote connectors need a publicly reachable HTTPS origin; `flair mcp enable` accepts loopback or unspecified targets for the local restart but refuses local issuers, while route registration itself does not enforce a public HTTPS issuer.
 `@tpsdev-ai/flair-client` is likewise its own package: add it to a project when you want to call Flair from your own code ([JavaScript / TypeScript](#javascript--typescript)).
 
 ### Where the agent's key lives
@@ -173,7 +173,7 @@ See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives �
 | Feature | What it does |
 |---|---|
 | **Semantic memory** | Auto-embedded on write. Search by meaning, not keywords. |
-| **Tiered durability** | `permanent` (retained until explicitly deleted by its owner or an admin) / `persistent` / `standard` (default) / `ephemeral` (24h TTL). |
+| **Tiered durability** | Four tiers; each states what it does and does not guarantee. permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them. |
 | **Temporal validity** | `validFrom` / `validTo` bounds. Expired memories drop out of search and bootstrap automatically. |
 | **Trust-graded recall** | Opt-in per-result evidence: provenance, usage signal, freshness, supersession. Confidence bands (`strong`/`moderate`/`breadcrumb`) and first-class **abstention** when nothing clears the floor. |
 | **Relationship graph** | Entity-to-entity triples with temporal bounds, queryable alongside semantic memory. |
@@ -263,10 +263,10 @@ flair search --agent mybot "that important thing"
 flair soul set --agent mybot --key role --value "Security reviewer" --admin-pass-file ~/.flair/admin-pass
 flair bootstrap --agent mybot --max-tokens 4000        # cold-start: soul + relevant memories
 flair backup --admin-pass-file ~/.flair/admin-pass     # logical JSON export
-flair restore ./backup.json --admin-pass-file ~/.flair/admin-pass
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair restore ./backup.json
 ```
 
-`--admin-pass-file` is preferred over `--admin-pass`: it keeps the secret out of `ps` and your shell history.
+For commands that declare `--admin-pass-file`, prefer it over `--admin-pass` to keep the secret out of `ps` and your shell history.
 
 ### JavaScript / TypeScript
 

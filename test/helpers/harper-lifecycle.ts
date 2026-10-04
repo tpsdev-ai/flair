@@ -794,6 +794,7 @@ export interface StartHarperOptions {
    * responsible for cleaning it up.
    */
   installDir?: string;
+  homeDir?: string;
   /**
    * When false, skip the #1450 orphan-exit preload so a SIGKILL of this
    * parent leaves Harper alive (the #1372 reap-on-start known-answer).
@@ -869,7 +870,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   const baseEnv: Record<string, string> = {
     ...parentEnv,
     ROOTPATH: installDir,
-    HOME: installDir,               // isolate from system Harper install (~/.harperdb)
+    HOME: opts.homeDir ?? installDir,
     // Point the embeddings model dir at the repo-root models/ that CI / local
     // runs pre-download into (the FLAIR_MODELS_DIR override; see
     // resources/embeddings-provider.ts:resolveModelsDir). Without this, the fix's

@@ -271,10 +271,10 @@ describe("mem0 bridge: shared", () => {
     ).rejects.toThrow(/--user/);
   });
 
-  it("throws when --api-key is missing and not in env", async () => {
+  it("throws when the API key is missing and not in env", async () => {
     await expect(
       collectMemories({ user: "u1" }, mockCtx()),
-    ).rejects.toThrow(/--api-key/);
+    ).rejects.toThrow(/--api-key-file/);
   });
 
   it("throws on HTTP 401 (invalid key)", async () => {

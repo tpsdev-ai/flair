@@ -7,9 +7,10 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { buildEd25519Auth, resolveKeyPath } from "../lib/auth-resolve.js";
+import { buildEd25519Auth, requestTarget, requestUrl, resolveKeyPath } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
 import { join } from "node:path";
+import { DURABILITY_CAVEAT } from "../lib/durability-copy.js";
 
 export type SearchCli = {
   resolveBaseUrl: (...args: any[]) => any;
@@ -162,7 +163,7 @@ program
   .option("--scoring <mode>", "Scoring mode: raw (default) uses cosine similarity/BM25 only; composite re-ranks by durability/recency/retrieval (measurably hurts precision as of flair#623 — opt-in only)", "raw")
   .option("--min-score <n>", "Drop results below this score (0..1)", "0")
   // Client-side filters (applied after server response)
-  .option("--durability <level>", "Filter to permanent|persistent|standard|ephemeral (client-side)")
+  .option("--durability <level>", `Filter results by durability (permanent/persistent/standard/ephemeral; comma-separated; client-side). ${DURABILITY_CAVEAT}`)
   .option("--source <name>", "Filter by source/agentId (client-side)")
   // Output modes
   .option("--explain", "Show score breakdown (raw, composite, durability, age, usage) per hit — also added to --json output as _explain")
@@ -175,10 +176,11 @@ program
         process.exit(2);
       }
       const baseUrl = resolveBaseUrl(opts);
+      const url = requestUrl(baseUrl, "/SemanticSearch");
       const headers: Record<string, string> = { "content-type": "application/json" };
       const keyPath = opts.key || resolveKeyPath(agentId);
       if (keyPath) {
-        headers["authorization"] = buildEd25519Auth(agentId, "POST", "/SemanticSearch", keyPath);
+        headers["authorization"] = buildEd25519Auth(agentId, "POST", requestTarget(url), keyPath);
       }
 
       // Build payload from CLI options. Server validates types.
@@ -198,7 +200,7 @@ program
       const minScore = Number.parseFloat(opts.minScore ?? "0");
       if (Number.isFinite(minScore) && minScore > 0) payload.minScore = minScore;
 
-      const res = await fetch(`${baseUrl}/SemanticSearch`, {
+      const res = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),

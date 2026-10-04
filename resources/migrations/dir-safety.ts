@@ -52,7 +52,7 @@ export function verifySecureDir(dir: string): void {
  */
 export function ensureSecureDir(dir: string): void {
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    mkdirSync(dir, { mode: 0o700 });
   }
   try {
     verifySecureDir(dir);

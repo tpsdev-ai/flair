@@ -1,18 +1,5 @@
-/**
- * rem-runner.test.ts — Unit tests for src/rem/runner.ts.
- *
- * Pure orchestration coverage. No Harper or filesystem state required
- * outside an isolated tmpdir. Tests pause sentinel, env-var pause, dry-run
- * (skip write but still log), happy path (writes snapshot + log row),
- * api failure (fail-stops-cycle + error in log row), soul shape coercion
- * (single row vs multi row), and step 5 distillation (§3B, issue #707): success populates
- * `api failure (fail-stops-cycle + error in log row), soul shape coercion\n * (single row vs multi row), and step 5 distillation (§3B, issue #707): success populates
- * `candidates` and flips `slice` to "2"; failure is recorded in `errors[]`
- * and the run is reported `failed` (flair#924 defect 1: a populated errors[]
- * must never coexist with `status: "completed"` — see the "status honesty"
- * regression block below); dry-run skips the /ReflectMemories call
- * entirely and `slice` stays "2-maintenance".
- */
+import { ApiHttpError } from "../src/lib/auth-resolve.ts";
+/** REM runner orchestration tests with isolated scratch state. */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
@@ -93,7 +80,7 @@ function baseOpts(overrides: Partial<RunnerOpts> = {}): RunnerOpts {
       // no adk: tags, so the cycle takes the unchanged agentId-only path.
       "POST:/Memory/search_by_conditions": () => [],
       "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
-      "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+      "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
       "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
     }),
     snapshotRoot,
@@ -114,6 +101,7 @@ describe("pause handling", () => {
     expect(r.status).toBe("paused");
     expect(r.snapshotPath).toBeUndefined();
     expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips).toEqual([]);
     expect(readLogRows()[0].status).toBe("paused");
   });
 
@@ -164,7 +152,7 @@ describe("happy path", () => {
         "GET:/Memory": () => ({ results: [{ id: "m1" }, { id: "m2" }, { id: "m3" }] }),
         "GET:/Soul": () => ({ items: [{ id: "s1" }] }),
           "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
-        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
@@ -179,7 +167,7 @@ describe("happy path", () => {
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
           "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
-        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
@@ -224,7 +212,7 @@ describe("step 5: distillation", () => {
             { id: "cand_bbb", claim: "second insight" },
           ],
           count: 2,
-          model: "llama3",
+          model: "llama3", gathered: 2, unreflected: 2,
         }),
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
@@ -256,7 +244,7 @@ describe("step 5: distillation", () => {
     expect(r.logRow.errors[0]).toContain("fetch failed: connection reset");
   });
 
-  it("no-backend (503) failure is recorded distinctly — structured message, not raw JSON", async () => {
+  it("no-backend (503) is a deliberate SKIP — completed run, listed apart from errors", async () => {
     const r = await runNightlyCycle(baseOpts({
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
@@ -264,16 +252,20 @@ describe("step 5: distillation", () => {
           "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         // Mirrors api()'s throw shape (src/cli.ts) for a 503 response body.
         "POST:/ReflectMemories": () => {
-          throw new Error(JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
+          throw new ApiHttpError(503, JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
         },
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
-    // A distillation that did not execute is a FAILED run (flair#924 defect 1),
-    // not a "completed" one with an error buried underneath.
-    expect(r.status).toBe("failed");
-    expect(r.logRow.errors.length).toBe(1);
-    expect(r.logRow.errors[0]).toBe("distillation: No generative backend configured. See the models configuration docs.");
+    // A stage that cannot run for lack of a model is a skip (flair#924 defect 1
+    // / #1503), not a failure: the run completes and records the reason. The
+    // old shape — status "failed" so the nightly job exited 1 every night — is
+    // gone.
+    expect(r.status).toBe("completed");
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips).toEqual(["distillation skipped: no generative backend configured"]);
+    // Distillation did not execute, so no distilledAt is recorded.
+    expect(r.logRow.distilledAt).toBeUndefined();
   });
 
   it("distillation_failed (502) failure surfaces the detail, distinct from the no-backend case", async () => {
@@ -302,7 +294,7 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
           "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
-        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
         "POST:/MemoryDedupStats": () => ({
           clusterCount: 3,
           largestClusterSize: 5,
@@ -327,7 +319,7 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
           "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
-        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
         "POST:/MemoryDedupStats": () => { throw new Error(JSON.stringify({ error: "forbidden: admin required" })); },
       }),
     }));
@@ -345,7 +337,7 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
           "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
-        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
         "POST:/MemoryDedupStats": () => ({ ok: true }), // missing the expected fields
       }),
     }));
@@ -575,12 +567,11 @@ describe("deriveActiveAdkTags (#1205b-1)", () => {
     expect(hasAdkUserTags([], AGENT)).toBe(false);
   });
 
-  it("isRemAbortedFailure matches rem_aborted JSON and abort text, not ordinary distill errors", () => {
-    expect(isRemAbortedFailure(JSON.stringify({ error: "rem_aborted", detail: "pause" }))).toBe(true);
-    expect(isRemAbortedFailure("REM distillation aborted (pause sentinel)")).toBe(true);
-    expect(isRemAbortedFailure(new Error(JSON.stringify({ error: "rem_aborted" })))).toBe(true);
-    expect(isRemAbortedFailure(JSON.stringify({ error: "distillation_failed" }))).toBe(false);
-    expect(isRemAbortedFailure("fetch failed: connection reset")).toBe(false);
+  it("isRemAbortedFailure requires the structured HTTP pause response", () => {
+    expect(isRemAbortedFailure(new ApiHttpError(503, JSON.stringify({ error: "rem_aborted" })))).toBe(true);
+    expect(isRemAbortedFailure("REM distillation aborted (pause sentinel)")).toBe(false);
+    expect(isRemAbortedFailure(new Error(JSON.stringify({ error: "rem_aborted" })))).toBe(false);
+    expect(isRemAbortedFailure(new ApiHttpError(502, JSON.stringify({ error: "rem_aborted" })))).toBe(false);
   });
 
   it("selects tags by ADK_TAG_PREFIX", () => {
@@ -640,7 +631,7 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
       reflect: (body) => {
         const tag = body.tag as string;
         const user = tag.split(":").pop();
-        return { candidates: [{ id: `cand_${user}` }], count: 1, model: "default" };
+        return { candidates: [{ id: `cand_${user}` }], count: 1, model: "default", gathered: 1, unreflected: 1 };
       },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
@@ -666,7 +657,7 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
   it("NON-ADK fallback: no adk tags → a SINGLE agentId-only distill (unchanged pre-#1205b behavior)", async () => {
     const { api, reflectCalls } = makeTagAwareApi({
       activeTags: [],
-      reflect: () => ({ candidates: [{ id: "cand_recent" }], count: 1, model: "default" }),
+      reflect: () => ({ candidates: [{ id: "cand_recent" }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
 
@@ -693,15 +684,16 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
         durability: "standard",
         createdAt: "2020-01-01T00:00:00.000Z",
       }],
-      reflect: () => ({ candidates: [{ id: "should-not-run" }], count: 1, model: "default" }),
+      reflect: () => ({ candidates: [{ id: "should-not-run" }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
 
-    expect(r.status).toBe("failed");
+    expect(r.status).toBe("completed");
     expect(reflectCalls).toEqual([]);
     expect(reflectCalls.some((c) => c.scope === "all")).toBe(false);
     expect(autoPromoteCalls).toEqual([]);
-    expect(r.logRow.errors.some((e) => e.includes("cross-user bleed"))).toBe(true);
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips.some((e) => e.includes("cross-user bleed"))).toBe(true);
   });
 
   it("a per-tag failure does not abort the remaining tags — recorded, and the run reports failed", async () => {
@@ -709,7 +701,7 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
       activeTags: ["adk:app:alice", "adk:app:bob"],
       reflect: (body) => {
         if (body.tag === "adk:app:bob") throw new Error("fetch failed: connection reset");
-        return { candidates: [{ id: "cand_alice" }], count: 1, model: "default" };
+        return { candidates: [{ id: "cand_alice" }], count: 1, model: "default", gathered: 1, unreflected: 1 };
       },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
@@ -724,7 +716,7 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
   it("respects the per-cycle tag cap; overflow deferred and recorded", async () => {
     const { api, reflectCalls } = makeTagAwareApi({
       activeTags: ["adk:app:alice", "adk:app:bob", "adk:app:carol"],
-      reflect: (body) => ({ candidates: [{ id: `cand_${body.tag.split(":").pop()}` }], count: 1, model: "default" }),
+      reflect: (body) => ({ candidates: [{ id: `cand_${body.tag.split(":").pop()}` }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api, maxTagsPerCycle: 2 }));
 
@@ -747,7 +739,7 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
       if (method === "GET" && path.startsWith("/Memory?")) return memories;
       if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
         if (key === "POST:/MemoryMaintenance") return { expired: 0, archived: 0 };
-      if (key === "POST:/ReflectMemories") { reflectCalls.push(body); return { candidates: [], count: 0, model: "default" }; }
+      if (key === "POST:/ReflectMemories") { reflectCalls.push(body); return { candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }; }
       if (key === "POST:/AutoPromoteCandidates") return { agentId: "test-agent", promoted: [], skipped: [], count: 0, considered: 0 };
       if (key === "POST:/MemoryDedupStats") return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "x" };
       throw new Error(`unexpected api: ${key}`);
@@ -768,7 +760,7 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
   it("calls /AutoPromoteCandidates ONCE after distillation for an ADK agentId, with a bounded limit", async () => {
     const { api, autoPromoteCalls } = makeTagAwareApi({
       activeTags: ["adk:app:alice", "adk:app:bob"],
-      reflect: (body) => ({ candidates: [{ id: `cand_${(body.tag as string).split(":").pop()}` }], count: 1, model: "default" }),
+      reflect: (body) => ({ candidates: [{ id: `cand_${(body.tag as string).split(":").pop()}` }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
       autoPromote: () => ({ agentId: "test-agent", promoted: ["m-1", "m-2"], skipped: [{ id: "c-x", reason: "no_adk_scope_tag" }], count: 2, considered: 3 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
@@ -787,7 +779,7 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
   it("does NOT call /AutoPromoteCandidates for a NON-ADK agent (no adk tags)", async () => {
     const { api, autoPromoteCalls } = makeTagAwareApi({
       activeTags: [],
-      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+      reflect: () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
 
@@ -799,7 +791,7 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
   it("dry-run skips the auto-promote sweep entirely (a side effect, like distillation)", async () => {
     const { api, autoPromoteCalls, reflectCalls } = makeTagAwareApi({
       activeTags: ["adk:app:alice"],
-      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+      reflect: () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api, dryRun: true }));
 
@@ -812,7 +804,7 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
   it("an auto-promote failure is recorded in errors and the run reports failed", async () => {
     const { api } = makeTagAwareApi({
       activeTags: ["adk:app:alice"],
-      reflect: () => ({ candidates: [{ id: "cand_alice" }], count: 1, model: "default" }),
+      reflect: () => ({ candidates: [{ id: "cand_alice" }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
       autoPromote: () => { throw new Error("fetch failed: connection reset"); },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
@@ -828,7 +820,7 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
   it("respects a caller-provided maxAutoPromotePerCycle as the sweep limit", async () => {
     const { api, autoPromoteCalls } = makeTagAwareApi({
       activeTags: ["adk:app:alice"],
-      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+      reflect: () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
     });
     await runNightlyCycle(baseOpts({ apiCall: api, maxAutoPromotePerCycle: 7 }));
     expect(autoPromoteCalls[0].limit).toBe(7);
@@ -960,8 +952,8 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
         journalRow(T("livesess"), hoursAgo(0.2)),
       ],
       reflect: (body) => body.scope === "tagged"
-        ? { candidates: [{ id: "cand_cont" }], count: 1, model: "default" }
-        : { candidates: [], count: 0, model: "default" },
+        ? { candidates: [{ id: "cand_cont" }], count: 1, model: "default", gathered: 1, unreflected: 1 }
+        : { candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
 
@@ -983,7 +975,7 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
     const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
       activeTags: [],
       memories: [journalRow(T("livesess"), hoursAgo(0.5))],
-      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+      reflect: () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
     expect(reflectCalls.filter((c) => c.scope === "tagged").length).toBe(0);
@@ -995,7 +987,7 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
     const { api, reflectCalls } = makeTagAwareApi({
       activeTags: [],
       memories: [journalRow(T("s3h"), hoursAgo(3))],
-      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+      reflect: () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
     });
     await runNightlyCycle(baseOpts({ apiCall: api, settleMs: 4 * 3600_000 }));
     expect(reflectCalls.filter((c) => c.scope === "tagged").length).toBe(0);
@@ -1007,7 +999,7 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
       memories: [journalRow(T("boom"), hoursAgo(3))],
       reflect: (body) => {
         if (body.scope === "tagged") throw new Error("fetch failed: connection reset");
-        return { candidates: [], count: 0, model: "default" };
+        return { candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 };
       },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
@@ -1024,7 +1016,7 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
         journalRow(T("s1"), hoursAgo(3)),
         journalRow(T("s2"), hoursAgo(4)),
       ],
-      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+      reflect: () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api, maxTagsPerCycle: 2 }));
     // 1 ADK tag + budget 1 → only one continuity session runs this cycle.
@@ -1039,7 +1031,7 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
     const { api, reflectCalls } = makeTagAwareApi({
       activeTags: [],
       memories: [journalRow(T("settled"), hoursAgo(3))],
-      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+      reflect: () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api, dryRun: true }));
     expect(r.status).toBe("dry-run");
@@ -1118,14 +1110,15 @@ describe("per-run distill cap + health refuse (#1515)", () => {
       activeTags: ["adk:app:alice", "adk:app:bob"],
       reflect: (body) => {
         if (body.tag === "adk:app:alice") writeFileSync(pauseFlagPath, "now\n");
-        return { candidates: [{ id: `cand_${(body.tag as string).split(":").pop()}` }], count: 1, model: "default" };
+        return { candidates: [{ id: `cand_${(body.tag as string).split(":").pop()}` }], count: 1, model: "default", gathered: 1, unreflected: 1 };
       },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
-    expect(r.status).toBe("failed");
+    expect(r.status).toBe("completed");
     expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
     expect(r.logRow.candidates).toEqual(["cand_alice"]);
-    expect(r.logRow.errors.some((e) => e.includes("aborted by operator"))).toBe(true);
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips.some((e) => e.includes("aborted by operator"))).toBe(true);
     expect(r.logRow.distill?.aborted).toBe(true);
     expect(r.logRow.dedup).toBeUndefined();
   });
@@ -1135,7 +1128,7 @@ describe("per-run distill cap + health refuse (#1515)", () => {
     const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
       activeTags: ["adk:app:alice", "adk:app:bob"],
       reflect: () => {
-        throw new Error(JSON.stringify({
+        throw new ApiHttpError(503, JSON.stringify({
           error: "rem_aborted",
           detail: "REM distillation aborted (pause sentinel or FLAIR_REM_PAUSE=1). Resume with: flair rem resume",
         }));
@@ -1146,13 +1139,14 @@ describe("per-run distill cap + health refuse (#1515)", () => {
       return api(method, path, body);
     };
     const r = await runNightlyCycle(baseOpts({ apiCall: wrapped }));
-    expect(r.status).toBe("failed");
+    expect(r.status).toBe("completed");
     expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
     expect(autoPromoteCalls).toEqual([]);
     expect(dedupCalls).toBe(0);
     expect(r.logRow.distill?.aborted).toBe(true);
     expect(r.logRow.dedup).toBeUndefined();
-    expect(r.logRow.errors.some((e) => e.includes("rem_aborted"))).toBe(true);
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips.some((e) => e.includes("rem_aborted"))).toBe(true);
   });
 
   it("503 rem_aborted on a non-ADK distill skips MemoryDedupStats", async () => {
@@ -1160,7 +1154,7 @@ describe("per-run distill cap + health refuse (#1515)", () => {
     const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
       activeTags: [],
       reflect: () => {
-        throw new Error(JSON.stringify({ error: "rem_aborted", detail: "paused" }));
+        throw new ApiHttpError(503, JSON.stringify({ error: "rem_aborted", detail: "paused" }));
       },
     });
     const wrapped: ApiCall = async (method, path, body) => {
@@ -1168,7 +1162,7 @@ describe("per-run distill cap + health refuse (#1515)", () => {
       return api(method, path, body);
     };
     const r = await runNightlyCycle(baseOpts({ apiCall: wrapped }));
-    expect(r.status).toBe("failed");
+    expect(r.status).toBe("completed");
     expect(reflectCalls).toHaveLength(1);
     expect(reflectCalls[0].scope).toBe("all");
     expect(autoPromoteCalls).toEqual([]);
@@ -1179,26 +1173,12 @@ describe("per-run distill cap + health refuse (#1515)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// flair#924 (defect 1) — status/exit-code honesty.
+// flair#924 (defect 1) / #1503 — deliberate skips are not failures.
 //
-// A REM nightly run whose distillation stage did not execute is NOT a
-// completed run. Before this fix, src/rem/runner.ts built the audit row's
-// status as `opts.dryRun ? "dry-run" : "completed"` unconditionally, so a
-// cycle that recorded `distillation: No generative backend configured …` in
-// errors[] still logged `status: "completed"` — while `flair rem nightly
-// run-once` exited 1 (src/commands/rem.ts: `if (row.errors.length > 0)
-// process.exit(1)`). The reported status and the one signal launchd records
-// disagreed, and the failure hid for 58 consecutive nights.
-//
-// These tests encode the invariant the fix restores: a populated errors[]
-// can NEVER coexist with status "completed". They FAIL on the pre-fix runner
-// (which returned "completed" alongside a populated errors[]) and PASS after
-// it. See the PR body for both results.
 // ─────────────────────────────────────────────────────────────────────────────
-describe("status honesty — a run that skipped a core stage is not 'completed' (flair#924 defect 1)", () => {
-  // The real failure shape from the issue: snapshot + maintenance succeed,
-  // distillation cannot start (503 no generative backend), so the run records
-  // `distillation: No generative backend configured …` in errors[].
+describe("status honesty — deliberate skips are not failures (flair#924 defect 1 / #1503)", () => {
+  // The real shape from the issue: snapshot + maintenance succeed, distillation
+  // cannot start (503 no generative backend).
   const noBackendOpts = () => baseOpts({
     apiCall: makeApi({
       "GET:/Memory": () => sampleMemories,
@@ -1206,31 +1186,41 @@ describe("status honesty — a run that skipped a core stage is not 'completed' 
       "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
       // Mirrors api()'s throw shape (src/cli.ts) for a 503 response body.
       "POST:/ReflectMemories": () => {
-        throw new Error(JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
+        throw new ApiHttpError(503, JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
       },
       "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
     }),
   });
 
-  it("distillation not executing reports a non-success status", async () => {
+  it("a deliberate skip completes the run and is recorded under skips[]", async () => {
     const r = await runNightlyCycle(noBackendOpts());
 
-    // The distillation stage did not execute, and it said so:
-    expect(r.logRow.errors.length).toBeGreaterThan(0);
-    expect(r.logRow.errors[0]).toContain("distillation:");
-    // …so the run MUST NOT claim success:
-    expect(r.status).not.toBe("completed");
-    expect(r.status).toBe("failed");
-  });
-
-  it("INVARIANT: a populated errors[] cannot coexist with status 'completed'", async () => {
-    const r = await runNightlyCycle(noBackendOpts());
-
-    expect(r.logRow.errors.length).toBeGreaterThan(0);
-    expect(r.status).not.toBe("completed");
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips).toEqual(["distillation skipped: no generative backend configured"]);
+    expect(r.status).toBe("completed");
     // The status the caller (`flair rem nightly run-once`) received and the
     // status persisted to the audit log are the same value — the scheduler
     // summary and the launchd exit code both read from this contract.
+    const rows = readLogRows();
+    expect(rows[0].status).toBe(r.status);
+    expect(rows[0].skips).toEqual(r.logRow.skips);
+  });
+
+  it("INVARIANT: a populated errors[] cannot coexist with status 'completed'", async () => {
+    // A REAL distillation failure (not a deliberate skip) stays an error.
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => { throw new Error("fetch failed: connection reset"); },
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
+      }),
+    }));
+
+    expect(r.logRow.errors.length).toBeGreaterThan(0);
+    expect(r.status).not.toBe("completed");
+    expect(r.status).toBe("failed");
     const rows = readLogRows();
     expect(rows[0].status).toBe(r.status);
     expect(rows[0].errors.length).toBeGreaterThan(0);
@@ -1240,5 +1230,161 @@ describe("status honesty — a run that skipped a core stage is not 'completed' 
     const r = await runNightlyCycle(baseOpts());
     expect(r.logRow.errors).toEqual([]);
     expect(r.status).toBe("completed");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// flair#1503 — generation timestamp.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("distillation staleness timestamp (flair#1503)", () => {
+  it("records distilledAt when the stage executed — even with zero candidates", async () => {
+    const r = await runNightlyCycle(baseOpts());
+    expect(r.logRow.skips).toEqual([]);
+    // The fixture gathered input and completed generation.
+    expect(r.logRow.distilledAt).toBe(r.logRow.runAt);
+    expect(readLogRows()[0].distilledAt).toBe(r.logRow.runAt);
+  });
+
+  it("no-backend across an ADK agent's tags records ONE skip and stops the loop", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice", "adk:app:bob"],
+      reflect: () => {
+        throw new ApiHttpError(503, JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
+      },
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    // One failed call is enough to know every tag will fail — the loop stops,
+    // and the reason is recorded once, not once per tag.
+    expect(reflectCalls.length).toBe(1);
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.skips).toEqual(["distillation skipped: no generative backend configured"]);
+    expect(r.status).toBe("completed");
+    expect(r.logRow.distilledAt).toBeUndefined();
+  });
+});
+
+describe("review regressions #2230", () => {
+  const noBackend = "No generative backend configured. See the models configuration docs.";
+  for (const [name, error] of [
+    ["502 structured no-backend", new ApiHttpError(502, JSON.stringify({ error: noBackend }))],
+    ["network phrase", new Error(`network failure: ${noBackend}`)],
+    ["503 inexact structured error", new ApiHttpError(503, JSON.stringify({ error: noBackend + " retry" }))],
+  ] as const) {
+    it(name + " stays an error", async () => {
+      const { api } = makeTagAwareApi({ activeTags: [], reflect: () => { throw error; } });
+      const result = await runNightlyCycle(baseOpts({ apiCall: api }));
+      expect(result.status).toBe("failed");
+      expect(result.logRow.skips).toEqual([]);
+      expect(result.logRow.errors).toHaveLength(1);
+      expect(result.logRow.distilledAt).toBeUndefined();
+    });
+  }
+  it("a successful HTTP error body cannot skip a backend failure", async () => {
+    const { api } = makeTagAwareApi({ activeTags: [], reflect: () => ({ error: noBackend }) });
+    const result = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(result.status).toBe("failed");
+    expect(result.logRow.skips).toEqual([]);
+  });
+
+  for (const path of ["tagged", "untagged", "continuity"] as const) {
+    for (const errorBody of ["rem_aborted", noBackend, "generation_failed", null]) {
+      const returned = errorBody !== null;
+      it(path + (returned ? ` successful HTTP error body ${errorBody} fails` : " HTTP 503 pause skips and stops"), async () => {
+        const now = new Date();
+        const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
+          activeTags: path === "tagged" ? ["adk:app:alice", "adk:app:bob"] : [],
+          ...(path === "continuity" ? { memories: ["alice", "bob"].map((id) => ({
+            id, agentId: "test-agent", durability: "ephemeral", tags: [`adk:continuity:${id}`],
+            createdAt: new Date(now.getTime() - DEFAULT_REM_SETTLE_MS - 1000).toISOString(),
+          })) } : {}),
+          reflect: (body) => {
+            if (path === "continuity" && body.scope === "all") {
+              return { candidates: [], count: 0, model: "fixture", gathered: 1, unreflected: 1 };
+            }
+            if (returned) return { error: errorBody };
+            throw new ApiHttpError(503, JSON.stringify({ error: "rem_aborted", detail: "paused" }));
+          },
+        });
+        let dedupCalls = 0;
+        const result = await runNightlyCycle(baseOpts({ nowOverride: now, apiCall: async (method, route, body) => {
+          if (route === "/MemoryDedupStats") dedupCalls++;
+          return api(method, route, body);
+        } }));
+        expect(result.logRow.distilledAt).toBeUndefined();
+        if (returned) {
+          expect(result.status).toBe("failed");
+          expect(result.logRow.skips).toEqual([]);
+          expect(result.logRow.errors).toHaveLength(path === "untagged" ? 1 : 2);
+          expect(result.logRow.errors.every((error) => error.includes(errorBody!))).toBe(true);
+          expect(readLogRows()[0].errors).toEqual(result.logRow.errors);
+          expect(result.logRow.distill?.aborted).not.toBe(true);
+          expect(reflectCalls).toHaveLength(path === "continuity" ? 3 : path === "tagged" ? 2 : 1);
+        } else {
+          expect(result.status).toBe("completed");
+          expect(result.logRow.errors).toEqual([]);
+          expect(result.logRow.skips).toEqual(["distillation: aborted by operator (rem_aborted)"]);
+          expect(result.logRow.distill?.aborted).toBe(true);
+          expect(reflectCalls).toHaveLength(path === "continuity" ? 2 : 1);
+          expect(autoPromoteCalls).toEqual([]);
+          expect(dedupCalls).toBe(0);
+        }
+      });
+    }
+  }
+
+  it("empty gather does not record generation", async () => {
+    const { api } = makeTagAwareApi({ activeTags: [], reflect: () => ({
+      candidates: [], count: 0, model: "default", gathered: 0, unreflected: 0,
+    }) });
+    const result = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(result.status).toBe("completed");
+    expect(result.logRow.distilledAt).toBeUndefined();
+    expect(readLogRows()[0].distilledAt).toBeUndefined();
+  });
+
+  for (const unreflected of [0, 1]) {
+    it(`records generation with 3 gathered rows and ${unreflected} unreflected`, async () => {
+      const { api } = makeTagAwareApi({ activeTags: [], reflect: () => ({
+        candidates: [{ id: "candidate" }], count: 1, model: "default", gathered: 3, unreflected,
+      }) });
+      const result = await runNightlyCycle(baseOpts({ apiCall: api }));
+      expect(result.status).toBe("completed");
+      expect(result.logRow.errors).toEqual([]);
+      expect(result.logRow.skips).toEqual([]);
+      expect(result.logRow.distill).toEqual({ gathered: 3, unreflected, maxMemories: DEFAULT_MAX_MEMORIES_PER_RUN });
+      expect(result.logRow.distilledAt).toBe(result.logRow.runAt);
+      expect(readLogRows()[0].distilledAt).toBe(result.logRow.runAt);
+    });
+  }
+
+  it("malformed response does not record generation", async () => {
+    for (const response of [
+      ...[-1, 0.5, "0", null].map((unreflected) => ({ candidates: [], count: 0, model: "default", gathered: 3, unreflected })),
+      ...[-1, 0.5, "3", null].map((gathered) => ({ candidates: [], count: 0, model: "default", gathered, unreflected: 0 })),
+      { candidates: [], count: 1, model: "default", gathered: 3, unreflected: 0 },
+      { candidates: [], count: 0, model: " ", gathered: 3, unreflected: 0 },
+      {}, { candidates: [], count: 0, model: "default", gathered: 1 },
+      { candidates: [{}], count: 1, model: "default", gathered: 1, unreflected: 1 },
+      { candidates: [{ id: "" }], count: 1, model: "default", gathered: 1, unreflected: 1 },
+      { candidates: [{ id: "candidate" }], count: 1, model: "default", gathered: 0, unreflected: 0 }]) {
+      const { api } = makeTagAwareApi({ activeTags: [], reflect: () => response });
+      const result = await runNightlyCycle(baseOpts({ apiCall: api }));
+      expect(result.status).toBe("failed");
+      expect(result.logRow.errors[0]).toContain("response shape");
+      expect(result.logRow.distilledAt).toBeUndefined();
+    }
+  });
+
+  it("one successful tag cannot stamp a partially failed cycle", async () => {
+    const { api } = makeTagAwareApi({ activeTags: ["adk:app:alice", "adk:app:bob"], reflect: (body) => {
+      if (body.tag === "adk:app:bob") throw new Error("model failure");
+      return { candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 };
+    } });
+    const result = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(result.status).toBe("failed");
+    expect(result.logRow.distill?.gathered).toBe(1);
+    expect(result.logRow.distilledAt).toBeUndefined();
+    expect(readLogRows()[0].distilledAt).toBeUndefined();
   });
 });

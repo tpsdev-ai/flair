@@ -1,6 +1,7 @@
 import { databases } from "harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
+import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js";
 import { applyOriginatorInstanceId, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 
 /**
@@ -75,27 +76,49 @@ export class Agent extends (databases as any).flair.Agent {
    * does not route through put() — so every rule written here was enforced on
    * one verb and not the other. Returns a Response to send, or null to proceed.
    *
-   * Two rules:
+   * Three rules:
    *   1. Only an admin principal may modify a principal OTHER than itself.
    *   2. Only an admin principal may change a principal's ADMIN STATUS — on any
    *      record, including the caller's own. Rule 1 alone never covered this:
    *      an agent editing its own record is inside its rights for ordinary
    *      fields (runtime, displayName, subjects) and must not be for the fields
    *      that decide whether it is an administrator.
+   *   3. A non-admin caller may not write `status` — the principal's LIFECYCLE
+   *      state — on any record, including its own (flair#2108). A body that
+   *      includes `status` is refused whole, so the other fields in that
+   *      request are not written either.
    *
    * `internal` (in-process maintenance, federation merge) and admin agents pass
    * through unchanged.
    */
   private async authorizePrincipalWrite(content: any): Promise<Response | null> {
     const auth = await resolveAgentAuth((this as any).getContext?.());
-    // Anonymous denied (defense-in-depth alongside allowUpdate; the old check read
-    // tpsAgent and treated a missing agent as trusted, so anonymous slipped through).
-    if (auth.kind === "anonymous") {
-      return new Response(JSON.stringify({ error: "authentication required" }), {
+    // A trusted internal call and an administrator are admitted here. Anonymous
+    // and any verdict kind the auth resolver does not define are refused before
+    // any mutation. A non-admin agent goes on to the rules below: a body with
+    // `status` is refused (rule 3); without it, rules 1 and 2 decide.
+    const admission = admitPrincipalWrite(auth);
+    if (admission === "internal" || admission === "admin") return null;
+    if (admission === "deny") {
+      const anonymous = (auth as { kind?: unknown }).kind === "anonymous";
+      return new Response(
+        JSON.stringify({ error: anonymous ? "authentication required" : "unrecognized caller verdict; refused" }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      );
+    }
+    // admission === "non-admin" here. Narrow the type (and stay fail-closed if a
+    // future verdict shape ever slipped past admitPrincipalWrite).
+    if (auth.kind !== "agent") {
+      return new Response(JSON.stringify({ error: "unrecognized caller verdict; refused" }), {
         status: 401, headers: { "content-type": "application/json" },
       });
     }
-    if (auth.kind !== "agent" || auth.isAdmin) return null;
+
+    // 3. A non-admin caller may not write `status`, on ANY row, including its
+    // own. Refused before the target-row update, so nothing in the request is
+    // applied.
+    const statusDenial = statusWriteRefusal(content, false);
+    if (statusDenial) return statusDenial;
 
     const existing = await Promise.resolve(super.get()).catch(() => null);
 

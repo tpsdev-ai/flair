@@ -15,6 +15,8 @@ import { Command, Option } from "commander";
 import * as render from "../render.js";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
+import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
@@ -101,7 +103,7 @@ export function register(program: Command): void {
     ),
   )
     .option("--content <text>", "memory content (alias for positional arg)")
-    .option("--durability <d>", "permanent|persistent|standard|ephemeral (default standard). Also decides the default visibility when --visibility is omitted: permanent/persistent -> shared, standard/ephemeral -> private").option("--tags <csv>")
+    .option("--durability <d>", `${DURABILITY_TIERS_HELP} (default standard). Also decides the default visibility when --visibility is omitted: permanent/persistent -> shared, standard/ephemeral -> private`).option("--tags <csv>")
     .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content)")
     .option("--subject <text>", "one-line title / entity this memory is about")
     .option("--derived-from <csv>", "Comma-separated source Memory IDs this memory was distilled/reflected from (sets Memory.derivedFrom; used by the `rem rapid` reflection loop)")
@@ -148,7 +150,7 @@ export function register(program: Command): void {
         const entities = parseEntitiesOptionOrExit(String(opts.entities));
         if (entities.length > 0) body.entities = entities;
       }
-      const out = await api("PUT", `/Memory/${memId}`, body, {
+      const out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, {
         agentId,
         agentIdSource: source,
         explicitAdminPass: opts.adminPass,
@@ -229,7 +231,7 @@ export function register(program: Command): void {
         body.derivedFrom = String(opts.derivedFrom).split(",").map((x: string) => x.trim()).filter(Boolean);
       }
 
-      const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { agentId, agentIdSource: source });
+      const out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, { agentId, agentIdSource: source });
       if (out?.error) {
         console.error(`Error writing task summary: ${out.error}`);
         process.exit(1);

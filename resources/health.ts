@@ -1,3 +1,4 @@
+import { systemdAgentId } from "../src/lib/systemd-agent-id.js";
 import { Resource, databases, server, logger } from "harper";
 import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
@@ -24,6 +25,7 @@ import {
   summarizePeerLiveness,
 } from "./federation-peer-liveness.js";
 import { decideInstanceAnswer, INSTANCE_ROW_PRUNE_REMEDY } from "../src/lib/instance-identity-row.js";
+import { summarizeExpiredByAgent, expiredByAgentWarningLines, type NightlyDriverFacts } from "../src/lib/expired-by-agent.js";
 import { readAllInstanceRows } from "./Federation.js";
 
 const db = databases as any;
@@ -254,6 +256,9 @@ export class HealthDetail extends Resource {
     stats.caller = { agentId: callerAgent ?? null, isAdmin };
 
     let memoriesList: any[] = [];
+    // Per-agent split of the expired-but-unarchived count, filled from the same
+    // single Memory scan below — not a second table read (flair#2231).
+    const expiredAgentCounts = new Map<string, number>();
 
     // ── Memory stats ──
     try {
@@ -279,7 +284,11 @@ export class HealthDetail extends Resource {
         const d = (m.durability ?? "standard") as string;
         if (d in byDurability) byDurability[d]++;
         if (m.archived) archived++;
-        if (!m.archived && m.validTo && new Date(m.validTo).getTime() < nowMs) expired++;
+        if (!m.archived && m.validTo && new Date(m.validTo).getTime() < nowMs) {
+          expired++;
+          const owner = typeof m.agentId === "string" ? m.agentId : "";
+          expiredAgentCounts.set(owner, (expiredAgentCounts.get(owner) ?? 0) + 1);
+        }
       }
       stats.memories = {
         total: memoriesList.length,
@@ -540,6 +549,10 @@ export class HealthDetail extends Resource {
 
     // ── REM ──
     let nightlyRunFailed = false;
+    let nightlyProbeOk = false;
+    let nightlyInstalled: boolean | null = false;
+    let nightlyDriverAgent: string | null = null;
+    let nightlyDriverAgentKnown = false;
     try {
       const logsDir = join(homedir(), ".flair", "logs");
       const remLog = join(logsDir, "rem.jsonl");
@@ -587,28 +600,82 @@ export class HealthDetail extends Resource {
       // exist; async + short-timeout so a slow/hung service manager can't
       // stall this request.
       let nightlyEnabled: boolean | null = null;
-      let nightlyInstalled = false;
       const plat = platform();
       if (plat === "darwin" || plat === "linux") {
-        nightlyInstalled = plat === "darwin"
-          ? await exists(join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist"))
-          : await exists(join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer"));
-        if (nightlyInstalled) {
+        const schedulerPath = plat === "darwin"
+          ? join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist")
+          : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer");
+        const unitPath = plat === "darwin" ? schedulerPath
+          : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.service");
+        const probeError = (path: string, error?: unknown): void => {
+          const code = (error as NodeJS.ErrnoException)?.code ?? "error code unavailable";
+          warnings.push({ level: "warn", message: `REM nightly driver state unknown: ${isAdmin ? path : redactHome(path)} (${code})` });
+        };
+        const filePresent = async (path: string): Promise<boolean | null> => {
+          try {
+            await fsp.stat(path);
+            return true;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+            probeError(path, error);
+            return null;
+          }
+        };
+        const [schedulerPresent, unitPresent] = await Promise.all([
+          filePresent(schedulerPath),
+          plat === "darwin" ? Promise.resolve(true) : filePresent(unitPath),
+        ]);
+        nightlyInstalled = schedulerPresent === null || unitPresent === null
+          ? null : schedulerPresent && unitPresent;
+        if (plat === "linux" && schedulerPresent !== null && unitPresent !== null
+          && schedulerPresent !== unitPresent) {
+          const orphan = schedulerPresent ? "timer" : "service";
+          const orphanPath = schedulerPresent ? schedulerPath : unitPath;
+          warnings.push({ level: "warn", message: `REM nightly orphan ${orphan} file: ${isAdmin ? orphanPath : redactHome(orphanPath)}` });
+        }
+        if (nightlyInstalled === true) {
           try {
             const { queryActiveStateAsync } = await import("../src/rem/scheduler.js");
             nightlyEnabled = await queryActiveStateAsync(plat);
-          } catch {
+            if (nightlyEnabled === null) probeError(schedulerPath);
+          } catch (error) {
             nightlyEnabled = null;
+            probeError(schedulerPath, error);
           }
-        } else {
+          try {
+            const unitText = await fsp.readFile(unitPath, "utf-8");
+            const agent = plat === "darwin"
+              ? unitText.match(/<key>FLAIR_AGENT_ID<\/key>\s*<string>([^<]+)<\/string>/)?.[1].trim() ?? null
+              : systemdAgentId(unitText);
+            if (agent) { nightlyDriverAgent = agent; nightlyDriverAgentKnown = true; }
+          } catch (error) {
+            probeError(unitPath, error);
+          }
+        } else if (nightlyInstalled === false) {
           nightlyEnabled = false;
         }
       }
+      nightlyProbeOk = true;
 
       const nightlyRecords = await tailJsonl(nightlyLog);
       const lastNightlyRec = nightlyRecords[nightlyRecords.length - 1];
       nightlyRunFailed = lastNightlyRec?.status === "failed";
       const lastNightlyAt = lastNightlyRec ? (lastNightlyRec.at ?? lastNightlyRec.ts ?? lastNightlyRec.timestamp ?? null) : null;
+
+      // Newest distillation from a completed cycle with no errors or skips, observed in the server-local log tail.
+      let lastDistilledAt: string | null = null;
+      const completeDistillation = (rec: any): boolean => rec?.status === "completed"
+        && !rec.errors?.length && !rec.skips?.length && !rec.distill?.aborted
+        && typeof rec.distilledAt === "string" && Number.isFinite(Date.parse(rec.distilledAt))
+        && Number.isInteger(rec.distill?.gathered) && rec.distill.gathered > 0;
+      const lastDistillationIncomplete = !!lastNightlyRec && !completeDistillation(lastNightlyRec);
+      for (let i = nightlyRecords.length - 1; i >= 0; i--) {
+        const rec = nightlyRecords[i];
+        if (completeDistillation(rec)) {
+          lastDistilledAt = rec.distilledAt;
+          break;
+        }
+      }
 
       let pendingCandidates: number | null = null;
       try {
@@ -625,6 +692,7 @@ export class HealthDetail extends Resource {
         !lastRestorativeAt &&
         nightlyEnabled === null &&
         !lastNightlyAt &&
+        !lastDistilledAt &&
         pendingCandidates === null;
       if (allNull) {
         stats.rem = null;
@@ -635,6 +703,8 @@ export class HealthDetail extends Resource {
           lastRestorativeAt,
           nightlyEnabled,
           lastNightlyAt,
+          lastDistilledAt,
+          lastDistillationIncomplete,
           pendingCandidates,
         };
         if (nightlyEnabled && lastNightlyAt && nowMs - new Date(lastNightlyAt).getTime() > 48 * 3600 * 1000) {
@@ -648,7 +718,7 @@ export class HealthDetail extends Resource {
 
     // Build this after REM discovery, including its unavailable-state fallback.
     // Health does not read the scheduler's next-run time. The existing audit
-    // row does carry status; do not expose raw errors through HealthDetail.
+    // row does carry status.
     if (stats.memories?.expired > 0) {
       const nightlyHint = stats.rem?.nightlyEnabled === true
         ? nightlyRunFailed
@@ -657,9 +727,17 @@ export class HealthDetail extends Resource {
         : stats.rem?.nightlyEnabled === false
           ? "automate: flair rem nightly enable (includes validTo archival)"
           : "nightly state is unknown — check: flair rem nightly status";
+      const driver: NightlyDriverFacts = {
+        installed: nightlyProbeOk ? nightlyInstalled : null,
+        agent: nightlyDriverAgent,
+        agentKnown: nightlyDriverAgentKnown,
+      };
+      const breakdown = summarizeExpiredByAgent(expiredAgentCounts, driver);
+      stats.memories.expiredByAgent = breakdown;
       warnings.push({
         level: "warn",
         message: `${stats.memories.expired} memories have expired validTo but aren't archived\n` +
+          expiredByAgentWarningLines(breakdown) +
           "    clear now: flair rem light (archives expired validTo; preview: --dry-run)\n" +
           `    ${nightlyHint}`,
       });

@@ -32,45 +32,12 @@ import {
   NodeConnectionTypes,
 } from "n8n-workflow";
 
-// flair-client is published ESM-only. n8n nodes compile to CJS and load via
-// `require`, so a static `import { FlairClient } from "@tpsdev-ai/flair-client"`
-// crashes at boot on Node 24+ with "No exports main defined" because the
-// flair-client package only declares an `import` condition in its exports
-// map. The `import type` line emits no runtime require, and the dynamic
-// import inside `makeClient` is the standard CJS→ESM interop path.
-//
-// Filed: ops follow-up to ship a dual ESM/CJS build of flair-client so
-// static imports work too. Until then this dynamic-import pattern is the
-// load-bearing fix.
-import type { FlairClient } from "@tpsdev-ai/flair-client";
-
-interface FlairCredentials {
-  baseUrl: string;
-  agentId: string;
-  adminPassword: string;
-}
-
-// Wrap dynamic import in Function() so TypeScript (compiled to CommonJS
-// for n8n consumption) doesn't downlevel `await import(...)` to a `require()`
-// call. The downleveled require() hits flair-client's ESM-only exports map
-// and Node 24+ rejects it (which is what bit us in n8n at runtime —
-// commit 31dd2b3 "fixed" this via dynamic import but TSC compiled it right
-// back to require under `module: "CommonJS"`).
-// The Function() trick keeps the import as a true native dynamic import in
-// the emitted JS, which Node honors as ESM regardless of caller's module
-// type. Standard CJS-to-ESM interop pattern.
-const importFlairClient = (): Promise<typeof import("@tpsdev-ai/flair-client")> =>
-  (new Function("return import('@tpsdev-ai/flair-client')") as () => Promise<any>)();
-
-async function makeClient(credentials: FlairCredentials): Promise<FlairClient> {
-  const mod = await importFlairClient();
-  return new mod.FlairClient({
-    url: credentials.baseUrl,
-    agentId: credentials.agentId,
-    adminUser: "admin",
-    adminPassword: credentials.adminPassword,
-  });
-}
+import {
+  flairCredentialTest,
+  makeClient,
+  warnDeprecatedAdminPassword,
+  asFlairCredentials,
+} from "../../client";
 
 export class FlairWrite implements INodeType {
   description: INodeTypeDescription = {
@@ -88,6 +55,7 @@ export class FlairWrite implements INodeType {
       {
         name: "flairApi",
         required: true,
+        testedBy: "flairCredentialTest",
       },
     ],
     codex: {
@@ -139,12 +107,12 @@ export class FlairWrite implements INodeType {
         options: [
           { name: "Standard (default)", value: "standard" },
           { name: "Persistent (key decisions)", value: "persistent" },
-          { name: "Permanent (inviolable)", value: "permanent" },
+          { name: "Permanent (kept)", value: "permanent" },
           { name: "Ephemeral (auto-expires 24h)", value: "ephemeral" },
         ],
         default: "standard",
         description:
-          "Durability tier. See Flair docs for the semantic differences.",
+          "Durability tier. permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.",
       },
       {
         displayName: "Type",
@@ -172,9 +140,12 @@ export class FlairWrite implements INodeType {
     ],
   };
 
+  methods = { credentialTest: { flairCredentialTest } };
+
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-    const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
+    const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
     const flair = await makeClient(credentials);
+    warnDeprecatedAdminPassword(this.logger, credentials);
     const inputs = this.getInputData();
     const out: INodeExecutionData[] = [];
 

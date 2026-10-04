@@ -10,13 +10,16 @@
  */
 import { describe, test, expect, afterEach } from "bun:test";
 import { createServer } from "node:http";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, lstatSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   resolveInitAdminPasswordSource,
   resolveInitAdminPasswordRefuseReason,
   detectPersistedAdminUser,
+  countRocksAdminUsers,
   initAdminPassRefusalMessage,
   adminPassDesyncFinding,
   callOpsSocket,
@@ -37,6 +40,25 @@ function makeTmpDir(): string {
   const dir = join(tmpdir(), `flair-837-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/**
+ * Build a Harper 5 system database (RocksDB) the way Harper does — a single
+ * `system` database whose `hdb_user/` primary column family holds one row per
+ * user — using the same engine, resolved through the `harper` dependency.
+ */
+function makeHarper5SystemDb(root: string, users: string[]): void {
+  const requireHere = createRequire(import.meta.url);
+  const rocksPath = createRequire(requireHere.resolve("harper")).resolve("@harperfast/rocksdb-js");
+  const RocksDatabase = (requireHere(rocksPath) as { RocksDatabase: any }).RocksDatabase;
+  const systemDir = join(root, "database", "system");
+  mkdirSync(systemDir, { recursive: true });
+  const db = RocksDatabase.open(systemDir, { name: "hdb_user/" });
+  try {
+    for (const user of users) db.put(user, "persisted-hash");
+  } finally {
+    db.close?.();
+  }
 }
 
 describe("resolveInitAdminPasswordSource — flair#837 persisted user", () => {
@@ -139,6 +161,45 @@ describe("detectPersistedAdminUser — Harper's own user-record paths", () => {
     mkdirSync(join(dir, "system"), { recursive: true });
     writeFileSync(join(dir, "system", "hdb_user.mdb"), "user-hash");
     expect(detectPersistedAdminUser(dir)).toBe(true);
+  });
+
+  test("Harper 5: a user row in the hdb_user/ RocksDB column family is a persisted user", () => {
+    const dir = makeTmpDir();
+    dirs.push(dir);
+    makeHarper5SystemDb(dir, ["admin"]);
+    expect(detectPersistedAdminUser(dir)).toBe(true);
+  });
+
+  test("Harper 5: countRocksAdminUsers writes nothing to the system tree", () => {
+    const dir = makeTmpDir();
+    dirs.push(dir);
+    makeHarper5SystemDb(dir, ["admin"]);
+    const systemDir = join(dir, "database", "system");
+    const fingerprint = (name = "."): unknown[] => {
+      const path = join(systemDir, name);
+      const stat = lstatSync(path, { bigint: true });
+      return [name, stat.size, stat.mtimeNs, stat.isDirectory()
+        ? readdirSync(path).sort().map(child => fingerprint(join(name, child)))
+        : createHash("sha256").update(readFileSync(path)).digest("hex")];
+    };
+    const before = fingerprint();
+    expect(countRocksAdminUsers(systemDir)).toBe(1);
+    expect(fingerprint()).toEqual(before);
+  });
+
+  test("Harper 5: an empty hdb_user/ store (mount wrote the table, no user) is NOT a persisted user", () => {
+    const dir = makeTmpDir();
+    dirs.push(dir);
+    makeHarper5SystemDb(dir, []);
+    expect(detectPersistedAdminUser(dir)).toBe(false);
+  });
+
+  test("an unreadable system database is not read as 'no user' — the detector throws", () => {
+    const dir = makeTmpDir();
+    dirs.push(dir);
+    mkdirSync(join(dir, "database", "system"), { recursive: true });
+    writeFileSync(join(dir, "database", "system", "not-rocksdb.txt"), "junk");
+    expect(() => detectPersistedAdminUser(dir)).toThrow();
   });
 });
 

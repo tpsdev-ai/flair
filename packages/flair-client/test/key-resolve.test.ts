@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -11,8 +11,20 @@ const {
   formatKeyLookup,
   inspectKeyLookup,
   keyPathCandidates,
+  loadPrivateKey,
+  loadPrivateKeyString,
   resolveKeyPath,
+  signRequest,
 } = await import("../src/auth.js");
+
+/** True when `header` carries an agent signature over `${agentId}:${ts}:${nonce}:${method}:${path}`. */
+function verifySignedHeader(header: string, publicKey: ReturnType<typeof createPublicKey>, method: string, path: string): boolean {
+  const rest = header.replace(/^TPS-Ed25519 /, "");
+  const cut = rest.indexOf(":");
+  const agentId = rest.slice(0, cut);
+  const [ts, nonce, signature] = rest.slice(cut + 1).split(":");
+  return verify(null, Buffer.from(`${agentId}:${ts}:${nonce}:${method}:${path}`), publicKey, Buffer.from(signature, "base64"));
+}
 
 function uniqueId(label: string): string {
   return `flair-1271-${label}-${randomBytes(4).toString("hex")}`;
@@ -159,6 +171,23 @@ describe("missed freshly-created key (flair#1271)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test("explicit Basic mode bypasses local and in-memory signing keys", async () => {
+    const agentId = uniqueId("basic-only");
+    writeFileSync(join(dir, `${agentId}.key`), randomBytes(32));
+    const client = new FlairClient({
+      agentId, authMode: "basic", adminUser: "admin", adminPassword: "legacy-secret",
+      privateKey: generateKeyPairSync("ed25519").privateKey,
+    });
+    await client.health();
+    expect((mockFetch as any).mock.calls[0][1].headers.Authorization).toBe(
+      "Basic " + Buffer.from("admin:legacy-secret").toString("base64"),
+    );
+    writeFileSync(join(dir, `${agentId}.key`), "malformed-key");
+    const malformed = new FlairClient({ agentId, authMode: "basic", adminUser: "admin", adminPassword: "legacy-secret" });
+    await malformed.health();
+    expect((mockFetch as any).mock.calls[1][1].headers.Authorization).toStartWith("Basic ");
+  });
+
   test("a key written after the first miss is picked up on the next request", async () => {
     const agentId = uniqueId("fresh");
     const client = new FlairClient({ agentId });
@@ -280,5 +309,95 @@ describe("formatKeyLookup (flair#1271)", () => {
     expect(text).toContain("signed with /home/agent/.flair/keys/grok-cos.key");
     expect(text).toContain("(found)");
     expect(text).toContain("flair agent add");
+  });
+});
+
+describe("loadPrivateKeyString — a key held as text (flair#1942)", () => {
+  test("refuses invalid base64 characters, including 32 raw text bytes", () => {
+    expect(() => loadPrivateKeyString("!".repeat(32))).toThrow(/INVALID_BASE64/);
+  });
+
+  test("refuses junk-wrapped base64 and surrounding whitespace", () => {
+    const text = Buffer.alloc(32, 7).toString("base64");
+    for (const decorated of [`!!${text}!!`, ` ${text}`, `${text}\n`]) {
+      expect(() => loadPrivateKeyString(decorated)).toThrow(/INVALID_BASE64/);
+    }
+  });
+
+  test("refuses missing, excessive, misplaced and noncanonical padding", () => {
+    const text = Buffer.alloc(32).toString("base64");
+    for (const invalid of [text.slice(0, -1), `${text}=`, `=${text.slice(1)}`, `${text.slice(0, -2)}B=`, ""]) {
+      expect(() => loadPrivateKeyString(invalid)).toThrow(/INVALID_BASE64/);
+    }
+  });
+
+  test("refuses RSA and EC PKCS8 keys by type", () => {
+    const keys = [
+      generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey,
+      generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey,
+    ];
+    for (const key of keys) {
+      const text = key.export({ type: "pkcs8", format: "der" }).toString("base64");
+      expect(() => loadPrivateKeyString(text)).toThrow(/UNSUPPORTED_KEY_TYPE/);
+    }
+  });
+
+  test("refuses decoded bytes that are neither a seed nor PKCS8 DER", () => {
+    for (const length of [1, 31, 33, 64]) {
+      expect(() => loadPrivateKeyString(Buffer.alloc(length, 7).toString("base64"))).toThrow(/INVALID_ED25519_KEY/);
+    }
+  });
+
+  test("refuses truncated DER and DER with trailing junk", () => {
+    const der = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" });
+    for (const bytes of [der.subarray(0, -1), Buffer.concat([der, Buffer.from("junk")])]) {
+      expect(() => loadPrivateKeyString(bytes.toString("base64"))).toThrow(/INVALID_ED25519_KEY/);
+    }
+  });
+
+  test("decodes a base64 PKCS8 DER key and signs with it", () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const text = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer).toString("base64");
+
+    const header = signRequest("agent-text", loadPrivateKeyString(text), "GET", "/Memory");
+
+    expect(verifySignedHeader(header, publicKey, "GET", "/Memory")).toBe(true);
+  });
+
+  test("decodes a base64 raw 32-byte seed", () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const seedText = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer)
+      .subarray(-32)
+      .toString("base64");
+
+    const header = signRequest("agent-seed", loadPrivateKeyString(seedText), "POST", "/Memory/x");
+
+    expect(verifySignedHeader(header, publicKey, "POST", "/Memory/x")).toBe(true);
+  });
+
+  test("resolves the same key as loadPrivateKey over a file with the same contents", () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const text = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer).toString("base64");
+    const dir = mkdtempSync(join(tmpdir(), "flair-1942-keytext-"));
+    try {
+      const file = join(dir, "agent.key");
+      writeFileSync(file, text);
+      const fromFile = createPublicKey(loadPrivateKey(file));
+      const fromText = createPublicKey(loadPrivateKeyString(text));
+      expect(fromText.export({ type: "spki", format: "pem" })).toBe(fromFile.export({ type: "spki", format: "pem" }));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a PEM", () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    const keyText = (privateKey.export({ type: "pkcs8", format: "der" }) as Buffer).toString("base64");
+
+    // The valid encoding resolves, so this test cannot pass on a tree where
+    // `loadPrivateKeyString` is missing — only the PEM case throws.
+    expect(() => loadPrivateKeyString(keyText)).not.toThrow();
+    expect(() => loadPrivateKeyString(pem)).toThrow();
   });
 });

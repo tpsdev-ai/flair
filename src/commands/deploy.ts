@@ -35,6 +35,20 @@ function shouldRunFleetVerify(...args: any[]): any {
   return cli.shouldRunFleetVerify(...args);
 }
 
+/** Quote one value for a POSIX shell command operators can copy verbatim. */
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Print the same next steps after a successful deploy and in the CLI example test. */
+export function printDeployNextSteps(url: string): void {
+  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+  console.log(`\nNext steps:`);
+  console.log(dim(`  1. Set an admin password in Fabric Studio (Cluster Settings → Admin)`));
+  console.log(dim(`  2. Save that password in an owner-only file (chmod 600), then seed your first agent:`));
+  console.log(`     flair agent add my-agent --target ${shellSingleQuote(url)} --admin-pass-file /path/to/admin-password`);
+}
+
 export function register(program: Command): void {
 // ─── flair deploy ─────────────────────────────────────────────────────────────
 
@@ -177,10 +191,7 @@ program
         }
       }
 
-      console.log(`\nNext steps:`);
-      console.log(dim(`  1. Set an admin password in Fabric Studio (Cluster Settings → Admin)`));
-      console.log(dim(`  2. Seed your first agent:`));
-      console.log(`     flair agent add --remote ${result.url} --name my-agent`);
+      printDeployNextSteps(result.url);
     } catch (err: any) {
       console.error(red(`\n✗ deploy failed: ${err.message}`));
       const hint = err.message?.toLowerCase();
