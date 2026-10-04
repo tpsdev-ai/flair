@@ -191,6 +191,7 @@
     "mysql2": "^3.22.0",
     "qs": "^6.16.0",
     "react-native-fs": "npm:empty-npm-package@1.0.0",
+    "@harperfast/fulltext": "npm:empty-npm-package@1.0.0",
     "tar": "^7.5.22",
     "undici": "~8.10.2",
     "uuid": "^11.1.1",
@@ -416,15 +417,11 @@
 
     "@harperfast/extended-iterable": ["@harperfast/extended-iterable@1.0.3", "", {}, "sha512-sSAYhQca3rDWtQUHSAPeO7axFIUJOI6hn1gjRC5APVE1a90tuyT8f5WIgRsFhhWA7htNkju2veB9eWL6YHi/Lw=="],
 
-    "@harperfast/fulltext": ["@harperfast/fulltext@0.5.0", "", { "optionalDependencies": { "@harperfast/fulltext-darwin-arm64": "0.5.0", "@harperfast/fulltext-linux-arm64-gnu": "0.5.0", "@harperfast/fulltext-linux-x64-gnu": "0.5.0", "@harperfast/fulltext-win32-x64-msvc": "0.5.0" } }, "sha512-rH2Q3LJLHPhxi8muzPLg00STbO7RFIqAgLA3tpBzSRdsJVuCV9ZMO2StlSZnUAPMnF5wF9SieuhHT9wi1vINBQ=="],
+    "@harperfast/fulltext": ["empty-npm-package@1.0.0", "", {}, "sha512-q4Mq/+XO7UNDdMiPpR/LIBIW1Zl4V0Z6UT9aKGqIAnBCtCb3lvZJM1KbDbdzdC8fKflwflModfjR29Nt0EpcwA=="],
 
-    "@harperfast/fulltext-darwin-arm64": ["@harperfast/fulltext-darwin-arm64@0.5.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-0OtKonopmXaP0/9wvpCuo/sklNxOEiQWnVf7aUsthH0B3sKUYT7HGnGtYkzqqUxdsFNlHPBr3IShyrWx9nAWYQ=="],
 
-    "@harperfast/fulltext-linux-arm64-gnu": ["@harperfast/fulltext-linux-arm64-gnu@0.5.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-QfNlYUntkal56jZejQ8cbSj8qvUlYv21V2j9xVctkFv+gmfn892kdU4oCg7dR7Qift8/huKUOyL/eGO0qYbgGw=="],
 
-    "@harperfast/fulltext-linux-x64-gnu": ["@harperfast/fulltext-linux-x64-gnu@0.5.0", "", { "os": "linux", "cpu": "x64" }, "sha512-+g5LMXhtODen+pGgmyTxcCuUAlk2NTeFOvr6duqUBVx542Hd/uDqPC9tUMjL12LJ9ci3LFqGwgW3FkxGedT7KA=="],
 
-    "@harperfast/fulltext-win32-x64-msvc": ["@harperfast/fulltext-win32-x64-msvc@0.5.0", "", { "os": "win32", "cpu": "x64" }, "sha512-PseSz47BMcIOMQdYUFoAUqAEyeHzceX+QQFun0wVCu/PtERPvtPWzzZxV4ofySzz+c9FkJHTSDu4XbAZhkaqkA=="],
 
     "@harperfast/hnsw": ["@harperfast/hnsw@0.4.0", "", { "optionalDependencies": { "@harperfast/hnsw-darwin-arm64": "0.4.0", "@harperfast/hnsw-linux-arm64-glibc": "0.4.0", "@harperfast/hnsw-linux-x64-glibc": "0.4.0", "@harperfast/hnsw-win32-x64": "0.4.0" } }, "sha512-3Fp4S7Y9repL97W/OnZu6s7zQr1Gysm7+3wGMY5J/O2jRezWkx2AMfT0/WQnEZdx+m1tCjUxTzL4GrQCpODt1g=="],
 

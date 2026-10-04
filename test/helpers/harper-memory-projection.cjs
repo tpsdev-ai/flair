@@ -11,7 +11,8 @@ const { ResourceBridge } = require("../../node_modules/harper/dist/dataLayer/har
 const FIXTURE_STORE_PATH = "/tmp/flair-memory-projection-fixture";
 
 async function main() {
-  const { query, rows } = JSON.parse(readFileSync(0, "utf8"));  const schema = readFileSync(require.resolve("../../schemas/memory.graphql"), "utf8");
+  const { query, rows } = JSON.parse(readFileSync(0, "utf8"));
+  const schema = readFileSync(require.resolve("../../schemas/memory.graphql"), "utf8");
   const body = schema.match(/^type Memory @table[^\n]*\{([\s\S]*?)^\}/m)?.[1];
   if (!body) throw new Error("Memory schema not found");
   const attributes = [...body.matchAll(/^  (\w+):/gm)].map(([, name]) => ({ name, attribute: name }));

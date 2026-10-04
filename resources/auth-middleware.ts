@@ -256,30 +256,7 @@ server.http(async (request: any, nextLayer: any) => {
     // The entry stays so the path is still public if that mount ever moves back
     // onto the default chain.
     url.pathname === "/.well-known/oauth-authorization-server" ||
-    url.pathname === "/OAuthMetadata" ||
-    // Presence roster is public-safe (field-allowlisted); GET serves the
-    // Office Space renderer without auth. Scoped to GET only (#604): the
-    // exact-path match used to match ANY method, so a bare `PUT /Presence`
-    // (collection-level, no id — Harper routes it to the same .put() as
-    // by-id PUT) early-returned here too, skipping this middleware entirely.
-    // A credential-less loopback PUT then reached Presence.put()'s
-    // resolveAgentAuth() call with NO tpsAnonymous/tpsAgent annotation, which
-    // fell through to raw `context.user` — populated by Harper's
-    // `authorizeLocal` (config true) ambient super_user injection for ANY
-    // credential-less loopback request — so the ownership check saw an
-    // "admin" caller (isAdmin=true) and let the write through unauthenticated
-    // (`super.put()`, no signature, no password). Mirrors the A2A GET-only
-    // pattern above: POST/PUT/DELETE now always transit the general
-    // middleware path below, which marks a genuinely headerless request
-    // tpsAnonymous BEFORE Harper's ambient elevation lands (resolveAgentAuth
-    // checks tpsAnonymous first — see agent-auth.ts's resolution order), so
-    // the ownership check in Presence.put()/delete() correctly denies it.
-    // POST (the heartbeat) is unaffected in practice: it already prefers
-    // request.tpsAgent when the middleware set it, and falls back to its own
-    // Ed25519 header parse otherwise — transiting the general path now just
-    // means a genuinely headerless POST gets marked anonymous (still 401)
-    // instead of skipping straight to that fallback parse.
-    (request.method === "GET" && url.pathname === "/Presence")
+    url.pathname === "/OAuthMetadata"
   ) return nextLayer(request);
 
   // Read the Authorization header ONCE, up front — the super_user branch below
