@@ -17,6 +17,7 @@ import * as render from "../render.js";
 import { resolveKeyPath, buildEd25519Auth, readSecretFileSecure, requestTarget, requestUrl } from "../lib/auth-resolve.js";
 import type { BridgeOptionSpec } from "../bridges/types.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { protoSafeRecord } from "../lib/proto-safe-record.js";
 
 export type BridgeCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -397,7 +398,7 @@ export function register(program: Command): void {
           //     (`BridgeOptionSpec.env`, e.g. MEM0_API_KEY);
           //   - `--api-key-file` fills a declared `apiKey` option, read here so
           //     the secret never appears in argv (group/world access refused).
-          const pluginOpts: Record<string, unknown> = { ...opts };
+          const pluginImportOpts = protoSafeRecord(opts);
           const declaredOptions: Record<string, BridgeOptionSpec> = loaded.plugin.options ?? {};
           if (opts.apiKeyFile !== undefined) {
             if (!declaredOptions.apiKey) {
@@ -408,15 +409,15 @@ export function register(program: Command): void {
             }
           }
           for (const [key, spec] of Object.entries(declaredOptions)) {
-            if (pluginOpts[key] === undefined && spec.env && process.env[spec.env] !== undefined) {
-              pluginOpts[key] = process.env[spec.env];
+            if (pluginImportOpts[key] === undefined && spec.env && process.env[spec.env] !== undefined) {
+              pluginImportOpts[key] = process.env[spec.env];
             }
           }
           if (opts.apiKeyFile !== undefined) {
-            pluginOpts.apiKey = readSecretFileSecure(opts.apiKeyFile, "--api-key-file");
+            pluginImportOpts.apiKey = readSecretFileSecure(opts.apiKeyFile, "--api-key-file");
           }
-          if (typeof pluginOpts.apiKey === "string") bridgeApiKey = pluginOpts.apiKey;
-          const source = loaded.plugin.import(pluginOpts, ctx);
+          if (typeof pluginImportOpts.apiKey === "string") bridgeApiKey = pluginImportOpts.apiKey;
+          const source = loaded.plugin.import(pluginImportOpts, ctx);
           await runImport({
             bridgeName: target.name,
             source,

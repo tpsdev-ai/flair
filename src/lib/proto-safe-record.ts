@@ -1,5 +1,5 @@
 /**
- * proto-safe-record.ts — the one helper for copying an untrusted object's own
+ * proto-safe-record.ts — shared helper for these converted sites, copying own
  * keys into a null-prototype record, entry by entry (flair#2235).
  *
  * Why this exists. A copy built with `Object.assign(target, source)` or an
@@ -14,10 +14,6 @@
  * an OWN property with `Object.defineProperty`, so every own enumerable string
  * key it copies survives, `__proto__` included, and the copy can never inherit
  * a prototype it did not ask for.
- *
- * Sites that copy an untrusted record into a plain object use this helper; the
- * source scanner in test/unit/proto-safe-copy-guard.test.ts fails the build on
- * a new un-allowlisted copy.
  */
 
 /** A per-key value transform, e.g. a recursive normalizer. */

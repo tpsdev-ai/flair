@@ -1,24 +1,11 @@
 /**
- * proto-safe-copy-guard.test.ts — the source scanner for flair#2235.
- *
- * Fails when source code copies an object's own keys into a PLAIN object
- * literal, the shapes that can lose or re-home an own `__proto__` key
- * (flair#2225, #2233):
- *
- *   - `Object.assign(<object literal>, …)`;
- *   - an own-key copy loop (`for … in`, or `for … of Object.keys(x)` /
- *     `Object.entries(x)`) that assigns `target[key] = …` where `target` starts
- *     as an object literal;
- *   - an object-literal spread `{ …x }` of a value that is a `JSON.parse`
- *     result.
- *
- * The remedy is src/lib/proto-safe-record.ts (protoSafeRecord). A site whose
- * source keys can never be `__proto__` is listed in ALLOWLIST below with a
- * reason; anything else must use the helper.
- *
- * Scanned: the root source tree (`src/`, `resources/`). The published packages
- * under `packages/*` are separate npm artifacts that cannot import a root
- * helper; they are out of scope for this guard.
+ * Source lint for flair#2235, not a proof of copy safety.
+ * Checks Object.assign with a literal target, loop-copy targets initialized
+ * with {} matched by variable name within a file, and JSON.parse spreads.
+ * Allowlist entries have expected occurrence counts.
+ * Spread preserves an own __proto__ key.
+ * This rule requires a null-prototype result for matched JSON.parse copies.
+ * Scans src/ and resources/; packages/ is outside its scope.
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -38,31 +25,25 @@ export interface ProtoCopyHit {
   text: string;
 }
 
-/**
- * Sites whose copied keys can never be `__proto__`. Each entry is matched by
- * file + a substring of the offending expression, so a NEW copy in the same
- * file still fails the guard.
- */
-export const ALLOWLIST: ReadonlyArray<{ file: string; contains: string; reason: string }> = [
+/** Fixed or prefix-filtered keys, matched by file and expression substring. */
+export const ALLOWLIST: ReadonlyArray<{ file: string; contains: string; expectedCount: number; reason: string }> = [
   {
     file: "resources/Presence.ts",
     contains: "out[key] = record[key]",
+    expectedCount: 1,
     reason: "key is filtered through ROSTER_ALLOWLIST (a fixed set), so it cannot be `__proto__`",
   },
   {
     file: "resources/MemoryFeed.ts",
     contains: "request[option] = value",
+    expectedCount: 1,
     reason: "iterates SUBSCRIPTION_OPTIONS (a fixed set), not the caller object's keys",
   },
   {
     file: "src/lib/doctor-federation-driver.ts",
     contains: "out[key] = value",
+    expectedCount: 2,
     reason: "key is filtered to the FLAIR_FEDERATION_ prefix, so it cannot be `__proto__`",
-  },
-  {
-    file: "src/commands/bridge.ts",
-    contains: "pluginOpts[key] = process.env[spec.env]",
-    reason: "key is a descriptor-declared option name and the value is a string, so it cannot set a prototype",
   },
 ];
 
@@ -172,27 +153,43 @@ export function detectTreeViolations(): ProtoCopyHit[] {
   return hits;
 }
 
-function allowlisted(hit: ProtoCopyHit): boolean {
-  return ALLOWLIST.some((entry) => entry.file === hit.file && hit.text.includes(entry.contains));
+function matchesEntry(hit: ProtoCopyHit, entry: (typeof ALLOWLIST)[number]): boolean {
+  return entry.file === hit.file && hit.text.includes(entry.contains);
 }
 
-describe("proto-safe copy guard (flair#2235)", () => {
-  test("no un-allowlisted plain-object copy of a source record's keys", () => {
+function allowlistCountMismatches(hits: ProtoCopyHit[]): string[] {
+  return ALLOWLIST.flatMap((entry) => {
+    const actual = hits.filter((hit) => matchesEntry(hit, entry)).length;
+    return actual === entry.expectedCount ? [] : [
+      `${entry.file}: ${entry.contains}: expected ${entry.expectedCount}, found ${actual}`,
+    ];
+  });
+}
+
+describe("proto-safe copy source lint (flair#2235)", () => {
+  test("matched copy forms have counted allowlist entries", () => {
     const hits = detectTreeViolations();
-    const unexpected = hits.filter((hit) => !allowlisted(hit));
-    if (unexpected.length > 0) {
-      const lines = unexpected.map((h) => `  ${h.file}:${h.line} [${h.rule}] ${h.text.slice(0, 100)}`);
-      throw new Error(
-        `Plain-object copy of an untrusted record (use protoSafeRecord from src/lib/proto-safe-record.ts):\n${lines.join("\n")}`,
-      );
-    }
-    expect(unexpected).toEqual([]);
+    const unexpected = hits.filter((hit) => !ALLOWLIST.some((entry) => matchesEntry(hit, entry)));
+    const errors = [
+      ...unexpected.map((h) => `${h.file}:${h.line} [${h.rule}] ${h.text.slice(0, 100)}`),
+      ...allowlistCountMismatches(hits),
+    ];
+    expect(errors).toEqual([]);
   });
 
-  test("every ALLOWLIST entry still matches a real hit (no stale entry)", () => {
+  test("a duplicate allowed expression fails its expected count", () => {
     const hits = detectTreeViolations();
-    const stale = ALLOWLIST.filter((entry) => !hits.some((h) => h.file === entry.file && h.text.includes(entry.contains)));
-    expect(stale.map((s) => s.file)).toEqual([]);
+    const allowed = hits.find((hit) => matchesEntry(hit, ALLOWLIST[0]))!;
+    expect(allowlistCountMismatches([...hits, ...detectProtoCopies(allowed.file,
+      "const out = {}; for (const key of Object.keys(record)) out[key] = record[key];",
+    )])).toEqual([`${allowed.file}: ${ALLOWLIST[0].contains}: expected 1, found 2`]);
+  });
+
+  test("a missing allowed expression fails its expected count", () => {
+    const hits = detectTreeViolations().filter((hit) => !matchesEntry(hit, ALLOWLIST[0]));
+    expect(allowlistCountMismatches(hits)).toEqual([
+      `${ALLOWLIST[0].file}: ${ALLOWLIST[0].contains}: expected 1, found 0`,
+    ]);
   });
 
   test("fires on a planted Object.assign copy", () => {
@@ -201,7 +198,7 @@ describe("proto-safe copy guard (flair#2235)", () => {
     expect(hits.map((h) => h.rule)).toContain("object-assign");
   });
 
-  test("fires on a planted own-key copy loop into {}", () => {
+  test("matches a planted loop target initialized with {} by file-wide variable name", () => {
     const planted = "const out = {};\nfor (const key of Object.keys(src)) out[key] = src[key];";
     const hits = detectProtoCopies("planted.ts", planted);
     expect(hits.map((h) => h.rule)).toContain("own-key-loop");
@@ -213,7 +210,7 @@ describe("proto-safe copy guard (flair#2235)", () => {
     expect(hits.map((h) => h.rule)).toContain("spread-json-parse");
   });
 
-  test("does not fire on the helper or on a null-prototype build", () => {
+  test("does not match the planted null-prototype loop or non-JSON spread", () => {
     const safe = [
       "const out = Object.create(null);",
       "for (const key of Object.keys(src)) out[key] = src[key];",
