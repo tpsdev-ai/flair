@@ -61,11 +61,11 @@ test("absent HTTP target beside a responding ops listener labels no candidate", 
   for (const entry of result.entries) expect(entry.reason).toContain("target identity unreadable");
 });
 
-test("matching HTTP and ops identities label the unreferenced file as a candidate", async () => {
+test("matching HTTP and ops identities leave the unreferenced file unidentified", async () => {
   const { ops, target } = listeners();
   const result = await classify(ops, target);
   expect(Object.fromEntries(result.entries.map(entry => [entry.agentId, entry.class]))).toEqual({
-    [live]: "keep", [candidate]: "orphan-candidate",
+    [live]: "keep", [candidate]: "unidentified",
   });
 });
 

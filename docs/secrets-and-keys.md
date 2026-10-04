@@ -146,12 +146,16 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 
 ## Key cleanup
 
-`flair keys prune` reports node-shaped files (`flair_<hex8>.key` without `.pub`)
-as orphan candidates when absent from the ops Instance and Agent tables, after
-the sole ops Instance id matches the HTTP target's `HealthDetail.federation.instance.id`.
-An unavailable identity match or unreadable rows leave files unidentified.
-`--apply` leaves all node-shaped seeds in place: ownership cannot be proven from one target's tables;
-removal needs per-file ownership proof ([#2200](https://github.com/tpsdev-ai/flair/issues/2200)).
+`flair keys prune` classifies every `.key` file in the key directory and, with
+`--apply`, MOVES prunable keys into `<keysDir>/.pruned/<date>/` — it never
+deletes.
+
+- Agent signing keys whose seed parses are prunable when the agent is not
+  registered on the targeted instance, except node-shaped files without `.pub`.
+- Node-shaped files (`flair_<hex8>.key` without `.pub`) stay report-only.
+  Minting attempts to record a sidecar; sidecar-write failure leaves them report-only.
+
+Unreadable reference rows leave node-shaped files unidentified.
 
 ## What about a `flair secret` CLI?
 

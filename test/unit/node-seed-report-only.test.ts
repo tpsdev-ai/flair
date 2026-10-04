@@ -38,7 +38,8 @@ test("--apply moves no node-shaped seed when two targets share a keys directory"
   }
   expect(lines.join("\n")).toContain("orphan candidate");
   expect(lines.join("\n")).toContain("ownership cannot be proven");
-  expect(lines.join("\n")).toContain("#2200");
+  // flair#2200: a seed with no owner record is named (sidecar path + remedy).
+  expect(lines.join("\n")).toContain("no owner record");
 });
 
 test("apply rejects a node-shaped file even if supplied as stale or invalid", () => {
