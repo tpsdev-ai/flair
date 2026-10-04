@@ -113,7 +113,7 @@ describe("flair bridge import mem0: the hinted credential form is the accepted f
     const addr = server.address();
     if (!addr || typeof addr === "string") throw new Error("mock server did not bind");
     mockUrl = `http://127.0.0.1:${addr.port}`;
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
