@@ -4697,6 +4697,7 @@ bindKeysCli({
   resolveBaseUrl,
   resolveOpsPort,
   resolveHttpPort,
+  readPortFromHarperConfig,
 });
 registerKeys(program);
 
