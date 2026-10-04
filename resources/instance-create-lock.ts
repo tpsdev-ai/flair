@@ -84,6 +84,30 @@ export const LOCK_DIR_REMEDY =
   "Remedy: make the Flair home writable by the Harper process (a directory the process can create " +
   "$HOME/.flair/locks with mode 0700). Identity creation is REFUSED while the lock dir is unusable.";
 
+/** The sidecar-write failure note (flair#2200) — the seed IS stored; only ownership is missing. */
+export function seedOwnerFailureNote(id: string, err: unknown): string {
+  return (
+    `[federation] stored the signing seed for ${id} but could not record its ownership sidecar ` +
+    `(${err instanceof Error ? err.message : String(err)}). Node-shaped files without .pub stay report-only. ` +
+    `Remedy: inspect and clear any conflicting sidecar path; check that $HOME/.flair/keys is writable by the Harper process (mode 0700).`
+  );
+}
+
+/** Store the seed and attempt to record its sidecar; metadata failure is logged. */
+export async function storeInstanceSeed(
+  id: string,
+  seed: Uint8Array,
+  dataDir: string = harperRootPath(),
+): Promise<void> {
+  const { keystore, recordSeedOwner } = await import("../src/keystore.js");
+  keystore.setPrivateKeySeed(id, seed);
+  try {
+    recordSeedOwner(id, dataDir);
+  } catch (err) {
+    console.error(seedOwnerFailureNote(id, err));
+  }
+}
+
 /**
  * Harper's data root for THIS process — the `ROOTPATH` env var Harper sets for a
  * component (read the same way `resources/models-dir.ts` reads it). The lock lives
