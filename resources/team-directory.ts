@@ -3,9 +3,8 @@
  *
  * Answers "who is in this office, and how do I reach them" from Flair's own
  * records: the active agent-kind principals, joined to their operator-published
- * `tps-mail` `Integration` contact. One resolver serves all three surfaces —
- * the `team_directory` MCP tool, `GET /TeamDirectory`, and the flair client —
- * so they cannot disagree about membership, filtering, caps or error shape.
+ * `tps-mail` `Integration` contact. One resolver serves the `team_directory`
+ * MCP tool, `GET /TeamDirectory` and the flair client.
  *
  * ─── Authority (the directory-specific verified-active-reader gate) ─────────
  * The resolver does NOT go through `Integration`'s owner-only REST scope: it
@@ -27,7 +26,8 @@
  * platform, and a VALID publication stamp enter the list. Tombstones (a null or
  * absent `directoryPublishedAt`) never do. One channel per agent: a principal
  * with several published `tps-mail` rows contributes the most recently
- * published one.
+ * published one, compared by publication time in epoch milliseconds rather
+ * than as strings (a stored stamp may be any parseable date string).
  *
  * ─── Caps (fixed, applied before anything is returned) ──────────────────────
  *   50 entries per response, one channel per agent, 256 UTF-8 bytes for
@@ -177,6 +177,7 @@ async function collectEntries(): Promise<TeamDirectoryEntry[] | Response> {
   }
 
   const byAgent = new Map<string, TeamDirectoryEntry>();
+  const byAgentTimeMs = new Map<string, number>();
   try {
     for await (const row of (databases as any).flair.Integration.search({
       select: ["agentId", "platform", "email", "directoryPublishedAt"],
@@ -189,17 +190,24 @@ async function collectEntries(): Promise<TeamDirectoryEntry[] | Response> {
       if (!owner) continue; // contact owner must be an active agent-kind principal
       if (utf8Bytes(r.agentId) > TEAM_DIRECTORY_MAX_STRING_BYTES) continue;
       if (utf8Bytes(r.email) > TEAM_DIRECTORY_MAX_STRING_BYTES) continue;
+      // Normalize the publication time to epoch milliseconds before choosing
+      // the most recent: a stored stamp may be any parseable date string, and
+      // string order is not time order ("10/03/2026" sorts before "2026-10-01").
+      const publishedMs = Date.parse(r.directoryPublishedAt);
       const entry: TeamDirectoryEntry = {
         agentId: r.agentId,
         name: cutToUtf8Bytes(agentDisplayName(owner), TEAM_DIRECTORY_MAX_STRING_BYTES),
         platform: r.platform,
         email: r.email,
-        publishedAt: r.directoryPublishedAt,
+        publishedAt: new Date(publishedMs).toISOString(),
         homeInstanceId: null, // stamped below from the resolved local instance
       };
       // One channel per agent: keep the most recently published row.
-      const prev = byAgent.get(entry.agentId);
-      if (!prev || entry.publishedAt > prev.publishedAt) byAgent.set(entry.agentId, entry);
+      const prevMs = byAgentTimeMs.get(entry.agentId);
+      if (prevMs === undefined || publishedMs > prevMs) {
+        byAgent.set(entry.agentId, entry);
+        byAgentTimeMs.set(entry.agentId, publishedMs);
+      }
     }
   } catch {
     return unavailable("team_directory_contact_store_unavailable");

@@ -170,6 +170,21 @@ describe("filtering happens before pagination", () => {
     expect(res.entries[0].email).toBe("new@example.test");
   });
 
+  it("keeps the later publication time when a non-ISO-8601 stamp sorts before an earlier ISO-8601 one", async () => {
+    addAgent("reader");
+    addAgent("agent-a");
+    const earlier = "2026-10-01T00:00:00.000Z";
+    const laterNonIso = "10/03/2026"; // later in time, but sorts BEFORE `earlier` as a string
+    expect(Date.parse(laterNonIso)).toBeGreaterThan(Date.parse(earlier));
+    expect(laterNonIso < earlier).toBe(true);
+    addContact("c1", { agentId: "agent-a", email: "earlier@example.test", directoryPublishedAt: earlier });
+    addContact("c2", { agentId: "agent-a", email: "later@example.test", directoryPublishedAt: laterNonIso });
+    const res = (await resolveTeamDirectory(agentCtx("reader"))) as any;
+    expect(res.entries).toHaveLength(1);
+    expect(res.entries[0].email).toBe("later@example.test");
+    expect(res.entries[0].publishedAt).toBe(new Date(Date.parse(laterNonIso)).toISOString());
+  });
+
   it("filters by exact id and by name substring", async () => {
     addAgent("reader");
     addAgent("agent-a", { name: "Alpha" });

@@ -6,7 +6,7 @@ import { resolveTeamDirectory } from "./team-directory.js";
  * GET /TeamDirectory — the team directory over local records (flair#2141 S3a).
  *
  * Serves the SAME resolver as the `team_directory` MCP tool and the flair
- * client, so all three surfaces return identical results. Query parameters
+ * client. Query parameters
  * (`id`, `name`, `cursor`, `limit`) filter and page the list; authority is the
  * resolver's verified-active-reader gate, which reads past Integration's
  * owner-only REST scope in-process. `allowRead` blocks anonymous HTTP before

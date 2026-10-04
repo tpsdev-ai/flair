@@ -803,9 +803,8 @@ type ToolImpl = (agent: ResolvedAgent, args: any) => Promise<any>;
 
 /**
  * team_directory (flair#2141 S3a) — the team directory, from Flair's own
- * records. A THIN wrapper over resources/team-directory.ts's one resolver, so
- * the /mcp surface, `GET /TeamDirectory` and the flair client return identical
- * results. The resolver owns authority (a verified active agent, read via
+ * records. A THIN wrapper over resources/team-directory.ts's one resolver.
+ * The resolver owns authority (a verified active agent, read via
  * `resolveAgentAuth` plus a fresh local Agent read), filtering (active
  * agent-kind principals with a matching, operator-published `tps-mail` contact)
  * and the caps. The delegation context carries the RESOLVED agent, so a tool

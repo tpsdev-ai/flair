@@ -38,7 +38,7 @@ export const PEER_STATUS_VALUES: readonly PeerStatus[] = [
 ];
 
 /**
- * The membership statuses: a peer carrying one of these is a directory member.
+ * The membership statuses: a peer carrying one of these is a federation member.
  * `revoked` is NOT a member, and a missing or unrecognized status is not a
  * member either (membership is granted only by an affirmative status).
  */
@@ -53,7 +53,7 @@ export function isPeerStatus(value: unknown): value is PeerStatus {
   return typeof value === "string" && (PEER_STATUS_VALUES as readonly string[]).includes(value);
 }
 
-/** True for a value that grants directory membership (see above). */
+/** True for a value that grants federation membership (see above). */
 export function isPeerMemberStatus(value: unknown): value is PeerStatus {
   return typeof value === "string" && (PEER_MEMBERSHIP_STATUSES as readonly string[]).includes(value);
 }

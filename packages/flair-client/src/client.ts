@@ -830,9 +830,9 @@ class SoulApi {
 /**
  * The team directory: active agent-kind principals with an operator-published
  * `tps-mail` contact. `GET /TeamDirectory` exercises the SAME resolver as the
- * `/mcp` `team_directory` tool, so a connector and a client see identical
- * results. Any verified active agent may read; publication and withdrawal are
- * operator-only and happen through the Integration resource, not here.
+ * `/mcp` `team_directory` tool. Any verified active agent may read; publication
+ * and withdrawal are operator-only and happen through the Integration resource,
+ * not here.
  */
 class TeamDirectoryApi {
   constructor(private client: FlairClient) {}
