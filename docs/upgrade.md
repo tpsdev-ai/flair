@@ -696,8 +696,11 @@ This used to be aspirational — nobody had actually checked. `test/compat/downg
 now checks it for real, nightly, alongside the mixed-version federation suite (both run
 from `.github/workflows/federation-compat.yml`'s `bun test test/compat/`): it boots the
 current build, writes a memory and a presence row, stops it *without* wiping the data
-directory, then boots the last **npm-published** `@tpsdev-ai/flair` against that exact
-same directory and confirms it comes up healthy and can read both rows back.
+directory, then starts the last **npm-published** `@tpsdev-ai/flair` against that exact
+same directory through its OWN CLI and either confirms it comes up healthy and can read
+both rows back (same engine), or — when the Harper engine moved — confirms the older
+CLI's backwards-engine guard refuses the store *before* Harper is spawned, naming the
+engine change, and leaves the data directory byte-identical.
 
 **The guarantee is now restated (flair#1050):** there is never a silent bad outcome.
 Either the old binary boots and serves the corpus correctly, **or** it refuses to start
@@ -720,6 +723,17 @@ recovery as the 5.1 → 5.2 break: `flair snapshot restore <path>`. The
 `downgrade-boot` suite treats that Harper crash as the loud-refusal branch of
 the flair#1050 invariant (it boots Harper via `startHarper`, so the CLI stamp
 phrasing is not on that path).
+
+**Engine-version break: Harper 5.2 → 5.3.** Harper 5.3's RocksDB storage format is
+one-way — a build older than 5.3 opens the bare store names and reads tables created
+under 5.3 as empty — so **data written by a 5.3 flair cannot be opened by an older
+flair**. An older flair refuses *before* its Harper is spawned: `flair start`'s
+backwards-engine guard reads the `engine-version.txt` stamp this release writes into
+`~/.flair/data` and, when the running engine is older than the stamp, exits non-zero
+naming both versions and the data directory, without opening the store — the data
+directory is left byte-identical. The remedy is the same as the breaks above: restore
+the pre-upgrade snapshot (`flair snapshot restore <path>`) or a `flair backup` export
+taken on the older version.
 
 **As observed when this suite was added (2026-07-08):** the npm-published baseline
 (0.21.0) boots cleanly against data written by a HEAD build roughly 14 commits ahead of

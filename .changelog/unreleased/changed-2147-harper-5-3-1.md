@@ -3,4 +3,6 @@
   > **Heads-up:** Harper 5.3's RocksDB storage format is one-way. A build older
   > than 5.3 opens the bare store names and reads tables created under 5.3 as
   > empty, so a data directory upgraded to 5.3 must not be served by an older
-  > flair.
+  > flair. An older flair now refuses such a start before Harper opens the
+  > store; the remedy is restoring the pre-upgrade snapshot, or a `flair backup`
+  > export taken on the older version.
