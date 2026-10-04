@@ -240,7 +240,7 @@ describe("flair#2139 S2c (2) — protected reindex fields", () => {
 
   test("a partial plain reindex keeps stored lineage and lifecycle fields", async () => {
     const id = nextId("plain-lineage");
-    const body = { id, agentId: A.id, content: "closed plain note", durability: "standard", visibility: "shared" };
+    const body = { id, agentId: A.id, content: "closed plain note", durability: "standard", visibility: "shared", createdAt: now() };
     const retained = { supersedes: "previous", validTo: "2020-01-01T00:00:00.000Z", validFrom: "2019-01-01T00:00:00.000Z", expiresAt: "2020-01-01T00:00:00.000Z", archived: true, archivedAt: now(), archivedBy: A.id };
     await ops({ operation: "upsert", database: "flair", table: "Memory", records: [{ ...body, ...retained }] });
     const result = await call(ADMIN_AGENT, "PUT", memPath(id), { ...body, _reindex: true });

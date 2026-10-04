@@ -231,7 +231,7 @@ function memoryFeedCases(phase: string) {
     const before = await openAs(B, "/FeedMemories");
     try {
       const sentinel = `${p}-expiry-before`;
-      await feedWrite(B, { id: sentinel, content: "before expiry" });
+      await feedWrite(B, { id: sentinel, content: `${p} before expiry` });
       await before.waitFor((e) => e.id === sentinel, "before-expiry sentinel");
       expect(before.events().map((e) => e.id)).toContain(root);
     } finally {
@@ -244,7 +244,7 @@ function memoryFeedCases(phase: string) {
     const after = await openAs(B, "/FeedMemories");
     try {
       const sentinel = `${p}-expiry-after`;
-      await feedWrite(B, { id: sentinel, content: "after expiry" });
+      await feedWrite(B, { id: sentinel, content: `${p} after expiry` });
       await after.waitFor((e) => e.id === sentinel, "after-expiry sentinel");
       expect(after.events().map((e) => e.id)).not.toContain(root);
     } finally {
