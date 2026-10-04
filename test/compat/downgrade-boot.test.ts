@@ -536,9 +536,9 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     }
 
     if (baselineBootError) {
-      // Same engine — a Harper storage break (LZ4) is the only loud refusal.
-      // Hang first: startHarper timeouts append the Harper log, so LZ4 can
-      // appear on a hung baseline. A timeout is hung, not refusal.
+      // Same engine — a Harper storage break (LZ4) is the documented loud
+      // refusal. Hang first: startHarper timeouts append the Harper log, so LZ4
+      // can appear on a hung baseline. A timeout is hung, not refusal.
       assertBaselineDidNotHang(baselineBootError);
       if (isLz4LoudRefusal(baselineBootError.message)) {
         return;
