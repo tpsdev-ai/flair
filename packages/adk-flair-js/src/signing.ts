@@ -1,7 +1,7 @@
 /**
  * TPS-Ed25519 request signing for adk-flair.
  *
- * Loads a PKCS8 base64-encoded Ed25519 private key from a keyfile and
+ * Loads an Ed25519 private key from a raw seed, base64 seed, base64 PKCS8 DER, or PEM keyfile and
  * produces `TPS-Ed25519 <agent-id>:<timestamp>:<nonce>:<base64-sig>`
  * Authorization headers for Flair API requests.
  */

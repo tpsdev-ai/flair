@@ -264,6 +264,20 @@ describe("the process a human or CI step actually consumes", () => {
     expect(res.out).toMatch(/tarball not found/);
   });
 
+  test.each(["null", "3", '"str"', "true", "false", "[]"])(
+    "a %s budget exits cleanly with DID NOT RUN",
+    (json) => {
+      const tree = writeTree({ harper: { bytes: 100 } });
+      const budget = join(scratch(), "budget.json");
+      writeFileSync(budget, json);
+      const res = runGate(["--tree", tree, "--budget", budget]);
+      expect(res.status).toBe(EXIT_DID_NOT_RUN);
+      expect(res.out).toContain("DID NOT RUN");
+      expect(res.out).toContain(`budget file is not an object: ${budget}`);
+      expect(res.out).not.toContain("TypeError");
+    },
+  );
+
   test("no args is DID NOT RUN, not a silent pass", () => {
     const res = runGate([]);
     expect(res.status).toBe(EXIT_DID_NOT_RUN);

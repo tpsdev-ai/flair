@@ -76,7 +76,7 @@ asks for it back in a fresh session 2 and prints whether the fact was recalled.
 | HTTP timeout     | `FLAIR_HTTP_TIMEOUT` | (unset — fail-fast defaults, read 1.5s) | Read/write timeout in seconds (float). Set for hosted Flair (below). |
 | Connect timeout  | `FLAIR_HTTP_CONNECT_TIMEOUT` | (unset — derived)     | Connect/pool timeout in seconds (float). Rarely needed on its own. |
 
-All settings can also be passed as constructor arguments:
+All settings can also be passed as constructor arguments, **except the remote-URL opt-in (`FLAIR_ALLOW_REMOTE_URL`), which is read from the environment only**:
 
 ```python
 FlairMemoryService(
@@ -87,6 +87,12 @@ FlairMemoryService(
 ```
 
 ### Explicit durability and visibility (opt-in)
+
+- permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+- persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+- standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+- ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+- No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
 
 The `add_memory()` method accepts optional `durability` and `visibility` keyword
 args that let application code control how memories persist and who can read them:
@@ -208,7 +214,7 @@ for registration, once.
 | Shape | What is true | What you see | What to do |
 |---|---|---|---|
 | **Record missing** | No `Agent` row for `FLAIR_AGENT_ID` on this `FLAIR_URL` | `401 {"error":"unknown_agent"}` on every signed call (`add_memory`, search, list) | `flair agent add` with `--target` / `--ops-target` as above. `flair agent list` is localhost-only — it cannot see the hosted registry. |
-| **Key mismatch** | The id exists; the public key on the server is not the key in `FLAIR_KEYFILE` | `401 {"error":"invalid_signature"}` | Same id, wrong file — copied from another host, rotated on one side only, or `FLAIR_KEYFILE` pointing at a different agent's key. Point `FLAIR_KEYFILE` at the key that matches this instance, or re-seed the hosted row from this machine's key (`flair agent add my-adk-app --target "$FLAIR_URL" --ops-target <ops-url> --admin-pass-file <path>` reuses the local file). `flair agent rotate-key` is localhost-only. Restart the ADK process so it reloads the key. |
+| **Key mismatch** | The id exists; the public key on the server is not the key in `FLAIR_KEYFILE` | `401 {"error":"invalid_signature"}` | Same id, wrong file — copied from another host, rotated on one side only, or `FLAIR_KEYFILE` pointing at a different agent's key. Point `FLAIR_KEYFILE` at the key that matches this instance. On the Flair host, `flair agent rotate-key <id>` replaces the stored key and writes the new private key there (localhost-only). Put that file on this host and point `FLAIR_KEYFILE` at it. Restart the ADK process so it reloads the key. |
 | **Config wrong** | Identity may be fine; you are not hitting the Flair you think | Timeouts, `ConnectError`, or **404 from Harper's catch-all** | Confirm `FLAIR_ALLOW_REMOTE_URL=1`, a raised `FLAIR_HTTP_TIMEOUT`, and a `FLAIR_URL` with **no path prefix**. Cloud-agent localhost is the VM, not your laptop. `/Health` can be 200 while `/Memory` is still 404 if the Flair app is not loaded yet. |
 
 Clock skew is a fourth, rarer 401: `timestamp_out_of_window`.
@@ -229,17 +235,33 @@ usually means you are not the owner the server thinks you are — the three
 shapes above — not that you should switch POST for PUT.
 
 `search_memory` swallows transport failures to empty (ADK's contract).
-`list_memories` and the write path raise `FlairRequestError` with
-`.status_code` — read that status before guessing.
+`list_memories` raises `FlairRequestError` with `.status_code` for any non-2xx
+response (read that status before guessing), and lets transport errors from
+`httpx` propagate. `add_memory` attempts every text-bearing record, then raises
+`FlairWriteError` (a `FlairRequestError` subclass carrying `written`, `total`,
+`failed`, `skipped` and the first failure's `.status_code`) if any write was
+refused or could not be confirmed. `total` counts only records ATTEMPTED —
+text-less entries are skipped: a failed write reports them in `skipped`, and a successful batch with skips emits one warning with the skipped and written counts.
+`.status_code` is an `int`, or `None` when the failure carried no status (a connection error or
+timeout) — the `"?"` sentinel appears only in the message and the `failed` list.
+After a timeout or connection error the record may or may not
+have landed. The `store_memory` tool turns that into `{"error": <message>,
+"written": n, "failed": m}` and reports
+`"stored"` only when every write was
+acknowledged with a 2xx. `add_session_to_memory` and `add_events_to_memory`
+still log a failed write and continue.
 
 ## Security
 
-### Per-user isolation
+### Per-user scope is a retrieval filter, not an isolation boundary
 
-All users of one ADK app share one Flair principal. Per-user isolation is
-enforced by tag-based server-side filtering, not cryptographic key separation.
-A bug in that filter would leak cross-user memories. For key-level isolation,
-use per-org Flair principals (the org layer).
+All users of one ADK app share one Flair principal. The compound tag
+`adk:<app_name>:<user_id>` is a per-user **RETRIEVAL FILTER** — it selects which
+memories a search returns — and it does **not** isolate one user's memories from
+another's: every user of one ADK app shares one Flair principal, so the tag is
+not a boundary between users. The server rejects forged ownership on ordinary
+agent writes. Other ordinary agents cannot read a private memory; admins and
+trusted internal calls can.
 
 ### Tag encoding
 
@@ -264,28 +286,35 @@ just documentation — a typo'd `FLAIR_URL` cannot silently exfiltrate queries.
 
 ## Timeouts
 
-The search path has a 2s total budget covering the full lifecycle including DNS:
+The client sets HTTPX **phase timeouts** (connect, read, write, pool); there is
+no enclosing wall-clock deadline over the whole request. The defaults are:
 
 - Connect: 0.5s
 - Read: 1.5s
 - Write: 1.0s
 - Pool: 0.5s
 
-One attempt, no retry on the turn path. A hung Flair will never add seconds to
-every turn. Write paths use the same timeout budget and log structured warnings
+One attempt, no retry on the turn path. The phase timeouts do not bound the
+total request duration: a server that keeps sending response data within the
+read timeout can keep a request open longer. Write paths use the same timeout budget and log structured warnings
 on failure (session id, event count, HTTP status).
 
 ## Scope mapping
 
 ADK scopes everything by `{app_name, user_id}`. Flair's model is agentId-keyed.
 The adapter bridges this with a **compound tag** — `adk:<app_name>:<user_id>` —
-on every record, filtered on every search.
+on every record, filtered on every search. The tag is a per-user RETRIEVAL
+FILTER, not an isolation boundary: every user of one ADK app shares one Flair
+principal.
 
 - `user_id` is **mandatory** in the search path — missing/empty returns empty,
-  never searches unscoped.
+  never searches unscoped. The service scopes every read and write by the
+  `app_name` and `user_id` it is given; the ADK runner passes the session's
+  values, and code that calls the service or builds the tools directly chooses
+  them itself.
 - The adapter **re-verifies the compound tag on every search hit** before
   mapping it out — defense-in-depth against filter bypass.
-- `user_id` comes from ADK's session context, never from caller-supplied input.
+- ADK supplies `app_name` and `user_id` from its request or session; direct service callers and `create_flair_tools(...)` choose the values they pass.
 
 ## MemoryEntry mapping
 
@@ -309,9 +338,23 @@ dict is its return channel.
 
 ## Idempotent writes
 
-Record ids are deterministic: `{app_name}:{user_id}:{session_id}:{event.id}`.
-Re-ingestion upserts the same record, statelessly. Flair's REM consolidates
-content; it never sees duplicates.
+An event with an id gets a deterministic record id. Tuples with no colon in
+any component keep the historical event-join
+(`{app_name}:{user_id}:{session_id}:{event.id}`). Re-ingesting one of those
+updates the same row only when that row already has a complete event stamp
+for the tuple: `sessionId` plus the compound tag and the `adk-event:` tag.
+An unstamped pre-upgrade row is not replaced automatically; the existing row
+is kept and the conflict is reported. An event without an id gets a fresh
+UUID, so re-ingesting it can store another row. When any component contains
+`:`, each component percent-encodes `%` as `%25`, `|` as `%7C`, and `:` as
+`%3A`, and the parts are joined with `|`. That id contains no `:`. The old
+event-join always contains at least three `:`, so the new id is not an
+event-join row the previous encoder stored. The first re-ingestion after
+upgrading can leave both the old row and the new one for a colon-bearing
+event. A create conflict on an event write replaces the existing row only
+when that row has a complete event stamp matching this tuple; otherwise the
+row is kept and the conflict is reported. A direct `add_memory()` re-add of
+the same id replaces that row.
 
 ## custom_metadata
 
@@ -403,9 +446,7 @@ entries = await memory_service.list_memories(
 - Returns `List[MemoryEntry]`, newest first (`createdAt` descending), with the
   full projection: content, `author`, `timestamp`, `custom_metadata`
   (including `subject`).
-- Scoped exactly like `search_memory`: the `adk:<app>:<user>` compound tag AND
-  the service's own agent identity, both pushed down server-side and
-  re-verified client-side on every row.
+- Listing sends owner and compound-tag filters to the server and rechecks both on returned rows; search sends the compound tag within Flair's read scope, then additionally rejects hits whose owner differs from the service identity.
 - **Pagination is a point-in-time snapshot** — `offset` is positional, not a
   live cursor. Writes between two page fetches shift positions, so a record
   can appear twice or be skipped across page boundaries; dedupe by `id` if you

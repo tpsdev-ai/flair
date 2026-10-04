@@ -30,7 +30,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -123,6 +123,50 @@ class FlairRequestError(RuntimeError):
         self.reason = reason
 
 
+class FlairWriteError(FlairRequestError):
+    """One or more records in an ``add_memory`` batch failed to write.
+
+    A subclass of :class:`FlairRequestError`, so every existing
+    ``except FlairRequestError`` keeps catching a failed write — the README
+    already promises ``add_memory`` raises it. What it adds is batch
+    accounting: ``written`` counts the records whose write Flair acknowledged
+    with a 2xx, ``total`` is the number of records ATTEMPTED (text-less
+    entries ``add_memory`` skips are excluded from ``total`` and counted in
+    ``skipped``), and ``failed`` lists ``(record_id, status)`` for each attempt
+    that was refused or could not be confirmed (status ``"?"`` when the failure
+    carried none, e.g. a connection error or timeout, where the record may or
+    may not have landed). ``status_code`` is the first failure's status as an
+    ``int``, or ``None`` when that status is unknown (the ``"?"`` sentinel lives
+    only in the message and the ``failed`` list). Check for ``None`` before
+    comparing ``status_code`` numerically.
+    """
+
+    status_code: int | None
+
+    def __init__(
+        self, written: int, total: int, failed: List[Tuple[str, Any]], skipped: int = 0
+    ):
+        self.written = written
+        self.total = total
+        self.failed = failed
+        self.skipped = skipped
+        first_status = failed[0][1] if failed else "?"
+        self.status_code = first_status if isinstance(first_status, int) else None
+        # Attribute-compatibility with FlairRequestError. A batch failure has
+        # no single method/path/reason, so these stay None rather than being
+        # fabricated from an arbitrary member of the batch.
+        self.method = None
+        self.path = None
+        self.reason = None
+        message = (
+            f"{written} of {total} memories written; "
+            f"{len(failed)} refused (status {first_status})"
+        )
+        if skipped:
+            message += f"; {skipped} skipped (no text)"
+        RuntimeError.__init__(self, message)
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -165,11 +209,79 @@ def _compound_tag(app_name: str, user_id: str) -> str:
     return f"{_TAG_PREFIX}:{_sanitize_tag_segment(app_name)}:{_sanitize_tag_segment(user_id)}"
 
 
+def _event_tag(event_id: str) -> str:
+    """Tag that names the event id inside an event-tuple stamp.
+
+    ``%``, ``:``, and ``_`` are encoded the same way as a compound-tag
+    segment, so two event ids cannot share a tag.
+    """
+    return f"adk-event:{_sanitize_tag_segment(event_id)}"
+
+
+def _row_is_same_event_tuple(
+    row: Mapping[str, Any], app_name: str, user_id: str, session_id: str, event_id: str
+) -> bool:
+    """True when ``row`` has a complete event stamp for this tuple.
+
+    A complete stamp is ``sessionId`` equal to this session and tags that
+    include both the compound tag and this event's ``adk-event:`` tag.
+    A missing stamp (a pre-upgrade event, or a direct-memory row that shares
+    the id) is not a match. A contradictory stamp is not a match. The id
+    alone is not a stamp.
+    """
+    tags = row.get("tags") or []
+    if not isinstance(tags, list):
+        return False
+    if row.get("sessionId") != session_id:
+        return False
+    if _compound_tag(app_name, user_id) not in tags:
+        return False
+    return _event_tag(event_id) in tags
+
+
+def _escape_record_id_component(value: str) -> str:
+    """Percent-encode ``%``, ``|``, and ``:`` so the component can be joined on ``|``.
+
+    ``%`` is encoded first so a literal ``%7C`` or ``%3A`` cannot be mistaken
+    for an encoded ``|`` or ``:``.
+    """
+    return value.replace("%", "%25").replace("|", "%7C").replace(":", "%3A")
+
+
 def _deterministic_record_id(
     app_name: str, user_id: str, session_id: str, event_id: str
 ) -> str:
-    """Deterministic record id for idempotent re-ingestion."""
-    return f"{app_name}:{user_id}:{session_id}:{event_id}"
+    """Deterministic record id for idempotent re-ingestion.
+
+    Tuples with no colon in any component keep the historical join
+    ``app:user:session:event``, so those stored rows stay addressable.
+    When any component contains ``:``, every component is percent-encoded
+    and the parts are joined with ``|``. That id contains no ``:``. The old
+    join of four components always contains at least three ``:`` — including
+    ids already stored for tuples that themselves contained ``:`` — so the
+    new id is outside that set.
+    """
+    parts = (app_name, user_id, session_id, event_id)
+    if any(":" in part for part in parts):
+        return "|".join(_escape_record_id_component(part) for part in parts)
+    return ":".join(parts)
+
+
+def _encode_record_id(record_id: str) -> str:
+    """Percent-encode a Memory id so it addresses exactly that record as ONE
+    path segment (flair#1970). REFUSES an id that is exactly ``.`` or ``..``:
+    percent-encoding leaves those unchanged and URL normalization collapses
+    ``/Memory/.`` to ``/Memory/`` and ``/Memory/..`` to ``/``, so the sent path
+    would not be the id (nor the signed path). Such an id cannot address its
+    record.
+    """
+    if record_id in (".", ".."):
+        raise ValueError(
+            f"record id {record_id!r} is a URL path dot-segment (\".\" or \"..\"); "
+            "it cannot be addressed as one path segment of /Memory/<id>. "
+            "Use a different id."
+        )
+    return quote(record_id, safe="")
 
 
 def _iso_now() -> str:
@@ -493,14 +605,12 @@ def _resolve_subject(
 class FlairMemoryService(BaseMemoryService):
     """Flair-backed memory service for Google ADK.
 
-    All users of one ADK app share one Flair principal. Per-user isolation is
-    enforced by tag-based server-side filtering, not cryptographic key
-    separation. See the README Security section for details.
+    The app/user tag is a retrieval filter within one Flair principal, not an isolation boundary.
 
     Constructor args (all optional; env vars provide defaults):
         url: Flair server URL. Default: FLAIR_URL or http://localhost:19926
         agent_id: Flair agent identity. Default: FLAIR_AGENT_ID
-        keyfile: Path to PKCS8 base64 Ed25519 key. Default: FLAIR_KEYFILE
+        keyfile: Path to an Ed25519 keyfile: raw seed, base64 seed, base64 PKCS8 DER, or PEM. Default: FLAIR_KEYFILE
         timeout: HTTP timeout. A float sets the read/write timeout in seconds
             (connect derived as min(timeout, 5.0)); an httpx.Timeout is used
             verbatim. Default: FLAIR_HTTP_TIMEOUT / FLAIR_HTTP_CONNECT_TIMEOUT
@@ -575,14 +685,40 @@ class FlairMemoryService(BaseMemoryService):
             )
             self._url_logged = True
 
-        auth = _sign_request(self._private_key, self._agent_id, method, path)
-        headers = {"Authorization": auth}
-        if json_body is not None:
-            headers["Content-Type"] = "application/json"
+        # flair#1987: the request is built ONCE and the signature covers exactly
+        # the path that request carries. The client's base URL may have a path
+        # (a deployment served under a prefix); httpx merges the route onto it,
+        # so signing the built request's own raw path (path + query) can never
+        # disagree with what is sent. A base URL that carries a query string or
+        # fragment is refused before any request: with a base query, httpx can
+        # append the route to the query instead of the path, and a base fragment
+        # is carried into the built URL. Refusing both keeps the base a pure path
+        # prefix.
+        parsed_base = httpx.URL(self._url)
+        if "?" in str(parsed_base) or "#" in str(parsed_base):
+            raise ValueError(
+                f"adk-flair: refusing base URL {self._url!r}: a base URL must not "
+                "carry a query string or fragment."
+            )
+        # _request accepts ROUTES only. A fully qualified URL bypasses the
+        # configured base and can address another origin, so a path with a
+        # scheme or host is refused before building.
+        route = httpx.URL(path)
+        if route.scheme or route.host:
+            raise ValueError(
+                f"adk-flair: refusing {path!r} as a request path: _request "
+                "accepts routes (paths), not absolute URLs."
+            )
 
         t0 = time.monotonic()
+        request = self._http.build_request(method, path, json=json_body)
+        request.headers["Authorization"] = _sign_request(
+            self._private_key, self._agent_id, method,
+            request.url.raw_path.decode("ascii"),
+        )
+
         try:
-            resp = await self._http.request(method, path, headers=headers, json=json_body)
+            resp = await self._http.send(request)
         except httpx.ConnectError as exc:
             elapsed = (time.monotonic() - t0) * 1000
             logger.warning(
@@ -608,7 +744,10 @@ class FlairMemoryService(BaseMemoryService):
             )
             raise
 
-        if resp.status_code >= 400:
+        # Only a 2xx confirms the request. httpx does not follow redirects, so a
+        # 3xx (or any other non-2xx) would otherwise read as success and a write
+        # could be reported as stored without landing (flair#1938).
+        if not 200 <= resp.status_code < 300:
             raise FlairRequestError(
                 method, path, resp.status_code, resp.reason_phrase
             )
@@ -619,9 +758,13 @@ class FlairMemoryService(BaseMemoryService):
         return resp.text
 
     async def _write_memory_record(
-        self, record_id: str, body: Dict[str, Any]
+        self,
+        record_id: str,
+        body: Dict[str, Any],
+        *,
+        event_tuple: Optional[Tuple[str, str, str, str]] = None,
     ) -> None:
-        """Create-or-replace one Memory record.
+        """Create one Memory record.
 
         Creates via ``POST /Memory/`` — Harper's collection create verb —
         with the id in the body. The previous shape, ``PUT /Memory/{id}``,
@@ -629,26 +772,58 @@ class FlairMemoryService(BaseMemoryService):
         does not exist yet (flair#1336, observed on hosted Harper Fabric;
         not reproducible on stock Harper 5.2.x, where PUT upserts).
 
-        A 409 from POST means the record already exists — re-ingestion of a
-        deterministic id (add_session_to_memory re-saves a growing session's
-        earlier events every time) or a caller-supplied id being rewritten.
-        Fall back to ``PUT /Memory/{id}`` for exactly that case, preserving
-        the pre-#1336 replace/refresh semantics for existing rows. Any other
+        A 409 from POST means the id is already occupied. A direct write
+        (no ``event_tuple``) replaces that row with PUT and does not read
+        it. An event write replaces the row only when it has a complete
+        event stamp for ``event_tuple`` (``sessionId`` plus the compound
+        tag and this event's tag). An unstamped pre-upgrade row or a
+        contradictory stamp is kept and the conflict is raised. Any other
         error propagates unchanged.
         """
+        # Validate/encode the id BEFORE any request (#1970): a ``.``/``..`` id
+        # cannot address its record, so a refused id sends nothing at all (not
+        # even the POST). ``_request`` signs the very path it sends, so the
+        # signed and sent PUT paths always agree.
+        put_path = f"/Memory/{_encode_record_id(record_id)}"
         try:
             await self._request("POST", "/Memory/", json_body=body)
+            return
         except FlairRequestError as exc:
             if exc.status_code != 409:
                 raise
-            await self._request("PUT", f"/Memory/{record_id}", json_body=body)
+        # Direct writes never enter the stamp check. A caller-chosen id
+        # replaces the occupied row, which is the add_memory re-add contract.
+        if event_tuple is None:
+            await self._request("PUT", put_path, json_body=body)
+            return
+        if await self._occupied_row_is_event_tuple(put_path, event_tuple):
+            await self._request("PUT", put_path, json_body=body)
+            return
+        raise FlairRequestError(
+            "POST",
+            put_path,
+            409,
+            "no matching event stamp; existing row kept",
+        )
+
+    async def _occupied_row_is_event_tuple(
+        self, path: str, event_tuple: Tuple[str, str, str, str]
+    ) -> bool:
+        """GET the occupied row. True only for a complete matching event stamp."""
+        try:
+            row = await self._request("GET", path)
+        except Exception:
+            return False
+        if not isinstance(row, dict):
+            return False
+        return _row_is_same_event_tuple(row, *event_tuple)
 
     # ── BaseMemoryService implementation ─────────────────────────────────────
 
     async def add_session_to_memory(self, session: Session) -> None:
         """Batch-write session events to Flair. Filters no-text events.
 
-        Re-ingestion is idempotent via deterministic record ids.
+        Re-ingestion reuses record IDs when app, user, session, and event IDs remain stable; missing event IDs receive fresh UUIDs.
         """
         app_name = session.app_name
         user_id = session.user_id
@@ -663,8 +838,9 @@ class FlairMemoryService(BaseMemoryService):
             if not text:
                 continue
 
+            event_id = event.id or str(uuid.uuid4())
             record_id = _deterministic_record_id(
-                app_name, user_id, session_id, event.id or str(uuid.uuid4())
+                app_name, user_id, session_id, event_id
             )
             body = {
                 "id": record_id,
@@ -672,11 +848,16 @@ class FlairMemoryService(BaseMemoryService):
                 "content": text,
                 "type": "session",
                 "durability": "standard",
-                "tags": [tag],
+                "tags": [tag, _event_tag(event_id)],
+                "sessionId": session_id,
                 "createdAt": _iso_now(),
             }
             try:
-                await self._write_memory_record(record_id, body)
+                await self._write_memory_record(
+                    record_id,
+                    body,
+                    event_tuple=(app_name, user_id, session_id, event_id),
+                )
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
@@ -737,7 +918,8 @@ class FlairMemoryService(BaseMemoryService):
                 "content": text,
                 "type": "session",
                 "durability": "standard",
-                "tags": [tag],
+                "tags": [tag, _event_tag(event_id)],
+                "sessionId": sid,
                 "createdAt": _iso_now(),
             }
             if metadata_json is not None:
@@ -745,7 +927,11 @@ class FlairMemoryService(BaseMemoryService):
             if subject_value is not None:
                 body["subject"] = subject_value
             try:
-                await self._write_memory_record(record_id, body)
+                await self._write_memory_record(
+                    record_id,
+                    body,
+                    event_tuple=(app_name, user_id, sid, event_id),
+                )
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
@@ -794,6 +980,11 @@ class FlairMemoryService(BaseMemoryService):
         Optional knobs (trust-anchor opt-in, never model-selected):
             durability: one of permanent, persistent, standard, ephemeral.
                 Omitted → "standard" in the body (unchanged behaviour).
+                permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+                persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+                standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+                ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+                No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
             visibility: one of private, shared.
                 Omitted → no visibility key in the body (server applies its
                 durability-keyed default). Supplied → included verbatim.
@@ -823,10 +1014,15 @@ class FlairMemoryService(BaseMemoryService):
         subject_value = _resolve_subject(subject, custom_metadata)
 
         written = 0
+        skipped = 0
+        attempted = 0
+        failed: List[Tuple[str, Any]] = []
         for mem in memories:
             content_text = self._extract_content_text(mem.content)
             if not content_text:
+                skipped += 1
                 continue
+            attempted += 1
 
             record_id = mem.id or hashlib.sha256(content_text.encode()).hexdigest()[:32]
             body: Dict[str, Any] = {
@@ -851,16 +1047,37 @@ class FlairMemoryService(BaseMemoryService):
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
+                failed.append((record_id, status))
                 logger.warning(
                     "adk-flair: direct memory write failed for id %s "
                     "(status=%s, written=%d/%d)",
-                    record_id, status, written, len(memories),
+                    record_id, status, written, attempted,
                 )
 
         if written:
             logger.debug(
                 "adk-flair: wrote %d direct memories (app=%s, user=%s)",
                 written, app_name, user_id,
+            )
+
+        # A failed or unconfirmed write must never be reported as stored
+        # (flair#1938): after attempting every text-bearing record, surface the
+        # partial batch. If every attempted write was acknowledged, this is a
+        # no-op and add_memory keeps returning None as before.
+        if failed:
+            raise FlairWriteError(written, attempted, failed, skipped)
+        # A batch whose every entry had no text wrote nothing; returning
+        # normally would read as success to the caller.
+        if attempted == 0 and skipped:
+            raise ValueError(
+                f"add_memory: all {skipped} memories in the batch have no text; nothing was written"
+            )
+        # flair#1967: a successful batch that skipped text-less entries says so,
+        # with counts only (never record content or ids).
+        if skipped:
+            logger.warning(
+                "adk-flair: add_memory skipped %d text-less entries (written=%d)",
+                skipped, written,
             )
 
     async def search_memory(
@@ -923,6 +1140,13 @@ class FlairMemoryService(BaseMemoryService):
             # This is the client-side analogue of Flair's isAllowed defense-in-depth.
             hit_tags: List[str] = hit.get("tags") or []
             if tag not in hit_tags:
+                continue
+
+            # flair#1943: owner-identity recheck, exactly as list_memories does
+            # (line ~1069). The compound tag is a per-user RETRIEVAL FILTER, not
+            # an identity boundary; a hit whose agentId is not this service's
+            # own agent id must be dropped before it becomes a MemoryEntry.
+            if hit.get("agentId") != self._agent_id:
                 continue
 
             memories.append(self._hit_to_memory_entry(hit))

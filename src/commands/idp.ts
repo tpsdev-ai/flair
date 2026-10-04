@@ -10,6 +10,7 @@
  * Do not import src/cli.ts from here — that would cycle and pull the
  * non-strict entry into the strict check.
  */
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
 import * as render from "../render.js";
@@ -200,7 +201,7 @@ export function register(program: Command): void {
 
       let cfg: any;
       try {
-        cfg = await api("GET", `/IdpConfig/${id}`);
+        cfg = await api("GET", `/IdpConfig/${encodeRecordId(id)}`);
       } catch {
         console.error(`IdP '${id}' not found`);
         process.exit(1);

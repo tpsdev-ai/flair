@@ -21,6 +21,7 @@
 import * as harper from "harper";
 import { mcpOAuthEnabled, mcpAuthConfig } from "./mcp-oauth-flag.js";
 import { checkMcpRateLimit } from "./rate-limit.js";
+import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
 
 /**
  * Boot guard (flair#1021): when FLAIR_MCP_OAUTH is on, the @harperfast/oauth
@@ -269,16 +270,14 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
   // stub build of harper lacks the export.
   const srv = deps.server ?? ((harper as any).server);
 
-  // Primary registration: urlPath subroute → own chain (flair's auth-middleware
-  // does not run here). `getConfig` pins iss/resource to the AS's values so the
-  // wrapper's iss/aud checks match the minted tokens even if this component
-  // resolves a different node_modules copy of the plugin (docs/mcp-oauth.md
-  // §"Using withMCPAuth from a different component").
+  // Mount /mcp after the guard.
   srv.http(
     withMCPAuth(rateLimitedMcpHandler(handler), {
-      getConfig: () => mcpAuthConfig(),
+      getConfig: () => (deps.harper ?? harper).server?.resources?.get("oauth")?.Resource?.mcpConfig?.enabled === true
+        ? mcpAuthConfig()
+        : undefined,
     }),
-    { urlPath: "/mcp" },
+    { urlPath: "/mcp", after: MULTI_WORKER_GUARD_HTTP_NAME },
   );
 
   console.error(`[mcp-oauth] /mcp mounted (OAuth-guarded); issuer=${config.issuer}`);

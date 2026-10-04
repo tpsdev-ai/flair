@@ -1,20 +1,23 @@
+import { systemdAgentId } from "../src/lib/systemd-agent-id.js";
 import { Resource, databases, server, logger } from "harper";
 import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
+import { multiWorkerCondition, multiWorkerHealthField } from "./multi-worker-guard.js";
 import { resolveBuildInfo } from "./build-info.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 import { hybridEnabled, retrievalMode } from "./bm25.js";
-import { bm25IndexEnabled, bm25IndexStatus } from "./bm25-index-service.js";
+import { bm25IndexEnabled, bm25IndexInRetrievalPath, bm25IndexStatus } from "./bm25-index-service.js";
+import { bm25DisabledWarning } from "./bm25-status.js";
 import { normalizeStamp } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
-import { withEmbedGpuHealth } from "./embed-gpu.js";
+import { embedGpuStatusNotice, withEmbedGpuHealth } from "./embed-gpu.js";
 import {
   classifyPeerLiveness,
   federationPeersAllDisconnectedWarning,
@@ -22,6 +25,7 @@ import {
   summarizePeerLiveness,
 } from "./federation-peer-liveness.js";
 import { decideInstanceAnswer, INSTANCE_ROW_PRUNE_REMEDY } from "../src/lib/instance-identity-row.js";
+import { summarizeExpiredByAgent, expiredByAgentWarningLines, type NightlyDriverFacts } from "../src/lib/expired-by-agent.js";
 import { readAllInstanceRows } from "./Federation.js";
 
 const db = databases as any;
@@ -82,11 +86,11 @@ function resolveVersion(): string {
  *
  * flair#1326: `ok: true` used to mean only "this resource answered." That
  * is a green light that lies when search routes are not mounted yet, or
- * when the hybrid BM25 index is still cold (first search after restart
- * scans the corpus; the lag grows with store size). `searchReady` is
+ * when the BM25 index is still empty or building (a text search waits for
+ * the background build; the wait grows with store size). `searchReady` is
  * always present. When search cannot be served at all, this endpoint
- * returns HTTP 503 and `ok: false`. When the process is live but recall
- * is still cold, it stays 200 and names the lag on `searchReadyReason`.
+ * returns HTTP 503 and `ok: false`. When the process is live but the index
+ * is not ready, it stays 200 and names the lag on `searchReadyReason`.
  *
  * Rich stats (memory counts, agent names, etc.) are behind /HealthDetail
  * which requires authentication. This prevents information leakage on
@@ -120,9 +124,16 @@ export class Health extends Resource {
       version: build?.version ?? resolveVersion(),
       buildCommit: build?.commit ?? null,
     }));
-    if (readiness.status !== 200) {
+    const multiWorker = multiWorkerHealthField(multiWorkerCondition());
+    let status = readiness.status;
+    if (multiWorker) {
+      body.ok = false;
+      body.multiWorker = multiWorker;
+      status = 503;
+    }
+    if (status !== 200) {
       return new Response(JSON.stringify(body), {
-        status: readiness.status,
+        status,
         headers: { "content-type": "application/json" },
       });
     }
@@ -130,16 +141,26 @@ export class Health extends Resource {
   }
 }
 
-/** Same sources /Health and /HealthDetail consult so they cannot disagree. */
-export function currentSearchReadiness(): SearchReadiness {
+/**
+ * Same sources /Health and /HealthDetail consult so they cannot disagree.
+ *
+ * `detail` includes the progress summary (doc counts) on the lag reason.
+ * Public /Health leaves it off — corpus size stays on the authenticated
+ * /HealthDetail `bm25` object, which is what `flair status` prints.
+ */
+export function currentSearchReadiness(detail = false): SearchReadiness {
   // Fail-open when the registry is missing (Sherlock on #1406 / flair#1411):
   // do not 503 forever. resolveSearchReadiness warns once and names the
   // degradation; we do not treat "registry should always be here" as a given.
   const resources = (server as { resources?: ResourceRegistry }).resources ?? null;
+  const full = bm25IndexStatus();
   return resolveSearchReadiness({
     resources,
     memoryTable: db.flair?.Memory,
-    bm25: bm25IndexStatus(),
+    // Public /Health omits summary so doc counts stay off the unauthenticated
+    // body. `reason` still carries a skipped warm or a stale marker;
+    // bm25SearchLagReason reads it when summary is absent.
+    bm25: detail ? full : { state: full.state, reason: full.reason },
     hybridEnabled: hybridEnabled(),
     retrievalMode: retrievalMode(),
     bm25IndexEnabled: bm25IndexEnabled(),
@@ -184,11 +205,14 @@ export class HealthDetail extends Resource {
     // flair#1326: same search-ready signal as public /Health. HealthDetail
     // stays HTTP 200 (it is a stats dump, not a traffic gate); the field
     // and a warning name the lag so `flair status` / operators can see it.
-    const readiness = currentSearchReadiness();
+    const readiness = currentSearchReadiness(true);
+    const bm25 = bm25IndexStatus();
+    stats.bm25 = bm25;
     const embeddingBody = withEmbedGpuHealth({ ok: true });
     stats.embedding = embeddingBody.embedding;
-    if (embeddingBody.embedding.fallback) {
-      warnings.push({ level: "warn", message: embeddingBody.embedding.fallback });
+    const embedNotice = embedGpuStatusNotice(embeddingBody.embedding);
+    if (embedNotice) {
+      warnings.push(embedNotice);
     }
     stats.searchReady = readiness.searchReady;
     // The active retrieval strategy (retrievalMode() in ./bm25.ts) — reported
@@ -201,6 +225,15 @@ export class HealthDetail extends Resource {
     if (!readiness.searchReady && readiness.searchReadyReason) {
       stats.searchReadyReason = readiness.searchReadyReason;
       warnings.push({ level: "warn", message: readiness.searchReadyReason });
+    } else {
+      // A failed index answers via the per-query scan. searchReady stays
+      // true (recall works); the line says why the fast path is off. The
+      // kill switch and vector-only retrieval are settings, not warnings.
+      const bm25Warning = bm25DisabledWarning(bm25, {
+        indexEnabled: bm25IndexEnabled(),
+        inRetrievalPath: bm25IndexInRetrievalPath(),
+      });
+      if (bm25Warning) warnings.push({ level: "warn", message: bm25Warning });
     }
 
     const ctx = (this as any).getContext?.();
@@ -223,6 +256,9 @@ export class HealthDetail extends Resource {
     stats.caller = { agentId: callerAgent ?? null, isAdmin };
 
     let memoriesList: any[] = [];
+    // Per-agent split of the expired-but-unarchived count, filled from the same
+    // single Memory scan below — not a second table read (flair#2231).
+    const expiredAgentCounts = new Map<string, number>();
 
     // ── Memory stats ──
     try {
@@ -248,7 +284,11 @@ export class HealthDetail extends Resource {
         const d = (m.durability ?? "standard") as string;
         if (d in byDurability) byDurability[d]++;
         if (m.archived) archived++;
-        if (!m.archived && m.validTo && new Date(m.validTo).getTime() < nowMs) expired++;
+        if (!m.archived && m.validTo && new Date(m.validTo).getTime() < nowMs) {
+          expired++;
+          const owner = typeof m.agentId === "string" ? m.agentId : "";
+          expiredAgentCounts.set(owner, (expiredAgentCounts.get(owner) ?? 0) + 1);
+        }
       }
       stats.memories = {
         total: memoriesList.length,
@@ -265,7 +305,6 @@ export class HealthDetail extends Resource {
           .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         if (sorted[0]) stats.lastWrite = sorted[0].createdAt;
       }
-      if (expired > 0) warnings.push({ level: "warn", message: `${expired} memories have expired validTo but aren't archived` });
       // Hash-fallback coverage — tiered by percentage. Thresholds are
       // first-pass defaults; Kern's review on ops-n4n may tune them.
       if (memoriesList.length > 0) {
@@ -509,6 +548,11 @@ export class HealthDetail extends Resource {
     } catch { stats.oauth = null; }
 
     // ── REM ──
+    let nightlyRunFailed = false;
+    let nightlyProbeOk = false;
+    let nightlyInstalled: boolean | null = false;
+    let nightlyDriverAgent: string | null = null;
+    let nightlyDriverAgentKnown = false;
     try {
       const logsDir = join(homedir(), ".flair", "logs");
       const remLog = join(logsDir, "rem.jsonl");
@@ -556,27 +600,82 @@ export class HealthDetail extends Resource {
       // exist; async + short-timeout so a slow/hung service manager can't
       // stall this request.
       let nightlyEnabled: boolean | null = null;
-      let nightlyInstalled = false;
       const plat = platform();
       if (plat === "darwin" || plat === "linux") {
-        nightlyInstalled = plat === "darwin"
-          ? await exists(join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist"))
-          : await exists(join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer"));
-        if (nightlyInstalled) {
+        const schedulerPath = plat === "darwin"
+          ? join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist")
+          : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer");
+        const unitPath = plat === "darwin" ? schedulerPath
+          : join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.service");
+        const probeError = (path: string, error?: unknown): void => {
+          const code = (error as NodeJS.ErrnoException)?.code ?? "error code unavailable";
+          warnings.push({ level: "warn", message: `REM nightly driver state unknown: ${isAdmin ? path : redactHome(path)} (${code})` });
+        };
+        const filePresent = async (path: string): Promise<boolean | null> => {
+          try {
+            await fsp.stat(path);
+            return true;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+            probeError(path, error);
+            return null;
+          }
+        };
+        const [schedulerPresent, unitPresent] = await Promise.all([
+          filePresent(schedulerPath),
+          plat === "darwin" ? Promise.resolve(true) : filePresent(unitPath),
+        ]);
+        nightlyInstalled = schedulerPresent === null || unitPresent === null
+          ? null : schedulerPresent && unitPresent;
+        if (plat === "linux" && schedulerPresent !== null && unitPresent !== null
+          && schedulerPresent !== unitPresent) {
+          const orphan = schedulerPresent ? "timer" : "service";
+          const orphanPath = schedulerPresent ? schedulerPath : unitPath;
+          warnings.push({ level: "warn", message: `REM nightly orphan ${orphan} file: ${isAdmin ? orphanPath : redactHome(orphanPath)}` });
+        }
+        if (nightlyInstalled === true) {
           try {
             const { queryActiveStateAsync } = await import("../src/rem/scheduler.js");
             nightlyEnabled = await queryActiveStateAsync(plat);
-          } catch {
+            if (nightlyEnabled === null) probeError(schedulerPath);
+          } catch (error) {
             nightlyEnabled = null;
+            probeError(schedulerPath, error);
           }
-        } else {
+          try {
+            const unitText = await fsp.readFile(unitPath, "utf-8");
+            const agent = plat === "darwin"
+              ? unitText.match(/<key>FLAIR_AGENT_ID<\/key>\s*<string>([^<]+)<\/string>/)?.[1].trim() ?? null
+              : systemdAgentId(unitText);
+            if (agent) { nightlyDriverAgent = agent; nightlyDriverAgentKnown = true; }
+          } catch (error) {
+            probeError(unitPath, error);
+          }
+        } else if (nightlyInstalled === false) {
           nightlyEnabled = false;
         }
       }
+      nightlyProbeOk = true;
 
       const nightlyRecords = await tailJsonl(nightlyLog);
       const lastNightlyRec = nightlyRecords[nightlyRecords.length - 1];
+      nightlyRunFailed = lastNightlyRec?.status === "failed";
       const lastNightlyAt = lastNightlyRec ? (lastNightlyRec.at ?? lastNightlyRec.ts ?? lastNightlyRec.timestamp ?? null) : null;
+
+      // Newest distillation from a completed cycle with no errors or skips, observed in the server-local log tail.
+      let lastDistilledAt: string | null = null;
+      const completeDistillation = (rec: any): boolean => rec?.status === "completed"
+        && !rec.errors?.length && !rec.skips?.length && !rec.distill?.aborted
+        && typeof rec.distilledAt === "string" && Number.isFinite(Date.parse(rec.distilledAt))
+        && Number.isInteger(rec.distill?.gathered) && rec.distill.gathered > 0;
+      const lastDistillationIncomplete = !!lastNightlyRec && !completeDistillation(lastNightlyRec);
+      for (let i = nightlyRecords.length - 1; i >= 0; i--) {
+        const rec = nightlyRecords[i];
+        if (completeDistillation(rec)) {
+          lastDistilledAt = rec.distilledAt;
+          break;
+        }
+      }
 
       let pendingCandidates: number | null = null;
       try {
@@ -593,6 +692,7 @@ export class HealthDetail extends Resource {
         !lastRestorativeAt &&
         nightlyEnabled === null &&
         !lastNightlyAt &&
+        !lastDistilledAt &&
         pendingCandidates === null;
       if (allNull) {
         stats.rem = null;
@@ -603,6 +703,8 @@ export class HealthDetail extends Resource {
           lastRestorativeAt,
           nightlyEnabled,
           lastNightlyAt,
+          lastDistilledAt,
+          lastDistillationIncomplete,
           pendingCandidates,
         };
         if (nightlyEnabled && lastNightlyAt && nowMs - new Date(lastNightlyAt).getTime() > 48 * 3600 * 1000) {
@@ -613,6 +715,33 @@ export class HealthDetail extends Resource {
         }
       }
     } catch { stats.rem = null; }
+
+    // Build this after REM discovery, including its unavailable-state fallback.
+    // Health does not read the scheduler's next-run time. The existing audit
+    // row does carry status.
+    if (stats.memories?.expired > 0) {
+      const nightlyHint = stats.rem?.nightlyEnabled === true
+        ? nightlyRunFailed
+          ? "nightly is enabled, but its last logged run failed — inspect ~/.flair/logs/rem-nightly.jsonl on the server"
+          : "nightly is enabled"
+        : stats.rem?.nightlyEnabled === false
+          ? "automate: flair rem nightly enable (includes validTo archival)"
+          : "nightly state is unknown — check: flair rem nightly status";
+      const driver: NightlyDriverFacts = {
+        installed: nightlyProbeOk ? nightlyInstalled : null,
+        agent: nightlyDriverAgent,
+        agentKnown: nightlyDriverAgentKnown,
+      };
+      const breakdown = summarizeExpiredByAgent(expiredAgentCounts, driver);
+      stats.memories.expiredByAgent = breakdown;
+      warnings.push({
+        level: "warn",
+        message: `${stats.memories.expired} memories have expired validTo but aren't archived\n` +
+          expiredByAgentWarningLines(breakdown) +
+          "    clear now: flair rem light (archives expired validTo; preview: --dry-run)\n" +
+          `    ${nightlyHint}`,
+      });
+    }
 
     // ── Dedup clusters (flair-quality Slice 1c) ──
     // Cheap read: a single small stat file, not a recomputation. The

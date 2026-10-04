@@ -77,6 +77,7 @@ export interface DoctorRunContext {
   detectedClientIds: readonly string[];
   /** Observed launchd state. Omit to skip the check as N/A. */
   launchd?: LaunchdManagement;
+  workerThreads?: WorkerThreadsObservation;
   keysDir?: string;
   keyAgentIds?: string[];
   agentFlag?: string;
@@ -108,6 +109,7 @@ export const DOCTOR_CHECK_IDS = [
   "verified-read",
   "keys-prune",
   "launchd-management",
+  "worker-threads",
 ] as const;
 
 export type DoctorCheckId = (typeof DOCTOR_CHECK_IDS)[number];
@@ -421,6 +423,86 @@ function runKeysPrune(ctx: DoctorRunContext): DoctorCheckResult {
   });
 }
 
+export type WorkerThreadsObservation =
+  | { kind: "serving" }
+  | { kind: "refused"; state: "refused" | "unsafe-opt-in"; workerCount: number | null }
+  | { kind: "unknown" };
+
+export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObservation {
+  if (raw === undefined) return { kind: "serving" };
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { kind: "unknown" };
+  const rec = raw as { state?: unknown; workerCount?: unknown };
+  if (rec.state !== "refused" && rec.state !== "unsafe-opt-in") return { kind: "unknown" };
+  const workerCount = rec.workerCount;
+  return {
+    kind: "refused",
+    state: rec.state,
+    workerCount: typeof workerCount === "number" && Number.isFinite(workerCount) ? workerCount : null,
+  };
+}
+
+export interface FlairHealthProbe {
+  reaching: boolean;
+  status: number;
+  body: unknown;
+  observation: WorkerThreadsObservation | null;
+}
+
+export function interpretFlairHealth(status: number, body: unknown): { reaching: boolean; observation: WorkerThreadsObservation | null } {
+  const observation = readWorkerThreadsObservation((body as { multiWorker?: unknown })?.multiWorker);
+  if (status >= 200 && status < 300) return { reaching: true, observation };
+  if (status === 503 && observation.kind === "refused") return { reaching: true, observation };
+  return { reaching: false, observation: null };
+}
+
+export async function probeFlairHealth(
+  url: string,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 3000,
+): Promise<FlairHealthProbe> {
+  try {
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    const verdict = interpretFlairHealth(res.status, body);
+    return { ...verdict, status: res.status, body };
+  } catch {
+    return { reaching: false, status: 0, body: null, observation: null };
+  }
+}
+
+function runWorkerThreads(ctx: DoctorRunContext): DoctorCheckResult {
+  const id = "worker-threads";
+  const label = "worker threads";
+  const observed = ctx.workerThreads;
+  if (!observed) {
+    return result(id, label, "skip", { detail: "no /Health response observed at the configured URL" });
+  }
+  if (observed.kind === "unknown") {
+    return result(id, label, "fail", {
+      detail: "the /Health response carried a worker-thread state this doctor does not recognize",
+      remedy: "Inspect /Health and re-run doctor",
+    });
+  }
+  if (observed.kind === "serving") {
+    return result(id, label, "pass", { detail: "the configured /Health response has no multi-worker refusal field" });
+  }
+  const count =
+    observed.workerCount === null ? "an unreadable worker count" : `${observed.workerCount} Harper worker threads`;
+  const detail =
+    observed.state === "refused"
+      ? `the configured /Health response reports refusal with ${count}; multi-worker is unsupported until the readiness work lands`
+      : `the configured /Health response reports ${count} and an explicit unsafe opt-in`;
+  return result(id, label, "fail", {
+    detail,
+    remedy: "Set THREADS_COUNT=1 and restart flair",
+  });
+}
+
 function runLaunchdManagement(ctx: DoctorRunContext): DoctorCheckResult {
   const id = "launchd-management";
   const label = "launchd management";
@@ -437,6 +519,11 @@ function runLaunchdManagement(ctx: DoctorRunContext): DoctorCheckResult {
   }
   if (m.state === "not-applicable" || m.state === "no-service") {
     return result(id, label, "skip", { detail: m.detail, launchd: m });
+  }
+  // flair#2040: launchd runs the job but the serving process is unidentified —
+  // not an alarm (nothing shows it is detached), and never a pass.
+  if (m.state === "unverified") {
+    return result(id, label, "warn", { detail: m.detail, remedy: m.remedy?.join(" && "), launchd: m });
   }
   // flair#1693: a registered plist that carries the admin password INLINE is a
   // downgrade from the flair#1573 pass-file shape — the secret lives in a
@@ -474,6 +561,7 @@ export const DOCTOR_CHECKS: readonly DoctorCheckDef[] = [
   { id: "verified-read", label: "per-agent verified-read", run: runVerifiedRead },
   { id: "keys-prune", label: "keys prune classification", run: runKeysPrune },
   { id: "launchd-management", label: "launchd management", run: runLaunchdManagement },
+  { id: "worker-threads", label: "worker threads", run: runWorkerThreads },
 ];
 
 export interface DoctorRun {

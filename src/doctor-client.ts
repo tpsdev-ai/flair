@@ -145,6 +145,9 @@ export type SessionStartHookBuildOptions = {
   /** Codex writes FLAIR_HOOK_HARNESS and keeps stderr visible (flair#1734).
    *  Claude Code keeps the #1007 silent wrapper. Default claude-code. */
   harness?: "claude-code" | "codex";
+  /** flair#2067 slice 2 — also enable the action-recall cache refresh on this
+   *  SessionStart entry (Claude Code only). */
+  actionRecall?: boolean;
 };
 
 export function buildSessionStartHookCommand(
@@ -164,6 +167,7 @@ export function buildSessionStartHookCommand(
   }
   const harness = opts?.harness ?? "claude-code";
   const envParts = harness === "codex" ? [`FLAIR_HOOK_HARNESS=${harness}`] : [];
+  if (opts?.actionRecall) envParts.push("FLAIR_ACTION_RECALL=1");
   envParts.push(`FLAIR_AGENT_ID=${agentId}`);
   if (flairUrl) envParts.push(`FLAIR_URL=${flairUrl}`);
   const env = envParts.join(" ");
@@ -197,6 +201,58 @@ export const SESSION_START_HOOK_INVOCATION_RE =
 
 export function isSessionStartHookInvocation(command: string): boolean {
   return typeof command === "string" && SESSION_START_HOOK_INVOCATION_RE.test(command);
+}
+
+/** Does this SessionStart command enable the action-recall refresh? */
+export function sessionStartEnablesActionRecall(command: string): boolean {
+  return typeof command === "string" && command.includes("FLAIR_ACTION_RECALL=1");
+}
+
+// ── the action-recall PreToolUse hook (flair#2067 slice 2) ──────────────────
+//
+// Runs the absolute runtime and artifact paths selected at installation.
+
+/** The exact substring identifying a Flair action-recall hook command. */
+export const ACTION_RECALL_HOOK_MARKER = "action-recall-hook.js";
+
+/** The Claude-only PreToolUse matcher written alongside our hook entry. */
+export const ACTION_RECALL_PRE_TOOL_USE_MATCHER = "Bash";
+
+/**
+ * Build the exact `command` string registered for the PreToolUse action-recall
+ * hook. Throws rather than emitting a quoted approximation when a value is
+ * unsafe. Artefact paths also allow `@`.
+ */
+export function buildActionRecallHookCommand(
+  bunPath: string,
+  artifactPath: string,
+  agentId: string,
+  flairUrl?: string,
+): string {
+  for (const [label, value] of [
+    ["agent id", agentId],
+    ["bun path", bunPath],
+    ["artefact path", artifactPath],
+  ] as const) {
+    if (!(label === "artefact path" ? /^[A-Za-z0-9._:@/-]+$/.test(value) : isHookCommandValueSafe(value))) {
+      throw new Error(
+        `${label} '${value}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -; artefact paths also allow @)`,
+      );
+    }
+  }
+  if (flairUrl != null && flairUrl !== "" && !isHookCommandValueSafe(flairUrl)) {
+    throw new Error(
+      `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    );
+  }
+  const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
+  const invocation = `${env} ${bunPath} ${artifactPath}`;
+  return String.raw`sh -c 'out=$(${invocation} 2>/dev/null) && [ -n "$out" ] && [ "${"$"}{#out}" -le 4096 ] && printf %s "$out" || true'`;
+}
+
+/** Match the artifact marker in commands without npx. */
+export function isFlairActionRecallCommand(command: string): boolean {
+  return typeof command === "string" && command.includes(ACTION_RECALL_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
 }
 
 /**
@@ -274,6 +330,26 @@ export const CONTINUITY_CAPTURE_HOOK_MARKER = "flair-continuity-capture";
 const CONTINUITY_INVOCATION_RE =
   /npx -y -p @tpsdev-ai\/flair-mcp(?:@[^\s"']+)? flair-continuity-capture/;
 
+// Share whole-command recognition with the writer. A matching invocation
+// substring alone cannot establish the current form; pin direction is separate.
+const CONTINUITY_PACKAGE_COMMAND_RE =
+  /^FLAIR_AGENT_ID=([^\s'"]+)(?: FLAIR_URL=([^\s'"]+))? npx -y (?:-p )?(@tpsdev-ai\/flair-mcp(?:@[^\s"']+)?) flair-continuity-capture$/;
+
+/** The report and writer must decode the same package argument. */
+function continuityPackageArgument(command: string | null): string | null {
+  if (command === null || !command.includes(FLAIR_MCP_PACKAGE)) return null;
+  const prefix = "sh -c '";
+  const suffix = " >/dev/null 2>/dev/null || true'";
+  const invocation = command.startsWith(prefix) && command.endsWith(suffix)
+    ? command.slice(prefix.length, -suffix.length)
+    : command;
+  const match = invocation.match(CONTINUITY_PACKAGE_COMMAND_RE);
+  if (!match || !isHookCommandValueSafe(match[1]!) || (match[2] !== undefined && !isHookCommandValueSafe(match[2]))) {
+    return `${FLAIR_MCP_PACKAGE}@unknown`;
+  }
+  return match[3]!;
+}
+
 /**
  * The PostToolUse matcher written alongside our hook entry — the EXACT
  * mutating-tool allowlist the capture binary enforces internally
@@ -342,7 +418,7 @@ export type ContinuityHookEvent = (typeof CONTINUITY_HOOK_EVENTS)[number];
  *              without Stop journals actions but never intent, and vice
  *              versa). A stale-form face; fixable.
  * stale      — both present but at least one is not the current form (unsilenced,
- *              hand-altered invocation, or a drifted PostToolUse matcher).
+ *              hand-altered invocation, a drifted PostToolUse matcher, or a non-version pin).
  */
 export type ContinuityHookState = "installed" | "absent" | "partial" | "stale";
 
@@ -351,9 +427,10 @@ export interface ContinuityHookEventReport {
   command?: string;
   /** PostToolUse only — the matcher on the group carrying our entry. */
   matcher?: string;
-  /** Present AND the exact shape we write today (silenced wrapper, unpinned
-   *  npx invocation, and — for PostToolUse — the expected matcher). */
+  /** Present with a silenced invocation, a bare or resolved version spec,
+   *  and — for PostToolUse — the expected matcher. */
   currentForm: boolean;
+  reason?: string;
 }
 
 export interface ContinuityCaptureHookReport {
@@ -384,12 +461,17 @@ function continuityEventReport(config: any, event: ContinuityHookEvent): Continu
   const hook = found.group.hooks[found.hookIndex];
   const command: string = typeof hook?.command === "string" ? hook.command : "";
   const matcher: string | undefined = typeof found.group?.matcher === "string" ? found.group.matcher : undefined;
+  const pinText = continuityPackageArgument(command);
   const shapeOk =
     hook?.type === "command" &&
     CONTINUITY_INVOCATION_RE.test(command) &&
     hookCommandIsSilenced(command);
   const matcherOk = event !== "PostToolUse" || matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
-  return { present: true, command, matcher, currentForm: shapeOk && matcherOk };
+  const spec = decodeWiringSpec(pinText ?? "", FLAIR_MCP_PACKAGE);
+  const pinOk = spec?.token.kind === "none" || spec?.token.kind === "version";
+  const reason = !spec || pinOk ? undefined
+    : "pin " + (spec?.token.kind ?? "malformed") + ": " + (spec?.token.value ?? "missing package");
+  return { present: true, command, matcher, currentForm: shapeOk && matcherOk && pinOk, reason };
 }
 
 /**
@@ -416,6 +498,28 @@ export function checkContinuityCaptureHooks(homeDir: string, settingsPath?: stri
   else if (postToolUse.currentForm && stop.currentForm) state = "installed";
   else state = "stale";
   return { path, postToolUse, stop, state };
+}
+
+/**
+ * Advice uses the same decision as the continuity writer, for both events.
+ * Include an absent sibling: an unreadable CLI version also refuses additions.
+ * Only the execution banner becomes an advice label; the writer's reason stays.
+ */
+export function continuityWriteBlockers(report: ContinuityCaptureHookReport): string[] {
+  const blockers: string[] = [];
+  for (const [event, entry] of [
+    ["PostToolUse", report.postToolUse],
+    ["Stop", report.stop],
+  ] as const) {
+    const label = `${event} continuity capture hook`;
+    const decision = decideContinuityWrite(entry.present ? entry.command ?? "" : null, label);
+    if (decision.action !== "write") {
+      blockers.push(
+        (decision.line ?? `${label}: ${decision.action}`).replace(": holding — ", ": held — "),
+      );
+    }
+  }
+  return blockers;
 }
 
 export type ContinuityMutationAction = "add" | "update" | "noop";
@@ -446,15 +550,19 @@ export interface ContinuityHookInstall {
  *                       never repins a BEHIND entry UP; it repairs shape only.
  */
 function decideContinuityWrite(existingCommand: string | null, entryLabel: string): PinWriteDecision {
+  // No package reference means a shape repair, not an unreadable pin (#1819).
+  // Keep the unknown sentinel for package-bearing commands whose argument we
+  // cannot locate safely; never decode the whole command as a pin (#1848).
+  const pinText = continuityPackageArgument(existingCommand);
   const decision = decidePinWrite({
     pkg: FLAIR_MCP_PACKAGE,
     entry: entryLabel,
-    existingText: existingCommand,
+    existingText: pinText,
     runningVersion: flairCliVersion(),
   });
   if (decision.action !== "write") return decision;
   if (existingCommand === null) return decision; // absent → provision at the running CLI
-  const spec = decodeWiringSpec(existingCommand, FLAIR_MCP_PACKAGE);
+  const spec = decodeWiringSpec(pinText ?? "", FLAIR_MCP_PACKAGE);
   if (isComparableWiringPin(spec)) return { action: "write", pin: wiringPinString(spec), line: null };
   return { action: "write", pin: null, line: null }; // unpinned → repair, stay unpinned
 }
@@ -1725,7 +1833,7 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
             const decision = decidePinWrite({
               pkg: FLAIR_MCP_PACKAGE,
               entry: `SessionStart hook in ${path}`,
-              existingText: hook.command,
+              existingText: FLAIR_MCP_PACKAGE, // The matched legacy form is unpinned.
               runningVersion: flairCliVersion(),
             });
             if (decision.action !== "write") {
@@ -2132,7 +2240,12 @@ export function resolveCollisionSafeName(existingNames: Iterable<string>, filena
   return `${filename}.${n}`;
 }
 
-export type KeyPruneClass = "keep" | "stale" | "invalid" | "unidentified" | "ignored";
+export type KeyPruneClass = "keep" | "stale" | "invalid" | "orphan-candidate" | "unidentified" | "ignored";
+
+/** An unparseable keystore blob may be a live federation key (flair#1026). */
+const UNIDENTIFIED_SEED_REASON =
+  "not a parseable Ed25519 private key seed — may be a keystore blob or another format; " +
+  "left in place, inspect it before removing anything (flair#1026)";
 
 export interface KeyPruneDecision {
   class: KeyPruneClass;
@@ -2164,20 +2277,8 @@ export function classifyKeyFile(
   baseUrl: string,
 ): KeyPruneDecision {
   if (!seedValid) {
-    // NOT "invalid", and therefore NOT prunable. "I could not parse this" and
-    // "this is a stale agent key" are different findings, and only the second
-    // is safe to act on. `~/.flair/keys/<id>.key` is a namespace shared by two
-    // writers: plaintext Ed25519 seeds, and AES-256-GCM keystore blobs written
-    // by FileKeyStore (flair#1026). A keystore blob is unparseable AS A SEED
-    // while being a LIVE federation key — classifying it "invalid" moved a key
-    // that was in use. An unidentified file is reported for a human and left
-    // exactly where it is.
-    return {
-      class: "unidentified",
-      reason:
-        "not a parseable Ed25519 private key seed — may be a keystore blob or another format; " +
-        "left in place, inspect it before removing anything (flair#1026)",
-    };
+    // NOT "invalid", and therefore NOT prunable — see UNIDENTIFIED_SEED_REASON.
+    return { class: "unidentified", reason: UNIDENTIFIED_SEED_REASON };
   }
   if (registration?.state === "registered") {
     return { class: "keep", reason: `agent '${agentId}' is registered on ${baseUrl} — never pruned` };
@@ -2192,6 +2293,50 @@ export function classifyKeyFile(
     class: "stale",
     reason: `agent '${agentId}' is not registered on ${baseUrl}${registration?.detail ? ` (${registration.detail})` : ""}`,
   };
+}
+
+/** Report node-shaped seeds using rows bound by HTTP/ops Instance id; never authorize removal. */
+export function classifyNodeKeySeed(
+  id: string,
+  instanceIds: readonly string[] | null,
+  baseUrl: string,
+  agentIds: readonly string[] | null = null,
+  unreadableReason?: string,
+): KeyPruneDecision {
+  if (instanceIds === null || agentIds === null) {
+    return {
+      class: "unidentified",
+      reason: `${instanceIds === null ? "Instance" : "Agent"} reference check unavailable${unreadableReason ? ` (${unreadableReason})` : ""}; node-shaped seed left in place`,
+    };
+  }
+  if (agentIds.includes(id)) {
+    return { class: "unidentified", reason: `id '${id}' is registered in the Agent table on ${baseUrl} (HTTP/ops Instance id matched); left in place` };
+  }
+  if (instanceIds.includes(id)) {
+    return { class: "keep", reason: `id '${id}' is named by the Instance row on ${baseUrl} (HTTP/ops Instance id matched); kept` };
+  }
+  return {
+    class: "orphan-candidate",
+    reason: `id '${id}' is absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched); ownership cannot be proven; not removed (see #2200)`,
+  };
+}
+
+export function orphanInstanceSeedAdvisory(input: {
+  nodeKeyIds: readonly string[];
+  instanceIds: readonly string[] | null;
+  agentIds?: readonly string[] | null;
+  unreadableReason?: string;
+  keysDir: string;
+  baseUrl: string;
+}): string | null {
+  const { nodeKeyIds, instanceIds, agentIds, keysDir, baseUrl } = input;
+  if (nodeKeyIds.length === 0) return null;
+  if (instanceIds === null || agentIds == null) {
+    return `${instanceIds === null ? "Instance" : "Agent"} reference check unavailable (${input.unreadableReason ?? "read unavailable"}); node-shaped seeds in ${keysDir} remain unidentified`;
+  }
+  const candidates = nodeKeyIds.filter((id) => classifyNodeKeySeed(id, instanceIds, baseUrl, agentIds).class === "orphan-candidate").length;
+  if (candidates === 0) return null;
+  return `${candidates} orphan candidate(s) in ${keysDir}, absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched); ownership cannot be proven; not removed (see #2200)`;
 }
 
 // ── Node-scoped federation keys vs agent signing keys (flair#1193) ─────────

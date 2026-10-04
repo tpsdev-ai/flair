@@ -49,7 +49,7 @@ boost. Hybrid search combines semantic and lexical ranks to order results, so th
 first result need not have the highest percentage or be near 100%. The percentage
 is not a probability that the memory answers your question correctly.
 
-`flair init` installs and starts Harper, creates the agent's Ed25519 keypair, verifies semantic search actually works, wires every MCP client it detects (Claude Code, Cursor, Codex CLI, Gemini CLI), and runs a smoke test. Restart your MCP client afterwards, then ask the agent *"what do you remember about me?"*
+`flair init --agent <id>` installs or reuses Harper, creates or reuses the agent's Ed25519 keypair, and checks semantic search. When wiring is enabled, it attempts to wire detected clients and may run an MCP smoke test for MCP client wiring.
 
 > **Pass `--agent`.** A bare `flair init` bootstraps the instance and stops there — no agent, no keypair, no MCP wiring.
 
@@ -63,9 +63,8 @@ Full walkthrough with expected output at every step: **[docs/quickstart.md](docs
 
 Two MCP paths, on purpose. A client on this machine and a remote connector are different trust situations, and each has its own mechanism. The write-up that joins them is [docs/mcp-clients.md — Two MCP paths](docs/mcp-clients.md#two-mcp-paths).
 
-- **Local client: the `npx` stdio adapter.** `@tpsdev-ai/flair-mcp` is a separate package and is not installed globally. `flair init` writes `npx -y @tpsdev-ai/flair-mcp@<version>` into each client's config, pinned to the CLI's own version. The adapter signs requests with the agent's Ed25519 key and sends them to `FLAIR_URL`. Loopback HTTP is the right scheme on this machine (the default is `http://127.0.0.1:19926`). A remote `FLAIR_URL` should use HTTPS. This is the path for Claude Code, Cursor, Codex, Gemini, and every other local MCP client.
-- **Remote client: native `/mcp`.** A JSON-RPC endpoint inside the server, OAuth bearer, exposing 12 curated tools. It is **off by default**: until `FLAIR_MCP_OAUTH=true` and the issuer is a public HTTPS origin (`FLAIR_MCP_ISSUER`, else `FLAIR_PUBLIC_URL`), no `/mcp` route is registered and the path returns 404. `true` is the value that turns on both Flair's route and the OAuth component; `1`, `yes`, and `on` leave the component off and every call 401s. OAuth client-metadata is fetched over HTTPS and refuses a private, loopback, or link-local host, and `flair mcp enable` refuses a local origin (localhost, loopback, RFC1918, IPv4 link-local, `.local`). A loopback install cannot be that origin, so native `/mcp` is remote-only by design.
-
+- **Local client: the `npx` stdio adapter.** `@tpsdev-ai/flair-mcp` is a separate package and is not installed globally. `flair init --agent <id>` attempts to wire detected clients when wiring is enabled, using `npx -y @tpsdev-ai/flair-mcp@<version>` pinned to the CLI's version. The adapter sends requests to `FLAIR_URL`, signing with an Ed25519 key when one resolves and otherwise using configured administrator Basic credentials when available. Loopback HTTP is the right scheme on this machine (the default is `http://127.0.0.1:19926`). A remote `FLAIR_URL` should use HTTPS. This is the path for Claude Code, Cursor, Codex, Gemini, and every other local MCP client.
+- **Remote client: native `/mcp`.** A JSON-RPC endpoint inside the server, OAuth bearer, exposing the curated tools that the JSON-RPC `tools/list` method on `/mcp` returns. It is off by default: an unset `FLAIR_MCP_OAUTH` leaves `/mcp` unregistered; a truthy flag and a configured issuer make Flair attempt to mount it, while only the literal value `true` also enables the OAuth component. `true` is the value that turns on both Flair's route and the OAuth component; `1`, `yes`, and `on` leave the component off and every call 401s. OAuth client-metadata is fetched over HTTPS and refuses a private, loopback, or link-local host. Remote connectors need a publicly reachable HTTPS origin; `flair mcp enable` accepts loopback or unspecified targets for the local restart but refuses local issuers, while route registration itself does not enforce a public HTTPS issuer.
 `@tpsdev-ai/flair-client` is likewise its own package: add it to a project when you want to call Flair from your own code ([JavaScript / TypeScript](#javascript--typescript)).
 
 ### Where the agent's key lives
@@ -79,10 +78,10 @@ Keys are how an agent *outside* the process proves who it is. Code running insid
 ### Useful flags
 
 ```bash
-flair init --client claude-code    # wire one client: claude-code, codex, gemini, cursor, all, none
-flair init --no-mcp                # instance + agent only, skip MCP wiring
-flair init --skip-soul             # skip the interactive personality wizard
-flair init --port 8000             # non-default port, remembered in ~/.flair/config.yaml
+flair init --agent mybot --client claude-code  # attempt to wire one client
+flair init --agent mybot --no-mcp              # register the agent; skip MCP wiring
+flair init --agent mybot --skip-soul           # skip the personality wizard
+flair init --agent mybot --port 8000           # use a non-default port
 ```
 
 ### Lifecycle
@@ -148,7 +147,7 @@ One Ed25519 identity, one memory store, three MCP-capable CLIs. A memory written
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-11 harness surfaces today. Pick whichever you're shipping in; the memory layer doesn't care. **[Full integrations catalog →](docs/integrations.md)**
+Choose your harness from the [full integrations catalog →](docs/integrations.md).
 
 ## How it works
 
@@ -174,17 +173,17 @@ See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives �
 | Feature | What it does |
 |---|---|
 | **Semantic memory** | Auto-embedded on write. Search by meaning, not keywords. |
-| **Tiered durability** | `permanent` (retained until explicitly deleted by its owner or an admin) / `persistent` / `standard` (default) / `ephemeral` (24h TTL). |
+| **Tiered durability** | Four tiers; each states what it does and does not guarantee. permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them. |
 | **Temporal validity** | `validFrom` / `validTo` bounds. Expired memories drop out of search and bootstrap automatically. |
 | **Trust-graded recall** | Opt-in per-result evidence: provenance, usage signal, freshness, supersession. Confidence bands (`strong`/`moderate`/`breadcrumb`) and first-class **abstention** when nothing clears the floor. |
 | **Relationship graph** | Entity-to-entity triples with temporal bounds, queryable alongside semantic memory. |
 | **Auto entity detection** | Entities extracted from memory content on write. No tagging required. |
 | **Predictive bootstrap** | Cold-start context selected from active project, recent activity and agent role — not just recency. |
 | **Multi-agent** | One instance, any number of agents, each with its own keys, memories and soul. |
-| **Federation** | Hub-and-spoke sync between instances using signed requests and pairing tokens. Originator enforcement blocks cross-node replay. [docs/federation.md](docs/federation.md) |
-| **Memory hygiene (REM)** | On-demand (`flair rem rapid`) and scheduled nightly distillation. Candidates are staged and promoted one at a time with a required rationale — never auto-applied. [docs/rem.md](docs/rem.md) |
+| **Federation** | Hub-and-spoke sync between instances using signed requests and pairing tokens. Non-hub peers sync only rows treated as self-originated; the nonce store rejects replayed signed requests. [docs/federation.md](docs/federation.md) |
+| **Memory hygiene (REM)** | On-demand (`flair rem rapid`) and scheduled nightly distillation. `flair rem promote` requires a rationale; nightly REM auto-promotes eligible ADK and continuity candidates. [docs/rem.md](docs/rem.md) |
 | **Memory bridges** | Import/export to foreign memory systems via a YAML descriptor or a code plugin. [docs/bridges.md](docs/bridges.md) |
-| **Real-time feeds** | Subscribe to memory or soul changes over WebSocket/SSE. |
+| **Real-time feeds** | Administrators subscribe to table changes over WebSocket/SSE; verified agents subscribe to changes to the memories they can read through `/FeedMemories`, and to soul changes through `/FeedSouls`. |
 | **OAuth 2.1 server** | PKCE, dynamic client registration, standards-compliant token endpoint. Delegate auth to Flair without a separate IdP. [docs/auth.md](docs/auth.md) |
 | **XAA** | Bind agent identities to Google Workspace, Azure AD or Okta accounts. |
 | **Web admin** | Server-rendered UI for principals, connectors, IdPs and instance config. No separate dashboard service. |
@@ -200,7 +199,7 @@ Every product here does semantic recall over stored memories. These are the dime
 |---|---|---|---|---|---|---|
 | **Where memories live** | infrastructure you run | self-host or Mem0 Cloud | self-host or hosted API | self-host or Letta Cloud | SageOx cloud | vendor cloud |
 | **Memory is scoped to** | the agent, via an Ed25519 keypair | tenant / user | per-user tenant | the runtime | the team | the account |
-| **Reaches other orchestrators** | 11 harnesses, incl. workflow and agent frameworks | several | several | Letta's runtime | 14+ coding agents and editors, via hooks, plugins and instruction files | no |
+| **Reaches other orchestrators** | Coding assistants, workflow engines, and agent frameworks ([catalog](docs/integrations.md)) | several | several | Letta's runtime | 14+ coding agents and editors, via hooks, plugins and instruction files | no |
 | **Sync between instances you run** | hub/spoke federation | no | no | no | one hosted service | one hosted service |
 | **Captures in-person conversation** | no | no | no | no | yes — Ox Dot | no |
 | **Per-agent persistent character** | first-class (Soul) | optional | persona-shaped | optional | team context, not per-agent | no |
@@ -213,7 +212,7 @@ Flair works with any agent runtime. Pick the path that fits yours — **[full ca
 
 ### Claude Code / Cursor / Codex CLI / Gemini CLI (MCP)
 
-`flair init` wires these automatically. To do it by hand:
+`flair init --agent <id>` attempts to wire detected clients when wiring is enabled. To configure one by hand:
 
 ```json
 // .mcp.json in your project root (Claude Code / Cursor format)
@@ -244,7 +243,7 @@ Per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/
 openclaw plugins install @tpsdev-ai/openclaw-flair
 ```
 
-Auto-detects the agent identity, provides `memory_store` / `memory_recall` / `memory_get`, and injects relevant memories at session start. See the [plugin README](packages/openclaw-flair/README.md).
+Auto-detects the agent identity, provides `memory_store` / `memory_search` / `memory_get`, and provides bootstrap context from `before_prompt_build` (requires host opt-in). See the [plugin README](packages/openclaw-flair/README.md).
 
 ### n8n
 
@@ -252,7 +251,7 @@ Auto-detects the agent identity, provides `memory_store` / `memory_recall` / `me
 Settings → Community Nodes → Install → @tpsdev-ai/n8n-nodes-flair
 ```
 
-Three nodes: **Flair Chat Memory** (Memory port), **Flair Search** and **Flair Write** (Tool ports). Setup and security guidance in **[docs/n8n.md](docs/n8n.md)** — read the auth note below first.
+Three nodes: **Flair Chat Memory** (Memory port), **Flair Search** (Tool port), **Flair Write** (Main connections). Setup and security guidance in **[docs/n8n.md](docs/n8n.md)** — read the auth note below first.
 
 ### Flair CLI
 
@@ -264,10 +263,10 @@ flair search --agent mybot "that important thing"
 flair soul set --agent mybot --key role --value "Security reviewer" --admin-pass-file ~/.flair/admin-pass
 flair bootstrap --agent mybot --max-tokens 4000        # cold-start: soul + relevant memories
 flair backup --admin-pass-file ~/.flair/admin-pass     # logical JSON export
-flair restore ./backup.json --admin-pass-file ~/.flair/admin-pass
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair restore ./backup.json
 ```
 
-`--admin-pass-file` is preferred over `--admin-pass`: it keeps the secret out of `ps` and your shell history.
+For commands that declare `--admin-pass-file`, prefer it over `--admin-pass` to keep the secret out of `ps` and your shell history.
 
 ### JavaScript / TypeScript
 
@@ -336,9 +335,9 @@ await h.post({ agentId: "mybot", content: "...", durability: "standard" });
 
 ### Auth across surfaces
 
-For every caller that reaches Flair over the network the default is **Ed25519 per-agent**: each agent holds its own key at `~/.flair/keys/<agent>.key` and signs every request. That gives write isolation — no agent can write as another — and identity-verified reads. It does *not* refuse cross-agent reads: within one instance, any verified agent can read any other agent's non-private memory by design. The hard boundary is the federation edge, not intra-instance reads. See [SECURITY.md](SECURITY.md).
+Ordinary agents using Ed25519 keys sign network requests. They can write only their own records and read their own plus other agents' non-private memories. Administrator agent roles and administrator Basic credentials have broader authority, including access to private memories. Stdio MCP, Pi, LangGraph, and the wake runner can use administrator Basic auth when no signing key resolves; n8n requires a Harper administrator password in its credential; its node requests use FlairClient, which prefers a resolving Ed25519 key and otherwise uses the configured Basic credentials. See [SECURITY.md](SECURITY.md).
 
-One exception: the **`n8n-nodes-flair`** node authenticates with the Harper **admin password** (Basic auth), which bypasses agent scoping entirely — it can read other agents' `visibility: private` memories and write as anyone. That is acceptable only on a single-tenant, operator-controlled n8n with trusted workflow inputs. Otherwise prefer the Ed25519 path. Full breakdown in **[docs/auth.md](docs/auth.md#auth-across-surfaces-read-this-first)**.
+Treat n8n's credential as an instance-wide administrator credential: a workflow can read private memories and write under any agent ID. Use it only on an operator-controlled, single-tenant n8n instance with trusted workflow inputs. Full breakdown: [docs/auth.md](docs/auth.md#auth-across-surfaces-read-this-first).
 
 In-process callers are a different model, not an exception to this one: they never sign, because identity is asserted through the call context rather than proven. Co-location *is* the grant — which is why Flair beside untrusted co-tenants on a shared instance is a different proposition to Flair inside your own app.
 
@@ -374,12 +373,13 @@ Managed hosting with multi-region replication and failover. Need a public URL fo
 
 Full model, threat analysis and recommendations in [SECURITY.md](SECURITY.md).
 
-- Ed25519 cryptographic identity — agents sign every request.
-- Writes are always agent-scoped. An agent can only write its own records.
-- Reads are open within the org: any agent can read any other agent's non-private memory, no grant required. `private` is the one owner-only exception ([DESIGN.md](DESIGN.md#access-model-open-within-the-org-closed-at-the-federation-edge)).
-- Which memories are non-private is decided at write time, from durability: `permanent`/`persistent` default to `shared`, `standard`/`ephemeral` to `private`. A write that names neither is `standard`, so it lands `private`. Say what you mean with `--visibility shared|private` (CLI) or `visibility` (MCP / SDK); a write response names the visibility the record landed on, so it never has to be inferred.
+- Ordinary agent keys use Ed25519 signatures and bind writes to their agent identity.
+- Administrator agent roles and administrator Basic credentials have broader authority.
+- Ordinary signed agents can read their own memories and other agents' non-private memories. Private memories are owner-only for ordinary agents; administrators can also read them.
+- `Memory.post()` and `Memory.put()` are the calls behind `flair memory add`, MCP `memory_store` and the SDK writes. A new memory they write without a visibility takes a default from durability: `permanent`/`persistent` default to `shared`, `standard`/`ephemeral` to `private`. A write that names neither lands `private`, and an update through `Memory.put()` that names no visibility keeps the stored one. Their write response names the visibility the record landed on whenever the record has one; the admin-only `_reindex` re-PUT, which rebuilds indexes for an existing row, does not return that response. `POST /FeedMemories` does not apply this default: a new `ephemeral` feed record without `visibility` lands `private`, any other new feed record without `visibility` has no visibility field and reads as non-private, an update that names no visibility keeps a stored `private`/`shared` value, and the response (the stored record) names `visibility` only when the record has one. Say what you mean with `--visibility shared|private` (CLI) or `visibility` (MCP / SDK / feed).
 - The admin password is generated by `flair init` and written to `~/.flair/admin-pass` (mode 0600). The CLI prints the path, never the value. Prefer `--admin-pass-file` over `--admin-pass` so it stays out of `ps` and shell history.
 - Key rotation via `flair agent rotate-key`.
+- Who can connect to a hosted Flair's native `/mcp` (which people, which apps, what they can reach) and how to revoke access: [docs/access-control.md](docs/access-control.md).
 
 ## Architecture
 

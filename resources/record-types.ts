@@ -101,9 +101,9 @@
  * explicitly deferred by Flint's post-slice-1 comment on #520 ("Sherlock
  * flagging stamp-default → stamp-strict convergence... Registry slice
  * follows" — convergence is a FUTURE decision, not made here). Each
- * sub-field is optional because not every table's write path calls
- * `stampAttribution` on both methods: Relationship has no post() override
- * at all (only `put`), so `attribution.post` is absent, not a placeholder.
+ * sub-field is optional because a table's write path need not call
+ * `stampAttribution` on both methods; an absent sub-field is not a
+ * placeholder.
  * The stamped attribute name is always `ownerField` above — no type uses a
  * different field for attribution vs. ownership scoping.
  *
@@ -401,9 +401,9 @@ export const RECORD_TYPES = {
     ownerField: "agentId",
     identity: "gated",
     readScope: "owner-only",
-    // No `post` — Relationship.ts has no post() override at all; only
-    // put() (upsert) calls stampAttribution.
-    attribution: { put: "stamp-strict" },
+    // post() (a collection create) and put() (upsert) share one preparation
+    // (Relationship.ts's prepareRelationshipWrite), with the same mode.
+    attribution: { post: "stamp-strict", put: "stamp-strict" },
     provenance: true,
     remEligible: false,
     federation: "included",
@@ -475,6 +475,23 @@ export const RECORD_TYPES = {
     // a new type's registration must not silently inherit whatever that
     // filter does or doesn't already exclude, so this is "excluded" by the
     // same reasoning, not by omission.
+    federation: "excluded",
+  },
+
+  // OrgSkillAssignment — flair#2141 S1. Org-scope skill assignments, readable
+  // by any verified agent. resources/OrgSkillAssignment.ts gates each write
+  // verb itself on the operator or internal source (no record-type-kit
+  // attribution idiom). No principal owns a row: `ownerField` names the
+  // server-stamped `writer`, which no read scope or attribution mode uses.
+  // Instance-local.
+  OrgSkillAssignment: {
+    table: "OrgSkillAssignment",
+    ownerField: "writer",
+    identity: "gated",
+    readScope: "none",
+    attribution: {},
+    provenance: false,
+    remEligible: false,
     federation: "excluded",
   },
 } as const satisfies Record<string, RecordTypePolicy>;

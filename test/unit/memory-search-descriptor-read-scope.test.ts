@@ -93,12 +93,31 @@ describe("flair#1870 — memory_search descriptor wording tracks Memory's read m
     }
   });
 
-  test("memory_search's description and outputShape state the open-within-org scope", () => {
+  test("memory_search's description names the non-admin scope and its outputShape names the caller's read scope", () => {
     const search = TOOL_DESCRIPTORS.find((d) => d.name === "memory_search");
     expect(search).toBeDefined();
     expect(search!.description).toContain("non-private");
-    expect(search!.outputShape).toContain("non-private");
+    expect(search!.outputShape).toContain("subject to the caller's read scope");
     expect(search!.description).not.toContain(GRANT_CLAIM);
     expect(search!.outputShape).not.toContain(GRANT_CLAIM);
+    // "non-private" and the absence of "granted" both still hold for the old
+    // admin-blind sentence. These two are what a revert of that sentence fails.
+    const description = search!.description.toLowerCase();
+    expect(description).toContain("non-admin callers");
+    expect(description).toMatch(/administrator\b[^.]{0,80}\baccess\b/);
+  });
+
+  test("both memory_delete output-shape copies delete by ID when authorized", () => {
+    // The memory_search pins above still pass on this PR's first head
+    // (d70c85fd), which already had the qualified search text. That head's
+    // memory_delete output shape still began "Deletes the caller's own memory",
+    // so this phrase is what proves the round-2 fix. Both copies are the
+    // descriptor outputShape and the /mcp contract summary.
+    const phrase = "Deletes a memory by ID when authorized";
+    const descriptor = TOOL_DESCRIPTORS.find((d) => d.name === "memory_delete");
+    expect(descriptor).toBeDefined();
+    expect(descriptor!.outputShape).toContain(phrase);
+    const summary = TOOLS["memory_delete"]?.contract?.summary;
+    expect(summary).toContain(phrase);
   });
 });

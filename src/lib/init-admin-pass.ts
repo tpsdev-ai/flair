@@ -26,7 +26,8 @@
  */
 import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
-import { existsSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+import { closeSync, existsSync, lstatSync, openSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** Copy-pasteable recovery commands. Tests assert these strings verbatim. */
@@ -98,12 +99,12 @@ export function resolveInitAdminPasswordSource(
     return "reuse-existing";
   }
 
-  if (!adminPassFileExists && !persisted && !reset) {
-    return "generate-new";
+  if (explicit && !reset) {
+    return "re-persist";
   }
 
-  if (persisted && explicit && !reset) {
-    return "re-persist";
+  if (!adminPassFileExists && !persisted && !reset) {
+    return "generate-new";
   }
 
   // Rotate is production credential rotation. The ONLY way in is the
@@ -135,28 +136,110 @@ export function resolveInitAdminPasswordRefuseReason(
 }
 
 /**
- * Harper's own install-validator signal that a rootPath already has a user
- * record (`system/hdb_user/data.mdb` or the legacy `system/hdb_user.mdb`).
- * Config presence alone is not enough — an interrupted install can write
- * harper-config.yaml before the user hash lands.
+ * Where each storage engine keeps the system schema (and so the admin user).
+ *
+ * Older data directories use LMDB: one file per table, at
+ * `system/hdb_user/data.mdb`, or the legacy single `system/hdb_user.mdb`.
+ *
+ * Harper 5 uses RocksDB: the whole `system` database is ONE column-family
+ * database at `database/system`, and each table's primary store is a column
+ * family named `<table>/` (Harper names a table's primary store with a
+ * trailing slash).
  */
-export function detectPersistedAdminUser(dataDir: string): boolean {
-  const dir = dataDir;
-  return (
-    existsSync(join(dir, "system", "hdb_user", "data.mdb")) ||
-    existsSync(join(dir, "system", "hdb_user.mdb"))
+export const HARPER_SYSTEM_DB_REL = join("database", "system");
+export const HDB_USER_PRIMARY_CF = "hdb_user/";
+
+/**
+ * Count the rows in the `hdb_user/` primary store of a Harper 5 system
+ * database, opened READ-ONLY (RocksDB read-only needs no lock, so this works
+ * while the instance is running, and writes nothing).
+ *
+ * `@harperfast/rocksdb-js` is resolved through the installed `harper`
+ * package: flair does not depend on it directly, and the reader must be the
+ * same engine Harper wrote the store with.
+ */
+export function countRocksAdminUsers(systemDbDir: string): number {
+  const requireFromHere = createRequire(import.meta.url);
+  const rocksPath = createRequire(requireFromHere.resolve("harper")).resolve(
+    "@harperfast/rocksdb-js",
   );
+  const { RocksDatabase } = requireFromHere(rocksPath) as {
+    RocksDatabase: {
+      open: (path: string, options?: Record<string, unknown>) => {
+        columns?: string[];
+        name?: string;
+        getKeysCount: () => number;
+        close?: () => void;
+      };
+    };
+  };
+  const probe = RocksDatabase.open(systemDbDir, { readOnly: true });
+  let hasUserStore: boolean;
+  try {
+    if (!Array.isArray(probe.columns) || !probe.columns.every(column => typeof column === "string")) {
+      throw new Error(`Invalid RocksDB columns metadata at ${systemDbDir}`);
+    }
+    hasUserStore = probe.columns.includes(HDB_USER_PRIMARY_CF);
+  } finally {
+    probe.close?.();
+  }
+  if (!hasUserStore) {
+    throw new Error(
+      `MISSING_HDB_USER_COLUMN: existing system store at ${systemDbDir} lacks ${HDB_USER_PRIMARY_CF}. Repair the system store or select the correct --data-dir.`,
+    );
+  }
+  const users = RocksDatabase.open(systemDbDir, { name: HDB_USER_PRIMARY_CF, readOnly: true });
+  try {
+    return users.getKeysCount();
+  } finally {
+    users.close?.();
+  }
+}
+
+/** A populated user store is evidence that the install is not fresh. */
+export function detectPersistedAdminUser(dataDir: string): boolean {
+  for (const path of [join(dataDir, "system", "hdb_user", "data.mdb"), join(dataDir, "system", "hdb_user.mdb")]) {
+    try {
+      const fd = openSync(path, "r");
+      closeSync(fd);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  const systemDbDir = join(dataDir, HARPER_SYSTEM_DB_REL);
+  try {
+    lstatSync(systemDbDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+  return countRocksAdminUsers(systemDbDir) > 0;
 }
 
 export function initAdminPassRefusalMessage(
   reason: InitAdminPasswordRefuseReason,
-  opts: { dataDir?: string; httpPort?: number; adminPassPath?: string; socketPath?: string } = {},
+  opts: {
+    dataDir?: string;
+    httpPort?: number;
+    adminPassPath?: string;
+    socketPath?: string;
+    /**
+     * Foreign-instance only. Default true keeps the historical `flair stop`
+     * line from before the occupied-listener detail. `flair init` passes
+     * false: those messages do not offer `flair stop`. `flair stop` cannot
+     * be promised to act on this listener (flair#1749).
+     */
+    offerFlairStop?: boolean;
+  } = {},
 ): string {
   if (reason === "foreign-instance") {
     const port = opts.httpPort ?? 19926;
+    const head =
+      `A Harper instance is already answering on port ${port} and this data directory has no persisted admin user.`;
+    if (opts.offerFlairStop === false) return head;
     return (
-      `A Harper instance is already answering on port ${port} and this data directory has no persisted admin user. ` +
-      `Stop that process before initializing a new instance:\n  ${INIT_STOP_FOREIGN_COMMAND}`
+      `${head} Stop that process before initializing a new instance:\n  ${INIT_STOP_FOREIGN_COMMAND}`
     );
   }
   if (reason === "reset-without-socket") {

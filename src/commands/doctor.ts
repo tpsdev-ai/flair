@@ -7,17 +7,18 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
+import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
-import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
+import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
-import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
-import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, renderCatalogDoctorLines, runDoctorChecks } from "../lib/doctor-run.js";
+import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, probeFlairHealth, renderCatalogDoctorLines, runDoctorChecks, type WorkerThreadsObservation } from "../lib/doctor-run.js";
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
@@ -30,14 +31,30 @@ import { mcpClientPinFindings, refreshOwnedPins, repinSessionStartHookGuarded, s
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME } from "../version-check.js";
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
+import { formatServingTreeLine, formatTreeAssessmentLines, type TreeAssessment } from "../lib/tree-divergence.js";
+import { rewriteFederationSchedulerRuntime, type RewriteFederationRuntimeResult } from "../federation/scheduler.js";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 
 import { dirname, join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
 
+export async function readNodeSeedAdvisory(
+  input: Parameters<typeof makeReadInstanceIds>[0] & { nodeKeyIds: string[]; keysDir: string },
+): Promise<string | null> {
+  if (input.nodeKeyIds.length === 0) return null;
+  const read = await makeReadInstanceIds(input)();
+  return orphanInstanceSeedAdvisory({
+    ...input,
+    instanceIds: read.state === "read" ? read.ids : null,
+    agentIds: read.state === "read" ? read.agentIds : null,
+    unreadableReason: read.state === "read" ? read.agentReadReason : read.reason,
+  });
+}
+
 export type DoctorCli = {
   api: (...args: any[]) => any;
+  assessInstallTree: (...args: any[]) => any;
   checkAgentRegistered: (...args: any[]) => any;
   classifyOpsSocketPosture: (...args: any[]) => any;
   configPath: (...args: any[]) => any;
@@ -51,7 +68,9 @@ export type DoctorCli = {
   readPortFromConfig: (...args: any[]) => any;
   relativeTime: (...args: any[]) => any;
   repairLaunchdManagement: (...args: any[]) => any;
+  repointMainServiceUnit: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
+  restartFlair: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   verifyAuditLog: (...args: any[]) => any;
   verifySemanticSearch: (...args: any[]) => any;
@@ -194,6 +213,134 @@ export function renderEmbedGpuDoctorFinding(
   return { lines, issueDelta: finding.isIssue ? 1 : 0 };
 }
 
+export interface InstallTreeDoctorDeps {
+  /** This CLI's tree vs the tree proven to serve the instance. */
+  assess: () => TreeAssessment;
+  /** Re-point the instance's own service unit (see repointMainServiceUnit in src/cli.ts). */
+  repoint: (dryRun: boolean) => { kind: string; detail: string };
+  /** Restart the instance (the same restart `flair restart` runs). */
+  restart: () => Promise<void>;
+  /** Classify (dryRun) or re-point the federation-sync shim. */
+  rewriteFederation: (dryRun: boolean) => Pick<RewriteFederationRuntimeResult, "status" | "detail">;
+}
+
+/**
+ * flair#2034 §2 — the "Install tree" doctor section: is the instance served
+ * from this CLI's install tree, and does the federation-sync shim run it?
+ *
+ * Runs in every `flair doctor` (it is not a catalog member, so it cannot be
+ * filtered out the way the catalog's launchd check is). Counting rules:
+ *
+ *   - a PROVEN divergence is one issue; a deliberate runtime pin (a different
+ *     node serving this CLI's own tree), a separately managed tree (a plain
+ *     tree or checkout) and an unknown serving tree are reported, never counted;
+ *   - `--fix` counts the divergence FIXED only after the unit was re-pointed,
+ *     the instance restarted, and the serving tree re-proven to be this CLI's —
+ *     "nothing to rewrite" or a failed restart is never a fix;
+ *   - a federation-sync shim running another npm-global tree is one issue,
+ *     fixed only when re-pointed AND re-read as current.
+ *
+ * Extracted from the action (like renderEmbedGpuDoctorFinding) so the counting
+ * is exercised directly; the action passes the real adapters.
+ */
+export async function runInstallTreeDoctorSection(
+  mode: { autoFix: boolean; dryRun: boolean },
+  deps: InstallTreeDoctorDeps,
+  write: (line: string) => void = (line) => console.log(line),
+): Promise<{ issues: number; fixed: number }> {
+  let issues = 0;
+  let fixed = 0;
+  const ok = render.icons.ok;
+  const bad = render.icons.error;
+  const info = render.icons.info;
+  const warn = render.icons.warn;
+
+  let a: TreeAssessment | null = null;
+  try {
+    a = deps.assess();
+  } catch (err: any) {
+    write(`  ${warn} install tree: could not check ${render.wrap(render.c.dim, `(${err?.message ?? err})`)}`);
+  }
+  if (a?.state === "same") {
+    write(`  ${ok} ${formatServingTreeLine(a)}`);
+    if (a.nodePin?.kind === "pinned") write(`  ${info} ${a.nodePin.message}`);
+  } else if (a?.state === "unknown") {
+    write(`  ${info} ${render.wrap(render.c.dim, formatServingTreeLine(a))}`);
+  } else if (a?.state === "separate") {
+    for (const line of formatTreeAssessmentLines(a, { context: "doctor" })) write(`  ${line}`);
+  } else if (a?.state === "diverged") {
+    issues++;
+    write(`  ${bad} ${render.wrap(render.c.red, "the instance is served from a different install tree than this CLI")}`);
+    for (const line of formatTreeAssessmentLines(a, { context: "doctor" })) write(`  ${render.wrap(render.c.yellow, line)}`);
+    if (mode.autoFix && a.cliOlder) {
+      write(`  ${bad} not re-pointed: this CLI's tree is older than what the instance runs — update it first (npm i -g @tpsdev-ai/flair), then re-run.`);
+    } else if (mode.autoFix && mode.dryRun) {
+      const r = deps.repoint(true);
+      write(`  ${info} ${render.wrap(render.c.dim, `[dry-run] ${r.detail}; then restart the instance and re-prove which tree serves it`)}`);
+    } else if (mode.autoFix) {
+      const r = deps.repoint(false);
+      if (r.kind === "repointed" || r.kind === "current") {
+        if (r.kind === "repointed") write(`  ${ok} ${r.detail}`);
+        try {
+          await deps.restart();
+          const after = deps.assess();
+          if (after.state === "same") {
+            fixed++;
+            write(`  ${ok} ${render.wrap(render.c.green, "restarted; verified")} — ${formatServingTreeLine(after)}`);
+          } else {
+            write(`  ${bad} restarted, but NOT fixed — ${formatServingTreeLine(after)}`);
+          }
+        } catch (err: any) {
+          write(`  ${bad} the restart failed (${err?.message ?? err}); the unit is re-pointed — run: flair restart`);
+        }
+      } else {
+        write(`  ${bad} not re-pointed — ${r.detail}`);
+      }
+    }
+  }
+
+  let f: Pick<RewriteFederationRuntimeResult, "status" | "detail"> | null = null;
+  try {
+    f = deps.rewriteFederation(true);
+  } catch (err: any) {
+    write(`  ${warn} federation-sync shim: could not check ${render.wrap(render.c.dim, `(${err?.message ?? err})`)}`);
+  }
+  switch (f?.status) {
+    case "current":
+      write(`  ${ok} federation-sync shim runs this CLI's tree`);
+      break;
+    case "pinned-node":
+    case "separate":
+      write(`  ${info} federation-sync shim: ${f.detail}`);
+      break;
+    case "refused":
+      write(`  ${warn} federation-sync shim: ${f.detail}`);
+      break;
+    case "would-rewrite": {
+      issues++;
+      write(`  ${bad} the federation-sync shim runs another install tree — ${f.detail}`);
+      if (mode.autoFix && mode.dryRun) {
+        write(`  ${info} ${render.wrap(render.c.dim, "[dry-run] would re-point the shim's exec line (the scheduler unit is not rewritten)")}`);
+      } else if (mode.autoFix) {
+        const r = deps.rewriteFederation(false);
+        const verify = r.status === "rewritten" ? deps.rewriteFederation(true) : null;
+        if (verify?.status === "current") {
+          fixed++;
+          write(`  ${ok} ${r.detail}`);
+        } else {
+          write(`  ${bad} federation-sync shim not re-pointed — ${verify ? verify.detail : r.detail}`);
+        }
+      } else {
+        write(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix  ${render.wrap(render.c.dim, "(or flair init)")}`);
+      }
+      break;
+    }
+    default:
+      break; // not enabled: nothing to say
+  }
+  return { issues, fixed };
+}
+
 // ─── flair doctor ─────────────────────────────────────────────────────────────
 
 
@@ -330,22 +477,13 @@ program
       }
     }
 
-    // Helper: try to reach Harper on a given port.
-    // Must return true ONLY when Harper's /Health endpoint returns 200 OK.
-    // A generic HTTP status > 0 (flair#862) would accept 404 from a Node
-    // inspector on 9229 or any other service — "present but wrong" beats
-    // "absent but correct".
+    // Probe a port's /Health.
     async function probePort(p: number): Promise<boolean> {
-      try {
-        const res = await fetch(`http://127.0.0.1:${p}/Health`, { signal: AbortSignal.timeout(3000) });
-        return res.ok; // 200-299 only — /Health returns { ok: true } on 200
-      } catch { return false; }
+      const probe = await probeFlairHealth(`http://127.0.0.1:${p}/Health`);
+      return probe.reaching;
     }
 
-    // Helper: discover what port a Harper PID is listening on.
-    // Scans ALL listening ports for this PID and returns the first one that
-    // responds to /Health with 200 OK. This avoids picking a debug port (9229)
-    // or any non-Flair listener that happens to share the process (flair#862).
+    // Find the PID's port by probing /Health.
     async function discoverPortFromPid(pid: string): Promise<number | null> {
       // Defense-in-depth: caller already validates, but re-check here
       if (!/^\d+$/.test(pid)) return null;
@@ -355,7 +493,6 @@ program
         // Extract all ports from lsof -Fn output (lines like "n127.0.0.1:PORT")
         const ports = [...out.matchAll(/n(?:\S+):(\d+)/g)].map(m => Number(m[1]));
         if (ports.length === 0) return null;
-        // Try each port until one responds to /Health with 200 OK
         for (const port of ports) {
           if (await probePort(port)) return port;
         }
@@ -467,13 +604,17 @@ program
     // picture here instead of a one-liner and `--fix` offers the restart.
     let runningVersion: string | null = null;
     let embedGpuFromHealth: unknown;
+    let workerThreads: WorkerThreadsObservation | undefined;
     if (harperResponding) {
       try {
-        const healthRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
-        if (healthRes.ok) {
-          const body = (await healthRes.json()) as { version?: unknown; embedding?: unknown };
-          runningVersion = typeof body?.version === "string" ? body.version : null;
-          embedGpuFromHealth = body.embedding;
+        const probe = await probeFlairHealth(`${baseUrl}/Health`);
+        if (probe.reaching) {
+          workerThreads = probe.observation ?? undefined;
+          if (probe.status >= 200 && probe.status < 300 && probe.body && typeof probe.body === "object") {
+            const healthBody = probe.body as { version?: unknown; embedding?: unknown };
+            runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
+            embedGpuFromHealth = healthBody.embedding;
+          }
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
 
@@ -543,6 +684,13 @@ program
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
         issues++;
       }
+
+      if (nodeKeyIds.length > 0 && harperResponding) {
+        const advisory = await readNodeSeedAdvisory({
+          nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
+        });
+        if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
+      }
     } else {
       console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);
       console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
@@ -595,16 +743,32 @@ program
     // The remedy names the two exits: `--admin-pass-file` / `--reset-admin-pass`.
     try {
       const dataDir = defaultDataDir();
-      const finding = adminPassDesyncFinding({
-        adminPassFileExists: existsSync(defaultAdminPassPath()),
-        persistedAdminUser: detectPersistedAdminUser(dataDir),
-        dataDir,
-        adminPassPath: defaultAdminPassPath(),
-      });
-      if (finding?.flagged) {
-        console.log(`  ${render.icons.error} ${finding.message}`);
-        console.log(`     ${render.wrap(render.c.dim, finding.remedy)}`);
+      let persistedAdminUser: boolean | null;
+      try {
+        persistedAdminUser = detectPersistedAdminUser(dataDir);
+      } catch {
+        persistedAdminUser = null;
+      }
+      if (persistedAdminUser === null) {
         issues++;
+        console.log(
+          `  ${render.icons.warn} ${render.wrap(
+            render.c.yellow,
+            `could not read the Harper system database under ${dataDir} to tell whether an admin user is persisted — not assessing the admin-pass desync`,
+          )}`,
+        );
+      } else {
+        const finding = adminPassDesyncFinding({
+          adminPassFileExists: existsSync(defaultAdminPassPath()),
+          persistedAdminUser,
+          dataDir,
+          adminPassPath: defaultAdminPassPath(),
+        });
+        if (finding?.flagged) {
+          console.log(`  ${render.icons.error} ${finding.message}`);
+          console.log(`     ${render.wrap(render.c.dim, finding.remedy)}`);
+          issues++;
+        }
       }
     } catch { /* best-effort — a missing data dir is not a doctor crash */ }
 
@@ -929,6 +1093,7 @@ program
       keysDir,
       keyAgentIds,
       agentFlag: typeof opts.agent === "string" ? opts.agent : undefined,
+      workerThreads,
     };
     const catalogBefore = runDoctorChecks(doctorCtx, { catalogIds: doctorCatalogIds });
     // flair#1834 PR-H: a hook file on disk IS the wiring — the same rule the
@@ -1333,8 +1498,13 @@ program
           const continuityDetail = continuity.state === "partial"
             ? (!continuity.postToolUse.present ? "the PostToolUse entry is missing" : "the Stop entry is missing")
             : "an entry is not the current form (unsilenced, hand-altered, or a drifted PostToolUse matcher)";
-          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${continuityDetail}`);
-          if (autoFix) {
+          const pinDetail = [
+            continuity.postToolUse.reason && "PostToolUse " + continuity.postToolUse.reason,
+            continuity.stop.reason && "Stop " + continuity.stop.reason,
+          ].filter(Boolean).join("; ");
+          const blockers = continuityWriteBlockers(continuity);
+          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${continuityDetail}${pinDetail ? "; " + pinDetail : ""}`);
+          if (autoFix && blockers.length === 0) {
             if (dryRun) {
               console.log(`     ${render.wrap(render.c.dim, "Would rewrite the continuity capture hooks in")} ${continuity.path}`);
             } else {
@@ -1354,7 +1524,14 @@ program
               }
             }
           } else {
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);
+            if (blockers.length > 0) {
+              const advice = pinDetail
+                ? "Resolve the listed non-version pin(s) manually; doctor cannot rewrite them."
+                : "Continuity hook rewrite held or refused; resolve the listed reason(s) manually.";
+              console.log(`     ${advice} ${blockers.join(" ")}`);
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);
+            }
           }
           issues++;
         }
@@ -1567,6 +1744,27 @@ program
       }
     }
 
+    // 7c. Install tree (flair#2034 §2) — after launchd management, so a repair
+    //     above has settled which service owns the instance before this asks.
+    console.log(`\n  ${render.wrap(render.c.bold, "Install tree")}`);
+    {
+      const treeSection = await runInstallTreeDoctorSection(
+        { autoFix, dryRun },
+        {
+          assess: () =>
+            cli.assessInstallTree(defaultDataDir(), effectivePort, {
+              local: true,
+              runningVersion: effectivePort === port ? instanceVersion : null,
+            }) as TreeAssessment,
+          repoint: (dry) => cli.repointMainServiceUnit(defaultDataDir(), effectivePort, { dryRun: dry }),
+          restart: () => cli.restartFlair(effectivePort, defaultDataDir()),
+          rewriteFederation: (dry) => rewriteFederationSchedulerRuntime({ dryRun: dry }),
+        },
+      );
+      issues += treeSection.issues;
+      fixed += treeSection.fixed;
+    }
+
     // 7a. Resolve which agent identities the two verified-read sections below
     // (Fleet presence, Migrations) iterate (flair#722). Previously both
     // sections required --agent explicitly; doctor already enumerates every
@@ -1647,9 +1845,10 @@ program
     // pre-#722 single unauthenticated read (hidden versions, "Pass --agent"
     // hint) — there's no agent to sign as, but remote agents may still have
     // heartbeated onto this instance and identities are worth showing.
+    const presenceUrl = requestUrl(baseUrl, "/Presence");
     async function fetchAndRenderFleetPresence(headers: Record<string, string>, canSign: boolean, indent: string): Promise<void> {
       try {
-        const presRes = await fetch(`${baseUrl}/Presence`, { headers, signal: AbortSignal.timeout(5000) });
+        const presRes = await fetch(presenceUrl, { headers, signal: AbortSignal.timeout(5000) });
         if (!presRes.ok) {
           // flair#1880: GET /Presence requires a verified reader by default, so
           // a keyless (unsigned) read now gets 401. Say so plainly instead of a
@@ -1721,7 +1920,7 @@ program
           const registered = renderAgentGateHeader(gate);
           if (!registered) continue;
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
-          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/Presence", keyPath) };
+          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(presenceUrl), keyPath) };
           await fetchAndRenderFleetPresence(headers, true, "      ");
         }
       }
@@ -1745,9 +1944,10 @@ program
     // iterates only the gate-passed agents and rolls the rest into one
     // aggregate skip line. The issue COUNT is unaffected either way — gate
     // findings are counted exactly once, at gate-resolution time (step 7a).
+    const healthDetailUrl = requestUrl(baseUrl, "/HealthDetail");
     async function fetchAndRenderMigrations(headers: Record<string, string>, indent: string): Promise<void> {
       try {
-        const migRes = await fetch(`${baseUrl}/HealthDetail`, { headers, signal: AbortSignal.timeout(5000) });
+        const migRes = await fetch(healthDetailUrl, { headers, signal: AbortSignal.timeout(5000) });
         if (!migRes.ok) {
           console.log(`${indent}${render.icons.warn} Could not fetch migration state (HTTP ${migRes.status})`);
           return;
@@ -1808,7 +2008,7 @@ program
         for (const gate of passedGates) {
           renderAgentGateHeader(gate);
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
-          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/HealthDetail", keyPath) };
+          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(healthDetailUrl), keyPath) };
           await fetchAndRenderMigrations(headers, "      ");
         }
         const skipped = agentGates.length - passedGates.length;

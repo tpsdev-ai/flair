@@ -14,21 +14,11 @@ If you've never set up Flair before, do step 1 first. If Flair is already runnin
 
 ## Step 1 — Install Flair (do once)
 
-```bash
-# Install Flair globally
-npm install -g @tpsdev-ai/flair
-
-# Initialize the local Harper-backed server
-flair init
-
-# Provision an agent identity. Pick a name — typically per-project, per-purpose,
-# or "me" if you want one durable identity across everything.
-flair agent add my-project
-# → writes ~/.flair/keys/my-project.key (Ed25519 PKCS8) and registers the agent
-
-# Sanity check
-flair status
-```
+Follow [the laptop quickstart](quickstart.md) through agent setup and
+verification. Its `flair init --agent local` path creates the agent identity
+and attempts to wire detected clients when wiring is enabled.
+For the manual snippets below, replace `my-project` with the agent ID you
+created (`local` if you followed the quickstart unchanged).
 
 > **`flair: command not found` right after installing?** Your npm global prefix's bin dir isn't on PATH (common with a user prefix like `~/.npm-global`) — run `export PATH="$(npm prefix -g)/bin:$PATH"`, persist that line in your shell profile, and `flair doctor` will print the exact line for your shell any time.
 
@@ -43,9 +33,9 @@ The snippets below are the **local** path. Flair also has a native `/mcp` endpoi
 | MCP client on this machine (Claude Code, Cursor, Codex, Gemini, and the snippets below) | `npx -y @tpsdev-ai/flair-mcp@<version>` stdio adapter | Ed25519 over HTTP to the instance |
 | Remote MCP client that must dial a public HTTPS origin | Native `/mcp` on the instance | OAuth bearer. Unmounted until `FLAIR_MCP_OAUTH=true` and a public issuer are set (otherwise the path 404s). |
 
-Native `/mcp` is remote-only by design. The OAuth authorization server fetches client metadata over HTTPS and refuses private, loopback, and link-local hosts. `flair mcp enable` refuses localhost, loopback, RFC1918, IPv4 link-local, and `.local`. Set `FLAIR_MCP_OAUTH=true` — that is the one value that enables both Flair's `/mcp` route and the OAuth component. A loopback Flair cannot be the origin those clients dial. The stdio adapter is the local path because it speaks the instance's Ed25519 HTTP API and does not need that public origin.
+Native `/mcp` is remote-only by design. The OAuth authorization server fetches client metadata over HTTPS and refuses private, loopback, and link-local hosts. `flair mcp enable` accepts loopback or unspecified targets for the local restart but refuses local issuers. Set `FLAIR_MCP_OAUTH=true` — that is the one value that enables both Flair's `/mcp` route and the OAuth component. A loopback Flair cannot be the origin those clients dial. The stdio adapter is the local path because it speaks the instance's Ed25519 HTTP API and does not need that public origin.
 
-`flair init` writes the stdio adapter. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools).
+`flair init --agent <id>` attempts to wire detected local clients unless MCP wiring is disabled; bare `flair init` only initializes the instance. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools). Who can connect through native `/mcp`, and how to revoke access, is in [access-control.md](access-control.md).
 
 ---
 
@@ -53,9 +43,9 @@ Native `/mcp` is remote-only by design. The OAuth authorization server fetches c
 
 Pick whichever you use. The MCP server is the same package; only the config syntax differs.
 
-> **Pin the version.** An unpinned `@tpsdev-ai/flair-mcp` re-resolves to whatever is currently published on *every* agent session, so any future publish reaches your machine silently, with no lockfile and no review step in the path. `flair init` wires clients to a **pinned** spec on purpose, and every MCP-server config snippet below is written the same way: `@tpsdev-ai/flair-mcp@<version>`.
+> **Pin the version.** An unpinned `@tpsdev-ai/flair-mcp` re-resolves to whatever is currently published on *every* agent session, so any future publish reaches your machine silently, with no lockfile and no review step in the path. `flair init --agent <id>` attempts to wire detected clients when wiring is enabled; every MCP-server config snippet below is written the same way: `@tpsdev-ai/flair-mcp@<version>`.
 >
-> Replace `<version>` with the version you intend to run — the one you already have is `flair --version` — and bump it deliberately. Leaving the literal `<version>` in place fails loudly at `npx`, which is the intended failure: better than a config that looks pinned and isn't. `flair init` is the easier path and fills this in for you.
+> Replace `<version>` with the version you intend to run — the one you already have is `flair --version` — and bump it deliberately. Leaving the literal `<version>` in place fails loudly at `npx`, which is the intended failure: better than a config that looks pinned and isn't. `flair init --agent <id>` can fill in the version for clients it wires; check its wiring summary for skipped or held configs.
 >
 > **Do not stay on a pin older than 0.18.0.** `@tpsdev-ai/flair-client` before 0.18.0 (and `@tpsdev-ai/flair-mcp` that shipped it) silently drops writes — including against another agent's shared memories — and a server upgrade does not fix that. `flair doctor` flags those pins; the remedy is `flair upgrade` (the adapter), not a newer Harper/Flair server alone. See [troubleshooting — silent write drop](troubleshooting.md#pre-0180-flair-client--flair-mcp-silently-drops-writes).
 
@@ -176,7 +166,7 @@ If you already have the older, unwrapped command, `flair doctor` reports it and
 
 The hook reads Claude Code's SessionStart
 payload on stdin, calls Flair's `bootstrap` (soul + relevant memories +
-predicted context, scoped to your project by the session's working directory),
+predicted context; the hook sends a basename subject hint, and bootstrap selects a bounded set of the agent's own and recent memories under a token budget),
 and emits it as `hookSpecificOutput.additionalContext` — which Claude Code
 injects into the new session's context. The matcher is omitted, so it fires on
 every session start (`startup`, `resume`, `clear`, `compact`); add
@@ -188,8 +178,9 @@ It honors the same env as the MCP server (`FLAIR_AGENT_ID`, `FLAIR_URL`,
 `FLAIR_HOOK_HARNESS=codex` so bootstrap records the Codex channel; the
 stdout contract stays `hookSpecificOutput.additionalContext`.
 
-**It degrades to a no-op, always.** No `FLAIR_AGENT_ID`, Flair down, an auth
-error, or a hung daemon (past the timeout) → the hook prints `{}` and exits 0.
+A failed bootstrap attempts a stderr diagnostic and can still return a continuity
+resume hint; without either kind of context it returns `{}`, and the entry point
+exits successfully.
 Claude Code treats that as "no context to add" and starts normally. The hook
 can never block or break session startup. The injected context is clamped to
 ≤10,000 characters to keep the session-start payload small. And if the command
@@ -257,7 +248,8 @@ flair hook uninstall --harness codex
 
 `flair doctor` reports this hook when Codex is detected. `flair hook install
 --harness codex` writes `FLAIR_HOOK_HARNESS=codex` and keeps hook stderr
-visible (auth failures must not be swallowed). After install, **re-approve**
+visible; the session-start hook attempts one stderr diagnostic when bootstrap
+fails (auth failures must not be swallowed). After install, **re-approve**
 the command in Codex with `/hooks` — a wiring change resets trust, and
 untrusted hooks are listed and skipped. `flair hook status --harness codex`
 reports that pending-approval state as configured but delivery not verified.
@@ -304,31 +296,35 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | Tool | What it does |
 |---|---|
 | `memory_search` | Semantic search across the caller's own and other agents' non-private memories |
-| `memory_store` | Save a memory (type, durability, tags, visibility), attributed to the authenticated agent. Optional `usedMemoryIds` cites memories that informed the write |
+| `memory_store` | Save a memory (type, durability, tags, visibility), under the configured agent ID, subject to server authorization. Optional `usedMemoryIds` cites memories that informed the write |
 | `skill_store` | Write a skill-tagged memory. `trigger` is the recall text; `content` is the procedure. Durability is forced to persistent, and SkillScan rejects a dangerous payload before embed |
 | `skill_search` | Rank skills by their trigger against a task. Returns a catalog (id, name, trigger, description, tags, agentId), not the procedure |
-| `skill_get` | Fetch one skill's full procedure by id. Own skills and shared skills only; a private skill owned by someone else is not returned |
+| `skill_get` | Fetch one skill's full procedure by id. Non-admin callers can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills |
 | `memory_update` | Update a memory by id. Overwrites in place, or pass `preserveHistory` to write a superseding version. Optional `usedMemoryIds` |
 | `memory_get` | Fetch a specific memory by ID |
-| `memory_delete` | Delete one of your own memories |
+| `memory_delete` | Delete a memory by ID. Non-admin callers can delete only their own memories; administrators can also delete other agents' memories |
 | `relationship_store` | Assert a subject-predicate-object triple (for example "nathan manages flair"). Asserting the same triple again updates that row |
 | `bootstrap` | Session-start context: soul, memories, and predicted context. Pass `subjects` for predictive loading |
-| `soul_set` | Advertised as setting a soul entry. The server refuses runtime Soul writes, including this tool's Ed25519 call; operators use `flair soul set` |
+| `soul_set` | Advertised as setting a soul entry. Verified administrator Basic credentials are accepted; Ed25519 agent calls, including this tool's, are refused. Operators use `flair soul set` |
 | `soul_get` | Get a soul entry |
 | `flair_workspace_set` | Set this agent's workspace state (ref, label, provider, task, phase, summary) in the Office Space |
 | `flair_orgevent` | Publish an org-wide coordination event (claim, release, or status), attributed to the caller |
 | `flair_catchup` | Drain this agent's own org-event catch-up feed. Page with `after`; advance the watermark with `ack` |
 | `record_usage` | Report that recalled memories were actually used (`memoryId` or `memoryIds`, plus optional `attribution`). Drives `usageCount` / `usageBoost` |
 
-Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's server, not by client convention — you can't write as another agent. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
+For ordinary signed agents, Flair enforces write ownership server-side: they can write only under their authenticated agent ID. Administrator credentials and administrator agent roles have broader authority. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
 
-Which memories are non-private is decided at write time, and the default is not "shared". `memory_store` defaults `durability` to `standard`, and the server derives visibility from durability — `permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private` — so **a bare `memory_store` call writes an owner-only memory that no other agent can read.** Pass `visibility: "shared"` (or `"private"`, to be explicit) to say what you mean; the tool reports the visibility the write actually landed on so an agent can confirm it rather than assume.
+Which memories are non-private is decided at write time, and the default is not "shared". `memory_store` defaults `durability` to `standard`, and the server derives visibility from durability — `permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private` — so **a bare `memory_store` call creates a private memory: ordinary agents other than its owner cannot read it; administrators retain access.** Pass `visibility: "shared"` (or `"private"`, to be explicit) to say what you mean; the tool reports the visibility the write actually landed on so an agent can confirm it rather than assume.
 
 ### Reading the `bootstrap` payload
 
+The following structured-payload details describe the HTTP bootstrap response and native `/mcp`; stdio `flair-mcp` returns the formatted context as an MCP text block.
+
 `bootstrap` returns the canonical structured containers — `soul`, `memories`, `predicted`, `teammateFindings`, `events` — plus counts and a `tokenEstimate`. The containers are **always present** (empty `[]`/`{}` when there's nothing), so an empty container is distinguishable from an unsupported one.
 
-**The token ledger reconciles `tokenEstimate` from the payload alone (flair#1270).** Every token-charged content class carries a counter — `soulTokens`, `memoryTokens`, `trustTokens`, `eventsTokens` — plus a measured `scaffoldTokens` for the fixed JSON frame, and `tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens + trustTokens + eventsTokens`. The remaining ≈ gap is the bounded per-item difference between the prose lines the memory counters measure and the heavier structured objects the containers ship. A payload whose estimate an agent can't decompose from the reported figures is a bug, not an accounting convention.
+**Skill assignments are reported in `skills` and `skillDiagnostics` (flair#2141).** A `skills` entry is `{ name, skillId, scope, priority, source }` for an assigned skill that won priority resolution; a `skillDiagnostics` entry is a refused, superseded, unresolved or ambiguous assignment with its `decision` and `reason`. Both arrays are present whatever `includeSoul` and `includeContext` say, and hold the entries admitted within the remaining token budget; `skillsTruncated` and `skillDiagnosticsTruncated` count the entries that did not fit. An entry names the skill and does not carry its procedure: fetch that with `skill_get` and the `skillId`, or over REST with a signed `GET /Memory/<skillId>`, which applies the same by-id read gate as `skill_get`. A name-only assignment that wins priority resolution resolves when the agent has exactly one live skill row of its own with that name (not archived, past `validTo` or past `expiresAt`); with none it is `unresolved`, with more than one `ambiguous`. An `OrgSkillAssignment` row is also a candidate when the target's Agent record has `kind` agent and `status` active (absent counts as agent and active); humans, deactivated principals and targets with no Agent record get no org candidates. A Soul `skill-assignment` row with `metadata.optOut: true` removes the org candidates with that name for that agent before priority resolution, when this instance's id can be read and the row's `originatorInstanceId` equals it. An org `skills` entry has `scope: "org"` and its `skillId` is the row's `skillRef`; an org assignment that wins priority resolution with a `skillRef` that is not a live skill row the agent can read is `unresolved`. The `name` and `source` strings come from Soul `skill-assignment` rows, and an org entry's `name` from its `OrgSkillAssignment` row; they reach the agent without SkillScan; that is safe only because no agent key can write those rows (admin agent keys included); only operator credentials and Flair's own internal paths can, so widening who may write them changes what reaches the agent's context.
+
+**The token ledger reconciles `tokenEstimate` from the payload alone (flair#1270).** Every token-charged content class carries a counter — `soulTokens`, `memoryTokens`, `trustTokens`, `eventsTokens`, `skillsTokens`, `skillDiagnosticsTokens` — plus a measured `scaffoldTokens` for the fixed JSON frame, and `tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens + trustTokens + eventsTokens + skillsTokens + skillDiagnosticsTokens`. At the `/mcp` default (`includeContext: false`) the remaining ≈ gap is the bounded per-item difference between the prose lines the memory counters measure and the heavier structured objects the containers ship; with `includeContext: true` the prose `context` mirror widens it and no upper bound applies. A payload whose estimate an agent can't decompose from the reported figures is a bug, not an accounting convention.
 
 **Empty containers say why they're empty (flair#1182).** When a structured container ships empty, the payload carries a short hint naming the reason and what fills it — `eventsHint`, `teammateFindingsHint`, `predictedHint`. This is present *only* when the container is empty, so a deliberately-empty container is never confused with a silent drop (a connector never has to diff against a previous payload to tell the two apart).
 
@@ -342,7 +338,7 @@ Which memories are non-private is decided at write time, and the default is not 
 |---|---|---|
 | `FLAIR_AGENT_ID` | (none — required) | Must match `flair agent add <id>` |
 | `FLAIR_URL` | `http://127.0.0.1:19926` | Override for remote Flair instances |
-| `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key` | Ed25519 PKCS8 key — created by `flair agent add` |
+| `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key` | Path to the Ed25519 private key; `flair agent add` creates a raw 32-byte seed. |
 
 The MCP server has no client-side flags beyond these env vars; everything else (timeouts, dedup thresholds, error classification) is opinionated defaults from the underlying [`@tpsdev-ai/flair-client`](../packages/flair-client) package.
 
@@ -350,7 +346,7 @@ The MCP server has no client-side flags beyond these env vars; everything else (
 
 ## What about pi?
 
-pi has no MCP client support, so Flair ships a **native pi extension** instead: [`@tpsdev-ai/pi-flair`](../packages/pi-flair/README.md). Same backend, same agent isolation, zero MCP in the path.
+pi has no MCP client support, so Flair ships a **native pi extension** instead: [`@tpsdev-ai/pi-flair`](../packages/pi-flair/README.md). Same backend. With an ordinary signed identity, writes are owned by that agent; reads admit its own records and other agents' non-private records. Zero MCP in the path.
 
 Wiring is a `packages` entry in pi's own settings (`~/.pi/agent/settings.json`), not an `mcpServers` block:
 
@@ -360,7 +356,7 @@ Wiring is a `packages` entry in pi's own settings (`~/.pi/agent/settings.json`),
 }
 ```
 
-`flair init --client pi` writes exactly that (pinned), or use pi's own installer: `pi install npm:@tpsdev-ai/pi-flair`. `flair doctor` detects pi and checks the wiring — including the one known trap: **an `npm:` spec under the `extensions` settings key is silently ignored by pi** (`extensions` takes local file paths only; package sources belong under `packages` — [#1346](https://github.com/tpsdev-ai/flair/issues/1346)). Doctor calls that misconfiguration out by name, and `flair doctor --fix` moves the entry.
+`flair init --agent my-agent --client pi` writes exactly that (pinned), or use pi's own installer: `pi install npm:@tpsdev-ai/pi-flair`. `flair doctor` detects pi and checks the wiring — including the one known trap: **an `npm:` spec under the `extensions` settings key is silently ignored by pi** (`extensions` takes local file paths only; package sources belong under `packages` — [#1346](https://github.com/tpsdev-ai/flair/issues/1346)). Doctor calls that misconfiguration out by name, and `flair doctor --fix` moves the entry.
 
 One difference from the MCP clients above: pi settings carry no per-package `env` block, so `FLAIR_AGENT_ID` (and `FLAIR_URL` when non-default) must be exported in the environment that launches pi. Doctor reports what it sees in its own shell and says so — it cannot observe the environment of every pi launch.
 
@@ -368,7 +364,7 @@ One difference from the MCP clients above: pi settings carry no per-package `env
 
 ## What about Hermes (Nous Research)?
 
-Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`packages/hermes-flair/`](../packages/hermes-flair). Same backend, same agent isolation, different plug shape.
+Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`packages/hermes-flair/`](../packages/hermes-flair). Same backend. With an ordinary signed identity, writes are owned by that agent; reads admit its own records and other agents' non-private records. Different plug shape.
 
 Future MCP-capable agent CLIs (and there are more landing every month) will work out of the box with the MCP server above — no per-framework adapter required from us.
 
@@ -380,7 +376,7 @@ Future MCP-capable agent CLIs (and there are more landing every month) will work
 
 **"connection_error: could not reach Flair at http://127.0.0.1:19926".** The Flair server isn't running. Run `flair status` to check; `flair start` to bring it up.
 
-**"auth_error: …" on every call.** The agent identity doesn't match a registered key. Re-run `flair agent add <id>` (idempotent on re-add — won't lose existing memories). Against a hosted instance the same three shapes apply (record missing / key mismatch / config wrong), and a by-id 404 is fail-closed ownership, not an existence signal — [Hosted Flair auth](integrations.md#hosted-flair-auth--your-agent-got-a-404).
+**"auth_error: …" on every call.** Read the reported cause. For `unknown_agent`, no Agent row exists: run `flair agent add <id>`. For `invalid_signature`, the signature did not verify against the stored public key. Check the signing key and the signed request first. For a confirmed key mismatch, `agent add` refuses a well-formed existing row. On the Flair host, `flair agent rotate-key <id>` writes a new private key on that host. That file must be on the client host before the MCP process can sign with it. `FLAIR_KEY_PATH` only names a path on the signing host; point it at that local file when the key is not in the default location, then restart the MCP process. `flair agent remove <id>` and then add again is the other path for a well-formed row. `flair agent remove` tries to delete that agent's Memory and Soul rows. Other auth errors follow the cause they name. A by-id 404 is fail-closed ownership, not an existence signal — [Hosted Flair auth](integrations.md#hosted-flair-auth--your-agent-got-a-404).
 
 **Tool calls succeed but the agent doesn't see results in subsequent turns.** Check that the CLI is actually invoking `bootstrap` at session start — most CLIs need an explicit prompt nudge ("call the bootstrap tool now") on first use. Subsequent turns should pick up automatically once the CLI sees the schema.
 

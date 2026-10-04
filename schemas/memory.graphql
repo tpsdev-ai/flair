@@ -42,8 +42,22 @@ type Memory @table(database: "flair") {
   tags: [String] @indexed
   durability: String @indexed
   source: String
+  type: String                # flair#1940 A1'' item 1: declared from MEASURED data, not derived from the schema. A live
+                               # store (3,963 Memory rows) really carries `type` on 62% of rows — the client filters
+                               # on it and MemoryMaintenance archives `type === "session"`. Declaring it here is what
+                               # lets the declared-only whitelist (resources/memory-declared-attributes.ts) KEEP it on a
+                               # full-row write instead of stripping it. Nullable/additive — existing rows keep their
+                               # value, rows without it stay without it.
   createdAt: String! @indexed
   updatedAt: String
+  instanceToken: String @indexed  # flair#1940 A1-iv: a server-stamped row INCARNATION token (UUID). The named
+                               # application create paths stamp a local `instanceToken`; existing legacy rows may have
+                               # none. Memory's REST write paths remove client-supplied `instanceToken` and
+                               # `provenance`. The named update paths retain a stored token when their existing-row read
+                               # succeeds. The host-pointer join binds on it: a pointer is returned only when
+                               # memoryId, authorId === agentId, instanceToken and "not archived" all hold, so a
+                               # deleted-and-recreated id (which gets a NEW token) can never re-bind a stale pointer.
+                               # Nullable/additive: existing rows read back null (clean-upgrade-path gate).
   expiresAt: String @indexed
   retrievalCount: Int          # Observable search-hit counter. Authoritative increments live on
                                # MemoryHitStat (resources/hit-tracking.ts, flair#1528); GET/search
@@ -84,16 +98,28 @@ type Memory @table(database: "flair") {
   validFrom: String @indexed   # ISO timestamp — when this fact became true
   validTo: String @indexed     # ISO timestamp — when this fact stopped being true (null = still valid)
   _safetyFlags: [String]       # content safety flags from scanContent()
-  provenance: String           # JSON blob (memory-provenance slice 1; claimed.client added by flair#718): { v, verified: { agentId, timestamp }, claimed?: { model, client } }
-                               # Nullable by design — existing rows read back provenance = null, unchanged behavior (clean-upgrade-path gate).
-                               # Same idiom as Soul.metadata below. Stamped server-side in resources/Memory.ts; never client-writable.
-  originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side in
-                               # resources/Memory.ts from resources/instance-identity.ts's localInstanceId() — never client-writable.
-                               # Nullable (existing rows read null = clean upgrade). Distinct from the legacy _originatorInstanceId
-                               # (Federation.ts's mergeRecord — stamped by the RECEIVER at merge time, forgeable/lossy); this field is
-                               # stamped by the ORIGINATING instance itself and preserved (never re-stamped) as the record flows through
-                               # sync merges. @indexed for the later sync push-query filter (per-record signature verification and the
-                               # classifier org-gate are separate, later slices — not built here).
+  provenance: String           # JSON blob (memory-provenance slice 1; claimed.client added by flair#718): { v, verified: { agentId, timestamp, receivedAt }, claimed?: { model, client } }
+                               # Server-STAMPED (receivedAt is the server's receipt time, never client-writable — flair#1940 A4).
+  # flair#1940 A1' — The Memory schema does not declare a pointer attribute.
+  # Supported Memory writes store accepted pointers in `MemoryHostSource`
+  # (below); the named non-admin reads use its gated join. Client and adapter
+  # transport is outside this slice. The three write-body inputs (hostSource,
+  # hostSourceScope, hostSourceVisibility) are consumed by Memory.post()/put()
+  # and are never persisted here.
+  originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side on every
+                               # application write via resources/originator-instance.ts from resources/instance-identity.ts's localInstanceId()
+                               # (Memory/Soul/Agent/Relationship post()/put()/patch(), Memory's _reindex re-PUT, the FeedMemories ingest, AgentSeed
+                               # and the MCP/IdP principal provisioning). On CREATE the local id is stamped and any request-body value is
+                               # ignored; on UPDATE the STORED value stands (a body value neither replaces nor clears it, and an update that
+                               # omits the field leaves it). Nullable (existing rows read null = clean upgrade).
+                               # NOT client-writable through a resource write. Distinct from the legacy _originatorInstanceId (Federation.ts's
+                               # mergeRecord — stamped by the RECEIVER at merge time, forgeable/lossy); this field is stamped by the ORIGINATING
+                               # instance itself and preserved (never re-stamped) as the record flows through sync merges. Federation and Harper's
+                               # administrator ops API are EXCEPTIONS to the rule, not the field's only raw writers: the SIGNED federation merge
+                               # (FederationSync.post, which accepts a signed HTTP body from a known, non-revoked peer; a record's own signature,
+                               # when present, is verified against the pinned key of the record's envelope originator) and the administrator ops
+                               # API (:9925, admin auth). @indexed for the
+                               # later sync push-query filter (per-record signature verification and the classifier org-gate are separate slices).
   metadata: String             # JSON blob (flair#1332/#1202): ADK custom_metadata, store-and-return. CLIENT-WRITABLE
                                # (unlike provenance above, which is server-stamped) and OPAQUE TO THE SERVER by
                                # contract: stored verbatim, returned verbatim, never parsed server-side, never
@@ -114,6 +140,7 @@ type Memory @table(database: "flair") {
                                # that producer is a follow-up); additive/nullable, existing rows carry no
                                # entities, readers tolerate absent (same pattern as Presence.activityUpdatedAt).
                                # See docs/entity-vocabulary.md.
+  skillSubjectId: String @indexed  # Nullable, server-owned skill subject.
 }
 
 # Explicit entity-to-entity relationships with temporal validity.
@@ -141,14 +168,20 @@ type Relationship @table(database: "flair") {
   updatedAt: String
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
                                     # for the full contract (write-time stamp, nullable, preserved across sync merges).
-                                    # Stamped server-side in resources/Relationship.ts's put().
-  provenance: String                # JSON blob (relationship-write-path, folded K&S refinement): SAME shape as
-                                    # Memory.provenance above — { v, verified: { agentId, timestamp }, claimed?: { model, client } }
-                                    # — via the shared resources/provenance.ts buildProvenance(), never a
-                                    # Relationship-specific format. Nullable by design — pre-existing rows read back
+                                    # Stamped server-side in resources/Relationship.ts's post() and put() via resources/originator-instance.ts
+                                    # (create stamps the local id; update keeps the stored value; never client-writable).
+  provenance: String                # JSON blob (relationship-write-path, folded K&S refinement; re-stamped on
+                                    # the semantic PATCH path by flair#1960 r2): SAME shape as
+                                    # Memory.provenance above — { v, verified: { agentId, timestamp, receivedAt },
+                                    # claimed?: { createdAt, model, client } } — via the shared
+                                    # resources/provenance.ts buildProvenance(), never a
+                                    # Relationship-specific format. On a newly stamped local write, every
+                                    # field under `verified` is server-derived (the resolved auth verdict
+                                    # + one server clock read), never client-writable. Nullable by design — pre-existing rows read back
                                     # provenance = null, unchanged behavior (migration-equivalence gate, same
                                     # discipline as Memory.usageCount/flair#684). Stamped server-side in
-                                    # resources/Relationship.ts's put(); never client-writable.
+                                    # resources/Relationship.ts's post() and put() (and re-stamped on a semantic patch());
+                                    # never client-writable.
 }
 
 type Soul @table(database: "flair") {
@@ -164,7 +197,8 @@ type Soul @table(database: "flair") {
   updatedAt: String
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
                                     # for the full contract (write-time stamp, nullable, preserved across sync merges).
-                                    # Stamped server-side in resources/Soul.ts's post()/put().
+                                    # Stamped server-side in resources/Soul.ts's post()/put() via resources/originator-instance.ts
+                                    # (create stamps the local id; update keeps the stored value; never client-writable).
 }
 
 type MemoryGrant @table(database: "flair") @export {
@@ -219,6 +253,62 @@ type MemoryHitStat @table(database: "flair") {
   id: ID @primaryKey           # Memory.id
   retrievalCount: Int
   lastRetrieved: String
+}
+
+# MemoryHostSource — the host pointer, IN ITS OWN TABLE (flair#1940 slice 1 /
+# A1', confirmed by Kern and Sherlock). The pointer is a host-object pointer —
+# versioned JSON { v: 1, host, kind, id, url? } — The Memory schema does not
+# declare a pointer attribute. Supported Memory writes store accepted pointers in
+# `MemoryHostSource`; the named non-admin reads use its gated join. Client and
+# adapter transport is outside this slice.
+#
+# Writes are NOT a REST surface for any caller: Memory.post()/put() write the row
+# in the SAME transaction as the Memory row — a request's open transaction, or
+# one created with transaction(ctx, cb) when an internal caller has no request
+# context — so the row and its pointer commit together or not at all (real-
+# Harper t1/t2: a failed pointer write leaves no row, and a failed PUT leaves
+# the pre-existing row byte-identical). This resource refuses its OWN
+# post()/put()/patch()/delete() for EVERY caller (r4-http), so no REST caller
+# can plant a pointer; a superuser Harper operation against the table (an
+# operator export, backup or reseed) is the operator path.
+#
+# Direct resource reads permit admin agents and trusted in-process callers;
+# non-admin agents cannot read this table directly. The author
+# reads their own pointer only through the gated join INTO Memory results (A1'
+# item 4), never from this table directly. Bootstrap does not render pointers in
+# this slice.
+#
+# NOT federated (A1' item 5/A1'' item 8): the table is absent from
+# FEDERATION_TABLE_POLICY, so it is never in the sync's table set, an inbound row
+# carrying a pointer field is REFUSED (resources/federation-classify.ts). The
+# outbound reader projects declared Memory attributes. The inbound merge removes
+# undeclared attributes except the named bookkeeping fields (f1-out/f1-in).
+#
+# Cascade (A1' item 6 / A1'' item 2): `Memory.delete` and maintenance expiry or
+# age-based archival delete the pointer with their Memory operation. `MemoryArchive`
+# basement/restore retains the pointer row; the join suppresses it while the Memory
+# is archived. `Memory.delete` joins a request transaction when present; maintenance
+# uses an owned transaction per item (c3). An orphan sweep re-checks inside the
+# transaction before deleting; a cleanup failure makes the maintenance run report a
+# failure, not "complete".
+#
+# hostSource is a writer claim attributed to the authenticated agent on agent
+# writes — a claimed external source. Flair does not verify the host object and
+# does not cryptographically sign the pointer body (the Ed25519 request
+# signature covers method and URL, not the body).
+# scopeAtWrite is the record's visibility AT WRITE (null → author-only). The join
+# takes the narrower of the stored pointer scope and the Memory row's current
+# visibility. A partial PUT carries the stored visibility it read at the start of
+# the request (p2). receivedAt is server-stamped.
+type MemoryHostSource @table(database: "flair") @export {
+  memoryId: ID @primaryKey      # the Memory.id this pointer belongs to
+  hostSource: String!           # canonical v1 JSON: { v:1, host, kind, id, url? }
+  scopeAtWrite: String          # the record's visibility at write when the write opted in; null = author-only
+  authorId: String! @indexed    # server-stamped from the authenticated principal, NEVER the body
+  memoryInstanceToken: String   # the Memory row's server-stamped `instanceToken` at pointer-write time (A1-iv). The
+                               # join returns this pointer only when it still equals the Memory row's token, so a
+                               # deleted-and-recreated id (new token) never re-binds it.
+  receivedAt: String!           # server receipt time
 }
 
 # MemoryCandidate — staged distillations from the FLAIR-NIGHTLY-REM cycle.
@@ -293,4 +383,61 @@ type Asset @table(database: "flair") @export {
   data: Blob                       # binary content, stored out-of-record
   createdAt: String! @indexed
   updatedAt: String                # stamped on write; later sweep key (nullable/additive)
+}
+
+# OrgSkillAssignment — an org-scope skill assignment (flair#2141 S1):
+# `skillRef`, under `skillName` and `priority`, for the agents on this
+# instance that receive org skills (resources/skill-manifest.ts). No @export:
+# the REST surface is resources/OrgSkillAssignment.ts, whose writes need the
+# operator or internal source and server-stamp `writer`, `sourceClass`,
+# `createdAt` and `updatedAt`. Instance-local: absent from the federation table
+# policy.
+type OrgSkillAssignment @table(database: "flair") {
+  id: ID @primaryKey
+  skillName: String! @indexed
+  skillRef: String!
+  priority: String!                # critical | high | standard | low
+  createdAt: String!
+  updatedAt: String
+  writer: String                   # the operator's principal id; null for an internal write
+  sourceClass: String!             # operator | internal
+}
+
+# OrgSkillAssignmentHistory — one row per accepted write through
+# resources/OrgSkillAssignment.ts, appended in the write's transaction.
+# No @export and no resource class: there is no direct /OrgSkillAssignmentHistory route.
+type OrgSkillAssignmentHistory @table(database: "flair") {
+  id: ID @primaryKey
+  assignmentId: String! @indexed
+  op: String!                      # create | update | delete
+  actor: String                    # the writer; null for an internal write
+  sourceClass: String!             # operator | internal
+  previousHash: String             # sha256 of the stored row before the write; null on create
+  at: String!
+}
+
+# InstructionVersion — single-row Soul and skill write history; Soul collection deletes are refused.
+# REST mutation verbs are refused; reads authorize soul and skill subjects.
+# The administrator operations API is an unaudited exception.
+type InstructionVersion @table(database: "flair") @export {
+  id: ID @primaryKey              # encodes subjectType + subjectId + version
+  subjectType: String! @indexed   # soul | skill
+  subjectId: String! @indexed     # canonical subject (soul: agentId:key)
+  agentId: String! @indexed       # owner
+  key: String                     # Soul key
+  version: BigInt!                # positive per-subject sequence
+  kind: String!                   # create | update | delete
+  rowId: ID!                      # affected physical row
+  valueHash: String               # sha256 of the value bytes; null on delete
+  previousVersionHash: String     # preceding record digest; null on the first record
+  recordHash: String!             # record digest over every other field
+  soulSnapshot: String            # serialized Soul state including its value
+  memoryId: ID                    # skill-version Memory reference
+  visibility: String              # retained skill read-scope metadata
+  actorKind: String!              # operator | agent | internal | instance
+  actorId: String                 # verified identity; null for unattributed internal calls
+  sourceClass: String!            # operator | internal | agent | federation | seed
+  createdAt: String!              # server ISO timestamp
+  guarded: Boolean!               # whether expectedVersion was compared
+  expectedVersion: ID             # the compared head; null on an unguarded write
 }

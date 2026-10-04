@@ -14,7 +14,7 @@
 
 import { describe, expect, test, beforeAll } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,10 +33,10 @@ function makeFixture(opts: {
   distCli?: string | null;
 } = {}): string {
   const { quickstart = true, git = true, distCli = null } = opts;
-  const dir = mkdtempSync(join(tmpdir(), "flair-docs-freshness-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "flair-docs-freshness-")));
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
-  for (const f of ["docs-freshness-check.mjs", "changelog-fragments.mjs", "published-paths.mjs"]) {
+  for (const f of ["docs-freshness-check.mjs", "changelog-fragments.mjs", "changelog-release-notes.mjs", "changelog-extract.mjs", "published-paths.mjs"]) {
     cpSync(join(REPO_ROOT, "scripts", f), join(dir, "scripts", f));
   }
 
@@ -330,6 +330,20 @@ describe("api-reference-schema-coverage", () => {
     expect(res.status).toBe(1);
     expect(res.out).toContain("API/schema reference is missing");
   });
+});
+
+test("annotation names the fragment and continuation line", () => {
+  const dir = fixture({ distCli: fakeCli(3) });
+  const file = ".changelog/unreleased/fixed-indent.md";
+  writeFileSync(join(dir, file), "- entry\n\n" + " ".repeat(3) + "bad\n");
+  const res = spawnSync("node", [join(dir, SCRIPT_REL)], { cwd: dir, encoding: "utf8", timeout: 10000, env: { ...process.env, GITHUB_ACTIONS: "true" } });
+  expect(res.error).toBeUndefined();
+  expect(res.status).toBe(1);
+  const annotations = res.stdout.split("\n").filter((line) => line.startsWith("::error file=") && line.includes("continuation indent"));
+  expect(annotations).toHaveLength(2);
+  for (const line of annotations) {
+    expect(line).toContain("::error file=" + file + ",line=3::" + file + ":3: continuation indent 3; indent continuation lines by an even number of spaces: 2 for the entry, 4 or more for nested content.");
+  }
 });
 
 describe("cleanup", () => {

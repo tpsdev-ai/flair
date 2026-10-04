@@ -6,8 +6,8 @@
 > Do NOT enable in production until Sherlock signs off on live enablement.
 
 This is the **Model 2** native-MCP path: a custom in-process `/mcp` JSON-RPC
-handler guarded by `@harperfast/oauth`'s `withMCPAuth`, serving the 9 curated
-flair tools with a per-agent OAuth identity. It is distinct from the
+handler guarded by `@harperfast/oauth`'s `withMCPAuth`, serving the 17 tools in `resources/mcp-tools.ts`
+with a per-agent OAuth identity. It is distinct from the
 native-application-MCP surface (design A / `FLAIR_MCP_ENABLED`); Model 2 does not
 use Harper's native MCP transport, so it is not blocked by the Harper native-MCP
 gating gaps.
@@ -18,12 +18,10 @@ gating gaps.
   Streamable HTTP: `initialize` / `tools/list` / `tools/call` / `ping`. On
   `tools/call` it resolves the verified token `sub` → a flair `Agent`, then
   dispatches to the curated tool.
-- `resources/mcp-tools.ts` — the 9 curated tools (memory_search, memory_store,
-  memory_get, memory_delete, bootstrap, soul_set, soul_get, flair_workspace_set,
-  flair_orgevent), each a thin wrapper over the existing resource handler
+- `resources/mcp-tools.ts` — the 17 tools in `resources/mcp-tools.ts`, each a thin wrapper over the existing resource handler
   (Memory / SemanticSearch / BootstrapMemories / Soul / WorkspaceState /
-  OrgEvent). No raw CRUD surface — the only path to the datastore through `/mcp`
-  is one of these 9 semantic tools. Curated **by construction**.
+  OrgEvent / AttentionQuery / RecordUsage). No raw CRUD surface — the only path to the datastore through `/mcp`
+  is one of the 17 tools in `resources/mcp-tools.ts`. Curated **by construction**.
 - `resources/mcp-oauth.ts` — registers `server.http(withMCPAuth(mcpHandler),
   { urlPath: '/mcp' })` **only when `FLAIR_MCP_OAUTH` is on.** `/mcp` runs on its
   own dispatch chain; flair's default auth-middleware does not run for it.
@@ -36,10 +34,24 @@ aud, scope }`. The handler maps `sub` → a flair `Agent` id:
 
 1. Look up `Credential` where `kind === "idp"` AND `idpSubject === sub` → its
    `principalId` is the Agent id. (Same credential surface XAA's ID-JAG path
-   uses — one identity model.)
+   uses — one identity model.) That Agent must exist and be active on **every**
+   tool call dispatched through the mapping — the rule the Ed25519 path applies
+   (`isPrincipalDeactivated`; a record with no `status` field counts as
+   active). A deactivated or missing principal is refused with a JSON-RPC error
+   that names the principal and the operator's remedy, so a token minted while
+   the principal was active stops working once it is deactivated and, while the
+   token remains valid, works again once it is reactivated. The credential's
+   `lastUsedAt` is updated, best effort, after a tool has run; the update
+   writes that field alone.
 2. If no mapping and `FLAIR_MCP_JIT_PROVISION` is on, JIT-provision a
    non-admin `Agent` + `Credential(kind:"idp")` from the sub.
 3. Otherwise **deny** — an unresolvable sub never runs as anonymous or admin.
+
+A failed credential lookup or principal read during identity resolution
+refuses the call. It is never read as "allowed", and never as "no mapping", so
+step 2 runs only for a subject the credential lookup answered for. A failed
+read of the credential before the post-tool `lastUsedAt` update leaves the
+served answer unchanged.
 
 The resolved agent is set as `request.tpsAgent` on a flair-shaped delegation
 context, so the wrapped handler scopes to the verified agent exactly as an
@@ -108,8 +120,8 @@ registered identities.
 
 ## Enabling (operator checklist)
 
-1. **Install the AS plugin** — add `@harperfast/oauth` (already an exact-pinned
-   dependency) and declare it in `config.yaml`:
+1. **Configure the AS plugin** — `@harperfast/oauth` is exact-pinned in `package.json`
+   and already declared in `config.yaml`; configure the existing block:
 
    ```yaml
    '@harperfast/oauth':
@@ -118,6 +130,7 @@ registered identities.
        github:
          clientId: ${OAUTH_GITHUB_CLIENT_ID}
          clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
+         redirectUri: ${OAUTH_GITHUB_REDIRECT_URI}   # this instance's public origin + /oauth; the plugin appends '/github/callback'. Since @harperfast/oauth 2.7.0 a CONFIGURED provider needs it (2.8.1 skips an unconfigured one first — HarperFast/oauth#259)
      mcp:
        enabled: ${FLAIR_MCP_OAUTH}          # whole-token env reference (flair#1152) — the choice lives in the ENVIRONMENT, so a re-packed deploy can't revert it
        issuer: ${FLAIR_MCP_ISSUER}          # pin to your public origin — REQUIRED
@@ -132,17 +145,17 @@ registered identities.
          allowedHosts:                        # CIMD is the only supported client-registration path
            - claude.ai
            - claude.com
-       signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}    # pin in clusters
+       # signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}  # Optional pin; add this line and stage the variable.
+       # Without a pin, minting reuses a persisted key or generates and persists one if the key table is empty.
    ```
 
    **DCR is not supported; clients connect via CIMD (Client ID Metadata
-   Documents).** `flair mcp enable` (flair#756) writes exactly this shape —
-   see "Legacy clients" below.
+   Documents).** The shipped `config.yaml` contains this block; `flair mcp enable`
+   uses it instead of creating it. See "Legacy clients" below.
 
-   The `config.yaml` block is intentionally NOT committed to the live config in
-   this slice — adding it changes boot behavior, which would break the
-   default-OFF / byte-identical contract. An operator adds it deliberately when
-   turning the surface on.
+   The shipped `config.yaml` already declares `@harperfast/oauth`; enable its MCP
+   surface with `FLAIR_MCP_OAUTH=true` and configure the issuer and provider
+   credentials.
 
 2. **Set the env:**
    - `FLAIR_MCP_OAUTH=true` — turns on the `/mcp` route registration AND the
@@ -151,6 +164,9 @@ registered identities.
      same var accepts only "true"/"false" and deletes anything else, so `1`
      gives you a guarded `/mcp` with no authorization server behind it).
    - `FLAIR_MCP_ISSUER=https://your-public-origin` (or `FLAIR_PUBLIC_URL`).
+   - `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET` and
+     `OAUTH_GITHUB_REDIRECT_URI=https://your-public-origin/oauth` — staged by
+     `flair mcp enable` using `--issuer` (default: `--instance`).
    - `FLAIR_MCP_JIT_PROVISION=1` — ONLY if you want unknown subjects
      auto-provisioned (default OFF; pre-provision Agent+Credential otherwise).
 
@@ -191,8 +207,6 @@ cannot connect to this surface.
 
 ## Deferred (not in this slice)
 
-- Live `config.yaml` wiring of the `@harperfast/oauth` plugin (kept out to
-  preserve the byte-identical flag-OFF contract; documented above for operators).
 - Migrating the homegrown `OAuth.ts` / `XAA.ts` opaque-token AS to the plugin.
   Per Kern: deprecate-don't-delete — they stay for the Ed25519/signed-REST path.
   XAA's JIT-provisioning is kept; the Model-2 handler reuses the same

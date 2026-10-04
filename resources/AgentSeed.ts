@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * POST /AgentSeed
  *
@@ -24,7 +25,10 @@ import { allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
 import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
+import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { rejectSkillWritePath } from "./skill-write.js";
+import { stampOriginatorOnCreate } from "./originator-instance.js";
+import { SKILL_ASSIGNMENT_KEY } from "./skill-provenance.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -71,13 +75,41 @@ export class AgentSeed extends Resource {
     // Validate the entire caller-controlled template before creating any rows.
     const defaults = DEFAULT_SOUL_KEYS(agentId, name, role, now);
     const merged = { ...defaults, ...(soulTemplate || {}) };
+    // flair#2141 S1: a seeded Soul entry carries a value only, so a
+    // skill-assignment (and its optOut metadata) is written through Soul.
+    if (Object.hasOwn(merged, SKILL_ASSIGNMENT_KEY)) {
+      return new Response(JSON.stringify({
+        error: "skill_assignment_not_seedable",
+        message: "soulTemplate cannot carry a skill-assignment; write it through Soul",
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
     for (const value of Object.values(merged)) {
       const refusal = await refuseSoulWriteContent({ agentId, value: String(value) });
       if (refusal) return refusal;
     }
 
     // ── Agent record ──────────────────────────────────────────────────────────
-    const existingAgent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
+    // flair#1965 r3: a FAILED existing-Agent lookup must refuse the whole seed.
+    // The previous `.catch(() => null)` turned a read ERROR into "no agent", so
+    // the raw Agent.put below would take the CREATE branch and overwrite an
+    // existing row (with a fresh local originator stamp). A read error is never
+    // "no row". See resources/originator-instance.ts for the same rule on the
+    // resource write paths.
+    let existingAgent: any;
+    try {
+      existingAgent = await (databases as any).flair.Agent.get(agentId);
+    } catch (err) {
+      // Constant format string + a structured data object (semgrep
+      // javascript.lang.security.audit.unsafe-formatstring).
+      console.error(
+        "AgentSeed: the existing-agent lookup failed, so the seed was refused rather than overwriting the row as a create",
+        { agentId, err },
+      );
+      return new Response(JSON.stringify({
+        error: "agent_lookup_failed",
+        message: "the existing agent record could not be read, so the seed was refused",
+      }), { status: 500, headers: { "content-type": "application/json" } });
+    }
     let agent = existingAgent;
     if (!existingAgent) {
       // flair#941 — this writes the RAW table, so resources/Agent.ts's post()
@@ -87,6 +119,11 @@ export class AgentSeed extends Resource {
       // ordinary agent. Admin-only path (allowCreate + the isAdmin re-check
       // above), so this normalises an authorized intent.
       agent = reconcileAdminFields({ id: agentId, name, role, publicKey: "pending", createdAt: now, updatedAt: now });
+      // flair#1965 r2: this creates an Agent row through the RAW table, so the
+      // Agent resource's post() stamp never runs. Stamp the local instance id
+      // here (every create path carries it). See
+      // resources/originator-instance.ts.
+      await stampOriginatorOnCreate(agent);
       await (databases as any).flair.Agent.put(agent);
       invalidateAdminCache();
     }
@@ -102,6 +139,8 @@ export class AgentSeed extends Resource {
         continue;
       }
       const entry = { id, agentId, key, value: String(value), provenance: soulProvenance(auth, source!, now), durability: "permanent", createdAt: now, updatedAt: now };
+      // flair#1965 r2: raw Soul create — stamp the local instance id.
+      await stampOriginatorOnCreate(entry);
       await (databases as any).flair.Soul.put(entry);
       soulEntries.push(entry);
     }
@@ -134,8 +173,10 @@ export class AgentSeed extends Resource {
         // are written via skill_store, not seeded as onboarding memories).
         const skillDenial = rejectSkillWritePath(def);
         if (skillDenial) return skillDenial;
-        const id = `seed-${agentId}-${i}-${Date.now()}`;
-        const record = {
+        // A full random UUID in the id: this raw-table write is meant to create,
+        // never to replace an existing record.
+        const id = `seed-${agentId}-${i}-${Date.now()}-${randomUUID()}`;
+        const record: any = {
           id,
           agentId,
           content: def.content,
@@ -146,6 +187,13 @@ export class AgentSeed extends Resource {
           updatedAt: now,
           archived: false,
         };
+        stripUndeclaredMemoryAttributes(record);
+        // A1-iv items 1/3: the seed is a create path — strip server-stamped
+        // fields and stamp a fresh incarnation token.
+        stripServerStampedFields(record);
+        record.instanceToken = randomUUID();
+        // flair#1965 r2: raw Memory create — stamp the local instance id.
+        await stampOriginatorOnCreate(record);
         await (databases as any).flair.Memory.put(record);
         noteMemoryUpsert(record);
         memories.push(record);

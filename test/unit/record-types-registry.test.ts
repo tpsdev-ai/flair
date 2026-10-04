@@ -69,9 +69,9 @@ const VALID_MCP_WRITE_VERBS = ["store", "delete", "update"];
 describe("RECORD_TYPES — shape and exhaustiveness", () => {
   const entries = Object.entries(RECORD_TYPES) as Array<[string, RecordTypePolicy]>;
 
-  it("registers exactly the five core tables plus MemoryCandidate and Asset (no more, no fewer)", () => {
+  it("registers exactly the five core tables plus MemoryCandidate, Asset and OrgSkillAssignment (no more, no fewer)", () => {
     expect(Object.keys(RECORD_TYPES).sort()).toEqual(
-      ["Asset", "Memory", "MemoryCandidate", "OrgEvent", "Relationship", "Soul", "WorkspaceState"].sort(),
+      ["Asset", "Memory", "MemoryCandidate", "OrgEvent", "OrgSkillAssignment", "Relationship", "Soul", "WorkspaceState"].sort(),
     );
   });
 
@@ -180,13 +180,13 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
     });
   });
 
-  it("Relationship: owner-only, stamp-strict on put only (no post override), provenance, federated", () => {
+  it("Relationship: owner-only, stamp-strict on post and put, provenance, federated", () => {
     expect(RECORD_TYPES.Relationship).toEqual({
       table: "Relationship",
       ownerField: "agentId",
       identity: "gated",
       readScope: "owner-only",
-      attribution: { put: "stamp-strict" },
+      attribution: { post: "stamp-strict", put: "stamp-strict" },
       provenance: true,
       remEligible: false,
       federation: "included",
@@ -242,6 +242,19 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
       identity: "gated",
       readScope: "owner-only",
       attribution: { post: "validate-truthy", put: "validate-truthy" },
+      provenance: false,
+      remEligible: false,
+      federation: "excluded",
+    });
+  });
+
+  it("OrgSkillAssignment (flair#2141 S1): unscoped verified reads, no attribution idiom, no provenance/embedding/mcp, not federated", () => {
+    expect(RECORD_TYPES.OrgSkillAssignment).toEqual({
+      table: "OrgSkillAssignment",
+      ownerField: "writer",
+      identity: "gated",
+      readScope: "none",
+      attribution: {},
       provenance: false,
       remEligible: false,
       federation: "excluded",
@@ -376,11 +389,8 @@ describe("Drift tripwire — the five resource classes wire their kit parameters
     expect(files.Memory).toContain(`RECORD_TYPES.Memory.attribution.${method}`);
   });
 
-  it.each(entries("Relationship", "put"))("Relationship: stampAttribution draws mode from RECORD_TYPES.Relationship.attribution.%s", (method) => {
+  it.each(entries("Relationship", "post", "put"))("Relationship: stampAttribution draws mode from RECORD_TYPES.Relationship.attribution.%s", (method) => {
     expect(files.Relationship).toContain(`RECORD_TYPES.Relationship.attribution.${method}`);
-  });
-  it("Relationship: has no post() override wired to stampAttribution (attribution.post is intentionally absent)", () => {
-    expect(RECORD_TYPES.Relationship.attribution.post).toBeUndefined();
   });
 
   it.each(entries("WorkspaceState", "post", "put"))("WorkspaceState: stampAttribution draws mode %s from RECORD_TYPES.WorkspaceState.attribution.%s", (method) => {

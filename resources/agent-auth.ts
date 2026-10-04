@@ -13,10 +13,12 @@
  * Auth model: an agent presents `Authorization: TPS-Ed25519 <id>:<ts>:<nonce>:<sig>`.
  * The signature covers `<id>:<ts>:<nonce>:<METHOD>:<pathname><search>` and is
  * verified against the agent's stored Ed25519 public key. Replay is bounded by a
- * 30s timestamp window + a per-(agent,nonce) seen-set pruned to that window.
+ * 30s timestamp window + an instance-wide record of each (agent, nonce)
+ * (resources/replay-store.ts).
  */
 import { databases } from "harper";
-import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { ADMIN_ROLE, agentRecordIsAdmin } from "./agent-admin.js";
 
 /**
@@ -55,11 +57,11 @@ export function isPrincipalDeactivated(agent: { status?: unknown } | null | unde
 }
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
-// WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
-// importEd25519Key all live in ./ed25519-auth.ts — the single
-// shared implementation imported by auth-middleware.ts, agent-auth.ts, and
-// Presence.ts so a nonce recorded via any one of the three call sites is
-// visible to the other two, and the crypto/decoder logic can't drift.
+// WINDOW_MS and importEd25519Key live in ./ed25519-auth.ts, and the replay
+// guard (isKnownAgentReplay / claimAgentNonce) in ./replay-store.ts — shared by
+// auth-middleware.ts, agent-auth.ts and Presence.ts, so a nonce recorded via
+// any one of the three call sites, on any worker thread, is refused by all of
+// them, and the crypto/decoder logic can't drift.
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
 // Admin agents come from FLAIR_ADMIN_AGENTS (comma-separated) OR Agent records
@@ -136,8 +138,9 @@ async function doVerify(request: any): Promise<AgentAuth | null> {
   const now = Date.now();
   if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS) return null;
 
-  // Reject replays within the window (isNonceReplay prunes expired entries first).
-  if (isNonceReplay(agentId, nonce, now)) return null;
+  // A nonce this thread already saw recorded is refused before any lookup. A
+  // miss here proves nothing: claimAgentNonce below is the authoritative check.
+  if (isKnownAgentReplay(agentId, nonce, now)) return null;
 
   const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
   if (!agent?.publicKey) return null;
@@ -163,7 +166,9 @@ async function doVerify(request: any): Promise<AgentAuth | null> {
     return null;
   }
 
-  recordNonce(agentId, nonce, ts);
+  // Record the nonce instance-wide now that the signature has verified, and
+  // before the request has any effect. A replay or an unusable store refuses.
+  if (!(await claimAgentNonce(agentId, nonce)).ok) return null;
   return { agentId, isAdmin: await isAdmin(agentId) };
 }
 

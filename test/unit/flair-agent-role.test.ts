@@ -1,5 +1,6 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { ensureFlairAgentRole } from "../../src/cli";
+import { FLAIR_AGENT_PERMISSION, alignFlairAgentRole } from "../../src/lib/flair-agent-role";
 
 // Mirrors the federation-pair-role.test.ts pattern: a sequenced global-fetch mock
 // that captures the ops-API bodies ensureFlairAgentRole sends.
@@ -60,12 +61,22 @@ describe("ensureFlairAgentRole — idempotency", () => {
 
   it("calls alter_role when an existing role has different permissions", async () => {
     installFetch([
-      { ok: true, body: [{ role: ROLE_NAME, permission: { super_user: true } }] },
+      { ok: true, body: [{ role: ROLE_NAME, id: "role-row-id-2154", permission: { super_user: true } }] },
       { ok: true, body: { ok: true } },
     ]);
     await ensureFlairAgentRole(OPS_URL, ADMIN, PASS);
     expect(capturedBodies[1].operation).toBe("alter_role");
     expect(capturedBodies[1].role).toBe(ROLE_NAME);
+    expect(capturedBodies[1].id).toBe("role-row-id-2154");
+  });
+
+  it("refuses to alter a role whose list_roles row carries no id", async () => {
+    installFetch([
+      { ok: true, body: [{ role: ROLE_NAME, permission: { super_user: true } }] },
+    ]);
+    await expect(ensureFlairAgentRole(OPS_URL, ADMIN, PASS)).rejects.toThrow("no id");
+    // Refused before any write: no alter_role was attempted.
+    expect(capturedBodies.map((b) => b.operation)).toEqual(["list_roles"]);
   });
 });
 
@@ -122,6 +133,63 @@ describe("ensureFlairAgentRole — security invariants of the grant spec", () =>
     // System/admin-only tables: no access at all.
     for (const t of ["Peer", "PairingToken", "SyncLog", "OAuthClient", "OAuthToken", "IdpConfig", "IdJagReplay", "MemoryHitStat"]) {
       expect(tables[t]).toEqual({ read: false, insert: false, update: false, delete: false, attribute_permissions: [] });
+    }
+  });
+});
+
+describe("flair_agent grants for the org skill tables (flair#2141 S1)", () => {
+  it("OrgSkillAssignment is read-only for agents; its history table gets nothing", () => {
+    const tables = FLAIR_AGENT_PERMISSION.flair.tables;
+    expect(tables.OrgSkillAssignment).toEqual({ read: true, insert: false, update: false, delete: false, attribute_permissions: [] });
+    expect(tables.OrgSkillAssignmentHistory).toEqual({ read: false, insert: false, update: false, delete: false, attribute_permissions: [] });
+  });
+});
+
+describe("alignFlairAgentRole — the server's startup check (flair#2141 S1)", () => {
+  function fakeOps(listResult: unknown | (() => never)) {
+    const calls: Array<Record<string, unknown>> = [];
+    const op = async (body: Record<string, unknown>) => {
+      calls.push(body);
+      if (body.operation === "list_roles") {
+        if (typeof listResult === "function") return (listResult as () => never)();
+        return listResult;
+      }
+      return { message: "ok" };
+    };
+    return { op, calls };
+  }
+
+  it("alters an existing role whose grants differ, by its id, to the canonical spec", async () => {
+    const { op, calls } = fakeOps([{ id: "role-id-1", role: ROLE_NAME, permission: { super_user: false, flair: { tables: {} } } }]);
+    expect(await alignFlairAgentRole(op)).toBe("updated");
+    expect(calls.map((c) => c.operation)).toEqual(["list_roles", "alter_role"]);
+    expect(calls[1].id).toBe("role-id-1");
+    expect(calls[1].permission).toEqual(FLAIR_AGENT_PERMISSION);
+  });
+
+  it("a differing role with no id throws, and nothing is written", async () => {
+    const { op, calls } = fakeOps([{ role: ROLE_NAME, permission: {} }]);
+    await expect(alignFlairAgentRole(op)).rejects.toThrow("no id");
+    expect(calls.map((c) => c.operation)).toEqual(["list_roles"]);
+  });
+
+  it("leaves a role that already matches untouched", async () => {
+    const { op, calls } = fakeOps([{ role: ROLE_NAME, permission: JSON.parse(JSON.stringify(FLAIR_AGENT_PERMISSION)) }]);
+    expect(await alignFlairAgentRole(op)).toBe("unchanged");
+    expect(calls.map((c) => c.operation)).toEqual(["list_roles"]);
+  });
+
+  it("never creates the role on an instance without it", async () => {
+    const { op, calls } = fakeOps([{ role: "super_user", permission: { super_user: true } }]);
+    expect(await alignFlairAgentRole(op)).toBe("absent");
+    expect(calls.map((c) => c.operation)).toEqual(["list_roles"]);
+  });
+
+  it("a role list that fails or is not a list throws, and nothing is written", async () => {
+    for (const listResult of [() => { throw new Error("list_roles failed"); }, { error: "not a list" }]) {
+      const { op, calls } = fakeOps(listResult);
+      await expect(alignFlairAgentRole(op)).rejects.toThrow();
+      expect(calls.map((c) => c.operation)).toEqual(["list_roles"]);
     }
   });
 });

@@ -27,14 +27,27 @@ flair backup \
 # 2. Check what's outdated (doesn't install anything)
 flair upgrade --check
 
-# 3. Upgrade — installs, restarts, and verifies the new version is actually
-#    serving, all in one step (see "Upgrade is a transaction" below)
+# 3. Upgrade — installs, then restarts and verifies that the new version is
+#    serving (--no-restart skips both, --no-verify skips the verification).
+#    A failure does not always roll back: when a new flair package was
+#    installed and the pre-install /Health check was refused, a failed restart
+#    keeps the new package and exits successfully, printing the start error
+#    and `flair start`. See "Restart, verification and rollback" below
 flair upgrade
 
 # 4. Verify
 flair status
 flair doctor
 ```
+
+After a restart, `flair status` shows the BM25 index building in the
+background (`building 312/817 docs (38%) · started 4s ago`) and then
+`ready · 817 docs · built in 1.2s · 3m ago`. A text search issued while it
+is building waits for that build. `disabled — <reason>` means the index is
+not serving; the reason says why (after a failure, search is on the
+per-query scan). With `FLAIR_BM25_INDEX=false` or vector-only retrieval the
+index is not built at all. With `THREADS_COUNT` greater than 1 the line
+names the worker it describes.
 
 `flair upgrade` checks and upgrades the npm-global packages (`@tpsdev-ai/flair`,
 `@tpsdev-ai/flair-mcp`) and, if present, the `openclaw-flair` plugin (via
@@ -45,8 +58,8 @@ for each already-wired client (`~/.claude.json`, `~/.claude/settings.json`,
 `~/.codex/config.toml`, `~/.codex/hooks.json`, and the other auto-wired clients).
 Pass `--all` to also see `flair-client` (normally hidden as a
 transitive dependency). **Other integrations upgrade in their own ecosystem, not via
-`flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` / `hermes-flair`
-(pip / your Python package manager), `n8n-nodes-flair` (n8n's Community Nodes UI).
+`flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` (an npm module), `hermes-flair`
+(reinstall the plugin from a flair checkout: `hermes plugins install path:<flair>/packages/hermes-flair`), `n8n-nodes-flair` (n8n's Community Nodes UI).
 
 If the running instance's exec path is a **plain extracted tree** (npm pack +
 `npm install --omit=dev`, typically under systemd — no git checkout, not the
@@ -77,8 +90,16 @@ and:
 5. Restarts the systemd unit whose `WorkingDirectory` / `ExecStart` names the
    tree (`FLAIR_SYSTEMD_UNIT=flair.service` adds an explicit unit). If no unit
    is found, it falls back to `flair restart`
-6. Verifies, then removes `.upgrade-prev`. On a failed restart or verify the
-   previous tree is swapped back
+6. Verifies, then removes `.upgrade-prev` on success. A thrown restart error
+   keeps a swapped Flair package when the prior `/Health` connection was
+   refused (`keep`, successful exit). With a swap and a running or indeterminate
+   prior probe, a nonempty previous version selects rollback. No swap, or no
+   previous version after a running or indeterminate probe, selects `no-target`
+   (failure). Verification keeps an `ok` or `healthy-unverified` result;
+   other results select rollback with a
+   nonempty previous version, or `cannot-rollback` without one. A reported
+   deprecation blocks rollback, and a missing saved tree skips tree restoration.
+   See [Restart, verification and rollback](#restart-verification-and-rollback).
 
 ```bash
 flair upgrade --check --tree /opt/flair
@@ -90,48 +111,143 @@ flair upgrade --tree /opt/flair --flair-version 0.50.0
 without touching the tree. A git checkout or a path that *is* the npm-global
 install is refused rather than overwritten.
 
-### Upgrade is a transaction
+### After a Node bump: the CLI and the instance in different install trees
 
-As of flair#635, `flair upgrade` is install → restart → verify →
-rollback-on-failure, in one step — installing new code without restarting used
-to leave the OLD process serving while the version on disk lied about what was
-actually running:
+A service unit bakes the node binary and install tree of the runtime it was
+written under. After a Node version bump, `flair` on your PATH can come from the
+new runtime's global tree while the instance keeps serving the old one.
+`flair status`, `flair upgrade`, `flair doctor` and `flair restart` name this —
+both trees, both versions, the unit — but only when it is **proven**: the
+service manager must own the process that answered — the one process listening
+on the instance's port, which must also be the PID the instance reported about
+itself when it reported one. Two listeners, none, or a PID file that names
+another process make the answer unknown; only when the port's listeners cannot
+be read at all (`lsof` missing or failing) does a reported PID stand on its own.
+On Linux, the unit is found from that process — its cgroup (`/proc/<pid>/cgroup`,
+cgroup v2) names the systemd user unit it runs in — and systemd must report that
+process as the unit's MainPID and the unit's file in `~/.config/systemd/user` as
+its `FragmentPath`. Because the unit comes from the process, not from a tree path
+in a unit file, it is still found after `flair init` re-pointed the file: the
+state is then diverged with `flair restart` as the remedy. Otherwise the serving
+tree is reported as unknown and nothing is advised from it.
 
-- **Restart happens automatically** after install. Pass `--no-restart` to
-  stage the new packages without bouncing the process yet (the old
-  opt-in `--restart` flag still parses but is now a no-op — restart is the
-  default).
-- **The restart runs through the newly installed CLI** (flair#905), not the
-  process that did the installing. Only version N's own code knows how version
-  N starts — spawn arguments, required environment, config templates and the
-  Harper dependency's own package name are all things a release may change, and
-  the pre-swap process would get every one of them wrong the same silent way.
-  The output names the CLI it handed the restart to. If that CLI can't be found
-  or its version can't be confirmed, the upgrade says so and restarts in-process
-  rather than refusing to start anything.
-- **Post-restart verification** (skip with `--no-verify`) confirms the
-  restarted instance answers `/Health`, that an authenticated request
-  round-trips, and that the reported running version matches what was just
-  installed. It then runs the same enumerable doctor install-health checks
-  (`flair doctor`'s client-integration catalog, plus launchd management)
-  and prints `✅ verified: healthy` only when every check ran and none
-  failed. A missing Codex SessionStart hook — which `flair init` before
-  0.50.0 never wrote — is one of those checks. Installing the hook is
-  consent-bearing (it executes at every session start): an interactive
-  upgrade prompts; a non-interactive upgrade states the gap and withholds
-  ✅. Pass `--install-hooks` to consent without a prompt, then `flair
-  doctor` exits 0.
-- **On a failed restart OR a failed verification**, `flair upgrade`
-  automatically reinstalls the previously-running `@tpsdev-ai/flair` version,
-  restarts again, and re-verifies — then exits nonzero with a clear report of
-  what failed. Until flair#905 the rollback was wired to the *verification* leg
-  only: an upgrade that installed new packages and then failed to start them
-  exited 1 and left the operator on the new version with nothing running, which
-  is the single outcome this transaction exists to prevent. If the
-  rollback itself fails verification, it says so loudly and points at the
-  concrete pre-upgrade snapshot path (see "Pre-upgrade snapshot" below)
-  instead of retrying in a loop — see [Downgrade](#downgrade) for the
-  restore procedure.
+The remedy is `flair init && flair restart`. `flair init` re-points the
+instance's own unit — **only** its launcher, node, Harper entry and working
+directory — and writes nothing unless the unit is provably this instance's and
+exactly a shape flair supports:
+
+| | Written only when | Refused (nothing written) |
+|---|---|---|
+| macOS plist (`~/Library/LaunchAgents/ai.tpsdev.flair.<hash>.plist`), read as XML structure | one Label (this data directory's) at the top level, ROOTPATH (this data directory) and HOME (yours) in `EnvironmentVariables`, no `Program` key, ProgramArguments = the launcher in its WorkingDirectory tree, this instance's admin-pass file, a `node`, a Harper entry in that tree | a plist that is not this instance's or not in that shape — another HOME, label or pass file, an extra argument, a key in the wrong dict — and an XML declaration naming an encoding other than UTF-8, an XML comment, CDATA, a character reference, a duplicate key, or an unsupported XML element |
+| Linux systemd user unit (the one proven above) | one `WorkingDirectory=` (the served tree) and one `ExecStart=` of `<node> <harper.js> run .` or `<launcher> <admin-pass file> <node> <harper.js>`, optional `-` prefix | drop-ins (any location systemd reports, or `<unit>.d` beside the file), any other argument (operator arguments are never rewritten), quoting, `%` specifiers, `$` variables, line continuations, other `ExecStart=` prefixes, and a new path that would need quoting |
+| Both, when moving to a different installed tree | the old tree is an npm-global install; its flair version and this CLI's are strict semver and this CLI's is not older (prereleases count: `0.57.0-beta.1` is older than `0.57.0`) | a plain tree or checkout (separately managed), an unreadable, non-semver or newer version (a downgrade cannot be ruled out) |
+
+A unit that serves this CLI's tree with a different, existing node is treated
+as a deliberate pin: `flair init` leaves it, and init and `flair doctor` report it
+with the hand edit that would move it. A plist that already serves this CLI's
+tree has a missing runtime path replaced without the version check in the table,
+which applies only to a move between trees. The write is atomic and
+lands only over the bytes it was planned from — the file is read as a regular
+file (a symlink is refused, not followed) whose bytes are valid UTF-8 (anything
+else is refused before planning), and its bytes are re-checked immediately
+before the rename, so an edit saved in between refuses the write. On Linux,
+`flair init` first records what systemd holds for the unit (it writes nothing
+if it cannot, or if systemd no longer reports the serving process as the
+unit's MainPID), then runs `systemctl --user daemon-reload` (which also loads any
+other pending edits to your user units) and checks what systemd loaded. If the
+reload fails or systemd does not hold the re-pointed unit, the previous bytes
+are restored, systemd is reloaded and asked again. That check covers three
+fields: when systemd's FragmentPath, drop-ins and WorkingDirectory are back at
+the values recorded before the write, flair says exactly that and still calls
+full agreement between the restored file and systemd unverified; otherwise it
+reports systemd's state as unverified. Every refusal names the file, what did not match, and the
+remedy — the paths to set by hand, an update of this CLI's tree, or a
+reinstall; after a hand edit, `flair restart` brings the instance up under
+the edited unit (macOS reloads the plist; on Linux, when the unit is proven to
+run the instance, it reloads systemd, restarts through the unit and checks that
+the unit's new main process runs from its WorkingDirectory). On Linux,
+`flair restart` never stops a process that a systemd unit supervises — one
+systemd reports as that unit's MainPID — and starts it again outside the unit:
+when it is not the proven unit, it refuses and names the `systemctl` command to
+use. It also refuses when flair cannot learn the MainPID of the unit the
+process's cgroup names (systemd cannot be asked, or reports no main process),
+naming the same command, and when the process's cgroup cannot be read at all
+or contradicts itself (for example, a user slice and a user manager that name
+different users, or one unit's cgroup nested in another's) — then no manager is
+asked.
+A process that only runs inside some service's cgroup without being its main
+process (a child of a CI runner agent, a terminal multiplexer or an ssh session
+service) was started directly, and `flair restart` restarts it directly.
+
+The federation-sync shim (`~/.flair/bin/flair-federation-sync`) is re-pointed
+the same way: only its exec line changes, the scheduler unit is never
+rewritten, and the shim is refused when it is a symlink or not valid UTF-8,
+changes between the read and the rename, runs any command other than what
+`flair federation sync enable` writes (comment lines are not compared), or —
+when it is moved to a different installed tree — when that tree's version (or
+this CLI's) is not strict semver or is newer.
+`flair federation sync enable` regenerates it.
+
+### Restart, verification and rollback
+
+In the local upgrade path, `--no-restart` skips restart and post-restart
+verification. With restart enabled, the pre-install `/Health` probe runs, also
+under `--no-verify`. With `--no-restart`, it runs only when a pre-upgrade
+snapshot is needed, to decide whether that snapshot restarts the old instance.
+
+The probe labels a successful HTTP response `running`. A caught error is
+`stopped` when every failure in it, including each `cause` and aggregated
+error, is a connection refusal: a string code must be `ECONNREFUSED` or
+`ConnectionRefused`, and an uncoded failure with no nested failures must
+contain one of them in its text. Other responses and caught errors are
+`indeterminate`.
+The `stopped` label does not establish whether a process exists.
+
+After a thrown restart error, `decideAfterRestartFailure` selects:
+
+| Flair itself was swapped | Prior probe | Previous version | Decision |
+| --- | --- | --- | --- |
+| No | Any | Any | `no-target` |
+| Yes | `stopped` | Any | `keep` |
+| Yes | `running` or `indeterminate` | Nonempty | `rollback` |
+| Yes | `running` or `indeterminate` | Missing or empty | `no-target` |
+
+`keep` leaves the new package installed, prints the start error and
+`flair start`, and exits successfully. `no-target` exits with failure.
+`rollback` enters the shared rollback path below.
+
+When post-restart verification runs, `decideAfterVerify` returns `ok` for
+a successful probe; otherwise it returns `healthy-unverified` when the probe
+reports healthy with a credentials failure. Other results select `rollback`
+for a nonempty previous version and `cannot-rollback` otherwise; the latter exits
+with failure. Prior liveness and the swap flag are not inputs to this decision.
+
+The shared rollback path refuses a target reported deprecated by the registry
+lookup and exits with failure. Failed or unusable lookups, including a null
+`deprecated` field, allow the attempt. npm-global attempts to reinstall the
+previous package version; plain-tree attempts to restore the saved tree when
+it exists and skips restoration when it is absent. The tree restore first
+attempts to move the live path to `.upgrade-failed` when it exists.
+
+After that stage, an engine change requires a snapshot path and successful
+snapshot restoration before restart. Before restoring, rollback stops the
+instance and requires fresh daemon evidence that it is stopped. It then moves
+the current data directory to a unique, timestamped sibling named
+`<data-dir>.pre-rollback-<timestamp>-<suffix>` and prints that retained path.
+Rollback never deletes this retained directory. If stopping, confirming the
+stop, validating the snapshot, or moving the data aside fails, restoration is
+refused without replacing the current data. To recover writes made after the
+snapshot, stop Flair, set aside the restored data directory, move the retained
+directory back, and start with the Harper engine version that wrote it.
+Rollback then attempts restart and, if restart returns, verification; its
+reported outcomes exit with failure.
+
+If that restart throws, the npm-global and restored-tree diagnostics label
+the rollback target known-broken for this attempt. The missing-tree diagnostic
+uses a neutral headline. Plain-tree recovery text reports whether the previous
+tree was restored and whether a live tree was set aside. Both lanes report
+whether a data snapshot was restored. An npm version candidate printed by
+this message is not guaranteed non-deprecated.
 
 ### Pre-upgrade snapshot (opt-in for same-engine, unconditional on engine change)
 
@@ -177,23 +293,23 @@ To capture one first: `flair snapshot create` (physical) or `flair backup` (logi
 - **Retention:** keeps the newest 3 snapshots, prunes older ones automatically after
   each successful snapshot — whether taken via `--snapshot` or `flair snapshot create`
   (below); both draw from the same `~/.flair/upgrade-snapshots/` pool.
-- **Consistency:** when a snapshot is taken (`--snapshot`, or `flair snapshot create`),
-  Flair is briefly stopped, snapshotted, and immediately restarted on the same version
-  before anything else happens — a plain file copy of a *running* Harper's data
-  directory isn't guaranteed point-in-time consistent (Harper 5.x stores tables in
-  RocksDB — an LSM engine whose WAL, MANIFEST, and SST files can be
-  mid-write/mid-compaction), so the snapshot always happens against a quiesced
-  directory. During an upgrade this means a short stop/start blip even with
-  `--no-restart` — the snapshot's correctness doesn't depend on whether you want a
-  restart *after* the upgrade, those are separate questions. (A native Harper backup
-  operation, `get_backup`, was evaluated and rejected here — see the code comment
+- **Consistency:** a snapshot uses a stopped, quiesced data directory — a plain
+  file copy of a *running* Harper's data directory isn't guaranteed point-in-time
+  consistent (Harper 5.x stores tables in RocksDB, whose WAL, MANIFEST, and SST
+  files can be mid-write/mid-compaction). `flair snapshot create` restarts Flair
+  afterward. During an upgrade, the old version is restarted after the snapshot
+  only if the pre-install `/Health` probe did not refuse the connection. A refused
+  connection leaves it stopped through the package swap. An instance that answered
+  or had indeterminate liveness has a short stop/start blip even with
+  `--no-restart`; that flag controls the restart *after* the upgrade. (A native
+  Harper backup operation, `get_backup`, was evaluated and rejected here — see the code comment
   above `createDataSnapshot` in `src/cli.ts` for why: it backs up one table/schema at a
   time over the running HTTP API, not the whole data directory, and would be strictly
   less complete than a plain file copy.)
 - **Failure is a hard stop when requested:** if you passed `--snapshot` and the
   snapshot itself fails (disk full, permissions, etc.), the upgrade aborts before any
-  package changes — no packages are swapped, Flair is restarted on the version it was
-  already running.
+  package changes. Flair is restarted on the old version only if the pre-install
+  `/Health` probe did not refuse the connection.
 
 #### `flair snapshot` — the standalone command
 
@@ -443,9 +559,19 @@ flair restart
 flair restore ~/flair-backup-<date>.json
 ```
 
-`flair upgrade` does this automatically on a failed post-restart verification — see
-"Upgrade is a transaction" above. This section is for doing it by hand, e.g. after
-`--no-verify`, or after problems surface later than the automatic check catches.
+`flair upgrade` selects automatic rollback after post-restart verification only
+when the result is neither `ok` nor `healthy-unverified` and a nonempty previous
+version is available; otherwise a failed result is `cannot-rollback`. A thrown
+restart error instead keeps a swapped Flair package after a refused pre-upgrade
+`/Health` connection (`keep`, successful exit). No swap, or no previous version
+after a running or indeterminate probe, selects `no-target`; a swap with that
+probe and a nonempty previous version selects rollback. Reported deprecation
+blocks rollback; a missing saved plain-tree directory skips tree restoration.
+Engine-change data restoration requires a confirmed stop and retention of the
+current directory. See [Restart, verification and rollback](#restart-verification-and-rollback)
+for the decisions and retained-data recovery instructions. This section is for
+manual recovery, e.g. after `--no-verify`, or after problems surface later than
+the automatic check catches.
 
 ### Known issue — upgrading *from* an older version can still report a false rollback
 

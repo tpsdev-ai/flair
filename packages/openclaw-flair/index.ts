@@ -23,8 +23,8 @@ import { createHash, type KeyObject } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { FlairClient, loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { FlairClient, encodeRecordId, loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 
 /** The host tool-context fields this plugin reads. `agentId` is the identity. */
 type ToolContext = { agentId?: string };
@@ -1062,7 +1062,7 @@ export default {
             Type.Literal("persistent"),
             Type.Literal("standard"),
             Type.Literal("ephemeral"),
-          ], { description: "Memory durability" })),
+          ], { description: "Memory durability. permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them." })),
           type: Type.Optional(Type.Union([
             Type.Literal("session"),
             Type.Literal("lesson"),
@@ -1078,6 +1078,10 @@ export default {
           let memId: string | null = null;
           try {
             const client = clientFor(ctx.agentId);
+            // #1970: validate the supersede id and build its path BEFORE the
+            // primary write, so a refused id (a URL path dot-segment) can never
+            // let a request out first. The SAME built path is reused for the PUT.
+            const supersedePath = supersedes ? `/Memory/${encodeRecordId(supersedes)}` : null;
             // D11: no hand-built id. The client's canonical UUID path owns
             // memory ids (`agentId-<uuid>`), so two writes in the same
             // millisecond never address the same record.
@@ -1091,11 +1095,11 @@ export default {
             memId = typeof (result as any).id === "string" ? (result as any).id : null;
             const errors: string[] = [];
             let supersedeClosed: true | false | "not-found" = false;
-            if (supersedes) {
+            if (supersedes && supersedePath) {
               try {
                 const old = await client.memory.get(supersedes);
                 if (old) {
-                  await client.request("PUT", `/Memory/${supersedes}`, {
+                  await client.request("PUT", supersedePath, {
                     ...old,
                     archived: true,
                     archivedAt: new Date().toISOString(),

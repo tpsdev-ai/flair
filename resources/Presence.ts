@@ -40,7 +40,8 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { resolveAgentAuth, isPrincipalDeactivated } from "./agent-auth.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
-import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -90,10 +91,10 @@ export function publicRosterEnabled(): boolean {
  *
  * GET /Presence/<id> is NOT on auth-middleware.ts's short-circuit list (only
  * the exact "/Presence" collection GET is). The middleware verifies the
- * TPS-Ed25519 signature and records the nonce in the ONE shared nonce store,
+ * TPS-Ed25519 signature and records the nonce in the ONE shared replay store,
  * annotating request.tpsAgent but NOT verifyAgentRequest's per-request memo.
  * Calling verifyAgentRequest() again would re-consume that same nonce, read as
- * a replay (isNonceReplay) and deny a legitimate agent. resolveAgentAuth()
+ * a replay (claimAgentNonce) and deny a legitimate agent. resolveAgentAuth()
  * consults the middleware's tpsAgent/tpsAnonymous annotations FIRST, and only
  * falls back to a header verify when the middleware never ran (the
  * short-circuited collection GET) — so it reuses the established verdict
@@ -218,11 +219,11 @@ export function buildPresenceRecord(
 }
 
 // ─── Nonce replay + crypto helpers ─────────────────────────────────────────────
-// WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
-// importEd25519Key all live in ./ed25519-auth.ts — the single
-// shared implementation imported by auth-middleware.ts, agent-auth.ts, and
-// Presence.ts so a nonce recorded via any one of the three call sites is
-// visible to the other two, and the crypto/decoder logic can't drift.
+// WINDOW_MS and importEd25519Key live in ./ed25519-auth.ts, and the replay
+// guard (isKnownAgentReplay / claimAgentNonce) in ./replay-store.ts — shared by
+// auth-middleware.ts, agent-auth.ts and Presence.ts, so a nonce recorded via
+// any one of the three call sites, on any worker thread, is refused by all of
+// them, and the crypto/decoder logic can't drift.
 
 // ─── Status derivation (pure — exported for unit testing) ─────────────────────
 
@@ -580,7 +581,9 @@ export class Presence extends (databases as any).flair.Presence {
         );
       }
 
-      if (isNonceReplay(headerAgentId, nonce, now)) {
+      // A nonce this thread already saw recorded is refused before any lookup.
+      // A miss proves nothing: claimAgentNonce below is the authoritative check.
+      if (isKnownAgentReplay(headerAgentId, nonce, now)) {
         return new Response(
           JSON.stringify({ error: "nonce_replay_detected" }),
           { status: 401, headers: { "Content-Type": "application/json" } },
@@ -622,7 +625,15 @@ export class Presence extends (databases as any).flair.Presence {
         );
       }
 
-      recordNonce(headerAgentId, nonce, ts);
+      // Record the nonce instance-wide now that the signature has verified, and
+      // before the heartbeat is written. A replay or an unusable store refuses.
+      const claim = await claimAgentNonce(headerAgentId, nonce);
+      if (!claim.ok) {
+        return new Response(
+          JSON.stringify({ error: claim.error }),
+          { status: claim.status, headers: { "Content-Type": "application/json" } },
+        );
+      }
       // Deactivation guard — same predicate as the middleware Basic branches.
       // A deactivated principal must not be allowed to heartbeat, even when
       // the Ed25519 signature is valid.

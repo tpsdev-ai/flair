@@ -18,23 +18,37 @@ import {
   resolveInitAdminPasswordRefuseReason,
   resolveInitAdminPasswordSource,
 } from "../lib/init-admin-pass.js";
+import { canonicalLexicalPath } from "../lib/daemon-liveness.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { seedUsingFlairSkill } from "../lib/skill-seed.js";
+import { clearSkillSeedPending, markSkillSeedPending } from "../lib/skill-seed-pending.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
-import { execSync, spawn } from "node:child_process";
+import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
+import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
+import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { join, resolve } from "node:path";
+import { createConnection } from "node:net";
 import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
+import {
+  commandArg,
+  foreignOccupiedListenerDetail,
+  describeOccupiedListener,
+  staleHarperBeforeAuthNotice,
+  type OccupiedHarperListener,
+  type OperationsPortAttribution,
+} from "../lib/init-occupied-listener.js";
 
 export type InitCli = {
   api: (...args: any[]) => any;
   b64url: (...args: any[]) => any;
   buildOperationsApiConfig: (...args: any[]) => any;
-  cleanupLegacyLaunchdPlist: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
   defaultLaunchAgentsDir: (...args: any[]) => any;
   ensureFlairAgentRole: (...args: any[]) => any;
@@ -52,6 +66,7 @@ export type InitCli = {
   pubKeyPath: (...args: any[]) => any;
   readyOpsSocketPosture: (...args: any[]) => any;
   reconcileFederationInstanceViaOpsApi: (...args: any[]) => any;
+  repointMainServiceUnit: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   writeAdminPassFile: (...args: any[]) => any;
   resolveOpsBindHost: (...args: any[]) => any;
@@ -63,15 +78,32 @@ export type InitCli = {
   runSoulWizard: (...args: any[]) => any;
   seedAgentViaOpsApi: (...args: any[]) => any;
   seedFederationInstanceViaOpsApi: (...args: any[]) => any;
+  readOccupiedListener: (port: number) => OccupiedHarperListener;
+  resolveInstanceServingPid: (dataDir: string, port: number, deps: { findListeningPids: (port: number) => number[] }) => number | null;
   shouldShowInlineSecretWarning: (...args: any[]) => any;
   verifyAuditLog: (...args: any[]) => any;
   verifySemanticSearch: (...args: any[]) => any;
   waitForHealth: (...args: any[]) => any;
   writeDaemonSidecar: (...args: any[]) => any;
-  writeInitLaunchdPlist: (...args: any[]) => any;
+  registerInitLaunchdService: (...args: any[]) => any;
+  initLaunchdExitCode: (kind: string) => number;
   MQTT_DISABLED_CONFIG: any;
   STARTUP_TIMEOUT_MS: any;
 };
+
+async function localPortAcceptsTcp(port: number): Promise<boolean> {
+  return new Promise((resolveConnected) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const finish = (connected: boolean): void => {
+      socket.destroy();
+      resolveConnected(connected);
+    };
+    socket.setTimeout(1000);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.once("timeout", () => finish(false));
+  });
+}
 
 let cli: InitCli;
 
@@ -90,10 +122,6 @@ function b64url(...args: any[]): any {
 
 function buildOperationsApiConfig(...args: any[]): any {
   return cli.buildOperationsApiConfig(...args);
-}
-
-function cleanupLegacyLaunchdPlist(...args: any[]): any {
-  return cli.cleanupLegacyLaunchdPlist(...args);
 }
 
 function defaultDataDir(...args: any[]): any {
@@ -208,6 +236,42 @@ function seedFederationInstanceViaOpsApi(...args: any[]): any {
   return cli.seedFederationInstanceViaOpsApi(...args);
 }
 
+/**
+ * flair#2141 S2 — seed the org-wide `using-flair` skill on an instance, as the
+ * operator. Idempotent (fixed row ids, read by primary key). A refusal names
+ * what failed and how to fix it, and FAILS this run: init never reports success
+ * after a seed it could not complete.
+ */
+async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, adminPass: string): Promise<void> {
+  const outcome = await seedUsingFlairSkill({
+    baseUrl,
+    user: adminUser,
+    pass: adminPass,
+    notify: (line) => console.log(line),
+  });
+  if (outcome.kind === "refused") {
+    console.error(`Error: the using-flair skill seed was refused — ${outcome.message}`);
+    process.exit(1);
+  }
+  console.log(`using-flair skill: ${outcome.message}`);
+}
+
+function readOccupiedListener(port: number): OccupiedHarperListener {
+  return cli.readOccupiedListener(port);
+}
+
+/**
+ * Operations-port attribution for a later 401. `before` is taken now;
+ * `reread` runs only if the insert is rejected, so a holder that changed
+ * during the request is not named. The HTTP port's pids are not an input.
+ */
+function operationsPortAttribution(port: number): OperationsPortAttribution {
+  return {
+    before: readOccupiedListener(port),
+    reread: () => readOccupiedListener(port),
+  };
+}
+
 function shouldShowInlineSecretWarning(...args: any[]): any {
   return cli.shouldShowInlineSecretWarning(...args);
 }
@@ -228,8 +292,17 @@ function writeDaemonSidecar(...args: any[]): any {
   return cli.writeDaemonSidecar(...args);
 }
 
-function writeInitLaunchdPlist(...args: any[]): any {
-  return cli.writeInitLaunchdPlist(...args);
+function registerInitLaunchdService(...args: any[]): any {
+  return cli.registerInitLaunchdService(...args);
+}
+
+/** `flair init`'s launchd-step exit code (flair#2040, flair#2085): 1 for a refused, down or uncertain outcome, else 0. */
+function initLaunchdExitCode(kind: string): number {
+  return cli.initLaunchdExitCode(kind);
+}
+
+function repointMainServiceUnit(...args: any[]): any {
+  return cli.repointMainServiceUnit(...args);
 }
 
 export function register(program: Command): void {
@@ -259,7 +332,7 @@ program
   .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
-  .option("--skip-start", "Skip Harper startup (assume already running)")
+  .option("--skip-start", "Do not start Harper; with --agent, defer registration (ignored with --target/--ops-target)")
   .option("--skip-soul", "Skip interactive personality setup")
   .option("--client <client>", "Client(s) to wire: claude-code, codex, gemini, cursor, antigravity, pi (native extension), all, or none")
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
@@ -403,6 +476,10 @@ program
       } else {
         console.log("No --agent-id provided -- skipping agent registration");
       }
+
+      // flair#2141 S2 — seed the org-wide using-flair skill on the remote
+      // instance, as the operator. Idempotent; a refusal fails this run.
+      await seedUsingFlairSkillViaRest(baseUrl, adminUser, flairAdminPass);
 
       // Reconcile the federation Instance identity row if --remote (hub role).
       // flair#1883: this used to INSERT a row with a fresh random id on every
@@ -567,12 +644,61 @@ program
     let reusedExistingAdminPass = false;
     let pendingAdminPassRotate = false;
     const adminPassPath = defaultAdminPassPath();
-    const persistedAdminUser = detectPersistedAdminUser(dataDir);
-    let alreadyRunning = false;
+    let persistedAdminUser: boolean;
     try {
-      const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
-      if (res.status > 0) alreadyRunning = true;
-    } catch { /* not running */ }
+      persistedAdminUser = detectPersistedAdminUser(dataDir);
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(
+        `❌ Refusing to initialize: the Harper system database under ${dataDir} could not be read, ` +
+          `so I cannot tell whether an admin user is already persisted (${detail}). ` +
+          `Repair that data directory (or point --data-dir at the right one) and re-run.`
+      );
+      process.exit(1);
+    }
+    let alreadyRunning = false;
+    if (opts.skipStart && !agentId) {
+      let healthStatus: number | undefined;
+      try {
+        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) {
+          alreadyRunning = true;
+          healthStatus = res.status;
+        }
+      } catch {}
+      const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
+        const attributed = harperConfigPath(dataDir) !== null &&
+          listener.pids.length === 1 &&
+          listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
+          (listener.dataDirs.length === 1 ||
+            cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
+        if (attributed) return;
+        console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
+        console.error(foreignOccupiedListenerDetail(listener, dataDir));
+        console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
+        process.exit(1);
+      };
+      const httpListener = readOccupiedListener(httpPort);
+      alreadyRunning ||= httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort);
+      if (alreadyRunning) {
+        refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
+        console.log(`Harper already running on port ${httpPort} — skipping start`);
+      }
+      const opsListener = readOccupiedListener(opsPort);
+      let opsAnswer: number | undefined;
+      try {
+        const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) opsAnswer = res.status;
+      } catch {}
+      if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
+        refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
+      }
+    } else if (!opts.skipStart) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) alreadyRunning = true;
+      } catch { /* not running */ }
+    }
     const explicitCredential = !!(
       opts.adminPassFile || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || opts.adminPass
     );
@@ -595,11 +721,29 @@ program
     const refuseIfNeeded = (fileExists: boolean) => {
       const reason = resolveInitAdminPasswordRefuseReason(fileExists, passwordCtx);
       if (!reason) return;
-      console.error(initAdminPassRefusalMessage(reason, {
+      const message = initAdminPassRefusalMessage(reason, {
         dataDir,
         httpPort,
         adminPassPath,
-      }));
+      });
+      // The port is already taken and this data dir has no admin user.
+      // The unauthenticated /health probe already ran. This is one read of
+      // that port's listener — not the before-and-after 401 attribution.
+      // Name it and exit before any Authorization header is sent. Do not
+      // signal it. `flair stop` cannot be promised to act on this listener
+      // (flair#1749).
+      if (reason === "foreign-instance") {
+        const listener = readOccupiedListener(httpPort);
+        const head = initAdminPassRefusalMessage(reason, {
+          dataDir,
+          httpPort,
+          adminPassPath,
+          offerFlairStop: false,
+        });
+        console.error(`${head}\n${foreignOccupiedListenerDetail(listener, dataDir)}`);
+      } else {
+        console.error(message);
+      }
       process.exit(1);
     };
 
@@ -708,12 +852,35 @@ program
     mkdirSync(dataDir, { recursive: true });
     readyOpsSocketPosture(dataDir);
 
+    let skippedOwnStart = false;
     if (!opts.skipStart) {
       if (alreadyRunning) {
         console.log(`Harper already running on port ${httpPort} — skipping start`);
+        const httpListener = readOccupiedListener(httpPort);
+        const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
+        if (notice) {
+          console.error(notice);
+          process.exit(1);
+        }
+        skippedOwnStart = true;
       }
+    }
 
-      if (!alreadyRunning) {
+    if (!alreadyRunning) {
+      // Detect whether Harper has already been installed in this data dir.
+      // Harper's config is created during install — its presence means
+      // install already ran. Re-running install against an existing data dir
+      // crashes in Harper v5 beta.6+ (checkForExistingInstall queries the
+      // database before the env is initialized). Goes through
+      // harperConfigPath so an install predating Harper's config-file rename
+      // (harperdb-config.yaml) is still recognised as installed rather than
+      // re-installed over.
+      const alreadyInstalled = harperConfigPath(dataDir) !== null;
+      const willStart = !opts.skipStart;
+
+      // An already-installed instance with --skip-start is not installed
+      // over or started.
+      if (!alreadyInstalled || willStart) {
         const bin = harperBin();
         if (!bin) {
           throw new Error(
@@ -726,16 +893,6 @@ program
         }
 
         mkdirSync(dataDir, { recursive: true });
-
-        // Detect whether Harper has already been installed in this data dir.
-        // Harper's config is created during install — its presence means
-        // install already ran. Re-running install against an existing data dir
-        // crashes in Harper v5 beta.6+ (checkForExistingInstall queries the
-        // database before the env is initialized). Goes through
-        // harperConfigPath so an install predating Harper's config-file rename
-        // (harperdb-config.yaml) is still recognised as installed rather than
-        // re-installed over.
-        const alreadyInstalled = harperConfigPath(dataDir) !== null;
 
         const opsSocket = join(dataDir, "operations-server");
         // authorizeLocal: false (flair#654) — a credential-less loopback ops-API
@@ -826,15 +983,19 @@ program
         // Start Harper with flair loaded as a component (the "." arg).
         // ROOTPATH in env points to the data dir; authorizeLocal and thread
         // count are set via HARPER_SET_CONFIG — no need for dev mode.
-        console.log(`Starting Harper on port ${httpPort}...`);
-        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
-        proc.unref();
-        // flair#1454: write the identity sidecar immediately after spawn so
-        // `flair stop` and `flair status` can classify this daemon's state
-        // without lsof. Same call as startFlairProcess() uses.
-        if (proc.pid) writeDaemonSidecar(dataDir, proc.pid, httpPort);
+        if (willStart) {
+          console.log(`Starting Harper on port ${httpPort}...`);
+          const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
+          proc.unref();
+          // flair#1454: write the identity sidecar immediately after spawn so
+          // `flair stop` and `flair status` can classify this daemon's state
+          // without lsof. Same call as startFlairProcess() uses.
+          if (proc.pid) writeDaemonSidecar(dataDir, proc.pid, httpPort);
+        }
       }
+    }
 
+    if (!opts.skipStart) {
       console.log("Waiting for Harper health check...");
       await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
       console.log("Harper is healthy ✓");
@@ -866,8 +1027,9 @@ program
         console.log(`Admin password saved to: ${adminPassPath}`);
       }
 
-      // Register launchd service on macOS so Harper survives reboots
-      // and `flair restart` / `flair stop` work via launchctl.
+      // Write this instance's launchd plist on macOS so launchd can own it
+      // (survive reboots; `flair restart` / `flair stop` via launchctl) — and
+      // report whether launchd ACTUALLY manages it (flair#2040).
       if (process.platform === "darwin") {
         const harperBinPath = harperBin();
         if (harperBinPath) {
@@ -875,20 +1037,6 @@ program
           const plistDir = defaultLaunchAgentsDir();
           mkdirSync(plistDir, { recursive: true });
           const plistPath = launchdPlistPath(label, plistDir);
-
-          // flair#693 + flair#966: a pre-flair#693 install registered under
-          // the bare LEGACY_LAUNCHD_LABEL. init always writes fresh plist
-          // content below (it has the current ports/creds in hand), so
-          // migration here is just "clean up the old registration" —
-          // unload + remove it BEFORE writing the new one, so re-running
-          // init never leaves two services behind for this data dir.
-          //
-          // flair#966: the legacy plist is NOT scoped to this data dir —
-          // it is a single global label. cleanupLegacyLaunchdPlist reads
-          // ROOTPATH to establish ownership before touching it.
-          cleanupLegacyLaunchdPlist(dataDir, plistDir, (cmd: string) => {
-            execSync(cmd, { stdio: "pipe" });
-          });
 
           const opsSocket = join(dataDir, "operations-server");
           // authorizeLocal: false (flair#654) — same posture as the initial spawn
@@ -914,33 +1062,82 @@ program
           // emits the pass-file launcher and never HDB_ADMIN_PASSWORD. It reuses
           // an existing valid ~/.flair/admin-pass, or proves the credential in
           // hand against this (now-healthy) instance and writes it 0600, or
-          // refuses without writing a plist. An already-adopted instance is left
-          // byte-for-byte unchanged rather than downgraded to the inline shape.
-          const outcome = await writeInitLaunchdPlist({
+          // refuses without writing a plist. An already-adopted instance is never
+          // regenerated or downgraded to the inline shape; only its runtime paths
+          // are re-pointed, when it is provably this instance's plist serving
+          // another npm-global tree (flair#2034 — see src/lib/service-repoint.ts).
+          //
+          // flair#693 + flair#966 + flair#2040: a pre-flair#693 install
+          // registered under the bare LEGACY_LAUNCHD_LABEL is retired here, but
+          // only when ROOTPATH proves it is this data dir's — and when its job
+          // is the process SERVING this instance, retiring it stops Flair, so
+          // registerInitLaunchdService preflights the launchd domain and
+          // validates the replacement BEFORE unloading anything, loads and
+          // verifies the replacement, and restores the legacy job on failure.
+          //
+          // flair#2040: NEVER a check mark for a load that did not happen. The
+          // step reports "launchd-managed ✓" only when launchd is verified to
+          // run the process serving this instance; otherwise it says the plist
+          // is on disk and Flair runs directly, with the reason. The plist
+          // writer's own outcome (written / unchanged / re-pointed / not
+          // re-pointed, flair#2034) is reported in the same lines.
+          const launchdStep = await registerInitLaunchdService({
             dataDir,
-            plistPath,
-            label,
-            adminPass,
-            adminUser,
-            modelsDir,
-            execPath: process.execPath,
-            harperBinPath,
-            workingDirectory: flairPackageDir(),
-            httpPort: httpBind.bindValue,
-            opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
-            setConfig,
             port: httpPort,
+            plistDir,
+            write: {
+              dataDir,
+              plistPath,
+              label,
+              adminPass,
+              adminUser,
+              modelsDir,
+              execPath: preferVersionManagerAlias(process.execPath),
+              harperBinPath,
+              workingDirectory: flairPackageDir(),
+              httpPort: httpBind.bindValue,
+              opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
+              setConfig,
+              port: httpPort,
+            },
           });
-          if (outcome.kind === "refused") {
-            console.error(`Error: ${outcome.detail}`);
-            process.exit(1);
+          for (const line of launchdStep.lines as Array<{ stream: "out" | "err"; text: string }>) {
+            (line.stream === "err" ? console.error : console.log)(line.text);
           }
-          console.log(
-            outcome.kind === "unchanged"
-              ? "Launchd service already managed — plist unchanged ✓"
-              : "Launchd service registered ✓",
-          );
+          const launchdExit = initLaunchdExitCode(launchdStep.kind);
+          if (launchdExit !== 0) process.exit(launchdExit);
         }
+      }
+
+      // flair#2034 §2: on Linux the instance's own service is the systemd
+      // USER unit proven to own the serving process (flair writes none). A
+      // unit that serves another npm-global tree is re-pointed — runtime paths
+      // only — and systemd is reloaded; anything else is left alone.
+      if (process.platform === "linux") {
+        const r = repointMainServiceUnit(dataDir, httpPort);
+        if (r.kind === "repointed") {
+          console.log(`Systemd user unit re-pointed at this CLI's install tree ✓ — ${r.detail}`);
+          console.log("  It takes effect when systemd next starts the unit: flair restart");
+        } else if (r.kind === "refused") {
+          console.warn(`Systemd user unit left unchanged — ${r.detail}`);
+        } else if (r.kind === "pinned-node") {
+          console.log(`Systemd user unit left as it is — ${r.detail}`);
+        }
+      }
+
+      // flair#2034 §2: the federation-sync shim bakes the node + flair paths
+      // of the runtime that enabled it. When it runs another npm-global tree,
+      // re-point its exec line (only that line; the scheduler unit is never
+      // rewritten). A machine that never enabled federation sync is left alone.
+      try {
+        const fed = rewriteFederationSchedulerRuntime();
+        if (fed.status === "rewritten") {
+          console.log(`Federation sync shim re-pointed at this CLI's install tree ✓ — ${fed.detail}`);
+        } else if (fed.status === "refused") {
+          console.warn(`Federation sync shim left unchanged — ${fed.detail}`);
+        }
+      } catch (err: any) {
+        console.warn(`Could not check the federation sync shim: ${err?.message ?? err}`);
       }
     }
 
@@ -990,6 +1187,28 @@ program
     // means an explicit loopback also persists, so a widening can be reversed.
     persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost, httpBind.host);
 
+    // flair#2141 S2 — seed the org-wide using-flair skill on this instance, as
+    // the operator. Re-initializing an already-installed default local instance
+    // with `flair init --skip-start` defers seeding to a later `flair start`
+    // with the admin credential; that command has no `--data-dir` flag.
+    // (Remote init, `--target`, seeds with or
+    // without `--skip-start`.) A refusal fails this run rather than reporting a
+    // successful init without the skill, so both local paths call it before
+    // they print their success summary.
+    const seedUsingFlairSkillOnInstall = async (): Promise<void> => {
+      if (opts.skipStart) {
+        if (dataDir === defaultDataDir()) {
+          markSkillSeedPending(dataDir);
+          console.log("using-flair skill: pending");
+        } else {
+          console.log("using-flair skill: not seeded");
+        }
+        return;
+      }
+      await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);
+      clearSkillSeedPending(dataDir);
+    };
+
     if (agentId) {
       // Generate or reuse keypair
       mkdirSync(keysDir, { recursive: true });
@@ -1014,74 +1233,88 @@ program
         console.log(`Keypair written: ${privPath} ✓`);
       }
 
-      // Seed agent via operations API
-      console.log(`Seeding agent '${agentId}' via operations API...`);
-      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass);
-      console.log(`Agent '${agentId}' registered ✓`);
-
-      // Verify Ed25519 auth
-      console.log("Verifying Ed25519 auth...");
       const httpUrl = `http://127.0.0.1:${httpPort}`;
-      const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${agentId}`);
-      if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
-      console.log("Ed25519 auth verified ✓");
+      if (!opts.skipStart) {
+        // Seed agent via operations API. Unlike the pre-auth observation,
+        // which is one read, a 401 names a pid only when the read before the
+        // insert and the read after the rejection are the same sole PID. The
+        // HTTP port's holder is not an input and is not assumed to have caused
+        // the rejection. Several holders, or a holder that changed during the
+        // request, stay unattributed. Init started Harper itself → no listener,
+        // and that 401 keeps the credential hint.
+        console.log(`Seeding agent '${agentId}' via operations API...`);
+        const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
+        await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
+        console.log(`Agent '${agentId}' registered ✓`);
 
-      // Verify semantic search ACTUALLY works (real embed→paraphrase-search
-      // round-trip). A clean-VM dogfood found semantic search dead out of the box
-      // (sudo/root-owned install can't write the embeddings models symlink →
-      // EACCES) while init reported success. Never report a clean init when
-      // recall-by-meaning is broken. Skipped paths (no key yet) are non-fatal.
-      console.log("Verifying semantic search...");
-      const embedCheck = await verifySemanticSearch(httpUrl, agentId, keysDir);
-      if (embedCheck.state === "ok") {
-        console.log(`Semantic search operational ✓ ${render.wrap(render.c.dim, `(paraphrase recall verified, score ${embedCheck.score.toFixed(2)})`)}`);
-      } else if (embedCheck.state === "degraded") {
-        // LOUD — embeddings not loaded. Same message class as `flair doctor`.
-        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search DEGRADED")} — embeddings not loaded; recall-by-meaning will NOT work.`);
-        console.log(`   ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
-        console.log(`   ${render.wrap(render.c.dim, "Common cause: the embeddings component lacks write access (sudo/root global installs).")}`);
-        console.log(`   ${render.wrap(render.c.dim, "Fix: install without sudo (see README Quick Start), then:")} flair restart && flair doctor`);
-      } else if (embedCheck.state === "failed") {
-        // flair#1501: the instance rejected the probe's signature. init just
-        // registered this agent, so this is a genuine auth defect, not a
-        // missing identity — surface it loudly with the signer named.
-        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search probe rejected")} — ${embedCheck.detail}.`);
-        console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
-      } else {
-        console.log(`${render.icons.warn} Semantic search not verified ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
-      }
+        // Verify Ed25519 auth
+        console.log("Verifying Ed25519 auth...");
+        const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${encodeRecordId(agentId)}`);
+        if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
+        console.log("Ed25519 auth verified ✓");
 
-      // Verify the audit log ACTUALLY records (flair#970) — a positive
-      // control, not a flag read: `describe_table` reports `audit: true` on
-      // nodes whose audit trail is empty (base-copy elision, harper#2212).
-      // Same surface as the semantic-search check above.
-      console.log("Verifying audit log...");
-      const auditCheck = await verifyAuditLog(httpUrl, agentId, keysDir, `http://127.0.0.1:${opsPort}`, adminUser, adminPass);
-      if (auditCheck.state === "ok") {
-        // Present tense ONLY: the probe proves current recording, never
-        // historical completeness — see AuditVerifyResult's doc comment.
-        console.log(`Audit log: recording (verified now) ✓ ${render.wrap(render.c.dim, "(verifies current recording, not history — a resynced node's audit has a hard start boundary at its copy time)")}`);
-      } else if (auditCheck.state === "degraded") {
-        if (auditCheck.cause === "disabled") {
-          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log DISABLED")} — ${auditCheck.detail}.`);
-          console.log(`   ${render.wrap(render.c.dim, "Fix: enable logging.auditLog in the ROOT harperdb-config.yaml (the Harper instance config, NOT flair's component config.yaml), then restart Harper.")}`);
+        // Verify semantic search ACTUALLY works (real embed→paraphrase-search
+        // round-trip). A clean-VM dogfood found semantic search dead out of the box
+        // (sudo/root-owned install can't write the embeddings models symlink →
+        // EACCES) while init reported success. Never report a clean init when
+        // recall-by-meaning is broken. Skipped paths (no key yet) are non-fatal.
+        console.log("Verifying semantic search...");
+        const embedCheck = await verifySemanticSearch(httpUrl, agentId, keysDir);
+        if (embedCheck.state === "ok") {
+          console.log(`Semantic search operational ✓ ${render.wrap(render.c.dim, `(paraphrase recall verified, score ${embedCheck.score.toFixed(2)})`)}`);
+        } else if (embedCheck.state === "degraded") {
+          // LOUD — embeddings not loaded. Same message class as `flair doctor`.
+          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search DEGRADED")} — embeddings not loaded; recall-by-meaning will NOT work.`);
+          console.log(`   ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
+          console.log(`   ${render.wrap(render.c.dim, "Common cause: the embeddings component lacks write access (sudo/root global installs).")}`);
+          console.log(`   ${render.wrap(render.c.dim, "Fix: install without sudo (see README Quick Start), then:")} flair restart && flair doctor`);
+        } else if (embedCheck.state === "failed") {
+          // flair#1501: the instance rejected the probe's signature. init just
+          // registered this agent, so this is a genuine auth defect, not a
+          // missing identity — surface it loudly with the signer named.
+          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search probe rejected")} — ${embedCheck.detail}.`);
+          console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
         } else {
-          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log NOT RECORDING")} — ${auditCheck.detail}.`);
-          console.log(`   ${render.wrap(render.c.red, "Audit reports as enabled, but fresh writes produced no audit entries — do not treat the audit log as a record of what happened.")}`);
-          console.log(`   ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
-          console.log(`   ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
+          console.log(`${render.icons.warn} Semantic search not verified ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
         }
-      } else if (auditCheck.state === "failed") {
-        // Same loud discipline as the semantic-search probe above (flair#1501).
-        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log probe rejected")} — ${auditCheck.detail}.`);
-        console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
+
+        // Verify the audit log ACTUALLY records (flair#970) — a positive
+        // control, not a flag read: `describe_table` reports `audit: true` on
+        // nodes whose audit trail is empty (base-copy elision, harper#2212).
+        // Same surface as the semantic-search check above.
+        console.log("Verifying audit log...");
+        const auditCheck = await verifyAuditLog(httpUrl, agentId, keysDir, `http://127.0.0.1:${opsPort}`, adminUser, adminPass);
+        if (auditCheck.state === "ok") {
+          // Present tense ONLY: the probe proves current recording, never
+          // historical completeness — see AuditVerifyResult's doc comment.
+          console.log(`Audit log: recording (verified now) ✓ ${render.wrap(render.c.dim, "(verifies current recording, not history — a resynced node's audit has a hard start boundary at its copy time)")}`);
+        } else if (auditCheck.state === "degraded") {
+          if (auditCheck.cause === "disabled") {
+            console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log DISABLED")} — ${auditCheck.detail}.`);
+            console.log(`   ${render.wrap(render.c.dim, "Fix: enable logging.auditLog in the ROOT harperdb-config.yaml (the Harper instance config, NOT flair's component config.yaml), then restart Harper.")}`);
+          } else {
+            console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log NOT RECORDING")} — ${auditCheck.detail}.`);
+            console.log(`   ${render.wrap(render.c.red, "Audit reports as enabled, but fresh writes produced no audit entries — do not treat the audit log as a record of what happened.")}`);
+            console.log(`   ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
+            console.log(`   ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
+          }
+        } else if (auditCheck.state === "failed") {
+          // Same loud discipline as the semantic-search probe above (flair#1501).
+          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log probe rejected")} — ${auditCheck.detail}.`);
+          console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
+        } else {
+          // An unrun check must not look like a pass.
+          console.log(`${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditCheck.detail})`);
+        }
+
       } else {
-        // An unrun check must not look like a pass.
-        console.log(`${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditCheck.detail})`);
+        console.log(`Agent registration deferred. After flair start, run flair init --agent ${JSON.stringify(agentId)} (keep your instance flags).`);
       }
 
-      // Output — admin password printed once, never written to disk
-      console.log("\n✅ Flair initialized successfully");
+      // flair#2141 S2 — seed the using-flair skill before init reports success.
+      await seedUsingFlairSkillOnInstall();
+
+      console.log(opts.skipStart ? "\n✅ Flair configured locally (no agent registered)" : "\n✅ Flair initialized successfully");
       console.log(`   Agent ID:    ${agentId}`);
       console.log(`   Flair URL:   ${httpUrl}`);
       console.log(`   Private key: ${privPath}`);
@@ -1111,13 +1344,13 @@ program
       // "AI assistant [default]" — it leaked into bootstrap output and
       // confused users. Now those paths leave the soul empty and nudge the
       // user toward `flair soul set` / `flair doctor` instead.
-      if (!opts.skipSoul && process.stdin.isTTY) {
+      if (!opts.skipStart && !opts.skipSoul && process.stdin.isTTY) {
         const soulEntries = await runSoulWizard(agentId);
         if (soulEntries.length > 0) {
           console.log("");
           for (const [key, value] of soulEntries) {
             try {
-              await api("PUT", `/Soul/${agentId}:${key}`,
+              await api("PUT", `/Soul/${encodeRecordId(`${agentId}:${key}`)}`,
                 { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() },
                 { baseUrl: httpUrl, explicitAdminPass: adminPass, adminUser });
               console.log(`   ✓ soul:${key} set`);
@@ -1134,7 +1367,7 @@ program
           console.log(`   Or run \`flair doctor\` anytime for a nudge.`);
         }
       } else {
-        const reason = opts.skipSoul ? "--skip-soul" : "non-interactive";
+        const reason = opts.skipStart ? "--skip-start" : opts.skipSoul ? "--skip-soul" : "non-interactive";
         console.log(`\n   Soul prompts skipped (${reason}). Add entries with:`);
         console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
       }
@@ -1336,7 +1569,7 @@ program
       // would render a green "MCP server responded" for a setup that never
       // starts an MCP server.
       const wiredAnyMcpClient = wiringResults.some((r) => r.client !== "pi");
-      if (!opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0 && wiredAnyMcpClient) {
+      if (!opts.skipStart && !opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0 && wiredAnyMcpClient) {
         console.log("\n   Smoke-testing MCP server...");
         try {
           // The RUNNING CLI's own server: mcpServerSpec() pins to THIS
@@ -1426,6 +1659,8 @@ program
       }
     } else {
       const httpUrl = `http://127.0.0.1:${httpPort}`;
+      // flair#2141 S2 — seed the using-flair skill before init reports success.
+      await seedUsingFlairSkillOnInstall();
       console.log("\n✅ Flair initialized (no agent registered)");
       console.log(`   Flair URL:   ${httpUrl}`);
       
@@ -1459,14 +1694,6 @@ program
       }
     }
 
-    // All init work is genuinely done at this point: Harper is installed +
-    // running (detached, unref'd — survives this process exiting), the agent is
-    // registered, semantic search is verified, MCP clients are wired, and the
-    // smoke test ran. The MCP smoke subprocess can leave a lingering npx handle
-    // that pins Node's event loop for ~60s after success ("rc=0 but doesn't
-    // return"). We've cleared/unref'd the known timers above; exit explicitly so
-    // the prompt returns in a couple seconds regardless of any stray handle. The
-    // running Harper instance is unaffected.
     await new Promise<void>((r) => process.stdout.write("", () => r()));
     process.exit(0);
   });

@@ -249,9 +249,10 @@ describe("negative control — a normally-installed skill loads silently", () =>
 });
 
 describe("wiring tripwires — main's inline report-and-load-both must be gone", () => {
-  test("MemoryBootstrap delegates Active Skills to resolveActiveSkills", () => {
+  test("MemoryBootstrap delegates Active Skills to resolveActiveSkills (through resolveSkillManifest, flair#2141)", () => {
     const src = readFileSync("resources/MemoryBootstrap.ts", "utf8");
-    expect(src).toContain("resolveActiveSkills");
+    expect(src).toContain("resolveSkillManifest(");
+    expect(readFileSync("resources/skill-manifest.ts", "utf8")).toContain("resolveActiveSkills(");
     expect(src).not.toMatch(/if \(peers\.length > 1\)/);
     expect(src).not.toMatch(/line \+= " \[SKILL_CONFLICT\]"/);
   });
@@ -265,5 +266,34 @@ describe("wiring tripwires — main's inline report-and-load-both must be gone",
   test("MemoryFeed runs refuseSkillWriteSource on the raw-table write (same gate as Memory.post)", () => {
     const src = readFileSync("resources/MemoryFeed.ts", "utf8");
     expect(src).toContain("refuseSkillWriteSource");
+  });
+});
+
+// flair#2141 S1 — `metadata.optOut` on a skill-assignment is a boolean.
+describe("refuseSkillAssignmentWrite — optOut (flair#2141 S1)", () => {
+  const optOutRow = (optOut: unknown, asObject = false) => ({
+    key: "skill-assignment",
+    value: "using-flair",
+    metadata: asObject ? { optOut } : JSON.stringify({ optOut }),
+  });
+
+  test("a boolean optOut registers, as a JSON string or an object", () => {
+    for (const value of [true, false]) {
+      expect(refuseSkillAssignmentWrite(optOutRow(value))).toBeNull();
+      expect(refuseSkillAssignmentWrite(optOutRow(value, true))).toBeNull();
+    }
+  });
+
+  test("a non-boolean optOut is refused with 400 skill_opt_out_not_boolean", async () => {
+    for (const value of ["true", 1, null, {}]) {
+      const res = refuseSkillAssignmentWrite(optOutRow(value));
+      expect(res?.status, JSON.stringify(value)).toBe(400);
+      expect((await res!.json()).error).toBe("skill_opt_out_not_boolean");
+    }
+  });
+
+  test("a PATCH that omits metadata is checked against the stored metadata", () => {
+    expect(refuseSkillAssignmentWrite({ value: "using-flair" }, optOutRow("yes"))?.status).toBe(400);
+    expect(refuseSkillAssignmentWrite({ value: "using-flair" }, optOutRow(true))).toBeNull();
   });
 });

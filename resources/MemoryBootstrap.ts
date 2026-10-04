@@ -5,7 +5,7 @@ import { wrapUntrusted } from "./content-safety.js";
 import { isTeammate, formatTeamLine, isZeroRowNoOpEvent } from "./memory-bootstrap-lib.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { isValidEntity } from "./entity-vocab.js";
-import { withDetachedTxn } from "./table-helpers.js";
+import { withDetachedTxn, withDetachedTxnAsync } from "./table-helpers.js";
 import { getPresenceRoster } from "./presence-internal.js";
 import {
   buildCollisionEntries,
@@ -28,7 +28,19 @@ import { estimateTokens } from "./token-estimate.js";
 import { initialPosition, ORG_EVENT_STREAM } from "./agent-read-position-lib.js";
 import { defaultReadPositionTable, ensureReadPosition } from "./agent-read-position.js";
 import { catchupSeekTimestamp, isCatchupEligible } from "./org-event-catchup-lib.js";
-import { resolveActiveSkills } from "./skill-provenance.js";
+import { SKILL_ASSIGNMENT_KEY } from "./skill-provenance.js";
+import { SKILL_TAG } from "./skill-write.js";
+import {
+  SKILL_ROW_SELECT,
+  receivesOrgSkills,
+  resolvableSkillRows,
+  resolveSkillManifest,
+  skillLine,
+  type OrgSkillInput,
+  type SkillDiagnostic,
+  type SkillManifestEntry,
+} from "./skill-manifest.js";
+import { localInstanceId } from "./instance-identity.js";
 
 /**
  * POST /MemoryBootstrap
@@ -89,13 +101,15 @@ import { resolveActiveSkills } from "./skill-provenance.js";
  *   { context, sections, tokenEstimate, maxTokens, memoriesIncluded, memoriesAvailable,
  *     memoriesTruncated, teammateFindingsIncluded, teammateFindingsTruncated,
  *     teammateFindingsMatched, agentId, scope, soul, memories, predicted,
- *     teammateFindings, events, soulTokens, memoryTokens, trustTokens,
- *     eventsTokens, scaffoldTokens[, currentTaskHint][, taskRetrievalHint][, predictedHint] }
+ *     teammateFindings, events, skills, skillDiagnostics, skillsTruncated,
+ *     skillDiagnosticsTruncated, soulTokens, memoryTokens, trustTokens,
+ *     eventsTokens, skillsTokens, skillDiagnosticsTokens, scaffoldTokens
+ *     [, currentTaskHint][, taskRetrievalHint][, predictedHint] }
  *
  *   TOKEN LEDGER (flair#1270): the counters decompose `tokenEstimate` from the
  *   payload alone —
  *     tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens + trustTokens
- *                     + eventsTokens
+ *                     + eventsTokens + skillsTokens + skillDiagnosticsTokens
  *   Each figure is measured from what SHIPS (never derived as a residual), so
  *   a section that ships uncounted content breaks the identity visibly instead
  *   of hiding in an unexplained gap. See the ledger block in the response tail
@@ -279,6 +293,10 @@ const MAX_CANDIDATE_POOL = 100;
 // `m._source !== agentId` is the "is this a teammate's finding" check; own
 // memories never carry `_source` at all.
 function formatMemory(m: any, agentId?: string): string {
+  // flair#1940 A1' item 5: bootstrap does NOT render pointers in this slice.
+  // The pointer lives in MemoryHostSource and is joined only into Memory.get/
+  // search/SemanticSearch results; the bootstrap citation (A6) arrives in slice
+  // 4. So this surface leaves the record unchanged.
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
   const chain = m.supersedes ? " [supersedes earlier decision]" : "";
@@ -540,23 +558,27 @@ export class BootstrapMemories extends Resource {
       soul: 90, "workspace-rules": 91,
     };
 
+    // flair#2141 — `skill-assignment` rows are read whatever includeSoul says
+    // (the skills manifest in 1b is always present); the other soul entries
+    // only when includeSoul is on.
     const skillAssignments: any[] = [];
+    const soulEntries: { key: string; value: unknown; line: string; tokens: number; priority: number }[] = [];
+    for await (const record of (databases as any).flair.Soul.search()) {
+      if (record.agentId !== agentId) continue;
+      if (record.key === SKILL_ASSIGNMENT_KEY) {
+        skillAssignments.push(record);
+        continue;
+      }
+      if (!includeSoul) continue;
+      const line = `**${record.key}:** ${record.value}`;
+      const tokens = estimateTokens(line);
+      const priority = SOUL_KEY_PRIORITY[record.key] ?? 50;
+      soulEntries.push({ key: record.key, value: record.value, line, tokens, priority });
+    }
+
     const soulMaxTokens = Math.floor(maxTokens * 0.4); // 40% of budget for soul
     if (includeSoul) {
       let soulTokens = 0;
-      const soulEntries: { key: string; value: unknown; line: string; tokens: number; priority: number }[] = [];
-
-      for await (const record of (databases as any).flair.Soul.search()) {
-        if (record.agentId !== agentId) continue;
-        if (record.key === "skill-assignment") {
-          skillAssignments.push(record);
-          continue;
-        }
-        const line = `**${record.key}:** ${record.value}`;
-        const tokens = estimateTokens(line);
-        const priority = SOUL_KEY_PRIORITY[record.key] ?? 50;
-        soulEntries.push({ key: record.key, value: record.value, line, tokens, priority });
-      }
 
       // Sort by priority (lower = more important)
       soulEntries.sort((a, b) => a.priority - b.priority);
@@ -604,13 +626,75 @@ export class BootstrapMemories extends Resource {
       }
     }
 
-    // --- 1b. Skill assignments (durable source + stated conflict outcome) ---
-    // flair#1433: do not report-and-load-both. resolveActiveSkills decides
-    // (unique priority wins; equal-priority same-name tie refuses) and
-    // states the decision on the line. Non-durable sources are refused.
-    if (skillAssignments.length > 0) {
-      const resolved = resolveActiveSkills(skillAssignments);
-      sections.skills.push(...resolved.lines);
+    // The read scope (see the "Read-scope" block below), resolved here because
+    // the skills manifest (1b) re-checks its skill rows against it.
+    const scope = await resolveReadScope(agentId);
+
+    // --- 1b. Skills manifest (flair#2141 S1b and S1; conflict rules flair#1433) ---
+    // Present whatever includeSoul and includeContext say. resolveSkillManifest
+    // (resources/skill-manifest.ts) splits the agent's own and org-scope
+    // assignments into winners, each with the skill row `skill_get` reads,
+    // and diagnostics. Entries are
+    // admitted while they fit the shared budget, right after the soul, at
+    // their serialized size; an entry that does not fit is counted in
+    // skillsTruncated / skillDiagnosticsTruncated instead.
+    const includedSkills: SkillManifestEntry[] = [];
+    const includedSkillDiagnostics: SkillDiagnostic[] = [];
+    let skillsTruncated = 0;
+    let skillDiagnosticsTruncated = 0;
+    // flair#2141 S1 — when org rows exist, the target's Agent record is read on
+    // this call, and org assignments apply only when it says the target
+    // receives org skills.
+    const orgRows: any[] = [];
+    const orgQuery = withDetachedTxn(ctx, () => (databases as any).flair.OrgSkillAssignment.search());
+    for await (const row of orgQuery as AsyncIterable<any>) orgRows.push(row);
+    const org: OrgSkillInput = { assignments: [], rows: [], instanceId: null };
+    if (orgRows.length > 0
+      && receivesOrgSkills(await withDetachedTxnAsync(ctx, () => (databases as any).flair.Agent.get(agentId)))) {
+      const refRows: any[] = [];
+      for (const ref of new Set(orgRows.map((row) => row.skillRef).filter((ref) => typeof ref === "string"))) {
+        const refQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
+          conditions: [{ attribute: "id", comparator: "equals", value: ref }],
+          select: SKILL_ROW_SELECT,
+        }));
+        for await (const record of refQuery as AsyncIterable<any>) refRows.push(record);
+      }
+      org.assignments = orgRows;
+      org.rows = resolvableSkillRows(refRows, scope.isAllowed);
+      org.instanceId = await localInstanceId();
+    }
+    if (skillAssignments.length > 0 || org.assignments.length > 0) {
+      const skillRows: any[] = [];
+      if (skillAssignments.length > 0) {
+        const skillQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
+          conditions: [
+            { attribute: "agentId", comparator: "equals", value: agentId },
+            { attribute: "tags", comparator: "equals", value: SKILL_TAG },
+            { attribute: "archived", comparator: "not_equal", value: true },
+          ],
+          select: SKILL_ROW_SELECT,
+        }));
+        for await (const record of skillQuery as AsyncIterable<any>) skillRows.push(record);
+      }
+      const manifest = resolveSkillManifest(
+        skillAssignments,
+        resolvableSkillRows(skillRows, scope.isAllowed),
+        agentId,
+        org,
+      );
+      for (const entry of manifest.skills) {
+        const cost = estimateTokens(JSON.stringify(entry));
+        if (cost > tokenBudget) { skillsTruncated++; continue; }
+        includedSkills.push(entry);
+        sections.skills.push(skillLine(entry));
+        tokenBudget -= cost;
+      }
+      for (const diagnostic of manifest.diagnostics) {
+        const cost = estimateTokens(JSON.stringify(diagnostic));
+        if (cost > tokenBudget) { skillDiagnosticsTruncated++; continue; }
+        includedSkillDiagnostics.push(diagnostic);
+        tokenBudget -= cost;
+      }
     }
 
     // --- 1c. Team roster + cross-agent search nudge ---
@@ -670,8 +754,8 @@ export class BootstrapMemories extends Resource {
     // spans the org. Each bounded query still re-checks `scope.isAllowed()`
     // on every record even where it's provably a no-op (e.g. an
     // agentId==self-only query) — uniform defense-in-depth, never skipped
-    // because "the filter already pushed down."
-    const scope = await resolveReadScope(agentId);
+    // because "the filter already pushed down." (`scope` is resolved above,
+    // before the skills manifest.)
 
     // `memoriesAvailable`: dropped the org-wide exact count (computing it
     // exactly WAS the scan being removed — `visibility != private` isn't
@@ -1484,7 +1568,9 @@ export class BootstrapMemories extends Resource {
     if (sections.soul.length > 0) {
       parts.push("## Identity\n" + sections.soul.join("\n"));
     }
-    if (sections.skills.length > 0) {
+    // flair#2141 — rendered from the admitted `skills` entries, and only with
+    // includeSoul.
+    if (includeSoul && sections.skills.length > 0) {
       parts.push("## Active Skills\n" + sections.skills.join("\n"));
     }
     if (sections.team.length > 0) {
@@ -1544,7 +1630,8 @@ export class BootstrapMemories extends Resource {
     // counter doesn't prevent silent regression, per Kern's #1270 ruling):
     //
     //   tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens
-    //                   + trustTokens + eventsTokens
+    //                   + trustTokens + eventsTokens + skillsTokens
+    //                   + skillDiagnosticsTokens
     //
     // Every token-charged content class has a named counter, so a consumer can
     // decompose `tokenEstimate` FROM THE PAYLOAD ALONE and any future section
@@ -1586,6 +1673,12 @@ export class BootstrapMemories extends Resource {
     // trust: charged content with no counter would be invisible in the ledger.
     const eventsTokens = includedEvents.reduce(
       (sum, evt) => sum + estimateTokens(JSON.stringify(evt)), 0);
+    // flair#2141 — the skills manifest and its diagnostics: Σ estimateTokens
+    // (JSON) over the shipped entries, the same per-entry cost 1b charged.
+    const skillsTokens = includedSkills.reduce(
+      (sum, entry) => sum + estimateTokens(JSON.stringify(entry)), 0);
+    const skillDiagnosticsTokens = includedSkillDiagnostics.reduce(
+      (sum, entry) => sum + estimateTokens(JSON.stringify(entry)), 0);
 
     // flair#744 slice 1 — opt-in per-memory trust block. Bootstrap renders
     // memories as text lines rather than result objects, so the block is
@@ -1701,6 +1794,12 @@ export class BootstrapMemories extends Resource {
       ...(taskRetrievalHint ? { taskRetrievalHint } : {}),
       scope: scopeInfo,
       soul: soulMap,
+      // flair#2141 S1b — always present (`[]` when none), whatever includeSoul
+      // and includeContext say; see 1b.
+      skills: includedSkills,
+      skillDiagnostics: includedSkillDiagnostics,
+      skillsTruncated,
+      skillDiagnosticsTruncated,
       memories: includedOwnMemories,
       predicted: includedPredicted,
       // flair#1199 — cross-agent teammate findings as a structured container
@@ -1746,6 +1845,8 @@ export class BootstrapMemories extends Resource {
       // token-charged content class is decomposable from the payload alone.
       trustTokens,
       eventsTokens,
+      skillsTokens,
+      skillDiagnosticsTokens,
       // flair#1199 — the content-selection budget this response was built
       // against (echoed so a connector can relate tokenEstimate to the budget it
       // asked for — and so the conformance tokenEstimate<=maxTokens invariant is
@@ -1812,6 +1913,8 @@ export class BootstrapMemories extends Resource {
       ...responseBody,
       context: "",
       soul: {},
+      skills: [],
+      skillDiagnostics: [],
       memories: [],
       predicted: [],
       teammateFindings: [],

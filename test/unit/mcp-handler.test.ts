@@ -137,7 +137,19 @@ class SoulMock extends HarperShapedBase {
 // Configurable per-test via these mutable fixtures.
 let credentials: any[] = [];
 let agents: Record<string, any> = {};
-const puts: { table: string; record: any }[] = [];
+const puts: { table: string; record: any; op?: "patch" }[] = [];
+// Set to make the resolver's credential lookup / principal read fail.
+let credentialSearchError: Error | null = null;
+let agentGetError: Error | null = null;
+// Set to make the credential's lastUsedAt patch fail.
+let credentialPatchError: Error | null = null;
+
+/** Store a credential row the way Harper does: a put replaces it, a patch merges into it (and creates it when missing). */
+function storeCredential(id: any, fields: any, merge: boolean): void {
+  const i = credentials.findIndex((c) => c?.id === id);
+  if (i < 0) credentials = [...credentials, { ...fields, id }];
+  else credentials = credentials.map((c, j) => (j === i ? (merge ? { ...c, ...fields, id } : { ...fields, id }) : c));
+}
 
 // Constructable no-op base classes so the REAL resource modules (which do
 // `class X extends databases.flair.X` or `extends Resource`) link + load — we
@@ -147,11 +159,23 @@ class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const databasesMock = {
   flair: {
     Credential: Object.assign(class extends NoopBase {}, {
-      search: async function* (_q: any) { for (const c of credentials) yield c; },
-      put: async (r: any) => { puts.push({ table: "Credential", record: r }); return r; },
+      search: async function* (_q: any) {
+        if (credentialSearchError) throw credentialSearchError;
+        for (const c of credentials) yield c;
+      },
+      put: async (r: any) => { puts.push({ table: "Credential", record: r }); storeCredential(r.id, r, false); return r; },
+      get: async (id: any, _ctx?: any) => credentials.find((c) => c?.id === id) ?? null,
+      patch: async (id: any, update: any, _ctx?: any) => {
+        if (credentialPatchError) throw credentialPatchError;
+        puts.push({ table: "Credential", record: { id, ...update }, op: "patch" });
+        storeCredential(id, update, true);
+      },
     }),
     Agent: Object.assign(class extends NoopBase {}, {
-      get: async (id: string) => agents[id] ?? null,
+      get: async (id: string) => {
+        if (agentGetError) throw agentGetError;
+        return agents[id] ?? null;
+      },
       put: async (r: any) => { puts.push({ table: "Agent", record: r }); agents[r.id] = r; return r; },
     }),
     Memory: class extends NoopBase {},
@@ -166,7 +190,7 @@ const databasesMock = {
 // SemanticSearch/BootstrapMemories.
 mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {}, getUser: async () => null } }));
 
-const { mcpHandler, resolveAgentFromSub } = await import("../../resources/mcp-handler.ts");
+const { mcpHandler, resolveAgentFromSub, PrincipalRefusedError } = await import("../../resources/mcp-handler.ts");
 const { __setHandlers } = await import("../../resources/mcp-tools.ts");
 
 // Inject capture doubles for the delegated handlers via the tools registry —
@@ -200,6 +224,9 @@ beforeEach(() => {
   credentials = [];
   agents = {};
   puts.length = 0;
+  credentialSearchError = null;
+  agentGetError = null;
+  credentialPatchError = null;
   delete process.env.FLAIR_MCP_JIT_PROVISION;
 });
 afterEach(() => {
@@ -272,6 +299,7 @@ describe("protocol handshake", () => {
 describe("resolveAgentFromSub", () => {
   it("existing idp Credential → its principalId", async () => {
     credentials = [{ principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" }];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
     const agent = await resolveAgentFromSub("sub-alice");
     expect(agent).toEqual({ agentId: "agt_alice", isAdmin: false });
   });
@@ -327,6 +355,7 @@ describe("resolveAgentFromSub", () => {
   // ─── flair#718 authorship-provenance: clientId threading ──────────────────
   it("no clientId passed → resolved agent has NO clientId property at all (not stamped as undefined)", async () => {
     credentials = [{ principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" }];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
     const agent = await resolveAgentFromSub("sub-alice");
     expect(agent).toEqual({ agentId: "agt_alice", isAdmin: false });
     expect("clientId" in (agent as any)).toBe(false);
@@ -334,6 +363,7 @@ describe("resolveAgentFromSub", () => {
 
   it("clientId passed → copied onto the resolved agent unchanged (existing-credential path)", async () => {
     credentials = [{ principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" }];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
     const agent = await resolveAgentFromSub("sub-alice", "flair_cl_abc123");
     expect(agent).toEqual({ agentId: "agt_alice", isAdmin: false, clientId: "flair_cl_abc123" });
   });
@@ -349,6 +379,7 @@ describe("resolveAgentFromSub", () => {
 describe("tools/call — scopes to the resolved agent (no forging)", () => {
   beforeEach(() => {
     credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
   });
 
   it("memory_search delegates with request.tpsAgent = resolved id", async () => {
@@ -460,8 +491,16 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
           { sub: "sub-bob" },
         ));
         const body = await parse(res);
-        const payload = body.result.structuredContent ?? body.result;
-        expect(JSON.stringify(payload)).toContain("invalid_visibility");
+        if (typeof bad === "string") {
+          // An unrecognised string value: the memory_store wrapper's invalid_visibility.
+          const payload = body.result.structuredContent ?? body.result;
+          expect(JSON.stringify(payload)).toContain("invalid_visibility");
+        } else {
+          // A non-string value never reaches the tool: tools/call refuses an
+          // argument that does not match the declared type.
+          expect(body.error?.code).toBe(-32602);
+          expect(String(body.error?.message)).toContain('"visibility"');
+        }
         // The load-bearing half: nothing reached the Memory resource. A guard
         // that reports an error AFTER writing has prevented nothing.
         expect(lastCall).toBeNull();
@@ -962,5 +1001,347 @@ describe("body size cap", () => {
     // Empty body → not valid JSON-RPC → parse error, not a size rejection.
     const body = JSON.parse(res.body);
     expect(body.error.code).toBe(-32700);
+  });
+});
+
+// ─── principal status on every call ─────────────────────────────────────────
+describe("tools/call — the mapped principal must exist and be active on every call dispatched through a credential mapping", () => {
+  beforeEach(() => {
+    credentials = [{ id: "cred_carol", principalId: "agt_carol", kind: "idp", idpSubject: "sub-carol", status: "active" }];
+    agents["agt_carol"] = { id: "agt_carol", status: "active" };
+  });
+
+  function callAs(sub: string, name: string, args: any) {
+    return mcpHandler(post({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name, arguments: args } }, { sub })).then(parse);
+  }
+
+  it("an active principal's call runs", async () => {
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.ctx.request.tpsAgent).toBe("agt_carol");
+  });
+
+  it("a principal record with no status field runs (a missing status counts as active)", async () => {
+    agents["agt_carol"] = { id: "agt_carol" };
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.ctx.request.tpsAgent).toBe("agt_carol");
+  });
+
+  it("a deactivated principal is refused on every tool, naming the principal and the remedy; nothing runs and the credential is not updated", async () => {
+    agents["agt_carol"] = { id: "agt_carol", status: "deactivated" };
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    for (const name of Object.keys(TOOLS)) {
+      lastCall = null;
+      const body = await callAs("sub-carol", name, {});
+      expect(body.result, name).toBeUndefined();
+      expect(body.error?.code, name).toBe(-32001);
+      expect(body.error?.message, name).toContain("principal 'agt_carol' is deactivated");
+      expect(body.error?.message, name).toContain('set its status to "active"');
+      expect(lastCall, name).toBeNull();
+    }
+    expect(puts).toEqual([]);
+  });
+
+  it("any status other than active is refused", async () => {
+    for (const status of ["suspended", "revoked", "", null]) {
+      agents["agt_carol"] = { id: "agt_carol", status };
+      lastCall = null;
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error?.code, String(status)).toBe(-32001);
+      expect(lastCall, String(status)).toBeNull();
+    }
+  });
+
+  it("a credential that maps to a principal that does not exist is refused", async () => {
+    delete agents["agt_carol"];
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error?.code).toBe(-32001);
+    expect(body.error?.message).toContain("principal 'agt_carol', which does not exist");
+    expect(lastCall).toBeNull();
+  });
+
+  it("a failed read of the principal's status refuses the call", async () => {
+    agentGetError = new Error("storage unavailable");
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.result).toBeUndefined();
+    expect(body.error?.code).toBe(-32000);
+    expect(body.error?.message).toContain("the status of principal 'agt_carol' could not be read");
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a failed credential lookup refuses the call and does not JIT-provision, even with JIT on", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentialSearchError = new Error("storage unavailable");
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.result).toBeUndefined();
+    expect(body.error?.code).toBe(-32000);
+    expect(body.error?.message).toContain("could not be read");
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a deactivated principal is refused, not replaced, when JIT is on", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    agents["agt_carol"] = { id: "agt_carol", status: "deactivated" };
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error?.code).toBe(-32001);
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a call whose tool has run marks the credential used, after the tool ran", async () => {
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+    const touched = puts.filter((p) => p.table === "Credential");
+    expect(touched.length).toBe(1);
+    expect(touched[0].op).toBe("patch");
+    expect(Object.keys(touched[0].record).sort()).toEqual(["id", "lastUsedAt"]);
+    expect(touched[0].record.id).toBe("cred_carol");
+    expect(typeof touched[0].record.lastUsedAt).toBe("string");
+  });
+
+  // A tool call that changes the credential while it runs.
+  function toolChangingCredential(change: () => void) {
+    return __setHandlers({
+      SemanticSearch: class extends HarperShapedBase {
+        async post() { change(); return { ok: true }; }
+      },
+    });
+  }
+
+  it("a credential revoked while its tool runs stays revoked, and its lastUsedAt is set", async () => {
+    const restore = toolChangingCredential(() => storeCredential("cred_carol", { status: "revoked" }, true));
+    try {
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error).toBeUndefined();
+      const stored = credentials.find((c) => c.id === "cred_carol");
+      expect(stored?.status).toBe("revoked");
+      expect(stored?.principalId).toBe("agt_carol");
+      expect(typeof stored?.lastUsedAt).toBe("string");
+    } finally {
+      restore();
+    }
+  });
+
+  it("a credential re-linked to another principal while its tool runs keeps the new principalId, and its lastUsedAt is set", async () => {
+    const restore = toolChangingCredential(() => storeCredential("cred_carol", { principalId: "agt_dave" }, true));
+    try {
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error).toBeUndefined();
+      const stored = credentials.find((c) => c.id === "cred_carol");
+      expect(stored?.principalId).toBe("agt_dave");
+      expect(stored?.status).toBe("active");
+      expect(typeof stored?.lastUsedAt).toBe("string");
+    } finally {
+      restore();
+    }
+  });
+
+  it("a credential deleted while its tool runs is not created again", async () => {
+    const restore = toolChangingCredential(() => { credentials = credentials.filter((c) => c.id !== "cred_carol"); });
+    try {
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error).toBeUndefined();
+      expect(credentials.find((c) => c.id === "cred_carol")).toBeUndefined();
+      expect(puts).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("a failed lastUsedAt update does not change the call's answer", async () => {
+    credentialPatchError = new Error("write failed");
+    const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBe(false);
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+    expect(credentials.find((c) => c.id === "cred_carol")?.lastUsedAt).toBeUndefined();
+  });
+
+  it("a call whose arguments are rejected leaves the credential's lastUsedAt unchanged", async () => {
+    const body = await callAs("sub-carol", "memory_search", {});
+    expect(body.error?.code).toBe(-32602);
+    expect(lastCall).toBeNull();
+    expect(puts).toEqual([]);
+  });
+
+  it("a call whose tool throws leaves the credential's lastUsedAt unchanged", async () => {
+    const restore = __setHandlers({
+      SemanticSearch: class extends HarperShapedBase { async post() { throw new Error("search backend down"); } },
+    });
+    try {
+      const body = await callAs("sub-carol", "memory_search", { query: "hi" });
+      expect(body.error?.code).toBe(-32000);
+      expect(body.error?.message).toContain("tool execution failed");
+      expect(puts).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("with JIT on, a first call whose arguments are rejected creates the credential without lastUsedAt", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentials = []; // no credential maps the subject: JIT provisions one
+    const body = await callAs("sub-new", "memory_search", {});
+    expect(body.error?.code).toBe(-32602);
+    expect(lastCall).toBeNull();
+    const creds = puts.filter((p) => p.table === "Credential");
+    expect(creds.length).toBe(1);
+    expect(creds[0].record.idpSubject).toBe("sub-new");
+    expect("lastUsedAt" in creds[0].record).toBe(false);
+  });
+
+  it("with JIT on, a first call whose tool has run sets the new credential's lastUsedAt after the tool ran", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentials = []; // no credential maps the subject: JIT provisions one
+    const seen: { atToolRun: any[] | null } = { atToolRun: null };
+    const restore = __setHandlers({
+      SemanticSearch: class extends HarperShapedBase {
+        async post() {
+          seen.atToolRun = puts.filter((p) => p.table === "Credential").map((p) => ({ ...p.record }));
+          return { ok: true };
+        }
+      },
+    });
+    try {
+      const body = await callAs("sub-new", "memory_search", { query: "hi" });
+      expect(body.error).toBeUndefined();
+      const atToolRun = seen.atToolRun ?? [];
+      expect(atToolRun.length).toBe(1);
+      expect("lastUsedAt" in atToolRun[0]).toBe(false);
+      const creds = puts.filter((p) => p.table === "Credential");
+      expect(creds.length).toBe(2);
+      expect(creds[1].op).toBe("patch");
+      expect(creds[1].record.id).toBe(atToolRun[0].id);
+      expect(credentials.find((c) => c.id === atToolRun[0].id)?.idpSubject).toBe("sub-new");
+      expect(typeof creds[1].record.lastUsedAt).toBe("string");
+    } finally {
+      restore();
+    }
+  });
+
+  it("an unknown tool is refused before the subject is resolved, and nothing is written", async () => {
+    const body = await callAs("sub-carol", "no_such_tool", {});
+    expect(body.error?.code).toBe(-32602);
+    expect(puts).toEqual([]);
+  });
+
+  it("resolving an existing mapping writes nothing", async () => {
+    expect(await resolveAgentFromSub("sub-carol")).toEqual({ agentId: "agt_carol", isAdmin: false });
+    expect(puts).toEqual([]);
+  });
+
+  it("resolveAgentFromSub throws the refusal for a deactivated principal and resolves an active one", async () => {
+    agents["agt_carol"] = { id: "agt_carol", status: "deactivated" };
+    let thrown: unknown;
+    try { await resolveAgentFromSub("sub-carol"); } catch (err) { thrown = err; }
+    expect(thrown).toBeInstanceOf(PrincipalRefusedError);
+    expect((thrown as any).rpcCode).toBe(-32001);
+
+    agents["agt_carol"] = { id: "agt_carol", status: "active" };
+    expect(await resolveAgentFromSub("sub-carol")).toEqual({ agentId: "agt_carol", isAdmin: false });
+  });
+});
+
+// ─── tools/call argument types ───────────────────────────────────────────────
+describe("tools/call — arguments must match the tool's declared types", () => {
+  // A helper, not an inline assignment: TypeScript would otherwise narrow
+  // lastCall to null for the rest of the test.
+  function resetLastCall() { lastCall = null; }
+
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  async function call(name: string, args: any) {
+    const res = await mcpHandler(post(
+      { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+    return parse(res);
+  }
+
+  const ID_TOOLS = ["memory_get", "memory_update", "memory_basement", "memory_restore", "memory_delete", "skill_get"];
+  for (const name of ID_TOOLS) {
+    it(`${name}: a non-string or empty id is refused before the tool runs`, async () => {
+      for (const id of [42, true, ["m1"], { m: 1 }, ""]) {
+        resetLastCall();
+        const body = await call(name, { id, content: "x" });
+        expect(body.error?.code).toBe(-32602);
+        expect(String(body.error?.message)).toContain(`invalid arguments for ${name}`);
+        expect(lastCall).toBeNull();
+      }
+    });
+  }
+
+  it("a mistyped optional argument, a mistyped array item and a non-object arguments value are refused", async () => {
+    for (const [name, args] of [
+      ["memory_search", { query: "hi", limit: "3" }],
+      ["memory_store", { content: "x", tags: ["a", 1] }],
+      ["memory_search", ["hi"]],
+      ["memory_search", { query: { text: "hi" } }],
+      ["memory_search", {}],
+    ] as const) {
+      resetLastCall();
+      const body = await call(name, args);
+      expect(body.error?.code).toBe(-32602);
+      expect(lastCall).toBeNull();
+    }
+  });
+
+  it("conforming arguments still reach the tool (null optionals are treated as absent)", async () => {
+    resetLastCall();
+    const body = await call("memory_search", { query: "hi", limit: 3, includeTrust: null });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+  });
+
+  it("a null optional argument is not forwarded to the resource", async () => {
+    resetLastCall();
+    const body = await call("memory_store", { content: "x", tags: null, type: null });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.post");
+    // Exactly what an omitted argument gives: the wrapper's default for type,
+    // and no tags value (never null).
+    expect(lastCall?.args?.tags).toBeUndefined();
+    expect(lastCall?.args?.type).toBe("session");
+  });
+
+  it("an undeclared id on a tool without an id argument is left to the tool, as before", async () => {
+    resetLastCall();
+    const body = await call("memory_search", { query: "hi", id: 42 });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+  });
+});
+
+describe("checkToolArguments — every native tool's declared property types are enforced", () => {
+  it("refuses a wrong-typed value and accepts a right-typed one for every declared property", async () => {
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    const { checkToolArguments } = await import("../../resources/mcp-tool-arguments.ts");
+    const sample: Record<string, any> = { string: "s", number: 1, integer: 1, boolean: true, array: [], object: {} };
+    const wrong: Record<string, any> = { string: 1, number: "1", integer: 1.5, boolean: "true", array: {}, object: [] };
+    let checked = 0;
+    for (const [name, t] of Object.entries<any>(TOOLS)) {
+      const schema = t.def.inputSchema ?? {};
+      const base: Record<string, any> = {};
+      for (const req of schema.required ?? []) {
+        const type = schema.properties?.[req]?.type;
+        base[req] = sample[Array.isArray(type) ? type[0] : type] ?? "s";
+      }
+      expect(checkToolArguments(schema, base), `${name} base`).toBeNull();
+      for (const [prop, def] of Object.entries<any>(schema.properties ?? {})) {
+        const type = Array.isArray(def.type) ? def.type[0] : def.type;
+        if (!(type in wrong)) continue;
+        expect(checkToolArguments(schema, { ...base, [prop]: sample[type] }), `${name}.${prop} right`).toBeNull();
+        expect(checkToolArguments(schema, { ...base, [prop]: wrong[type] }), `${name}.${prop} wrong`).not.toBeNull();
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(40);
   });
 });

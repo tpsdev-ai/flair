@@ -5,6 +5,7 @@
  * spinning up Harper's database module. The same SkipReason names are used
  * in SyncLog.skippedReasons so operators can grep for them.
  */
+import { effectiveAgentStatus } from "./agent-status-guard.js";
 
 export interface SyncRecord {
   table: string;
@@ -47,7 +48,26 @@ export type SkipReason =
   // PRINCIPAL_OWNING_TABLES) whose principalId is absent or does not equal
   // data.agentId. Absent is a skip, not an accept — deriving the
   // requirement from field presence would make the check opt-out.
-  | "principal_mismatch";
+  | "principal_mismatch"
+  // ─── flair#1940 A1' item 5 (hostSource is NOT federated) ────────────────
+  // A record whose data carries a pointer field (hostSource / hostSourceScope
+  // / hostSourceVisibility) is refused, never merged. The pointer table
+  // (MemoryHostSource) is absent from FEDERATION_TABLE_POLICY, so it is never
+  // in the sync's table set either (an inbound "MemoryHostSource" row skips as
+  // "unknown_table").
+  | "pointer_not_federated"
+  // ─── flair#2108 (an inbound Agent `status` that differs from the stored one) ──
+  // Emitted by FederationSync.post before the raw put, for a record that passed
+  // the earlier sync checks: an inbound Agent record
+  // whose effective status (a missing `status` counts as "active") differs from
+  // an existing local Agent's effective stored status, also when the record is older than the stored row and would
+  // lose the last-write-wins merge. The federation path carries no verified
+  // administrator authority for that principal, so the whole record is skipped
+  // rather than merged without `status`.
+  | "agent_status_not_federated"
+  // Emitted by FederationSync.post before the row is read: the payload's id is
+  // missing or is not the envelope's id, so the record is not applied.
+  | "id_mismatch";
 
 /**
  * Static policy for every table FederationSync will merge.
@@ -190,6 +210,15 @@ export type ClassifyResult =
   | { action: "merge"; originator: string }
   | { action: "skip"; reason: SkipReason };
 
+/** The Memory attributes that would carry a pointer into an inbound federated
+ *  row (flair#1940 A1' item 5). Local + pure — this module stays DB-free. */
+const FEDERATION_POINTER_FIELDS = ["hostSource", "hostSourceScope", "hostSourceVisibility"] as const;
+
+function inboundCarriesPointer(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  return FEDERATION_POINTER_FIELDS.some((f) => (data as Record<string, unknown>)[f] !== undefined);
+}
+
 export function classifyRecord(
   record: SyncRecord,
   peerRole: string,
@@ -200,6 +229,11 @@ export function classifyRecord(
 ): ClassifyResult {
   if (!knownTables.has(record.table)) {
     return { action: "skip", reason: "unknown_table" };
+  }
+
+  // flair#1940 A1' item 5: refuse an inbound row carrying a host pointer.
+  if (inboundCarriesPointer(record.data)) {
+    return { action: "skip", reason: "pointer_not_federated" };
   }
 
   const originator = record.originatorInstanceId ?? receiverInstanceId;
@@ -224,4 +258,27 @@ export function classifyRecord(
   }
 
   return { action: "merge", originator };
+}
+
+/**
+ * flair#2108: does this inbound Agent record's effective status differ from an
+ * existing local principal's effective stored status (a record with no `status`
+ * field counts as "active")? True only when the record is for
+ * the Agent table, a local row exists, and the two differ under the feature's
+ * lifecycle rule, which `effectiveAgentStatus` (resources/agent-status-guard.ts)
+ * applies to both sides: a missing or undefined `status` is "active".
+ * `updatedAt` is not compared, so a record older than the stored row, which
+ * would lose the last-write-wins merge, is also true. The federation path
+ * carries no verified administrator authority for the principal (the batch is
+ * signed, and a record signature may also be present; neither is an admin
+ * claim), so a true answer skips the whole record before the raw put.
+ */
+export function inboundChangesExistingPrincipalStatus(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+): boolean {
+  if (record.table !== "Agent" || local == null) return false;
+  const data = record.data;
+  if (!data || typeof data !== "object") return false;
+  return effectiveAgentStatus(data.status) !== effectiveAgentStatus(local.status);
 }

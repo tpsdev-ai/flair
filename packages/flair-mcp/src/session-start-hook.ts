@@ -18,11 +18,14 @@
  *
  * NO-OP-ON-ANY-FAILURE GUARANTEE
  * ------------------------------
- * This hook can never block or break Claude Code startup. Every failure mode —
- * missing FLAIR_AGENT_ID, malformed stdin, Flair unreachable, auth error, a
- * hung daemon, an unexpected throw — degrades to printing `{}` (an empty,
- * inert hook output) and exiting 0. It never throws, never writes to stderr in
- * a way that surfaces to the user, and never exits non-zero.
+ * This hook can never block or break Claude Code startup. Every failure mode
+ * (missing FLAIR_AGENT_ID, malformed stdin, Flair unreachable, auth error, a
+ * hung daemon, an unexpected throw) exits 0. Malformed stdin is treated as
+ * empty input and can still yield bootstrap context. A failed bootstrap yields
+ * a pre-compaction record and/or a continuity resume hint only when their
+ * separate lookups find one; otherwise stdout is `{}`. The hook attempts one
+ * stderr diagnostic when bootstrap fails (flair#1943). The Codex command retains stderr and the
+ * Claude Code command discards it; delivery depends on stderr being writable.
  *
  * A hard timeout (FLAIR_HOOK_TIMEOUT_MS, default 8s) wraps the bootstrap call
  * so a stalled Flair daemon can't hang session startup; on timeout we no-op.
@@ -86,6 +89,9 @@ import {
   resolveContinuityTimeoutMs,
   type ContinuityClient,
 } from "./continuity.js";
+import { fetchPreCompactRecord, formatPreCompactContext, resolvePreCompactLookup } from "./precompact.js";
+import { canonicalUrl, DEFAULT_FLAIR_URL } from "./action-recall.js";
+import { refreshActionRecallCache, type ActionRecallRefreshClient } from "./action-recall-refresh.js";
 
 /** Claude Code SessionStart additionalContext hard limit (chars). */
 const MAX_CHARS = 10_000;
@@ -137,6 +143,22 @@ interface SessionStartInput {
 // Compaction is NOT a restart: prepareContinuityBoot stays fully inert on a
 // compaction-sourced SessionStart — no rotation, no state-file touch, no
 // hint (scenario S7 holds by construction).
+//
+// Pre-compaction record (flair#2069): when the PreCompact hook
+// (./precompact-hook.ts) saved a record, this hook shows it FIRST, when the
+// marker matches and the GET returns an eligible live row: after a
+// compaction, the record this harness session saved; after a restart, the
+// one the previous session saved, when the marker still names that session.
+// Which record is decided locally, without a request: the marker file
+// (./precompact.ts resolvePreCompactLookup: a bounded, asynchronous read) is
+// matched against this harness session after a compaction, or against the
+// prior continuity pointer after a restart. The record is then fetched with
+// one `GET /Memory/<id>`; the lookup and that GET run concurrently with
+// bootstrap under the same continuity timeout as the resume hint. No marker,
+// or no match ⇒ no record GET (session start's other requests are
+// unchanged); any failure ⇒ nothing shown, boot proceeds.
+// The record is shown as quoted data between fixed BEGIN/END lines with every
+// line prefixed (./precompact.ts formatPreCompactContext).
 
 /** Minimal surface of FlairClient this hook depends on (eases testing).
  *  `request` is optional and structurally matches PresencePoster (presence.ts)
@@ -149,7 +171,35 @@ interface BootstrapClient extends Partial<PresencePoster> {
     maxTokens?: number;
     channel?: string;
     subjects?: string[];
-  }): Promise<{ context?: string } | undefined>;
+  }): Promise<{ context?: string; scope?: { agentId?: string; isAdmin?: boolean } } | undefined>;
+}
+
+/** Injectable pieces for the action-recall refresh (flair#2067 slice 2),
+ *  off by default so existing tests and installs are unchanged. */
+export interface SessionStartDeps {
+  makeRecallClient?: (agentId: string) => ActionRecallRefreshClient;
+  now?: number;
+  actionRecallRoot?: string;
+}
+
+/** Whether the action-recall refresh runs on this SessionStart. Opt-in: the
+ *  installer sets FLAIR_ACTION_RECALL=1 on the SessionStart entry. */
+export function actionRecallEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = readEnvOrUnset("FLAIR_ACTION_RECALL", env);
+  return value != null && value !== "" && value !== "0";
+}
+
+/** Recall-path client: the SAME identity as the bootstrap client, but with an
+ *  EMPTY admin pair so flair-client's FLAIR_ADMIN_USER/PASSWORD Basic fallback
+ *  can never turn this read into an admin read. */
+function defaultRecallClientFactory(agentId: string): ActionRecallRefreshClient {
+  return new FlairClient({
+    agentId,
+    url: readEnvOrUnset("FLAIR_URL"),
+    keyPath: readEnvOrUnset("FLAIR_KEY_PATH"),
+    adminUser: "",
+    adminPassword: "",
+  });
 }
 
 /**
@@ -182,10 +232,20 @@ function readStdin(): Promise<string> {
   });
 }
 
-/** Race a promise against a timeout. Rejects with a timeout error if exceeded. */
+/** The hook's OWN bootstrap-timer rejection (flair#1943). A dedicated class so
+ *  the classifier recognises its own timeout by IDENTITY, never by reading a
+ *  message. */
+export class BootstrapTimeoutError extends Error {
+  constructor() {
+    super("bootstrap timeout");
+    this.name = "BootstrapTimeoutError";
+  }
+}
+
+/** Race a promise against a timeout. Rejects with a BootstrapTimeoutError if exceeded. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("bootstrap_timeout")), ms);
+    const timer = setTimeout(() => reject(new BootstrapTimeoutError()), ms);
     timer.unref?.();
     promise.then(
       (value) => {
@@ -198,6 +258,63 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
+}
+
+export type BootstrapFailureKind = "auth" | "timeout" | "unreachable" | `http-${number}`;
+
+/**
+ * flair#1943 — classify a bootstrap failure for the one stderr line. Reads a
+ * numeric HTTP status FIRST (`status`, what FlairError carries, then
+ * `status_code`, then `statusCode`); when a status exists the message is never
+ * consulted. With no status, the ONLY timeout is the hook's own bootstrap
+ * timer (a BootstrapTimeoutError) or an error whose name is exactly
+ * `TimeoutError`; everything else is `unreachable`. No kind is ever decided
+ * from message text. Never reads or includes credentials.
+ */
+export function classifyBootstrapFailure(err: unknown): BootstrapFailureKind {
+  const e = err as
+    | { status?: unknown; status_code?: unknown; statusCode?: unknown; name?: unknown }
+    | null;
+  const status = numericStatus(e);
+  if (status !== undefined) return status === 401 || status === 403 ? "auth" : `http-${status}`;
+  if (err instanceof BootstrapTimeoutError) return "timeout";
+  if (typeof e?.name === "string" && e.name === "TimeoutError") return "timeout";
+  return "unreachable";
+}
+
+/** The first NUMERIC HTTP status the error carries, checked `status` →
+ *  `status_code` → `statusCode` (flair#1943). */
+function numericStatus(e: { status?: unknown; status_code?: unknown; statusCode?: unknown } | null): number | undefined {
+  for (const key of ["status", "status_code", "statusCode"] as const) {
+    const v = e?.[key];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+  }
+  return undefined;
+}
+
+// flair#1943: one no-op 'error' listener per process, so repeated failed
+// runs in one process never add listeners (and never trigger Node's
+// max-listeners warning on stderr).
+let stderrErrorAbsorbed = false;
+
+/** The stderr diagnostic for a failed bootstrap. NAMES the actor, the state and
+ *  the remedy; never contains a key, token, password or Authorization value. */
+function reportBootstrapFailure(err: unknown): void {
+  const kind = classifyBootstrapFailure(err);
+  const line = `flair session-start: bootstrap failed (${kind}); this session starts without bootstrap context. Next: run \`flair doctor\`, and check FLAIR_URL and this agent's key.\n`;
+  try {
+    // Best-effort (flair#1943): a failed stderr write (a closed pipe → EPIPE)
+    // must not change stdout or the exit code. The write may throw
+    // SYNCHRONOUSLY or surface later as an 'error' event on the stream; absorb
+    // both, so the hook still prints its payload and exits 0.
+    if (!stderrErrorAbsorbed) {
+      process.stderr.on("error", () => {});
+      stderrErrorAbsorbed = true;
+    }
+    process.stderr.write(line);
+  } catch {
+    // ignore — the diagnostic is best-effort
+  }
 }
 
 /** Build the SessionStart hook output JSON from a context string. */
@@ -213,7 +330,10 @@ function hookOutput(context: string): string {
 /**
  * Core hook logic, with injectable dependencies so it can be unit-tested
  * without a live Flair daemon. Returns the exact string to print to stdout.
- * NEVER throws — every failure path returns NOOP_OUTPUT.
+ * A failed bootstrap can still return a pre-compaction record and a
+ * continuity resume hint. Without bootstrap context, a pre-compaction record
+ * or a resume hint, this returns NOOP_OUTPUT. The entry
+ * point catches unexpected exceptions.
  *
  * @param rawInput   the raw stdin string (may be empty / malformed)
  * @param makeClient factory for the bootstrap client (defaults to FlairClient)
@@ -221,6 +341,7 @@ function hookOutput(context: string): string {
 export async function runHook(
   rawInput: string,
   makeClient: (agentId: string) => BootstrapClient = defaultClientFactory,
+  deps: SessionStartDeps = {},
 ): Promise<string> {
   // flair#1250: drop any unsubstituted `${...}` interpolation literal from the
   // env before the client is built, so flair-client's own process.env fallback
@@ -285,7 +406,24 @@ export async function runHook(
         ).catch(() => null)
       : Promise.resolve(null);
 
+  // Pre-compaction record (flair#2069): decided locally, fetched concurrently,
+  // the marker read and the fetch both bounded by the same continuity timeout;
+  // null (nothing shown) on any failure.
+  const precompactDone: Promise<string | null> =
+    typeof client.request === "function"
+      ? withTimeout(
+          (async () => {
+            const lookup = await resolvePreCompactLookup(input, agentId, continuity);
+            if (!lookup) return null;
+            const record = await fetchPreCompactRecord(client as unknown as ContinuityClient, agentId, lookup);
+            return record ? formatPreCompactContext(record) : null;
+          })(),
+          resolveContinuityTimeoutMs(),
+        ).catch(() => null)
+      : Promise.resolve(null);
+
   let context = "";
+  let bootstrapScope: { agentId?: string; isAdmin?: boolean } | undefined;
   try {
     const res = await withTimeout(
       Promise.resolve(
@@ -298,16 +436,46 @@ export async function runHook(
       resolveTimeoutMs(),
     );
     context = res && res.context ? String(res.context) : "";
-  } catch {
+    bootstrapScope = res?.scope;
+  } catch (err) {
     context = ""; // flair unreachable / auth error / timeout → no bootstrap context
+    // flair#1943: keeping stderr open cannot reveal an error never written to
+    // it. Write ONE line to STDERR (never stdout — that is the hook payload),
+    // so a real failure stays visible instead of being swallowed. A failed
+    // bootstrap contributes no bootstrap context; a continuity resume hint may
+    // still be returned. The entry point preserves a successful exit.
+    reportBootstrapFailure(err);
   }
 
   const resumeHint = await resumeHintDone;
+  const precompactBlock = await precompactDone;
   await presenceDone;
 
-  // Combine: bootstrap context first, then AT MOST one continuity hint line.
-  // Either piece may be absent; both absent ⇒ the inert no-op output.
+  // Action-recall refresh (flair#2067 slice 2): opt-in, runs AFTER bootstrap
+  // with the agent's own non-admin scope, through the recall client whose
+  // admin pair is empty. Publication is deadline-checked.
+  if (actionRecallEnabled()) {
+    const session = typeof input.session_id === "string" ? input.session_id : "";
+    const recallUrl = canonicalUrl(readEnvOrUnset("FLAIR_URL") ?? DEFAULT_FLAIR_URL);
+    if (bootstrapScope && session && recallUrl) {
+      const recallClient = (deps.makeRecallClient ?? defaultRecallClientFactory)(agentId);
+      await refreshActionRecallCache(recallClient, {
+        agentId,
+        url: recallUrl,
+        session,
+        bootstrapResult: { scope: bootstrapScope },
+        now: deps.now,
+        root: deps.actionRecallRoot,
+      }).catch(() => ({ ok: false }));
+    }
+  }
+
+  // Combine: the pre-compaction record FIRST (bounded, so the MAX_CHARS cut
+  // below can only shorten what follows it), then the bootstrap context, then
+  // AT MOST one continuity hint line. Any piece may be absent; all absent ⇒
+  // the inert no-op output.
   const pieces: string[] = [];
+  if (precompactBlock) pieces.push(precompactBlock);
   if (context.trim()) pieces.push(context);
   if (resumeHint) pieces.push(resumeHint);
   if (pieces.length === 0) return NOOP_OUTPUT;

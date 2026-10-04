@@ -29,6 +29,55 @@ const DEFAULT_URL = "http://localhost:19926";
 const DEFAULT_TIMEOUT = 30_000;
 
 /**
+ * True when `hostname` (as WHATWG URL reports it) is a loopback host —
+ * `localhost`, any `127.0.0.0/8` address, or IPv6 `::1` (reported as `[::1]`
+ * by `new URL().hostname`). Compared exactly, brackets included.
+ */
+function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  if (h === "localhost") return true;
+  if (h === "[::1]" || h === "::1") return true; // IPv6 loopback
+  if (/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(h)) return true; // 127.0.0.0/8
+  return false;
+}
+
+/**
+ * flair#1951 — refuse to SEND admin Basic credentials over plain `http://` to a
+ * non-loopback host. Credentials in an Authorization header on such a URL are
+ * readable by anyone on the path. Called BEFORE any request is made. Signed
+ * (Ed25519) requests and https are unaffected; loopback http is unaffected.
+ * The message names the actor, the state and the remedy, and NEVER includes the
+ * credentials.
+ */
+function assertBasicAuthTransportAllowed(target: string, base: string): void {
+  // Checks the FINAL URL the request will go to, and fails closed when it or
+  // the base cannot be parsed or when they name different hosts.
+  let parsed: URL;
+  let baseParsed: URL;
+  try {
+    parsed = new URL(target);
+    baseParsed = new URL(base);
+  } catch {
+    throw new Error(
+      "flair-client: refusing to send admin Basic credentials: the request URL could not be parsed; " +
+        "check FLAIR_URL, or use an Ed25519 key for this agent",
+    );
+  }
+  if (parsed.host !== baseParsed.host) {
+    throw new Error(
+      `flair-client: refusing to send admin Basic credentials to ${parsed.host}: it is not FLAIR_URL's host ` +
+        `(${baseParsed.host}); check FLAIR_URL, or use an Ed25519 key for this agent`,
+    );
+  }
+  if (parsed.protocol !== "http:") return; // https (and anything else) unaffected
+  if (isLoopbackHostname(parsed.hostname)) return; // loopback http unaffected
+  throw new Error(
+    `flair-client: refusing to send admin Basic credentials over plain http to ${parsed.hostname}; ` +
+      `use an https:// FLAIR_URL, or an Ed25519 key for this agent`,
+  );
+}
+
+/**
  * Combine two abort signals, safe on the OLDEST Node this package allows.
  *
  * `AbortSignal.any` landed in Node 20.3, but `engines.node` floors this package
@@ -37,6 +86,37 @@ const DEFAULT_TIMEOUT = 30_000;
  * present, else link the two signals by hand — honouring an already-aborted
  * input and forwarding the abort reason.
  */
+/**
+ * Read a fetch response body, refusing to buffer more than `maxBytes`.
+ * Opt-in (flair#2067): only callers that pass `maxResponseBytes` take this
+ * path; everyone else keeps `res.text()`. A body that exceeds the cap throws
+ * after cancelling the stream, so the caller sees an error rather than a
+ * truncated parse.
+ */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let total = 0;
+  let out = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`flair-client: response body exceeds ${maxBytes} bytes`);
+      }
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+  } finally {
+    reader.releaseLock?.();
+  }
+  return out;
+}
+
 function anySignal(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
   const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
   if (typeof any === "function") return { signal: any.call(AbortSignal, [a, b]), cleanup: () => {} };
@@ -84,6 +164,7 @@ export class FlairClient {
   private lastKeyLookup: KeyLookupState | undefined;
   private timeoutMs: number;
   private basicAuth: string | null = null;
+  private authMode: "auto" | "basic";
 
   constructor(config: FlairClientConfig) {
     // Every env fallback below goes through readEnvOrUnset (flair#1254): a
@@ -92,7 +173,8 @@ export class FlairClient {
     // reads as UNSET, so the existing defaults apply instead of the literal
     // winning the `??`/`||` chain and poisoning the connection.
     this.url = (config.url ?? readEnvOrUnset("FLAIR_URL") ?? DEFAULT_URL).replace(/\/$/, "");
-    this.agentId = config.agentId || readEnvOrUnset("FLAIR_AGENT_ID") || "";
+    this.agentId = config.agentId === undefined ? readEnvOrUnset("FLAIR_AGENT_ID") || "" : config.agentId;
+    this.authMode = config.authMode ?? "auto";
     this.keyPath = config.keyPath;
     if (config.privateKey !== undefined) {
       this.rawPrivateKey = config.privateKey;
@@ -111,6 +193,7 @@ export class FlairClient {
   }
 
   private resolveKey(): KeyObject | null {
+    if (this.authMode === "basic") return null;
     // Cache a FOUND key only. A miss must be retried on the next request —
     // flair#1271: `flair agent add` can write ~/.flair/keys/<id>.key after
     // this client was constructed (or after an earlier probe), and a cached
@@ -150,6 +233,34 @@ export class FlairClient {
   }
 
   /**
+   * flair#1987 — the FINAL request URL: `path` joined onto the base URL's OWN
+   * path with exactly one slash between them (whether or not the base ends in
+   * "/"). Parsed with `new URL` so the path sent is the path the base names.
+   *
+   * A base URL whose serialized form carries a query string or fragment is
+   * refused BEFORE any request: even a bare trailing "?" or "#" changes
+   * relative URL resolution and can discard the base's path. An ordinary base
+   * (an origin with no path) addresses exactly the URLs it did before.
+   */
+  private requestUrl(path: string): URL {
+    let base: URL;
+    try {
+      base = new URL(this.url);
+    } catch {
+      throw new Error(`flair-client: cannot parse the base URL "${this.url}"`);
+    }
+    // A bare trailing "?" or "#" reports no search/hash but still changes how
+    // the route is joined and can discard the base's path, so refuse ANY query
+    // or fragment delimiter.
+    if (base.href.includes("?") || base.href.includes("#")) {
+      throw new Error(
+        `flair-client: refusing base URL "${this.url}": a base URL must not carry a query string or fragment.`,
+      );
+    }
+    return new URL(path.replace(/^\/+/, ""), `${base.href.replace(/\/+$/, "")}/`);
+  }
+
+  /**
    * Make an authenticated request to Flair.
    *
    * `opts.signal` is an optional caller-owned abort signal (e.g. a plugin's
@@ -162,8 +273,22 @@ export class FlairClient {
     method: string,
     path: string,
     body?: unknown,
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; maxResponseBytes?: number } = {},
   ): Promise<T> {
+    if (opts.maxResponseBytes !== undefined && (!Number.isFinite(opts.maxResponseBytes) || opts.maxResponseBytes <= 0)) {
+      throw new RangeError("flair-client: invalid maxResponseBytes; expected a finite positive number");
+    }
+    if (!path.startsWith("/")) {
+      throw new Error('flair-client: a request path must start with "/"');
+    }
+    // flair#1987: build the FINAL request URL once, joined onto the base URL's
+    // OWN path, and sign exactly the path that URL carries. Signing the route
+    // alone would cover "/Memory/<id>" while a deployment served under a path
+    // sent "/<prefix>/Memory/<id>" — the server then refuses the signature
+    // (it verifies over pathname+query, see resources/agent-auth.ts).
+    const url = this.requestUrl(path);
+    const target = url.toString();
+    const signedPath = `${url.pathname}${url.search}`;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       // flair#1383: the server refuses clients older than 0.18.0 on write paths.
@@ -173,8 +298,11 @@ export class FlairClient {
     };
     const key = this.resolveKey();
     if (key) {
-      headers["Authorization"] = signRequest(this.agentId, key, method, path);
+      headers["Authorization"] = signRequest(this.agentId, key, method, signedPath);
     } else if (this.basicAuth) {
+      // flair#1951: never send admin Basic credentials over plain http to a
+      // non-loopback host. Refuse BEFORE any request is made.
+      assertBasicAuthTransportAllowed(target, this.url);
       headers["Authorization"] = this.basicAuth;
       // Basic-only snapshot — do not spread a prior inspectKeyLookup result.
       // A 401 here is about admin credentials, not key-file paths (review on #1390).
@@ -192,17 +320,21 @@ export class FlairClient {
       ? anySignal(timeoutSignal, opts.signal)
       : { signal: timeoutSignal, cleanup: () => {} };
     try {
-      const res = await fetch(`${this.url}${path}`, {
+      const res = await fetch(target, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: combined.signal,
       });
+      const text = opts.maxResponseBytes !== undefined
+        ? await readBodyCapped(res, opts.maxResponseBytes)
+        : await res.text().catch((err: unknown) => {
+          if (res.ok) throw err;
+          return "";
+        });
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
         throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);
       }
-      const text = await res.text();
       return text ? JSON.parse(text) : ({} as T);
     } finally {
       // Remove any listeners on the caller's long-lived signal on EVERY path —
@@ -237,6 +369,14 @@ export class FlairClient {
 
 // ─── Memory API ─────────────────────────────────────────────────────────────
 
+function mergeMetadata(existing: string | null | undefined, patch: Record<string, unknown>): string {
+  const parsed: unknown = existing == null ? {} : JSON.parse(existing);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("flair-client: metadata must be a JSON object");
+  }
+  return JSON.stringify({ ...parsed, ...patch });
+}
+
 class MemoryApi {
   constructor(private client: FlairClient) {}
 
@@ -254,9 +394,13 @@ class MemoryApi {
   async write(content: string, opts: {
     id?: string;
     type?: MemoryType;
+    /**
+     * Retention tier (default standard). permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget. persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it). standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days. ephemeral — routine maintenance reaps it once its TTL (24h by default) passes. No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
+     */
     durability?: Durability;
     tags?: string[];
     subject?: string;
+    metadata?: Record<string, unknown>;
     /** Writer-controlled sharing intent. Omit to let the
      *  server apply its durability-keyed default (permanent/persistent →
      *  shared, standard/ephemeral → private) — only forwarded when the
@@ -297,6 +441,7 @@ class MemoryApi {
     // the server's durability-keyed default (Memory.post/put) is the one
     // source of truth for the default, never duplicated here.
     if (opts.visibility !== undefined) record.visibility = opts.visibility;
+    if (opts.metadata !== undefined) record.metadata = JSON.stringify(opts.metadata);
     // Passthrough hints — the server strips these before persisting; they are
     // never stored on the record itself.
     if (opts.dedup !== undefined) record.dedup = opts.dedup;
@@ -312,7 +457,7 @@ class MemoryApi {
     // row (resources/Memory.ts). Absent = omitted, zero behavior change.
     if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
 
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, record, {
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, record, {
       signal: opts.signal,
     });
     // Merge the server response (deduplicated/matchedId/matchConfidence/
@@ -342,16 +487,18 @@ class MemoryApi {
    * MemoryGrant from that owner — otherwise it denies the request (cross-agent
    * write).
    */
-  async update(id: string, content: string, opts: { preserveHistory?: boolean; usedMemoryIds?: string[] } = {}): Promise<Memory> {
+  async update(id: string, content: string, opts: { preserveHistory?: boolean; usedMemoryIds?: string[]; metadata?: Record<string, unknown> } = {}): Promise<Memory> {
     const existing = await this.get(id);
     if (!existing) {
-      throw new FlairError("PUT", `/Memory/${id}`, 404, `memory ${id} not found`);
+      throw new FlairError("PUT", `/Memory/${encodeRecordId(id)}`, 404, `memory ${id} not found`);
     }
+    const metadata = opts.metadata === undefined ? existing.metadata : mergeMetadata(existing.metadata, opts.metadata);
 
     if (opts.preserveHistory) {
       const newId = `${this.client.agentId}-${crypto.randomUUID()}`;
       const record: Record<string, unknown> = {
         ...existing,
+        ...(metadata !== undefined ? { metadata } : {}),
         id: newId,
         content,
         supersedes: id,
@@ -390,11 +537,12 @@ class MemoryApi {
       // `supersedes` being set also makes the server bypass the dedup gate
       // for this write (it's an intentional version link, not an ambiguous
       // new write).
-      const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${newId}`, record);
+      const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(newId)}`, record);
       return { ...record, ...(response ?? {}) } as unknown as Memory;
     }
 
     const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
+    if (metadata !== undefined) merged.metadata = metadata;
     delete merged.embedding;
     delete merged.embeddingModel;
     delete merged.deduped;
@@ -403,7 +551,7 @@ class MemoryApi {
     if (Array.isArray(opts.usedMemoryIds) && opts.usedMemoryIds.length > 0) {
       merged.usedMemoryIds = opts.usedMemoryIds;
     }
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, merged);
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, merged);
     return { ...merged, id, ...(response ?? {}) } as unknown as Memory;
   }
 
@@ -429,7 +577,7 @@ class MemoryApi {
 
   /** Get a memory by ID. */
   async get(id: string): Promise<Memory | null> {
-    try { return await this.client.request("GET", `/Memory/${id}`); }
+    try { return await this.client.request("GET", `/Memory/${encodeRecordId(id)}`); }
     catch (e) {
       if (e instanceof FlairError && e.status === 404) return null;
       throw e;
@@ -467,9 +615,9 @@ class MemoryApi {
     const rows: Memory[] = Array.isArray(result) ? result : ((result as { results?: Memory[] })?.results ?? []);
 
     const memories = rows.filter((memory) => {
-      // Keep the agent-scoped contract: the server's read scope also admits
-      // shared memories granted to this agent, but list() is an own-memory
-      // listing (the old explicit agentId condition had the same effect).
+      // The server admits own and other agents' non-private records; this
+      // listing additionally restricts results to the configured owner (the
+      // old explicit agentId condition had the same effect).
       if (memory.agentId !== this.client.agentId) return false;
       if (opts.subject !== undefined && memory.subject !== opts.subject) return false;
       if (opts.type !== undefined && memory.type !== opts.type) return false;
@@ -492,7 +640,7 @@ class MemoryApi {
 
   /** Delete a memory. */
   async delete(id: string): Promise<void> {
-    await this.client.request("DELETE", `/Memory/${id}`);
+    await this.client.request("DELETE", `/Memory/${encodeRecordId(id)}`);
   }
 }
 
@@ -537,6 +685,30 @@ class MemoryApi {
 export function canonicalRelationshipId(agentId: string, subject: string, predicate: string, object: string): string {
   const material = [agentId, subject, predicate, object].join("\u0000").toLowerCase();
   return createHash("sha256").update(material, "utf8").digest().subarray(0, 16).toString("base64url");
+}
+
+/**
+ * The one encoder for a record id used as the single dynamic path segment of a
+ * `/Memory/<id>` or `/Relationship/<id>` request (flair#1970). Percent-encoding
+ * makes an id with reserved URL characters (`#`, `?`, `/`, `%`, space, …) reach
+ * the server as ONE path segment that decodes back to the id, so it addresses
+ * exactly that record.
+ *
+ * REFUSES an id that is exactly `.` or `..`: percent-encoding leaves those
+ * unchanged, and URL normalization collapses `/Memory/.` to `/Memory/` and
+ * `/Memory/..` to `/`, so the sent path would not be the id (nor the signed
+ * path). Such an id cannot address its record, so it is an error, not a
+ * request. Exported so every in-repo caller that builds the same path can share
+ * one rule.
+ */
+export function encodeRecordId(id: string): string {
+  if (id === "." || id === "..") {
+    throw new Error(
+      `record id ${JSON.stringify(id)} is a URL path dot-segment ("." or ".."); ` +
+        `it cannot be addressed as one path segment of /Memory/<id> or /Relationship/<id>. Use a different id.`,
+    );
+  }
+  return encodeURIComponent(id);
 }
 
 class RelationshipApi {
@@ -594,14 +766,14 @@ class RelationshipApi {
     if (input.validTo !== undefined) record.validTo = input.validTo;
     if (input.source !== undefined) record.source = input.source;
 
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Relationship/${id}`, record);
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Relationship/${encodeRecordId(id)}`, record);
     return { ...record, id, agentId: this.client.agentId, ...(response ?? {}) } as unknown as Relationship;
   }
 
   /** Get a relationship by canonical id (or any id, e.g. one openclaw wrote
    *  under its own convention). Returns null on 404 (not found / not yours). */
   async get(id: string): Promise<Relationship | null> {
-    try { return await this.client.request("GET", `/Relationship/${id}`); }
+    try { return await this.client.request("GET", `/Relationship/${encodeRecordId(id)}`); }
     catch (e) {
       if (e instanceof FlairError && e.status === 404) return null;
       throw e;
@@ -610,7 +782,7 @@ class RelationshipApi {
 
   /** Delete a relationship by id. */
   async delete(id: string): Promise<void> {
-    await this.client.request("DELETE", `/Relationship/${id}`);
+    await this.client.request("DELETE", `/Relationship/${encodeRecordId(id)}`);
   }
 }
 

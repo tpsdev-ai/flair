@@ -44,6 +44,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createDataSnapshot, launchdLabel, launchdPlistPath } from "../../src/cli";
+import { installFakeServiceManager } from "../helpers/fake-launchctl.ts";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 
@@ -53,11 +54,37 @@ const LEGACY_PER_USER_PORT = 20881;
 /** `DEFAULT_PORT` in src/cli.ts. A refusal must never quietly answer with it. */
 const DEFAULT_PORT = 19926;
 
+/**
+ * Read the TCP port a stub reports in `path`.
+ *
+ * The stub wrote the file with a plain `writeFileSync`, which created the
+ * file BEFORE it wrote the content. A reader keyed on the file's EXISTENCE
+ * alone could read it mid-write, get an empty string, and parse `Number("")` as
+ * 0 — which is how this file failed in the darwin-gated lane on an unrelated
+ * PR (`Expected to not contain: "0"`, flair#2130). Wait for a real port, and
+ * fail loudly when none appears, instead of trusting the file's presence.
+ */
+async function readStubPort(path: string, timeoutMs = 5_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (existsSync(path)) {
+      const port = Number(readFileSync(path, "utf-8").trim());
+      if (Number.isInteger(port) && port > 0) return port;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`stub did not report a valid port at ${path} within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 describe("flair#914 — an instance's port comes from Harper's config in its data directory", () => {
   let tmpHome: string;
   let shimBin: string;
   let defaultDataDir: string;
   let launchctlLog: string;
+  let svc: ReturnType<typeof installFakeServiceManager> | undefined;
+  let savedPath: string | undefined;
   const scratchDirs: string[] = [];
   const spawned: Array<{ kill: (s?: number) => void }> = [];
 
@@ -74,9 +101,16 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
     launchctlLog = join(tmpHome, "launchctl-invocations.log");
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
+    // flair#2062: on a systemd host, the doctor/snapshot paths here ask
+    // `systemctl --user show` about the caller's cgroup unit. Lay a recording
+    // fake first on PATH (this file's own launchctl shim stays ahead of it) with
+    // a fail-closed tripwire behind it, so no run can reach the host systemctl.
+    savedPath = process.env.PATH;
+    svc = installFakeServiceManager("flair914-svc-");
+    process.env.PATH = `${svc.pathEntry}:${savedPath ?? ""}`;
   });
 
   afterEach(() => {
@@ -84,6 +118,14 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
       // SIGKILL: one stub deliberately ignores SIGTERM, and a survivor would
       // hold its port into the next test.
       try { proc.kill(9); } catch { /* already gone */ }
+    }
+    try {
+      svc?.assertClear();
+    } finally {
+      svc?.cleanup();
+      svc = undefined;
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
     }
     for (const dir of [tmpHome, shimBin, ...scratchDirs.splice(0)]) {
       rmSync(dir, { recursive: true, force: true });
@@ -179,19 +221,18 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import { writeFileSync, renameSync } from "node:fs";`,
         // flair#1478: probeHealth requires Flair's public /Health shape, not a bare 200.
         `const srv = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"ok":true,"version":"0.53.0","buildCommit":null,"searchReady":true}'); });`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
+        // Write the port ATOMICALLY (temp + rename): the reader waits on this
+        // file, so a plain writeFileSync let it read the file between create
+        // and write and parse the port as 0 (flair#2130).
+        `srv.listen(0, "127.0.0.1", () => { const t = process.argv[2] + ".tmp"; writeFileSync(t, String(srv.address().port)); renameSync(t, process.argv[2]); });`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script, portFile], { stdout: "ignore", stderr: "ignore" });
     spawned.push(proc);
-    for (let i = 0; i < 100 && !existsSync(portFile); i++) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    if (!existsSync(portFile)) throw new Error("health stub did not report a port");
-    const port = Number(readFileSync(portFile, "utf-8").trim());
+    const port = await readStubPort(portFile);
     return {
       port,
       pid: (proc as unknown as { pid: number }).pid,
@@ -951,9 +992,41 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
 
       expect(exitCode).toBe(0);
       expect(stdout + stderr).toMatch(/Flair stopped/i);
-      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(true);
+      // flair#2055: the self-heal wrote the sidecar to verify this identity, and
+      // the stop that followed CONFIRMED the pid gone — so the sidecar is
+      // removed on the way out. "Flair stopped" (which requires a VERIFIED
+      // identity, i.e. the self-heal fired) plus the dead pid is the heal proof;
+      // a leftover sidecar naming a dead pid is exactly what #2055 removes.
+      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(false);
       expect(pidAlive(pid)).toBe(false);
     },
     30_000,
   );
+});
+
+describe("readStubPort — the stub's port handshake is not racy (flair#2130)", () => {
+  test("waits for a port written AFTER the file exists, never returns 0 for an empty file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair914-port-"));
+    try {
+      const portFile = join(dir, "stub-port");
+      // The file exists (as writeFileSync creates it) with no content yet —
+      // the exact state that made the old existence-only read parse port 0.
+      writeFileSync(portFile, "");
+      setTimeout(() => writeFileSync(portFile, "41234\n"), 50);
+      expect(await readStubPort(portFile)).toBe(41234);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fails loudly when no valid port ever appears", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair914-port-"));
+    try {
+      const portFile = join(dir, "stub-port");
+      writeFileSync(portFile, "not-a-port\n");
+      await expect(readStubPort(portFile, 200)).rejects.toThrow(/did not report a valid port/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

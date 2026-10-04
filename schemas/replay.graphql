@@ -1,0 +1,18 @@
+# Replay store shared by agent auth (TPS-Ed25519) and federation body
+# signatures (flair#2061). One row per accepted nonce, written once by
+# resources/replay-store.ts under a per-key lock, and read by every Harper
+# worker thread of this instance:
+#   a:<agentId>:<nonce>   agent auth
+#   f:<nonce>             federation
+#
+# replicate: false — local to this instance.
+# expiration: 120 — seconds a row is kept. Harper's expiration scan runs once
+#   per instance (on the last worker) and removes a row no earlier than this
+#   after it was written. It MUST equal REPLAY_RETENTION_S in
+#   resources/replay-store.ts and stay longer than twice every replay window
+#   (30 s each today); test/unit-isolated/replay-store.test.ts pins both.
+# Internal bookkeeping only: no @export, never served.
+type ReplayNonce @table(database: "flair", replicate: false, expiration: 120) {
+  id: ID @primaryKey               # scope-prefixed key (see above)
+  seenAt: Long!                    # ms-epoch when recorded
+}

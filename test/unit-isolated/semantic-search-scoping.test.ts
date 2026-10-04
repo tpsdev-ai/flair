@@ -71,6 +71,7 @@ function matchesCondition(record: any, cond: any): boolean {
 }
 
 let memoryStore: Map<string, any>;
+let pointerStore: Map<string, any>;
 let memoryGrants: any[];
 
 function memorySearchGen(query: any) {
@@ -102,6 +103,23 @@ const databasesMock = {
       },
     },
     Agent: { get: async () => null, search: async () => [] },
+    MemoryHostSource: {
+      // flair#1940 A1' item 4 (j1): the semantic-search gated join reads the
+      // pointer row by memoryId (batched). Mirror the MemoryHostSource table.
+      search: (query: any) => {
+        const conds = Array.isArray(query?.conditions) ? query.conditions : [];
+        const op = query?.operator || "and";
+        let rows = Array.from(pointerStore.values());
+        if (conds.length > 0) {
+          rows = rows.filter((r) => {
+            const rs = conds.map((c: any) => matchesCondition(r, c));
+            return op === "or" ? rs.some(Boolean) : rs.every(Boolean);
+          });
+        }
+        async function* gen() { for (const r of rows) yield r; }
+        return gen();
+      },
+    },
   },
 };
 
@@ -121,6 +139,7 @@ const anonCtx = () => ({ tpsAnonymous: true });
 
 function reset() {
   memoryStore = new Map();
+  pointerStore = new Map();
   memoryGrants = [];
   embedInputTypeCalls = [];
 }
@@ -204,6 +223,32 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
     const res: any = await s.post({});
     const ids = res.results.map((r: any) => r.id).sort();
     expect(ids).toEqual(["a", "b"]);
+  });
+
+  // ─── flair#1940 A1' item 4 (j1): the gated join on the SemanticSearch surface ──
+  it("(j1) DEFAULT selection returns the author's own pointer, and 'withheld' to a non-author on a shared record", async () => {
+    reset();
+    // A SHARED record the non-author CAN read, whose pointer is author-only
+    // (scopeAtWrite null). DEFAULT_SELECT omits `provenance`, so a
+    // provenance-based join would fail here — the pointer row's authorId is
+    // what decides.
+    memoryStore.set("m-shared", { id: "m-shared", agentId: "agent-a", content: "alpha", visibility: "shared", instanceToken: "tok-j1" });
+    pointerStore.set("m-shared", {
+      memoryId: "m-shared",
+      hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "run-aaaaaaaa" }),
+      scopeAtWrite: null,
+      authorId: "agent-a",
+      memoryInstanceToken: "tok-j1",
+    });
+
+    const asAuthor: any = await makeSearch(agentCtx("agent-a")).post({ limit: 10 });
+    const authorRec = asAuthor.results.find((r: any) => r.id === "m-shared");
+    expect(authorRec.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-aaaaaaaa" }); // assertion: the author's own pointer, as the validated object
+
+    const asOther: any = await makeSearch(agentCtx("agent-b")).post({ limit: 10 });
+    const otherRec = asOther.results.find((r: any) => r.id === "m-shared");
+    expect(otherRec).toBeDefined(); // assertion: the shared RECORD is readable
+    expect(otherRec.hostSource).toBe("withheld"); // assertion: the pointer is withheld from a non-author
   });
 
   it("archived records stay excluded regardless of the scoping change", async () => {

@@ -2,7 +2,16 @@ import type { KeyObject } from "node:crypto";
 
 export type { KeyObject };
 
-/** Memory durability levels. */
+/**
+ * Memory durability levels.
+ *
+ * Retention, decay and bootstrap ordering by tier:
+ * permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+ * persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+ * standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+ * ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+ * No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
+ */
 export type Durability = "permanent" | "persistent" | "standard" | "ephemeral";
 
 /** Memory type classification. */
@@ -27,6 +36,7 @@ export interface Memory {
   durability: Durability;
   tags: string[];
   subject?: string;
+  metadata?: string | null;
   /** Writer-controlled sharing intent. Absent on records written before this
    *  field existed — the server treats absence as "shared" (migration-
    *  invariant: an existing memory keeps reading to exactly whoever holds a
@@ -80,7 +90,10 @@ export interface Relationship {
   createdAt: string;
   updatedAt?: string;
   /** JSON blob, same shape as Memory.provenance — { v, verified: { agentId,
-   *  timestamp }, claimed?: { model, client } }. Absent on rows written before this
+   *  timestamp, receivedAt }, claimed?: { createdAt, model, client } }.
+   *  `verified.*` is server-derived (timestamp and receivedAt are the server
+   *  write instant); `claimed.*` is the caller's unverified claim (the record's
+   *  own `createdAt` is the claimed creation time). Absent on rows written before this
    *  field existed (migration-equivalence: additive/nullable). */
   provenance?: string;
   /** Always true after a successful write() — the server never suppresses a
@@ -125,14 +138,20 @@ export interface BootstrapResult {
   memoryCount: number;
   soulCount: number;
   tokenEstimate: number;
+  /** flair#1182/#2067 — resolved caller identity and read scope. Present on a
+   *  live server; a caller that needs it (the action-recall refresh) treats an
+   *  absent scope as "no cache". */
+  scope?: { agentId?: string; isAdmin?: boolean; reads?: string };
 }
 
 /** Client configuration. */
 export interface FlairClientConfig {
   /** Flair server URL. Default: http://localhost:19926 */
   url?: string;
-  /** Agent ID for authentication and data scoping. Falls back to FLAIR_AGENT_ID env var. */
+  /** Agent ID for authentication and data scoping. Uses FLAIR_AGENT_ID only when omitted. */
   agentId?: string;
+  /** "basic" disables Ed25519 key resolution. Default: "auto". */
+  authMode?: "auto" | "basic";
   /** Path to Ed25519 private key file. Auto-resolved if omitted. */
   keyPath?: string;
   /** In-memory Ed25519 private key (PEM string or pre-loaded KeyObject).

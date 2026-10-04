@@ -61,6 +61,8 @@ export type SkillOutcome = {
   reason: string;
   loaded: boolean;
   line: string;
+  /** The assignment this outcome decides. */
+  input: SkillAssignmentInput;
 };
 
 export function parseSkillMetadata(metadata: unknown): Record<string, unknown> {
@@ -192,6 +194,14 @@ function assignmentKey(content: any, existing?: any): string | undefined {
 export function refuseSkillAssignmentWrite(content: any, existing?: any): Response | null {
   if (assignmentKey(content, existing) !== SKILL_ASSIGNMENT_KEY) return null;
   const metadata = content?.metadata !== undefined ? content.metadata : existing?.metadata;
+  // flair#2141 S1: `metadata.optOut`, when present, is a boolean.
+  const parsed = parseSkillMetadata(metadata);
+  if (Object.hasOwn(parsed, "optOut") && typeof parsed.optOut !== "boolean") {
+    return new Response(
+      JSON.stringify({ error: "skill_opt_out_not_boolean", message: "metadata.optOut must be true or false" }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
   const result = registerSkillAssignment({
     key: SKILL_ASSIGNMENT_KEY,
     value: content?.value ?? existing?.value,
@@ -209,7 +219,7 @@ export function refuseSkillAssignmentWrite(content: any, existing?: any): Respon
   );
 }
 
-function normalizePriority(p: unknown): string {
+export function normalizePriority(p: unknown): string {
   if (typeof p === "string" && Object.hasOwn(PRIORITY_RANK, p)) return p;
   return "standard";
 }
@@ -218,7 +228,7 @@ function priorityRank(p: string): number {
   return PRIORITY_RANK[p] ?? PRIORITY_RANK.standard;
 }
 
-function formatBase(name: string, priority: string, source: string | undefined): string {
+export function formatBase(name: string, priority: string, source: string | undefined): string {
   const src = source ? `, source: ${source}` : "";
   return `- ${name} (${priority} priority${src})`;
 }
@@ -234,6 +244,7 @@ function compareOutcomes(a: SkillOutcome, b: SkillOutcome): number {
 }
 
 function outcomeOf(
+  input: SkillAssignmentInput,
   name: string,
   priority: string,
   source: string | undefined,
@@ -249,7 +260,7 @@ function outcomeOf(
       ? ` [refused: ${reason}]`
       : ` [SKILL_CONFLICT refused: ${reason}]`;
   }
-  return { name, priority, source, decision, reason, loaded, line };
+  return { name, priority, source, decision, reason, loaded, line, input };
 }
 
 /**
@@ -270,6 +281,7 @@ export function resolveActiveSkills(assignments: SkillAssignmentInput[]): {
   outcomes: SkillOutcome[];
 } {
   const prepared: Array<{
+    input: SkillAssignmentInput;
     name: string;
     priority: string;
     source: string | undefined;
@@ -282,10 +294,10 @@ export function resolveActiveSkills(assignments: SkillAssignmentInput[]): {
     const priority = normalizePriority(raw.priority);
     const source = skillSourceOf(raw);
     if (source && !isDurableSkillSource(source)) {
-      outcomes.push(outcomeOf(name, priority, source, "refused", `non-durable source ${source}`, false));
+      outcomes.push(outcomeOf(raw, name, priority, source, "refused", `non-durable source ${source}`, false));
       continue;
     }
-    prepared.push({ name, priority, source });
+    prepared.push({ input: raw, name, priority, source });
   }
 
   const byName = new Map<string, typeof prepared>();
@@ -298,7 +310,7 @@ export function resolveActiveSkills(assignments: SkillAssignmentInput[]): {
   for (const group of byName.values()) {
     if (group.length === 1) {
       const only = group[0];
-      outcomes.push(outcomeOf(only.name, only.priority, only.source, "loaded", "sole", true));
+      outcomes.push(outcomeOf(only.input, only.name, only.priority, only.source, "loaded", "sole", true));
       continue;
     }
     const best = Math.min(...group.map((g) => priorityRank(g.priority)));
@@ -306,6 +318,7 @@ export function resolveActiveSkills(assignments: SkillAssignmentInput[]): {
     if (top.length === 1) {
       const winner = top[0];
       outcomes.push(outcomeOf(
+        winner.input,
         winner.name,
         winner.priority,
         winner.source,
@@ -316,6 +329,7 @@ export function resolveActiveSkills(assignments: SkillAssignmentInput[]): {
       for (const loser of group) {
         if (loser === winner) continue;
         outcomes.push(outcomeOf(
+          loser.input,
           loser.name,
           loser.priority,
           loser.source,
@@ -330,7 +344,7 @@ export function resolveActiveSkills(assignments: SkillAssignmentInput[]): {
     const reason =
       `equal-priority tie at ${top[0].priority}; load refused (sources: ${sources.join(", ")})`;
     for (const member of group) {
-      outcomes.push(outcomeOf(member.name, member.priority, member.source, "refused", reason, false));
+      outcomes.push(outcomeOf(member.input, member.name, member.priority, member.source, "refused", reason, false));
     }
   }
 

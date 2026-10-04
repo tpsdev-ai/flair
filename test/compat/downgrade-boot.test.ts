@@ -491,7 +491,11 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     if (baselineBootError) {
       throw new Error("skipped: baseline never booted — see the boot test above for the documented failure");
     }
-    const res = await fetch(`${baseline!.httpURL}/Presence`);
+    // GET /Presence needs a verified reader since 0.56.0 (PRESENCE_PUBLIC_ROSTER opts
+    // back in), and the npm baseline is whatever `latest` is today. Read as the
+    // baseline's admin so the check holds for every baseline version.
+    const auth = "Basic " + Buffer.from(`admin:${baseline!.admin.password}`).toString("base64");
+    const res = await fetch(`${baseline!.httpURL}/Presence`, { headers: { Authorization: auth } });
     expect(res.status).toBe(200);
     const roster = await res.json() as any[];
     const entry = roster.find((r) => r.id === AGENT_ID);

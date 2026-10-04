@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 // Import after mock setup
-const { FlairClient, FlairError } = await import("../src/client.js");
+const { FlairClient, FlairError, canonicalRelationshipId } = await import("../src/client.js");
 const authMod = await import("../src/auth.js");
 import { generateKeyPairSync } from "node:crypto";
 
@@ -54,6 +54,29 @@ describe("FlairClient", () => {
   test("agentId is set from config", () => {
     const client = new FlairClient({ agentId: "mybot" });
     expect(client.agentId).toBe("mybot");
+  });
+
+  test("an omitted agentId uses FLAIR_AGENT_ID", async () => {
+    process.env.FLAIR_AGENT_ID = "ambient-agent";
+    const { privateKey } = generateKeyPairSync("ed25519");
+    for (const config of [{}, { agentId: undefined }]) {
+      const client = new FlairClient({ ...config, privateKey });
+      expect(client.agentId).toBe("ambient-agent");
+      await client.request("GET", "/Memory");
+    }
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    for (const [, init] of (mockFetch as any).mock.calls) {
+      expect(init.headers.Authorization).toStartWith("TPS-Ed25519 ambient-agent:");
+    }
+  });
+
+  test("an explicit empty agentId does not use FLAIR_AGENT_ID", () => {
+    process.env.FLAIR_AGENT_ID = "ambient-agent";
+    for (const agentId of ["", " \t ", "explicit-agent"]) {
+      const client = new FlairClient({ agentId });
+      expect(client.agentId).toBe(agentId);
+    }
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   // ─── flair#718 authorship-provenance ───────────────────────────────────────
@@ -1048,5 +1071,89 @@ describe("privateKey config option", () => {
     expect(inspectSpy).toHaveBeenCalledWith("test", undefined);
 
     inspectSpy.mockRestore();
+  });
+});
+
+describe("Memory and Relationship ids in request paths are percent-encoded", () => {
+  // Every id must reach the server as exactly one path segment that decodes
+  // back to the id, whatever characters it contains.
+  const ids = ["a#b", "x?y=1", "a/b/c", "50%", "lg:agent:ns:key", "sp ace"];
+
+  function onlyPathSegment(call: unknown[], resource = "Memory"): string {
+    const url = new URL(String(call[0]));
+    const parts = url.pathname.split("/").filter(Boolean);
+    expect(parts.length).toBe(2); // assertion: /<resource>/<one segment>
+    expect(parts[0]).toBe(resource);
+    expect(url.search).toBe("");
+    expect(url.hash).toBe("");
+    return decodeURIComponent(parts[1]);
+  }
+
+  test("write, get and delete address exactly the given id", async () => {
+    for (const id of ids) {
+      mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+      const client = new FlairClient({ agentId: "test" });
+      await client.memory.write("hello", { id });
+      await client.memory.get(id);
+      await client.memory.delete(id);
+      for (const call of mockFetch.mock.calls) expect(onlyPathSegment(call)).toBe(id);
+      expect(mockFetch.mock.calls.length).toBe(3);
+    }
+  });
+
+  test("update reads and writes exactly the given id", async () => {
+    for (const id of ids) {
+      mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify({ id, agentId: "test", content: "old" }), { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+      const client = new FlairClient({ agentId: "test" });
+      await client.memory.update(id, "new");
+      expect(mockFetch.mock.calls.length).toBeGreaterThan(0);
+      for (const call of mockFetch.mock.calls) expect(onlyPathSegment(call)).toBe(id);
+    }
+  });
+
+  test("relationship get and delete address exactly the given id", async () => {
+    for (const id of ids) {
+      mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+      const client = new FlairClient({ agentId: "test" });
+      await client.relationship.get(id);
+      await client.relationship.delete(id);
+      expect(mockFetch.mock.calls.length).toBe(2);
+      for (const call of mockFetch.mock.calls) expect(onlyPathSegment(call, "Relationship")).toBe(id);
+    }
+  });
+
+  test("relationship write sends its canonical id as one path segment (route check — the id is URL-safe by construction)", async () => {
+    // The id is derived (agentId+subject+predicate+object hashed to base64url),
+    // so it is URL-safe by construction; this is a ROUTE check that the write
+    // sends it as ONE segment after /Relationship/ with no query and no
+    // fragment, exactly as get and delete do — NOT an encoding guard (it cannot
+    // go red on an interpolation revert, because the id needs no encoding).
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+    const client = new FlairClient({ agentId: "test" });
+    const expectedId = canonicalRelationshipId("test", "nathan", "manages", "flair");
+    await client.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
+    expect(mockFetch.mock.calls.length).toBe(1);
+    expect(onlyPathSegment(mockFetch.mock.calls[0], "Relationship")).toBe(expectedId);
+  });
+
+  test("a '.'/'..' id is refused before any request (#1970)", async () => {
+    // Percent-encoding leaves '.'/'..' unchanged and URL normalization would
+    // collapse '/Memory/.' to '/Memory/' and '/Memory/..' to '/', so such an id
+    // cannot address its record: the client refuses it and sends NOTHING.
+    for (const bad of [".", ".."]) {
+      mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+      const client = new FlairClient({ agentId: "test" });
+      await expect(client.memory.get(bad)).rejects.toThrow(/dot-segment/); // assertion: refused, naming the rule
+      await expect(client.memory.delete(bad)).rejects.toThrow(/dot-segment/);
+      await expect(client.memory.update(bad, "x")).rejects.toThrow(/dot-segment/);
+      await expect(client.relationship.get(bad)).rejects.toThrow(/dot-segment/);
+      await expect(client.relationship.delete(bad)).rejects.toThrow(/dot-segment/);
+      expect(mockFetch.mock.calls.length).toBe(0); // assertion: nothing sent for the refused Memory/Relationship ids
+    }
   });
 });

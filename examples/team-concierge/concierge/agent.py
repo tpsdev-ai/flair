@@ -141,6 +141,10 @@ async def record_decision(decision: str, tool_context: ToolContext) -> dict:
     # write "as" another user. The connector derives the compound tag
     # adk:concierge:<user> from app_name+user_id internally.
     user_id = tool_context.user_id
+    if not decision or not decision.strip():
+        return {
+            "error": "decision must be non-empty — provide the decision as one statement",
+        }
     await service.add_memory(
         app_name=APP_NAME,
         user_id=user_id,
@@ -169,6 +173,10 @@ async def record_personal(note: str, tool_context: ToolContext) -> dict:
     """
     service = _flair_service(tool_context)
     user_id = tool_context.user_id
+    if not note or not note.strip():
+        return {
+            "error": "note must be non-empty — provide the note as one statement",
+        }
     await service.add_memory(
         app_name=APP_NAME,
         user_id=user_id,

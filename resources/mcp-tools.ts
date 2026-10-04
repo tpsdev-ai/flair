@@ -1,6 +1,5 @@
 /**
- * mcp-tools.ts — the 12 curated flair tools for the Model-2 custom /mcp handler.
- *
+ * mcp-tools.ts — the 17 curated flair tools for the Model-2 custom /mcp handler.
  * Curated BY CONSTRUCTION: this module implements a fixed set of tools, each a
  * thin wrapper over the existing flair Resource handler. No business logic is
  * re-implemented — the wrapped handlers (Memory / SemanticSearch /
@@ -10,7 +9,7 @@
  * per-source scoping — see resources/AttentionQuery.ts's module doc), so the
  * MCP surface inherits the SAME security model as the signed-REST path. There
  * is no raw CRUD surface — the only way to reach the datastore through /mcp is
- * via one of these 14 semantic tools.
+ * via one of these 17 semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
  *   memory_basement · memory_restore · skill_store · skill_search · skill_get ·
@@ -383,8 +382,9 @@ function projectSkillCard(r: any): Record<string, unknown> {
  *   - the HNSW leg over the stored embedding — which for a skill row IS the
  *     `trigger` embedding (#1543), so the task is ranked against "when to use";
  *   - the 'query' inputType SemanticSearch already applies to the task string;
- *   - resolveReadScope (own any-visibility + every non-private row) — NEVER
- *     another agent's private skill.
+ *   - Non-admin searches use resolveReadScope: own records at any visibility
+ *     plus other agents' non-private records. Administrator searches can
+ *     include private skills.
  * Identity is the RESOLVED agent; no body agentId is forwarded, so a caller can
  * never widen scope past its own read-scope (the SemanticSearch cross-agent
  * guard would 403 a mismatch anyway).
@@ -419,9 +419,9 @@ async function skillSearch(agent: ResolvedAgent, args: any) {
  * skill_get — the full skill by id (flair#1546 component 2).
  *
  * A thin wrapper over Memory.get() — the SAME by-id read as memory_get, under
- * the SAME read-scope gate (makeByIdReadGate → resolveReadScope): a non-owner
- * cannot read another agent's PRIVATE skill (it 404s), exactly as a private
- * memory does. skill_get is the disclosure step after skill_search's catalog:
+ * the SAME read-scope gate (makeByIdReadGate → resolveReadScope): a non-admin
+ * caller cannot read another agent's private skill; administrators retain
+ * access, exactly as a private memory does. skill_get is the disclosure step after skill_search's catalog:
  * it returns the full procedure (`content`) + trigger + metadata.
  *
  * It is a SKILL tool, not a general reader: a readable id that is NOT a skill
@@ -562,10 +562,10 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
 // retrievable via memory_get and memory_search(includeArchived:true)). Restore
 // is the deliberate, GLOBAL inverse — it un-retires the memory for EVERY
 // session, not a session-local view (that is drawers, Deliverable B, which does
-// not exist yet). Both are writes scoped to the caller's own lane: the read
-// uses Memory.get()'s read-scope gate and the write uses Memory.put()'s
-// ownership gate (stampAttribution), so a caller can neither read nor write
-// another agent's memory here.
+// not exist yet). Non-admin agent reads use Memory.get()'s owner-and-
+// visibility scope; administrator and trusted internal reads are unfiltered.
+// Mutating another agent's record requires administrator or trusted internal
+// authority (Memory.put()'s stampAttribution gate).
 async function memoryBasement(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
   const id = args?.id;
@@ -617,7 +617,9 @@ async function memoryGet(agent: ResolvedAgent, args: any) {
   // path the Ed25519 REST route takes: it loads the row, hands the override a
   // `RequestTarget` (never a bare string), and still dispatches through
   // Memory.get() → makeByIdReadGate → resolveReadScope, so the scope model is
-  // unchanged (own + org-non-private only). See resources/in-process.ts:223.
+  // unchanged: non-admin agents can read their own and other agents'
+  // non-private records; administrator reads are unfiltered. See
+  // resources/in-process.ts:223.
   //
   // flair#744 slice 1 — opt-in inline trust block. The instance call passed
   // `includeTrust` as a 2nd positional opts arg to get(); the static form has
@@ -885,8 +887,9 @@ export interface ToolInvariants {
    *   result[total] ≈ Σ result[terms]
    *
    * (for bootstrap: tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens
-   * + trustTokens + eventsTokens — the identity documented at the counters'
-   * definition in resources/MemoryBootstrap.ts's response tail). Every term
+   * + trustTokens + eventsTokens + skillsTokens + skillDiagnosticsTokens — the
+   * identity documented at the counters' definition in
+   * resources/MemoryBootstrap.ts's response tail). Every term
    * must be a NUMBER (the counter convention reports 0, never omits), and the
    * gap `total - Σ terms` is bounded on BOTH sides:
    *
@@ -1197,7 +1200,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_search: {
         impl: memorySearch,
     contract: {
-      summary: "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own and other agents' non-private memories; each hit carries content, never the raw embedding.",
+      summary: "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding.",
       requiredFields: ["results"],
       fieldTypes: { results: "array" },
       invariants: {
@@ -1234,8 +1237,8 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
     contract: {
       summary:
         "{ results: SkillCard[] } — the skill catalog (lightweight id/name/trigger/description/tags/agentId, " +
-        "ranked by trigger match); the full procedure and the raw embedding are never on a card. Scoped to the " +
-        "caller's own + non-private skills; another agent's private skill is never returned.",
+        "ranked by trigger match); the full procedure and the raw embedding are never on a card. Non-admin callers " +
+        "can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills.",
       requiredFields: ["results"],
       fieldTypes: { results: "array" },
       invariants: {
@@ -1252,13 +1255,14 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
     contract: {
       summary:
         "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a " +
-        "skill readable under the caller's read-scope — embedding + embeddingModel always stripped. A non-owner " +
-        "cannot read another agent's private skill, and a readable non-skill id is not found (both 404).",
+        "skill readable under the caller's read-scope — embedding + embeddingModel always stripped. A non-admin " +
+        "caller cannot read another agent's private skill; administrators retain access. A readable non-skill id " +
+        "is reported as not found.",
       requiredFields: ["id", "agentId", "content", "createdAt"],
       fieldTypes: { id: "string", agentId: "string", content: "string" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
-      errorShape: { trigger: "get a non-skill / unreadable / another agent's private id (404)", fields: ["error", "status"] },
+      errorShape: { trigger: "get a non-skill or unreadable id (404)", fields: ["error", "status"] },
     },
   },
   memory_update: {
@@ -1280,7 +1284,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
       fieldTypes: { id: "string", archived: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
-      errorShape: { trigger: "basementing a non-existent or non-owned id", fields: ["error", "status"] },
+      errorShape: { trigger: "basementing a non-existent, unreadable, or unauthorized id", fields: ["error", "status"] },
     },
   },
   memory_restore: {
@@ -1291,24 +1295,24 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
       fieldTypes: { id: "string", archived: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
-      errorShape: { trigger: "restoring a non-existent or non-owned id", fields: ["error", "status"] },
+      errorShape: { trigger: "restoring a non-existent, unreadable, or unauthorized id", fields: ["error", "status"] },
     },
   },
   memory_get: {
         impl: memoryGet,
     contract: {
-      summary: "The full memory record { id, agentId, content, durability, createdAt, ... } for the caller's own id — embedding + embeddingModel stripped by default.",
+      summary: "The full memory record { id, agentId, content, durability, createdAt, ... } for the requested ID, subject to the caller's read scope; embedding and embeddingModel are stripped by default.",
       requiredFields: ["id", "agentId", "content", "createdAt"],
       fieldTypes: { id: "string", agentId: "string", content: "string" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
-      errorShape: { trigger: "get a non-existent / unowned id (makeByIdReadGate 404)", fields: ["error", "status"] },
+      errorShape: { trigger: "get a non-existent or unreadable id (makeByIdReadGate 404)", fields: ["error", "status"] },
     },
   },
   memory_delete: {
         impl: memoryDelete,
     contract: {
-      summary: "Deletes the caller's own memory at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
+      summary: "Deletes a memory by ID when authorized, at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
       invariants: { fullyResolved: true },
       errorShape: { trigger: "a non-admin deletes another agent's memory", fields: ["error", "status"] },
     },
@@ -1325,11 +1329,15 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         "memoriesTruncated", "teammateFindingsIncluded", "teammateFindingsTruncated",
         "teammateFindingsMatched", "context", "flairVersion",
         "eventWatermark", "eventsHasMore", "eventsRemaining",
+        // flair#2141 S1b — the skills manifest, always present.
+        "skills", "skillDiagnostics", "skillsTruncated", "skillDiagnosticsTruncated",
         // flair#1270 — the payload token LEDGER: every token-charged content
         // class has a counter, so tokenEstimate ≈ scaffoldTokens + soulTokens +
-        // memoryTokens + trustTokens + eventsTokens decomposes from the payload
-        // alone (see the identity block in MemoryBootstrap's response tail).
+        // memoryTokens + trustTokens + eventsTokens + skillsTokens +
+        // skillDiagnosticsTokens decomposes from the payload alone (see the
+        // identity block in MemoryBootstrap's response tail).
         "soulTokens", "memoryTokens", "trustTokens", "eventsTokens", "scaffoldTokens",
+        "skillsTokens", "skillDiagnosticsTokens",
       ],
       fieldTypes: {
         agentId: "string", soul: "object", memories: "array", predicted: "array",
@@ -1341,6 +1349,8 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         soulTokens: "number", memoryTokens: "number", trustTokens: "number",
         eventsTokens: "number", scaffoldTokens: "number",
         eventWatermark: "string", eventsHasMore: "boolean", eventsRemaining: "number",
+        skills: "array", skillDiagnostics: "array", skillsTruncated: "number",
+        skillDiagnosticsTruncated: "number", skillsTokens: "number", skillDiagnosticsTokens: "number",
       },
       invariants: {
         // count == delivered — the historical count/charge/deliver drift.
@@ -1350,12 +1360,14 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
           { count: "teammateFindingsIncluded", containers: ["teammateFindings"] },  // #1199
           { count: "sections.events", containers: ["events"] },                     // #1206
           { count: "sections.soul", containers: ["soul"] },                         // #1371
+          { count: "sections.skills", containers: ["skills"] },                     // #2141
         ],
         // present + typed even when empty — never a bare {} / missing key (#1182).
         selfDescribingEmpty: [
           { path: "soul", type: "object" }, { path: "memories", type: "array" },
           { path: "predicted", type: "array" }, { path: "teammateFindings", type: "array" },
           { path: "events", type: "array" }, { path: "sections", type: "object" },
+          { path: "skills", type: "array" }, { path: "skillDiagnostics", type: "array" }, // #2141
         ],
         // #1200 — dedup by the SEMANTIC content key (excludes id/createdAt, which
         // vary across physical duplicate rows). See ToolInvariants.dedupSignature.
@@ -1369,14 +1381,18 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         // structured charge gap; uncounted content does not fit under it.
         budgetCap: { estimate: "tokenEstimate", budget: "maxTokens", tolerance: 0.25 },
         // flair#1290 step 4 — the #1270 token-ledger identity, enforced:
-        // tokenEstimate ≈ scaffold + soul + memory + trust + events, two-sided
+        // tokenEstimate ≈ scaffold + soul + memory + trust + events + skills
+        // + skillDiagnostics, two-sided
         // (constants sized in bootstrap-token-ledger-1270.test.ts, which reads
         // them from HERE — one identity, one tolerance definition). The upper
         // bound is waived when the request opted into the prose mirror
         // (includeContext), which legitimately widens the gap by design.
         tokenDecomposition: {
           total: "tokenEstimate",
-          terms: ["scaffoldTokens", "soulTokens", "memoryTokens", "trustTokens", "eventsTokens"],
+          terms: [
+            "scaffoldTokens", "soulTokens", "memoryTokens", "trustTokens", "eventsTokens",
+            "skillsTokens", "skillDiagnosticsTokens", // #2141
+          ],
           perItemContainers: ["memories", "predicted", "teammateFindings"],
           perItemGap: 60,
           fixedSlack: 150,
@@ -1423,6 +1439,12 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         containerRules: [
           { container: "events", requiredFields: ["id", "kind", "summary", "createdAt"] },
           { container: "memories", requiredFields: ["id", "content"], forbiddenFields: INTERNAL_MEMORY_FIELDS },
+          // #2141 — a manifest entry names a skill; the procedure is fetched with skill_get.
+          {
+            container: "skills",
+            requiredFields: ["name", "skillId", "scope", "priority", "source"],
+            forbiddenFields: ["content", "trigger", "metadata"],
+          },
         ],
         fullyResolved: true, // #1182 — never a spread pending Promise collapsing to {flairVersion}.
       },
@@ -1482,7 +1504,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   },
 });
 
-/** The tool definitions for a tools/list response (exactly the 12 curated tools). */
+/** The tool definitions for a tools/list response (exactly the 17 curated tools). */
 export function listToolDefs(): McpToolDef[] {
   return Object.values(TOOLS).map((t) => t.def);
 }

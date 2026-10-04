@@ -13,7 +13,7 @@ Flair is the right pick when you want:
 | **Shape** | Tagged + typed memories with semantic search, plus chat-buffer compatibility | Conversation-buffer only (LangChain `BaseMessage` records) |
 | **Cross-orchestrator** | Same memory readable from Claude Code, OpenClaw, n8n | n8n-internal schema; nothing else reads it |
 | **Cross-instance** | Hub-spoke federation built-in (local ↔ Fabric, etc.) | Single-instance unless you self-build replication |
-| **Identity** | Ed25519 per-agent (planned) or admin-token (v1) | n8n credential per workflow |
+| **Identity** | Ed25519 with Agent Private Key selected; the v1 admin password is still accepted, deprecated | n8n credential per workflow |
 
 If your AI Agent only needs to remember the last N turns of a single chat in a single n8n instance, Postgres-as-memory is fine. If you want the same memory to inform a Claude Code conversation tomorrow, or to persist across n8n redeploys via federated Flair, this package is the path.
 
@@ -39,16 +39,26 @@ In n8n: **Credentials → New → Flair API**. Fill in:
 | Field | Value |
 |---|---|
 | **Base URL** | `http://localhost:19926` (or your team's Flair URL) |
-| **Agent ID** | Logical identity that will own memories from this n8n workspace. Workflows that share an Agent ID share memory ownership. Use distinct IDs when isolation matters. |
-| **Admin Password** | Your Flair admin password (in `~/.flair/admin-pass` for local installs). **Sensitive** — see [Security](#security). |
+| **Agent ID** | The memory owner and, with Agent Private Key selected, signing identity, e.g. `n8n-support`. Workflows that share an Agent ID share memory ownership. |
+| **Agent Private Key** | That agent's Ed25519 private key. |
 
-Click **Test** — if the test request to `/Memory` returns 200, the credential is good.
+Register a new agent with `flair agent add n8n-support`, or use an existing agent's matching key:
+
+```bash
+base64 < ~/.flair/keys/n8n-support.key
+```
+
+Paste the base64 output into **Agent Private Key**.
+
+Click **Test** — it reads `/Memory` using the selected auth mode and reports that mode on success.
+
+**Admin Password (deprecated)** — used only with Agent Private Key empty. Requests use Harper administrator Basic authentication, including access to other agents' private memories, and each node execution warns.
 
 ### 4. Wire the nodes
 
 Three nodes ship in the package:
 
-- **Flair Chat Memory** — connects to an AI Agent's `Memory` socket. Stores chat history in Flair, scoped by Subject. Defaults to per-workflow memory; set the optional Session Sub-Key to `={{ $execution.id }}` for per-run isolation.
+- **Flair Chat Memory** — connects to an AI Agent's `Memory` socket. Stores chat history in Flair, scoped by Subject. Defaults to per-workflow memory; set the optional Session Sub-Key to `={{ $execution.id }}` for per-run chat-history grouping by subject.
 - **Flair Search** — connects to an AI Agent's `Tool` socket. Two operations:
   - *Semantic Search* — agent calls `flair_search({ query })`, gets memories ranked by similarity.
   - *Get By Subject* — agent calls `flair_get_by_subject()`, gets memories under a config-time-bound subject.
@@ -70,30 +80,26 @@ The agent now answers using both its current chat history (from Flair Chat Memor
 
 n8n memory connectors expose a `sessionKey` parameter that scopes the chat history. Flair has a richer model:
 
-- **Subject** (required) — the entity / conversation / topic the memory is about. Indexed in Flair's schema; efficient to filter on. Default: `={{ $workflow.name }}`.
-- **Session Sub-Key** (optional) — appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run isolation, or a customer/user id for per-customer scoping, or leave blank to share across runs.
+- **Subject** (required) — the entity / conversation / topic the memory is about. For Flair Search Get By Subject, the client compares subjects after retrieval and the node requests no ordering. Default: `={{ $workflow.name }}`.
+- **Session Sub-Key** (optional) — appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run chat-history grouping by subject, or a customer/user id for per-customer scoping, or leave blank to share across runs.
 
 Patterns:
 
 - **"This assistant remembers"** — set Subject to a stable string (`customer-support`, `daily-standup`). Leave Session Sub-Key blank. All runs share memory.
-- **Per-conversation isolation** — set Subject to the conversation owner (`customer:1234`), leave Session Sub-Key blank. Each conversation is isolated by subject.
-- **Per-execution isolation** — set Session Sub-Key to `={{ $execution.id }}`. Each n8n run gets its own memory window. (This is most similar to n8n's default `sessionKey={{ $execution.id }}`.)
+- **Per-conversation grouping** — set Subject to a unique conversation ID (for example, `conversation:abc123`) and leave Session Sub-Key blank. Runs using the same Agent ID and conversation ID select the same chat history; different conversation IDs select different histories.
+- **Per-execution grouping** — set Session Sub-Key to `={{ $execution.id }}`. A distinct subject selects each conversation's or run's chat-history window; it does not restrict access to those memories. (This is most similar to n8n's default `sessionKey={{ $execution.id }}`.)
 
 ## Security
 
-> **The admin password gives every workflow with this credential read/write access to the entire Flair instance**, not just the configured Agent ID. The blast radius is the whole memory store. Treat the credential as highly sensitive: n8n encrypts credentials at rest, but any n8n admin or backup restore can extract it.
+With Agent Private Key selected, requests sign as the credential's Agent ID. Ordinary agents write their own memories and read their own plus other agents' non-private memories; administrator-role agents have broader authority.
 
-For production deployments where untrusted workflow inputs reach Flair, wait for **Ed25519 per-agent authentication** (planned). v1 (admin password) is appropriate when:
+The deprecated **Admin Password** path uses Harper administrator Basic authentication, with access to other agents' private memories. It is used only while Agent Private Key is empty, and every execution that uses it logs a warning. To migrate, set Agent Private Key (step 3).
 
-- The n8n instance is single-tenant and operator-controlled
-- Workflow inputs are trusted (your own CRM, your own webhook source)
-- Memory leakage between agents is acceptable for the use case
+Treat the key as a secret.
 
-If any of those don't hold, use Flair's CLI / SDK clients (which support per-agent Ed25519 today) and wait for the n8n credential update.
+## Get By Tag
 
-## Get By Tag — coming soon
-
-The Flair Search node currently exposes Semantic Search and Get By Subject. **Get By Tag** is deferred until `flair-client.memory.list` exposes a `tags` filter. Workaround for now: use Semantic Search and let the model filter results by tags in the response.
+The Flair Search node currently exposes Semantic Search and Get By Subject. **Get By Tag** is not yet exposed as an operation. The `memory.list` client does support the `tags` filter — use it directly via the SDK for agent-driven tag filtering.
 
 ## Worked examples
 

@@ -141,3 +141,26 @@ describe("evaluate — promotion paths preserved", () => {
     expect(evaluate(record, NOW, THIRTY_D).suggestion).toBe("promote");
   });
 });
+
+describe("flair#1940 A1' item 1 — a consolidation candidate never carries an inline pointer", () => {
+  test("(co1) evaluate drops the inline pointer fields from the returned memory", () => {
+    const record = {
+      id: "co-1",
+      agentId: "krais",
+      durability: "standard",
+      content: "a note",
+      createdAt: ago(60 * DAY),
+      lastRetrieved: null,
+      retrievalCount: 0,
+      // A raw writer could leave these on the row; the candidate must not.
+      hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "r1" }),
+      hostSourceScope: "record",
+      hostSourceVisibility: "shared",
+    };
+    const candidate = evaluate(record, NOW, THIRTY_D);
+    expect("hostSource" in candidate.memory).toBe(false); // assertion: inline hostSource removed
+    expect("hostSourceScope" in candidate.memory).toBe(false); // assertion: inline scope removed
+    expect("hostSourceVisibility" in candidate.memory).toBe(false); // assertion: inline visibility removed
+    expect(candidate.memory.id).toBe("co-1"); // assertion: the rest of the row is intact
+  });
+});

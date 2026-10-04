@@ -1,7 +1,7 @@
 /**
  * export.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair export`.
+ * Owns the `flair export` command.
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
@@ -13,6 +13,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 
 import { join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type ExportCli = {
   privKeyPath: (...args: any[]) => any;
@@ -32,6 +33,18 @@ function privKeyPath(...args: any[]): any {
 
 function resolveHttpPort(...args: any[]): any {
   return cli.resolveHttpPort(...args);
+}
+
+const AGENT_REQUIRED_FIELDS = ["id", "name", "publicKey", "createdAt"] as const;
+const MEMORY_REQUIRED_FIELDS = ["id", "agentId", "content", "createdAt"] as const;
+const SOUL_REQUIRED_FIELDS = ["id", "agentId", "key", "value", "createdAt"] as const;
+const GRANT_REQUIRED_FIELDS = ["id", "ownerId", "granteeId", "scope"] as const;
+
+function hasRequiredStringFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
+  return !!value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && fields.every((field) => typeof (value as Record<string, unknown>)[field] === "string");
 }
 
 export function register(program: Command): void {
@@ -54,9 +67,12 @@ program
     if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
 
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
+    class HttpError extends Error {
+      constructor(message: string, readonly status: number) { super(message); }
+    }
     async function adminGet(path: string): Promise<any> {
       const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: auth }, signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) throw new Error(`GET ${path} failed (${res.status})`);
+      if (!res.ok) throw new HttpError(`GET ${path} failed (${res.status})`, res.status);
       return res.json();
     }
 
@@ -64,26 +80,45 @@ program
 
     // Fetch agent record
     let agent: any;
-    try { agent = await adminGet(`/Agent/${agentId}`); }
-    catch { console.error(`Agent '${agentId}' not found`); process.exit(1); }
+    try {
+      agent = await adminGet(`/Agent/${encodeRecordId(agentId)}`);
+    } catch (err) {
+      // flair#1970 acceptance: a read that FAILS is not "not found". Only a
+      // definite 404 is; a transport failure, a 5xx, or an unreadable body is a
+      // refusal that names what happened rather than an absent agent.
+      if (err instanceof HttpError && err.status === 404) {
+        console.error(`Agent '${agentId}' not found`);
+        process.exit(1);
+      }
+      console.error(`Error: could not read agent '${agentId}': ${err instanceof Error ? err.message : String(err)}. Check instance access and retry.`);
+      process.exit(1);
+    }
+    if (!hasRequiredStringFields(agent, AGENT_REQUIRED_FIELDS) || agent.id !== agentId) {
+      console.error(`Error: could not read agent '${agentId}': response did not contain a complete requested agent. Check the instance and retry.`);
+      process.exit(1);
+    }
 
-    // Fetch memories
-    const allMemories: any[] = await adminGet("/Memory/").catch(() => []);
-    const memories = Array.isArray(allMemories)
-      ? allMemories.filter((m: any) => m.agentId === agentId)
-      : [];
+    async function readCollection(path: string, name: string, requiredFields: readonly string[]): Promise<any[]> {
+      try {
+        const rows = await adminGet(path);
+        if (!Array.isArray(rows)) throw new Error(`GET ${path} returned a non-array body`);
+        const malformedIndex = rows.findIndex((row) => !hasRequiredStringFields(row, requiredFields));
+        if (malformedIndex !== -1) throw new Error(`GET ${path} returned a malformed item at index ${malformedIndex}`);
+        return rows;
+      } catch (err) {
+        console.error(`Error: could not read ${name}: ${err instanceof Error ? err.message : String(err)}. Check instance access and retry.`);
+        process.exit(1);
+      }
+    }
 
-    // Fetch souls
-    const allSouls: any[] = await adminGet("/Soul/").catch(() => []);
-    const souls = Array.isArray(allSouls)
-      ? allSouls.filter((s: any) => s.agentId === agentId)
-      : [];
+    const allMemories = await readCollection("/Memory/", "memories", MEMORY_REQUIRED_FIELDS);
+    const memories = allMemories.filter((m: any) => m.agentId === agentId);
 
-    // Fetch grants
-    const allGrants: any[] = await adminGet("/MemoryGrant/").catch(() => []);
-    const grants = Array.isArray(allGrants)
-      ? allGrants.filter((g: any) => g.ownerId === agentId || g.granteeId === agentId)
-      : [];
+    const allSouls = await readCollection("/Soul/", "souls", SOUL_REQUIRED_FIELDS);
+    const souls = allSouls.filter((s: any) => s.agentId === agentId);
+
+    const allGrants = await readCollection("/MemoryGrant/", "grants", GRANT_REQUIRED_FIELDS);
+    const grants = allGrants.filter((g: any) => g.ownerId === agentId || g.granteeId === agentId);
 
     // Optionally include private key
     let privateKey: string | undefined;

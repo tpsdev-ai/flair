@@ -9,22 +9,16 @@ Different surfaces authenticate differently. The model in one place:
 
 | Surface | Auth | Scope | Notes |
 |---------|------|-------|-------|
-| **CLI / SDK clients** (`flair`, `flair-client`) | **Ed25519 per-agent** | Own writes; org-wide non-private reads | Default, recommended. Signs every request; an agent can never write as another, and reads are scoped to its own memories (any visibility) plus every other agent's **non-private** memories on the instance. |
-| **MCP server** (`@tpsdev-ai/flair-mcp`) | **Ed25519 per-agent** | Own writes; org-wide non-private reads | Same per-agent identity as the CLI — key auto-resolved from `~/.flair/keys/<agent>.key`. |
-| **OpenClaw / pi / Hermes plugins** | **Ed25519 per-agent** | Own writes; org-wide non-private reads | Same secure path; auto-detect agent identity. |
-| **`n8n-nodes-flair`** | **Harper admin-password Basic auth** | ⚠️ **Whole instance, read + write, including `private`** | The admin credential bypasses agent scoping entirely — every workflow gets read/write on the *entire* memory store, including other agents' `private`-marked memories, not just the org-wide non-private pool an Ed25519 identity would see. |
+| **CLI / SDK clients** (`flair`, `flair-client`) | Ed25519 agent keys; administrator Basic on supported paths | Ordinary signed agents: own writes; own and org-wide non-private reads | Administrator agent roles and Basic credentials have broader authority. |
+| **MCP server** (`@tpsdev-ai/flair-mcp`) | Ed25519 agent key; configured administrator Basic fallback | Ordinary signed agents: own writes; own and org-wide non-private reads | The key is auto-resolved from `~/.flair/keys/<agent>.key`; Basic is used when no key resolves and administrator credentials are configured. |
+| **OpenClaw / pi / Hermes plugins** | Ed25519 agent keys; Pi can use configured administrator Basic fallback | Ordinary signed agents: own writes; own and org-wide non-private reads | OpenClaw identity comes from host context; Pi requires `FLAIR_AGENT_ID`; Hermes defaults to `hermes`. |
+| **`n8n-nodes-flair`** | **Ed25519 with Agent Private Key selected**; deprecated administrator Basic | Ordinary signed agents: own writes; own and org-wide non-private reads | The deprecated **Admin Password** authenticates as the Harper administrator (whole instance, including `private`) when Agent Private Key is empty. |
 
-**The default, secure path is Ed25519 per-agent** (see below): each agent holds its own key and signs every request. That guarantees **write isolation** — no agent can write as another — and identity-verified reads. It does **not** mean cross-agent reads are refused: within one Flair instance (one org), any verified agent can read any other agent's memory unless that memory is explicitly marked `visibility: private` (owner-only). The hard access boundary is the **federation edge** (a separate Flair instance / org), not reads within an instance. See [SECURITY.md](../SECURITY.md) for the full model. Use Ed25519 per-agent everywhere you can regardless — it's still what makes writes and identity trustworthy.
+**The default, secure path is Ed25519 per-agent** (see below): each agent holds its own key and signs every request. For ordinary signed agents, this enforces write ownership: they can write only their own records and read their own plus other agents' non-private records. Administrator credentials and administrator agent roles have broader authority, including access to private records. The hard access boundary is the **federation edge** (a separate Flair instance / org), not reads within an instance. See [SECURITY.md](../SECURITY.md) for the full model. Use Ed25519 per-agent everywhere you can regardless — it's still what makes writes and identity trustworthy.
 
-### Known limitation — n8n uses admin-password Basic auth
+### n8n: agent-key signing, with the admin password deprecated
 
-The `n8n-nodes-flair` community node authenticates with the Harper **admin password** (Basic auth), which bypasses agent scoping entirely — not just the org-wide non-private reads an Ed25519 identity already gets. Concretely, an n8n workflow using the admin credential can write memories under *any* agent's identity (no per-agent write isolation) and can read *every* memory including ones marked `visibility: private` (which stay owner-only under normal Ed25519 auth). This is acceptable only when **all** of the following hold:
-
-- The n8n instance is single-tenant and operator-controlled.
-- Workflow inputs are trusted (your own CRM, your own webhook source).
-- Write-forgery and full read access (including `private` memories) are acceptable for the use case.
-
-If any of those don't hold, use Flair's CLI / SDK clients (which support per-agent Ed25519 today) and wait for the n8n credential to gain Ed25519 per-agent auth (planned). Full guidance in [docs/n8n.md](n8n.md#security).
+With **Agent Private Key** selected, `n8n-nodes-flair` signs as the credential's Agent ID. Ordinary agents write their own memories and read their own plus other agents' non-private memories. The deprecated **Admin Password** path uses Harper administrator Basic authentication only with an empty Agent Private Key, and warns on each node execution. See [n8n setup](n8n.md#3-create-the-credential).
 
 ## Ed25519 Agent Auth (Default)
 
@@ -49,7 +43,7 @@ never an existence signal. The adapter write-up is
 
 Flair has no `mode`/`shape` config setting — the shape you get is emergent from *how you provision principals*, not something you declare:
 
-- **Personal (the default).** `flair init` mints ONE agent identity and wires that same `FLAIR_AGENT_ID` into every MCP client it configures (Claude Code, Codex, Gemini, Cursor). One human driving several AI clients ends up with one canonical principal and one Ed25519 keypair — all clients share ownership of the same memory. This is intentional, not a limitation: all clients see each other's private rows (one human's memory, one view), a fact re-asserted from two different clients dedups to one memory, and usage counting treats the principal as one contributor.
+- **Personal.** `flair init --agent <id>` creates (or reuses) ONE agent identity and wires that same `FLAIR_AGENT_ID` into every MCP client it configures (Claude Code, Codex, Gemini, Cursor). One human driving several AI clients ends up with one canonical principal and one Ed25519 keypair — all clients share ownership of the same memory. This is intentional, not a limitation: all clients see each other's private rows (one human's memory, one view). Writes with fresh IDs create separate records even when the server reports a dedup match; writes that reuse an existing ID update that record. Usage counting treats the shared principal as one contributor.
 - **Org (multiple real agents).** `flair agent add <id>` mints a distinct principal — its own keypair, its own ownership boundary — for each real agent that should be a separate identity. Wire each principal's own `FLAIR_AGENT_ID` into its own client(s).
 
 Nothing in flair validates which shape you're in; a personal install that later grows into an org just runs `flair agent add` for the new distinct identities it needs.
@@ -65,6 +59,8 @@ The native `/mcp` OAuth surface (see below) doesn't need any client-side wiring 
 ## OAuth 2.1
 
 Flair includes a built-in OAuth 2.1 authorization server for client integrations (e.g., Claude connecting to Flair as an MCP server).
+
+The native `/mcp` endpoint is guarded by the `@harperfast/oauth` authorization server instead; who can connect through it, and how to revoke that access, is in [access-control.md](access-control.md).
 
 ### Dynamic Client Registration
 
@@ -232,6 +228,8 @@ For organizations using an Identity Provider (IdP), XAA lets the IdP control who
 3. Client sends the ID token to Flair's token endpoint using the `jwt-bearer` grant type
 4. Flair validates the JWT signature, checks issuer/domain, maps to a Principal, and issues a scoped access token
 
+A `jti` claim, when present, must be a nonempty string, and the assertion must then carry an `exp` no more than 24 hours (plus 30 seconds of clock skew) ahead. Flair records the `jti` before it issues tokens, and refuses the assertion if it is presented to this Harper instance again.
+
 ```
 POST /OAuthToken
 Content-Type: application/x-www-form-urlencoded
@@ -320,9 +318,9 @@ Ed25519 keys, including admin-agent keys, and MCP/OAuth delegation cannot create
 update, patch or delete Soul. A missing context does not grant Soul authority.
 This distinguishes credential classes; an administrator password is still a
 privileged secret, not proof that a human typed the request. Keep it out of
-agent-runtime environments. The n8n adapter currently uses admin Basic credentials
-and therefore retains operator-level access; it needs separate runtime credentials
-to receive the runtime restriction. Existing verified Soul reads are unchanged.
+agent-runtime environments. The n8n adapter uses agent signing when Agent Private
+Key is selected; its deprecated Admin Password path uses administrator Basic
+authentication. Existing verified Soul reads are unchanged.
 
 For an explicit operator edit:
 

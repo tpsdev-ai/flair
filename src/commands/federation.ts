@@ -11,6 +11,7 @@
  * Do not import src/cli.ts from here — that would cycle and pull the
  * non-strict entry into the strict check.
  */
+import { encodeRecordId } from "../lib/record-id-path.js";
 import { Command } from "commander";
 import nacl from "tweetnacl";
 import { existsSync, readFileSync } from "node:fs";
@@ -35,6 +36,7 @@ import {
   ADMIN_PASS_HELP,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
+import { FEDERATION_MEMORY_SELECT } from "../lib/federation-memory-attributes.js";
 import {
   decideInstancePrune,
   formatInstanceRow,
@@ -216,7 +218,8 @@ const PAIR_TOKEN_MAYBE_CONSUMED =
 /**
  * Strip any userinfo (user:password) and query string from a URL before printing
  * it. An --ops-target like https://user:pass@host/?token=... must never put the
- * credential or the query token on stderr.
+ * credential or the query token on stderr. If parsing fails, none of the
+ * caller-controlled text is safe to classify, so print a fixed placeholder.
  */
 export function redactUrl(u: string): string {
   try {
@@ -224,10 +227,10 @@ export function redactUrl(u: string): string {
     url.username = "";
     url.password = "";
     url.search = "";
+    url.hash = "";
     return url.toString();
   } catch {
-    // Not a parseable absolute URL: strip a userinfo-looking prefix and any query.
-    return u.replace(/\/\/[^/@]*@/, "//").replace(/\?.*$/, "");
+    return "<unparseable URL>";
   }
 }
 
@@ -236,7 +239,7 @@ export function redactUrl(u: string): string {
  * fetch to a user-supplied URL can carry the full URL (credentials included)
  * in err.message, so the message must never reach an error line.
  */
-function fetchErrorLabel(err: unknown): string {
+export function fetchErrorLabel(err: unknown): string {
   // Node's fetch wraps the OS error: the useful code (ECONNREFUSED, ENOTFOUND,
   // …) is on err.cause.code, so prefer it over the wrapper's code/name.
   const e = err as { code?: unknown; name?: unknown; cause?: { code?: unknown } };
@@ -772,7 +775,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           res = await fetch(`${opsEndpoint}/`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: ["*"] }),
+            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: table === "Memory" ? [...FEDERATION_MEMORY_SELECT] : ["*"] }),
             signal: AbortSignal.timeout(15_000),
           });
         } catch (err: any) {
@@ -1965,7 +1968,7 @@ export function register(program: Command): void {
       let errors = 0;
       for (const p of candidates) {
         try {
-          const res = await api("DELETE", `/FederationPeers/${encodeURIComponent(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
+          const res = await api("DELETE", `/FederationPeers/${encodeRecordId(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
           const ok = res?.ok ?? res?.deleted ?? true;
           if (ok) {
             deleted++;

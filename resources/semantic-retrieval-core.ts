@@ -113,7 +113,11 @@ function distanceToSimilarity(distance: number): number {
 // deliberately omits `provenance` (it's only needed for the trust block), and
 // adding it unconditionally would change every existing recall response's
 // bytes. See SemanticSearch.ts / MemoryBootstrap.ts's `includeTrust` handling.
-export const DEFAULT_SELECT = ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
+// flair#1940 A3: `instanceToken` IS in the default projection — the gated host
+// pointer join (host-source-visibility.ts's pointerOutcomeFor) binds a pointer
+// to the row's CURRENT incarnation token, so a semantic result must carry it or
+// a permitted reader would never see their pointer.
+export const DEFAULT_SELECT = ["id", "agentId", "content", "contentHash", "visibility", "instanceToken", "tags", "durability",
   "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "usageCount", "lastRetrieved",
   "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
   "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject", "summary",

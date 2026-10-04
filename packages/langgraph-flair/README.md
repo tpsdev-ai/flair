@@ -1,8 +1,8 @@
 # @tpsdev-ai/langgraph-flair
 
-LangGraph `BaseStore` adapter backed by [Flair](https://github.com/tpsdev-ai/flair) — durable agent memory with crypto-pinned per-agent identity, federated peer-to-peer sync, and cross-orchestrator portability.
+LangGraph-style store backed by [Flair](https://github.com/tpsdev-ai/flair), with Ed25519 authentication when a key resolves and administrator Basic authentication when configured without a key.
 
-Drop-in for LangGraph's `InMemoryStore`. The same memories your LangGraph agent writes are then visible to every other Flair-enabled harness:
+FlairStore implements LangGraph's `BaseStore` interface; it provides get, put, delete, search, batch, and namespace enumeration, with the limitations below. Other Flair-enabled harnesses can retrieve these stored JSON items when connected to the same Flair instance with access to the owning agent's records, including:
 
 - Claude Code / Cursor / Continue.dev / Codex (via [`@tpsdev-ai/flair-mcp`](../flair-mcp))
 - OpenClaw (via [`@tpsdev-ai/openclaw-flair`](../openclaw-flair))
@@ -43,39 +43,42 @@ LangGraph's `BaseStore` uses hierarchical namespaces (`["users", "profiles"]`) a
 | `namespace: ["users", "profiles"]` | `tags: ["lg-ns:users/profiles"]` |
 | `key: "user123"` | id suffix: `lg:<agentId>:users/profiles:user123` |
 | `value: { name: "Alice" }` | `content: '{"name":"Alice"}'` |
-| `search.query: "..."` | semantic search via Flair's HNSW index |
+| `search.query: "..."` | Non-empty search queries call Flair's `/SemanticSearch` endpoint. The server selects hybrid (BM25 plus vector), vector-only, or BM25-only retrieval; embedding availability affects whether the vector leg can run. |
 | `search.filter: { age: { $gte: 18 } }` | applied client-side after retrieval |
 
 ## Authentication
 
-`FlairStore` inherits from `FlairClient`. Three options:
+`FlairStore` composes a `FlairClient`. Three options:
 
-1. **Ed25519 keypair** (preferred): set `FLAIR_AGENT_ID` and the client auto-resolves your key.
-2. **Explicit key path**: `new FlairStore({ agentId, keyPath: "/path/to/key.pem" })`
-3. **Basic auth fallback**: `new FlairStore({ agentId, adminUser, adminPassword })` for standalone deployments.
+1. **Ed25519 keypair** (preferred): pass `agentId` to the constructor; the client also reads `FLAIR_AGENT_ID` from env, but the constructor parameter is required.
+2. **Explicit key file**: use `new FlairStore({ agentId, keyPath: "/path/to/key.key" })` with a file containing base64-encoded PKCS8 DER or a raw Ed25519 seed; pass a PEM string through privateKey instead.
+3. **Basic auth fallback**: `new FlairStore({ agentId, adminUser, adminPassword })` for standalone deployments. It is used only when no key resolves for the request: a present key wins, and a rejected signature is not retried with Basic. The client refuses to send Basic auth over plain HTTP to a non-loopback host.
 
 ```typescript
 const store = new FlairStore({
   agentId: "my-agent",
   url: "https://flair.example.com",  // or FLAIR_URL env var
-  adminPassword: process.env.FLAIR_ADMIN_PASS,
+  adminUser: process.env.FLAIR_ADMIN_USER,
+  adminPassword: process.env.FLAIR_ADMIN_PASSWORD,
 });
 ```
 
+If a key for `my-agent` is found, the store signs with it and does not send the admin credentials.
+
 ## What you get
 
-- **Persistence**: memories survive process restarts and re-deploys.
-- **Federation**: pair your local Flair to a hub; memories sync peer-to-peer.
-- **Cross-orchestrator**: switch from LangGraph to OpenClaw to Claude Code without losing the agent's history.
-- **Identity**: every memory is tied to a crypto-pinned `agentId`. No tenant-isolation slop.
+- **Persistence**: items are stored in the Flair server and can outlive the LangGraph process when the server's data is retained.
+- **Federation**: configured peers can sync eligible non-private memories; new FlairStore items default to private and are excluded from federation.
+- **Cross-orchestrator**: authorized Flair integrations can retrieve the JSON items stored here; FlairStore does not automatically capture or transfer LangGraph checkpoints or conversation history.
+- **Identity**: every memory is scoped to an `agentId` that verifies writes with Ed25519 auth when a key is present (admin Basic credentials skip cryptographic validation). A signed non-admin agent can write only as itself; non-private memories are readable by other agents on the instance. Do not use memory contents or namespace tags to enforce tenant access.
 - **Open source**: runs on your hardware. No SaaS lock-in.
 
 ## Limitations (v1)
 
-- LangGraph's `IndexConfig` (custom embedding model, per-field indexing) is ignored. Flair has its own embedding pipeline (`nomic-embed-text-v1.5`, 768-dim) and embeds the full content blob. If you need per-field embeddings, pre-extract and store as separate items.
-- `search.filter` operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`) are applied client-side after retrieving the namespace prefix. Tag-based pre-filtering (the namespace) keeps this bounded; high-fanout filters across many memories will be slower.
-- Namespace-prefix matching uses the full joined-path tag (`lg-ns:users/profiles`). Items in `["users", "profiles", "u123"]` are reachable via the `["users", "profiles"]` prefix because the search routine post-filters parsed namespaces against the requested prefix — but searching by a *single label anywhere in the namespace* (e.g. "all items with `profiles` somewhere") isn't supported. LangGraph's `BaseStore.search` API doesn't expose this surface either, so there's no read path that would benefit; if a future LangGraph extension adds it we'll add a derived index then.
-- `listNamespaces` returns namespaces seen in your stored memories (best-effort scan). Empty namespaces aren't enumerable.
+- FlairStore exposes no IndexConfig option and ignores the per-item index argument. It sends each value as JSON content to Flair, which attempts server-side embedding using its configured backend. To store fields separately, extract them into separate items before calling put.
+- `search.filter` operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`) are applied client-side after retrieval. Neither the tag-based path nor the semantic path applies a namespace pre-filter on the server; both fetch then filter on the client. For non-semantic queries, the adapter lists the agent's memories and checks namespace-tag prefixes client-side; semantic results are also filtered by namespace prefix client-side. High-fanout filters across many memories will be slower.
+- Namespace-prefix matching compares whole labels, so a search for `("users",)` includes descendant namespaces and excludes unrelated labels such as `("usersX",)`. An empty prefix searches the agent's LangGraph items across namespaces, subject to filtering and pagination. The non-semantic path reads the agent's full item set with no candidate cap, so a parent-prefix search never returns a short page when more matches exist. The stored namespace encoding escapes `/` and `:` in labels and restores their original values when decoded. Earlier items under valid labels without `/` or `:` keep their ids and tags and need no migration. Items that earlier versions stored under a label containing `/` or `:` are not read back under their original namespace; delete them by id and write them again. The semantic path still checks the requested namespace prefix after retrieving candidates. An unpaired surrogate in a namespace label or key makes `put` and `delete` throw and makes `get` return null before any request. Such a label in a `search` prefix or `listNamespaces` match condition matches nothing before any request; it cannot be percent-encoded in a Memory ID path.
+- `listNamespaces` is public and returns namespaces derived from the agent's newest 1,000 memories (a bounded scan), applies match conditions and maxDepth, then paginates the distinct results. Namespaces without stored items cannot be enumerated, and namespaces represented only outside that scan can be missed.
 
 ## License
 

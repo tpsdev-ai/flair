@@ -53,6 +53,66 @@ beforeEach(() => {
 });
 
 describe("FeedMemories.post authority fields", () => {
+  test("(r23-feed-update) a full-row feed update RE-STAMPS provenance (flair#1960 r2) — the legacy stored blob is not carried forward", async () => {
+    const legacy = '{ "v": 1, "verified": {"agentId":"alice", "timestamp":"2026-01-01T00:00:00.000Z"} }\n';
+    memoryStore.set("feed-provenance", {
+      id: "feed-provenance", agentId: "alice", content: "original body",
+      provenance: legacy, instanceToken: "original-token",
+    });
+    const before = Date.now();
+    const result = await feed().post({
+      id: "feed-provenance", agentId: "alice", content: "changed feed body",
+      provenance: "FORGED", instanceToken: "FORGED-TOKEN",
+    });
+    expect(result.id).toBe("feed-provenance");
+    const stored = memoryStore.get(result.id);
+    expect(stored.content).toBe("changed feed body"); // control: the full-row put ran
+    // A changed-content re-ingest is a semantic write: provenance is re-derived
+    // from the trusted identity + server clock, never the stored/legacy blob.
+    const provenance = JSON.parse(stored.provenance);
+    expect(provenance.verified.agentId).toBe("alice");
+    expect(provenance.verified.timestamp).not.toBe("2026-01-01T00:00:00.000Z"); // not the legacy value
+    expect(provenance.verified.timestamp).not.toBe("FORGED");
+    expect(Date.parse(provenance.verified.timestamp)).toBeGreaterThanOrEqual(before);
+    expect(provenance.verified.timestamp).toBe(provenance.verified.receivedAt);
+    // The incarnation token is still preserved (a re-ingest is not a reincarnation).
+    expect(stored.instanceToken).toBe("original-token");
+  });
+
+  test.each([false, true])("(r23-feed-stamp) a new or unstamped feed row gets trusted provenance (existing=%s)", async (existing) => {
+    if (existing) memoryStore.set("feed-stamp", {
+      id: "feed-stamp", agentId: "alice", content: "unstamped legacy body",
+      instanceToken: "legacy-token",
+    });
+    const before = Date.now();
+    const result = await feed().post({
+      id: "feed-stamp", agentId: "alice", content: "new feed body",
+      provenance: "FORGED", instanceToken: "FORGED-TOKEN",
+      createdAt: "1900-01-01T00:00:00.000Z", updatedAt: "1900-01-01T00:00:00.000Z",
+      model: "claimed-model", claimedClient: "claimed-client",
+    });
+    const stored = memoryStore.get("feed-stamp");
+    expect(result.id).toBe("feed-stamp");
+    expect(stored.content).toBe("new feed body");
+    const provenance = JSON.parse(stored.provenance);
+    expect(provenance.v).toBe(1);
+    expect(provenance.verified.agentId).toBe("alice");
+    for (const field of ["timestamp", "receivedAt"]) {
+      expect(Date.parse(provenance.verified[field])).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(provenance.verified[field])).toBeLessThanOrEqual(Date.now());
+    }
+    // flair#1960: the feed's own createdAt is a CLAIM — recorded under
+    // claimed.createdAt (the row keeps it too), never as a verified timestamp.
+    expect(provenance.claimed).toEqual({ createdAt: "1900-01-01T00:00:00.000Z", model: "claimed-model", client: "claimed-client" });
+    expect(provenance.verified.timestamp).not.toBe("1900-01-01T00:00:00.000Z");
+    expect(stored.createdAt).toBe("1900-01-01T00:00:00.000Z");
+    expect(stored.model).toBeUndefined();
+    expect(stored.claimedClient).toBeUndefined();
+    expect(stored.instanceToken).not.toBe("FORGED-TOKEN");
+    expect(typeof stored.instanceToken).toBe("string");
+    if (existing) expect(stored.instanceToken).toBe("legacy-token");
+  });
+
   test("a body with promotionStatus:approved cannot land a forged verdict", async () => {
     const result = await feed().post({
       id: "feed-forged",

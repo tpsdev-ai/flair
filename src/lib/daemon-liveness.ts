@@ -54,11 +54,28 @@ export type IdentityResult =
   | { kind: "unverified"; reason: string }
   | { kind: "none" };
 
-/** `kill(pid, 0)` is a three-way, not a boolean. */
+/** `kill(pid, 0)` is a FOUR-way, not a boolean. */
 export type PidLiveness =
   | { kind: "alive" }
-  | { kind: "gone" }   // ESRCH
-  | { kind: "eperm" }; // exists, but another user's
+  | { kind: "gone" }                     // ESRCH — the pid does not exist
+  | { kind: "eperm" }                    // exists, but another user's
+  | { kind: "unknown"; reason: string };  // the probe failed for another reason — NOT gone
+
+/**
+ * Map the errno from a failed `kill(pid, 0)` to a `PidLiveness`. Pure so the
+ * adapter's errno handling is unit-testable.
+ *
+ * `gone` is returned ONLY for ESRCH — the one errno that says the pid does not
+ * exist. EPERM means it exists but is another user's. EVERY other errno
+ * (EINVAL, EACCES, ...) is `unknown`: the liveness was not determined, and
+ * unknown must never be read as "gone". A caller with the successful case (no
+ * error) passes through `alive` itself.
+ */
+export function livenessFromKillError(code: string | undefined): PidLiveness {
+  if (code === "ESRCH") return { kind: "gone" };
+  if (code === "EPERM") return { kind: "eperm" };
+  return { kind: "unknown", reason: code ?? "the liveness probe failed" };
+}
 
 /**
  * The health probe. `ok` is flair-identified 2xx — not "any HTTP answered"
@@ -192,6 +209,17 @@ export function classifyDaemonState(ev: DaemonEvidence, ctx: DaemonContext): Dae
     };
   }
 
+  // Liveness could not be determined (an errno other than ESRCH/EPERM). This is
+  // NOT "gone": refusing is the only safe verdict (unknown never licenses an
+  // action — neither a stop nor a sidecar removal).
+  if (liveness?.kind === "unknown") {
+    return {
+      state: "UNKNOWN",
+      detail:
+        `could not determine whether the recorded pid ${pid} is alive (${liveness.reason}) — refusing to act on it`,
+    };
+  }
+
   return { state: "UNKNOWN", detail: "could not determine whether Flair is running" };
 }
 
@@ -246,6 +274,49 @@ export function isStartTimeMatch(actualMs: number, recordedMs: number, tolerance
 }
 
 /**
+ * Does a flair#1454 sidecar's `startTimeMs` agree with a process's start
+ * second (flair#2056)? `startSecondMs` is the start time truncated to a whole
+ * second, in epoch ms. macOS reads the second `ps -o lstart=` reports; Linux
+ * derives it from `/proc` with a verified tick rate. They agree when they are
+ * within 2000 ms of each other, compared in milliseconds: a start
+ * second of 12 s against a sidecar of 14.5 s is 2500 ms and does not agree.
+ */
+export function sidecarStartAgrees(startSecondMs: number, sidecarStartMs: number): boolean {
+  return Math.abs(sidecarStartMs - startSecondMs) <= 2000;
+}
+
+/** A Harper entry path under an install tree: `…/node_modules/[@<scope>/]harper/dist/bin/harper.js`. */
+const HARPER_ENTRY_PATH = /(^|\/)node_modules\/(@[^/]+\/)?harper\/dist\/bin\/harper\.js$/;
+/** The relative entry Harper's own restart forks, from its package directory (LAUNCH_SERVICE_SCRIPTS.MAIN). */
+const HARPER_RESTART_ENTRY = "dist/bin/harper.js";
+
+/**
+ * Is this a Harper-shaped command line (flair#2056)? It shows what the process
+ * was started with, not that it serves anything.
+ *
+ * The first argument's basename is `node` or `bun`, and the second is a Harper
+ * entry path: `…/node_modules/harper/dist/bin/harper.js` or
+ * `…/node_modules/@<scope>/harper/dist/bin/harper.js` (what `flair start`, the
+ * launchd launcher and a systemd unit pass), or `dist/bin/harper.js` (what
+ * Harper's own restart forks). A second argument starting with `-`, or a Harper
+ * path in a later argument, does not match.
+ *
+ * `cmdline` is `/proc/<pid>/cmdline` (NUL-separated: the arguments exactly) or
+ * the line `ps -o command=` reports (arguments joined by spaces; split here on
+ * whitespace). From the `ps` line this does not establish which argument is the
+ * script: an argument containing a space can produce a matching line.
+ */
+export function isHarperProcessCommandLine(cmdline: string): boolean {
+  const args = cmdline.includes("\u0000") ? cmdline.split("\u0000") : cmdline.trim().split(/\s+/);
+  if (args.length < 2) return false;
+  const exe = args[0].split("/").pop();
+  if (exe !== "node" && exe !== "bun") return false;
+  const second = args[1];
+  if (second.startsWith("-")) return false;
+  return second === HARPER_RESTART_ENTRY || HARPER_ENTRY_PATH.test(second);
+}
+
+/**
  * Parse `/proc/<pid>/stat` field 22 (starttime, in clock ticks).
  *
  * Field 2 (comm) is parenthesised and may itself contain spaces and `)`
@@ -272,7 +343,7 @@ export function procStartTimeToEpochMs(
   starttimeTicks: number,
   uptimeSeconds: number,
   nowMs: number,
-  clkTck = 100,
+  clkTck: number,
 ): number {
   const bootTimeMs = nowMs - uptimeSeconds * 1000;
   return bootTimeMs + (starttimeTicks / clkTck) * 1000;
@@ -458,4 +529,70 @@ export function shouldAdoptMissingSidecar(input: {
   if (input.portOwner.kind === "mismatch") return false;
   if (input.instanceMatch.kind === "mismatch") return false;
   return true;
+}
+
+// ─── the stale identity sidecar (flair#2055) ────────────────────────────────
+//
+// After `flair stop` ended a directly started Harper, the sidecar flair wrote
+// at spawn still names the stopped pid. A later instance under a DIFFERENT
+// supervisor (a systemd user unit's Harper) writes its own pid to `hdb.pid`,
+// so `hdb.pid` and the sidecar disagree — and reading that as an identity
+// conflict made every stop/restart refuse ("its identity could not be
+// verified"). A sidecar whose named pid is CONFIRMED gone is a leftover, not a
+// conflict; dropping it lets the live process be identified on the evidence it
+// serves. The two pure gates below are the whole decision, so the adapter's fs
+// and liveness reads stay seams.
+
+/**
+ * Whether the identity sidecar is stale — does it name a pid that is CONFIRMED
+ * gone?
+ *
+ * Stale is a POSITIVE finding, never a default. Only `kill(pid, 0)` returning
+ * ESRCH (`gone`) is stale; `eperm` (a live process owned by another user) and
+ * every indeterminate answer — `null`, or a probe that failed with any other
+ * errno (`unknown`) — are NOT stale. Unknown evidence never licenses an action,
+ * so a non-stale sidecar stays evidence and the machine keeps refusing.
+ */
+export type SidecarStaleness =
+  | { kind: "stale" }   // names a pid CONFIRMED gone — drop it, treat as absent
+  | { kind: "live" }    // names a pid that is alive (or EPERM) — real evidence
+  | { kind: "unknown" }; // liveness of the named pid could not be determined
+
+export function classifySidecarStaleness(
+  sidecar: SidecarRead,
+  liveness: PidLiveness | null,
+): SidecarStaleness {
+  // Absent / unreadable is not a stale sidecar to drop; callers only ask about
+  // a sidecar they could read.
+  if (sidecar.kind !== "present") return { kind: "live" };
+  if (liveness === null) return { kind: "unknown" };
+  if (liveness.kind === "gone") return { kind: "stale" };
+  if (liveness.kind === "alive" || liveness.kind === "eperm") return { kind: "live" };
+  // liveness.kind === "unknown" — not stale.
+  return { kind: "unknown" };
+}
+
+/**
+ * The #2055 stop-time gate: remove the sidecar ONLY when the pid it names is
+ * CONFIRMED gone AND a fresh O_NOFOLLOW read still names that same pid.
+ *
+ * `observedPid` is the pid the sidecar named when the stop was observed;
+ * `observedPidLiveness` is that pid read AFTER the stop's wait — `gone` (ESRCH)
+ * is the confirmation. A process that survived, one owned by another user
+ * (EPERM), or one whose liveness could not be read removes nothing.
+ *
+ * `sidecar` is a fresh O_NOFOLLOW read taken after the stop. A sidecar another
+ * supervisor rewrote in between names a DIFFERENT pid and is left alone (the
+ * "still names that pid" check). A symlinked or malformed sidecar arrives here
+ * as `unreadable` (the read never followed the link) and is likewise not
+ * removed — removing on unknown evidence is the defect this gate exists to
+ * prevent.
+ */
+export function shouldRemoveSidecarAfterStop(input: {
+  observedPid: number;
+  observedPidLiveness: PidLiveness;
+  sidecar: SidecarRead;
+}): boolean {
+  if (input.observedPidLiveness.kind !== "gone") return false;
+  return input.sidecar.kind === "present" && input.sidecar.pid === input.observedPid;
 }

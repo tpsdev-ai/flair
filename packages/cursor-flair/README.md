@@ -21,7 +21,7 @@ flair status               # default HTTP origin: http://127.0.0.1:19926
 
 **Grok Bot / Cursor cloud / another machine:** `127.0.0.1:19926` is not reachable. Start on Harper Fabric: **[docs/quickstart-fabric.md](../../docs/quickstart-fabric.md)**.
 
-`<id>` must match the `FLAIR_AGENT_ID` you configure in the plugin. Node.js **>= 22.18** is required on the machine that runs `npx` (the MCP server's engines field).
+`<id>` must match the `FLAIR_AGENT_ID` you configure in the plugin. Node.js **>= 22** is required on the machine that runs `npx` (the MCP server's engines field).
 
 ## Install
 
@@ -61,7 +61,7 @@ Cursor ships a native **Memories** feature: persistent notes the agent saves as 
 
 - Set `FLAIR_URL` to an origin the agent VM can reach. The default `http://127.0.0.1:19926` points at the npx host, which on a cloud agent is the cloud VM.
 - The agent key lives on the **npx host** at `~/.flair/keys/<id>.key` (or `FLAIR_KEY_PATH` in that machine's environment). If you cannot mount a key, set `FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD` in the host env of the machine that runs `npx` — not in plugin Configure.
-- Node **>= 22.18** must be on that same machine.
+- Node **>= 22** must be on that same machine.
 
 ## Skills
 
@@ -99,7 +99,7 @@ Schedule that command. A running agent uses `flair_catchup` instead — see the 
 ## Not this plugin
 
 - Built-in Flair `/mcp` OAuth — off by default; a different surface
-- Claude Code `flair-session-start` hook — Claude-only; do not run it from Cursor
+- Claude Code / Codex `flair-session-start` hook — supported for both; the installer writes it into the target harness's settings. Codex runs a hook only after you trust it, and records that trust as a hash of the hook in `~/.codex/config.toml`, so the written hook does nothing until you trust it in Codex (and again after it changes).
 - OpenClaw, n8n, Hermes, LangGraph, Pi, ADK packages — other harnesses, same Flair backend
 
 ## Troubleshooting

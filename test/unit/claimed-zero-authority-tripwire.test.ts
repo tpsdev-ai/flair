@@ -58,7 +58,7 @@
  *      that doesn't exist.
  *   5. resources/mcp-handler.ts (WHOLE FILE) — auth resolution for the
  *      native `/mcp` OAuth path: `resolveAgentFromSub` / `jitProvisionPrincipal`
- *      / `isAgentAdmin` / `handleToolCall`'s sub→agent dispatch. This is the
+ *      / `requireActivePrincipal` / `handleToolCall`'s sub→agent dispatch. This is the
  *      sole place that turns a verified token into a scoped flair identity
  *      for every MCP tool call — if `claimed.*` ever leaked into WHO a call
  *      is attributed to, it would start here.
@@ -255,7 +255,7 @@ const SCAN_TARGETS: ScanTarget[] = [
   {
     file: "resources/mcp-handler.ts",
     label: "mcp-handler.ts (whole file)",
-    why: "auth resolution (resolveAgentFromSub/jitProvisionPrincipal/isAgentAdmin/handleToolCall) — turns a verified token into a scoped flair identity for every MCP tool call",
+    why: "auth resolution (resolveAgentFromSub/jitProvisionPrincipal/requireActivePrincipal/handleToolCall) — turns a verified token into a scoped flair identity for every MCP tool call",
     extract: wholeFile,
   },
 ];

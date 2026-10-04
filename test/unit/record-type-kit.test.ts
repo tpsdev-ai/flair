@@ -34,6 +34,7 @@ const {
   makeAuthGate,
   makeReadScope,
   makeByIdReadGate,
+  makeScopedSearch,
   resolveAuthGate,
   stampAttribution,
   buildProvenance,
@@ -477,5 +478,148 @@ describe("stampAttribution — field parameterization (authorId, not just agentI
     const result = stampAttribution({ kind: "agent", agentId: "attacker", isAdmin: false }, content, "authorId", "validate-strict", "authorId mismatch");
     expect(result.denied).toBeDefined();
     expect(content.agentId).toBeUndefined(); // only authorId touched
+  });
+});
+
+// ─── makeByIdReadGate: a shaped target is scoped on the full stored row ─────
+
+describe("makeByIdReadGate — the read scope is evaluated on the full stored row", () => {
+  class FakeTarget {
+    id?: string;
+    select?: string | string[];
+    property?: string;
+  }
+  const store = new Map<string, any>([
+    ["priv-1", { id: "priv-1", agentId: "owner", visibility: "private", content: "SENTINEL-private" }],
+    ["shared-1", { id: "shared-1", agentId: "owner", visibility: "shared", content: "shared text" }],
+  ]);
+  // Mirrors Harper: a target's selection or property shapes the returned value.
+  const superGet = async (t: any) => {
+    const row = store.get(typeof t === "string" ? t : t?.id);
+    if (!row) return null;
+    if (t?.property) return row[t.property];
+    if (Array.isArray(t?.select)) return Object.fromEntries(t.select.map((k: string) => [k, row[k]]));
+    if (typeof t?.select === "string") return row[t.select];
+    return row;
+  };
+  function shaped(id: string, shape: Partial<FakeTarget>): FakeTarget {
+    return Object.assign(new FakeTarget(), { id }, shape);
+  }
+  function self(agentId: string) {
+    return { getContext: () => ({ request: agentCtx(agentId) }), search: mock(() => null) };
+  }
+
+  for (const [label, shape] of [
+    ["an array selection", { select: ["content"] }],
+    ["a single-field selection", { select: "content" }],
+    ["a property read", { property: "content" }],
+    ["a selection that includes the owner", { select: ["content", "agentId"] }],
+  ] as Array<[string, Partial<FakeTarget>]>) {
+    it(`${label} of another agent's private row is 404`, async () => {
+      const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+      const res: any = await gate.call(self("reader"), shaped("priv-1", shape), superGet);
+      expect(res instanceof Response).toBe(true); // assertion: denied
+      expect(res.status).toBe(404);
+    });
+  }
+
+  it("the owner gets the shaped value of their own private row", async () => {
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const res: any = await gate.call(self("owner"), shaped("priv-1", { select: ["content"] }), superGet);
+    expect(res).toEqual({ content: "SENTINEL-private" });
+  });
+
+  it("another agent gets the shaped value of a shared row", async () => {
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const res: any = await gate.call(self("reader"), shaped("shared-1", { property: "content" }), superGet);
+    expect(res).toBe("shared text");
+  });
+
+  it("the decision never reuses the caller's target or its class", async () => {
+    // A target whose class installs a selection when constructed: the decision
+    // must still see the full stored row (here: private, so another agent gets 404).
+    class SelectingTarget {
+      id?: string;
+      select: string[] = ["id", "agentId", "content"];
+    }
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const res: any = await gate.call(self("reader"), Object.assign(new SelectingTarget(), { id: "priv-1" }), superGet);
+    expect(res instanceof Response).toBe(true); // assertion: denied on the full row
+    expect(res.status).toBe(404);
+  });
+
+  it("the decision read gets a fresh plain object with only the id, never the caller's target", async () => {
+    const seen: any[] = [];
+    const recording = async (t: any) => { seen.push(t); return superGet(t); };
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const caller = Object.assign(new FakeTarget(), { id: "shared-1" });
+    const res: any = await gate.call(self("reader"), caller, recording);
+    expect(res).toEqual({ id: "shared-1", agentId: "owner", visibility: "shared", content: "shared text" });
+    expect(seen[0]).not.toBe(caller); // assertion: not the caller's target
+    expect(Object.getPrototypeOf(seen[0])).toBe(Object.prototype); // a plain object
+    expect(seen[0]).toEqual({ id: "shared-1" }); // carrying only the id
+  });
+
+  it("a target with no id still reads the loaded instance's unselected row", async () => {
+    // Harper's default instance mode loads the resource by id before get(); a
+    // target without an id then gets that loaded record. Model it here.
+    const loaded = { id: "shared-1", agentId: "owner", visibility: "shared", content: "shared text" };
+    const instanceGet = async (t: any) => (t?.id == null ? loaded : superGet(t));
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const res: any = await gate.call(self("reader"), {}, instanceGet);
+    expect(res).toEqual(loaded); // assertion: the authorized row, as before this change
+  });
+
+  it("owner-only mode: a shaped read of another agent's row is 404", async () => {
+    const gate = makeByIdReadGate(makeReadScope("owner-only"));
+    const res: any = await gate.call(self("reader"), shaped("shared-1", { select: ["content"] }), superGet);
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── makeScopedSearch: query composition ────────────────────────────────────
+
+describe("makeScopedSearch — the scope is the outermost AND; caller conditions are kept", () => {
+  const scope = { attribute: "agentId", comparator: "equals", value: "me" };
+  const readScope = async () => ({ condition: scope, isAllowed: () => true });
+  const compose = async (query: any) => {
+    let seen: any;
+    await makeScopedSearch(readScope)("me", query, (q: any) => (seen = q));
+    return seen;
+  };
+  const a = { attribute: "x", comparator: "equals", value: 1 };
+  const b = { attribute: "y", comparator: "equals", value: 2 };
+
+  it("no query, an empty array or empty conditions → just the scope", async () => {
+    for (const q of [undefined, [], { conditions: [] }, { operator: "or" }]) {
+      expect(await compose(q)).toMatchObject({ conditions: [scope], operator: "and" });
+    }
+  });
+
+  it("one caller condition sits directly under the outer AND, whatever the caller's operator", async () => {
+    expect(await compose({ operator: "or", conditions: [a] })).toMatchObject({ conditions: [scope, a], operator: "and" });
+    expect(await compose([a])).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
+  it("a single condition object (not an array) is kept", async () => {
+    expect(await compose({ conditions: a })).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
+  it("iterable conditions (a Set) are kept, in the conditions property and as a bare query", async () => {
+    expect(await compose({ conditions: new Set([a]) })).toMatchObject({ conditions: [scope, a], operator: "and" });
+    expect(await compose({ operator: "or", conditions: new Set([a, b]) })).toMatchObject({
+      conditions: [scope, { conditions: [a, b], operator: "or" }],
+      operator: "and",
+    });
+    expect(await compose(new Set([a]))).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
+  it("several caller conditions keep the caller's operator inside their own group", async () => {
+    expect(await compose({ operator: "or", conditions: [a, b], limit: 5 })).toMatchObject({
+      conditions: [scope, { conditions: [a, b], operator: "or" }],
+      operator: "and",
+      limit: 5,
+    });
   });
 });

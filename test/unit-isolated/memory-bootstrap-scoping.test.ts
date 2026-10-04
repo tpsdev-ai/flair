@@ -63,19 +63,37 @@ function matchesCondition(record: any, cond: any): boolean {
     return cond.operator === "or" ? results.some(Boolean) : results.every(Boolean);
   }
   const fieldVal = record[cond.attribute];
+  // An array attribute (Memory.tags) matches `equals` when any element does.
+  if (cond.comparator === "equals" && Array.isArray(fieldVal)) return fieldVal.includes(cond.value);
   if (cond.comparator === "equals") return fieldVal === cond.value;
   if (cond.comparator === "not_equal") return fieldVal !== cond.value;
   return true;
 }
 
 let memoryStore: Map<string, any>;
+// flair#2141 — when set, the skill-row read (a Memory search on the `skill`
+// tag) fails, for the failed-read case: "call" throws from the search call,
+// "iterate" from the first read of its results.
+let failSkillRowRead: false | "call" | "iterate" = false;
 let memoryGrants: any[];
 let soulStore: Map<string, any> = new Map();
 let orgEventStore: any[] = [];
+// flair#2141 S1 — Agent records by id (the org-skill eligibility read) and the
+// OrgSkillAssignment rows; `failOrgRead` makes the org-assignment read throw.
+let agentStore: Map<string, any> = new Map();
+let orgSkillStore: any[] = [];
+let failOrgRead = false;
+// The Instance rows localInstanceId() reads; `failInstanceRead` makes that read throw.
+let instanceRows: any[] = [];
+let failInstanceRead = false;
 const readPositionStore = new Map<string, any>();
 
 function memorySearchGen(query: any) {
   const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
+  if (failSkillRowRead && conditions.some((c: any) => c?.attribute === "tags" && c?.value === "skill")) {
+    if (failSkillRowRead === "call") throw new Error("skill row read failed");
+    return (async function* () { throw new Error("skill row read failed"); })();
+  }
   let records = Array.from(memoryStore.values());
   for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
   async function* gen() {
@@ -122,7 +140,25 @@ const databasesMock = {
         return gen();
       },
     },
-    Agent: { search: () => emptyGen(), get: async () => null },
+    Agent: { search: () => emptyGen(), get: async (id: any) => agentStore.get(id) ?? null },
+    OrgSkillAssignment: {
+      search: () => {
+        if (failOrgRead) throw new Error("org assignment read failed");
+        async function* gen() {
+          for (const r of orgSkillStore) yield r;
+        }
+        return gen();
+      },
+    },
+    Instance: {
+      search: () => {
+        if (failInstanceRead) throw new Error("instance read failed");
+        async function* gen() {
+          for (const r of instanceRows) yield r;
+        }
+        return gen();
+      },
+    },
     Relationship: { search: () => emptyGen() },
     OrgEvent: {
       search: (query?: any) => {
@@ -151,6 +187,8 @@ class ResourceBase {}
 mock.module("harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
 
 const { BootstrapMemories } = await import("../../resources/MemoryBootstrap.ts");
+const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
+const { estimateTokens } = await import("../../resources/token-estimate.ts");
 
 function makeBootstrap(ctxRequest: any) {
   const r: any = new (BootstrapMemories as any)();
@@ -161,9 +199,16 @@ const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tps
 
 function reset() {
   memoryStore = new Map();
+  failSkillRowRead = false;
   memoryGrants = [];
   soulStore = new Map();
   orgEventStore = [];
+  agentStore = new Map();
+  orgSkillStore = [];
+  failOrgRead = false;
+  instanceRows = [];
+  failInstanceRead = false;
+  _resetLocalInstanceIdCacheForTests();
   readPositionStore.clear();
   embedInputTypeCalls = [];
   taskEmbedding = undefined;
@@ -853,6 +898,17 @@ describe("MemoryBootstrap.post() — org-event watermark path (flair#931)", () =
 // soul entries must collapse to one, so the always-on budget is not spent
 // re-saying the same thing.
 describe("MemoryBootstrap.post() — verbatim soul duplicates collapse (flair#1431)", () => {
+  it.each([false, true])("keeps the priority winner when reversed=%s", async (reverse) => {
+    reset();
+    const agentId = "agent-soul-1730";
+    const keys = ["identity", "identity-file"];
+    if (reverse) keys.reverse();
+    for (const key of keys) seedSoul(agentId, key, "SAME_SOUL_BODY");
+    const res: any = await makeBootstrap(agentCtx(agentId)).post({ agentId, maxTokens: 6000, includeContext: true });
+    expect(res.soul).toEqual({ identity: "SAME_SOUL_BODY" });
+    expect(res.context.split("SAME_SOUL_BODY").length - 1).toBe(1);
+  });
+
   function seedSoul(agentId: string, key: string, value: string) {
     soulStore.set(`${agentId}:${key}`, { id: `${agentId}:${key}`, agentId, key, value });
   }
@@ -885,27 +941,59 @@ describe("MemoryBootstrap.post() — verbatim soul duplicates collapse (flair#14
 // flair#1433 — Active Skills through the real bootstrap payload. Pure-module
 // cases live in test/unit/skill-provenance.test.ts; these pin that
 // MemoryBootstrap.post() actually ships the stated outcome.
+function seedAssignment(row: {
+  id: string;
+  agentId: string;
+  value: string;
+  priority?: string;
+  source?: string;
+}) {
+  soulStore.set(row.id, {
+    id: row.id,
+    agentId: row.agentId,
+    key: "skill-assignment",
+    value: row.value,
+    priority: row.priority ?? "standard",
+    metadata: row.source ? JSON.stringify({ source: row.source }) : undefined,
+  });
+}
+
+// A skill-tagged Memory row named `name` (skill_store folds the name into
+// metadata). Persistent skills default to shared visibility.
+function seedSkillRow(row: {
+  id: string;
+  agentId: string;
+  name: string;
+  visibility?: string;
+  createdAt?: string;
+  content?: string;
+  trigger?: string;
+}) {
+  memoryStore.set(row.id, {
+    id: row.id,
+    agentId: row.agentId,
+    tags: ["skill"],
+    metadata: JSON.stringify({ name: row.name, description: `about ${row.name}` }),
+    content: row.content ?? `procedure for ${row.name}`,
+    trigger: row.trigger ?? `when ${row.name} applies`,
+    durability: "persistent",
+    visibility: row.visibility ?? "shared",
+    createdAt: row.createdAt ?? "2026-01-01T00:00:00.000Z",
+    archived: false,
+  });
+}
+
+function activeSkillsBlock(ctx: string): string {
+  const start = ctx.indexOf("## Active Skills");
+  if (start === -1) return "";
+  const next = ctx.indexOf("\n## ", start + 1);
+  return next === -1 ? ctx.slice(start) : ctx.slice(start, next);
+}
+
 describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)", () => {
   const KNOWN_TMP =
     "/tmp/harperfast-skills-inspect/package/harper-best-practices/SKILL.md";
   const NPM_SOURCE = "npm:@harperfast/skills@1.4.2@1.4.2";
-
-  function seedAssignment(row: {
-    id: string;
-    agentId: string;
-    value: string;
-    priority?: string;
-    source?: string;
-  }) {
-    soulStore.set(row.id, {
-      id: row.id,
-      agentId: row.agentId,
-      key: "skill-assignment",
-      value: row.value,
-      priority: row.priority ?? "standard",
-      metadata: row.source ? JSON.stringify({ source: row.source }) : undefined,
-    });
-  }
 
   it("negative control: a normally-installed, non-conflicting skill loads silently", async () => {
     reset();
@@ -915,6 +1003,7 @@ describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)"
       value: "harperfast-skills",
       source: NPM_SOURCE,
     });
+    seedSkillRow({ id: "skill-harperfast", agentId: "flint", name: "harperfast-skills" });
     const res: any = await makeBootstrap(agentCtx("flint")).post({
       agentId: "flint",
       includeSoul: true,
@@ -925,9 +1014,10 @@ describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)"
     expect(res.context).not.toContain("SKILL_CONFLICT");
     expect(res.context).not.toContain("refused");
     expect(res.sections.skills).toBe(1);
+    expect(res.skillDiagnostics).toEqual([]);
   });
 
-  it("a /tmp inspect path is not loaded as durable provenance; the line names the path", async () => {
+  it("a /tmp inspect path is not loaded as durable provenance; the diagnostic names the path", async () => {
     reset();
     seedAssignment({
       id: "tmp",
@@ -935,15 +1025,19 @@ describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)"
       value: "harper-best-practices",
       source: KNOWN_TMP,
     });
+    seedSkillRow({ id: "skill-hbp", agentId: "flint", name: "harper-best-practices" });
     const res: any = await makeBootstrap(agentCtx("flint")).post({
       agentId: "flint",
       includeSoul: true,
       includeContext: true,
     });
-    expect(res.context).toContain(KNOWN_TMP);
-    expect(res.context).toContain("non-durable source");
-    expect(res.context).toContain("refused");
-    expect(res.context).not.toContain("[SKILL_CONFLICT]");
+    expect(res.skills).toEqual([]);
+    expect(res.skillDiagnostics).toHaveLength(1);
+    expect(res.skillDiagnostics[0].decision).toBe("refused");
+    expect(res.skillDiagnostics[0].source).toBe(KNOWN_TMP);
+    expect(res.skillDiagnostics[0].reason).toContain("non-durable source");
+    expect(res.skillDiagnostics[0].reason).toContain(KNOWN_TMP);
+    expect(res.context).not.toContain("## Active Skills");
   });
 
   it("equal-priority same-identity conflict refuses the load; outcome is stated and order-independent", async () => {
@@ -960,6 +1054,7 @@ describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)"
       value: "harperfast-skills",
       source: NPM_SOURCE,
     });
+    seedSkillRow({ id: "skill-harperfast", agentId: "flint", name: "harperfast-skills" });
     const first: any = await makeBootstrap(agentCtx("flint")).post({
       agentId: "flint",
       includeSoul: true,
@@ -978,21 +1073,18 @@ describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)"
       value: "harperfast-skills",
       source: "npm:@harperfast/skills@2.0.0",
     });
+    seedSkillRow({ id: "skill-harperfast", agentId: "flint", name: "harperfast-skills" });
     const second: any = await makeBootstrap(agentCtx("flint")).post({
       agentId: "flint",
       includeSoul: true,
       includeContext: true,
     });
-    expect(first.context).toContain("SKILL_CONFLICT refused:");
-    expect(first.context).toContain("equal-priority tie");
-    expect(first.context).toContain(NPM_SOURCE);
-    expect(first.context).toContain("npm:@harperfast/skills@2.0.0");
-    const skillsBlock = (ctx: string) => {
-      const start = ctx.indexOf("## Active Skills");
-      const next = ctx.indexOf("\n## ", start + 1);
-      return next === -1 ? ctx.slice(start) : ctx.slice(start, next);
-    };
-    expect(skillsBlock(first.context)).toBe(skillsBlock(second.context));
+    expect(first.skills).toEqual([]);
+    expect(first.skillDiagnostics.map((d: any) => d.decision)).toEqual(["refused", "refused"]);
+    expect(first.skillDiagnostics.map((d: any) => d.source)).toEqual(["npm:@harperfast/skills@1.4.2@1.4.2", "npm:@harperfast/skills@2.0.0"]);
+    expect(first.skillDiagnostics[0].reason).toContain("equal-priority tie");
+    expect(first.skillDiagnostics).toEqual(second.skillDiagnostics);
+    expect(first.context).not.toContain("## Active Skills");
   });
 
   it("check 4: two different names at the same priority both load with no SKILL_CONFLICT (live #1433 false-positive shape)", async () => {
@@ -1009,17 +1101,292 @@ describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)"
       value: "harperfast-skills",
       source: NPM_SOURCE,
     });
+    seedSkillRow({ id: "skill-hbp", agentId: "flint", name: "harper-best-practices" });
+    seedSkillRow({ id: "skill-harperfast", agentId: "flint", name: "harperfast-skills" });
     const res: any = await makeBootstrap(agentCtx("flint")).post({
       agentId: "flint",
       includeSoul: true,
       includeContext: true,
     });
-    const start = res.context.indexOf("## Active Skills");
-    const next = res.context.indexOf("\n## ", start + 1);
-    const block = next === -1 ? res.context.slice(start) : res.context.slice(start, next);
+    const block = activeSkillsBlock(res.context);
     expect(block).toContain("- harper-best-practices (standard priority");
     expect(block).toContain(`- harperfast-skills (standard priority, source: ${NPM_SOURCE})`);
     expect(block).not.toContain("SKILL_CONFLICT");
     expect(res.sections.skills).toBe(2);
+    expect(res.skillDiagnostics).toEqual([]);
+  });
+});
+
+// flair#2141 S1b — the structured skills manifest. The pure resolver rules are
+// in test/unit/skill-manifest.test.ts; these drive MemoryBootstrap.post().
+describe("MemoryBootstrap.post() — skills manifest (flair#2141 S1b)", () => {
+  const SOURCE = "npm:@example/skills@1.0.0";
+
+  // One winner, one superseded, one equal-priority tie, one unresolved name.
+  function seedMixedAssignments() {
+    seedAssignment({ id: "win", agentId: "agent-a", value: "alpha", priority: "high", source: SOURCE });
+    seedAssignment({ id: "lose", agentId: "agent-a", value: "alpha", priority: "low", source: SOURCE });
+    seedAssignment({ id: "tie-1", agentId: "agent-a", value: "beta", source: "npm:@example/beta@1" });
+    seedAssignment({ id: "tie-2", agentId: "agent-a", value: "beta", source: "npm:@example/beta@2" });
+    seedAssignment({ id: "missing", agentId: "agent-a", value: "gamma" });
+    seedSkillRow({ id: "skill-alpha", agentId: "agent-a", name: "alpha" });
+    seedSkillRow({ id: "skill-beta", agentId: "agent-a", name: "beta" });
+  }
+
+  it("includeSoul:false still returns the resolved manifest and diagnostics; refused, tied and unresolved skills appear only in diagnostics", async () => {
+    reset();
+    seedMixedAssignments();
+    soulStore.set("role", { id: "role", agentId: "agent-a", key: "role", value: "ROLE-PROSE-MARKER" });
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({
+      agentId: "agent-a",
+      includeSoul: false,
+      includeContext: true,
+    });
+    expect(res.skills).toEqual([
+      { name: "alpha", skillId: "skill-alpha", scope: "own", priority: "high", source: SOURCE },
+    ]);
+    const diag = res.skillDiagnostics.map((d: any) => `${d.name}:${d.decision}`);
+    expect(diag).toEqual(["alpha:superseded", "beta:refused", "beta:refused", "gamma:unresolved"]);
+    const shipped = new Set(res.skills.map((s: any) => s.name));
+    for (const d of res.skillDiagnostics) {
+      if (d.name !== "alpha") expect(shipped.has(d.name), `${d.name} must not ship in skills`).toBe(false);
+    }
+    // includeSoul:false keeps omitting the soul prose and the structured map.
+    expect(res.soul).toEqual({});
+    expect(res.context).not.toContain("ROLE-PROSE-MARKER");
+    expect(res.context).not.toContain("## Active Skills");
+  });
+
+  it("includeContext:false (the /mcp default) returns the manifest, and the prose carries no skills section", async () => {
+    reset();
+    seedMixedAssignments();
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({
+      agentId: "agent-a",
+      includeContext: false,
+    });
+    expect(res.skills.map((s: any) => s.skillId)).toEqual(["skill-alpha"]);
+    expect(res.skillDiagnostics).toHaveLength(4);
+    expect(res.context).not.toContain("## Active Skills");
+  });
+
+  it("with includeSoul and includeContext, '## Active Skills' holds one line per shipped winner", async () => {
+    reset();
+    seedMixedAssignments();
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({
+      agentId: "agent-a",
+      includeSoul: true,
+      includeContext: true,
+    });
+    expect(activeSkillsBlock(res.context).trim()).toBe(`## Active Skills\n- alpha (high priority, source: ${SOURCE})`);
+    expect(res.sections.skills).toBe(res.skills.length);
+  });
+
+  it("a manifest entry carries name, skillId, scope, priority and source only — never the procedure", async () => {
+    reset();
+    seedAssignment({ id: "a", agentId: "agent-a", value: "alpha", source: SOURCE });
+    seedSkillRow({
+      id: "skill-alpha",
+      agentId: "agent-a",
+      name: "alpha",
+      content: "PROCEDURE-BODY-MARKER",
+      trigger: "TRIGGER-TEXT-MARKER",
+    });
+    seedAssignment({ id: "m", agentId: "agent-a", value: "missing" });
+    for (const includeContext of [true, false]) {
+      const res: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeContext });
+      expect(res.skills).toHaveLength(1);
+      expect(Object.keys(res.skills[0])).toEqual(["name", "skillId", "scope", "priority", "source"]);
+      expect(res.skillDiagnostics).toHaveLength(1);
+      // The skill row is the agent's own persistent memory, so its body can
+      // ship in `memories`; the manifest, the diagnostics and the prose skills
+      // block must not carry it.
+      const manifest = JSON.stringify([res.skills, res.skillDiagnostics]) + activeSkillsBlock(res.context);
+      expect(manifest).not.toContain("PROCEDURE-BODY-MARKER");
+      expect(manifest).not.toContain("TRIGGER-TEXT-MARKER");
+    }
+  });
+
+  it("a name resolves to the agent's own skill row only: a teammate's shared or private row with the name leaves it unresolved; two own rows are ambiguous", async () => {
+    reset();
+    seedAssignment({ id: "a1", agentId: "agent-a", value: "own-row" });
+    seedAssignment({ id: "a2", agentId: "agent-a", value: "teammate-shared" });
+    seedAssignment({ id: "a3", agentId: "agent-a", value: "teammate-private" });
+    seedAssignment({ id: "a4", agentId: "agent-a", value: "two-own" });
+    seedSkillRow({ id: "teammate-old", agentId: "agent-b", name: "own-row", createdAt: "2020-01-01T00:00:00.000Z" });
+    seedSkillRow({ id: "own-new", agentId: "agent-a", name: "own-row", visibility: "private", createdAt: "2026-06-01T00:00:00.000Z" });
+    seedSkillRow({ id: "shared-old", agentId: "agent-b", name: "teammate-shared", createdAt: "2020-01-01T00:00:00.000Z" });
+    seedSkillRow({ id: "private-old", agentId: "agent-b", name: "teammate-private", visibility: "private", createdAt: "2020-01-01T00:00:00.000Z" });
+    seedSkillRow({ id: "two-own-1", agentId: "agent-a", name: "two-own" });
+    seedSkillRow({ id: "two-own-2", agentId: "agent-a", name: "two-own" });
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeSoul: false });
+    expect(res.skills.map((s: any) => `${s.name}=${s.skillId}`)).toEqual(["own-row=own-new"]);
+    const byName = Object.fromEntries(res.skillDiagnostics.map((d: any) => [d.name, d]));
+    expect(byName["teammate-shared"].decision).toBe("unresolved");
+    expect(byName["teammate-private"].decision).toBe("unresolved");
+    expect(byName["two-own"].decision).toBe("ambiguous");
+    expect(byName["two-own"].candidates).toEqual(["two-own-1", "two-own-2"]);
+  });
+
+  it("a failed skill-row read fails the bootstrap rather than reporting the names unresolved", async () => {
+    reset();
+    seedAssignment({ id: "a", agentId: "agent-a", value: "alpha" });
+    seedSkillRow({ id: "skill-alpha", agentId: "agent-a", name: "alpha" });
+    for (const mode of ["call", "iterate"] as const) {
+      failSkillRowRead = mode;
+      await expect(makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a" })).rejects.toThrow("skill row read failed");
+    }
+  });
+
+  it("the manifest and diagnostics are charged to the shared budget and reported in skillsTokens / skillDiagnosticsTokens", async () => {
+    // A long source makes the one manifest entry cost more than the short
+    // permanent memory, so the budget decides which of the two ships.
+    const LONG_SOURCE = `npm:@example/${"x".repeat(400)}@1.0.0`;
+    const entry = { name: "alpha", skillId: "skill-alpha", scope: "own", priority: "standard", source: LONG_SOURCE };
+    const entryCost = estimateTokens(JSON.stringify(entry));
+    const seed = () => {
+      reset();
+      seedAssignment({ id: "a", agentId: "agent-a", value: "alpha", source: LONG_SOURCE });
+      seedAssignment({ id: "m", agentId: "agent-a", value: "missing" });
+      seedSkillRow({ id: "skill-alpha", agentId: "agent-a", name: "alpha" });
+      memoryStore.set("mem-1", {
+        id: "mem-1", agentId: "agent-a", content: "short", durability: "permanent",
+        createdAt: "2026-01-01T00:00:00.000Z", archived: false,
+      });
+    };
+
+    // Ample budget: everything ships, and the counters equal the same-estimator
+    // sum over what shipped.
+    seed();
+    const full: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeContext: false, maxTokens: 4000 });
+    expect(full.skills).toEqual([entry]);
+    expect(full.skillsTokens).toBe(entryCost);
+    expect(full.skillDiagnosticsTokens).toBe(
+      full.skillDiagnostics.reduce((n: number, d: any) => n + estimateTokens(JSON.stringify(d)), 0),
+    );
+    expect(full.skillDiagnosticsTokens).toBeGreaterThan(0);
+    expect(full.memories.map((m: any) => m.id)).toContain("mem-1");
+
+    // Budget = exactly the manifest entry: it ships and leaves nothing for the
+    // diagnostic or the memory.
+    seed();
+    const exact: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeContext: false, maxTokens: entryCost });
+    expect(exact.skills).toEqual([entry]);
+    expect(exact.skillDiagnostics).toEqual([]);
+    expect(exact.skillDiagnosticsTruncated).toBe(1);
+    expect(exact.memoriesIncluded).toBe(0);
+    expect(exact.memories.map((m: any) => m.id)).not.toContain("mem-1");
+
+    // One token short: the entry does not ship and is counted.
+    seed();
+    const short: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeContext: false, maxTokens: entryCost - 1 });
+    expect(short.skills).toEqual([]);
+    expect(short.skillsTruncated).toBe(1);
+    expect(short.skillsTokens).toBe(0);
+    expect(short.sections.skills).toBe(0);
+
+    // Diagnostics draw from the same budget: with only an unresolved
+    // assignment (long source) and the memory, a budget of exactly the
+    // diagnostic's cost ships the diagnostic and leaves nothing for the memory.
+    const seedDiagnosticOnly = () => {
+      reset();
+      seedAssignment({ id: "m", agentId: "agent-a", value: "missing", source: LONG_SOURCE });
+      memoryStore.set("mem-1", {
+        id: "mem-1", agentId: "agent-a", content: "short", durability: "permanent",
+        createdAt: "2026-01-01T00:00:00.000Z", archived: false,
+      });
+    };
+    seedDiagnosticOnly();
+    const ample: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeContext: false, maxTokens: 4000 });
+    expect(ample.skillDiagnostics).toHaveLength(1);
+    expect(ample.memoriesIncluded).toBe(1);
+    seedDiagnosticOnly();
+    const diagExact: any = await makeBootstrap(agentCtx("agent-a")).post({
+      agentId: "agent-a", includeContext: false, maxTokens: ample.skillDiagnosticsTokens,
+    });
+    expect(diagExact.skillDiagnostics).toHaveLength(1);
+    expect(diagExact.memoriesIncluded).toBe(0);
+    expect(diagExact.memoriesTruncated).toBe(1);
+  });
+
+  it("the payload passes the bootstrap contract, including the ledger identity with the skills terms", async () => {
+    reset();
+    seedMixedAssignments();
+    const args = { includeContext: false };
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", ...args });
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    const { conform } = await import("../helpers/mcp-conformance.ts");
+    expect(TOOLS.bootstrap.contract.invariants!.tokenDecomposition!.terms).toEqual(
+      expect.arrayContaining(["skillsTokens", "skillDiagnosticsTokens"]),
+    );
+    conform("bootstrap", { ...res, flairVersion: "0.0.0-test" }, TOOLS.bootstrap.contract, { args });
+  });
+});
+
+// flair#2141 S1 — org-scope assignments through MemoryBootstrap.post(). The
+// pure rules are in test/unit/skill-manifest.test.ts.
+describe("MemoryBootstrap.post() — org-scope skills (flair#2141 S1)", () => {
+  function seedOrg() {
+    seedSkillRow({ id: "org-skill", agentId: "agent-ops", name: "using-flair" });
+    seedSkillRow({ id: "org-tied", agentId: "agent-ops", name: "tied" });
+    orgSkillStore.push(
+      { id: "o1", skillName: "using-flair", skillRef: "org-skill", priority: "standard" },
+      { id: "o2", skillName: "tied", skillRef: "org-tied", priority: "high" },
+      { id: "o3", skillName: "tied", skillRef: "org-tied", priority: "high" },
+      { id: "o4", skillName: "dangling", skillRef: "no-such-row", priority: "standard" },
+      { id: "o5", skillName: "opted", skillRef: "org-skill", priority: "standard" },
+    );
+    soulStore.set("opt", {
+      id: "opt", agentId: "agent-a", key: "skill-assignment", value: "opted",
+      metadata: JSON.stringify({ optOut: true }), originatorInstanceId: "inst-local",
+    });
+    instanceRows.push({ id: "inst-local", publicKey: "k", role: "hub", status: "active", createdAt: "2026-01-01T00:00:00.000Z" });
+  }
+
+  it("includeSoul:false returns the org winner with scope org; tied and unresolved org skills appear only in diagnostics, and an opted-out one in neither", async () => {
+    reset();
+    seedOrg();
+    agentStore.set("agent-a", { id: "agent-a" });
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeSoul: false });
+    expect(res.skills).toEqual([
+      { name: "using-flair", skillId: "org-skill", scope: "org", priority: "standard", source: null },
+    ]);
+    expect(res.skillDiagnostics.map((d: any) => `${d.name}:${d.scope}:${d.decision}`)).toEqual([
+      "dangling:org:unresolved",
+      "tied:org:refused",
+      "tied:org:refused",
+    ]);
+  });
+
+  it("a human, a deactivated agent and a target with no Agent record get no org skills; the record is read again on the next call", async () => {
+    reset();
+    seedOrg();
+    agentStore.set("agent-a", { id: "agent-a", kind: "agent", status: "active" });
+    agentStore.set("human-h", { id: "human-h", kind: "human", status: "active" });
+    const admin = makeBootstrap(agentCtx("admin-x", true));
+    expect((await admin.post({ agentId: "agent-a", includeSoul: false })).skills.map((s: any) => s.name)).toEqual(["using-flair"]);
+    agentStore.set("agent-a", { id: "agent-a", kind: "agent", status: "deactivated" });
+    for (const target of ["agent-a", "human-h", "no-record"]) {
+      const res: any = await admin.post({ agentId: target, includeSoul: false });
+      expect(res.skills, target).toEqual([]);
+      expect(res.skillDiagnostics, target).toEqual([]);
+    }
+  });
+
+  it("when this instance's id cannot be read, an unstamped opt-out does not apply and the org skill stays", async () => {
+    reset();
+    seedOrg();
+    delete soulStore.get("opt").originatorInstanceId;
+    agentStore.set("agent-a", { id: "agent-a" });
+    failInstanceRead = true;
+    const res: any = await makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeSoul: false });
+    expect(res.skills.map((s: any) => s.name)).toEqual(["opted", "using-flair"]);
+  });
+
+  it("a failed org-assignment read fails the bootstrap rather than reporting no org skills", async () => {
+    reset();
+    seedOrg();
+    agentStore.set("agent-a", { id: "agent-a" });
+    failOrgRead = true;
+    await expect(makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a" })).rejects.toThrow("org assignment read failed");
   });
 });

@@ -1,14 +1,16 @@
 /**
  * agent.ts — `flair agent` command group (flair#1630 / epic #1618).
  *
- * Extracted from src/cli.ts with ZERO behavior change. Owns the `agent`
- * commander registration (`add`, `list`/`show`, `remove`, ...) and its action
- * handlers — including the Ed25519 keypair generation in `agent add` and the
- * interactive-removal flow in `agent remove`, both moved verbatim.
+ * Extracted from src/cli.ts. Owns the `agent` commander registration
+ * (`add`, `list`/`show`, `remove`, ...) and its action handlers, including
+ * Ed25519 keypair generation in `agent add` and the interactive removal flow.
  *
- * SECURITY: this module only relocates existing identity/auth logic. It does not
- * add or alter any registration, signing, key-generation, or key-permission
- * behavior.
+ * `agent add` (flair#2126) looks up the id before it writes. A well-formed
+ * existing row is refused — the stored public key is left unchanged — and
+ * that message names `flair agent rotate-key` or `flair agent remove` first.
+ * An unreadable row exits without that remedy. A new id is inserted, then
+ * read back; `registered` is printed only when the stored public key matches
+ * the key this command generated or reused and `name` is a string.
  *
  * Shared cli.ts-local helpers are injected via bindCli() so this module never
  * imports src/cli.ts (avoids the import cycle and keeps it inside the strict
@@ -29,6 +31,7 @@ import {
   resolveKeyPath,
   authFetch,
 } from "../lib/auth-resolve.js";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type AgentCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -87,6 +90,171 @@ const seedAgentViaOpsApi = (
 ): Promise<void> => cli.seedAgentViaOpsApi(opsPortOrUrl, agentId, pubKeyB64url, adminUser, adminPass);
 const agentRecordIsAdmin = (record: any): boolean => cli.agentRecordIsAdmin(record);
 
+const INLINE_ADMIN_PASS_WARNING =
+  "warning: --admin-pass passed inline. Use FLAIR_ADMIN_PASS without typing its value into a recorded " +
+  "shell line (for example, read it from the admin-pass file).";
+
+interface StoredAgent {
+  id: string;
+  name?: string;
+  publicKey?: string;
+}
+
+/** Operations API URL, same shape as `seedAgentViaOpsApi` (trailing slash). */
+function opsApiUrl(opsPortOrUrl: number | string): string {
+  return typeof opsPortOrUrl === "number"
+    ? `http://127.0.0.1:${opsPortOrUrl}/`
+    : `${opsPortOrUrl.replace(/\/$/, "")}/`;
+}
+
+type ParsedAgentRows =
+  | { ok: true; row: StoredAgent | null }
+  | { ok: false; reason: string };
+
+/**
+ * Parse an operations `search_by_value` body for one id.
+ * `[]` is the only absence. One row with this id and a string `name` is that
+ * agent even when `publicKey` is missing or empty: a missing public key is
+ * still an existing row and fails the later success check. It is not a
+ * missing row. Unreadable, and never treated as absence: a non-array, more
+ * than one row, a non-object element, a missing or empty id, a different id,
+ * a non-string `publicKey`, or a missing or non-string `name`.
+ */
+function parseAgentRows(body: unknown, id: string): ParsedAgentRows {
+  if (!Array.isArray(body)) {
+    return { ok: false, reason: "operations API returned an unexpected body." };
+  }
+  if (body.length === 0) return { ok: true, row: null };
+  if (body.length !== 1) {
+    return { ok: false, reason: `operations API returned ${body.length} rows for Agent '${id}'.` };
+  }
+  const row = body[0];
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return { ok: false, reason: "operations API returned a malformed Agent row." };
+  }
+  const rec = row as { id?: unknown; name?: unknown; publicKey?: unknown };
+  if (typeof rec.id !== "string" || rec.id.length === 0) {
+    return { ok: false, reason: "operations API returned a malformed Agent row." };
+  }
+  if (rec.id !== id) {
+    return {
+      ok: false,
+      reason: `operations API returned Agent '${rec.id}' while looking up '${id}'.`,
+    };
+  }
+  if (rec.publicKey !== undefined && typeof rec.publicKey !== "string") {
+    return { ok: false, reason: "operations API returned a malformed Agent row." };
+  }
+  if (typeof rec.name !== "string") {
+    return { ok: false, reason: "operations API returned an Agent row whose name is missing or not a string." };
+  }
+  const publicKey = typeof rec.publicKey === "string" && rec.publicKey.length > 0 ? rec.publicKey : undefined;
+  return {
+    ok: true,
+    row: {
+      id: rec.id,
+      name: rec.name,
+      ...(publicKey !== undefined ? { publicKey } : {}),
+    },
+  };
+}
+
+function agentAlreadyExistsMessage(id: string): string {
+  return (
+    `Error: Agent '${id}' already exists; its stored public key was left unchanged. ` +
+    `Run \`flair agent rotate-key ${id}\` on the Flair host to replace the key, ` +
+    `or \`flair agent remove ${id}\` first and then \`flair agent add ${id}\`. ` +
+    `\`flair agent remove\` tries to delete that agent's Memory and Soul rows.`
+  );
+}
+
+function agentKeyNotStoredMessage(id: string, stored: StoredAgent | null): string {
+  let found: string;
+  if (!stored) {
+    found = `Reading the record back found no Agent row for '${id}'.`;
+  } else if (typeof stored.publicKey !== "string" || stored.publicKey.length === 0) {
+    found = `An Agent row for '${id}' was found, but it has no usable public key.`;
+  } else {
+    found = `The stored public key is '${stored.publicKey}', which is not the key generated or reused by this command.`;
+  }
+  return (
+    `Error: Agent '${id}' was not stored with the public key generated or reused by this command. ${found} ` +
+    `Run \`flair agent rotate-key ${id}\` on the Flair host to replace the key, ` +
+    `or \`flair agent remove ${id}\` first and then \`flair agent add ${id}\`. ` +
+    `\`flair agent remove\` tries to delete that agent's Memory and Soul rows.`
+  );
+}
+
+/**
+ * Read one Agent row by id through the operations API.
+ * Exits on a failed body read, an empty body, non-JSON, a row whose id is
+ * not the one searched, or a row that is unreadable: non-object, missing or
+ * empty id, non-string `publicKey`, or missing or non-string `name`.
+ * Those results are not "no such agent". A row with this id and a string
+ * `name` is returned even when `publicKey` is missing or empty; that is an
+ * existing row, and the add success check refuses it. Returns null only
+ * when the body is a JSON `[]`.
+ */
+async function readStoredAgent(
+  opsPortOrUrl: number | string,
+  id: string,
+  adminUser: string,
+  adminPass: string,
+): Promise<StoredAgent | null> {
+  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  let res: Response;
+  try {
+    res = await fetch(opsApiUrl(opsPortOrUrl), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+      body: JSON.stringify({
+        operation: "search_by_value",
+        database: "flair",
+        table: "Agent",
+        search_attribute: "id",
+        search_value: id,
+        get_attributes: ["id", "name", "publicKey"],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error: could not read Agent '${id}': ${message}`);
+    process.exit(1);
+  }
+  let text: string;
+  try {
+    text = await res.text();
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error: could not read Agent '${id}': ${message}`);
+    process.exit(1);
+  }
+  if (!res.ok) {
+    console.error(`Error: could not read Agent '${id}' (${res.status}): ${text}`);
+    process.exit(1);
+  }
+  if (text.trim().length === 0) {
+    console.error(`Error: could not read Agent '${id}': operations API returned an empty body.`);
+    process.exit(1);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    console.error(`Error: could not read Agent '${id}': operations API returned a body that is not JSON.`);
+    process.exit(1);
+  }
+  const parsed = parseAgentRows(body, id);
+  // `=== false`, not `!parsed.ok`: tsconfig.cli.json is not strict, and `!`
+  // does not narrow this union there.
+  if (parsed.ok === false) {
+    console.error(`Error: could not read Agent '${id}': ${parsed.reason}`);
+    process.exit(1);
+  }
+  return parsed.row;
+}
+
 /** Register the `flair agent` command group (flair#1630). */
 export function register(program: Command): void {
   // ─── flair agent ─────────────────────────────────────────────────────────────
@@ -95,7 +263,7 @@ export function register(program: Command): void {
 
   agent
     .command("add <id>")
-    .description("Register a new agent in a running Flair instance")
+    .description("Register a new agent. Refuses an id whose Agent record already exists")
     .option("--name <name>", "Display name (defaults to id)")
     .option("--port <port>", "Harper HTTP port")
     .option("--admin-pass <pass>", "Admin password for registration")
@@ -103,7 +271,7 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--ops-port <port>", "Harper operations API port")
-    .option("--target <url>", "Remote Flair REST URL; derives the ops API URL (port-1) to seed the Agent there (env: FLAIR_TARGET)")
+    .option("--target <url>", "Remote Flair REST URL; derives ops URL (HTTPS no port/:443 → Fabric ops :9925; HTTP no port/:80 → :19925; other ports 2–65535 → port-1; port 1 refused; env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL to seed the Agent on (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (id: string, opts) => {
       const httpPort = resolveHttpPort(opts);
@@ -169,6 +337,17 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
+      // flair#2126 — Harper 5.2.8 skips an insert whose id already exists and
+      // still returns OK, so the seed helper's 409/"already exists" path never
+      // fires and the old public key stays. Look the id up first and refuse
+      // before any key file or insert. A later read-back covers a row that
+      // appears in the gap, or an insert that does not store this key.
+      const existing = await readStoredAgent(seedOpsTarget, id, adminUser, adminPass);
+      if (existing) {
+        console.error(agentAlreadyExistsMessage(id));
+        process.exit(1);
+      }
+
       mkdirSync(keysDir, { recursive: true });
       const privPath = privKeyPath(id, keysDir);
       const pubPath = pubKeyPath(id, keysDir);
@@ -190,13 +369,18 @@ export function register(program: Command): void {
       }
 
       await seedAgentViaOpsApi(seedOpsTarget, id, pubKeyB64url, adminUser, adminPass);
+      const stored = await readStoredAgent(seedOpsTarget, id, adminUser, adminPass);
+      if (!stored || stored.publicKey !== pubKeyB64url) {
+        console.error(agentKeyNotStoredMessage(id, stored));
+        process.exit(1);
+      }
       console.log(
         typeof seedOpsTarget === "string"
           ? `✅ Agent '${id}' (${name}) registered (ops: ${seedOpsTarget})`
           : `✅ Agent '${id}' (${name}) registered`,
       );
       console.log(`   Private key: ${privPath}`);
-      console.log(`   Public key:  ${pubKeyB64url}`);
+      console.log(`   Public key:  ${stored.publicKey}`);
       // flair#1280 — connector legibility at provisioning time: an OAuth /mcp
       // connector resolves its own token subject to an Agent via
       // Credential(kind:idp), NOT via this key, and the two identities are
@@ -222,10 +406,7 @@ export function register(program: Command): void {
       // fromEnv is true ONLY when the resolved value came from env (no inline override).
       const adminPassFromEnv = !opts.adminPass && (!!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD);
       if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
-        console.error(
-          "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
-          "to keep secrets out of shell history."
-        );
+        console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
       const mode = render.resolveOutputMode(opts);
@@ -311,7 +492,7 @@ export function register(program: Command): void {
     .description("Show agent details")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (id: string, opts) => {
-      const out = await api("GET", `/Agent/${id}`);
+      const out = await api("GET", `/Agent/${encodeRecordId(id)}`);
       const mode = render.resolveOutputMode(opts);
       if (mode === "json") {
         console.log(render.asJSON(out));
@@ -353,10 +534,7 @@ export function register(program: Command): void {
       // fromEnv is true ONLY when the resolved value came from env (no inline override).
       const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
       if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
-        console.error(
-          "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
-          "to keep secrets out of shell history."
-        );
+        console.error(INLINE_ADMIN_PASS_WARNING);
       }
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const adminUser = resolveAdminUser(opts.adminUser);
@@ -420,7 +598,7 @@ export function register(program: Command): void {
       // Verify new key works
       console.log(`Verifying new Ed25519 auth...`);
       const httpUrl = `http://127.0.0.1:${httpPort}`;
-      const verifyRes = await authFetch(httpUrl, id, currentPrivPath, "GET", `/Agent/${id}`);
+      const verifyRes = await authFetch(httpUrl, id, currentPrivPath, "GET", `/Agent/${encodeRecordId(id)}`);
       if (!verifyRes.ok) {
         console.error(`⚠️  Auth verification failed (${verifyRes.status}). Old key is backed up at: ${backupPrivPath}`);
         process.exit(1);

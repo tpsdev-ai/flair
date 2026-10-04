@@ -2,11 +2,112 @@ import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
-import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
-import { resolveReadScope } from "./memory-read-scope.js";
-import { NOT_FOUND } from "./record-type-kit.js";
-import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
+import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
+import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
+import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
+import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
+
+// --- Non-admin Memory read: ignore the caller's selection --------------------
+//
+// flair#1940 round 17. A non-admin HTTP Memory read returns the authorized,
+// pointer-projected row; a caller `select(...)` or `property` is dropped from the
+// request URL before Harper parses it, while conditions, operator, sort, limit
+// and offset are left exactly as sent. These helpers are the whole of that
+// normalization.
+
+const DECLARED_MEMORY_ATTRIBUTE_SET = new Set<string>(
+  DECLARED_MEMORY_ATTRIBUTES as readonly string[],
+);
+
+function isMemoryReadPath(pathname: string): boolean {
+  return pathname === "/Memory" || pathname === "/Memory/" || pathname.startsWith("/Memory/");
+}
+
+// Drop a caller's `select(...)` and `property` from a Memory read URL, keeping
+// conditions, operator, sort, limit and offset. Returns the input unchanged when
+// the URL carries no selection.
+function stripMemorySelection(rawUrl: string): string {
+  const q = rawUrl.indexOf("?");
+  let pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
+  let query = q === -1 ? "" : rawUrl.slice(q + 1);
+
+  // Path form: Harper reads a trailing `.<declared>` on the id as `property`.
+  // Harper decides on the DECODED path — RequestTarget decodes the path
+  // (`this.id = decodeURIComponent(path)`) and Resource.parsePath then splits at
+  // the first dot — so the middleware must decide on the decoded segment too, or
+  // it misses a percent-encoded dot: `%2E` (and `%2e`) IS a dot to Harper. Drop
+  // that suffix so the id addresses the full row; a suffix that is not a
+  // declared Memory attribute stays part of the id, exactly as Harper's own rule
+  // leaves it (a content-type extension such as `json` is not a declared
+  // attribute, so it is left for Harper to read as a content type).
+  const slash = pathPart.lastIndexOf("/");
+  const seg = pathPart.slice(slash + 1);
+  const decodedSeg = decodePathSegment(seg);
+  const dot = decodedSeg.indexOf(".");
+  if (dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1))) {
+    // Rebuild the id from its decoded form. Harper decodes the path it is handed,
+    // so this re-encoded segment addresses the SAME id, without the property.
+    pathPart = `${pathPart.slice(0, slash + 1)}${encodeURIComponent(decodedSeg.slice(0, dot))}`;
+  }
+
+  // Query form: drop every `select(...)` token and every `property` parameter.
+  for (const [start, end] of selectSpans(query).reverse()) {
+    query = query.slice(0, start) + query.slice(end);
+  }
+  query = query
+    .split("&")
+    .filter((p) => p !== "" && p !== "property" && !p.startsWith("property="))
+    .join("&");
+  // A run of separators left by removing `select(...)` tokens carries nothing.
+  if (/^[,;]*$/.test(query)) query = "";
+
+  if (q === -1) return pathPart;
+  return query === "" ? pathPart : `${pathPart}?${query}`;
+}
+
+/** Decode a path segment the way Harper does before its property parse; fall
+ *  back to the raw segment when it is not valid percent-encoding (Harper rejects
+ *  the malformed request; the middleware must not crash on it). */
+function decodePathSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+// [start, end) ranges of every `select(...)` call in a query string, accounting
+// for Harper's nested-list form `select((a,b))`.
+function selectSpans(query: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const marker = "select(";
+  let from = 0;
+  for (;;) {
+    const idx = query.indexOf(marker, from);
+    if (idx < 0) break;
+    const before = idx > 0 ? query[idx - 1] : "";
+    if (before && /[A-Za-z0-9_$-]/.test(before)) {
+      from = idx + marker.length;
+      continue;
+    }
+    let depth = 1;
+    let i = idx + marker.length;
+    for (; i < query.length; i++) {
+      const ch = query[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    if (i >= query.length) break;
+    spans.push([idx, i + 1]);
+    from = i + 1;
+  }
+  return spans;
+}
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -45,11 +146,11 @@ function getAdminPass(): string | null {
 // an admin — one implementation guarantees they can't diverge.
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
-// WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
-// importEd25519Key all live in ./ed25519-auth.ts — the single
-// shared implementation imported by auth-middleware.ts, agent-auth.ts, and
-// Presence.ts so a nonce recorded via any one of the three call sites is
-// visible to the other two, and the crypto/decoder logic can't drift.
+// WINDOW_MS and importEd25519Key live in ./ed25519-auth.ts, and the replay
+// guard (isKnownAgentReplay / claimAgentNonce) in ./replay-store.ts — shared by
+// auth-middleware.ts, agent-auth.ts and Presence.ts, so a nonce recorded via
+// any one of the three call sites, on any worker thread, is refused by all of
+// them, and the crypto/decoder logic can't drift.
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
   try {
@@ -60,7 +161,9 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // document vector, same as the three Memory.ts sites; must match.
     const embedding = await getEmbedding(record.content, "document");
     if (!embedding) return;
-    await patchRecord((databases as any).flair.Memory, memoryId, { embedding });
+    const embedPatch = { embedding };
+    stripUndeclaredMemoryAttributes(embedPatch);
+    await patchRecord((databases as any).flair.Memory, memoryId, embedPatch);
     console.log(`[auto-embed] ${memoryId}: ${embedding.length}d`);
   } catch (err: any) {
     console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);
@@ -69,16 +172,44 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
 
 // ─── HTTP middleware ──────────────────────────────────────────────────────────
 
+// Flair's clients use exactly these HTTP methods. Harper routes other methods
+// to resource handlers as well; refusing them here, before any other branch of
+// the default REST middleware, keeps the tables it serves to the methods their
+// handlers are written and tested for. (Separately mounted routes such as /mcp
+// and OAuth discovery have their own dispatch chains and method handling.)
+const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
+  "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
+]);
+
 server.http(async (request: any, nextLayer: any) => {
+  // ── HTTP method allowlist, FIRST ───────────────────────────────────────────
+  // Before the public-path passthrough and before any auth branch, so no path
+  // and no caller (anonymous, agent or admin) can reach a handler through any
+  // other method.
+  // Exact match: HTTP methods are case-sensitive, and these are the spellings
+  // Flair's clients send.
+  const httpMethod = String(request.method ?? "");
+  if (!ALLOWED_HTTP_METHODS.has(httpMethod)) {
+    return new Response(JSON.stringify({
+      error: "method_not_allowed",
+      detail: `Flair accepts ${[...ALLOWED_HTTP_METHODS].join(", ")}.`,
+    }), {
+      status: 405,
+      headers: { "content-type": "application/json", allow: [...ALLOWED_HTTP_METHODS].join(", ") },
+    });
+  }
+
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
-  // ── Rate limiting, FIRST ───────────────────────────────────────────────────
+  // ── Rate limiting, right after the method check ────────────────────────────
   // Before the public-path passthrough below (the OAuth endpoints all sit on it,
   // so a hook placed after it would never run for them), and before anything
-  // reads a credential.
+  // reads a credential. A request refused by the method check above never
+  // reaches the limiter, and consumes no budget.
   //
   // Ordering is a security property, not tidiness. The counter is consumed for
-  // every request to a throttled endpoint whether or not the credential that
+  // every request to a throttled endpoint that passes the method check, whether
+  // or not the credential that
   // came with it was any good — if only failures were counted, "did this consume
   // budget" would answer "was that credential valid", which is a cleaner
   // enumeration oracle than the 400 the endpoint already returns. Because the
@@ -325,7 +456,9 @@ server.http(async (request: any, nextLayer: any) => {
   if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS)
     return new Response(JSON.stringify({ error: "timestamp_out_of_window" }), { status: 401 });
 
-  if (isNonceReplay(agentId, nonce, now))
+  // A nonce this thread already saw recorded is refused before any lookup. A
+  // miss here proves nothing: claimAgentNonce below is the authoritative check.
+  if (isKnownAgentReplay(agentId, nonce, now))
     return new Response(JSON.stringify({ error: "nonce_replay_detected" }), { status: 401 });
 
   const agent = await (databases as any).flair.Agent.get(agentId);
@@ -352,7 +485,12 @@ server.http(async (request: any, nextLayer: any) => {
       return new Response(JSON.stringify({ error: "signature_verification_failed", detail: e?.message }), { status: 401 });
   }
 
-  recordNonce(agentId, nonce, ts);
+  // Record the nonce instance-wide now that the signature has verified, and
+  // before the request reaches anything else. A replay (401) or an unusable
+  // replay store (503, named in the server log) refuses.
+  const claim = await claimAgentNonce(agentId, nonce);
+  if (!claim.ok) return new Response(JSON.stringify({ error: claim.error }), { status: claim.status });
+
   request.tpsAgent = agentId;
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
@@ -448,9 +586,7 @@ server.http(async (request: any, nextLayer: any) => {
       try {
         const record = await (databases as any).flair[guarded.table]?.get(guarded.id);
         if (isForbiddenOwnerMutation(record, guarded.ownerField, agentId)) {
-          return new Response(JSON.stringify({
-            error: `forbidden: cannot modify ${guarded.table} owned by another principal`,
-          }), { status: 403, headers: { "Content-Type": "application/json" } });
+          return ownerMutationRefusal(guarded.table);
         }
       } catch { /* unreadable row → fall through to the resource's own rules */ }
     }
@@ -621,38 +757,22 @@ server.http(async (request: any, nextLayer: any) => {
   // body-level enforcement since it receives the parsed data from Harper's REST
   // layer. The middleware's job is identity verification (done above).
 
-  // ── Memory GET: non-admin can only read own memories (by ID) ────────────────
-  if (!request.tpsAgentIsAdmin && method === "GET") {
-    if (url.pathname.startsWith("/Memory/")) {
-      try {
-        const pathParts = url.pathname.split("/").filter(Boolean);
-        const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
-        if (memId) {
-          const record = await (databases as any).flair.Memory.get(memId);
-          if (record && record.agentId && record.agentId !== agentId) {
-            // Centralized read-scope (Layer 1): the owner's records at any
-            // visibility plus every other agent's non-private records; grants
-            // are not consulted on reads (resolveReadScope()). This
-            // used to be a `visibility === "office"` bypass (any authenticated
-            // agent, no grant needed) — that's gone; the private-exclusion is
-            // now enforced the same way every other read path enforces it.
-            //
-            // Denial is the SAME 404 the resource layer returns (flair#1264):
-            // Memory.get() deliberately answers NOT_FOUND for a cross-agent
-            // private id so a denied caller can't distinguish "doesn't exist"
-            // from "exists but not yours" — a 403 here, worse yet one naming
-            // the owning agent, confirmed the id exists AND disclosed its
-            // owner, defeating that anti-enumeration contract one layer up.
-            // Reuses record-type-kit's NOT_FOUND so the two layers cannot
-            // drift apart in shape.
-            const scope = await resolveReadScope(agentId);
-            if (!scope.isAllowed(record)) {
-              return NOT_FOUND();
-            }
-          }
-        }
-      } catch { /* record not found or table error — let resource handle */ }
-    }
+  // ── Memory read: a non-admin read ignores the caller's selection ─────────────
+  // flair#1940 round 17 (design ruling): a non-admin HTTP Memory read does NOT
+  // honour a caller `select(...)` or `property`. As soon as authentication has
+  // established that the caller is not an admin — and BEFORE anything reads a
+  // Memory row or hands the request to the next layer — the request URL is
+  // normalized to drop the caller's selection, keeping conditions, operator,
+  // sort, limit and offset exactly as sent. Harper builds its REST target from
+  // this URL AFTER this middleware, so the original selection cannot be
+  // reapplied. An admin read and a trusted internal read are unchanged, while a
+  // direct contextual non-admin read now ignores the selection too (the same
+  // contract, applied in `Memory.get`/`Memory.search`). The by-id
+  // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
+  // which returns the same 404 this middleware used to return.
+  if (!request.tpsAgentIsAdmin && method === "GET" && isMemoryReadPath(url.pathname)) {
+    const stripped = stripMemorySelection(request.url);
+    if (stripped !== request.url) request.url = stripped;
   }
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
@@ -671,4 +791,4 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   return response;
-}, { runFirst: true });
+}, { runFirst: true, name: FLAIR_AUTH_MIDDLEWARE_HTTP_NAME });

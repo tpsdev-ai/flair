@@ -21,6 +21,7 @@
  */
 import { Command } from "commander";
 import { createHash } from "node:crypto";
+import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type RelationshipCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -103,7 +104,7 @@ export function register(program: Command): void {
       if (opts.validFrom) body.validFrom = opts.validFrom;
       if (opts.validTo) body.validTo = opts.validTo;
       if (opts.source) body.source = opts.source;
-      const out = await api("PUT", `/Relationship/${id}`, body, { agentId, agentIdSource: source });
+      const out = await api("PUT", `/Relationship/${encodeRecordId(id)}`, body, { agentId, agentIdSource: source });
       console.log(JSON.stringify(out, null, 2));
     });
 }

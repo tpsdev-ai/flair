@@ -13,19 +13,22 @@ import { fabricUpgrade } from "../fabric-upgrade.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { defaultKeysDir } from "../lib/auth-resolve.js";
+import { classifyDaemonState, type DaemonEvidence } from "../lib/daemon-liveness.js";
 import { renderVerifiedSummary } from "../lib/doctor-run.js";
 import { isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { FLAIR_MCP_PACKAGE, clearFlairCliVersionCache } from "../lib/mcp-spec.js";
-import { createRegistryNoticePrinter, fetchLatestVersion, isStrictSemver } from "../lib/npm-registry.js";
+import { createRegistryNoticePrinter, fetchLatestVersion, fetchVersionDeprecation, isStrictSemver } from "../lib/npm-registry.js";
+import { classifyUpgradePriorLiveness, type PriorLiveness } from "../lib/upgrade-prior-liveness.js";
+import { decideAfterRestartFailure, decideDeprecatedRollback, formatKnownBrokenRollbackRestart, type DeprecationLookup, type RollbackRecoveryLane } from "../lib/upgrade-rollback.js";
 import { ownedPinRefreshShouldReport, refreshOwnedPins } from "../lib/owned-pins.js";
 import { extractSnapshotSafely, validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
 import { collectUpgradeExecPathWarning, findFlairPackageDir, resolveNpmGlobalFlairPackage, resolveServingFlairPackage } from "../lib/upgrade-exec-path.js";
-import { PlainTreeUpgradePlan, applyPlainTreeUpgrade, decidePlainTreeRollback, discardPlainTreePrevious, findSystemdUnitsForTree, formatPlainTreeBanner, formatPlainTreePlan, formatPlainTreeScopeFooter, planPlainTreeUpgrade, resolvePlainTreeListingTarget, resolvePlainTreeTarget, restartSystemdUnits, restorePlainTreePrevious } from "../lib/upgrade-plain-tree.js";
+import { PlainTreeUpgradePlan, UPGRADE_FAILED_SUFFIX, decidePlainTreeRollback, discardPlainTreePrevious, findSystemdUnitsForTree, formatPlainTreeBanner, formatPlainTreePlan, formatPlainTreeScopeFooter, planPlainTreeUpgrade, resolvePlainTreeListingTarget, resolvePlainTreeTarget, restartSystemdUnits, stopSystemdUnits, restorePlainTreePrevious, treeSibling } from "../lib/upgrade-plain-tree.js";
 import { probeInstance } from "../probe.js";
 import * as render from "../render.js";
-import { FLAIR_PKG_NAME, primeVersionCheckCache } from "../version-check.js";
+import { FLAIR_PKG_NAME, primeVersionCheckCache, probeInstanceVersion } from "../version-check.js";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 
 import { join, resolve, sep } from "node:path";
 import { create as tarCreate } from "tar";
@@ -36,14 +39,17 @@ import { create as tarCreate } from "tar";
 import type { UpgradeStatus } from "../lib/upgrade-status.js";
 import { classifyInstalledVersion, formatUpgradeStatusLine } from "../lib/upgrade-status.js";
 import { resolveHome } from "../lib/home.js";
+import { formatTreeAssessmentLines, withRunningVersion, type TreeAssessment } from "../lib/tree-divergence.js";
 
 export type UpgradeCli = {
+  assessInstallTree: (...args: any[]) => any;
   decideAfterRollbackVerify: (...args: any[]) => any;
   decideAfterVerify: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
   doctorRunAfterUpgrade: (...args: any[]) => any;
   flairPackageDir: (...args: any[]) => any;
   fleetSweepCallerExitMessage: (...args: any[]) => any;
+  gatherDaemonEvidence: (port: number, dataDir: string) => Promise<DaemonEvidence>;
   humanBytes: (...args: any[]) => any;
   isCredentialOnlyFailure: (...args: any[]) => any;
   observeLaunchdManagement: (...args: any[]) => any;
@@ -59,6 +65,10 @@ export type UpgradeCli = {
   resolveInstanceServingPid: (...args: any[]) => any;
   resolveUpgradeRestartVerify: (...args: any[]) => any;
   restartAfterUpgrade: (...args: any[]) => any;
+  /** Package-install binding used by runPackageInstall. */
+  runPackageInstall: (spec: string) => void;
+  /** Tree-swap binding used by applyPlainTreeUpgrade. */
+  applyPlainTreeUpgrade: (plan: PlainTreeUpgradePlan) => Promise<void>;
   shouldPrintUpgradeLine: (...args: any[]) => any;
   shouldRunFleetVerify: (...args: any[]) => any;
   startFlairProcess: (...args: any[]) => any;
@@ -73,6 +83,11 @@ let cli: UpgradeCli;
 /** Bind the cli-locals this module depends on. */
 export function bindCli(fns: UpgradeCli): void {
   cli = fns;
+}
+
+/** Shallow-merge the supplied bindings into cli. */
+export function rebindCli(partial: Partial<UpgradeCli>): void {
+  cli = { ...cli, ...partial };
 }
 
 function decideAfterRollbackVerify(...args: any[]): any {
@@ -157,6 +172,14 @@ function resolveUpgradeRestartVerify(...args: any[]): any {
 
 function restartAfterUpgrade(...args: any[]): any {
   return cli.restartAfterUpgrade(...args);
+}
+
+function applyPlainTreeUpgrade(plan: PlainTreeUpgradePlan): Promise<void> {
+  return cli.applyPlainTreeUpgrade(plan);
+}
+
+function runPackageInstall(spec: string): void {
+  cli.runPackageInstall(spec);
 }
 
 function shouldPrintUpgradeLine(...args: any[]): any {
@@ -571,24 +594,29 @@ export const UPGRADE_SNAPSHOT_NUDGE_LINES: readonly string[] = [
 ];
 
 /**
- * Run the stop → snapshot → prune → restart dance for a pre-upgrade snapshot.
+ * Run the stop → snapshot → prune → conditional restart sequence for a
+ * pre-upgrade snapshot.
  * Extracted from the upgrade action so the --snapshot and engine-version-change
  * branches share the same mechanism (flair#1047).
  *
  * On snapshot failure: aborts the upgrade (process.exit(1)), restarting Flair
- * first if it was stopped. On restart-after-snapshot failure: also exits.
+ * first only if the initial /Health probe did not refuse. On restart-after-
+ * snapshot failure: also exits.
  */
 
-async function runUpgradeSnapshot(port: number, dataDir: string): Promise<void> {
+async function runUpgradeSnapshot(port: number, dataDir: string, restartAfterSnapshot: boolean): Promise<string> {
   // Consistency: a running Harper's data dir can be mid-write, and a
   // plain file copy of a live database directory isn't guaranteed
   // point-in-time consistent (Harper 5.x = RocksDB: WAL/SST/MANIFEST
-  // can tear under a live copy). Stopping first — then immediately
-  // restarting the OLD version, before any package changes — gives a
-  // quiesced, safe-to-copy directory with only a brief blip, even for
+  // can tear under a live copy). Stopping first gives a quiesced,
+  // safe-to-copy directory. When restartAfterSnapshot is true (the initial
+  // /Health probe did not refuse the connection), the OLD version is then
+  // restarted before any package changes — a brief blip, even for
   // --no-restart (the snapshot's correctness doesn't depend on
   // whether the caller wants a restart AFTER the upgrade — those are
-  // orthogonal). See docs/upgrade.md for the native-backup alternative
+  // orthogonal). A refused probe leaves the instance stopped, so the
+  // restart-failure decision's `stopped` reading still holds after the
+  // package swap. See docs/upgrade.md for the native-backup alternative
   // considered and rejected (Harper's `get_backup` op backs up one
   // table/schema at a time over the running HTTP API — not the whole
   // data dir — and rejecting it here means this path never depends on
@@ -609,18 +637,22 @@ async function runUpgradeSnapshot(port: number, dataDir: string): Promise<void> 
   } catch (err: any) {
     console.error(`❌ snapshot failed: ${err.message}`);
     console.error("   Aborting upgrade — no packages were changed.");
-    if (stoppedForSnapshot) {
+    if (stoppedForSnapshot && restartAfterSnapshot) {
       try { await startFlairProcess(port, dataDir); } catch { /* best effort — surface the original snapshot error, not this */ }
     }
     process.exit(1);
   }
-  try {
-    await startFlairProcess(port, dataDir);
-  } catch (err: any) {
-    console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
-    console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
-    process.exit(1);
+  if (restartAfterSnapshot) {
+    try {
+      await startFlairProcess(port, dataDir);
+    } catch (err: any) {
+      console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
+      console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
+      process.exit(1);
+    }
   }
+  if (!snapshotPath) throw new Error("pre-upgrade snapshot finished without a path");
+  return snapshotPath;
 }
 
 
@@ -950,20 +982,47 @@ program
     }
     const treeLane = treeDecision.kind === "use" ? treeDecision.inspection : null;
 
+    // flair#2034 §2: compare this CLI's install tree with the tree PROVEN to
+    // serve the instance (the service manager owns the serving process), once,
+    // before any branch — and with the version the instance actually runs.
+    // Not on the plain-tree lane: there a separate tree serving is the point.
+    let treeAssessment: TreeAssessment | null = null;
+    if (!treeLane) {
+      try {
+        const upgradePort = resolveHttpPort({});
+        treeAssessment = cli.assessInstallTree(defaultDataDir(), upgradePort, { local: true }) as TreeAssessment;
+        if (treeAssessment.state !== "unknown") {
+          treeAssessment = withRunningVersion(
+            treeAssessment,
+            await probeInstanceVersion(`http://127.0.0.1:${upgradePort}`, 2000),
+          );
+        }
+      } catch {
+        treeAssessment = null;
+      }
+    }
+    const treesDiverge = treeAssessment?.state === "diverged";
+
     // flair#1109 (b): print the mismatch warning only when this run will
     // still treat npm-global as the install. Collect always, so the (b)
-    // wiring test keeps seeing the call.
+    // wiring test keeps seeing the call. A PROVEN tree divergence (#2034)
+    // says the same thing with the serving tree named and the remedy, so it
+    // replaces this warning rather than printing beside it.
     try {
       const execPathWarning = collectUpgradeExecPathWarning({
         servingPid: upgradeServingPid,
         cliPackageDir: flairPackageDir(),
         npmGlobalPrefix: upgradeNpmPrefix,
       });
-      if (execPathWarning && !treeLane) {
+      if (execPathWarning && !treeLane && !treesDiverge) {
         console.log(execPathWarning);
         console.log("");
       }
     } catch { /* never fail upgrade over a path probe */ }
+    if (treesDiverge && treeAssessment) {
+      for (const line of formatTreeAssessmentLines(treeAssessment, { context: "upgrade" })) console.log(line);
+      console.log("");
+    }
 
     if (treeLane) {
       console.log(formatPlainTreeBanner(treeLane));
@@ -1234,6 +1293,17 @@ program
       for (const f of unknownFindings) {
         console.log(`\n❔ ${f.name}: could not parse installed version ${JSON.stringify(f.installed)} — not reporting it as up to date.`);
       }
+      // flair#2034 §2: never claim convergence while a DIFFERENT install tree
+      // is proven to serve the instance — the listing above is about this
+      // CLI's tree, not the one serving. The divergence block was printed once,
+      // above the listing.
+      if (treesDiverge) {
+        console.log(
+          "\nNo upgrades available for this CLI's tree — but the instance is served from a different install tree " +
+            "(see above), so that is not a statement about what is running.",
+        );
+        return;
+      }
       console.log(anyAhead || unknownFindings.length > 0 ? "\nNo upgrades available." : "\n✅ Everything is up to date.");
       return;
     }
@@ -1331,43 +1401,15 @@ program
     // never restarts Flair onto a different port.
     const baseUrl = `http://127.0.0.1:${upgradePort}`;
 
-    // ── Credential pre-flight (flair#741 fix #1) ────────────────────────────
-    // Post-restart verification (below) needs to authenticate against the
-    // running instance. If it can't do that RIGHT NOW, against the CURRENT,
-    // pre-upgrade instance, every upgrade on this machine is structurally
-    // doomed before a single package is touched: post-restart verify fails
-    // for the exact same credential reason, the rollback fires, and the
-    // rollback's own re-verify fails identically — producing "ROLLBACK ALSO
-    // FAILED VERIFICATION / state UNKNOWN" for an instance that was healthy
-    // the entire time. That is exactly the flair#741 incident report (a
-    // real 0.22.0→0.22.1 upgrade, healthy Flair, no ~/.flair/admin-pass, no
-    // FLAIR_ADMIN_PASS). Catch it here, before any mutation, with a message
-    // that says plainly: nothing was touched.
-    //
-    // Runs the SAME verification call (probeInstance + the agent-key-aware
-    // verifyAuthedGet, fix #2) that post-restart verification uses below —
-    // just against the pre-upgrade instance, with no expectVersion (there's
-    // no target version to compare against yet; the question here is purely
-    // "does an authenticated read work at all").
-    //
-    // Gated on --verify (shouldVerify): this check exists ONLY to keep
-    // post-restart verification honest. A user who already opted out of
-    // that verification with --no-verify has no use for a pre-flight that
-    // protects it, and blocking their upgrade on a check they didn't ask
-    // for would be a new, surprising failure mode of its own.
-    //
-    // Deliberately does NOT abort when the pre-flight instance is merely
-    // UNREACHABLE (down/timeout) rather than reachable-but-unauthenticated.
-    // `flair upgrade` may be the user's way of FIXING a down instance (bad
-    // code on disk that a newer version resolves) — today's behavior
-    // (pre-flair#741, no pre-flight at all) already lets that proceed, and
-    // a new hard block here would take away a legitimate recovery path for
-    // a failure mode this issue was never about. Only the specific
-    // "server responded, credentials didn't work" case is structurally
-    // doomed in a way a fresh install/restart can't fix on its own — so
-    // only that case aborts. (If a down instance turns out to ALSO lack
-    // credentials, that surfaces the normal way: post-restart verification
-    // fails and rolls back, same as any other post-restart failure.)
+    // Probe prior /Health, including under --no-verify: the pre-upgrade
+    // snapshot and the restart-failure decision both read it. A --no-restart
+    // upgrade probes only if a snapshot is needed.
+    // The separate credential preflight runs when shouldVerify is true and
+    // exits only when isCredentialOnlyFailure(preflight) is true.
+    let priorLiveness: PriorLiveness = { kind: "indeterminate", reason: "prior /Health was not probed" };
+    if (shouldRestart) {
+      priorLiveness = await classifyUpgradePriorLiveness(baseUrl, { timeoutMs: 3000 });
+    }
     if (shouldVerify) {
       const preflight = await probeInstance(baseUrl, {
         // A short, bounded budget — this instance is presumed already
@@ -1450,6 +1492,9 @@ program
       engineVersionChanging,
       !!opts.noEngineSnapshot,
     );
+    if (!shouldRestart && (snapshotDecision === "snapshot" || snapshotDecision === "engine-version-change")) {
+      priorLiveness = await classifyUpgradePriorLiveness(baseUrl, { timeoutMs: 3000 });
+    }
     let snapshotPath: string | null = null;
     if (snapshotDecision === "nudge") {
       // Non-blocking nudge only — never prompt/block here, this must stay
@@ -1470,10 +1515,10 @@ program
       console.log(`\nHarper engine version changing (${fromLabel} → ${toLabel}) — snapshotting data before upgrade...`);
       console.log(render.wrap(render.c.dim, "The tested-downgrade guarantee does not hold across engine version boundaries."));
       console.log(render.wrap(render.c.dim, "Pass --no-engine-snapshot to skip this (not recommended)."));
-      await runUpgradeSnapshot(upgradePort, upgradeDataDir);
+      snapshotPath = await runUpgradeSnapshot(upgradePort, upgradeDataDir, priorLiveness.kind !== "stopped");
     } else if (snapshotDecision === "snapshot") {
       console.log("\nSnapshotting data before upgrade...");
-      await runUpgradeSnapshot(upgradePort, upgradeDataDir);
+      snapshotPath = await runUpgradeSnapshot(upgradePort, upgradeDataDir, priorLiveness.kind !== "stopped");
     }
 
     // Perform upgrade. `latest` comes from the npm registry's HTTP
@@ -1503,7 +1548,7 @@ program
           continue;
         }
         console.log(`  Installing ${pkg}@${latest}...`);
-        execFileSync("npm", ["install", "-g", `${pkg}@${latest}`], { stdio: "pipe" });
+        runPackageInstall(`${pkg}@${latest}`);
         console.log(`  ✅ ${pkg}@${latest} installed`);
       } catch (err: any) {
         console.error(`  ❌ ${pkg} upgrade failed: ${err.message}`);
@@ -1549,8 +1594,12 @@ program
     // while the version on disk lies about what's actually running.
     // --no-restart opts back out for the "stage now, bounce later" case.
     // --restart is kept as a deprecated no-op for old muscle memory.
-    // Upgrade = install → restart → verify → (rollback on failure), one
-    // transaction — never report success on a broken restart.
+    // Restart failure: no swap yields no-target; a swap after a refused
+    // pre-upgrade /Health connection yields keep (exit success). Otherwise a
+    // nonempty previous version selects rollback, or no-target without one.
+    // Verification has its own ok/healthy-unverified/rollback/cannot-rollback
+    // decision. Rollback refuses reported deprecation; plain-tree restoration
+    // is skipped when the saved tree is missing. See docs/upgrade.md.
     const previousFlairVersion = flairFinding?.installed ?? null;
     const expectedFlairVersion =
       flairFinding?.status === "outdated" && !flairInstallFailed
@@ -1576,33 +1625,50 @@ program
     const port = upgradePort;
     // baseUrl was hoisted above (pre-flight, fix #1) — same URL, no redeclaration.
 
-    /**
-     * Roll @tpsdev-ai/flair back to `toVersion`, restart on it, re-verify, and
-     * exit. Shared by the two ways an upgrade can fail after the package swap:
-     * the restart itself (flair#905) and post-restart verification (flair#635).
-     *
-     * flair#905 found the restart leg wired straight to `process.exit(1)` — so
-     * `docs/upgrade.md`'s "install → restart → verify → rollback-on-failure, in
-     * one step" was only ever true for the verify leg. An upgrade that installed
-     * new packages and then failed to start them left the operator on the new
-     * version with nothing running and no rollback, which is the one outcome the
-     * whole transaction exists to prevent.
-     */
+    /** Map deprecation lookup results other than active/deprecated to unknown. */
+    const readRollbackDeprecation = async (version: string): Promise<DeprecationLookup> => {
+      try {
+        const res = await fetchVersionDeprecation(FLAIR_PKG_NAME, version);
+        if (res.kind === "deprecated") return { kind: "deprecated", message: res.message };
+        if (res.kind === "active") return { kind: "active" };
+        return { kind: "unknown" };
+      } catch {
+        return { kind: "unknown" };
+      }
+    };
+
     const rollbackTo = async (toVersion: string, reason: string): Promise<never> => {
+      let rollbackSnapshotRestored = false;
+      let plainTreeRestored = false;
+      let plainTreeLiveSetAside = false;
+      const deprecation = decideDeprecatedRollback({
+        toVersion,
+        lookup: await readRollbackDeprecation(toVersion),
+        installedVersion: expectedFlairVersion,
+        reason,
+      });
+      if (deprecation.kind === "refuse") {
+        for (const line of deprecation.lines) console.error(line);
+        process.exit(1);
+      }
+
       console.log(`\nRolling back @tpsdev-ai/flair to ${toVersion}...`);
       try {
         if (treePlan) {
           const rollbackDecision = decidePlainTreeRollback(existsSync(treePlan.previousDir));
           if (rollbackDecision.kind === "restore") {
-            if (!restorePlainTreePrevious(treePlan)) {
+            const restored = restorePlainTreePrevious(treePlan);
+            if (!restored.restored) {
               throw new Error(`no previous tree at ${treePlan.previousDir} to restore`);
             }
+            plainTreeRestored = true;
+            plainTreeLiveSetAside = restored.liveTreeSetAside;
             console.log(`  ✅ restored previous tree from ${treePlan.previousDir}`);
           } else {
             console.log(`   (${rollbackDecision.reason})`);
           }
         } else {
-          execFileSync("npm", ["install", "-g", `@tpsdev-ai/flair@${toVersion}`], { stdio: "pipe" });
+          runPackageInstall(`@tpsdev-ai/flair@${toVersion}`);
         }
       } catch (err: any) {
         console.error(`❌ rollback install failed: ${err.message}`);
@@ -1625,15 +1691,44 @@ program
           console.log(`\nEngine version changed — restoring pre-upgrade snapshot before rollback...`);
           console.log(`  snapshot: ${snapshotPath}`);
           console.log(`  target:   ${upgradeDataDir}`);
+          let retainedDataDir: string;
           try {
+            // A failed restart/verify does not prove the daemon stopped.
+            // stopFlairProcess can return after a best-effort wait; require
+            // fresh pid AND health evidence before touching the directory.
+            if (treePlan) stopSystemdUnits(treePlan.systemdUnits);
+            await stopFlairProcess(port, upgradeDataDir);
+            const state = classifyDaemonState(
+              await cli.gatherDaemonEvidence(port, upgradeDataDir),
+              { port, dataDir: upgradeDataDir },
+            );
+            if (state.state !== "NOT_RUNNING") {
+              throw new Error(`instance is not confirmed stopped (${state.state})`);
+            }
             await validateSnapshotArchive({ file: snapshotPath, targetDir: upgradeDataDir });
-            rmSync(upgradeDataDir, { recursive: true, force: true });
+            // Reserve a unique sibling, even for two rollbacks in the same
+            // millisecond. Rename preserves post-snapshot writes; never prune
+            // this directory or put it inside the tree being restored.
+            const destination = mkdtempSync(`${resolve(upgradeDataDir)}.pre-rollback-${new Date().toISOString().replace(/[:.]/g, "-")}-`);
+            renameSync(upgradeDataDir, destination);
+            retainedDataDir = destination;
+          } catch (err: any) {
+            console.error(`❌ refusing snapshot restore: could not stop and retain the current data: ${err.message}`);
+            console.error(`   ${upgradeDataDir} was not moved or replaced; no snapshot was restored.`);
+            console.error(`   Resolve the stop or move-aside failure before retrying; snapshot: ${snapshotPath}`);
+            process.exit(1);
+          }
+          console.log(`  Current data retained at: ${retainedDataDir}`);
+          console.log(`  To recover writes made after the snapshot: stop Flair, set aside ${upgradeDataDir}, move ${retainedDataDir} back to ${upgradeDataDir}, and start with the Harper engine version that wrote it.`);
+          try {
             mkdirSync(upgradeDataDir, { recursive: true, mode: 0o700 });
             await extractSnapshotSafely({ file: snapshotPath, targetDir: upgradeDataDir });
+            rollbackSnapshotRestored = true;
             console.log(`  ✅ snapshot restored`);
           } catch (err: any) {
             console.error(`❌ snapshot restore failed: ${err.message}`);
             console.error(`   @tpsdev-ai/flair@${toVersion} is installed but the data directory could not be restored.`);
+            console.error(`   Pre-restore data remains intact at ${retainedDataDir}.`);
             console.error(`   The snapshot itself is intact at ${snapshotPath} — restore it by hand:`);
             console.error(`   flair snapshot restore "${snapshotPath}"`);
             console.error(`   Then: flair start`);
@@ -1670,9 +1765,28 @@ program
           await restartAfterUpgrade(port, upgradeDataDir, rolledBackCli.ok ? rolledBackCli : null);
         }
       } catch (err: any) {
-        console.error(`❌ rollback restart failed: ${err.message}`);
-        console.error(`   @tpsdev-ai/flair@${toVersion} is installed but NOT running. Start it with: flair start`);
-        console.error("   Then check: flair status");
+        // Report the install lane, tree-restore results and snapshot-restore
+        // result to formatKnownBrokenRollbackRestart.
+        const lane: RollbackRecoveryLane = treePlan
+          ? {
+              kind: "plain-tree",
+              treeDir: treePlan.treeDir,
+              failedDir: treeSibling(treePlan.treeDir, UPGRADE_FAILED_SUFFIX),
+              previousDir: treePlan.previousDir,
+              restored: plainTreeRestored,
+              liveTreeSetAside: plainTreeLiveSetAside,
+            }
+          : { kind: "npm-global" };
+        for (const line of formatKnownBrokenRollbackRestart({
+          toVersion,
+          error: err?.message ?? String(err),
+          recoveryVersion: expectedFlairVersion,
+          lane,
+          snapshotRestored: rollbackSnapshotRestored,
+          snapshotPath,
+        })) {
+          console.error(line);
+        }
         process.exit(1);
       }
 
@@ -1744,9 +1858,25 @@ program
       }
     } catch (err: any) {
       console.error(`❌ restart failed: ${err.message}`);
-      console.error("   Flair is NOT running. Your data in ~/.flair was not touched by this upgrade.");
-      if (flairWasSwapped && previousFlairVersion) {
-        await rollbackTo(previousFlairVersion, `restart failed: ${err.message}`);
+      const restartDecision = decideAfterRestartFailure({
+        priorLiveness: priorLiveness.kind,
+        flairWasSwapped,
+        previousVersion: previousFlairVersion,
+        installedVersion: expectedFlairVersion,
+        startError: err?.message ?? String(err),
+      });
+      // decideAfterRestartFailure: no swap -> no-target; swapped + stopped ->
+      // keep; otherwise a nonempty previous version -> rollback, else no-target.
+      // keep exits successfully; rollbackTo and no-target exit with failure.
+      if (restartDecision.kind === "keep") {
+        for (const line of restartDecision.lines) console.error(line);
+        process.exit(0);
+      }
+      if (restartDecision.kind === "rollback") {
+        if (priorLiveness.kind === "indeterminate") {
+          console.error(`   Prior /Health was indeterminate (${priorLiveness.reason}) — not confirmed stopped, so this failure still rolls back.`);
+        }
+        await rollbackTo(restartDecision.toVersion, restartDecision.reason);
       }
       // Not reached when a rollback ran — rollbackTo always exits. Say WHICH of
       // the two "no rollback" cases this is; "nothing to roll back" is not the

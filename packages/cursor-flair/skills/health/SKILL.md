@@ -34,4 +34,4 @@ Probe the configured Flair instance. There is no `Health` MCP tool on `flair-mcp
 
 - Dump secrets or key paths into chat
 - Claim a hosted Flair cloud product exists
-- Recommend the Claude-only `flair-session-start` hook
+- Recommend the per-harness `flair-session-start` hook (Claude Code, Codex)

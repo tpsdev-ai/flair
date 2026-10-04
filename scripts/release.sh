@@ -252,17 +252,9 @@ if [[ "$MODE" == "--publish" ]]; then
   echo "  Publishing @tpsdev-ai/flair..."
   (cd "$ROOT" && npm publish) || { echo "❌ flair publish failed"; exit 1; }
 
-  # The five leaf packages below soft-fail so a break-glass publish of the core
-  # three isn't blocked by, say, flair-bench's one-time Trusted Publisher
-  # bootstrap (docs/releasing.md). That is a reasonable trade — but it used to
-  # end with `git tag` and `✅ published and tagged` regardless, which is not
-  # (flair#953). A partial publish rendered identically to a complete one, and
-  # the tag then said a release shipped that a consumer cannot install: the root
-  # package pins its internal deps at the exact version, so a missing leaf is a
-  # broken install, not a missing extra.
-  #
-  # They still soft-fail individually. What changed is that the failures are
-  # counted, named at the end, and block the tag.
+  # Attempt all leaf publishes, collecting failures instead of stopping early.
+  # Report every failed package and refuse to tag a partial release (flair#953).
+  # A tag created by this script requires every package in this release to publish.
   SOFT_FAILED=()
   soft_publish() {
     local dir="$1" name="$2" hint="${3:-}"
@@ -278,10 +270,8 @@ if [[ "$MODE" == "--publish" ]]; then
   soft_publish "packages/n8n-nodes-flair" "@tpsdev-ai/n8n-nodes-flair"
   soft_publish "packages/langgraph-flair" "@tpsdev-ai/langgraph-flair" "may need build step"
   soft_publish "packages/adk-flair-js"     "@tpsdev-ai/adk-flair"     "may need build step"
-  # Until the one-time bootstrap in docs/releasing.md is done (first manual
-  # publish + npm Trusted Publisher registration), this is expected to fail on a
-  # brand-new install of the package.
-  soft_publish "packages/flair-bench"     "@tpsdev-ai/flair-bench"     "may need build step, or first-publish bootstrap — see docs/releasing.md"
+  # Like the other leaf packages, flair-bench may need a build step.
+  soft_publish "packages/flair-bench"     "@tpsdev-ai/flair-bench"     "may need build step"
 
   if (( ${#SOFT_FAILED[@]} > 0 )); then
     echo ""
@@ -368,6 +358,12 @@ echo "📰 Assembling changelog fragments..."
 }
 (cd "$ROOT" && node scripts/changelog-fragments.mjs promote "$VERSION") || {
   echo "❌ Changelog assembly failed — fix the fragments before releasing."; exit 1;
+}
+
+# Preview published release notes.
+echo "📰 Rendered GitHub release notes:"
+(cd "$ROOT" && node scripts/changelog-release-notes.mjs "$VERSION") || {
+  echo "❌ Release-note rendering failed."; exit 1;
 }
 
 # 2. Bump versions in all package.json files
@@ -492,7 +488,10 @@ if ! (cd "$ROOT" && node scripts/check-darwin-gated-tests.mjs); then
   fi
   exit 1
 fi
-if ! (cd "$ROOT" && bun run test:unit); then
+# --fail-fast (flair#2030): a release stops at the first failing step. The
+# runner turns keep-going on for a truthy CI value, and a release shell can
+# inherit CI=true; the explicit flag wins over it.
+if ! (cd "$ROOT" && bun run test:unit --fail-fast); then
   echo "❌ Tests failed (unit)"
   if [[ "$(uname -s)" == Darwin ]]; then
     echo "   This host is macOS. The unit suite includes darwin-gated launchd tests that Linux CI skips (flair#1012)."
@@ -569,12 +568,13 @@ echo "🔖 Opening release PR..."
 PR_PAYLOAD="$(mktemp)"
 trap 'rm -f "$PR_PAYLOAD"' EXIT
 PR_TITLE="release: v${VERSION}" PR_HEAD="$RELEASE_BRANCH" PR_VERSION="$VERSION" node -e '
-  const body = `Version bump across workspace packages to v${process.env.PR_VERSION}.
+  const body = `Version bump of the lockstep release packages to v${process.env.PR_VERSION}.
 
 See CHANGELOG.md for what'"'"'s in this release.
 
-After CI is green and this is merged, tag the release (OIDC staging — no npm login):
+After this merges, Release auto-tag normally creates the tag once main'"'"'s CI passes. If it refused, resolve what it reports; do not tag by hand. If it did not run, a repository admin (a ruleset restricts creating v* tags) must tag the release (OIDC staging — no npm login) once the checks it applies pass; the first command must print nothing:
 \`\`\`
+git ls-remote --tags origin v${process.env.PR_VERSION}
 git checkout main && git pull
 git tag -a v${process.env.PR_VERSION} -m "v${process.env.PR_VERSION}" && git push origin v${process.env.PR_VERSION}
 \`\`\`

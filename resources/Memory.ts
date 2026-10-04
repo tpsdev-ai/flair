@@ -1,19 +1,33 @@
 import { databases } from "harper";
+import { randomUUID } from "node:crypto";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { guardAuthorityFields } from "./authority-field-guard.js";
 import { isForbiddenOwnerMutation } from "./record-owner-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
-import { localInstanceId } from "./instance-identity.js";
+import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, keepStoredOriginator, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { isEmbeddingSpaceUniform, noteWriteStamp } from "./embedding-space-guard.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
-import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
+import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
+import { validateHostSource } from "./host-source.js";
+import {
+  buildPointerRow,
+  extractPointerInputs,
+  isPointerEchoOf,
+  loadStoredPointer,
+  projectRowsThroughPointers,
+} from "./memory-host-source.js";
+import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
+import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
+import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -33,13 +47,222 @@ import {
   stampAttribution,
   FORBIDDEN,
   UNAUTH,
+  NOT_FOUND,
 } from "./record-type-kit.js";
+import { isSemanticPatch, MEMORY_SEMANTIC_FIELDS } from "./provenance.js";
 import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
+import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
+import { refuseReservedSeedWrite, reservedSeedWriteDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
+
+/** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
+ *  truncate). Same shape the pre-A1' inline checks returned. */
+function hostSourceBadRequest(error: string, message: string): Response {
+  return new Response(JSON.stringify({ error, message }), {
+    status: 400,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * flair#1940 round 18 — drop a caller `select`/`property` from a non-admin
+ * collection read so the gated pointer join sees the stored rows. This is NOT a
+ * selection parser: it removes the two keys and leaves every other query
+ * property (conditions, operator, sort, limit, offset, ...) exactly as sent. A
+ * query without a selection is returned unchanged.
+ */
+function withoutCallerSelection(query: any): any {
+  if (!query || typeof query !== "object") return query;
+  if ((query as any).select === undefined && (query as any).property === undefined) return query;
+  const copy: any = Array.isArray(query) ? query.slice() : { ...query };
+  delete copy.select;
+  delete copy.property;
+  return copy;
+}
+
+/**
+ * Write the Memory row joining transaction `c` (0a). Resource.prototype.post
+ * uses the instance's OWN `#context`, which an internal caller (a direct
+ * `new Memory().post(...)`) does not have, and the base table has no `post` —
+ * so the base collection `create(id, record, context)` is used, which honours
+ * an explicit context and joins `c.transaction`. Returns the new id. Falls
+ * back to the static post for the unit mock (which models post, not create).
+ */
+async function writeMemoryRowPost(cls: any, content: any, c: any): Promise<string> {
+  if (typeof cls?.create === "function") {
+    const created = await cls.create(content.id ?? null, content, c);
+    if (typeof created === "string") return created;
+    return created?.getId?.() ?? created?.id ?? content.id ?? "";
+  }
+  const r: any = await (databases as any).flair.Memory.post(content, c);
+  return r?.id ?? content.id ?? "";
+}
+
+/** The authenticated author id for a pointer row, or "" when there is no
+ *  principal (internal write). NEVER the body. */
+function pointerAuthorId(auth: AgentAuthVerdict): string {
+  return auth.kind === "agent" ? auth.agentId : "";
+}
+
+/** A fresh server-stamped row incarnation token (flair#1940 A1-iv item 1). */
+function newInstanceToken(): string {
+  return randomUUID();
+}
+
+/** Stamp the row incarnation token for a write: PRESERVE the existing row's
+ *  token on an update, else generate a fresh one (call AFTER
+ *  stripServerStampedFields, so a client-supplied value is gone first). */
+function stampInstanceToken(content: any, existing: any): void {
+  const preserved =
+    existing && typeof existing.instanceToken === "string" && existing.instanceToken.length > 0
+      ? existing.instanceToken
+      : null;
+  content.instanceToken = preserved ?? newInstanceToken();
+}
+
+/**
+ * flair#1940 A1' — validate the write body's pointer inputs and build the
+ * pointer row (canonical hostSource + scopeAtWrite + server-stamped
+ * authorId/receivedAt). Returns a 400 `denial` on an invalid pointer/scope,
+ * `row: null` when the body carries no pointer, else the row to persist.
+ */
+function buildPointerForWrite(args: {
+  inputs: { hostSource: unknown; hostSourceScope: unknown };
+  memoryId: string;
+  visibility: string | null | undefined;
+  auth: AgentAuthVerdict;
+  memoryInstanceToken?: string | null;
+  storedPointer?: PointerRow | null;
+}): { row: ReturnType<typeof buildPointerRow> | null; denial?: Response } {
+  const { inputs, memoryId, visibility, auth, memoryInstanceToken, storedPointer } = args;
+  if (inputs.hostSource === undefined || inputs.hostSource === null) {
+    if (inputs.hostSourceScope !== undefined) {
+      return { row: null, denial: hostSourceBadRequest("invalid_host_source_scope", "hostSourceScope requires a hostSource") };
+    }
+    return { row: null };
+  }
+  const hs = validateHostSource(inputs.hostSource);
+  if (!hs.ok) return { row: null, denial: hostSourceBadRequest("invalid_host_source", hs.error) };
+  // Only an author's exact echo of the stored full canonical value preserves
+  // the pointer row. A normally projected URL has its query and fragment
+  // removed and is not an exact echo.
+  if (
+    inputs.hostSourceScope === undefined &&
+    storedPointer &&
+    isPointerEchoOf(inputs.hostSource, storedPointer, pointerAuthorId(auth))
+  ) {
+    return { row: null };
+  }
+  let scopeAtWrite: string | null = null;
+  if (inputs.hostSourceScope !== undefined) {
+    if (inputs.hostSourceScope !== "record") {
+      return {
+        row: null,
+        denial: hostSourceBadRequest(
+          "invalid_host_source_scope",
+          `hostSourceScope must be "record" or omitted; a scope wider than the record is refused (got ${JSON.stringify(inputs.hostSourceScope)})`,
+        ),
+      };
+    }
+    scopeAtWrite = visibility ?? null;
+  }
+  return {
+    row: buildPointerRow({
+      memoryId,
+      canonical: hs.canonical,
+      scopeAtWrite,
+      authorId: pointerAuthorId(auth),
+      memoryInstanceToken: memoryInstanceToken ?? null,
+      receivedAt: new Date().toISOString(),
+    }),
+  };
+}
+
+/** A fixed 500 body for a pointer that could not be persisted. The RESPONSE
+ *  carries only a fixed message, never the raw error/stack (CodeQL:
+ *  information exposure through a stack trace). */
+function hostSourcePersistFailure(message: string): Response {
+  return new Response(JSON.stringify({ error: "host_source_persist_failed", message }), {
+    status: 500,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * Abort the request's open transaction so the Memory row staged into it is
+ * rolled back with the failed pointer row (flair#1940 A1' item 2). This is
+ * exactly harper 5.2.8's `transaction.abort(context)` (dist/resources/
+ * transaction.js): resolve `context.transaction` and abort it. The module is
+ * not importable as a named export of the `harper` package (its exports map
+ * exposes only "."), so we call the transaction object the context already
+ * carries. A context with no open transaction has nothing to abort (the unit
+ * lane's hand-built contexts).
+ */
+function abortRequestTransaction(ctx: any): void {
+  const txn = ctx?.transaction;
+  if (!txn || typeof txn.abort !== "function") return;
+  // A failed abort is an ERROR, not a normal response (A1-iv item 4): if the
+  // transaction cannot be aborted, the rollback is not established, so the
+  // failure MUST propagate rather than being swallowed behind a 500 body.
+  txn.abort();
+}
+
+/**
+ * flair#1940 A1' item 2 — persist the pointer row in the SAME request
+ * transaction as the Memory row. The request context is passed to the table
+ * write so Harper's `txnForContext` joins the write to the request's open
+ * transaction (`context.transaction`, joinable) instead of opening its own —
+ * both tables live in database flair, so both rows commit together or not at
+ * all. On failure the request transaction is ABORTED, so the already-staged
+ * Memory row never commits, and the fixed 500 body is returned. There is no
+ * compensating delete: the transaction is the mechanism. Returns null on
+ * success.
+ */
+async function persistPointerRow(
+  row: ReturnType<typeof buildPointerRow>,
+  ctx: any,
+): Promise<Response | null> {
+  try {
+    // The pointer-table ADAPTER (flair#1940 A1-iv item 6) writes via the real
+    // MemoryHostSource table in production; a test drives a failing write from
+    // TEST code (the shared Harper mock). A missing table throws (fail closed).
+    await putPointerRow(row, ctx);
+    return null;
+  } catch (err) {
+    // Abort the request transaction so NEITHER row commits, then fail the
+    // write. No silent loss (A7): the write fails loudly.
+    abortRequestTransaction(ctx);
+    console.error("Memory: host-source pointer persist failed (write aborted)", err);
+    return hostSourcePersistFailure("host-source pointer could not be persisted");
+  }
+}
+
+/** flair#1940 A1' item 6 (A1'' item 2) — cascade: delete the pointer row where a
+ *  Memory row dies. The delete is passed the request context so it JOINS the
+ *  request transaction (both tables in database flair), so a failing pointer
+ *  delete fails the whole operation atomically; failures are NEVER swallowed.
+ *  Returns null on success, a fixed 500 body on failure (after aborting the
+ *  request transaction so nothing commits). */
+async function deletePointerRow(memoryId: string, ctx: any): Promise<Response | null> {
+  try {
+    // The pointer-table ADAPTER (A1-iv item 6); a missing table throws (fail
+    // closed, never a silent skip).
+    await deletePointerRowViaTable(memoryId, ctx);
+    return null;
+  } catch (err) {
+    abortRequestTransaction(ctx);
+    console.error("Memory: host-source pointer delete failed (delete aborted)", err);
+    return new Response(JSON.stringify({ error: "host_source_delete_failed", message: "host-source pointer could not be deleted" }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+  }
+}
+
 
 /**
  * flair#744 slice 1 — read the opt-in `includeTrust` flag for a by-id get.
@@ -324,7 +547,7 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
 }
 
 /** Build the final write response: always `written: true`, always includes
- *  `id`, `visibility`, and layers the dedup collision signal on top when
+ *  `id`, includes `visibility` when the persisted row has one, and layers the dedup collision signal on top when
  *  present. Never a code path where a match suppresses these base fields.
  *
  *  ── Why `visibility` is in the write response (flair#991) ──────────────────
@@ -341,9 +564,9 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
  *  Read from `content`, not from `base`: `content.visibility` is the value
  *  that was actually persisted a few lines earlier, and assigning after the
  *  `...base` spread means the persisted value wins over anything the storage
- *  layer echoes back. Omitted (not `null`) when unset, which happens only on
- *  the put()-over-an-existing-record path where a partial merge carried no
- *  visibility — reporting `null` there would read as "no one but the owner",
+ *  layer echoes back. Omitted (not `null`) when unset, which happens only for
+ *  an existing record that has no stored writable visibility — reporting `null`
+ *  there would read as "no one but the owner",
  *  the opposite of what an absent field means to `isPrivateVisibility()`. */
 function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null): any {
   const base = result && typeof result === "object" && !Array.isArray(result) ? result : {};
@@ -377,6 +600,7 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
     throw new Error(`supersede-close: record ${oldId} not found`);
   }
   const closed = { ...existing, ...patch };
+  stripUndeclaredMemoryAttributes(closed);
   await withDetachedTxn(ctx, () => (databases as any).flair.Memory.put(closed));
   // flair#1357 — a supersede-close sets `validTo`, which the retrieval filters
   // read, so the lexical index has to see it as eagerly as a content write.
@@ -434,7 +658,7 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  * closeSupersededIfNeeded) already treats it as unset with no further
  * changes needed.
  */
-async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict): Promise<Response | null> {
+async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict, ctx: any): Promise<Response | null> {
   if (content.supersedes === null) {
     delete content.supersedes;
   }
@@ -443,6 +667,10 @@ async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdi
       status: 400, headers: { "Content-Type": "application/json" },
     });
   }
+  // flair#2141 S2: superseding closes the target row, so a reserved seed id
+  // needs operator authority here too (resources/seed-reservation.ts).
+  const seedDenial = reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth);
+  if (seedDenial) return seedDenial;
   if (content.supersedes && auth.kind === "agent" && !auth.isAdmin) {
     const target = await (databases as any).flair.Memory.get(content.supersedes).catch(() => null);
     if (target && target.agentId !== auth.agentId) {
@@ -506,43 +734,156 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
  * "reuse buildProvenance as-is" contract) instead of a hand-copied format
  * that could drift. See that module for the full field-by-field rationale
  * (verified.agentId from the auth verdict never the body, verified.timestamp
- * = the server-computed createdAt, optional unverified claimed.model /
- * claimed.client passthroughs — the latter added by flair#718 authorship-
- * provenance). Deliberately NOT implemented in this slice: a
+ * = the SERVER write instant (flair#1960), optional unverified
+ * claimed.createdAt / claimed.model / claimed.client passthroughs — the last
+ * two added by flair#718 authorship-provenance). Deliberately NOT implemented
+ * in this slice: a
  * context-fingerprint field — bootstrap doesn't return the IDs a fingerprint
  * would need, so it requires client cooperation that's out of scope here.
  */
 
 /**
- * ─── Write-time originatorInstanceId stamp (federation-edge-hardening slice 1) ──
+ * ─── Write-time originatorInstanceId (federation-edge-hardening slice 1) ─────
  *
- * Stamps this instance's own federation identity (resources/instance-
- * identity.ts's localInstanceId(), cached — never a DB read per write) onto
- * every LOCAL write. Deliberately a no-op when `content.originatorInstanceId`
- * already carries a non-null value: this is the anti-clobber rule that keeps
- * a federation-synced record's true origin intact.
- *
- * Why this can never clobber a synced record: FederationSync.post()
- * (resources/Federation.ts) merges incoming records via the RAW table object
- * (`(databases as any).flair.Memory.put(mergedData)`) — Harper's static
- * table-level put, not this Resource subclass's instance put() below. The
- * merge path never runs this function at all, so a record arriving from
- * instance B keeps whatever `originatorInstanceId` it already carried in
- * `mergedData` (that instance's own write-time stamp, carried through in the
- * synced row) with no risk of this instance overwriting it with its own id.
- * The `content.originatorInstanceId == null` guard below is still applied —
- * defense-in-depth for any future path that might route a synced payload
- * through this class's post()/put() — so the invariant holds even if that
- * assumption ever changes.
- *
- * `localInstanceId()` resolves to null on an instance that has never been
- * federation-bootstrapped (no Instance row yet) — the field is nullable by
- * design, so this stamps null rather than inventing an id.
+ * The server-stamped `originatorInstanceId` contract and the create/update rule
+ * live in resources/originator-instance.ts — the single delegate Memory, Soul,
+ * Agent and Relationship share, so the four writers cannot drift. In short:
+ * a CREATE stamps this instance's own id (any body value is ignored); an UPDATE
+ * keeps the stored value (a body value neither replaces nor clears it); and a
+ * federation merge — resources/Federation.ts's FederationSync.post(), which
+ * applies inbound rows through the RAW table handle, never a resource method —
+ * preserves the originating instance's value. See that module for the full
+ * rationale. `content.originatorInstanceId == null` is no longer read here: a
+ * body value is not trusted at any point.
  */
-async function stampOriginatorInstanceId(content: any): Promise<void> {
-  if (content.originatorInstanceId == null) {
-    content.originatorInstanceId = await localInstanceId();
+
+/**
+ * flair#2139 S2 — write a skill create/update atomically through the
+ * transactional writer.
+ */
+async function writeSkillCreateOrUpdate(
+  args: {
+    ctx: any;
+    auth: AgentAuthVerdict;
+    content: any;
+    storedRow: Record<string, any> | null;
+    explicitPredecessor: Record<string, any> | null;
+    method: "post" | "put";
+    pointer: { row: any } | null;
+    /** A reserved seed id: version the write IN PLACE (same physical id). */
+    inPlaceId?: string | null;
+    reembedding?: boolean;
+    requestedPayload?: Record<string, any>;
+  },
+): Promise<any> {
+  const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding, requestedPayload } = args;
+  const now = new Date().toISOString();
+  const explicitSuccessor = !!explicitPredecessor && (!storedRow || content.supersedes !== storedRow.supersedes);
+  let successorId = inPlaceId
+    ? inPlaceId
+    : explicitSuccessor || !storedRow
+      ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
+      : `${content.agentId}-${randomUUID()}`;
+  const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
+  const addressedId = storedRow ? String(storedRow.id) : explicitPredecessor ? String(explicitPredecessor.id) : null;
+  const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
+  let unchangedHead: Record<string, any> | null = null;
+  const outcome = await runSkillVersionWrite({
+    ctx,
+    subjectId,
+    agentId: String(content.agentId),
+    head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
+    plan: async (head, shared) => {
+      const stale = await validateSkillSnapshots(storedRow, explicitPredecessor, content.id ?? null, shared);
+      const denied = await authorizeSkillOwners(ctx, auth, [storedRow, explicitPredecessor, head ?? content], shared);
+      if (denied) return denied;
+      if (inPlaceId && method === "put" && !reembedding && !explicitPredecessor && !pointer?.row &&
+        head?.id === inPlaceId && requestedPayload && skillPayloadUnchanged(requestedPayload, head)) {
+        unchangedHead = head;
+        return null;
+      }
+      if (stale) return stale;
+      if ((storedRow || explicitPredecessor) && !head) return skillWriteConflict("skill_head_missing");
+      if (explicitSuccessor && head?.id !== explicitPredecessor?.id) return skillWriteConflict("skill_predecessor_stale");
+      if (storedRow && head?.id !== storedRow.id) return skillWriteConflict("skill_target_stale");
+      const reembedInPlace = method === "put" && reembedding && head &&
+        head.id === storedRow?.id && skillPayloadUnchanged(content, head);
+      if (reembedInPlace) successorId = String(head.id);
+      const liveHead = head;
+      const successor = buildSkillSuccessorRow({
+        base: { ...content, agentId: liveHead?.agentId ?? content.agentId }, predecessorRow: liveHead, successorId, subjectId,
+        // An in-place (reserved seed) write keeps the same physical id, so it
+        // sets no `supersedes` and closes no row.
+        supersedes: reembedInPlace ? head.supersedes ?? null : inPlaceId || !liveHead ? null : String(liveHead.id), now,
+      });
+      if (reembedInPlace) {
+        successor.instanceToken = typeof head.instanceToken === "string" && head.instanceToken.length > 0
+          ? head.instanceToken : content.instanceToken;
+      }
+      await applyOriginatorInstanceId(successor, liveHead);
+      applyFederationBookkeeping(successor, liveHead);
+      captured.row = successor;
+      const value = typeof successor.content === "string" ? successor.content : null;
+      const visibility = skillVersionVisibility(successor);
+      if (inPlaceId || reembedInPlace) {
+        return liveHead
+          ? { kind: "update", predecessor: null, successor, closePatch: {}, value, visibility }
+          : { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+      }
+      if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+      captured.closed = liveHead;
+      return { kind: "update", predecessor: liveHead, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility };
+    },
+    hooks: {
+      ...defaultSkillHooks,
+      pointer: async (shared) => {
+        if (captured.closed) {
+          const denial = await deletePointerRow(String(captured.closed.id), shared);
+          if (denial) return denial;
+        }
+        return pointer?.row
+          ? persistPointerRow({ ...pointer.row, memoryId: successorId, memoryInstanceToken: captured.row?.instanceToken }, shared)
+          : null;
+      },
+    },
+  });
+  if (!outcome.ok) return outcome.response;
+  if (captured.closed) noteMemoryDelete(String(captured.closed.id));
+  if (captured.row) {
+    noteMemoryUpsert(captured.row);
+    noteWriteStamp(captured.row.embeddingModel);
   }
+  return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
+}
+
+/** Close the live head and delete its pointer in the version transaction. */
+async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record: Record<string, any> }): Promise<any> {
+  const { ctx, auth, record } = args;
+  let closedId = "";
+  const now = new Date().toISOString();
+  const subjectId = String(record.skillSubjectId ?? record.id);
+  const outcome = await runSkillVersionWrite({
+    ctx,
+    subjectId,
+    agentId: String(record.agentId),
+    head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
+    plan: async (head, shared) => {
+      const stale = await validateSkillSnapshots(record, null, String(record.id), shared);
+      if (stale) return stale;
+      const denied = await authorizeSkillOwners(ctx, auth, [record, head], shared);
+      if (denied) return denied;
+      if (!head) return skillWriteConflict("skill_head_missing");
+      const liveHead = head;
+      closedId = String(liveHead.id);
+      return { kind: "delete", predecessor: liveHead, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead) };
+    },
+    hooks: { ...defaultSkillHooks, pointer: async (shared) => deletePointerRow(closedId, shared) },
+  });
+  if (!outcome.ok) return outcome.response;
+  noteMemoryDelete(closedId);
+  return new Response(JSON.stringify({ id: closedId, deleted: true }), {
+    status: 200, headers: { "Content-Type": "application/json" },
+  });
 }
 
 export class Memory extends (databases as any).flair.Memory {
@@ -567,13 +908,13 @@ export class Memory extends (databases as any).flair.Memory {
   allowRead() { return memoryAuthGate.call(this); }
 
   /**
-   * Override get() to scope by-id reads the same way search() scopes
-   * collection reads (memory-soul-read-gate fix). Never distinguishes
-   * "doesn't exist" from "exists but not yours" — both return 404, never
-   * 403, so a denied caller can't use get() to enumerate other agents'
-   * memory ids. Wired through record-type-kit.ts's makeByIdReadGate, scoped
-   * with Memory's own "open-within-org" read-scope resolver above — same
-   * dispatch shape Relationship.ts/WorkspaceState.ts's get() overrides use.
+   * Override get() to apply Memory's open-within-org scope to by-id reads,
+   * as search() does for collection reads. For a verified non-admin agent,
+   * a missing record and one outside its read scope both return 404; this
+   * does not disclose whether another agent's private record exists.
+   * Anonymous HTTP requests are denied by allowRead(), while administrator
+   * and trusted internal reads are unfiltered. Wired through
+   * record-type-kit.ts's makeByIdReadGate.
    */
   async get(target?: any, opts?: { includeTrust?: boolean }) {
     // Collection / query reads — the `GET /Memory/?<query>` form and the bare
@@ -594,7 +935,40 @@ export class Memory extends (databases as any).flair.Memory {
     if (!target || (typeof target === "object" && target.isCollection)) {
       return this.search(target);
     }
-    const result = await memoryByIdReadGate.call(this, target, (t: any) => super.get(t));
+
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
+    // flair#1940 round 18 (design ruling): a non-admin read ignores the caller's
+    // `select`/`property` whatever the target shape — the same contract the auth
+    // middleware enforces for a REST read, applied here for a direct contextual
+    // read. Read the FULL stored row through the shared by-id gate (which builds
+    // its own plain id-only target) so the pointer decision below always sees
+    // the stored `id`, `agentId`, `instanceToken`, `archived` and `visibility`.
+    // A shaped read — a caller target carrying a selection, or a class that
+    // installs one — can never hand the join an already-projected value. Trusted
+    // internal and admin reads keep their target unchanged.
+    const nonAdminAgent = auth.kind === "agent" && !auth.isAdmin;
+    let readTarget: any = target;
+    if (nonAdminAgent) {
+      const targetId = typeof target === "string" ? target : (target as any)?.id;
+      readTarget = targetId != null ? { id: targetId } : {};
+    }
+    const result = await memoryByIdReadGate.call(this, readTarget, (t: any) => super.get(t));
+    // flair#1940 A3 (by-ID surface): the pointer is projected for THIS reader
+    // BEFORE the trust block is attached. Admin/internal stay unfiltered (they
+    // read the unredacted row, like every other field); a non-admin agent is
+    // the reader the withheld rule protects. The FULL stored row goes through
+    // the helper: the gated join renders a pointer ONLY when the row carries
+    // its `id` and `instanceToken`, and an inline pointer field on the Memory
+    // row is stripped from the returned object.
+    let projected = result;
+    if (result && typeof result === "object" && !(result instanceof Response)) {
+      if (nonAdminAgent) {
+        // A1' item 4 / A1-iv item 2: the gated join, through the ONE reader
+        // helper (projectRowsThroughPointers) — pointer | "withheld" | nothing.
+        projected = (await projectRowsThroughPointers([result as any], auth.agentId))[0];
+      }
+    }
     // flair#744 slice 1 — opt-in inline trust-evidence block, attached ONLY to
     // a genuine by-id record (never a NOT_FOUND `Response`, never null), and
     // ONLY after the ownership/read-scope gate above has already resolved. The
@@ -604,10 +978,10 @@ export class Memory extends (databases as any).flair.Memory {
     // byte-identical to pre-slice-1.
     if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
       const ctx = (this as any).getContext?.();
-      const withHits = await applyHitStats(result, ctx);
+      const withHits = await applyHitStats(projected, ctx);
       return attachTrust(withHits as any, wantsTrust(target, opts));
     }
-    return result;
+    return projected;
   }
 
   /**
@@ -649,13 +1023,56 @@ export class Memory extends (databases as any).flair.Memory {
     // makeScopedSearch (record-type-kit.ts) — same correct composition
     // MemoryCandidate.search() already applies — so a caller-supplied
     // `operator: "or"` cannot boolean-inject past the owner scope.
-    return overlayHitStatsResult(
-      memoryScopedSearch(gate.agentId, query, (q) => withDetachedTxn(ctx, () => super.search(q))),
-      ctx,
+    // Fetch pointers once per bounded chunk, then yield its projected rows
+    // before consuming the next chunk (never one pointer query per row).
+    const readerAgentId = gate.agentId;
+    // flair#1940 round 18 (design ruling): a non-admin read ignores the caller's
+    // `select`/`property`. For a REST read the auth middleware drops the
+    // selection from the request URL before Harper parses it; for a direct
+    // contextual read the selection is dropped here, before the scoped search,
+    // so the gated pointer join below always sees the stored rows. This is a key
+    // deletion, not a selection parser: the read runs on the same conditions,
+    // operator, sort, limit and offset, unselected, and the hit-stat overlay
+    // still runs on the full row.
+    const source = memoryScopedSearch(readerAgentId, withoutCallerSelection(query), (q) =>
+      withDetachedTxn(ctx, () => super.search(q)),
     );
+    // A1-iv item 2 + round 22: stream in FIXED-SIZE chunks. Each chunk is
+    // projected through the ONE reader helper (ONE batched pointer query for
+    // that chunk) and yielded BEFORE the next chunk is read, so a non-admin
+    // listing no longer buffers the reader's whole readable corpus and every
+    // pointer query stays bounded. Result order and the per-row projection are
+    // preserved (rows are yielded in source order, each through
+    // applyHitStats). Pinned by test/unit/memory-host-source.test.ts
+    // (r22-search-chunks) — RED if the chunked flush is reverted to one
+    // whole-set buffer.
+    const POINTER_JOIN_CHUNK = 200;
+    const joined = (async function* joinPointerBatch() {
+      let rows: any[] = [];
+      const flush = async function* () {
+        const batch = rows;
+        rows = [];
+        const projected = await projectRowsThroughPointers(batch, readerAgentId);
+        for (const row of projected) {
+          yield await applyHitStats(row, ctx);
+        }
+      };
+      // memoryScopedSearch returns a Promise of the iterable (its scopedSearch
+      // is async); await it before iterating.
+      for await (const row of await (source as any)) {
+        rows.push(row);
+        if (rows.length >= POINTER_JOIN_CHUNK) yield* flush();
+      }
+      if (rows.length > 0) yield* flush();
+    })();
+    return joined;
   }
 
   async post(content: any, context?: any) {
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // Rate limiting — use authenticated agent ID, not client-supplied body field
@@ -696,6 +1113,11 @@ export class Memory extends (databases as any).flair.Memory {
       const attr = stampAttribution(auth, content, RECORD_TYPES.Memory.ownerField, RECORD_TYPES.Memory.attribution.post, "forbidden: cannot write memory owned by another agent");
       if (attr.denied) return attr.denied;
     }
+
+    const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
+    const preparedSkill = await prepareSkillBody(content, postStored);
+    if (preparedSkill instanceof Response) return preparedSkill;
+    content = preparedSkill.content;
 
     // flair#744 slice A: citation-on-write — consume-and-strip, same
     // discipline as `claimedClient` below. Pull the optional
@@ -815,7 +1237,9 @@ export class Memory extends (databases as any).flair.Memory {
         try {
           const src = await (databases as any).flair.Memory.get(sourceId);
           if (src) {
-            patchRecord((databases as any).flair.Memory, sourceId, { lastReflected: now }).catch(() => {});
+            const reflectPatch = { lastReflected: now };
+            stripUndeclaredMemoryAttributes(reflectPatch);
+            patchRecord((databases as any).flair.Memory, sourceId, reflectPatch).catch(() => {});
           }
         } catch {}
       }
@@ -824,7 +1248,7 @@ export class Memory extends (databases as any).flair.Memory {
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with put() — see validateAndAuthorizeSupersedes doc).
-    const supersedesError = await validateAndAuthorizeSupersedes(content, auth);
+    const supersedesError = await validateAndAuthorizeSupersedes(content, auth, ctx);
     if (supersedesError) return supersedesError;
 
     // Temporal validity: validFrom defaults to now, validTo left null for active facts.
@@ -899,10 +1323,29 @@ export class Memory extends (databases as any).flair.Memory {
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
+    // ── flair#1940 slice 1 (A1'): the host pointer is NOT a Memory attribute. ──
+    // Consume the write-body-only pointer inputs OUT of the row (they must
+    // never be persisted on the Memory row), validate them, and build the
+    // pointer row written alongside the Memory row below. A client-supplied
+    // `hostSourceVisibility` is a FORGERY of the server's write-time stamp and
+    // is dropped here (never read). Reject, never truncate/coerce.
+    const pointerInputs = extractPointerInputs(content);
+    // A1-iv item 3: strip every server-stamped field a client body may not set
+    // (instanceToken, provenance). They are re-stamped below.
+    stripServerStampedFields(content);
+    // A1-iv item 1: a NEW row gets a server-stamped incarnation token.
+    content.instanceToken = newInstanceToken();
+    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: content.visibility, auth, memoryInstanceToken: content.instanceToken });
+    if (pointer.denial) return pointer.denial;
+
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above. Stamped last, right before persist, so it
     // reflects the final resolved `content.createdAt`.
     content.provenance = buildProvenance(auth, content.createdAt, content);
+    // flair#1940 A4: `receivedAt` is SERVER-stamped inside provenance above; a
+    // client-supplied top-level `receivedAt` is IGNORED (stripped here so it is
+    // never persisted as a row field).
+    delete content.receivedAt;
     // flair#718 authorship-provenance: `claimedClient` is a WRITE-BODY-ONLY
     // passthrough — buildProvenance above already folded it into
     // `provenance.claimed.client` (sanitized/capped). Strip it from the row
@@ -910,13 +1353,47 @@ export class Memory extends (databases as any).flair.Memory {
     // top-level field — authorship lives in the provenance JSON only.
     delete content.claimedClient;
 
-    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
-    // 1) — see stampOriginatorInstanceId's doc above. No-op if already set
-    // (never fires for a genuine local write — no client sets this field).
-    await stampOriginatorInstanceId(content);
+    // Write-time originatorInstanceId (federation-edge-hardening slice 1): a
+    // post() is always a CREATE, so this instance's own id is stamped and any
+    // request-body value is ignored — see resources/originator-instance.ts.
+    await stampOriginatorOnCreate(content);
+    // flair#1965 r2: the receiver-side federation bookkeeping (`_originatorInstanceId`
+    // et al.) is a client-unsettable stamp; a CREATE must not carry one from the
+    // body. See resources/originator-instance.ts.
+    dropClientFederationBookkeeping(content);
 
     // ── Write the new record FIRST ──────────────────────────────────────────
-    const result = await super.post(content);
+    // A1' item 1: the guard keeps declared Memory attributes and the explicit
+    // `UNDECLARED_ALLOWED` fields, so an undeclared key (including a pointer
+    // field a raw writer tried to slip in) is dropped.
+    // Pinned by test/unit/memory-host-source.test.ts (r20-post) — RED if this
+    // call is removed.
+    stripUndeclaredMemoryAttributes(content);
+    if (isSkillWrite(content)) {
+      const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
+      return await writeSkillCreateOrUpdate({
+        ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
+        inPlaceId: reservedId != null ? String(reservedId) : null,
+      });
+    }
+    // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
+    // transaction. With a request context they join its open transaction; with
+    // NO context (an internal direct call, e.g. new Memory().post(...))
+    // withSharedWriteTransaction creates one, so a failed pointer write rolls
+    // the Memory row back too instead of leaving it pointer-less.
+    // Pinned by test/unit/memory-host-source.test.ts (r20-atomic) — RED if the
+    // owned-transaction branch is bypassed.
+    const postResult = await withSharedWriteTransaction(ctx, async (c) => {
+      const newId = await writeMemoryRowPost((this as any).constructor, content, c);
+      if (pointer.row) {
+        pointer.row.memoryId = newId;
+        const persistDenial = await persistPointerRow(pointer.row, c);
+        if (persistDenial) return persistDenial;
+      }
+      return null;
+    });
+    if (postResult instanceof Response) return postResult;
+    const result: any = {};
     // flair#1357 — read-your-write for the lexical leg. The table change feed
     // (resources/bm25-index-service.ts) is the CORRECTNESS mechanism; this
     // synchronous hook is what makes a store immediately searchable rather
@@ -957,6 +1434,10 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   async patch(content: any, query?: any) {
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // flair#1383 — patch() routes past put(), so it needs its own refuse.
@@ -965,8 +1446,56 @@ export class Memory extends (databases as any).flair.Memory {
       if (stale) return stale;
     }
     stripClientVersionPassthrough(content);
+    // flair#1960 r2: capture the (undeclared) authorship-claim inputs BEFORE the
+    // undeclared-attribute strip removes them, so a semantic PATCH re-stamps
+    // provenance with the SAME claims a post()/put() would record from this body
+    // (a PATCH body's `model`/`claimedClient` are folded into `claimed` only).
+    const claimInputs = { model: (content as any)?.model, claimedClient: (content as any)?.claimedClient };
+    // A1' item 1: patch() is a Memory writer too. Drop any pointer inputs and
+    // every undeclared attribute here, so a PATCH can never carry a pointer
+    // onto the row (the pointer is written ONLY by post()/put() and the table
+    // resource). These paths discard the supplied pointer input and create no
+    // pointer row; an existing pointer row stays bound to the updated Memory.
+    // Pinned by test/unit/memory-host-source.test.ts (r20-patch) — RED if this
+    // guard call is removed.
+    extractPointerInputs(content);
+    stripUndeclaredMemoryAttributes(content);
+    // A1-iv item 3: strip server-stamped fields on patch too (a PATCH body may
+    // not set instanceToken or provenance; the stored values stand).
+    stripServerStampedFields(content);
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    // Preserve stored visibility on updates before applying write policy: a
+    // null is no change (PATCH merges), and a present value goes through the
+    // same validator and ephemeral-tier guard as put().
+    if (content && "visibility" in content && content.visibility == null) delete content.visibility;
+    if (content && (content.visibility !== undefined || content.durability !== undefined)) {
+      const durabilityError = assertValidDurability(content.durability);
+      if (durabilityError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_durability", message: durabilityError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      const visibilityError = assertValidVisibility(content.visibility);
+      if (visibilityError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_visibility", message: visibilityError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      const stored = await super.get();
+      const tierError = assertVisibilityAllowedForDurability(
+        content.durability ?? stored?.durability,
+        content.visibility ?? stored?.visibility,
+      );
+      if (tierError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_visibility_for_durability", message: tierError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+    }
     // ── flair#1542 + residual (Kern #1543 review 5135715289): reject skill patches ──
     // patch() routes past put() (and thus past the SkillScan gate + forced
     // durability), so a skill write on this verb would land unscanned. There are
@@ -981,21 +1510,73 @@ export class Memory extends (databases as any).flair.Memory {
     // Skills are written via skill_store (→ Memory.post) or Memory.put; no
     // memory_patch tool exists and no internal path patches a skill row (hit-
     // tracking goes through table.put, not this override), so rejecting is safe.
-    const existingForSkill = (await Promise.resolve(super.get()).catch(() => null)) as any;
+    // flair#1965 r3 + flair#1960 r3: resolve the stored row ONCE, by the
+    // URL-BOUND target id — refusing a body `id` that disagrees with the
+    // address, and refusing a lookup that FAILS (a failed read is never "no
+    // stored row"). This ONE resolved row drives BOTH rule sets: the skill-row
+    // check and semantic-PATCH provenance decision below, AND the
+    // originatorInstanceId create/update rule. The previous `.catch(() => null)`
+    // turned a read ERROR into "no stored row"; isSemanticPatch returns false
+    // for `null`, so the patch fell through to `super.patch()` as a
+    // METADATA-ONLY write and kept a legacy stored blob — including a
+    // caller-chosen `verified.timestamp` — in place, and (b) stamped a CREATE
+    // over a row that actually exists. See resources/originator-instance.ts's
+    // resolveStoredRow.
+    const resolvedStored = await resolveStoredRow(this, "Memory", content, () => super.get());
+    if (resolvedStored.denial) return resolvedStored.denial;
+    const existingForSkill = resolvedStored.row;
     const skillDenial = rejectSkillWritePath(content) ?? rejectSkillWritePath(existingForSkill);
     if (skillDenial) return skillDenial;
+    // ── flair#1960 r2: a SEMANTIC patch re-stamps provenance ────────────────
+    // patch() strips a caller-supplied `provenance` (above) so a body can never
+    // SET a `verified.*` field, but stripping alone would leave the STORED blob
+    // in place — including a legacy row whose `verified.timestamp` came from a
+    // client `createdAt` before this release. A patch that changes the record's
+    // content is a fresh authored write, so it re-stamps from the resolved auth
+    // and ONE server clock read (never the caller's `createdAt`, never a carried-
+    // forward stored value). A metadata-only patch (no semantic field changes)
+    // keeps the stored, previously-stamped blob: no new content was authored, so
+    // there is no new write to attribute. See resources/provenance.ts
+    // (isSemanticPatch / MEMORY_SEMANTIC_FIELDS) for the field set.
+    if (isSemanticPatch(content, existingForSkill, MEMORY_SEMANTIC_FIELDS)) {
+      const ctx = (this as any).getContext?.();
+      const auth = await resolveAgentAuth(ctx);
+      content.provenance = buildProvenance(
+        auth,
+        content.createdAt ?? existingForSkill?.createdAt,
+        claimInputs,
+      );
+    }
+    // flair#1965 r2: a PATCH over an EXISTING row keeps the stored
+    // originatorInstanceId (a body value is dropped); a PATCH whose URL target
+    // has NO stored row is a CREATE when it reaches the table — Harper's patch
+    // path has no existing-row requirement — so it must stamp the local id
+    // rather than leave the new row un-stamped. Only an administrator's or a
+    // trusted internal PATCH gets that far; the table guard
+    // (resources/table-patch-policy.ts) refuses the rest. See
+    // resources/originator-instance.ts.
+    await applyOriginatorInstanceId(content, existingForSkill);
+    // The receiver-side federation bookkeeping keeps its stored value (a patch
+    // merges); a client body value is dropped.
+    dropClientFederationBookkeeping(content);
     return super.patch(content, query);
   }
 
   async put(content: any) {
+    const reembedding = content?.embedding === null && content?.embeddingModel === null;
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
+    if (seedDenial) return seedDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
     // Reindex migration bypass: admin-only escape hatch used by the
-    // MemoryReindex admin endpoint to re-PUT each existing record byte-for-byte
+    // MemoryReindex admin endpoint to re-PUT declared and named retained fields
     // (no updatedAt bump, no embedding regen, no safety rescan) so Harper
-    // repopulates secondary indices. Because this skips content safety and
+    // repopulates secondary indices. Other undeclared fields are stripped and
+    // an absent incarnation token is generated. Because this skips safety and
     // auditability, it must be gated to admins. Internal calls (no auth
     // context) pass through, matching the pattern used in delete().
     if (content._reindex === true) {
@@ -1009,6 +1590,58 @@ export class Memory extends (databases as any).flair.Memory {
         });
       }
       delete content._reindex;
+      // A1' item 1: the reindex branch keeps declared and named retained
+      // attributes. Pinned by test/unit/memory-host-source.test.ts
+      // (r20-put-reindex) — RED if this call is removed.
+      stripUndeclaredMemoryAttributes(content);
+      // A1-iv items 1/3: strip a client-supplied server-stamped field, then
+      // PRESERVE the existing row's incarnation token (reindex is a re-PUT of
+      // an existing row, never a reincarnation).
+      stripServerStampedFields(content);
+      // flair#1965 r3: resolve the stored row by the URL-BOUND target id (never a
+      // body id alone); a body id that disagrees with the address, or a lookup
+      // that FAILS, refuses the reindex. A reindex is a re-PUT of an EXISTING
+      // row, so an absent stored row is refused too — a failed read must never
+      // be read as "no row" and re-created/re-stamped. See
+      // resources/originator-instance.ts's resolveStoredRow.
+      const resolvedReindex = await resolveStoredRow(this, "Memory", content, () => super.get());
+      if (resolvedReindex.denial) return resolvedReindex.denial;
+      const reindexExisting = resolvedReindex.row;
+      if (!reindexExisting) {
+        return new Response(
+          JSON.stringify({
+            error: "reindex_row_not_found",
+            message: "the _reindex re-PUT requires an existing stored row",
+          }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      stampInstanceToken(content, reindexExisting);
+      // Keep the EXISTING row's STORED provenance byte-for-byte. The rest of
+      // the row is filtered above and may gain an absent incarnation token.
+      // The body's provenance was stripped above so it cannot be forged;
+      // restoring it from `reindexExisting` (never from the submitted value)
+      // keeps provenance byte-identical across a corpus-wide reindex.
+      // Pinned by test/unit/memory-host-source.test.ts (r20-put-reindex) — RED
+      // if this restore is removed.
+      if (reindexExisting && typeof reindexExisting.provenance === "string") {
+        content.provenance = reindexExisting.provenance;
+      }
+      // flair#1965: a reindex is a re-PUT of an EXISTING row (an UPDATE), so the
+      // row's stored originatorInstanceId stands; a body value is dropped, and a
+      // legacy row with no value is left un-stamped. See
+      // resources/originator-instance.ts.
+      keepStoredOriginator(content, reindexExisting);
+      // The receiver-side federation bookkeeping likewise stands as stored.
+      applyFederationBookkeeping(content, reindexExisting);
+      // Preserve stored visibility on updates before applying write policy:
+      // a reindex payload that omits it keeps the record's stored value.
+      if (content.visibility === undefined || content.visibility === null) {
+        const stored = await super.get();
+        if (stored && (stored.visibility === PRIVATE_VISIBILITY || stored.visibility === SHARED_VISIBILITY)) {
+          content.visibility = stored.visibility;
+        }
+      }
       const reindexed = await super.put(content);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
@@ -1039,6 +1672,14 @@ export class Memory extends (databases as any).flair.Memory {
       const attr = stampAttribution(auth, content, RECORD_TYPES.Memory.ownerField, RECORD_TYPES.Memory.attribution.put, "forbidden: cannot write memory owned by another agent");
       if (attr.denied) return attr.denied;
     }
+
+    const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
+    if (resolvedExisting.denial) return resolvedExisting.denial;
+    const preExisting = resolvedExisting.row;
+    const requestedPayload = { ...content };
+    const preparedSkill = await prepareSkillBody(content, preExisting);
+    if (preparedSkill instanceof Response) return preparedSkill;
+    content = preparedSkill.content;
 
     // flair#744 slice A: citation-on-write — same consume-and-strip
     // discipline as post() above. Strip BEFORE anything else touches
@@ -1078,19 +1719,16 @@ export class Memory extends (databases as any).flair.Memory {
     content.archived = content.archived ?? false;
     content.createdAt = content.createdAt ?? now;
 
-    // Fetch the pre-existing record (if any) ONCE — reused below both to
-    // decide whether this PUT is a fresh create (dedup gate applies, default
-    // visibility stamped) or an update/patch (dedup-bypassed, visibility left
-    // untouched). See the dedup-gate block further down for why an existing
-    // id skips the gate; the SAME "does a record already exist" check gates
-    // the visibility default (Layer 1 part A): patchRecord/supersede-
-    // close all route through put() with a MERGED
-    // `{...existing, ...patch}` payload, and must never have their stored
-    // visibility overwritten by a default recomputed from that merged content
-    // — only a genuinely NEW id gets the default stamped.
-    const preExisting = content.id
-      ? await (databases as any).flair.Memory.get(content.id).catch(() => null)
-      : null;
+
+    // Preserve stored visibility on updates before applying write policy
+    // (only the two writable values; the guards below see the result).
+    if (
+      preExisting &&
+      (content.visibility === undefined || content.visibility === null) &&
+      (preExisting.visibility === PRIVATE_VISIBILITY || preExisting.visibility === SHARED_VISIBILITY)
+    ) {
+      content.visibility = preExisting.visibility;
+    }
 
     // ─── Default visibility (durability-keyed) — Layer 1, part A ────────────
     // Explicit visibility on the write ALWAYS overrides; only stamp the
@@ -1170,7 +1808,7 @@ export class Memory extends (databases as any).flair.Memory {
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
     // this too: it's the only HTTP-reachable create path).
-    const supersedesError = await validateAndAuthorizeSupersedes(content, auth);
+    const supersedesError = await validateAndAuthorizeSupersedes(content, auth, ctx);
     if (supersedesError) return supersedesError;
     if (content.supersedes && !content.validFrom) {
       content.validFrom = content.createdAt;
@@ -1254,28 +1892,93 @@ export class Memory extends (databases as any).flair.Memory {
       // archivedBy should be set by the caller (CLI stamps req.tpsAgent via query param)
     }
 
+    // ── flair#1940 slice 1 (A1'): the host pointer is NOT a Memory attribute. ──
+    // Identical rule to post(): consume the write-body-only pointer inputs OUT
+    // of the row, validate them, and build the pointer row written alongside
+    // the Memory row below. A client-supplied `hostSourceVisibility` is dropped
+    // (never read). Reject, never truncate/coerce.
+    const pointerInputs = extractPointerInputs(content);
+    // A1-iv item 3: strip server-stamped fields (a client may not set them).
+    stripServerStampedFields(content);
+    // A1-iv item 1: PRESERVE the existing row's incarnation token on an update,
+    // else generate one (a fresh create via put).
+    stampInstanceToken(content, preExisting);
+    // A1'' item 5: a partial PUT (one that omits `visibility`, e.g. a
+    // memory_update full put) must stamp scopeAtWrite from the record's
+    // EFFECTIVE visibility — the existing row's when the body omits it — not
+    // from an undefined body value that would wrongly yield author-only.
+    const effectiveVisibility = content.visibility ?? preExisting?.visibility;
+    // A partial PUT carries the stored visibility it read at the start of the
+    // request (one carry, above, before the write-policy guards).
+    // Adjudication B (round 4): load the stored pointer row so an echo of it is
+    // recognised and not replaced (see buildPointerForWrite).
+    let storedPointer: PointerRow | null = null;
+    if (
+      content.id &&
+      pointerInputs.hostSource !== undefined &&
+      pointerInputs.hostSource !== null &&
+      pointerInputs.hostSourceScope === undefined
+    ) {
+      storedPointer = await loadStoredPointer(content.id);
+    }
+    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: effectiveVisibility, auth, memoryInstanceToken: content.instanceToken, storedPointer });
+    if (pointer.denial) return pointer.denial;
+
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above post(). Applies to every put() (fresh
     // create AND update/patch) — never gated on preExisting, so an update
     // always gets a freshly-stamped provenance reflecting the CURRENT
     // authenticated actor performing this write.
     content.provenance = buildProvenance(auth, content.createdAt, content);
+    // flair#1940 A4: a client-supplied `receivedAt` is IGNORED (stripped; the
+    // server's receipt time lives inside provenance, stamped above).
+    delete content.receivedAt;
     // flair#718 authorship-provenance — see post()'s identical comment above:
     // strip the write-body-only `claimedClient` passthrough now that it's
     // folded into `provenance.claimed.client`. Never persisted as a row field.
     delete content.claimedClient;
 
-    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
-    // 1) — see stampOriginatorInstanceId's doc above post(). No-op if
-    // already set: an update/patch of an existing local record carries its
-    // own already-stamped originatorInstanceId forward unchanged (the
-    // `{...existing, ...patch}` merge pattern every put() caller uses), and a
-    // federation-synced record never reaches this method at all (see that
-    // function's doc for why the merge path can't clobber it here either).
-    await stampOriginatorInstanceId(content);
+    // Write-time originatorInstanceId (federation-edge-hardening slice 1):
+    // a CREATE (no pre-existing row) stamps this instance's own id, ignoring
+    // any body value; an UPDATE keeps the STORED value — a body value neither
+    // replaces nor clears it. A federation-synced record never reaches this
+    // method at all (the merge path writes via the raw table handle). See
+    // resources/originator-instance.ts.
+    await applyOriginatorInstanceId(content, preExisting);
+    // The receiver-side federation bookkeeping stands as stored on an update,
+    // and a client body may not set it on a create. See
+    // resources/originator-instance.ts.
+    applyFederationBookkeeping(content, preExisting);
 
     // ── Write the new/updated record FIRST ──────────────────────────────────
-    const result = await super.put(content);
+    // A1' item 1: persist ONLY declared Memory attributes (see post()).
+    // Pinned by test/unit/memory-host-source.test.ts (r20-put) — RED if this
+    // call is removed.
+    stripUndeclaredMemoryAttributes(content);
+    if (isSkillWrite(content)) {
+      const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
+      return await writeSkillCreateOrUpdate({
+        ctx, auth, content, storedRow: preExisting, explicitPredecessor: preparedSkill.predecessor, method: "put", pointer,
+        reembedding, requestedPayload,
+        inPlaceId: reservedId != null ? String(reservedId) : null,
+      });
+    }
+    // A1' item 2 (adjudication 0a): share ONE transaction with the pointer row
+    // (see post()). The shared helper's owned-transaction branch is pinned by
+    // test/unit/memory-host-source.test.ts (r20-atomic, which drives POST);
+    // request-context PUT rollback is pinned by
+    // test/integration/host-source-atomicity-1940.test.ts (t2).
+    const putResult = await withSharedWriteTransaction(ctx, async (c) => {
+      const r: any = await (databases as any).flair.Memory.put(content, c);
+      if (pointer.row) {
+        pointer.row.memoryId = r?.id ?? content.id ?? "";
+        const persistDenial = await persistPointerRow(pointer.row, c);
+        if (persistDenial) return persistDenial;
+      }
+      return r;
+    });
+    if (putResult instanceof Response) return putResult;
+    const result: any = putResult;
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(content);
     noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
@@ -1297,8 +2000,15 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async delete(id: any) {
-    const auth = await resolveAgentAuth((this as any).getContext?.());
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();
+    // flair#2141 S2: check the seed's fixed id against the operator-source
+    // reservation (resources/seed-reservation.ts).
+    const seedDenial = reservedSeedWriteDenial(
+      "Memory", [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], ctx, auth,
+    );
+    if (seedDenial) return seedDenial;
     // Read stored ownership, not the read-scoped get() response. Enforce here
     // as well as middleware so MCP/in-process callers have the same policy.
     const record = await super.get(id);
@@ -1306,13 +2016,40 @@ export class Memory extends (databases as any).flair.Memory {
         isForbiddenOwnerMutation(record, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
       return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
     }
-    // Durability controls retention, not the owner's authority to delete.
-    const deleted = await super.delete(id);
-    noteMemoryDelete(id);
-    const deletedId = typeof id === "string" ? id : record?.id;
-    if (typeof deletedId === "string" && deletedId.length > 0) {
-      await clearHitStats(deletedId, (this as any).getContext?.()).catch(() => {});
+
+    const reservedSeed = [id, (this as any).getId?.(), ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)]
+      .some((candidate) => isReservedSeedId("Memory", candidate));
+    if (!reservedSeed && rowIsSkill(record)) {
+      return await writeSkillDelete({ ctx, auth, record });
     }
-    return deleted;
+    // Durability controls retention, not the owner's authority to delete.
+    // A1' item 2 (adjudication 0a/0c): the Memory delete and its pointer
+    // delete share ONE transaction; with no request context
+    // withSharedWriteTransaction creates one. A failing pointer delete aborts
+    // it, so nothing is deleted; failures are NOT swallowed.
+    // A request-owned transaction may still abort after this method returns.
+    // Its committed change feed updates BM25 after commit; only a transaction
+    // owned here can use the synchronous hook after the shared write returns.
+    // Capture ownership before the helper changes the context's transaction.
+    const requestOwnsTransaction = isJoinableTransaction(ctx);
+    const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
+      const d = await (databases as any).flair.Memory.delete(id, c);
+      const deletedId = typeof id === "string" ? id : record?.id;
+      if (typeof deletedId === "string" && deletedId.length > 0) {
+        const pointerDenial = await deletePointerRow(deletedId, c);
+        if (pointerDenial) return pointerDenial;
+      }
+      return d;
+    });
+    if (deleteResult instanceof Response) return deleteResult;
+    // Use the RESOLVED deleted id (a by-record delete carries only `id`, so the
+    // stored row's id is the fallback). An owned transaction has committed;
+    // a request-owned write waits for the committed change feed instead.
+    const resolvedDeletedId = typeof id === "string" ? id : record?.id;
+    if (!requestOwnsTransaction && typeof resolvedDeletedId === "string" && resolvedDeletedId.length > 0) {
+      noteMemoryDelete(resolvedDeletedId);
+    }
+    if (typeof id === "string") await clearHitStats(id, ctx).catch(() => {});
+    return deleteResult;
   }
 }

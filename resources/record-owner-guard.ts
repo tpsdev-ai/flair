@@ -119,6 +119,12 @@ export const OWNER_GUARD_EXEMPT: Readonly<Record<string, string>> = Object.freez
   // resources/Agent.ts's shared write-authorization helper, which both its
   // put() and its patch() route through.
   Agent: "self-ownership by primary key; enforced in resources/Agent.ts for every verb",
+  // flair#1940 A1': MemoryHostSource refuses REST writes. Application pointer
+  // writes stamp `authorId` from the authenticated principal; direct resource
+  // reads permit admins and trusted internal callers.
+  MemoryHostSource: "REST writes refused; application writes stamp authorId; direct reads limited to admins and trusted internal callers",
+  // Application append-only history; REST writes are refused.
+  InstructionVersion: "application append-only; REST writes refused",
 });
 
 /** The verbs that can mutate a record, and therefore need the rule applied. */
@@ -178,6 +184,22 @@ export function isForbiddenOwnerMutation(
   const owner = record[ownerField];
   if (owner == null || owner === "") return true;
   return owner !== callerAgentId;
+}
+
+/**
+ * The refusal for a write that names a stored record owned by another
+ * principal: 403 with a body that names only the table.
+ *
+ * One constructor for every place the rule is enforced — the auth middleware
+ * for `/<Table>/<id>` routes, and resources/relay-ops.ts for a Message POST to
+ * the collection that reuses an existing message id — so a refused caller gets
+ * the same response on either route, and it carries nothing from the stored
+ * row.
+ */
+export function ownerMutationRefusal(table: string): Response {
+  return new Response(JSON.stringify({
+    error: `forbidden: cannot modify ${table} owned by another principal`,
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
 }
 
 /**

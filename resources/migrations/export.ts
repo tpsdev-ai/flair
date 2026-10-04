@@ -46,6 +46,7 @@ export function createContentOnlyExport(
   const now = deps.now();
   const iso = now.toISOString().replace(/[:.]/g, "-");
   const dir = join(deps.exportRoot, `${sanitizeIdPart(opts.migrationId)}-${opts.table}-${iso}`);
+  ensureSecureDir(deps.exportRoot);
   ensureSecureDir(dir);
 
   const fields = sourceFieldsFor(opts.table);

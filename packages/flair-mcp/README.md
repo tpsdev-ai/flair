@@ -23,7 +23,7 @@ cat > .mcp.json << 'EOF'
 EOF
 ```
 
-`npx -y @tpsdev-ai/flair-mcp` fetches and runs the server on demand — no global install needed. (`flair init` wires this for you automatically; see below.)
+`npx -y @tpsdev-ai/flair-mcp` fetches and runs the server on demand — no global install needed. (`flair init --agent <id>` attempts to wire detected clients when wiring is enabled; see below.)
 
 ### Prerequisites
 
@@ -48,7 +48,7 @@ Once configured, Claude Code (or any MCP client) gets these tools:
 | `skill_search` | Find skills that apply to a task. Returns a catalog, not the procedure. |
 | `skill_get` | Retrieve the full skill by ID (disclosure after `skill_search`). |
 | `bootstrap` | Cold-start context — soul + recent memories in one call. |
-| `soul_set` | Set personality or project context (included in every bootstrap). |
+| `soul_set` | Soul writes require verified administrator Basic credentials; Ed25519 agent requests are refused. Operators should use the REST API or CLI. |
 | `soul_get` | Get a personality or project context entry. |
 | `record_usage` | Report that recalled memories were actually used (drives `usageCount`). |
 
@@ -68,7 +68,7 @@ Once configured, Claude Code (or any MCP client) gets these tools:
 Claude Code ↔ stdio ↔ flair-mcp ↔ HTTP ↔ Flair (Harper)
 ```
 
-The MCP server is a thin wrapper around `@tpsdev-ai/flair-client`. All memory is stored in your local Flair instance with Ed25519 authentication. Nothing leaves your machine unless you point `FLAIR_URL` at a remote server.
+The MCP server is a thin wrapper around `@tpsdev-ai/flair-client`. All memory is stored in the Flair instance selected by `FLAIR_URL` (defaulting to localhost). Requests are signed with the agent's Ed25519 key whenever one resolves. Only when no key resolves, and both `FLAIR_ADMIN_USER` and `FLAIR_ADMIN_PASSWORD` are set, does the client send admin Basic auth; a key that cannot be parsed is an error, and a rejected signature is not retried with Basic. The MCP client connects to FLAIR_URL; a paired local instance may separately federate eligible memories.
 
 ## Remote Flair
 
@@ -82,14 +82,14 @@ Point to a remote Flair instance:
       "args": ["-y", "@tpsdev-ai/flair-mcp"],
       "env": {
         "FLAIR_AGENT_ID": "my-project",
-        "FLAIR_URL": "http://your-server:19926"
+        "FLAIR_URL": "https://your-server:19926"
       }
     }
   }
 }
 ```
 
-Copy your key from the server: `scp server:~/.flair/keys/my-project.key ~/.flair/keys/`
+The client REFUSES to send admin Basic credentials over plain HTTP to a non-loopback host (the credentials would travel in a request header): use an HTTPS `FLAIR_URL`, or an Ed25519 key, for a remote instance. Copy your key from the server: `scp server:~/.flair/keys/my-project.key ~/.flair/keys/`
 
 ## License
 

@@ -2,7 +2,7 @@
  * openclaw-flair — identity core (slice 1) tests.
  *
  * The mock models the REAL host registration contract and is typed against the
- * plugin API from the `openclaw` devDep (`OpenClawPluginApi`):
+ * plugin API from the installed `openclaw` peer (`OpenClawPluginApi`):
  *   - tools are registered as FACTORIES `(ctx) => tool`, resolved per call with
  *     an immutable `ctx.agentId`;
  *   - prompt/context policy and conversation access are host config gates
@@ -16,9 +16,9 @@
  * requests" is asserted directly, and the signer id is read off the
  * `Authorization` header of anything that IS sent.
  *
- * Typed against the plugin API in `openclaw@2026.7.1` (the devDependency in
- * this tree). Parity with 2026.8.1 / 2026.9.6 is proven only by the real-host
- * drills, not by this mock.
+ * A lockfile install supplies the `openclaw` peer version resolved in bun.lock.
+ * The mock is typed against that installed peer's API; its simulated behavior
+ * does not establish runtime parity with supported hosts. That requires real-host drills.
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
@@ -28,7 +28,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 
 /** The one file the A1 regression test plants under a root-owned directory. */
 const A1_TMP_KEY = "/tmp/ocf-a1-916.key";
@@ -1604,6 +1604,45 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     expect(res.details.written).toBe(false);
     expect(res.details.errors.join(" ")).toMatch(/network down/);
     expect(calls.filter((c) => c.method === "PUT" && c.url.includes("/Memory/old-target")).length).toBe(0);
+  });
+
+  test("#1970: a superseded id with reserved URL characters reaches the wire as ONE encoded path segment", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const oldId = "old#1?x/y%z w";
+    const calls = installFetchStub((call) => {
+      if (call.method === "GET" && /\/Memory\//.test(call.url)) return { status: 200, body: { id: oldId, content: "old", agentId: "A" } };
+      return { status: 200, body: {} };
+    });
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const res = await store.execute("1", { text: "remember this", supersedes: oldId });
+    expect(res.details.supersedeClosed).toBe(true);
+
+    const encoded = `/Memory/${encodeURIComponent(oldId)}`;
+    const closePut = calls.find((c) => c.method === "PUT" && new URL(c.url).pathname === encoded);
+    expect(closePut).toBeTruthy(); // assertion: the supersede-close PUT path is the encoded id
+    const u = new URL(closePut!.url);
+    expect(u.pathname.split("/").filter(Boolean).length).toBe(2); // assertion: /Memory/<one segment>
+    expect(u.search).toBe("");
+    expect(u.hash).toBe("");
+  });
+
+  test("#1970: a '.'/'..' supersedes id is refused BEFORE any request, naming the id and the rule", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    for (const bad of [".", ".."]) {
+      const calls = installFetchStub(() => ({ status: 200, body: {} }));
+      const res = await store.execute("1", { text: "remember this", supersedes: bad });
+      expect(calls).toHaveLength(0); // assertion: ZERO fetch calls — nothing went out
+      expect(res.details.written).toBe(false); // assertion: the primary write did not happen
+      expect(res.details.errors.join(" ")).toMatch(/dot-segment/); // assertion: the rule is named
+      expect(res.details.errors.join(" ")).toContain(`record id ${JSON.stringify(bad)}`); // assertion: the id is named literally
+    }
   });
 });
 

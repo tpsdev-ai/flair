@@ -18,6 +18,1957 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.59.0] - 2026-10-02
+
+### Added
+
+- **A successful bootstrap now returns a `skills` manifest and `skillDiagnostics`, over REST and native `/mcp`.** A `skills` entry is `{ name, skillId, scope, priority, source }` for an assigned skill that won priority resolution; fetch its procedure with `skill_get` and the `skillId`. A `skillDiagnostics` entry is a refused, superseded, unresolved or ambiguous assignment with its reason. A name-only assignment resolves when the agent has exactly one live skill row of its own with that name; with none it is unresolved, with more than one ambiguous. Both arrays are present with `includeSoul: false` and at the `/mcp` default, and hold the entries admitted within the remaining `maxTokens` content budget: `skillsTokens` and `skillDiagnosticsTokens` count their cost, and `skillsTruncated` and `skillDiagnosticsTruncated` count the entries that did not fit.
+
+  The prose `## Active Skills` section now lists only the entries in `skills`, and only when both `includeSoul` and `includeContext` are true. In 0.58.0 it also listed refused and superseded assignments with a `SKILL_CONFLICT` or `refused` note, and assignments that named no skill row.
+
+- **Bootstrap now resolves org-scope skill assignments (`OrgSkillAssignment`) together with the agent's own; an org entry in `skills` has `scope: "org"`.** (flair#2141)
+  A row carries `skillName`, `priority` and `skillRef`; its `skillId` in
+  `skills` is that `skillRef`. It applies to a target whose Agent record has
+  `kind` agent and `status` active (absent counts as both), under the same
+  priority and tie rules as the agent's own assignments. A Soul
+  `skill-assignment` row with `metadata.optOut: true` removes the org
+  assignments with that name for that agent when this instance's id can be
+  read and the row's `originatorInstanceId` equals it.
+
+  Verified agents read `GET /OrgSkillAssignment`. `POST`, `PUT`, `PATCH` and
+  `DELETE` need Admin Basic credentials or Flair's internal path; agent keys,
+  admin-agent keys included, get 403. Each accepted write appends an
+  `OrgSkillAssignmentHistory` row (actor, source class, and the hash of the row
+  before the write, null on a create). There is no direct `/OrgSkillAssignmentHistory`
+  route. Neither table is federated.
+
+  Soul `POST`, `PUT` and `PATCH` refuse with 400 a `skill-assignment` row whose
+  `metadata.optOut` is not a boolean; `AgentSeed` refuses with 400 a request
+  whose `soulTemplate` has a `skill-assignment` key. At start, the server
+  attempts to bring an existing `flair_agent` role up to this release's grants
+  and logs a failure.
+
+- **New operator page: who can connect to your Flair.** `docs/access-control.md`
+  covers the three checks on a hosted Flair's native `/mcp` endpoint (which
+  people, which apps, what they can reach), how to revoke access, and worked
+  examples for people and bots. Linked from the README, `docs/auth.md` and
+  `docs/mcp-clients.md`.
+
+### Changed
+
+- **The `Integration Tests` CI job now runs as three parallel shards behind the same required check.** Each shard runs the same steps on its share of `test/integration/*.test.ts`, assigned by `scripts/ci/integration-shards.mjs`; a final job named `Integration Tests` fails unless every shard succeeds.
+
+  (Closes #2149, #2131)
+
+### Fixed
+
+- **The launchd launcher and `resolveInstanceServingPid` now check the command line of the process `hdb.pid` names, not only that the pid is alive (flair#2056).**
+
+  The launcher refuses to start a second Harper, and `resolveInstanceServingPid` uses the `hdb.pid` pid as PID-file evidence, only when that live process's command line is `node` or `bun` followed by a Harper entry path (`…/node_modules/harper/dist/bin/harper.js`, its `@<scope>/harper` equivalent, or `dist/bin/harper.js`, which Harper's own restart forks). A Harper path in a later argument does not count. The launcher reads the line `ps -o command=` reports, which joins arguments with spaces, so it does not establish which argument is the script; `resolveInstanceServingPid` reads `/proc/<pid>/cmdline` when it can (Linux), and otherwise the `ps` line (macOS, or a `/proc` that cannot be read). A flair#1454 identity sidecar (`flair-daemon.json`) is not required. A sidecar disagrees when it names a different pid, or a `startTimeMs` more than 2000 ms from the process's start second (whole seconds, as `ps -o lstart=` reports; `/proc` on Linux for `resolveInstanceServingPid`). Then the launcher does not refuse and continues its normal start, and `resolveInstanceServingPid` returns the first process listening on the port, if any, which can be the same pid.
+
+- **Boot readiness recovery mocks now exit after parent loss or a bounded wait.**
+
+  (Closes #2080)
+
+- **The README's federation and REM feature rows now match what the code does (Closes #2093).**
+
+- **Through the Agent resource, only an administrator or trusted internal call can set `Agent.status`; federated peers cannot change existing local principals' status (Closes #2108).**
+
+  A non-admin agent's `PUT` or `PATCH` that includes `status` is refused with `403` naming the field and pointing at Presence, and writes nothing — not the `status`, and not the other fields in the same request. A non-admin agent's edit of its own record without `status` is unchanged. An anonymous request is refused and writes nothing. A federated peer's Agent record whose `status` differs from an existing local principal's stored value — a missing or undefined `status` counting as `active` on either side — is skipped whole — also when the record is older than the stored row — and reported as `agent_status_not_federated` when it reaches the status comparison.
+
+- **`flair mcp enable --cimd-allowed-hosts` sets the list in the edited `config.yaml` only after a preflight match with the target; without `--dry-run`, a mismatch is refused.** `--dry-run` skips the match and writes nothing, but still refuses a Fabric instance, an invalid host list, and a `config.yaml` that is missing, unreadable or not valid YAML, or has no `@harperfast/oauth` `mcp` mapping. Before this release, the flag's value only appeared in the command's output, and the list the instance used did not change.
+
+  The edited file is the `config.yaml` the command edits for `mcp.enabled` on the machine it runs on (`./config.yaml`, else `~/.flair/config.yaml`). The preflight match links the host and process ID the target's operations API reports, a readable process on this machine, and that file (by `realpath`). If the match passes and the run reaches `local-config-update`, the command writes `mcp.clientIdMetadataDocuments.allowedHosts` unless the file already holds that exact list, then reads the file back before restarting the instance; if the write or the read-back fails, it stops before the restart. The flag is refused before anything changes for an entry that is not a lowercase bare hostname, for a `*.harperfabric.com` instance, and when that `config.yaml` is missing or has no `@harperfast/oauth` `mcp` block. Without the flag the command does not inspect or change the list.
+
+  In a successful `flair mcp enable` run (without `--dry-run` or `--json`), the closing summary after the step list now opens with "The OAuth metadata check passed. The /mcp route itself was not probed." instead of "claude.ai can now connect."; the claude.ai note, when it applies, and the connector paste block follow it. That check reads only the authorization-server metadata.
+
+  `flair mcp enable --dry-run` no longer creates the signing key. It reports the path where a run without `--dry-run` would reuse or generate one, and writes no file.
+
+- **`flair mcp enable` corrects stale setup messages; a Fabric re-run completes after target-issuer binding and public-origin self-verify pass.**
+  In 0.57.0 the error for a missing target admin password named an
+  `--admin-pass-file` flag, and the ops-API 404 hint named `--ops-url`; the
+  command has neither. The error now asks for `--admin-pass`, and the hint names
+  the address the command derived from the instance URL (same host, port 9925),
+  which no option overrides. The `config-block` step printed `mcp.enabled=false`,
+  and listed a `--cimd-allowed-hosts` value as the shipped `allowedHosts`. It now
+  reports the `${FLAIR_MCP_OAUTH}` reference and the allowed hosts that
+  `config.yaml` ships, says the step writes nothing, and shows a
+  `--cimd-allowed-hosts` value as requested, pointing to the
+  `cimd-allowed-hosts` step for whether and when the run writes it.
+
+  On a Fabric instance the `fabric-operator-deploy` step failed on every run, so a
+  re-run after the operator's restart stopped there again. The run first checks that the target’s own OAuth metadata names the requested issuer, then self-verifies the public origin; `enable` completes only when both pass. When a response came back but self-verify did not pass, the step
+  reports why and asks for a re-run with `--confirm-secrets-applied` after the
+  restart; if the run pushed the secrets to the instance, it asks for a restart
+  instead of asking to apply the staged file. When the request itself fails, it
+  names the URL it tried and asks the operator to check DNS, HTTPS reachability
+  from this machine and that the instance is running before re-running. A run
+  reaches that step only after `--confirm-secrets-applied` or a yes at the
+  prompt. The Fabric summary no longer says to set `mcp.enabled: true` in `config.yaml` and redeploy. On success it mentions restarting if a secret value changed; when the public surface answers but remains inactive, it asks for a restart after a verified push, or for staged secrets to be applied and the instance restarted.
+
+  (Closes #2116)
+
+- **`flair mcp disable` now asks for the remote target's admin password via `--admin-pass` in its help and missing-password error.**
+  (Closes #2121)
+
+- **`flair mcp enable` now tells operators to restart Fabric or load verified pushed secrets when confirmation is pending.**
+  The confirmation prompt and failure step no longer instruct operators to apply
+  the staged file after the secrets were pushed and read back. Runs without a
+  verified push retain the staged-file instructions. (Closes #2129)
+
+- **Release PR text explains automatic tagging and the admin fallback for a missed run (Closes #2132)**
+
+- **`flair mcp enable` now matches the checked issuer to the target's own OAuth metadata before reporting a successful metadata check.** (Closes #2134)
+
+- **`flair mcp enable` now describes the connector identity mapping without claiming unconditional reads or writes.** See `docs/access-control.md` for the principal's access scope. (Closes #2135)
+
+- **The promote block's final check waits up to 120 s for the registry to show the new `latest` before it reports skew.**
+  In 0.58.0 the check read each package's `latest` once with `npm view`, straight
+  after the last `npm dist-tag add`. The registry can serve the previous `latest`
+  for a short time after a move, so after the 0.57.0 and 0.58.0 promotes the check
+  reported skew for `@tpsdev-ai/flair` and printed RESTORE lines for a promote that
+  had succeeded. The block now runs the check in a wait mode
+  (`scripts/ci/registry-latest-skew.mjs <version> --await 120`, with each package's
+  previous `latest`). It reads every `latest` from the registry's dist-tags
+  endpoint (`npm dist-tag ls --prefer-online`) and re-reads a package that is not
+  yet at the new version, with backoff, until it is or the wait ends. If every such
+  package still reads its previous `latest` then, the check exits 3 and the block
+  prints the command to re-run the check, then the RESTORE lines as a fallback.
+  Skew and an unreadable `latest` still exit 1 and 2, and the block prints the
+  RESTORE lines for them as before. Without `--await` the check reads and reports
+  as in 0.58.0, including the canary's pre-promote report; an extra argument it
+  used to ignore is now a usage error (exit 2).
+
+  (Closes #2140)
+
+- **The CLI's role update sends the role's `id`, so `ensureFlairAgentRole` and
+  `ensureFlairPairInitiatorRole` can change an existing role on Harper 5.2.8.**
+  Harper's `alter_role` addresses a role by that `id` and refuses a call without
+  it ("Id can't be blank"). In the previous release the call omitted it, so
+  bringing an existing role's permissions to the expected spec failed and the
+  role kept its old permissions.
+
+  (Closes #2154)
+
+- **`flair mcp disable` reports the restart request without claiming the unchecked `/mcp` route is unmounted.**
+  (Closes #2159)
+
+- **`flair agent add` refuses an id that already has an Agent record, and reports success only after the stored public key matches.**
+  Re-running add for an existing id used to print `registered` while Harper 5.2.8 left the old public key in place, so a newly generated key then failed with `invalid_signature`. The command looks the id up first and accepts only a JSON `[]` as absence. When a record is already there, it exits with an error that names the id. A new id is inserted as before; the command reads the row back and prints the stored public key only when it matches the key generated or reused by this command.
+
+  > **Heads-up:** `flair agent add <id>` no longer finishes silently when that id already exists. A well-formed existing row names `flair agent rotate-key <id>` or `flair agent remove <id>`. An unreadable row exits without that remedy. `flair agent rotate-key` writes the new private key on the Flair host. The new key file must be on the signing host before that process can use it. Configure the signing process to use the local file, then restart it. `flair agent remove` tries to delete that agent's Memory and Soul rows.
+
+### Security
+
+- **An XAA assertion's `jti` is recorded once per instance, under the same per-key lock as agent-auth and federation nonces.** (flair#2073)
+  When a `jwt-bearer` grant's assertion carries a `jti` and validates, the
+  `jti` is recorded in `IdJagReplay` before any token is issued,
+  so a serving instance accepts the assertion at most once; with `FLAIR_MULTI_WORKER_UNSAFE=1`, that replay refusal spans its workers. When
+  the store is unavailable or the write fails, that grant is refused with
+  `503 temporarily_unavailable` (`replay_store_unavailable`), and the server log
+  names the cause. New rows expire after 25 hours. An existing `IdJagReplay` row is treated as a replay while that row remains in the store.
+
+  > **Heads-up:** a `jti` claim, when present, must be a nonempty string, and
+  > the assertion must then carry an `exp` no more than 24 hours (plus 30
+  > seconds of clock skew) ahead. Otherwise the grant is refused with
+  > `400 invalid_grant`.
+
+  (Closes #2073)
+
+- Flair returns a named 503 for non-health requests when Harper reports multiple workers without the unsafe opt-in or cannot read the worker count.
+  > **Heads-up:** Set `THREADS_COUNT=1` and restart Flair; investigate a worker count that remains unreadable.
+
+- **A raised root dependency override for fastify moves the repo lockfile out of the affected ranges of five fastify advisories published 2026-09-30.**
+  `fastify` ^5.12.5 resolves 5.12.5 in `bun.lock` (GHSA-hwr6-493r-vm6h, GHSA-9q9j-q6p8-xq58,
+  GHSA-p68q-wchp-6fh7, GHSA-667r-xxjv-c9mm, GHSA-4mh8-r7rc-xpvc).
+  > **Heads-up:** npm installs still carry Harper 5.2.8’s Fastify 5.11.3 pin, so these five advisories remain allowlisted until Flair uses a Harper release outside their affected ranges. No upgrade action is required.
+
+- **A root dependency override for `@grpc/grpc-js` moves the repo lockfile out of the affected ranges of GHSA-f596-whhp-79r4 and GHSA-m9gg-hp2v-232j.**
+  `@grpc/grpc-js` ^1.14.5 resolves 1.14.5 in `bun.lock`. In this repository the package comes
+  only from `@google/adk`, a dependency of `@tpsdev-ai/adk-flair`; an npm install of
+  `@tpsdev-ai/flair` does not include it. Root overrides do not apply to npm installs of a published package, so this override does not set `@grpc/grpc-js` for npm installs of `@tpsdev-ai/adk-flair`; npm resolves it from `@google/adk`’s dependency tree.
+  > **Heads-up:** An install whose lockfile already records an affected version keeps it until that lockfile's `@grpc/grpc-js` entry changes.
+
+  Flair's own code imports no gRPC package.
+
+## [0.58.0] - 2026-09-30
+
+### Added
+
+- **The release tagger also marks the Python package.** When the release commit's
+  tree carries `packages/adk-flair/pyproject.toml` at the very version being
+  tagged, the auto-tagger creates `adk-flair-v<version>` from the SAME commit as
+  `v<version>`, so the PyPI publish no longer waits for a hand-pushed tag. The tagger
+  skips the second tag when the file is absent. Releasing without the Python package
+  also requires removing the pyproject from `SOURCE_VERSION_FILES` in
+  `scripts/check-version-sync.mjs` and from the explicit paths staged by
+  `scripts/release.sh`; then the release can be tagged `v` alone. The `[project]`
+  version is read with Python's `tomllib` — the same reader
+  `.github/workflows/adk-flair-publish.yml` uses — so a `version =` line inside a
+  multi-line string or array is never mistaken for the project version. The reader fails CLOSED: a TOML parse error, a `python3`
+  without `tomllib`, or a `[project]` that is not a table refuses
+  `adk-pyproject-unsupported` naming the reason; a `dynamic` version or a missing
+  `[project].version` refuses `adk-version-mismatch`; and a version that differs
+  refuses `adk-version-mismatch` BEFORE either tag is written. An
+  `adk-flair-v<version>` already at another commit refuses `adk-tag-exists-elsewhere`
+  without writing the `v` tag; a rejected second POST refuses
+  `adk-ref-write-rejected`, leaving the `v` tag in place and never retrying (for a
+  403 the text names the App's ruleset bypass setting as the first thing to check,
+  then the re-run). An adk ref read that fails refuses `adk-ref-unreadable` rather
+  than throwing, except after a rejected POST, where the refusal stays
+  `adk-ref-write-rejected` and the read-back is reported as `not read`. The `tomllib` reader
+  runs `python3 -I` with only `PATH` in its environment, so a module in the
+  checkout cannot shadow the standard library and no token reaches it. After an
+  accepted POST, read-back distinguishes four refusals: the read failed, the ref is
+  missing, the ref cannot resolve to a commit, or it resolves elsewhere. The rejected-POST
+  and elsewhere texts name the two refs' read-back values (the raw ref type and SHA
+  when unresolvable, or `not found`) and the check the operator runs next. The
+  pyproject's membership+read is ONE function: a `git ls-tree` that does not answer
+  exactly "absent" or "the path", or a failed `git show`, refuses
+  `adk-pyproject-unreadable` before any POST on BOTH paths; no stderr substring
+  decides anything. The `[project]` version is read by tomllib with `dynamic`
+  checked BEFORE a static `version` line, so `dynamic = ["version"]` plus a stray
+  `version` line has NO project version (and refuses `adk-version-mismatch`). The
+  version WRITER (`scripts/check-version-sync.mjs --write`) precomputes the two
+  `SOURCE_VERSION_FILES` edits (`packages/flair-bench/src/version.ts` and
+  `packages/adk-flair/pyproject.toml`), verifies the pyproject edit with `tomllib`
+  (refused unless only `project.version` changed) and the flair-bench edit with its
+  own declaration check, writes NOTHING if either fails, and leaves the
+  `package.json` bumps to `release.sh`; it replaces only the version bytes so a
+  mixed CRLF/LF file keeps every other byte intact. Each guarantee names its test in
+  `test/unit/release-auto-tag.test.ts` and
+  `test/unit/release-auto-tag-workflow.test.ts`.
+
+  > **Heads-up:** a repo admin must list the release-tag App as a bypass actor on
+  > the `adk-flair-v*` tag ruleset (id 24044018). Until then the second POST is
+  > rejected (403) and the release refuses with `adk-ref-write-rejected`.
+
+- **The release attempt now carries its certified digest, the canary has a machine surface, and an unprivileged poll can start the promote.** Slice 1 of the automated promote:
+  - `release-publish.yml`'s `release-attempt` deployment marker gains a `payload` of `{package_set_digest, manifest_sha256, version}`, taken from the values `stage-publish` already re-derived from the artifact it staged — written BEFORE anything is staged, so a missing or mismatched digest refuses the stage. (`test/unit/release-publish-marker-workflow.test.ts`)
+  - `scripts/ci/canary-verdict.sh --emit bash` prints ONLY the executable promote block, byte-identical to the fenced text a human sees (one definition, by construction); a FAIL or a non-release version has no block and exits 3 with one stderr line. (`test/unit/canary-verdict.test.ts`)
+  - `release-promote-poll.yml` (new) runs every 10 minutes; it holds no npm credential (no `environment`, no repo secret — the automatic `GITHUB_TOKEN` with `actions: write`, `contents: read`, `deployments: read`), checks out only the default branch at the run's own sha together with what the package derivation reads (`scripts/ci`, the root `package.json`, `packages/*/package.json`), and it runs on `schedule` only (no manual trigger: a manual run with `--ref` would execute that ref's copy of the workflow). The package-list derivation fails CLOSED (a non-zero exit or an empty list is an error exit naming the cause); markers are read across ALL pages (`--paginate`, flattened); per pending marker the version is the payload's `.version`, validated against the ref (`ref == v<payload.version>`); every lockstep package must be public and re-derive the certified digest (ALL-form); and on READY it dispatches `release-promote.yml` on the tag ref — gated behind that workflow existing (slice 2). Its outputs never decide what is promoted. (`test/unit/release-promote-poll-workflow.test.ts`)
+  - CODEOWNERS: the promote machinery (`canary-verdict.sh`, `package-set-digest.mjs`, the registry hashers, `lockstep-packages.mjs`, `canary.yml`, `release-promote*.yml`) joins the trust root, and the test resolves EFFECTIVE ownership (last matching rule wins; each pattern is matched by git itself, `git check-ignore` on the CODEOWNERS pattern, since CODEOWNERS uses gitignore syntax). (`test/unit/release-auto-tag-workflow.test.ts`)
+
+- **Memories now support validated host-source pointers, stored in `MemoryHostSource` and returned through visibility-gated reads (slice 1 of #1940).** On `POST /Memory` and `PUT /Memory/<id>` the pointer inputs (`hostSource`, `hostSourceScope`, `hostSourceVisibility`) are write-body-only: The server validates `hostSource` and `hostSourceScope`, removes all three pointer fields from the Memory body, and ignores a client-supplied `hostSourceVisibility` (A2 — a closed `host`/`kind` pair set `openclaw/run`, `cursor/launch`, `codex/turn`, an id grammar, an https-only url with NO userinfo and no C0/DEL/C1 controls or bidi marks, NFC, reject-never-truncate), then writes a `MemoryHostSource` row keyed by memoryId holding the canonical pointer, `scopeAtWrite`, a server-stamped `authorId`, and `receivedAt`. The Memory row and its pointer row commit together or not at all. The named application write paths remove pointer fields before persisting Memory rows. Federation filters its outbound and inbound Memory rows separately. Trusted raw table operations remain outside these resource guards. Non-admin Memory reads ignore caller `select` and `property` and return the authorized, pointer-projected row; filters, sorting and pagination remain effective, and a selected collection response may include larger stored fields such as embeddings. Supported writes store host pointers only in `MemoryHostSource`. For non-admin `Memory.get`, `Memory.search`, and `SemanticSearch` results, the gated projection removes inline pointer fields and renders a pointer only from a bound `MemoryHostSource` row. A pointer is visible to a non-admin reader only through a gated join into Memory results — the pointer, `"withheld"`, or nothing — with the effective visibility the NARROWER of the write-time scope and the record's current visibility. The join takes the narrower of the stored pointer scope and the Memory row's current visibility, so a later widening never widens the pointer; a rendered URL shows only scheme/host/path. Direct resource reads permit admin agents and trusted in-process callers; non-admin agents cannot read the pointer table directly, and its writes stamp `authorId` from the authenticated principal, it is excluded from federation by mechanism (an inbound pointer row is refused), and the pointer is cascaded away where Memory rows die. `hostSource` is a writer claim attributed to the authenticated agent on agent writes; Flair does not verify the host object and does not cryptographically sign the pointer body.
+
+- **Claude Code can now recall Flair memories on every prompt, not only at session start.**
+  The new `flair-prompt-recall` binary in `@tpsdev-ai/flair-mcp` is a `UserPromptSubmit` hook. It
+  searches with the prompt (markup, URLs and long ids stripped, 500 characters at most), using the
+  same hybrid search as the MCP `memory_search` tool and the agent's own Ed25519 key, and adds the
+  hits that meet a relevance threshold as context: each with its id, date, score and a snippet,
+  under a header that frames them as a signal to verify, not an instruction, and bounded to 2,000
+  characters in all. A memory flagged by Flair's content scan is shown behind a fixed warning line
+  that cutting the text to fit never removes. It skips background task notifications and short
+  acknowledgements, exits 0 on every path, and when Flair is unreachable, slow or refuses the
+  request it adds no memories, only one line saying recall was unavailable. The time budget runs
+  from the hook's start and ends any asynchronous wait (the prompt on stdin, the config file, the
+  search request and its response); the prompt and the config file are read with size caps, and
+  after the Flair client returns, the hook examines a bounded number of results and characters. A
+  response that has fully arrived is parsed, and every result in it converted, synchronously by the
+  client before that; the budget cannot interrupt that step and the response size is not capped.
+  The threshold (default 0.62), the number of memories (default 4) and the time budget (default
+  3000 ms) come from `FLAIR_PROMPT_RECALL_MIN_SCORE`, `FLAIR_PROMPT_RECALL_MAX_HITS` and
+  `FLAIR_PROMPT_RECALL_TIMEOUT_MS`, or from the matching top-level keys in `~/.flair/config.yaml`.
+  The hook never uses admin credentials. It is opt-in and wired by hand: `docs/claude-code.md` now
+  lists all four Claude Code hooks and gives the `settings.json` entry for this one, launched from
+  a pinned local install so no package resolution runs ahead of every prompt.
+
+  (Closes #2066)
+
+- **Claude Code can now save a continuity record just before a compaction and show it first when the session continues or restarts.**
+  The new `flair-precompact` binary in `@tpsdev-ai/flair-mcp` is a `PreCompact` hook. It reads the end
+  of the transcript (at most its last 1 MiB, keeping up to the last 2,000 nonblank lines of that) and
+  copies out, with no model call, the standing instructions a fixed word heuristic finds in the turns
+  the transcript labels as user turns (once the harness markup it recognizes is removed), the open
+  tasks, the last five file edits and shell-command descriptions (never the commands), and the last
+  assistant message's text blocks, joined and cut to 300 characters. Strings in the record that match
+  its credential patterns (listed, with their limits, in `docs/claude-code.md`), including a whole
+  Authorization-style value after `Authorization:`, `Bearer` or `Basic`, are replaced with
+  `[redacted]` before the record is stored and again before it is shown (a task status that redaction
+  would change is shown as `open` instead); a secret that matches no pattern is kept as written, and
+  the record is at most 2,000 characters. When the transcript's end holds something to record and the
+  write succeeds, it is stored with the agent's own key as one private, ephemeral memory in the
+  session's continuity journal; a later run for the same session and trigger within 5 minutes of the
+  moment the hook's marker first named that record (the marker is written before the write is
+  attempted, so a failed write starts the window too), whether it repeats the compaction or handles a
+  second one of the same kind, targets that record again: only a write Flair applies changes it,
+  creating the record if it is absent and updating it if present (two runs at the same moment can each
+  add one). `flair-session-start` can now put a saved record at the top of its context, ahead of the
+  bootstrap context, when Flair returns the row the local marker file names as an eligible live row
+  (after a compaction of the same harness session, or after a restart when the marker names the
+  previous session), as quoted data: between fixed begin and end lines, with every line prefixed, so
+  no line of the record's text can forge the end line or start with a role marker such as `System:`.
+  The text itself stays untrusted: formatting cannot guarantee that a model disregards an instruction
+  written inside the quote. Once it has started, every path the hook handles ends in exit 0, so it
+  does not block compaction (the documented command's `|| true` covers a launcher that fails first);
+  when Flair is unreachable or slow, or one of its own files is refused, it shows one short warning.
+  Its time budget (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default 5000 ms) starts before it reads its input;
+  when it passes, the hook stops waiting on asynchronous work and exits once its output drains (at
+  most one more second). It cannot interrupt synchronous work such as the Flair client's read of the
+  agent's key file (the hook entry's Claude Code `timeout` is the outer bound). It checks the size of
+  the transcript, its continuity state file and its marker file before reading them; the key-file read
+  is outside those caps. It is opt-in and wired by hand: `flair hook install` does not write the
+  entry, and `docs/claude-code.md` gives the `settings.json` snippet and the heuristic's limits.
+
+  (Closes #2069)
+
+### Changed
+
+- **The supply-chain bake-time gate now also checks exact-pinned external `optionalDependencies`, not only `dependencies`.**
+  npm and bun install `optionalDependencies` by default ("optional" means a
+  failed install is non-fatal, not skipped), so they carry the same risk as any
+  other production dependency. At the time of this change the gate checks 16
+  pinned dependencies here instead of 9: the seven `@node-llama-cpp/*` platform
+  binaries that `packages/flair-bench` declares as optional. `peerDependencies`
+  and `devDependencies` are still not checked.
+
+  The collection rule moved from `scripts/check-dep-ages.mjs` into
+  `scripts/lib/check-dep-ages-collect.mjs` (`collectDeps`), which the script
+  imports relative to itself. An unexpected error, such as a missing
+  `packages/` directory, exits `2` (the registry-failure code). Outside `--ci` runs, `FLAIR_CHECK_DEP_AGES_ROOT` overrides the scanned
+  repository root; CI refuses the variable. Unit tests now run the gate against a fixture repository and a local
+  registry, and assert both fail-closed exits: `1` with the too-fresh
+  diagnostic under a 7-day policy, and `2` when the registry is unreachable.
+
+  > **Heads-up:** a project that copies the gate, as described in
+  > `docs/supply-chain-policy.md`, needs both files now: copy
+  > `scripts/lib/check-dep-ages-collect.mjs` into a `lib/` directory beside
+  > the script, keeping the relative layout, or the script fails at import.
+
+  (Closes #1935)
+
+- **Breaking: non-admin Memory reads return full authorized rows and ignore `select`/`property`; clients must select fields from the returned object.**
+  The auth middleware drops `select(...)` and `property` from a REST request URL before Harper
+  parses it, and `Memory.get`/`Memory.search` drop them for a direct contextual read, keeping
+  conditions, operator, sort, limit and offset exactly as sent. The read is answered on the same
+  id, or the same conditions under the same read scope, so each stored row goes through the gated
+  pointer join, which renders a pointer only from a bound `MemoryHostSource` row. A selected
+  collection response MAY include additional stored fields, including an embedding when one is
+  present, not only the named ones. Admin and trusted internal reads are unchanged.
+
+  (Refs #1940)
+
+- **A Relay `POST /Message` that reuses a stored message id gets the idempotent answer only when it comes from that message's sender.**
+  The stored message is owned by its `from`, and the send's `from` is the verified signer. When
+  they match, the send is answered with the stored message's accepted envelope: a retry writes no
+  second row and is not charged against the inbox cap again. When they differ, the send is
+  refused with `403 {"error":"forbidden: cannot modify Message owned by another principal"}` — the
+  same response the auth middleware gives a write to `/Message/<id>` the caller does not own — and
+  no field of the stored message is returned. The rule applies to admin senders too. If the stored
+  message cannot be read, the send is refused the same way and nothing is written.
+
+  Both refusals are built by one shared constructor (`resources/record-owner-guard.ts`'s
+  `ownerMutationRefusal`), so the two routes cannot drift apart.
+
+- **Bootstrap tests pin the priority winner for duplicate soul values.**
+  Whichever order the store returns them in, the identity key is kept and the shared body is emitted once.
+
+  (Closes #1730)
+
+- **In CI the unit lane now keeps going past a failing step and reports all failures at once, instead of stopping at the first.**
+  `scripts/test-unit.ts` gained a keep-going mode: it attempts every later step until its time budget runs out,
+  reports any step the budget leaves unrun, prints one final summary listing each failed step with its reason, and exits non-zero
+  if any step failed. It is on by default when `CI` holds a truthy value
+  (nonblank after trimming, excluding `0` and `false` case-insensitively;
+  GitHub Actions sets `CI=true`), and
+  available anywhere with `bun run test:unit --keep-going`. A local run without
+  the flag keeps the fail-fast behaviour and stops at the first failing step,
+  and `--fail-fast` forces that even when `CI` is set; the release script passes
+  it. In keep-going mode each step is killed at its time limit (90 s; 360 s for
+  the root unit tests step) and counts as a failed step, and the lane has a
+  budget of 510 s, so the summary and guards are expected to print before the CI
+  job's 10-minute limit as long as the job's work outside the lane stays within
+  the 90 s reserved for it (measured, not guaranteed); a fail-fast run is not
+  time-limited. The home-isolation and temp-leak guards run once at the end in
+  either mode. In keep-going mode a guard failure is listed in the same summary,
+  so it still fails the lane even when every step passed; in fail-fast mode each
+  guard prints its own error and fails the lane, with no combined summary.
+
+  (Closes #2030)
+
+- **`POST /RecordUsage` counts only memories in the caller's read scope, and a non-admin `MemoryUsage` read shows a row only while its memory is readable.**
+  The read scope is `resolveReadScope`, the rule a non-admin by-id `Memory.get` applies: the
+  caller's own memories at any visibility, and other agents' non-private memories. It applies to
+  every agent, admin agents included, although an admin's Memory reads are unfiltered, and
+  citation-on-write (`usedMemoryIds`) applies it through the same ledger core. An id outside that
+  scope is handled like an id that does not exist: the response is the same
+  `{ "recorded": true }` and the memory's `usageCount` does not change. The scope is checked on the
+  first read of the memory, before a ledger row is written, so an id outside it there gets no
+  ledger row for the caller. A memory that leaves the scope before the re-read that precedes the
+  count bump keeps the ledger row already written, and its count is not bumped. The caller's scope
+  is resolved once per call, and nothing is recorded if it cannot be resolved.
+
+  A non-admin `GET /MemoryUsage/<id>` or collection read returns the caller's own rows about
+  memories it can read; a row about a memory that is missing or out of its read scope reads as not
+  found. Like a non-admin Memory read, a non-admin ledger read ignores the caller's
+  `select`/`property`, and a collection `limit` can return fewer rows than it names. Admin and
+  trusted internal ledger reads are unchanged.
+
+  > **Heads-up:** a usage report counts only when the memory is in the reporting agent's read
+  > scope. Memories created through `Memory.post()` or `Memory.put()` default to private for
+  > `standard` and `ephemeral` durability. `POST /FeedMemories` defaults `ephemeral` records to
+  > private, while a new `standard` feed record with no `visibility` field is non-private; usage
+  > reports from other agents can count it.
+
+### Fixed
+
+- **`flair init` stops before authenticating when one read shows another data directory.** That pre-auth check is a single read of the HTTP listener. On Linux the directory comes from `/proc/<pid>/environ`. On macOS the directory is unavailable, so init does not refuse before auth from a parsed `ROOTPATH`. A later operations-port 401 is a separate check: a pid is named only when the read before the insert and the read after the 401 are the same sole PID. These messages do not offer `flair stop`. The remedy is `kill <pid>` when one process is named; otherwise the listener stays unattributed. A different directory does not prove the admin passwords differ, and the HTTP holder is not assumed to have caused an operations-port rejection. On these pre-authentication and authentication-refusal paths, init leaves the existing process running.
+
+- **A workspace package's non-optional peer must now resolve, in `bun.lock`, to a version its declared range allows.**
+  `scripts/check-peer-deps.mjs` now fails when any workspace package's
+  non-optional peer, as resolved in `bun.lock`, does not satisfy its declared
+  range; optional peers (`peerDependenciesMeta`) are skipped, and a declared
+  non-optional peer with no lock resolution fails closed. Every workspace listed
+  in the lock must have a readable, valid manifest; missing workspace inputs or
+  an unreadable `packages/` directory fail with a repair instruction. It runs in
+  the same CI job as `check-workspace-deps.mjs`. The lock is refreshed to
+  `openclaw@2026.9.5`.
+
+  (Closes #1936)
+
+- **Cleanup failures now fail the maintenance response, the transaction helper refuses to run unwrapped, and the pointer failure switch is a test-only adapter replacement.**
+  A `MemoryMaintenance` run with any cleanup error returns a failure naming the counts (never
+  “Maintenance complete”), and a missing `MemoryHostSource` table is reported rather than silently
+  skipped. `withSharedWriteTransaction` throws when Harper’s transaction function is unavailable
+  (no unwrapped fallback), skips a CLOSED/detached transaction, and a failed abort is an error. The
+  failure-injection seam exists only in test code; The build check recursively scans JavaScript (`.js`) files under `dist`, excluding `node_modules`, for the former seam symbol and failure switch. The real-Harper atomicity/REST-refusal guarantees are asserted by an integration test against
+  a composed copy whose pointer adapter is replaced.
+
+  (Refs #1940)
+
+- **The host pointer joins on a server-stamped row incarnation token, so a stale pointer is never returned and cleanup is hygiene.**
+  The named application create paths stamp a local `instanceToken`; existing legacy rows may have none. Memory's REST write paths remove client-supplied `instanceToken` and `provenance`. The named update paths retain a stored token when their existing-row read succeeds. The `MemoryHostSource` row
+  stores the row's `memoryInstanceToken`, and the join returns a pointer (or `"withheld"`) only when
+  `memoryId`, `authorId === agentId`, the incarnation token, and “not archived” all hold — so a
+  deleted-and-recreated id, a re-owned row, and an archived row all show no pointer, with no cleanup
+  required. `Memory.get()`, `Memory.search()` and `SemanticSearch` render pointers through the
+  pointer helper. Other Memory projections, bootstrap included, do not render pointers in
+  this slice. `originatorInstanceId` is handled in #1965.
+
+  (Refs #1940)
+
+- **A pointer commits with its Memory row, and an echoed pointer keeps a SHARED pointer shared.**
+  The host pointer (`hostSource`) lives in its own `MemoryHostSource` table and is written
+  with the request's transaction — a request's open one when there is one, and a created one
+  when an internal caller has no request context — so the Memory row and its pointer commit
+  together or not at all. A failed pointer write aborts that transaction and neither row
+  commits; a failed pointer delete fails the Memory delete (`t1`, `t2`,
+  `c3`). A partial PUT carries the stored visibility it read at the start of the request, so
+  a private memory is preserved sequentially (`p2`). An echo of the
+  stored pointer keeps it (and its scope) unchanged ONLY when the writer is the stored
+  pointer's author AND the value matches exactly, full URL included — a different query is a
+  new value, not an echo. `Memory.delete` and maintenance expiry or age-based archival delete the pointer with their Memory operation. `MemoryArchive` basement/restore retains the pointer row; the join suppresses it while the Memory is archived. `Memory.delete` joins a request transaction when present; maintenance uses an owned transaction per item. An orphan sweep re-checks inside the
+  transaction before deleting. `MemoryHostSource` refuses every REST write verb for every
+  caller (`r4-http`); a superuser Harper operation against the table (export, backup,
+  reseed) is the operator path. The outbound reader projects declared Memory attributes. The inbound merge removes undeclared attributes except the named bookkeeping fields (`f1-out`,
+  `f1-in`).
+
+  (Refs #1940)
+
+- **Reindex retains memory provenance, feed ingestion stamps it anew, and failed pointer cleanup preserves lexical recall.**
+  Reindex restores stored provenance byte-for-byte, retains declared and named allowed fields, strips other undeclared fields and generates an absent incarnation token. Feed creates and updates receive freshly derived provenance. Federation sends every field the inbound whitelist retains, including `meta`, `kind` and the named federation bookkeeping fields, and restores the provenance selected by the merge when it is a string.
+
+  Memory delete notifies the lexical index after its owned Memory-and-pointer transaction commits. A request-owned delete reaches the lexical index through the committed change feed. A failing pointer delete no longer removes the surviving row from a warmed BM25 index. Non-admin Memory search streams its pointer join in bounded chunks, and the orphan sweep counts row read or delete failures, continues with later rows and reports an incomplete run.
+
+  (Refs #1940)
+
+- **Client wiring, signing and read-scope text match the code in the README, the MCP guide and the tool descriptions.**
+  Init wiring, adapter and n8n signing, the session-start hook, and memory and skill read scope now say what the server does.
+
+  (Closes #1943)
+
+- **`FlairStore` structurally satisfies LangGraph's `BaseStore` type, and its documentation describes the implemented adapter.**
+  `FlairStore` exposes public `listNamespaces()`, `start()` and `stop()` methods. A contract test checks its assignability to `BaseStore` and exercises it as a compiled graph's `store`. `batch()` declares LangGraph's per-operation result type, `OperationResults<Op>`, instead of `any[]`; its checkpoint imports are type-only, so loading the adapter does not require that package at runtime. The unit lane type-checks the contract test and fails if the structural contract breaks. The README and source comments describe authentication, default visibility and federation eligibility, persistence conditions, retrieval, and namespace-enumeration limits. The package description states its authentication options, and the integrations catalog lists its methods and retrieval behavior.
+
+  (Refs #1943)
+
+- **Read-scope comments and model-facing tool text describe what the server does.**
+  The shared client, the native memory tools and the Memory resource say that reads admit the caller's own records and other agents' non-private records; `memory_get`'s output text says the record is subject to the caller's read scope; the `flair_catchup` description says the configured agent id selects the feed, and the stdio `soul_set` description says soul writes need administrator credentials.
+
+  (Refs #1943)
+
+- **The Hermes plugin's key loader now accepts a base64-encoded raw 32-byte Ed25519 seed**
+  in addition to raw seeds, PEM keys, and base64-encoded PKCS8 DER, mirroring
+  `src/lib/auth-resolve.ts` and `packages/adk-flair-js/src/signing.ts`.
+
+- **flair-client, the ADK Python memory service and the Hermes plugin sign the path they send when the base URL has a path.**
+  Each client builds the final request once, the route joined onto the base
+  URL's own path (a base with or without a trailing "/" addresses the same
+  URL), and signs that request's path plus query. A base URL that carries a
+  query string or fragment is refused before any request.
+
+- **The release guide and the release run's summary give all three post-publish canary inputs.**
+  `docs/releasing.md` names `package_set_digest` beside `version` and `expected_sha256`, with where it is printed, how to recompute it, and a dispatch example. The release run's summary now prints the digest and asks for it.
+
+  (Closes #1996)
+
+- **Metal engagement is read from the embedding engine, so an empty launchd capture is no longer reported as CPU.**
+  For a GPU offload request, `flair status` and `/Health` report three
+  states: Metal (with the requested layer count) when the engine says so,
+  CPU only when the engine says no GPU, and unconfirmed (not `backend: cpu`,
+  not `gpuLayers: 0`) when the engine exposes no readback. A CPU request
+  (`FLAIR_EMBED_GPU_LAYERS=0`, or the non-Metal default) is reported as CPU
+  without a readback. The GPU type is `getGpuType()` on the native binding
+  warmup already opened; a second addon is not loaded for the check. A
+  derived Metal default stays an advisory doctor warning. During warmup,
+  `/Health` marks the preview `pending: true` and HealthDetail says
+  "pending (warmup in progress)". Doctor treats that window as advisory,
+  including an explicit GPU request, and asks for a recheck after warmup;
+  a finished explicit request without readback remains blocking.
+
+  > **Heads-up:** for GPU-offload requests, Apple Silicon status uses engine
+  > readback; absent readback is reported as unconfirmed.
+
+- **A CLI and an instance in different install trees are now named; `flair init` re-points only a service unit it proves is its own.**
+
+  `flair status`, `flair upgrade`, `flair doctor` and `flair restart` report
+  which install tree serves the instance only when the service manager is
+  shown to own the process that answered. That process is the one process
+  listening on the instance's port, and when the instance reported its own PID
+  (`status`, when it can read it) it must be that same process. More than one
+  listener, or none, is unknown. Only when the port's listeners cannot be read
+  at all (`lsof` missing or failing) does the reported PID stand on its own.
+  Harper's PID file is only a cross-check: a live one that names another
+  process makes the tree unknown. On macOS the launchd job for
+  this data directory must be running as that process. On Linux the process's
+  own cgroup (`/proc/<pid>/cgroup`, cgroup v2) must place it in a systemd user
+  unit of this user whose MainPID it is and whose FragmentPath is that unit's
+  file in `~/.config/systemd/user`. The unit is found from the process, not
+  from a tree path in a unit file, so it is still found after `flair init`
+  re-points the file (the state is then diverged with a restart pending). The
+  tree is read from the process.
+  Without that proof (a remote `--target`, a directly started server, a
+  system-level or other supervisor, a server under a different HOME, a host
+  where the port's listeners cannot be read and no PID was reported) the
+  serving tree is unknown and no remedy is derived from it.
+
+  When a different npm-global tree (`…/lib/node_modules/@tpsdev-ai/flair`) is
+  proven to serve, the commands print both trees and both versions ("unknown"
+  where a version cannot be read) and the remedy `flair init && flair restart`,
+  with `npm i -g @tpsdev-ai/flair` first when this CLI's tree has the older
+  flair, or a hand edit when systemd applies drop-ins to the unit. `flair
+  status` decides its version hints from that one comparison and prints each
+  hint once; `status --json` carries the same comparison. `flair upgrade` prints
+  a proven divergence once and does not report "Everything is up to date" while
+  one is proven. A plain tree or a checkout serving the instance is reported as
+  separately managed and is never re-pointed.
+
+  `flair init` re-points the instance's own service unit at this CLI's tree,
+  changing only its launcher, node, Harper entry and working directory, and
+  writes nothing unless every check below holds. A refusal names the file, what
+  did not match, and the remedy: the paths to set by hand, an update of this
+  CLI's tree, or a reinstall.
+
+  - macOS, the adopted pass-file plist, read as XML structure: a plist whose
+    XML declaration names an encoding other than UTF-8, or that has an XML
+    comment, CDATA, a character reference, a duplicate key or an unsupported
+    XML element, is refused. It must declare exactly one Label (this
+    data directory's) in the top-level dict, ROOTPATH (this data directory) and
+    HOME (this user's) in its EnvironmentVariables dict, no `Program` key, and
+    ProgramArguments of exactly the launcher in its WorkingDirectory tree, this
+    instance's admin-pass file, a `node` binary and a Harper entry inside that
+    tree.
+  - Linux, the systemd user unit proven above: exactly one `WorkingDirectory=`
+    (the served tree) and one `ExecStart=` in [Service], in one of two shapes,
+    `<node> <harper.js> run .` or `<launcher> <admin-pass file> <node>
+    <harper.js>`, with no prefix but `-`, no quoting, specifier, variable or
+    line continuation. Operator arguments are never rewritten (the admin-pass
+    argument is kept as it is), a unit with any other argument is refused, and
+    a path of this CLI's that would need quoting in a unit is refused rather
+    than written. Drop-ins refuse the re-point, whether systemd reports them
+    from any location or a `<unit>.d` directory sits beside the file.
+  - Both, when moving the unit to a different installed tree: the old tree's
+    flair version and this CLI's must be strict semver, and the CLI's must not
+    be older by semver ordering, prereleases included (`0.57.0-beta.1` is older
+    than `0.57.0`); otherwise a downgrade cannot be ruled out and nothing is
+    written. (A plist already serving this CLI's tree has a missing runtime
+    path replaced without that version check.) A unit serving this CLI's tree
+    with a different, existing node is a deliberate pin that init leaves as it
+    is (init and doctor report it, with the hand edit that moves it).
+  - The write is atomic and lands only over the bytes it was planned from: the
+    file is read as a regular file (a symlink is refused, never followed) whose
+    bytes are valid UTF-8 (anything else is refused before planning), and its
+    bytes are re-checked, with its identity, immediately before the rename, so
+    an edit saved in between refuses the write. On Linux init first records
+    what systemd holds for the unit (nothing is written if it cannot, or if
+    systemd no longer reports the serving process as the unit's MainPID), then
+    runs `systemctl --user daemon-reload` (which also loads any other pending
+    edits to that user's units) and asks systemd whether it loaded the same
+    file, with no drop-ins and the new working directory. If the reload fails or
+    systemd does not hold that, init restores the previous bytes, reloads again
+    and asks again. That check covers three fields: when systemd's
+    FragmentPath, drop-ins and WorkingDirectory are back at the values
+    recorded before the write, the message says exactly that and still calls
+    full agreement between the restored file and systemd unverified; when they
+    are not, or when the restore or the second reload fails, the message
+    states what the file holds and that systemd's state is unverified.
+
+  `flair init` is still the full setup command and also re-runs its other
+  idempotent setup for the data directory, which creates or saves instance
+  state. `flair restart` restarts through the proven systemd user unit on
+  Linux (`systemctl --user restart`), checks that the unit's new main process
+  runs from the unit's WorkingDirectory, and afterwards reports which tree
+  serves the instance. It never stops a process that a systemd unit
+  supervises (systemd reports it as the unit's MainPID) and starts it again
+  outside that unit: when that unit is not the proven one, or when flair
+  cannot learn the unit's MainPID (systemd cannot be asked, or reports no main
+  process), it refuses and names the `systemctl` command to use; it also
+  refuses, without asking any manager, when the process's cgroup cannot be read
+  or contradicts itself (for example, a user slice and a user manager that name
+  different users, or one unit's cgroup nested in another's). A process that only runs
+  inside some service's cgroup without being its main process (a child of a
+  CI runner agent, for example) was started directly and is restarted
+  directly.
+
+  `flair init` and `flair doctor --fix` also re-point the federation-sync shim
+  when it runs another npm-global tree. Only the shim's exec line changes; the
+  launchd/systemd scheduler unit is only read and stays byte-identical. The
+  shim is refused when its commands differ from what `flair federation sync
+  enable` writes in anything but the two paths on the exec line (comment lines
+  are not compared), when it is a symlink or not valid UTF-8, when it changes
+  between the read and the rename, or, when moving it to a different
+  installed tree, when that tree's version (or this CLI's) is not strict
+  semver or is newer (a shim already running this CLI's tree has a missing
+  node replaced without that check); an unreadable unit or shim
+  is refused, and a leftover shim without an enabled scheduler is left alone.
+
+  `flair doctor` runs an install-tree check on every run. A different node
+  binary serving this CLI's own tree is reported as a deliberate runtime pin
+  that `flair init` does not change; a unit serving another tree is one issue,
+  and `--fix` counts it fixed only after the unit was re-pointed, the instance
+  restarted and the serving tree re-proven to be this CLI's.
+
+  The node path written by `flair init` (launchd plist), by the service and
+  federation-sync re-points, and by `flair federation sync enable` (the shim)
+  is mise's major-version alias (`…/installs/node/<major>/bin/node`) when it
+  resolves to the same binary, and otherwise the exact path. That alias is a
+  floating pointer: when mise moves it to a newer runtime of that major, the
+  unit runs that runtime from then on. It keeps the node path valid across a
+  patch or minor bump; it does not move the install tree, which a Node bump
+  still requires re-pointing. Volta's `bin/node` is used only when it resolves
+  to the same binary, which a standard Volta shim does not; nvm, fnm and asdf
+  expose no such alias, so their exact path is written.
+
+  (Refs #2034)
+
+- **Launchd handoffs check before stopping anything, report what they could not verify, and claim launchd only when proven (flair#2040).**
+  Launchd handoffs check GUI-domain availability before stopping an instance,
+  and init reports registration only after verifying the load.
+
+  Before `doctor --fix` stops the instance or unloads a job, it checks:
+  - that the GUI domain answers and the job is not disabled there (read-only
+    `launchctl print` and `print-disabled`);
+  - the engine;
+  - that existing plist and config files are readable;
+  - which jobs are loaded;
+  - which process serves the instance (or, when nothing is identified, that the
+    port is free);
+  - the credential;
+  - the plist it would install: every path exists, the launcher and node are
+    executable, and `plutil -lint` ran and accepted it.
+
+  An answer it cannot get counts as a failed check. It then refuses — non-zero,
+  never "fixed" — without stopping or unloading anything. The one file it can
+  write before refusing is the 0600 admin-pass file, when it must provision that
+  file from a credential proven against the running instance.
+
+  The load uses commands that name the probed domain (`launchctl bootstrap`,
+  `bootout` and `kickstart` against `gui/<uid>`), not `load`, `unload` and
+  `start`. Those act on whatever domain launchctl infers for the calling
+  process. If a step fails after the stop, doctor tries to unload the new job
+  and checks that it is gone, puts the plist and config files back
+  byte-for-byte, and tries to restart the instance directly. The result reports
+  each attempt's outcome. It also says when the state could not be established,
+  for example a job that could not be shown unloaded, in which case nothing is
+  started.
+
+  `flair init` retires a legacy `ai.tpsdev.flair` job only behind the same
+  checks. Init retires a non-serving legacy job directly and replaces a serving
+  legacy job through the guarded handoff; it removes the legacy plist only after
+  confirming the job is unloaded. If it
+  cannot be shown gone, init keeps that plist, puts back the plist it had just
+  written, reports the uncertainty and exits non-zero. When the job does serve
+  the instance, init tries the guarded replacement and a restore. When that
+  cannot be established, it refuses. Otherwise init writes the plist and says
+  Flair is running directly, not launchd-managed. The move off a legacy label
+  made by `flair start` (and the start legs of `restart`, `upgrade` and
+  `snapshot`) runs `plutil -lint` on the replacement plist before it unloads
+  anything, and refuses the move when the lint rejects it or cannot run.
+
+  A refusal like that, or a plist whose paths no longer exist, has loaded and
+  unloaded nothing, and the start paths then boot nothing out either: the
+  legacy job and both plists are left as they are. Flair starts directly only
+  when read-only `launchctl print` queries show no job for the instance loaded.
+  When one is loaded, or its state cannot be read, the command starts nothing,
+  names the job and the `launchctl bootout` remedy, and exits non-zero.
+
+  `init`, `start` and `doctor` print a launchd check mark (including the
+  legacy-migration lines) or "repaired" only when launchd's pid equals an
+  identified serving pid. When the serving process cannot be identified, the
+  result says so and claims nothing. After loading the job, `doctor --fix`
+  waits, up to the 60-second startup budget, while launchd reports a pid for
+  the job and its port does not answer (the connection is refused, or the
+  probe cannot tell), even when `hdb.pid` already names that pid: Harper can
+  write `hdb.pid` before it binds its port. "Repaired" also requires Flair's `/Health` to answer `ok`. A
+  port that answers ends the wait and is judged at once; a job that never
+  serves fails at the deadline, and the restore runs. After a failed load,
+  `flair start`'s fallback names the reason instead of a raw
+  `launchd start failed`, and starts directly only once the job is shown
+  unloaded again; otherwise it reports the uncertainty and exits non-zero.
+  `flair restart` still stops first: its start leg decides only whether Flair
+  comes back under launchd or directly.
+
+  The launchd launcher no longer starts a second instance on a data directory
+  that a live process already serves (the pid in `hdb.pid`). It exits 0 before
+  Harper loads anything, and launchd's KeepAlive retry may start Flair once that
+  process has exited. This PID guard applies only to the macOS launchd
+  launcher.
+
+  > **Heads-up:** to hand a directly running instance to launchd, run
+  > `flair doctor --fix` from a console (GUI) login session on the Mac. launchd
+  > may also start the job at the next console login (the plist sets RunAtLoad),
+  > provided the plist is valid and the job is enabled.
+
+  (Closes #2040)
+
+- **A leftover daemon identity sidecar no longer makes a stop or restart refuse.**
+  A sidecar whose pid is confirmed gone is treated as stale; stop and restart
+  can re-adopt the live process from current health and pid evidence: the
+  missing-sidecar self-heal runs when `/Health` identifies flair and the
+  pid-to-port and instance checks each match or are unavailable (a best-effort
+  skip, never a proof). A pid whose liveness cannot be determined is never read
+  as gone. The port-based stop removes the sidecar once the pid it names is
+  confirmed gone — opened with `O_NOFOLLOW` and removed only while a re-read
+  still names that pid. A start racing that re-read/unlink can lose its fresh
+  sidecar, leaving a live daemon with none; a later port-based stop or
+  restart can re-adopt it once the live process supplies the required pidfile
+  and health evidence (`test/unit/stale-sidecar-2055.test.ts`).
+  (`test/unit/daemon-liveness.test.ts`, `test/unit/daemon-sidecar-cleanup-2055.test.ts`)
+
+- **check-dep-ages treats an unparseable publish time as a registry failure.** A
+  publish time that is present but is not a parseable string — a non-string such
+  as a JSON object or number, or a string that is not a valid date — now fails
+  the gate the same way an unreachable registry does: it is reported under the
+  registry-failure diagnostic, naming the dependency and version, and the gate
+  exits 2 — unless a too-fresh dependency was also found, which takes precedence
+  and exits 1. The value is never compared to the bake-time cutoff, and the
+  failure is not retried.
+
+- **The CI dependency-age gate refuses the fixture-root override.** The gate is
+  invoked in CI with an explicit `--ci` flag and now exits 2, naming
+  `FLAIR_CHECK_DEP_AGES_ROOT`, when that variable is present on a CI run — even
+  an empty value — so a stray environment variable cannot divert the CI gate
+  away from the checked-out repository. It also exits 2 on an unknown argument,
+  so a typo cannot silently skip the guard. The variable still points the gate
+  at a fixture repository for tests, which do not pass `--ci`.
+
+- **`flair init` puts back the plist it wrote when the check of that plist cannot run (flair#2078).**
+  When `flair init` retires a legacy `ai.tpsdev.flair` registration, it writes
+  the new plist and checks it before unloading anything. A check that cannot
+  run, such as `plutil -lint` unable to create its temporary copy, is refused
+  like a check that fails: the new plist is put back as it was, or removed if
+  there was none, nothing is loaded or unloaded, and the message names the
+  plist and the error. If the plist cannot be put back, init says so, names
+  the file to remove, and exits non-zero.
+
+- **ADK record ids for colon-bearing tuples sit outside historical event-join ids.**
+  When an app, user, session, or event value contains `:`, both adk-flair
+  packages percent-encode the components and join them with `|`. The result
+  contains no `:`. The old event-join always contains at least three `:`, so
+  a new id is not an event-join row the previous encoder stored. Tuples with
+  no colon in any component keep the historical event-join id. A create
+  conflict on an event write replaces the row only when it has a complete
+  event stamp for that tuple. An unstamped pre-upgrade row is not replaced
+  automatically; it is kept and the conflict is reported. A direct re-add of
+  a caller-chosen id still replaces that row.
+
+- **The BM25 index builds in the background after startup, and `flair status` shows its progress.**
+  A restart no longer leaves the lexical index unwarmed until the first text
+  search. `flair status` reports building (docs and percent), ready (count,
+  duration, age), or disabled with the reason. With more than one Harper
+  worker, the line names the worker it describes. With `FLAIR_BM25_INDEX=false`
+  or vector-only retrieval the index is not built, and that setting is not
+  reported as a warning. Public `/Health` uses coarse wording when a background
+  warm was skipped or an index became stale, without exposing internal reasons.
+
+  (Closes #2032)
+
+- **Doctor names continuity hook pins that are not resolved versions.**
+  When both hooks are present, range, tag, unsupported, and malformed specs make the pair stale and appear with their pin classification.
+  A lone hook stays partial and reports both the missing entry and any pin problem.
+  Doctor and hook status direct non-version pins to manual resolution; doctor does not offer or attempt their rewrite.
+  A continuity command without a package retains the stale-form diagnosis.
+
+  (Closes #1819)
+
+- **REM now archives validTo-expired memories, making expired-memory health warnings actionable.**
+  `flair rem light` and nightly maintenance retain these rows with `archived: true`
+  and `archivedAt`, count them in archival stats, and clear their health warning.
+  Dry runs count eligible rows without archiving them. Existing ephemeral
+  `expiresAt` deletion and agent scoping are unchanged.
+  HealthDetail and status show the archive command and preview flag, the enable
+  command when nightly is disabled, and the last logged failure when enabled.
+  Unknown scheduler state stays explicit; no next-run time is fabricated.
+  Refs #2033. Refs #1503.
+
+- **Federation documentation distinguishes implemented behavior from protocol placeholders.**
+  Clarify HTTP push, record-level timestamp merging, and verify-if-present record signatures.
+  Pairing exchanges and pins both participants' public keys; cross-peer public-key broadcasts remain unimplemented.
+
+  (Refs #1453)
+
+- **Memory and soul feed subscriptions apply the subscriber's read scope.**
+  A non-admin agent subscribed to `FeedMemories` receives a memory only when the
+  ordinary Memory read rule allows it: its own records at any visibility, plus
+  other agents' non-private records. With the pinned Harper, the rule is
+  applied to the full stored row through Harper's subscription row filter, for
+  the records replayed when the subscription opens and for every live change.
+  A second check in the subscription loop delivers only `put` and `invalidate`
+  events whose value is an object. It decides from the event's own `agentId`
+  and `visibility` when both are present, and otherwise from the stored row
+  re-read by id, withholding the event when it has no id or when that read
+  fails or returns no owner. A non-admin subscription keeps only the caller's
+  record-id, descendant and replay options (`id`, `isCollection`,
+  `onlyChildren`, `startTime`, `previousCount`, `omitCurrent`), so a
+  subscription to `/FeedMemories/<id>` follows that record only; no caller
+  filter or other option reaches it. In a replay that uses `startTime` or
+  `previousCount`, an earlier version of a record is delivered only while the
+  record's current stored row is readable. Delete events are not delivered to
+  a filtered subscriber. Verified agents can subscribe to the memory feed, and
+  anonymous subscribers are refused. `FeedSouls` already follows the Soul read
+  rule (any verified agent reads every soul), and the same tests now cover it.
+  Admin and trusted internal subscribers are unchanged.
+
+  `POST /FeedMemories` writes do not take the durability-keyed visibility
+  default that `Memory.post()` and `Memory.put()` apply. A new `ephemeral` feed
+  record without `visibility` lands `private`; any other new feed record
+  without `visibility` has no visibility field, which reads as non-private; an
+  update that names no visibility keeps a stored `private`/`shared` value. The
+  feed's write response is the stored record, so it names `visibility` only
+  when the record has one. The 0.33.0 entry "Every memory write now reports
+  the visibility it landed on" describes the write response of `Memory.post()`
+  and `Memory.put()` (the calls behind `memory_store`, `flair memory add` and
+  the SDK writes), apart from the admin-only `_reindex` re-PUT.
+
+- **Changelog validation rejects odd continuation indentation and leading tabs.**
+  Every line after the first is checked, including lines inside fenced code.
+  Use an even number of leading spaces: two for entry text, four or more for
+  nested content. Unindented lines pass this check. Errors name the file, line
+  and indent; docs-freshness annotations point to the offending line.
+
+  (Closes #2007)
+
+- **Symlinked PATH directories no longer trigger false missing-PATH warnings.**
+  Flair recognizes version-manager aliases that resolve to its global bin directory,
+  so it does not suggest adding a Node version's real directory when an alias
+  already covers it. Broken or unreadable PATH entries do not interrupt the check.
+  Refs #2034 (part 1 of 2).
+
+- **The native `/mcp` path checks the principal's status on each tool call it dispatches through a credential mapping.**
+  A token's subject maps to a principal through its credential, and that
+  principal must exist and be active each time a tool call is dispatched
+  through the mapping — the same rule the Ed25519 path applies (a principal
+  with no `status` field counts as active). A deactivated or missing principal
+  is refused on every tool with an error that names the principal and what an
+  operator has to do. A token minted while the principal was active stops
+  working when `flair principal disable` deactivates it, and, while the token
+  remains valid, works again once the principal's status is set back to
+  `active`. If the credential lookup or the principal read fails during
+  identity resolution, the call is refused, and JIT provisioning runs only for
+  a subject that the credential lookup answered for. A failed read of the
+  credential before the post-tool `lastUsedAt` update leaves the served answer
+  unchanged. The credential's `lastUsedAt` is updated, best effort,
+  after a tool has run, not when a call is refused or its arguments are
+  rejected; the update writes that field alone.
+
+- **MCP setup follows the quickstart and documents BM25 cold starts.**
+  Link agent setup to the quickstart and explain index warmup after restarts in the upgrade and troubleshooting guides.
+
+  (Closes #1486)
+
+- **Memory delete waits for request commit before updating the lexical index.** Request-owned deletes now reach BM25 through the committed change feed, so aborting the request leaves a surviving memory searchable. Context-less deletes still update the warmed index after their owned transaction commits.
+
+- **Memory PATCH validates a durability it sets.**
+  An invalid durability on a PATCH is refused with `invalid_durability` before the stored row changes, as it already was on a create or a full replace.
+
+  (Closes #1961)
+
+- **`flair memory search` accepts `--json`.**
+  The flag emits a raw result array using the same JSON renderer as `flair search`.
+
+  (Closes #1717)
+
+- **PATCH updates existing rows; for a caller that is neither an administrator nor a trusted internal call it never creates one.**
+  On every table in the flair database, a PATCH from a caller that is not an
+  administrator or a trusted internal call does not create or modify its target
+  row when that row does not exist. The table's guard answers 404; a resource or authorization
+  check that refuses the request first answers with its own status (for
+  example, MemoryHostSource and MemoryUsage refuse such a PATCH with 403).
+  Where a resource permits creation, create the row with POST or PUT under the
+  resource's own create rules; for example, on a Memory PUT a non-admin agent's
+  supplied owner must match that agent. A PATCH to an existing row, and an
+  administrator's PATCH, are unchanged. The guard is installed on every table
+  class in the database's table registry when the component loads, so a table
+  added to the schema gets it without being named. A resource that overrides
+  `patch()` reaches the guard only by ending in `super.patch()`; an override
+  that does not must enforce the no-create rule itself by refusing, as
+  MemoryHostSource does.
+
+  > **Heads-up:** a client that created rows with PATCH using an agent key now
+  > gets a refusal: 404 from the table's guard, or an earlier refusal from
+  > Harper's permission check or from the resource. Where the resource permits
+  > creation, create the row with POST or PUT first; PATCH then updates it.
+
+- **The release guide explains nightly tag recovery after an advisory CI failure.**
+  The workflow header and docs/releasing.md give the schedule, the expected delay, the advisory allowlist and the conditions that still apply.
+
+  (Closes #1992)
+
+- **REM records invalid stage response envelopes as failures.**
+  Maintenance, distillation and auto-promotion now require object responses before accepting stage results.
+
+  (Closes #1738)
+
+- **Table subscription routes are served to administrators only.**
+  An exported table's subscription route, SSE (`Accept: text/event-stream`) or
+  WebSocket on `/<Table>/` and `/<Table>/<id>`, admits administrators (Admin
+  Basic or an admin agent) and trusted internal callers. A verified non-admin
+  agent is refused with 403 (WebSocket close code 3003), and a caller without a
+  valid credential with 401 (close code 3000). The guard is installed on every
+  table class in the database's table registry when the component loads, so a
+  table added to the schema gets it without being named. Resources that are not
+  tables, such as `/FeedMemories` and `/FeedSouls`, decide their own subscribers
+  and are not affected by this guard; verified agents receive changes to the
+  memories they can read through `/FeedMemories`, and soul changes through
+  `/FeedSouls`.
+
+  > **Heads-up:** a client that subscribed to a table route with an agent key now
+  > gets 403. Subscribe with an administrator's credential; a verified agent can
+  > use `/FeedMemories` for changes to the memories it can read, and
+  > `/FeedSouls` for soul changes.
+
+- **Task summaries accept an optional generic reference.**
+  Use --ref when a task has an identifier; existing --beads callers remain compatible.
+
+  (Closes #1780)
+
+- **Failed post-upgrade restarts keep a swapped Flair package after a refused
+  pre-upgrade `/Health` connection.** This includes `--no-verify` and an unreadable previous
+  version. With a running or indeterminate probe, a swapped Flair package and
+  a nonempty previous version select rollback. No swap, or no previous version
+  after a running or indeterminate probe, yields `no-target`.
+  A reported deprecation blocks the rollback attempt; failed lookups do not.
+  npm-global attempts to reinstall the previous package; plain-tree attempts
+  to restore the saved tree when it exists. If a rollback restart throws,
+  its diagnostics use the install lane and recorded tree and snapshot
+  restoration results. Before engine-change snapshot restoration, rollback
+  stops the instance and confirms it is stopped, then moves the current data
+  to a unique timestamped sibling directory. It prints that retained path and
+  how to recover writes made after the snapshot, and never deletes the retained
+  data. A failed stop, confirmation, validation, or move refuses restoration
+  without replacing the current data.
+
+  > **Heads-up:** After a refused pre-upgrade `/Health` connection, a failed
+  > restart keeps the new version only when Flair itself was swapped, exits
+  > successfully, and prints `flair start`. Timeouts remain indeterminate.
+  > A pre-upgrade snapshot leaves an instance with a refused `/Health` connection
+  > stopped; it no longer starts the old version before the package swap.
+  > Engine-change rollback retains pre-restore data beside the data directory;
+  > keep this copy to recover post-snapshot writes with the engine that wrote them.
+
+- **Rollback recovery now warns when the proposed version failed earlier in the upgrade.** The CLI also explains how to choose and check a different, non-deprecated release.
+
+- **Client wiring and hook repairs check the package pin they replace.**
+  Unrecognized package-bearing entries are held; continuity repairs retain
+  their existing pin state. Continuity commands with no package reference remain
+  shape repairs, with matching doctor and hook-status advice. Package-bearing
+  commands outside the writer's recognized forms report stale with held/manual
+  advice instead of appearing wired. Codex wiring and doctor decode the actual
+  TOML package argument, including literal/basic strings, escapes and multiline
+  args, while ambiguous entries stay held. Codex pin refreshes require a
+  recognized npx command with Flair as its package operand; unsupported
+  invocations are held without changing the configuration. Continuity reporting
+  and repairs share one package capture and the command builder's env-value
+  validation.
+
+  (Closes #1848)
+
+### Security
+
+- **Agent-auth and federation nonces are recorded once per instance, in a table every Harper worker thread shares.** (flair#2061)
+  A TPS-Ed25519 request's nonce, and a federation body's nonce, is written to
+  the new local `ReplayNonce` table after the signature verifies and before the
+  request takes effect, under a per-key lock, so each nonce is accepted once
+  across all worker threads of the instance. A nonce that is already recorded,
+  or that a concurrent request is recording, is refused as a replay. When the
+  replay store is unavailable or the write fails, the request is refused with
+  `503 replay_store_unavailable`, and the server log names the cause. Rows
+  expire after 120 s through Harper's own expiration scan, which runs once per
+  instance. The federation `Nonce` table declaration and its five-minute sweep
+  are retired; no rows are migrated.
+
+  > **Heads-up:** `FLAIR_AGENT_AUTH_WINDOW_MS`, if you set it, must stay below
+  > 60000. A larger window refuses every TPS-Ed25519 request with
+  > `replay_store_unavailable`, and the log names the variable.
+
+- **The by-id read gate checks the unselected row through its own target.**
+  For a non-admin by-id read, the shared gate passes `super.get` a fresh plain object containing only the id, or an empty object when the target has no id. It applies the read scope to the unselected row returned by that call. Once the row passes, the gate returns the requested selection or single property through a second read; an unshaped request returns the checked row.
+
+- **A non-admin HTTP collection `POST` is served only by a resource's own `post()`, and Relationship has one.**
+
+  `POST /Relationship/` runs the same preparation as `PUT /Relationship/<id>`.
+  For a verified non-admin agent, the owner is that agent (a body that names
+  another agent is refused with 403); an administrator or in-process caller
+  keeps the owner it supplies, and must supply one, as with `PUT`. The
+  preparation can refuse the write (with 401, 403, 429 or 400); a write that
+  passes it is normalized, gets `provenance` built server-side, and has
+  `originatorInstanceId` stamped as a create. A create that is otherwise
+  admitted, valid and within the rate limit answers 409 when its id already
+  exists, so a `POST` never updates a row.
+
+  On a table whose resource defines no `post()` of its own, a collection `POST`
+  from a non-admin HTTP caller is refused. The resource's `allowCreate()` check
+  runs first and can refuse it; otherwise the guard answers 403 for a verified
+  agent and 401 for a caller without a valid credential, and refuses a caller
+  it cannot resolve. Administrator and in-process `POST`s to such a table are
+  unchanged. Existing `post()` overrides are unchanged, and each keeps its own
+  write rules. The Flair client, the CLI and the MCP adapter create
+  relationships with `PUT /Relationship/<id>` and are unaffected.
+
+- **Application creates derive `originatorInstanceId` from the local instance identity, or stamp null when unavailable; updates preserve the stored value.**
+
+  Application writes derive originator attribution on creates and preserve
+  stored attribution on updates, including feed ingestion and principal
+  provisioning.
+
+  Now a **create** (`post()`, or a `put()`/`patch()` onto a row with no stored
+  counterpart) stamps this instance's own id, or null when no canonical instance
+  identity is available, and ignores any request-body value;
+  an **update** keeps the stored value — a body value neither replaces nor clears
+  it, and an update that omits the field leaves it. A row written before this
+  release that carries no value stays without one on a later update (the field is
+  additive, never invented on update). `PATCH` bodies cannot set it, and a
+  `PATCH` that creates a row is stamped too. The pre-existing row is resolved by
+  the URL-bound target id, never by a request-body `id`; a body id that disagrees
+  with the address, or a stored-row read that fails, refuses the write rather than
+  being read as a create. The paths covered: `Memory`, `Soul`, `Agent` and
+  `Relationship` (`post()`/`put()`/`patch()`, and Memory's `_reindex` re-PUT), the
+  `POST /FeedMemories` ingest, `POST /AgentSeed`, and the MCP / IdP principal
+  provisioning paths (one shared delegate, `resources/originator-instance.ts`).
+
+  The federation merge path applies rows through the raw table handle, never
+  through a resource's write method. It takes the incoming originator only for a
+  new or newer row and otherwise keeps the stored value, and a per-record
+  originator signature is verified when present or when policy requires one. That
+  path is an EXCEPTION to the stamping rule.
+  `POST /FederationSync` verifies the batch against the known, non-revoked
+  sending peer's pinned key and verifies any record signature against its
+  envelope originator's pinned key; an omitted envelope originator defaults to
+  the sending peer and need not equal `data.originatorInstanceId`. Record
+  signatures are verified when present; an operator can require them.
+
+  > **Scope:** the stamp is enforced at the resource layer for every REST /
+  > application write. Federation and the administrator operations API are
+  > exceptions to resource-layer stamping: verified federation batches use raw
+  > table writes, and authenticated administrators can write columns through the
+  > configured operations endpoint.
+  > The other raw-table writers (the feed ingest, `POST /AgentSeed` and the MCP /
+  > IdP provisioning paths) apply the rule themselves, as the list above says.
+  > These exceptions accept authenticated requests outside the application
+  > resource stamping rule.
+  >
+  > **Heads-up:** application `POST`/`PUT`/`PATCH` bodies do not choose
+  > `originatorInstanceId`; creates derive local identity and updates retain
+  > stored attribution.
+
+- **Root dependency overrides for brace-expansion, fast-uri and moment move the repo lockfile out of their advisories' affected ranges.**
+  `brace-expansion` ^5.0.12 (GHSA-6j4f-fj2g-mc7p, GHSA-qhr7-859c-m2p7, GHSA-q2hr-2g5m-vwhr),
+  `fast-uri` ^4.1.5 (GHSA-hrr3-gc8f-f4qj, GHSA-jvvf-x445-j334) and `moment` ^2.31.0
+  (GHSA-4p3w-j4w9-5jqw) resolve patched versions in `bun.lock`. npm installs still carry harper's
+  npm-shrinkwrap pins (brace-expansion 5.0.4, fast-uri 3.1.0 and 4.1.2, moment 2.30.1), so
+  GHSA-6j4f-fj2g-mc7p, GHSA-qhr7-859c-m2p7, GHSA-q2hr-2g5m-vwhr, GHSA-hrr3-gc8f-f4qj and
+  GHSA-4p3w-j4w9-5jqw stay allowlisted as harper-pinned until the harper release Flair depends
+  on resolves patched versions. Flair's own code imports none of these packages. Nothing to do on
+  upgrade.
+
+- **Root dependency overrides raised for undici, ip-address, lodash, joi and fast-uri advisories in the repo lockfile.**
+  `undici` ~8.10.2 (GHSA-3wwx-pv8p-q78v), `ip-address` ^10.5.1 (GHSA-rpw4-54j3-4h4q,
+  GHSA-2vr4-cq9g-pvrc) and `lodash` ^4.18.0 (GHSA-r5fr-rjxr-66jc, GHSA-xxjr-mmjv-4gpg,
+  GHSA-f23m-r3pf-42rh) move `bun.lock` out of the affected ranges, and the three lodash
+  audit-allowlist entries are retired. `joi` ^17.13.7 and `fast-uri` ^4.1.5 do the same for
+  `bun.lock` only: npm installs still carry harper's npm-shrinkwrap pins, so
+  GHSA-6w3j-5fw6-r9vr, GHSA-gg4h-3hg2-grpc, GHSA-6h2x-m376-mqjq and the new GHSA-qw65-cvwx-89v3 stay allowlisted as
+  harper-pinned until harper updates its shrinkwrap. Flair's own code imports none of these
+  packages. Nothing to do on upgrade.
+
+- **`provenance.verified.timestamp` is now stamped from the server clock.**
+  Every field under `verified` is server-derived: `verified.timestamp` — and
+  `verified.receivedAt` — is the server's write instant, taken from a single
+  clock read per write. The caller's `createdAt` remains the writer's claim on
+  the record and is recorded, sanitized like the other claims, under
+  `provenance.claimed.createdAt`; the written row's own `createdAt` still
+  carries the claim unchanged.
+
+  This holds on every LOCAL write path that stamps provenance: Memory `post()`,
+  `put()` and a semantic `patch()`; Relationship `post()`, `put()` and a
+  semantic `patch()`; feed ingest; and the Soul/AgentSeed operators. On such a newly
+  stamped write a request body can never set — or carry forward — any field
+  under `verified`: the writers strip a body-supplied `provenance` and re-derive
+  it from the resolved auth and one server clock read. A semantic update (one
+  that changes the record's content — `content`/`subject`/`summary` for Memory,
+  `subject`/`predicate`/`object` for Relationships — or its creation claim,
+  `createdAt` on both resources; a changed creation claim is re-authoring the
+  claim) re-stamps provenance; a metadata-only PATCH leaves the stored blob in
+  place, because no new content was authored. A PATCH whose stored-row read
+  fails is refused (500), never silently degraded to a metadata-only decision.
+
+  There is no bulk rewrite of stored provenance. Newly stamped provenance records
+  server write time under `verified` and sanitized creation claims under
+  `claimed`. Rows deliberately NOT
+  re-stamped: a metadata-only PATCH (no content or creation-claim change), the `_reindex`
+  maintenance re-PUT (which keeps the stored bytes so a corpus-wide reindex
+  stays byte-identical), federation-synced rows (which carry the provenance the
+  merge selected, when it is a string), and any row that is never written again. The server-stamped
+  rule applies to newly stamped local provenance from this release on.
+
+  (Closes #1960)
+
+## [0.57.0] - 2026-09-27
+
+### Added
+
+- **The server environment selector `FLAIR_RETRIEVAL_MODE` supports `hybrid`, `vector-only` and `bm25-only` retrieval for benchmark runs.**
+
+  This selector is intended for benchmark runs and has no CLI flag. When it is
+  unset, `FLAIR_HYBRID_RETRIEVAL` selects hybrid for `true`, `1` or `on`
+  (case-insensitively), and vector-only for other values; leaving both variables
+  unset selects hybrid.
+  In `bm25-only` mode, retrieval ranks using BM25 alone, without a vector leg
+  or query-embedding generation.
+
+- **A release PR that merges green on main now tags itself.** Tagging used to end
+  with a hand-pushed `vX.Y.Z`; that step is automatic now, so `release-publish`
+  stages the tarballs (publishing still waits on the maintainer's npm 2FA
+  approval) without anyone remembering to push a tag. The tag is written with a
+  GitHub App token, because a tag pushed with `GITHUB_TOKEN` would not start
+  `release-publish` at all.
+
+  > **Heads-up:** a repo admin installs the GitHub App and splits the release-tag
+  > rulesets after this merges. Until then a release refuses loudly with
+  > condition `app-not-configured` and opens an issue instead of tagging.
+
+### Changed
+
+- **The post-publish canary binds promotion to a package-set digest and promotes only exact `major.minor.patch` versions to `latest`.**
+
+  The release pack job records a SHA-256 digest of the sorted
+  `<name>@<version> <sha256>` lines for the lockstep package set. The canary
+  re-derives that digest from published tarballs and compares it with the
+  dispatched digest; a mismatch fails the SHA check and produces a `FAIL` verdict.
+
+  For a promotable version, the `PASS` verdict prints a block that re-hashes
+  the published tarballs and requires the same package-set digest before moving
+  any tag. A failed or malformed hash result, or a digest mismatch, stops that
+  block before promotion.
+
+  Build-metadata tags are rejected by release-publish's tag validation before
+  staging. Prerelease tags accepted by that validation use the `next` staging
+  dist-tag. A canary `PASS` for any version other than an exact
+  `major.minor.patch` prints no promotion commands.
+
+  (Refs #1671)
+
+- **The listed CLI admin commands share password-source validation and reject conflicting file and inline credentials.**
+
+  `backup`, `federation sync`/`verify`/`instance`, `memory add`,
+  `rem restore --apply`, `soul set`/`get`/`list`, and `agent add` resolve
+  `--admin-pass-file` and `--admin-pass` through `resolveAdminPassFromSources`,
+  as do `federation token` and `federation pair`. For these commands, supplying
+  nonempty values for both options is a usage error and exits before any request.
+  Environment-password and local-file fallbacks are command-specific.
+
+  Missing or empty password files are refused with their path; files with
+  group or other permission bits are refused with their path and mode.
+
+  > **Heads-up:** For the commands listed above, pass one explicit password
+  > source; prefer `--admin-pass-file` to `--admin-pass`.
+
+  (Refs #1910)
+
+- Renovate's configuration has been split into a **shared org preset** (`.github/renovate-preset.json`) and a **per-repo overrides file** (`.github/renovate.json`). The preset establishes the common policy: pin version updates, enforce a 7-day bake-time cooldown (matching `check-dep-ages.mjs`), group non-major updates per ecosystem (npm, Python, Docker, GitHub Actions) so each stays small enough to diagnose (managers outside those four keep only the groups config:recommended supplies), and propose Docker image digest pins via Renovate's `docker:pinDigests` preset (Dockerfiles, compose files and workflow container/service images; in current Renovate the preset exempts argocd, devcontainer, helmv3 and pyenv) — a pin protects an image once its PR is merged. The per-repo file extends the preset and holds only Flair-specific exceptions (workspace-internal `@tpsdev-ai/*` dep exclusions, keep-current allow-list for Harper). CLI and bob repos can extend the same preset via `github>tpsdev-ai/flair//.github/renovate-preset`. See the [supply-chain policy](https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md) for details and the PR body for the full config diff. The preset is owned by the CODEOWNERS trust root (`@heskew`), because Renovate reads it from the default branch for every repo that extends it.
+
+- **`flair-bootstrap`, `flair-sync`, `flair-sync-soul`, `migrate-memories`, and `flair-activity` refuse to run without an explicit agent identity.**
+
+  Each resolves `--agent <id>` or `FLAIR_AGENT_ID` and exits non-zero, naming
+  both remedies, before reading a key file or making a request — no shipped
+  default identity can sign as a principal the caller did not choose. The
+  watchdog's mail alert takes its sender from `FLAIR_AGENT_ID` /
+  `HARPER_WATCHDOG_AGENT_ID` and skips, logging the same remedy, when neither is
+  set; `repro-resource-busy` and `flair-client` already refused and continue to,
+  reads included. A CI guard fails any new default under `scripts/`.
+
+  (Refs #1822)
+
+- **The CLI spawn-budget gate now sees `Bun.spawn`/`Bun.spawnSync` and named aliases, so an untimed Bun spawn of the CLI entry fails too.**
+
+  The gate reads `Bun.spawn`'s `(argv, options)` shape as well as node's
+  `(cmd, argv, options)`, and matches a literal CLI entry or a file-local
+  `join(…, "cli.ts")`. Every offender that cannot be budgeted yet is held in a
+  reviewed baseline file (`scripts/ci/cli-spawn-budgets.baseline.json`) keyed on
+  file + enclosing helper/case + normalized call fingerprint + kind — never
+  `file:line`; one entry covers one call; a stale entry fails the gate, so the
+  list can only shrink; and a new offender fails even if a matching entry is
+  added in the same change. The ONE exception is the one-time seed: while the base
+  has no baseline file but descends from the seed-introduction anchor, the PR's
+  copy is the initial list (logged); the next PR that touches the gate removes
+  it. The six sites #1825 named now carry a `timeout`; the
+  rest are baselined with a reason each.
+
+  (Refs #1825)
+
+### Fixed
+
+- **The canary promote block prints a restore line for a package whose `dist-tag add` FAILED, and says
+  so when the check cannot read the state.**
+
+  A failed `npm dist-tag add` can still have applied the tag server-side (npm may
+  exit non-zero after the write), so that package is now reported as ATTEMPTED with
+  its state UNKNOWN and gets a restore line like every moved package; only packages
+  never attempted are listed as not moved. When the convergence check exits because
+  it could not READ the current state, the block no longer says every package moved —
+  it says the state is unknown and prints the restore lines. The emitted text also
+  stops claiming a stale PASS is refused: the preflight is an EQUALITY check of the
+  certified package-set digest, not a freshness check.
+
+  (Refs #1671)
+
+- **The canary promote block stops on a FAILED `dist-tag ls`, not just an empty one.**
+  A read whose `npm` exits non-zero is treated as unmeasurable and stops the block
+  before the first tag moves, naming the package; a value is stripped of CR and
+  surrounding whitespace and must be a version, so a malformed read can never
+  contaminate a restore line.
+
+  > **Heads-up:** if a canary promote block stops saying "unmeasurable is FAIL" or
+  > "is not a version", nothing moved — re-read the tag and promote again.
+
+- **The canary's promote block now PRINTS a rollback for a partially-moved `latest` instead of deleting it, and its rollback text matches the commands under it.**
+
+  When a `npm dist-tag add` fails mid-promote, the block printed
+  `npm dist-tag rm <pkg> latest` for the already-moved packages — which DELETES
+  their `latest` rather than restoring it. The block now reads each package's
+  current `latest` BEFORE the first move, and on failure prints
+  `npm dist-tag add <pkg>@<previous> latest` (a RESTORE line) for every package it
+  ATTEMPTED to move, and lists the packages NEVER attempted separately by name; it
+  never removes a tag. The package whose add FAILED is reported as ATTEMPTED with
+  its state UNKNOWN and gets a restore line too, because npm can apply a tag
+  server-side and still exit non-zero; and when
+  the final check cannot READ the state it says so instead of claiming every
+  package moved. A failed pre-move `dist-tag ls` stops before any move.
+
+  (Refs #1671)
+
+- **Supply-chain policy §2 no longer overstates how dependencies are pinned and checked.** Corrections: production `dependencies` mix exact pins and ranges, and the `overrides` block is mostly ranges with one exact alias (`npm:empty-npm-package@1.0.0`); the age gate (`check-dep-ages.mjs`) checks the publish age of external entries in the `dependencies` field whose version starts with a digit and skips workspace-internal packages and the keep-current list; the frozen-lockfile install catches manifest/lockfile inconsistency, and `check-workspace-deps.mjs` compares the literal versions of internal `@tpsdev-ai/*` dependencies while accepting `workspace:` declarations. `packages/flair-bench` declares `optionalDependencies`; the root declares none. Peer dependencies are described as installed: npm and Bun install non-optional peers by default (our workspace install records them in `bun.lock`); they are never bundled into published tarballs.
+
+- **adk-flair's `store_memory` tool no longer reports an unconfirmed memory write as stored.**
+
+  `FlairMemoryService.add_memory` caught every exception from a direct memory
+  write, logged a warning and returned normally, and the request helper treated
+  any status below 400 (a redirect included) as success. So the `store_memory`
+  tool could answer `{"status": "stored"}` when Flair had refused the record,
+  was unreachable, or never confirmed it. Now only a 2xx confirms a request.
+  `add_memory` attempts every text-bearing record and then raises
+  `FlairWriteError` (a subclass of `FlairRequestError`) carrying `written`,
+  `failed` (a list of `(record_id, status)`) and the first failure's
+  `status_code`, with a message such as `3 of 4 memories written; 1 refused
+  (status 403)`. After a timeout or connection error the record may or may not
+  have landed. The `store_memory` tool returns `{"error": <message>,
+  "written": n, "failed": m}` instead of `"stored"`.
+  `add_session_to_memory` and `add_events_to_memory` still log and continue.
+
+  (Refs #1938)
+
+- **A parent-prefix search in the LangGraph store returns items in descendant namespaces, and namespace labels use a reversible stored encoding.**
+  The non-semantic search matches whole namespace labels against the requested prefix and reads the agent's full item set with no candidate cap, so it no longer drops descendants or returns a short page when more matches exist. Labels containing `/` or `:` are escaped in stored ids and tags. Earlier items under valid labels without `/` or `:` keep their ids and tags; items stored under labels containing either character must be deleted by id and written again. The semantic path still checks the requested namespace prefix after retrieving candidates. An unpaired surrogate in a namespace label or key makes `put` and `delete` throw and makes `get` return null before any request. Such a label in a `search` prefix or `listNamespaces` match condition matches nothing before any request; it cannot be percent-encoded in a Memory ID path.
+
+  (Closes #1939)
+
+- **README claims in pi-flair, langgraph-flair, flair-mcp, cursor-wake-runner and cursor-flair are corrected to match the actual code.** Auto-capture no longer claims to save all assistant responses or secrets (it skips recognized secret patterns and content of 100 characters or fewer, truncating accepted text to 4000 chars). The Flair client URL is configurable and supports admin Basic auth fallback when Ed25519 keys are unavailable. LangGraph's `listNamespaces` no longer presents itself as a public method—it is supported through the `batch()` dispatch. Neither the tag-based nor the semantic search path applies a namespace pre-filter on the server; both filter on the client. Non-empty tag searches miss descendants; semantic prefix filtering can keep them; empty-prefix listing spans namespaces, up to its candidate limit. FlairStore composes rather than inherits FlairClient. Admin Basic auth is used only when no key resolves, is not a retry after a rejected signature, and belongs only on HTTPS or loopback. The cursor hook-install supports Claude Code and Codex; Codex runs the hook only after you trust it. The MCP server's engines field declares `>=22`, not `>=22.18`. (Refs #1943)
+
+- **ADK and Hermes descriptions now clarify the audited behaviors.**
+  The ADK app/user tag is described as a retrieval filter within one Flair principal; re-ingestion reuses record IDs when the app, user, session, and nonempty event IDs are unchanged; missing event IDs receive fresh UUIDs; the key-file formats each loader accepts are listed; listing and search are described with the filters each sends. Hermes describes its returned-row ordering and that it attempts to mirror add operations only.
+
+  (Refs #1943)
+
+- **ADK search drops hits from a foreign agent id, and the ADK READMEs state only what ships.**
+  Python `search_memory` and JS `searchMemory` now recheck that each hit's `agentId` is this service's own
+  agent identity, as listing already did: the compound tag `adk:<app_name>:<user_id>` is a per-user
+  RETRIEVAL FILTER, not an isolation boundary. The Python README describes HTTPX phase timeouts and its
+  UUID fallback for events without ids; the JS README describes its `fetch` abort timer. Both READMEs say
+  the service scopes reads and writes by the `app_name`/`user_id` it is given, that the remote-URL opt-in is
+  read from the environment only, and that other ordinary agents cannot read a private memory while admins
+  and trusted internal calls can.
+
+  (Refs #1943)
+
+- **Updates documentation for the native MCP endpoint, integrations, OpenClaw, Claude Code, and ADK JS.**
+
+    `README.md`: the native `/mcp` endpoint no longer states a stale tool count; its tools are what the JSON-RPC `tools/list` method returns. The n8n nodes are described with their real port types.
+
+    `docs/integrations.md`: integrations that sign with a per-agent Ed25519 key follow the same identity and read-scope rules, and n8n, which uses the Harper admin password, is named as the exception. With `--agent <id>` and wiring enabled, `flair init` attempts Pi wiring when Pi is explicitly selected or detected. ADK Python reads `FLAIR_HTTP_TIMEOUT`; ADK JS reads the constructor's `timeoutMs`. LangGraph requires `config.agentId` and can authenticate with an in-memory key, an explicit or automatically found keyfile, or Basic-auth fallback; its automatic lookup does not read `FLAIR_KEY_PATH`.
+
+    `docs/openclaw.md`: the example leaves out `allowConversationAccess`, which is required to enable auto-capture.
+
+    `docs/claude-code.md`: a successful write is not suppressed by a dedup match; eligible creates use writer-overridable match thresholds.
+
+- **Corrected setup, authentication, and dedup guidance.**
+  Client wiring examples include an agent ID, and the README links to the integrations catalog without a fixed harness count. Authentication guidance distinguishes ordinary signed agents from administrator roles and Basic credentials, including n8n's administrator password. Dedup matches are reported while fresh IDs create records and reused IDs update records. The Pi and Claude Code guides clarify their setup paths.
+
+  (Refs #1943)
+
+- **Five docs pages now accurately describe what the code does:** Pi requires a configured `FLAIR_AGENT_ID` (no auto-detect), the server may report a dedup collision when its conservative check finds a match but the write always proceeds, `langgraph-flair` is an npm package (not pip), the MCP handler serves 17 tools not 9, the bootstrap hook sends a basename subject hint and bootstrap selects a bounded set of the agent's own and recent memories under a token budget, a lost subprocess exits on reparenting to PID 1 or stdin close/end, `flair init --agent <id>` (not bare `flair init`) creates the one personal identity, the Model-2 handler list includes AttentionQuery and RecordUsage, and `hermes-flair` upgrades by reinstalling the Hermes plugin, not through pip.
+
+- **The MCP client guide, the flair-mcp README and the native-OAuth note describe what ships.**
+  Client-wiring examples pass `--agent`; `flair agent add` is described as writing a raw 32-byte seed; the structured bootstrap payload is attributed to HTTP and native `/mcp`, with stdio returning a text block; a failed hook bootstrap is described as a stderr diagnostic plus an optional resume hint; read scope is described as own plus other agents' non-private records; and the native OAuth note describes the shipped configuration.
+
+  (Refs #1943)
+
+- **Doc corrections clarify n8n tag and subject reads, OpenClaw identity, and wake-runner authentication.**
+
+  The subject field remains indexed in Flair's schema, while the Search node filters its retrieved rows client-side; FlairWrite passes content and four write options, and the server conditionally reports similarity matches on new-ID writes without suppressing them.
+
+   (Refs #1943)
+
+- **The OpenClaw and Claude Code integration docs now match the code.** The OpenClaw config example uses the `openclaw-flair` package shape (the memory slot and `hooks.allowPromptInjection`), with `agentId` only as an optional allow-list. The `memory_search` tool is a semantic search. Automatic context is a separate `before_prompt_build` hook: it needs `autoRecall` and the host's `hooks.allowPromptInjection`, passes no conversation topic, and returns context only when there is some. The recent window starts at 48 hours and widens to 7 and 30 days, rather than a fixed 24 hours. A verified agent can read all its own records (private included) and other agents' non-private records; grants do not expand that scope. Writes carry an `agentId` field (tags are optional), and a separate agent ID gives ownership, not isolation. Key lookup checks `.flair` and then the legacy directory for each resolved home before moving to the next. The host's own workspace files load each agent's `SOUL.md` and `AGENTS.md`; the plugin does not load or anchor those files.
+
+- **Clarify Pi identity setup, registered tool signatures, and ephemeral expiry text.**
+  The README and source header say the required identity comes from the environment that launches Pi and list the FLAIR_* variables getConfig reads. The header's tool signatures and the README's tool table match the registered schemas. The memory_store tool describes the server-stamped expiresAt (24 hours by default) and that search and bootstrap skip expired rows. An unused helper that guessed an agent id from the working directory is removed.
+
+  (Refs #1943)
+
+- **The session-start hook attempts one stderr diagnostic when a bootstrap fails, naming the failure kind.**
+  A failed bootstrap exits 0. Stdout carries a continuity resume hint only when the separate lookup finds eligible prior entries; otherwise it carries `{}`. The diagnostic names the kind and the next step (run `flair doctor`, then check FLAIR_URL and this agent's key). The kind is `auth` for an HTTP 401 or 403, `http-<status>` for any other HTTP status, `timeout` when the hook's own bootstrap timer fires or the error is a `TimeoutError`, and `unreachable` otherwise. The diagnostic is a fixed template with only the kind filled in, so it never contains a key, token, password, Authorization value, URL or response body. A failed stderr write is ignored. The Codex command retains stderr and the Claude Code command discards it; delivery depends on stderr being writable.
+
+  (Refs #1943)
+
+- **FlairClient refuses to send admin Basic credentials over plain http to a non-loopback host, before any request is made.**
+  When no Ed25519 key resolves and `FLAIR_ADMIN_USER`/`FLAIR_ADMIN_PASSWORD` are
+  set, the client attaches an admin Basic `Authorization` header. It now checks
+  the URL the request will actually go to, and refuses (an error naming a remedy,
+  and the host when both FLAIR_URL and the request URL parse) when that URL's scheme
+  is `http:` and its host is not loopback (`localhost`, `127.0.0.0/8`, `::1`), when
+  it cannot be parsed, or when its host differs from `FLAIR_URL`'s. A request path
+  must start with `/`. https, loopback http, and signed (Ed25519) requests are
+  otherwise unchanged. This covers every package that sends through FlairClient
+  (flair-mcp, langgraph-flair, pi-flair, the wake runner, the n8n nodes, and
+  openclaw-flair, which only signs). Admin requests that do not go through
+  FlairClient (n8n's credential test, CLI admin commands) are not covered by this
+  change.
+
+  (Closes #1951)
+
+- **The hermes-flair plugin now loads the raw-seed key `flair agent add` writes, defaults to Flair's port 19926, and describes search honestly.**
+  `_load_private_key` reads bytes and treats every exact 32-byte file as a raw seed. It also
+  accepts Ed25519 PEM and canonical base64 PKCS8 DER after stripping outer whitespace; the
+  decoder decodes text strictly, so invalid UTF-8 bytes are refused, and a PEM file must be
+  one whole block (junk before or after the block is refused). Unsupported readable
+  non-32-byte files raise a format `ValueError` naming the path; file read errors propagate.
+  The default URL moves to `http://127.0.0.1:19926`, matching Flair's own default port. The
+  `flair_search` tool description now names the read scope. The README states the accepted key
+  formats, the real default port, and the collection-only startup.
+
+  (Refs #1953)
+
+- **`FlairWriteError` now counts attempted records and reports skipped text-less ones, and its `status_code` is an `int` or `None`.**
+  `add_memory` sets `total` to the records it ATTEMPTED, so text-less entries are
+  excluded from `total` and reported in a new `skipped` count (named in the
+  message, e.g. "1 of 2 memories written; 1 refused (status 403); 1 skipped (no
+  text)"). `FlairWriteError.status_code` is now an `int`, or `None` when the
+  failure carried no status (a connection error or timeout) — the `"?"` sentinel
+  appears only in the message and the `failed` list; check for `None` before
+  comparing it numerically. A nonempty batch in which every entry has no text now raises
+  `ValueError` instead of returning as if it had written. The `store_memory`
+  tool keeps its `{"error", "written", "failed"}` shape.
+
+  (Closes #1954)
+
+- **ADK JS stores events that have no id as separate records instead of overwriting one another.**
+  The memory service gives an event with a missing or empty `id` a random UUID in its record id, as the Python package does; events with a non-empty `id` keep their deterministic `app:user:session:eventId` record id. The Python `FlairWriteError.status_code` is annotated as `int | None`.
+
+  (Refs #1967)
+
+- **ADK Python logs skipped text-less entries on a successful write, and the concierge example rejects empty input.**
+  `add_memory` logs one warning with the count of skipped text-less entries when every attempted write succeeds; a failed write still reports them in `FlairWriteError.skipped`. The team-concierge example's `record_decision` and `record_personal` tools return an error for empty input instead of writing.
+
+  (Refs #1967)
+
+- **Adapters that build their own Memory request paths encode the id, and refuse a "." / ".." id.**
+  The ADK Python and JS update fallbacks, the flair-mcp continuity capture hook and adapter tools, the bridges importer, the OpenClaw supersede write, the Hermes store, and flair-bench ingestion send Memory ids as one percent-encoded path segment; flair-client does the same for Memory and Relationship requests.
+  So an id with reserved URL characters addresses exactly that record, and where the request is signed the signature covers the same encoded path that is sent.
+  The bridge importer and flair-bench join the encoded route onto the base URL's own path and sign the URL they send; a base URL with a query string or fragment is refused.
+  Every one of these sites — flair-client included — also refuses an id that is exactly `.` or `..` before any request: percent-encoding leaves those unchanged and URL normalization would collapse the segment, so such an id does not address its record.
+
+  (Refs #1970)
+
+- **Asset, Credential, Relationship and MemoryCandidate collection reads use the shared scoped-search helper.**
+  Each composes the caller's owner scope with the query's own conditions the same way Memory reads do: the scope is the outermost condition, and every caller condition is kept. Anonymous denials, admin and internal reads, and by-id reads are unchanged.
+
+- **By-id reads are scoped on the full stored record.**
+  A by-id read that asks for a selection or a single property is checked with the table's read-scope rule on the full stored record, exactly like an unselected read, before the selected value is returned. This covers every table whose by-id reads use the shared read gate.
+
+- **flair-client percent-encodes Memory and Relationship ids in request paths.**
+  `memory.write`, `get`, `update` and `delete`, and `relationship.write`, `get` and `delete`, send the id as one encoded path segment, as Soul requests already did, so an id containing characters such as `#`, `?`, `%`, `/` or a space addresses exactly that record. The server decodes the segment, so ids made only of ordinary characters address the same records as before.
+
+- **`flair doctor` says UNVERIFIED when it could not run the pairing-role check, and its prune remedy names the form that deletes.**
+
+  `flair doctor` reads the instance's identity rows and its role list as two
+  separate reads. A consistent instance prints one green line naming its
+  identity; when the role list is unreadable the pairing-role line prints as
+  UNVERIFIED instead, saying which check did not run and why. A check that did
+  not run is never silent, and never green.
+
+  An instance with several `Instance` rows AND an unreadable role list prints
+  both facts: the row finding with its remedy, and the pairing-role UNVERIFIED
+  line naming what could not be read.
+
+  The remedy line names both forms of the command that resolves several
+  `Instance` rows — `flair federation instance prune --keep <id>`, and the same
+  command with `--apply` — because `prune` is a dry run until `--apply` is
+  passed. When several rows and the pairing role are both present, the two
+  remedies print in the order they work: the prune first, then
+  `flair init --remote`, which refuses while the table still holds more than one
+  row.
+
+  (Refs #1883)
+
+- **`flair doctor` reports two instance-identity mismatches, each with the one command that fixes it.**
+
+  A second `Instance` row (no canonical identity, so the cleanup sweep cannot
+  know whether the instance is a hub) and the `flair_pair_initiator` role on an
+  instance whose identity row is not a hub.
+
+  Both are read from the instance itself. If that read does not happen the check
+  reports UNVERIFIED rather than passing, and a consistent instance prints one
+  green line naming its identity.
+
+- **`flair federation token` and `pair` read the admin password from an owner-only file, keeping it out of shell history and `ps`.**
+
+  Both commands now take `--admin-pass-file <path>`, read in-process through the
+  same reader `flair backup` uses: the file must be owner-only (mode 0600), and a
+  group- or world-readable file is refused with a message naming the path and the
+  mode. An explicit `--admin-pass-file` or `--admin-pass` overrides
+  `FLAIR_ADMIN_PASS` (explicit beats ambient, as for every other `--admin-pass`);
+  combining the file and the flag is a usage error. `--admin-pass` still works,
+  but the `--help` text warns that it lands in shell history and the process
+  list. The federation docs now show the file form in every token-minting and
+  pairing snippet.
+
+  (Refs #1873)
+
+- **The pairing-cleanup sweep follows the identity row's role on every tick, and drops orphan bootstrap users too.**
+
+  Two defects, one fact about the instance. The sweep read the instance role ONCE, when the module
+  loaded — before a hub's identity row is seeded, since the seed runs after the
+  server has started — so a fresh hub saw "not a hub", disabled cleanup for the
+  life of the process, and never re-read. It re-reads on every tick now, so a
+  hub whose row appears after startup starts sweeping with no restart.
+
+  Second, the sweep walks the `pair-bootstrap-*` users themselves
+  (`list_users`), so a user whose token record is gone — invisible to a
+  token-only sweep — is dropped as well. A live, unexpired token still keeps its
+  user.
+
+  More than one `Instance` row is logged as an error naming its remedy, never
+  "first row wins".
+
+- **The pairing cleanup pauses when the Instance table holds a row it cannot name.**
+
+  The cleanup sweep's own reader skipped an `Instance` entry with no usable id,
+  so a table holding a hub row and a malformed row looked like a single hub and
+  the sweep ran, dropping bootstrap users and deleting pairing tokens. It now
+  reads through the same strict reader `init` and the server use: an entry
+  without a usable id makes the read unreadable, and the sweep pauses for that
+  tick instead of acting on part of the table.
+  (`test/unit/federation-cleanup.test.ts`)
+
+- **The pairing-cleanup sweep confirms each expired-token delete from Harper's result.**
+
+  Harper answers a `delete` with HTTP 200 and names the records it removed in
+  `deleted_hashes` and any it did NOT remove in `skipped_hashes`. The sweep logs
+  "deleted expired token" only when the result names the token as removed and
+  not as skipped. Otherwise it logs that the delete was NOT confirmed, naming the
+  first 8 characters of the token id; a record still in the table is still a
+  candidate, so the next tick retries it. The sweep's lines about one token or
+  its bootstrap user name it by its first 8 characters, and the full token id is
+  cut out of the delete's error text and out of the consumer id the audit line
+  logs. The same rule confirms the
+  deletes of `flair federation instance prune` and the role update of
+  `flair init --remote`.
+  (`test/unit/federation-cleanup.test.ts`, `test/unit/instance-identity-row.test.ts`)
+
+- **Delete operations send the `hash_values` list Harper requires, so expired pairing tokens are actually removed.**
+
+  Harper's delete schema requires `hash_values` (a list; `ids` is the equivalent
+  alias) and refuses a singular `hash_value` with a 400. The cleanup sweep's
+  expired-token delete used the singular form, so the record was never actually
+  deleted: every tick retried the refused call and logged the same error. The new
+  `flair federation instance prune` deletes rows with the list form, confirmed
+  against a live Harper.
+
+- **`flair init --remote` confirms the identity row it wrote, so an absent or wrong hub identity is never reported as reconciled.**
+
+  `flair init --remote` used to write its hub identity row blind: it inserted the
+  row and went on. It now re-reads after the write, and that read must hold
+  exactly one row — the one just written, with `role=hub`. A re-read that comes
+  back EMPTY (the insert never landed) or holds one DIFFERENT row (the role
+  update went elsewhere) fails the command and names the rows it found, because
+  "the write did not land" and "the write landed on another row" want different
+  operator responses.
+
+  (Refs #1883)
+
+- **The instance-identity readers see every row and never invent one, and a failure to read is an error.**
+
+  Four ways the instance could still end up with two identity rows, or with a
+  reader reporting an identity it does not have (flair#1883).
+
+  **The read is unconditional.** The CLI's readers (`flair init --remote`,
+  `flair doctor`, `flair federation instance list` and `prune`) read
+  `flair.Instance` over the ops API with one unconditional statement —
+  `SELECT id, role, publicKey, status, createdAt FROM flair.Instance` — because
+  a `search_by_conditions` needs at least one condition, and a condition is
+  exactly what hides a row. The pairing paths (`GET /FederationInstance` and
+  `POST /FederationPair`) and the cleanup sweep read every row with an
+  unfiltered search. (`createdAt` is REQUIRED by the schema —
+  `createdAt: String! @indexed` — so no legal row omits it; the date-shaped
+  `createdAt > "1970-01-01"` "select all" is the pattern the Agent and Memory
+  readers carry (`src/commands/agent.ts`, `src/commands/memory.ts`), and a row
+  that compares below it would be invisible to any read shaped that way.)
+
+  **A failed read is not first boot.** `GET /FederationInstance` used to log a
+  read error and fall through to its create branch, minting a fresh identity row
+  on every call while the store was unreadable — the same defect, entered from the
+  server side. It now answers 503 and creates nothing: only a successful read
+  that returns zero rows creates.
+
+  **After it writes, init re-reads.** The read-then-insert window is real, and a
+  concurrent `GET /FederationInstance` lands in it. Both the create and the
+  role-update paths now re-read and, on finding several rows, fail with the
+  refusal that names every row and the prune — instead of reporting a successful
+  init over a table that has no single identity.
+
+  **`prune` refuses an unknown `--keep` at every row count, and says what a delete
+  costs.** An id that names no row is refused whatever the table holds: with zero
+  or one row there is nothing to delete either, but a typo would otherwise read as
+  a successful prune of the row the operator meant to keep. And a prune that is
+  about to delete rows warns that a paired peer must re-pair when the identity it
+  pinned is one of them.
+
+  (Refs #1883)
+
+- **A hub's federation identity is ONE Instance row, and `flair init --remote` reconciles it instead of inserting a second.**
+
+  `GET /FederationInstance` find-or-creates a row (`role: spoke`), and
+  `flair init --remote` used to INSERT a hub row of its own under a fresh random
+  id — so a hub that had answered a read carried two rows and no canonical
+  identity, and every reader that took "the first row of the search" answered
+  from whichever row the table yielded first. Init now reads the rows first:
+
+  - no row → create one with `role: "hub"`;
+  - exactly one row → set THAT row's role to `hub`, keeping its id and key (the
+    identity peers already know);
+  - more than one row → refuse, naming every row (id, role, created) and the
+    command that resolves it.
+
+  Re-running is a no-op. `flair federation instance list` shows the rows and
+  `flair federation instance prune --keep <id>` deletes the rest (dry-run by
+  default; `--apply` to act). Both accept `--admin-pass-file`, which reads the
+  admin password from an owner-only file so it stays out of `ps` and shell
+  history, as well as `--admin-pass` and `FLAIR_ADMIN_PASS`.
+  (`test/unit/federation-instance-admin-pass-file.test.ts`)
+
+- **`flair federation instance prune` verifies each delete, so it never prints a row it did not remove.**
+
+  Harper answers a `delete` with HTTP 200 and reports the ids it removed in
+  `deleted_hashes`, naming an id it did NOT remove in `skipped_hashes` — the same
+  contract `updateInstanceRole` already checks. `deleteInstanceRow` took the
+  status alone as success, so a skipped row was still reported as deleted: the
+  operator read "deleted" for a row that was still there, and the instance kept
+  two identities. The delete result is now checked, and a skipped id is an error
+  naming what the server skipped instead of a line claiming a deletion.
+
+  (Refs #1883)
+
+- **A reader with several identity rows refuses instead of picking one, and a read that established nothing is not a read that found none.**
+
+  The two paths a pairing peer pins from — `GET /FederationInstance`, and the hub
+  identity in the `POST /FederationPair` response that a pairing spoke PINS as
+  its hub peer — still reported the first row of an unordered search, so which
+  identity they answered with depended on the table's own ordering. Both now
+  answer a 409 naming the prune that resolves them. `GET /FederationInstance`
+  (admin only) also names every row. `POST /FederationPair` is public and
+  refuses before the pairing token or a re-pairing peer's key is checked, so
+  its answer names no row, and the hub's log carries each row's id, role and
+  created time. The pairing refusal
+  happens BEFORE the one-time token is consumed, before the peer is read and
+  before any peer is written: a refused pairing leaves the token usable and the
+  table unchanged.
+
+  The prune's warning says that any row being deleted may be the identity a
+  paired peer pinned, and that such peers must re-pair. It cannot know which row
+  a peer pinned: while several rows existed, `POST /FederationPair` answered
+  with the first row of an unordered search (it is a 409 now), so a peer that
+  paired in that state may have pinned any of them.
+
+  A 200 from the ops API whose body is not a row list — invalid JSON, or a shape
+  the reader does not know — was read as zero rows, so `flair init --remote` could
+  create an identity on a read that established nothing, and `flair doctor` could
+  report "no rows" for a table it never saw. Unreadable is its own outcome and
+  follows the failed-read path: it throws, and only a successful read of zero rows
+  may create. The same holds for a row the reader cannot name (an entry with no
+  usable id): dropping it would read the table as "the rows I could name", so the
+  whole read is unreadable and `flair doctor` reports UNVERIFIED rather than
+  "no rows".
+
+  (Refs #1883)
+
+- **A failed `flair federation token` now really deletes the pairing token it minted.** The rollback used to send the singular `hash_value`, which Harper refuses with a 400, so the token stayed in the table and outlived the bootstrap user it was minted for. It now sends `hash_values` and reports whether Harper confirmed the delete, naming the token by its 8-character prefix only.
+
+  (Refs #1895)
+
+- **The combined abort signal removes both listeners as soon as either input aborts.**
+
+  `anySignal`'s hand-linked fallback (the Node < 20.3 path) now removes the
+  listener it holds on EACH input the moment either signal aborts, and the
+  client runs the returned cleanup in a `finally` that wraps the whole request
+  lifecycle — so a caller's long-lived signal cannot accumulate a listener
+  across requests, on success, timeout, a response error or a JSON error.
+
+  (Refs #1751)
+
+- **The client's caller abort signal works on every Node version the package allows.**
+
+  `AbortSignal.any` landed in Node 20.3, but this package floors `engines.node`
+  at 18, so a caller passing the new optional `signal` on Node 18 / 20.0–20.2
+  hit `TypeError: AbortSignal.any is not a function` before the fetch started.
+  The client now uses `AbortSignal.any` when it is present and otherwise links
+  the per-request timeout signal and the caller signal by hand, honouring an
+  already-aborted input and forwarding its abort reason.
+
+  (Refs #1751)
+
+- **`/HealthDetail` reports a refusal, not a coin-toss pick, when several Instance rows exist, and marks a failed read unreadable, not absent.**
+
+  Before this, `federation.instance` answered with whatever row `flair.Instance.search` happened to yield first — an arbitrary pick when the table held more than one row — and a read that threw was swallowed as "absent", so a storage failure made the detail read as a healthy, identity-less instance rather than as unreadable.
+
+  It now reads the Instance rows the same way `GET /FederationInstance` does (through the strict reader that refuses a row it cannot name) and decides the answer from every row it can see: exactly one row is reported as `{ id, role, status }`, with an absent `role` or `status` reported as `null`; no rows is `null` (unchanged); several rows is a refusal that names the prune command instead of the row the search yielded first; and a read that fails, or a row the reader cannot name, is reported as `{ unreadable: true }` — never `null` and never a pick.
+
+  For an admin, the several-rows refusal also lists every row's `id`, `role` and `createdAt`; a non-admin sees only the count and the prune command.
+
+   (Refs #1896)
+
+- **Flair's REST middleware allows `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `PATCH` and `DELETE` through its method check.**
+
+  These methods proceed to the middleware's path and authentication handling.
+  Every other method receives `405` with an `Allow` header listing the permitted
+  methods before path or authentication handling. Separately mounted routes
+  such as `/mcp` and OAuth discovery keep their own method handling.
+
+- **Concurrent first-boot `GET /FederationInstance` requests share one identity row; callers unable to acquire the creation lock receive a refusal.**
+
+  The read, identity creation and confirming re-read run under a filesystem
+  bakery lock at `<rootPath>/flair-locks/instance-create/`, shared by HTTP
+  workers and processes using that store root. The handler returns the
+  confirmed row.
+
+  Lock-directory and acquisition-deadline refusals return `503`; the default
+  deadline is 10 seconds and the refusal names a blocking claim when known.
+  A confirming re-read that finds no row also returns `503`; multiple rows
+  return `409`.
+
+  An unusable signing-key store does not itself prevent identity-row creation.
+  The `flair init --remote` writer does not participate in this lock.
+
+  (Refs #1897)
+
+- **A local Memory, Soul, Agent or Relationship POST/PUT with no originator now stamps no originator identity instead of an arbitrary one; PATCH is exempt.**
+
+  The write-time `originatorInstanceId` stamp resolves this instance's own
+  identity from the `Instance` table for a local Memory, Soul, Agent or
+  Relationship POST or PUT that carries no originator yet (PATCH routes past the
+  stamp on all four resources and is unchanged); Message uses the same
+  resolution for its org scope. It used to take the first row of an unordered
+  search and cache it, so on an instance whose table holds several rows — a
+  legacy install, or the state `flair init --remote`'s detected race leaves —
+  those writes were stamped with an arbitrary identity, one peers may never have
+  pinned. It now decides through the same shared rule the federation
+  readers use:
+
+  - one row → cached and returned, as before;
+  - no row, or a read that fails → null, uncached, as before;
+  - several rows → null, so the write stamps nothing.
+
+  A null `originatorInstanceId` is the defined local-origin state, so the write
+  still succeeds: the stamp does not throw (that would fail every local write on
+  such an instance and could lose writes on upgrade) and does not pick a row.
+  One error naming the row count and the prune remedy is logged once per refusal
+  window, and the refusal is remembered for at most a minute, so a write in that
+  state does not re-read the table every call and `flair federation instance
+  prune` takes effect without a restart. The read goes through the same strict reader
+  `GET /FederationInstance` uses, so an entry with no usable id is an unreadable
+  read (null) rather than a smaller list.
+
+  (Refs #1896)
+
+- **`memory_search`'s `tools/list` description now states it covers other agents' non-private memories.**
+  Every MCP client that lists tools sees the corrected read scope: the caller's own
+  memories plus every other agent's non-private memories on the instance — no per-owner
+  grant required.
+
+- **Native `/mcp` tool calls check declared argument types and required properties before the tool runs.**
+  When supplied, `arguments` must be a JSON object; omitted `arguments` are treated as `{}`. A `tools/call` whose arguments omit a required argument, carry a value of a type the tool's input schema does not declare, or (for a tool that declares an `id`) give an `id` that is not a non-empty string is refused with JSON-RPC error `-32602`. An optional argument given as `null` is treated as absent. An unrecognised visibility string still gets `invalid_visibility` from the `memory_store` tool.
+
+- **Auto-capture now normalises block-shaped messages, uses the client's UUID memory ids, and reports machine-readable store outcomes.**
+
+  The capture paths (agent_end, llm_input, llm_output) read a host message's
+  content through one function: text blocks are concatenated in order, and
+  image, thinking and tool blocks contribute nothing (their contents never
+  reach a memory). `memory_store` no longer hand-builds a `Date.now()` id — it
+  uses the client's canonical UUID path, so two writes in one millisecond can
+  no longer overwrite each other — and returns a machine-readable outcome
+  (`written`, `id`, `supersedeClosed`, `errors`, `deduplicated`, plus
+  `matchedId` when a near-duplicate was found): `written` is true only after
+  the primary write succeeded, a partial success (memory written,
+  supersede-close failed) is reported as exactly that, a deduplicated write
+  reports `deduplicated: true` with the `matchedId` it collided with, and an
+  unresolved identity returns `{ written: false, reason: "no-identity" }`
+  instead of silently returning.
+
+  (Refs #1751)
+
+- **OpenClaw auto-capture uses one bounded run map for capture state, retention and abort handling.**
+
+  Auto-capture is off by default and requires `autoCapture: true` plus the
+  host's `hooks.allowConversationAccess: true`. Recall is separate: when enabled
+  and permitted by `hooks.allowPromptInjection`, it can still make a bootstrap
+  read with capture disabled.
+
+  Capture records are keyed by agent and run ID, with separate capture counts
+  and excerpt-deduplication sets per run. Capture requires a host agent identity
+  and a run ID. Entity scanning precedes the synchronous reservation of the
+  excerpt hash and capture-count slot; a failed write releases that reservation.
+
+  An accepted successful `agent_end` marks the record ended and leaves it
+  eligible for capture until retirement. Sweeps retire ended records once
+  30 seconds have elapsed since their latest accepted `agent_end` and no write
+  is in flight; live records retire after 30 minutes idle.
+  During operation, removal requires a retired or aborted record, no write
+  in flight, and at least one hour since retirement or abort. Callbacks for
+  retained retired or aborted records are refused.
+
+  Ordinary admission purges removable records and refuses a new run at
+  10,000 records (`capture-capacity: full`). Retiring or aborting an existing
+  record changes it in place. While active, an abort for an unrecorded run
+  purges removable records and can use up to 1,000 additional slots; at that
+  limit it records nothing and logs `capture-capacity: abort-overflow`.
+  During shutdown, an abort for an unknown run records nothing and logs a
+  refusal. While active, callbacks can be admitted again after their record
+  is removed, and an unrecorded abort does not prevent later admission when
+  capacity is available.
+
+  A failed `agent_end` or `model_call_ended` with `failureKind: "aborted"`
+  aborts a recorded run's controller. In-flight capture requests receive that
+  signal, and results arriving after abort release their reservations without
+  counting as captures; requests already received by Flair may still be stored.
+  `gateway_stop` stops admission, clears the sweep timer, aborts recorded runs
+  and clears the map; that stopped registration starts no new capture writes.
+
+  (Refs #1751, #1892)
+
+- **OpenClaw callback warnings suppress repeated keys while those keys remain in a bounded cache.**
+
+  Missing-identity warnings from `agent_end`, `llm_input` and `llm_output`
+  are keyed by callback source. Capture and bootstrap-recall refusals or
+  failures use the agent identity (or `no-identity`), callback site and error
+  class. The class includes the error name and numeric status when present;
+  otherwise it uses the error name and a truncated message.
+
+  The shared warning cache retains up to 10,000 keys and evicts the oldest
+  inserted keys when full. Repeats are suppressed while their key remains
+  cached; an evicted key can produce another warning. Missing host identity
+  or an unusable signing key is refused before any outgoing request.
+
+  (Refs #1751, #1884)
+
+- **Memory updates now keep a record's stored `private` or `shared` visibility unless the write sets a new one**, on PUT, PATCH, the feed write path, the admin reindex path and the federation merge. PUT and the feed carry only `private` or `shared` when an update omits visibility; PATCH, the reindex path and the federation merge keep whatever value is stored. A PATCH that sets visibility or durability is checked by the visibility validator and the ephemeral-tier guard; a PATCH with a null or undefined visibility is no change. A failed existing-record lookup now fails the write. Ids generated by the feed and by agent seeding include a random UUID. A federation record is applied only when its payload carries its envelope's id.
+
+- **The token-id redactor defines each rebuilt key as an own property, so a JSON-parsed `__proto__` key stays an own key.** (Refs #1907)
+
+- **The release tagger reads the candidate commit as data, and the write job re-derives the decision (flair#1890 round 3).**
+
+  Two hardening items on the automatic release tagger.
+
+  **No candidate code runs at all.** Condition 6 used to execute the release commit's own version-sync script, so that script could write the step's verdict output (`verdict=TAG`) or a substituted sha and the write job would act on it. The candidate's WHOLE tree is now extracted with `git archive <sha>` into a scratch directory and checked by the DEFAULT branch's checker, which sees every file the candidate has rather than only its own inventory; a candidate's own script is never executed, in any job.
+
+  **The write job trusts nothing from `decide`.** It binds the target commit independently (the triggering run's own head sha, or its own nightly recomputation) and re-runs conditions 1-9 for that commit before it mints the App token. `decide`'s outputs only gate whether `write` starts and feed the refusal report — they never choose what gets tagged.
+
+- **The release shape check reads the release commit's own diff, and allows only
+  the lockfile this repo tracks.** Condition 7b listed a release PR's changed
+  files through the pull-request files API, which caps at 3,000 files and answers
+  a first-page 404 with an empty list — so a truncated list, or a 404, passed the
+  subset check vacuously. The list now comes from
+  `git diff --name-status -M <sha>^1 <sha>` on the release commit itself:
+  complete, no API, and a rename is reported with both of its paths, so a release
+  cannot move a file out of the trust root and still pass. An empty diff is
+  refused — a release changes at least its version-bearing files. And the
+  lockfile allowance is no longer the list of lockfile names in general but the
+  lockfile(s) this repo tracks at its own root (`bun.lock`), so a release cannot
+  swap in one the repo does not use.
+
+- **The ownership map owns itself: `CODEOWNERS` is now owned by the repo admin.**
+  The catch-all rule made the reviewers team the owner of `.github/CODEOWNERS`
+  itself, so a collaborator with merge access and that team's approval could
+  delete the `@heskew` entries — and then change the tagger, its workflow, its
+  version checker or the advisory allowlist in a later pull request. The file now
+  carries `/.github/CODEOWNERS @heskew`, below the catch-all, so changing who
+  owns the trust root takes the same human as changing the trust root.
+
+- **Release auto-tagging decides and writes in separate jobs, and refuses three edges it used to guess at.**
+
+  Four items from review of the automatic release tagger.
+
+  **The decision and the tag write are separate jobs.** The candidate's own
+  version-sync script used to run in the job that decided, which shared a
+  workspace with the step that mints the GitHub App token, so a merged commit
+  could plant a git hook or re-point `.git` and have a later git command run it
+  with the token in reach — restoring the working tree never covered that. No
+  candidate code runs at all now: condition 6 extracts the candidate's tree as
+  data. `decide` (conditions 1-9) holds no App credential at all; `write` is a
+  separate job on a fresh runner with a fresh default-branch checkout, and it
+  alone mints the token, re-checks condition 10 and creates the tag. Every
+  checkout sets `persist-credentials: false`, and the refusal reporter reads the
+  write job's outputs before the decide job's.
+
+  **The trigger's path guard tolerates the `@<ref>` suffix** that GitHub reports
+  in `workflow_run.path`, so the exact comparison no longer fails on every normal
+  CI completion.
+
+  **An empty check list is not "all checks green".** Condition 9 now requires a
+  check run from the CI workflow's check suite present on the commit — the suite
+  that woke the tagger, or a completed CI suite on that commit for the nightly —
+  and otherwise refuses with `checks-missing` instead of tagging a commit the CI
+  workflow never ran on.
+
+  **The nightly finds the release commit, or refuses.** It walks the version
+  file's own git history instead of a fixed 200-commit window, so a version
+  change any distance back is found; when the walk cannot find it, the run
+  refuses with `version-origin-not-found` rather than skipping silently.
+
+- **The release tagger refuses to tag from a stale `main`.** The second fetch of
+  `main` in the tag job — taken after the re-derivation's up-to-30-minute wait —
+  now has an id, and the tag step's condition requires that fetch to have
+  succeeded. Under `always()` alone, a failed fetch left `origin/main` at its
+  older value while the tag step still ran, so condition 10 could tag the release
+  that had been superseded during the wait. The fetch runs regardless of the App
+  token mint, so the separate path that reports a failed mint as
+  `app-not-configured` is unchanged.
+
+- **A release PR must be a single commit, and the tagger refuses one that is not (flair#1890 round 7).**
+
+  Condition 7b compares the tagged commit's diff against its first parent, which
+  is the whole release PR only under a squash merge; the repository also allows
+  rebase merges, where an earlier commit of the same PR lands before the tip and
+  7b never sees its files. The tagger now reads the release PR's commit count
+  from the pulls API and refuses `release-pr-not-single-commit` unless it is
+  exactly 1 — in the decision and again at the tag write, so a multi-commit
+  release can never be tagged on the strength of the tip's diff alone.
+
+- **A release PR can no longer carry a change to the release tagger, and the checker scans the whole candidate tree.** The tagger trusts the default branch — its workflow, its version checker and its advisory allowlist all execute from there — so those files are now owned by the repo admin in `CODEOWNERS`, and a release PR that touches anything outside the release surface (the version-bearing files, `CHANGELOG.md`, `.changelog/unreleased/*`, the lockfile) is refused as `release-pr-shape`. Condition 6 extracts the candidate commit as data (`git archive`) instead of materialising only the checker's inventory, so a version declaration the inventory does not list is found rather than hidden. Nothing from the candidate is executed.
+
+- **Integration, MemoryUsage and MemoryGrant reads use the shared read-scope helpers, and the shared scoped search keeps every caller condition.**
+  Their collection reads apply the read scope as the outermost condition of the query, as Memory, Message and WorkspaceState already do, and their by-id reads go through the shared by-id gate. The shared scoped search now keeps `conditions` given as any iterable or a single object and places a lone caller condition directly under the scope, so a caller's conditions only narrow the rows an agent may read and a single-condition query is accepted.
+
+- **Pairing-token ids now reach every sweep and rollback log line only as their 8-character prefix, or `[redacted]` for an id too short to cut.**
+
+  The redaction is deep and comes from one shared redactor: a string field at any
+  depth, an array element and an object KEY are all redacted. A token id shorter
+  than 12 characters is replaced in full — a prefix that is most of the id is not
+  a redaction — and every id the sweep has read in a pass joins the secret list,
+  so a caller-supplied `consumedBy` or a Harper error that embeds a DIFFERENT
+  token id is cut too. The sweep's two table-level error lines go through the
+  same redactor.
+
+  (Refs #1902)
+
+- **The CLI spawn-budget gate builds no regular expression from source text, so a file it scans cannot inject a pattern (flair#1825).**
+
+  The `signal:`-identifier check matched a variable name with a *dynamic*
+  `new RegExp(...)` built from that name, escaping only `$`. It now scans with
+  fixed literal patterns that capture any identifier and compares the captured
+  name with `===` — nothing from the scanned file reaches a regex engine.
+  (`test/unit/check-cli-spawn-budgets-gate-1825.test.ts`, round 7 item 3 and
+  round 8 item 2.)
+
+  (Refs #1825)
+
+- **The spawn-budget gate's SEED output states exactly what the seed predicate guarantees (flair#1825).**
+
+  On a descendant base it printed that the base "resolves to" the seed-introduction
+  commit and that "any other base without the file is refused" — both false for a
+  base that DESCENDS from the anchor (the predicate is `isAncestor`, not equality).
+  It now names the ACTUAL base sha, says the base DESCENDS from the anchor, and
+  says only a base that does not descend from it (or cannot be read) is refused.
+  (`test/unit/check-cli-spawn-budgets-gate-1825.test.ts`, round 10.)
+
+  (Refs #1825)
+
+- **The CLI spawn-budget gate's wait-bound rules are exact, closing the last classifier gaps (flair#1825).**
+
+  A `fetch` is bounded only when its OWN options carry a real deadline: `signal:
+  AbortSignal.timeout(<literal>)` where `<literal>` is a strict positive-integer
+  literal, or an identifier that is `const`-declared in the same file to exactly
+  that expression AND never reassigned (a `let`/`var`, or any second assignment, is
+  unbounded). A bare `signal`, an unknown signal value, a deadline that merely
+  appears later in the case, or a deadline the case reaches only by proximity does
+  NOT count. Test: `test/unit/check-cli-spawn-budgets-gate-1825.test.ts` (round 6
+  (a)/(b); round 7 item 3).
+
+  A `timeout:` literal is the ONE strict token `[1-9][0-9]{0,14}(?:_[0-9]{1,3})*` —
+  no leading zero, no leading/trailing/double underscore, at most 15 digits — and
+  the SAME rule applies to spawn timeouts, case budgets and `AbortSignal.timeout`
+  arguments alike: `0` is neither a spawn timeout nor a budget, and `1e999`,
+  `10000-10000`, `1__000`, `_1000` and a 310-digit literal are all unknown →
+  unbounded / no-budget. The count is of the digits AFTER underscores are removed,
+  so `1_000_000_000_000_000` (16 digits) is unknown and `999_999_999_999_999`
+  (15) is a deadline. A spawn's `timeout:` is read from the OPTIONS argument ONLY —
+  an argv element never decides it. Tests: round 7 item 4; round 9 items 1-2.
+
+  `fetch(` is a METHOD DEFINITION — and skipped — ONLY when the significant token
+  before `fetch` is `{`, `,`, `;` or the keyword `async` (object-literal/class-body
+  position) AND the `{` follows the closing paren on the same line; everything else,
+  including `await fetch("x")` with a trailing block, is a call. Tests: round 7 item 1.
+
+  A one-line function body contributes its waits exactly like a multiline one
+  (test: round 7 item 2). A case with no explicit budget that reaches a CLI-entry
+  spawn is an offender (test: round 7 item 5).
+
+  (Refs #1825; further classifier gaps go to #1921.)
+
+- **A unit test that leaves a scratch directory behind now fails the unit lane (flair#1889).**
+
+  Eight unit-test files take their scratch directory from the shared helper
+  `tempDir()` in `test/helpers/temp-dir.ts`, which registers the directory's
+  removal in the same call — a test cannot obtain one without its cleanup, and
+  the removal runs through bun's test hooks, not a process-exit hook (bun's test
+  runner does not run Node's `exit` listener). They are, under `test/unit/`,
+  `changelog-fragments`, `changelog-release-notes`, `first-publish-check`,
+  `first-run-hostile-verdict`, `release-sh-break-glass`, `secrets-push`,
+  `temp-dir` and `version-check`. Other unit tests give their scratch directory
+  their own hook-based cleanup, and the unit-lane guard covers them: it
+  snapshots the `flair-*` names in the OS temp directory before and after the
+  lane and fails when one appears, naming the new prefixes and their counts.
+
+  (Refs #1889)
+
 ## [0.56.0] - 2026-09-24
 
 ### Changed

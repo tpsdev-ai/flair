@@ -23,7 +23,8 @@
  * test/integration/migrations-embedding-stamp-e2e.test.ts.)
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
@@ -34,6 +35,7 @@ const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
 const SEED_IDS = Array.from({ length: 8 }, (_, i) => `synthetic-seed-${i}`);
 
 let harper: HarperInstance;
+let homeDir: string;
 let authHeader: string;
 
 async function opsCall(body: Record<string, unknown>): Promise<any> {
@@ -77,7 +79,10 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
   // then a later restart/upgrade is what runs the migration).
   beforeAll(async () => {
     process.env.FLAIR_ENABLE_TEST_MIGRATIONS = "1";
-    const first = await startHarper();
+    homeDir = mkdtempSync(join(tmpdir(), "flair-test-default-"));
+    const dataDir = join(homeDir, ".flair", "data");
+    mkdirSync(dataDir, { recursive: true });
+    const first = await startHarper({ installDir: dataDir, homeDir });
     authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
     harper = first;
 
@@ -101,16 +106,15 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     }
 
     await stopHarper(first, { keepInstallDir: true });
-    harper = await startHarper({ installDir: first.installDir });
+    harper = await startHarper({ installDir: first.installDir, homeDir });
   }, 180_000);
 
   afterAll(async () => {
     delete process.env.FLAIR_ENABLE_TEST_MIGRATIONS;
-    if (harper) {
+    if (harper) await stopHarper(harper);
+    if (homeDir) {
       const { rm } = await import("node:fs/promises");
-      const installDir = harper.installDir;
-      await stopHarper(harper); // ownsInstallDir is false for the reused-dir boot — won't remove it
-      await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
+      await rm(homeDir, { recursive: true, force: true, maxRetries: 4 });
     }
   });
 
@@ -171,19 +175,11 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     expect(raw).not.toContain("synthetic row");
   });
 
-  test("a risk-scoped (schema+metadata) snapshot was created at 0700 under <dataDir>/.migrations/snapshots/, then pruned to the retention policy", async () => {
-    // harper-lifecycle.ts sets HOME=installDir for the spawned process, and
-    // resources/migration-boot.ts's dataDir resolution is `HDB_ROOT ??
-    // homedir()/.flair/data` (same convention resources/health.ts already
-    // uses) — with HDB_ROOT unset here (as in every real deployment too;
-    // grep confirms src/cli.ts never sets it), that's <installDir>/.flair/data.
-    const snapshotRoot = join(harper.installDir, ".flair", "data", ".migrations", "snapshots");
+  test("a risk-scoped (schema+metadata) snapshot was created at 0700 under <dataDir>/.migrations/snapshots/", async () => {
+    const snapshotRoot = join(harper.installDir, ".migrations", "snapshots");
     expect(existsSync(snapshotRoot)).toBe(true);
 
     const entries = readdirSync(snapshotRoot).filter((e) => e.startsWith(SYNTHETIC_MIGRATION_ID));
-    // Retention (keep-last-3 / 30-day) auto-prunes on success — with exactly
-    // one successful cycle here, the one snapshot this run created should
-    // still exist (it's both the most recent AND well under 30 days old).
     expect(entries.length).toBeGreaterThanOrEqual(1);
 
     const dir = join(snapshotRoot, entries[0]);
@@ -195,8 +191,6 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     expect(manifest.scope).toBe("schema+metadata");
     expect(manifest.migrationId).toBe(SYNTHETIC_MIGRATION_ID);
 
-    // schema+metadata scope: a schema.json sits alongside the manifest —
-    // never a data dump of the seeded rows' content.
     const schemaPath = join(dir, "schema.json");
     if (existsSync(schemaPath)) {
       const schemaText = await Bun.file(schemaPath).text();
@@ -205,7 +199,7 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
   });
 
   test("the on-disk migration state file records success at the running version (the detect() short-circuit marker)", async () => {
-    const statePath = join(harper.installDir, ".flair", "data", ".migrations", "state.json");
+    const statePath = join(harper.installDir, ".migrations", "state.json");
     expect(existsSync(statePath)).toBe(true);
     const state = JSON.parse(await Bun.file(statePath).text());
     expect(state[SYNTHETIC_MIGRATION_ID].lastOutcome).toBe("success");

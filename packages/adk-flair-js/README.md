@@ -87,7 +87,7 @@ server.start();
 | `FLAIR_KEYFILE` | Yes | — | Path to the Ed25519 keyfile from `flair agent add` (raw seed; base64/PEM also accepted). A leading `~` is expanded. |
 | `FLAIR_ALLOW_REMOTE_URL` | No | — | Set to `1` to allow non-localhost URLs |
 
-All values can also be passed directly to the constructor.
+All values can also be passed directly to the constructor, **except the remote-URL opt-in (`FLAIR_ALLOW_REMOTE_URL`), which is read from the environment only**.
 
 Hosted Flair (non-localhost `FLAIR_URL`) uses the same Ed25519 triple as the
 Python package — agent id, keyfile, server-side `Agent` row with a matching
@@ -100,8 +100,10 @@ an existence signal. Walkthrough:
 ### Scope model
 
 Each ADK app authenticates as **one Flair agent** (its service identity).
-Per-user isolation is enforced by a **compound tag** — `adk:<app_name>:<user_id>`
-— attached to every record and filtered on every search. Reserved characters
+Per-user scope is a **compound tag** — `adk:<app_name>:<user_id>` — attached to
+every record and filtered on every search. It is a per-user **RETRIEVAL FILTER**,
+not an isolation boundary: every user of one ADK app shares one Flair principal,
+so the tag does not isolate one user's memories from another's. Reserved characters
 (`%`, `:`, `_`) in `app_name` or `user_id` are percent-encoded so distinct
 identities never collide and the `:` delimiter stays unambiguous.
 
@@ -109,19 +111,35 @@ identities never collide and the `:` delimiter stays unambiguous.
 
 - `user_id` is mandatory — empty/missing returns empty, never searches unscoped
 - Every hit is re-verified against the compound tag before mapping to `MemoryEntry`
-- Timeout budget: 2s total (connect 500ms, read 1500ms), one attempt, no retry
+- Timeout: search passes an AbortController signal to `fetch`, with a default 2,000 ms abort timer configurable through `timeoutMs`; it makes one attempt and does not retry
 - Search failures degrade silently with a structured warning (host, elapsed, phase)
 
 ### Write path
 
-- Deterministic record IDs: `app:user:session:eventId` — re-ingestion upserts.
+- Record IDs: an event with a non-empty `id` gets a deterministic record id.
+  Tuples with no colon in any component keep the historical event-join
+  `app:user:session:eventId`. Re-ingesting one of those updates the same row
+  only when that row already has a complete event stamp for the tuple
+  (`sessionId`, the compound tag, and the `adk-event:` tag). An unstamped
+  pre-upgrade row is not replaced automatically; the existing row is kept
+  and the conflict is reported. An event with a missing or empty `id` gets
+  a random UUID in that position, so each ingestion stores it as a new
+  record. When any component contains `:`, each component percent-encodes
+  `%` as `%25`, `|` as `%7C`, and `:` as `%3A`, and the parts are joined with
+  `|`. That id contains no `:`. The old event-join always contains at least
+  three `:`, so the new id is not an event-join row the previous encoder
+  stored. The first re-ingestion after upgrading can leave both the old row
+  and the new one for a colon-bearing event.
   Direct `addMemory()` writes use the entry's `id` when supplied, else the
-  first 32 hex chars of the content's SHA-256 (re-adds replace, not duplicate)
-- Creates ride `POST /Memory/` (the create verb) with the id in the body; a
-  `409` (record already exists) falls back to `PUT /Memory/{id}`, preserving
-  replace semantics — a PUT-shaped create 404s on Harper deployments where
-  PUT is update-only (flair#1336)
-- Write failures log a structured warning (session id, event count, HTTP status)
+  first 32 hex chars of the content's SHA-256. Re-adding that id replaces
+  the row.
+- Creates ride `POST /Memory/` (the create verb) with the id in the body. A
+  `409` on an event write replaces the row only when it has a complete event
+  stamp matching this tuple (`PUT /Memory/{id}`); otherwise the row is kept
+  and the conflict is reported. A `409` on a direct `addMemory()` replaces
+  the row. A PUT-shaped create 404s on Harper deployments where PUT is
+  update-only (flair#1336)
+- An event-write failure logs a warning with the session id, the event id, and how many events in the batch were written. A direct-write failure logs a warning with the record id, not a session id, and how many memories were written. Neither warning promises an HTTP status: a transport failure has none.
 - No-text events are filtered (Vertex parity)
 
 ## Security
@@ -133,12 +151,15 @@ is transmitted as raw text to the Flair instance at the configured URL.
 The Flair operator (which may be you) has full access to this data.
 Do not point `FLAIR_URL` at an instance you do not trust.
 
-### Metadata-level isolation, not cryptographic isolation
+### Metadata-level filtering, not cryptographic isolation
 
-All users of one ADK app share one Flair principal. Per-user isolation is
-enforced by tag-based server-side filtering, not cryptographic key separation.
-A bug in that filter would leak cross-user memories. For key-level isolation,
-use per-org Flair principals (the org layer).
+All users of one ADK app share one Flair principal. The compound tag
+`adk:<app_name>:<user_id>` is a per-user RETRIEVAL FILTER — it selects which
+memories a search returns — and it does NOT isolate one user's memories from
+another's: every user of one ADK app shares one Flair principal, so the tag is
+not a boundary between users. The server rejects forged ownership on ordinary
+agent writes. Other ordinary agents cannot read a private memory; admins and
+trusted internal calls can.
 
 ## API
 

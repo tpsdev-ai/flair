@@ -96,14 +96,6 @@
     "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
   },
   {
-    "file": "test/unit-isolated/doctor-fix-hook-boundary-1834.test.ts",
-    "scope": "runDoctor",
-    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
-    "kind": "spawn-no-timeout",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
-  },
-  {
     "file": "test/unit-isolated/doctor-fix-mcp-pins.test.ts",
     "scope": "runDoctor",
     "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
@@ -603,30 +595,6 @@
     "file": "test/integration/workspace-orgevent-cli-e2e.test.ts",
     "scope": "orgevent generates a fresh id per call — two publishes never collide",
     "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
-    "kind": "case-no-budget",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
-  },
-  {
-    "file": "test/unit-isolated/doctor-fix-hook-boundary-1834.test.ts",
-    "scope": "claude-code caller: a duplicate-assignment hook is HELD and printed",
-    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
-    "kind": "case-no-budget",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
-  },
-  {
-    "file": "test/unit-isolated/doctor-fix-hook-boundary-1834.test.ts",
-    "scope": "codex caller: the same HOLD is printed",
-    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
-    "kind": "case-no-budget",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
-  },
-  {
-    "file": "test/unit-isolated/doctor-fix-hook-boundary-1834.test.ts",
-    "scope": "claude-code caller, hook wired but Claude Code NOT configured (project-scoped MCP): the HOLD is still printed",
-    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
     "kind": "case-no-budget",
     "occurrence": 0,
     "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."

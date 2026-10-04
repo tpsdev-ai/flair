@@ -38,6 +38,8 @@ export const PRM_PATH = "/.well-known/oauth-protected-resource";
 /** RFC 8414 §3 — Authorization Server Metadata well-known path. */
 export const AS_METADATA_PATH = "/.well-known/oauth-authorization-server";
 
+export const JWKS_PATH = "/.well-known/jwks.json";
+
 /**
  * The public origin every URL in every discovery document derives from.
  *

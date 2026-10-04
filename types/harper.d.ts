@@ -7,6 +7,12 @@ declare module "harper" {
   export const tables: Record<string, any>;
   export const databases: Record<string, any>;
   /**
+   * The ambient request context Harper resolves when a call passes none (its
+   * context storage); an empty object outside a request. Consumed by
+   * resources/table-subscriptions.ts.
+   */
+  export function getContext(): any;
+  /**
    * Process-wide model-call facade (#1325). Only the shapes flair currently
    * consumes are stubbed here — mirrors harper's
    * resources/models/types.ts EmbedOpts/GenerateOpts/GenerateResult.
@@ -51,6 +57,20 @@ declare module "harper" {
     patch?(content: any): any;
     delete?(): any;
     static connect?(): AsyncIterable<any>;
+  }
+  /**
+   * Harper's query / by-id target (#1975, #1940). The resource builds a FRESH
+   * one carrying only the id for an unselected scope read. Only the members
+   * Flair consumes are declared; the real class extends URLSearchParams.
+   */
+  export class RequestTarget extends URLSearchParams {
+    id?: any;
+    isCollection?: any;
+    pathname?: any;
+    search?: any;
+    select?: any;
+    property?: any;
+    constructor(target?: any);
   }
   /**
    * Wrap bytes as a Harper Blob for out-of-record storage.

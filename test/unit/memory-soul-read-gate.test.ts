@@ -24,7 +24,7 @@
  * importing resources/Memory.ts — only resources/Soul.ts, which has no other
  * importer in test/unit/.
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -35,6 +35,21 @@ let soulStore: Map<string, any>;
 // federation-edge-hardening slice 1: resources/instance-identity.ts's
 // localInstanceId() reads this via databases.flair.Instance.search().
 let instanceRow: any = null;
+let versionStore: Map<string, any>;
+const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
+const InstructionVersionBase = {
+  primaryStore: versionPrimaryStore,
+  async *search(query: any) {
+    const conditions: any[] = query?.conditions ?? [];
+    const rows = [...versionStore.values()].filter((row) => conditions.every((c) => row[c.attribute] === c.value));
+    rows.sort((a, b) => Number(b.version) - Number(a.version));
+    for (const row of rows.slice(0, query?.limit ?? rows.length)) yield row;
+  },
+  async create(record: any) {
+    if (versionStore.has(record.id)) throw new Error("Record already exists");
+    versionStore.set(record.id, { ...record });
+  },
+};
 
 class BaseSoul {
   async post(content: any) {
@@ -44,13 +59,32 @@ class BaseSoul {
     soulStore.set(id, rec);
     return rec;
   }
+  // Real Harper binds the resource to the URL target (`getId()`); a PUT writes
+  // to THAT id and rewrites the record's primary key to it. `_targetId` models
+  // the URL-bound target. See resources/originator-instance.ts.
+  getId() { return (this as any)._targetId; }
   async put(content: any) {
-    const rec = { ...content };
-    soulStore.set(content.id, rec);
+    const id = this.getId() ?? content.id;
+    const rec = { ...content, id };
+    soulStore.set(id, rec);
     return rec;
   }
   async get(target?: any) {
-    const id = typeof target === "string" ? target : target?.id;
+    const id = typeof target === "string" ? target : (target?.id ?? (this as any)._targetId);
+    return soulStore.get(id) ?? null;
+  }
+  // Real Harper PATCH merges the body into the stored row; the id comes from the
+  // URL, which the double models as an explicit `_targetId` on the instance.
+  async patch(content: any) {
+    const id = content?.id ?? (this as any)._targetId;
+    const merged = { ...(soulStore.get(id) ?? {}), ...content };
+    soulStore.set(id, merged);
+    return { ...merged };
+  }
+  // Real Harper's table is statically callable (`databases.flair.Soul.get(id)`),
+  // which is how resources/originator-instance.ts's resolveStoredRow reads the
+  // pre-existing row for the create/update decision.
+  static async get(id: any) {
     return soulStore.get(id) ?? null;
   }
   search() {
@@ -74,6 +108,7 @@ const databasesMock = {
         return gen();
       },
     },
+    InstructionVersion: InstructionVersionBase,
   },
 };
 
@@ -92,8 +127,24 @@ const anonCtx = () => ({ tpsAnonymous: true });
 
 beforeEach(() => {
   soulStore = new Map();
+  versionStore = new Map();
   instanceRow = null;
   _resetLocalInstanceIdCacheForTests();
+  // The append helper runs the row write and the version append in one owned
+  // transaction (resources/request-transaction.ts); this mock owns/commits one.
+  (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+    const context = ctx && typeof ctx === "object" ? ctx : {};
+    if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
+    const txn: any = { open: 1, saveCommits: false };
+    context.transaction = txn;
+    let result: any;
+    try { result = cb(txn); } catch (e) { txn.open = 0; throw e; }
+    if (result && typeof result.then === "function") {
+      return result.then((v: any) => { txn.open = 0; return v; }, (e: any) => { txn.open = 0; throw e; });
+    }
+    txn.open = 0;
+    return result;
+  };
 });
 
 // ─── Soul.allowRead — anonymous denied, any verified agent allowed (no per-agent scoping) ──
@@ -152,46 +203,130 @@ describe("Soul write gates — unaffected by the read-gate fix", () => {
   });
 });
 
-// ─── federation-edge-hardening slice 1: write-time originatorInstanceId stamp ──
-// See resources/Memory.ts's stampOriginatorInstanceId doc for the full
-// contract (write-time, cached local instance id, anti-clobber for
-// federation-synced records). Soul.ts stamps in both post() and put().
-describe("federation-edge-hardening slice 1 — Soul.post()/put() write-time originatorInstanceId stamp", () => {
-  it("post() stamps the local instance id on a fresh local write", async () => {
+// ─── federation-edge-hardening slice 1 / flair#1965: originatorInstanceId stamp ──
+// See resources/originator-instance.ts for the full contract. originatorInstanceId
+// is server-stamped and NEVER client-writable: a body value on create is replaced
+// by the local id; on update the stored value stands. Soul.ts stamps on post()
+// (create) and put() (create or update).
+describe("federation-edge-hardening slice 1 / flair#1965 — Soul originatorInstanceId is server-stamped", () => {
+  const owner = () => ({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
+
+  it("CREATE (post) stamps the local instance id on a fresh local write", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const res: any = await s.post({ agentId: "agent-1", key: "identity", value: "my soul" });
+    const res: any = await makeSoul(owner()).post({ agentId: "agent-1", key: "identity", value: "my soul" });
     expect(res.originatorInstanceId).toBe("flair_local_test");
+  });
+
+  it("CREATE (post) IGNORES a request-body originatorInstanceId and stamps the local id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const res: any = await makeSoul(owner()).post({
+      agentId: "agent-1",
+      key: "identity",
+      value: "body claims instance B",
+      originatorInstanceId: "instance-B",
+    });
+    expect(res.originatorInstanceId).toBe("flair_local_test");
+    expect(res.originatorInstanceId).not.toBe("instance-B");
   });
 
   it("stamps null when this instance has no Instance row yet — never invents one", async () => {
     instanceRow = null;
-    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const res: any = await s.post({ agentId: "agent-1", key: "identity", value: "my soul" });
+    const res: any = await makeSoul(owner()).post({ agentId: "agent-1", key: "identity", value: "my soul" });
     expect(res.originatorInstanceId).toBeNull();
   });
 
-  it("THE KEY TEST — a soul record already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
+  it("CREATE (put, no stored row) stamps the local id and ignores a body value", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const res: any = await s.post({
-      agentId: "agent-1",
-      key: "identity",
-      value: "authored on instance B",
-      originatorInstanceId: "instance-B",
+    const res: any = await makeSoul(owner()).put({
+      id: "soul-1", agentId: "agent-1", key: "identity", value: "fresh put", originatorInstanceId: "instance-B",
     });
-    expect(res.originatorInstanceId).toBe("instance-B");
-    expect(res.originatorInstanceId).not.toBe("flair_local_test");
+    expect(res.originatorInstanceId).toBe("flair_local_test");
   });
 
-  it("put() also stamps the local instance id, and also never clobbers an already-set origin", async () => {
+  it("UPDATE (put) with a body value LEAVES the stored value — a client cannot change it", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s1 = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const fresh: any = await s1.put({ id: "soul-1", agentId: "agent-1", key: "identity", value: "fresh put" });
-    expect(fresh.originatorInstanceId).toBe("flair_local_test");
+    soulStore.set("soul-2", { id: "soul-2", agentId: "agent-1", key: "identity", value: "authored on B", originatorInstanceId: "instance-B" });
+    const res: any = await makeSoul(owner()).put({
+      id: "soul-2", agentId: "agent-1", key: "identity", value: "edit", originatorInstanceId: "instance-attacker",
+    });
+    expect(res.originatorInstanceId).toBe("instance-B");
+    expect(res.originatorInstanceId).not.toBe("instance-attacker");
+  });
 
-    const s2 = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const synced: any = await s2.put({ id: "soul-2", agentId: "agent-1", key: "identity", value: "synced put", originatorInstanceId: "instance-B" });
-    expect(synced.originatorInstanceId).toBe("instance-B");
+  it("UPDATE (put) that OMITS the field leaves the stored value", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-3", { id: "soul-3", agentId: "agent-1", key: "identity", value: "authored on B", originatorInstanceId: "instance-B" });
+    const res: any = await makeSoul(owner()).put({ id: "soul-3", agentId: "agent-1", key: "identity", value: "edit" });
+    expect(res.originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH cannot set or clear originatorInstanceId — the stored value stands", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-patch", { id: "soul-patch", agentId: "agent-1", key: "identity", value: "authored on B", originatorInstanceId: "instance-B" });
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-patch";
+    await s.patch({ originatorInstanceId: "instance-attacker" });
+    expect(soulStore.get("soul-patch").originatorInstanceId).toBe("instance-B");
+  });
+});
+
+// ─── flair#1965 round 2 — URL-target resolution + PATCH-create handling ─────
+describe("flair#1965 r2 — Soul PUT resolves the URL-bound target; a PATCH create is refused", () => {
+  const owner = () => ({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
+  it("REFUSES a PUT whose body id differs from the URL target id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-real", { id: "soul-real", agentId: "agent-1", key: "identity", value: "real", originatorInstanceId: "instance-B" });
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-real";
+    const res: any = await s.put({ id: "soul-decoy", agentId: "agent-1", key: "identity", value: "decoy", originatorInstanceId: "instance-attacker" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+    expect(soulStore.get("soul-decoy")).toBeUndefined();
+    expect(soulStore.get("soul-real").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("a PATCH that would CREATE a row is REFUSED (fail-closed on missing stored state) — never an un-stamped create", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-patch-new";
+    const res: any = await s.patch({ agentId: "agent-1", key: "identity", value: "brand new via patch" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(403);
+    expect(soulStore.get("soul-patch-new")).toBeUndefined();
+  });
+});
+
+// ─── flair#1965 round 3 — fail-closed, URL-bound stored-row resolution ───────
+describe("flair#1965 r3 — Soul PATCH is fail-closed and URL-bound", () => {
+  const owner = () => ({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
+
+  it("a FAILED stored-row read refuses the PATCH (500) — never read as 'no stored state'", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-r3-readfail", { id: "soul-r3-readfail", agentId: "agent-1", key: "identity", value: "authored on B", originatorInstanceId: "instance-B" });
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-r3-readfail";
+    const spy = spyOn(BaseSoul, "get").mockImplementation(async () => { throw new Error("simulated stored-row read failure"); });
+    try {
+      const res: any = await s.patch({ value: "an edit" });
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
+      expect(soulStore.get("soul-r3-readfail").value).toBe("authored on B"); // nothing written
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a PATCH whose body id disagrees with the URL target is refused (400)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-r3-real", { id: "soul-r3-real", agentId: "agent-1", key: "identity", value: "real", originatorInstanceId: "instance-B" });
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-r3-real";
+    const res: any = await s.patch({ id: "soul-r3-decoy", value: "decoy" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+    expect((await (res as Response).json()).error).toBe("id_target_mismatch");
+    expect(soulStore.get("soul-r3-decoy")).toBeUndefined();
+    expect(soulStore.get("soul-r3-real").value).toBe("real");
   });
 });

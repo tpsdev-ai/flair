@@ -10,10 +10,31 @@ delete (process.env as any).FLAIR_PUBLIC;
 let soulStore: Map<string, any>;
 let candidateStore: any[];
 let memoryStore: any[];
+let versionStore: Map<string, any>;
 let lookupFails = false;
 let getBehavior: "ok" | "throw" | "empty" = "ok";
 
+const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
+const InstructionVersionBase = {
+  primaryStore: versionPrimaryStore,
+  async *search(query: any) {
+    const conditions: any[] = query?.conditions ?? [];
+    const rows = [...versionStore.values()].filter((row) => conditions.every((c) => row[c.attribute] === c.value));
+    rows.sort((a, b) => Number(b.version) - Number(a.version));
+    for (const row of rows.slice(0, query?.limit ?? rows.length)) yield row;
+  },
+  async create(record: any) {
+    if (versionStore.has(record.id)) throw new Error("Record already exists");
+    versionStore.set(record.id, { ...record });
+  },
+};
+
 class BaseSoul {
+  // Real Harper binds the resource to the URL target (`getId()`); this double
+  // models the bound id on the instance as `.id` (the same shape the other
+  // Soul/Memory/Agent doubles use). resources/originator-instance.ts's
+  // resolveStoredRow reads the stored row by this id.
+  getId() { return (this as any).id; }
   async delete(id: string) { soulStore.delete(id); }
   async post(content: any) {
     soulStore.set(content.id ?? "soul", { ...content });
@@ -55,6 +76,7 @@ mock.module("harper", () => ({
       MemoryCandidate: { search: () => search(candidateStore) },
       Memory: { search: () => search(memoryStore) },
       Instance: { search: () => search([]) },
+      InstructionVersion: InstructionVersionBase,
     },
   },
 }));
@@ -73,10 +95,24 @@ function makeSoul(id?: string) {
 
 beforeEach(() => {
   soulStore = new Map();
+  versionStore = new Map();
   candidateStore = [];
   memoryStore = [];
   getBehavior = "ok";
   lookupFails = false;
+  (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+    const context = ctx && typeof ctx === "object" ? ctx : {};
+    if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
+    const txn: any = { open: 1, saveCommits: false };
+    context.transaction = txn;
+    let result: any;
+    try { result = cb(txn); } catch (e) { txn.open = 0; throw e; }
+    if (result && typeof result.then === "function") {
+      return result.then((v: any) => { txn.open = 0; return v; }, (e: any) => { txn.open = 0; throw e; });
+    }
+    txn.open = 0;
+    return result;
+  };
 });
 
 describe("Soul.put refuses ADK-sourced claims", () => {
@@ -148,7 +184,7 @@ describe("Soul.patch refuses ADK-sourced claims", () => {
     expect(soulStore.get("shared-app-role").value).toBe("Be the team's memory.");
   });
 
-  test("a failed stored-state read cannot authorize a PATCH", async () => {
+  test("a failed stored-state read cannot authorize a PATCH — refused (500), never read as 'no stored state'", async () => {
     soulStore.set("shared-app-pref", {
       id: "shared-app-pref",
       agentId: "shared-app",
@@ -157,7 +193,10 @@ describe("Soul.patch refuses ADK-sourced claims", () => {
     });
     getBehavior = "throw";
     const soul = makeSoul("shared-app-pref");
-    await expect(soul.patch({ value: "alice likes tea" })).rejects.toThrow("unavailable");
+    const res: any = await soul.patch({ value: "alice likes tea" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(500);
+    expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
     expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
   });
 
@@ -259,7 +298,9 @@ test("failed learned-content lookup aborts all content writes", async () => {
   lookupFails = true;
   for (const method of ["post", "put", "patch"]) {
     soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "original" });
-    await expect(makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "replacement" })).rejects.toThrow("provenance unavailable");
+    const write = makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "replacement" });
+    if (method === "patch") expect((await write).status).toBe(500);
+    else await expect(write).rejects.toThrow("provenance unavailable");
     expect(soulStore.get("soul").value).toBe("original");
   }
 });

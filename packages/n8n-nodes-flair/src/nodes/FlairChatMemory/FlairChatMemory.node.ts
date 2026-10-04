@@ -7,18 +7,14 @@ import {
   NodeConnectionTypes,
 } from "n8n-workflow";
 
-// See FlairWrite.node.ts header for the rationale on dynamic-import.
-// flair-client is ESM-only; static import from CJS-compiled n8n node
-// crashes at boot on Node 24+ with "No exports main defined".
-import type { FlairClient } from "@tpsdev-ai/flair-client";
+import {
+  flairCredentialTest,
+  makeClient,
+  warnDeprecatedAdminPassword,
+  asFlairCredentials,
+} from "../../client";
 
 import { FlairChatMessageHistory } from "./FlairChatMessageHistory";
-
-interface FlairCredentials {
-  baseUrl: string;
-  agentId: string;
-  adminPassword: string;
-}
 
 export class FlairChatMemory implements INodeType {
   description: INodeTypeDescription = {
@@ -36,6 +32,7 @@ export class FlairChatMemory implements INodeType {
       {
         name: "flairApi",
         required: true,
+        testedBy: "flairCredentialTest",
       },
     ],
     codex: {
@@ -71,7 +68,7 @@ export class FlairChatMemory implements INodeType {
         type: "string",
         default: "",
         description:
-          "Optional sub-scope appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run isolation, or leave blank to share memory across runs.",
+          "Optional sub-scope appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run chat-history grouping by subject, or leave blank to share memory across runs.",
       },
       {
         displayName: "Context Window Length",
@@ -84,26 +81,18 @@ export class FlairChatMemory implements INodeType {
     ],
   };
 
+  methods = { credentialTest: { flairCredentialTest } };
+
   async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
-    const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
+    const credentials = asFlairCredentials(await this.getCredentials("flairApi"));
     const subject = this.getNodeParameter("subject", itemIndex) as string;
     const sessionKey = this.getNodeParameter("sessionKey", itemIndex, "") as string;
     const k = this.getNodeParameter("contextWindowLength", itemIndex, 10) as number;
 
     const composedSubject = sessionKey ? `${subject}:${sessionKey}` : subject;
 
-    // See FlairWrite.node.ts for the rationale on Function-wrapped dynamic
-    // import (prevents TSC from downleveling to require() under
-    // module: "CommonJS").
-    const flairMod = await (new Function(
-      "return import('@tpsdev-ai/flair-client')",
-    ) as () => Promise<typeof import("@tpsdev-ai/flair-client")>)();
-    const flair = new flairMod.FlairClient({
-      url: credentials.baseUrl,
-      agentId: credentials.agentId,
-      adminUser: "admin",
-      adminPassword: credentials.adminPassword,
-    });
+    const flair = await makeClient(credentials);
+    warnDeprecatedAdminPassword(this.logger, credentials);
 
     const history = new FlairChatMessageHistory(flair, composedSubject, k);
 

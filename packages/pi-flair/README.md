@@ -67,7 +67,7 @@ key takes local file paths only — an `npm:` spec there is silently ignored by 
 > }
 > ```
 
-Or use environment variables:
+After installing the extension, configure its required identity in the environment that launches Pi:
 
 ```bash
 export FLAIR_AGENT_ID=my-agent
@@ -80,7 +80,7 @@ pi
 | Tool | Description |
 |------|-------------|
 | `memory_search` | Search memories by meaning. Understands temporal queries. |
-| `memory_store` | Save memories with type + durability (permanent/persistent/standard/ephemeral). |
+| `memory_store` | Save memories with a durability (permanent/persistent/standard/ephemeral) and optional tags. |
 | `bootstrap` | Load session context: soul + memories + predicted context. |
 
 ## Configuration Options
@@ -99,7 +99,7 @@ pi
 
 ### Auto-Capture Warning
 
-When `FLAIR_AUTO_CAPTURE=true`, all assistant responses are persisted to Flair memory with **ephemeral durability**. **This includes any secrets, credentials, or tokens your LLM may output.**
+When `FLAIR_AUTO_CAPTURE=true`, the handler *attempts to store* the inspected assistant entry when serialized content exceeds 100 characters and matches no recognized secret pattern. Accepted text is truncated to 4000 characters.
 
 **Do not enable `FLAIR_AUTO_CAPTURE=true` if your sessions may output:**
 
@@ -109,7 +109,7 @@ When `FLAIR_AUTO_CAPTURE=true`, all assistant responses are persisted to Flair m
 - AWS/GCP/Azure credentials
 - Any other sensitive data
 
-Auto-capture is best-effort and uses `dedup: false` to ensure all content is captured. For production use, disable auto-capture and store only non-sensitive summaries manually via `memory_store`.
+Auto-capture is best-effort, skips recognized secrets and content of 100 characters or fewer, and truncates text to 4000 characters. For production use, disable auto-capture and store only non-sensitive summaries manually via `memory_store`.
 
 ## How It Works
 
@@ -117,7 +117,7 @@ Auto-capture is best-effort and uses `dedup: false` to ensure all content is cap
 pi (extension) ↔ HTTP ↔ Flair (Harper)
 ```
 
-The extension calls Flair's HTTP API directly via `@tpsdev-ai/flair-client`. All memory is stored locally in `~/.flair/` with Ed25519 authentication.
+The extension calls Flair's HTTP API directly via `@tpsdev-ai/flair-client`. The server URL and authentication method (Ed25519 with admin Basic auth fallback) are configurable. Admin Basic auth is used only when no Ed25519 key resolves; the client refuses to send it over plain HTTP to a non-loopback host, because the credentials travel in a request header.
 
 ## Examples
 

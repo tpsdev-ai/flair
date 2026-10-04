@@ -49,7 +49,7 @@ First run does six things:
 5. Wires every MCP client it detects — Claude Code, Cursor, Codex CLI, Gemini CLI — to `npx -y @tpsdev-ai/flair-mcp`, then smoke-tests it. `--no-mcp` skips this.
 6. Opens a short **soul wizard** so your agent knows who it is.
 
-It also generates a Harper admin password and writes it to `~/.flair/admin-pass` (mode 0600). The CLI prints that **path**, never the value — read the file when a command needs the password, and prefer `--admin-pass-file ~/.flair/admin-pass` over pasting it into a command line.
+It also saves the supplied or generated Harper admin password to `~/.flair/admin-pass` (mode 0600). Read the file when a command needs the password, and prefer `--admin-pass-file ~/.flair/admin-pass` over pasting it into a command line.
 
 The soul wizard offers a few shapes:
 
@@ -121,6 +121,11 @@ flair memory add --agent local "Harper v5 sandbox blocks node:module but process
 
 Flair embedded the text locally on write. No network calls.
 
+### Task summaries
+Use `flair memory write-task-summary --agent local --outcome merged --summary "Finished the task"` to save a persistent task summary and print its memory id.
+The optional `--ref <ref>` accepts a task, issue, or PR reference; omitted references use `unreferenced`. Outcomes are `merged`, `rejected`, or `abandoned`.
+Existing `--beads` callers remain supported as a deprecated alias; `--ref` takes precedence.
+
 ### Who can read it
 
 `visibility: private` means **only `local` can read this memory** — no other agent on the instance can search it, fetch it by id, or receive it in a bootstrap.
@@ -131,6 +136,14 @@ You didn't ask for that, and it isn't a setting you have to remember. Flair deri
 |---|---|
 | `permanent`, `persistent` | `shared` — a fact or decision worth keeping is worth the team being able to find |
 | `standard`, `ephemeral` — including a bare write with no `--durability` | `private` — working context and scratch state belong to the agent that produced them |
+
+Retention, decay and bootstrap ordering by tier:
+
+- permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+- persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+- standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+- ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+- No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
 
 So sharing is a deliberate act, and it takes one flag:
 

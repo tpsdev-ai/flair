@@ -15,6 +15,13 @@ authentication:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
       clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
+      # WHOLE-TOKEN env reference, like the two above. Since @harperfast/oauth
+      # 2.7.0 a CONFIGURED provider (both credentials set) needs a redirectUri;
+      # 2.8.1 skips an UNCONFIGURED one before that check
+      # (HarperFast/oauth#259). Set it to this instance's public origin plus
+      # /oauth — the component appends '/github/callback'. With the credentials
+      # set, an unset or unresolved value here fails the plugin's load.
+      redirectUri: ${OAUTH_GITHUB_REDIRECT_URI}
   mcp:
     # WHOLE-TOKEN env reference — the same FLAIR_MCP_OAUTH flag flair's
     # in-process /mcp route gates on (resources/mcp-oauth-flag.ts). The on/off
@@ -56,7 +63,14 @@ authentication:
     dynamicClientRegistration:
       enabled: false
     clientIdMetadataDocuments:
+      # A LITERAL list, not a ${VAR} reference: @harperfast/oauth 2.5.0 does
+      # not split a variable's value into hosts, and an unset one would replace
+      # this default (flair#2113).
       allowedHosts:
         - claude.ai
         - claude.com
-    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}
+    # Optional pin; the algorithm follows the PEM (RSA -> RS256, EC P-256 -> ES256).
+    # Without a pin, minting reuses a persisted key or generates and persists
+    # one if oauth.harper_oauth_mcp_keys is empty.
+    # To pin, add the line below and stage the variable:
+    # signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}

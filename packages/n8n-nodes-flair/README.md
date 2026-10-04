@@ -7,8 +7,8 @@ n8n community node — use [Flair](https://github.com/tpsdev-ai/flair) as your A
 - **Flair Chat Memory** — n8n AI Agent Memory port. Stores chat history in Flair, replayable across runs and readable from Claude Code, OpenClaw, and any other Flair client. LangChain `BufferWindowMemory` under the hood.
 - **Flair Search** — n8n AI Agent Tool port. Two operations:
   - *Semantic Search* — finds memories ranked by similarity to a natural-language query.
-  - *Get By Subject* — lists memories filtered by subject, ordered by recency.
-  - *Get By Tag* — coming in a follow-up once `flair-client.memory.list` exposes a `tags` filter.
+  - *Get By Subject* — lists memories filtered by subject.
+  - *Get By Tag* — not yet an operation in the `FlairSearch` node. The `memory.list` client supports the `tags` filter.
 
 ## Installation
 
@@ -23,10 +23,12 @@ Full setup walkthrough, subject/sessionId patterns, and security guidance are in
 ## Credential setup
 
 1. **Base URL** — your Flair instance, e.g. `http://localhost:19926`
-2. **Agent ID** — the logical identity that will own memories written from this n8n workspace. Workflows that share an Agent ID share memory ownership.
-3. **Admin Password** — your Flair (Harper) admin password. **This grants read/write access to the entire instance.** For production with untrusted workflow inputs, wait for Ed25519 per-agent auth (planned).
+2. **Agent ID** — the memory owner and, with Agent Private Key selected, signing identity. Workflows that share an Agent ID share memory ownership.
+3. **Agent Private Key** — that agent's Ed25519 private key. Register a new agent with `flair agent add <agent-id>`, or use an existing agent's matching key; encode it with `base64 < ~/.flair/keys/<agent-id>.key`. With Agent Private Key selected, requests sign as Agent ID. Ordinary agents read their own and other agents' non-private memories; administrator-role agents have broader authority.
 
-The credential test hits `/Memory` (auth-required) — you'll know it works when the test succeeds.
+The credential test reads `/Memory` with the selected auth mode and reports that mode on success.
+
+**Admin Password (deprecated)** — used only with Agent Private Key empty. Requests use Harper administrator Basic authentication, including access to other agents' private memories, and each node execution warns.
 
 ## License
 

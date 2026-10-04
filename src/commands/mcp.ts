@@ -31,13 +31,22 @@ import {
   defaultMcpResource,
   defaultMcpIssuer,
   MAX_ASSERTION_LIFETIME_SECONDS,
+  clientAssertionAudienceForm,
+  resolveClientAssertionAudience,
+  oauthMetadataUrl,
+  type ClientAssertionAudience,
+  type ClientAssertionAudienceForm,
 } from "../mcp-client-assertion.js";
 import {
   enableMcp,
   disableMcp,
   mcpStatus,
   checkLocalOriginRefusal,
+  fabricLoopbackRefusal,
+  targetOriginRefusal,
   selfVerifyMcpMetadata,
+  cimdAllowedHostsFromFlag,
+  claudeAiExcludedNote,
   type EnableMcpResult,
   type SecretsMechanism,
 } from "../lib/mcp-enable.js";
@@ -426,14 +435,6 @@ export async function revokeMcpClient(params: McpRevokeParams, deps: McpRevokeDe
 }
 
 // ─── flair mcp enable / disable / status ────────────────────────────────────
-// flair#719 — the last piece of the paved-paths command family. Automates
-// docs/notes/mcp-oauth-model2.md's 8-step operator checklist into one
-// command, per the design record + K&S verdicts on #719's thread (see
-// src/lib/mcp-enable.ts's module header for the full binding design record,
-// including the scenario addendum: `enable` targets the HOSTED shape only —
-// it runs on the OPERATOR's machine, against a REMOTE instance, and refuses
-// honestly against a local-origin instance rather than walking eight steps
-// toward a connector that can never connect).
 
 /** Simple y/N confirmation over readline — TTY-only, mirrors the existing
  *  restore-confirmation pattern (`flair snapshot restore`) above. */
@@ -447,7 +448,7 @@ async function confirmYesNo(question: string): Promise<boolean> {
   return /^y(es)?$/i.test(answer.trim());
 }
 
-/** Plain-text readline prompt (tests never exercise this — CLI-only). Used
+/** Plain-text readline prompt. Used
  *  for --idp-client-id/--idp-client-secret/--idp-subject when a flag is
  *  omitted and stdin is a TTY. */
 async function promptText(question: string): Promise<string> {
@@ -457,6 +458,25 @@ async function promptText(question: string): Promise<string> {
     rl.question(question, (a) => { rl.close(); res(a); }),
   );
   return answer.trim();
+}
+
+/**
+ * flair#2113 review: the closing lines of a successful `flair mcp enable`.
+ * They claim only what the run checked: the self-verify step's OAuth metadata
+ * check (the /mcp route itself is not probed), and, when this run confirmed a
+ * --cimd-allowed-hosts list (ensured it in config.yaml, writing the list only
+ * if the file did not already hold that exact list, and read it back), whether
+ * that list includes claude.ai. With no flag the command does not inspect
+ * allowedHosts, so it says nothing about claude.ai.
+ */
+export function enableSuccessLines(result: EnableMcpResult): string[] {
+  const lines = [
+    `${render.icons.ok} ${render.wrap(render.c.bold, "The OAuth metadata check passed.")} The /mcp route itself was not probed.`,
+  ];
+  const claudeAiNote = claudeAiExcludedNote(result.cimdAllowedHosts);
+  if (claudeAiNote) lines.push(`${render.icons.info} ${claudeAiNote}`);
+  lines.push("", result.pasteBlock ?? "", "");
+  return lines;
 }
 
 function printEnableSteps(result: EnableMcpResult): void {
@@ -486,8 +506,19 @@ export function register(program: Command): void {
     )
     .option(
       "--token-endpoint <url>",
-      "Token-endpoint URL — becomes the `aud` claim (defaults to this instance's " +
+      "Token-endpoint URL — becomes the `aud` claim in token-endpoint mode (defaults to this instance's " +
         "own oauth token endpoint, same env vars)",
+    )
+    .option(
+      "--assertion-audience <form>",
+      'Audience form: "token-endpoint" (default — aud is the token-endpoint URL, header typ "JWT") ' +
+        'or "issuer" (aud is the authorization server metadata document\'s issuer, header typ ' +
+        '"client-authentication+jwt"). Uses FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE when set; otherwise token-endpoint.',
+    )
+    .option(
+      "--issuer <url>",
+      "Authorization server origin whose metadata document supplies the `aud` for the " +
+        '"issuer" audience form (defaults to this instance\'s issuer, same env vars)',
     )
     .option(
       "--resource <url>",
@@ -530,6 +561,26 @@ export function register(program: Command): void {
       const resource: string | undefined = opts.resource ?? defaultMcpResource();
       const expiresIn = opts.expiresIn ? Number(opts.expiresIn) : undefined;
 
+      let audienceForm: ClientAssertionAudienceForm;
+      try {
+        audienceForm = clientAssertionAudienceForm(opts.assertionAudience);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+      const issuerOrigin: string | undefined = opts.issuer ?? defaultMcpIssuer();
+      let audience: ClientAssertionAudience;
+      try {
+        audience = await resolveClientAssertionAudience({
+          form: audienceForm,
+          tokenEndpoint,
+          metadataUrl: issuerOrigin ? oauthMetadataUrl(issuerOrigin) : undefined,
+        });
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+
       let privateKey;
       try {
         privateKey = loadEd25519PrivateKeyFromFile(keyPath);
@@ -544,6 +595,7 @@ export function register(program: Command): void {
           tokenEndpoint,
           privateKey,
           expiresInSeconds: expiresIn,
+          audience,
         });
         const form = buildTokenRequestForm({ clientId, assertion, resource });
         if (opts.json) {
@@ -566,6 +618,7 @@ export function register(program: Command): void {
           privateKey,
           resource,
           expiresInSeconds: expiresIn,
+          audience,
           forceRefresh: Boolean(opts.forceRefresh),
         });
         if (opts.json) {
@@ -740,11 +793,12 @@ export function register(program: Command): void {
   mcp
     .command("enable")
     .description(
-      "One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the " +
-        "docs/notes/mcp-oauth-model2.md checklist. Targets a REMOTE instance with a public HTTPS origin; " +
-        "refuses honestly against a local-origin instance.",
+      "Enable the OAuth /mcp surface for claude.ai. " +
+        "Rejects invalid issuer URLs, localhost/.localhost/.local hosts, " +
+        "IPv4 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16 (also IPv4-mapped IPv6), " +
+        "and IPv6 ::, ::1, fc00::/7, fe80::/10; no DNS lookup.",
     )
-    .option("--instance <url>", "Remote flair instance to enable against (else FLAIR_URL)")
+    .option("--instance <url>", "Canonical http(s) target origin, optionally followed by / (else FLAIR_URL)")
     .option("--issuer <url>", "Public origin claude.ai will use (else --instance)")
     .option("--idp-provider <name>", "Upstream IdP provider", "github")
     .option("--idp-client-id <id>", "IdP OAuth app client id (else prompted interactively)")
@@ -752,41 +806,58 @@ export function register(program: Command): void {
     .option("--idp-subject <value>", "Your expected `sub`/login at the IdP (GitHub: your username; else prompted interactively)")
     .option("--principal <id>", "Principal (Agent) to map your IdP identity to — personal-shape default", "self")
     .option("--principal-kind <human|agent>", "Kind for a newly-created principal", "human")
-    .option("--secrets-mechanism <fabric-env-secrets|env-file>", "Override the shape-aware secrets mechanism (else auto-detected from --instance)")
+    .option("--secrets-mechanism <fabric-env-secrets|env-file>", "Override the shape-aware secrets mechanism (else selected from --instance and --fabric)")
     .option("--secrets-path <path>", "Override the secrets staging file path")
-    .option("--cimd-allowed-hosts <hosts>", "Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)")
-    .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
+    .option(
+      "--cimd-allowed-hosts <hosts>",
+      "Comma-separated lowercase hostnames to ensure as mcp.clientIdMetadataDocuments.allowedHosts in the config.yaml " +
+        "this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), written unless that file already holds " +
+        "that exact list, then read back, before the restart. " +
+        "Without --dry-run, refused unless a preflight match links the host and pid the target reports, a readable " +
+        "process on this machine, and that file (by realpath); --dry-run skips the match and writes nothing. " +
+        "Always refused with --fabric or a *.harperfabric.com instance. " +
+        "Without it the list is not changed (shipped: claude.ai,claude.com)",
+    )
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
-    .option("--dry-run", "Generate keys/tokens/config and validate inputs; skip every remote call")
+    .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
+    .option("--dry-run", "Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
       if (!instance) {
-        console.error("Error: --instance is required (or set FLAIR_URL) — `flair mcp enable` targets a specific remote instance.");
+        console.error("Error: --instance is required (or set FLAIR_URL) — `flair mcp enable` targets a specific instance.");
         process.exit(1);
       }
 
-      // Local-origin refusal short-circuits before we ask for anything else —
-      // never walk the operator through IdP app creation for a connector that
-      // can never connect.
-      const localCheck = checkLocalOriginRefusal(instance);
+      const targetRefusal = targetOriginRefusal(instance) ?? fabricLoopbackRefusal(instance, Boolean(opts.fabric));
+      if (targetRefusal) {
+        console.error(`${render.icons.error} ${targetRefusal}`);
+        process.exit(1);
+      }
+
+      const localCheck = checkLocalOriginRefusal(opts.issuer ?? instance);
       if (localCheck.refused) {
         console.error(`${render.icons.error} ${localCheck.message}`);
         process.exit(1);
       }
 
+      // flair#2113: an invalid --cimd-allowed-hosts, or one for a Fabric
+      // instance, is refused here, before anything is asked for. An explicit empty
+      // value is refused too: it used to be dropped as if the flag were absent.
+      const cimdFlag = cimdAllowedHostsFromFlag(opts.cimdAllowedHosts, instance, Boolean(opts.fabric));
+      if (cimdFlag.error) {
+        console.error(`${render.icons.error} ${cimdFlag.error}`);
+        process.exit(1);
+      }
+
       const dryRun = Boolean(opts.dryRun);
-      // --instance is ALWAYS remote for this command (local is refused above)
-      // — isRemoteTarget=true so a missing --admin-pass/FLAIR_ADMIN_PASS never
-      // silently falls back to THIS machine's local ~/.flair/admin-pass file
-      // against someone else's instance (see resolveLocalAdminPass's doc comment).
       const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!dryRun && !adminPass) {
         console.error(
-          "Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target " +
-            "(the operations API on the target instance needs it for identity mapping + restart).\n" +
+          "Error: --admin-pass <pass> is required for a REMOTE target " +
+            "(the command authenticates to the target instance's operations API with it).\n" +
             "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
             "local admin credentials, and sending them to another instance is how a local secret ends up on someone " +
             "else's Harper. Pass the target's own admin password explicitly.",
@@ -809,10 +880,6 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      const cimdAllowedHosts: string[] | undefined = opts.cimdAllowedHosts
-        ? String(opts.cimdAllowedHosts).split(",").map((h: string) => h.trim()).filter(Boolean)
-        : undefined;
-
       const result = await enableMcp(
         {
           instance,
@@ -825,12 +892,12 @@ export function register(program: Command): void {
           principalKind: opts.principalKind,
           adminUser: resolveAdminUser(opts.adminUser),
           adminPass,
-          signingKeyFilePath: opts.signingKeyFile,
           secretsMechanism,
           secretsStagingPath: opts.secretsPath,
-          cimdAllowedHosts,
+          cimdAllowedHosts: cimdFlag.hosts,
           dryRun,
           confirmSecretsApplied: Boolean(opts.confirmSecretsApplied),
+          fabric: Boolean(opts.fabric),
         },
         { confirmPrompt: dryRun ? undefined : confirmYesNo },
       );
@@ -847,25 +914,25 @@ export function register(program: Command): void {
       }
       if (!result.ok) {
         if (result.failedStep === "fabric-operator-deploy") {
-          // flair#1136: Fabric deployments require the operator to deploy the
-          // config change — we can't write to harperdb-config.yaml (Fabric
-          // regenerates it on every container restart).
+          // flair#1136/#1152: on Fabric, `enable` never restarts the instance and
+          // needs no config edit (config.yaml ships mcp.enabled as an env
+          // reference). The operator addresses the cause the step reports (applying
+          // the environment and restarting when it says so); a re-run then passes
+          // this step once self-verify does (flair#2116).
+          // The step's own detail above carries the specifics.
           console.error(
             `\n${render.icons.info} ${render.wrap(render.c.bold, "Fabric deployment detected.")}`,
           );
           console.error(
-            `   The @harperfast/oauth block ships in your component config.yaml with mcp.enabled: false.`,
+            `   The /mcp OAuth surface did not pass self-verify on the public origin yet; the step above says why`,
           );
           console.error(
-            `   To activate: set mcp.enabled: true (literal boolean) in your deployed component`,
+            `   and what to do. Address that cause (restart the instance if its environment changed), then re-run`,
           );
           console.error(
-            `   config.yaml, ensure the staged secrets are live in the instance's process`,
+            `   \`flair mcp enable\` with the same options plus --confirm-secrets-applied: that step checks again`,
           );
-          console.error(
-            `   environment, and redeploy. Then re-run \`flair mcp enable\` — earlier steps`,
-          );
-          console.error(`   are idempotent and will be reused.\n`);
+          console.error(`   and passes once self-verify does.\n`);
         } else {
           console.error(`${render.icons.error} enable failed at step "${result.failedStep}" — see detail above for the exact fix, then re-run \`flair mcp enable\` (earlier steps are idempotent and will be reused).`);
         }
@@ -876,16 +943,14 @@ export function register(program: Command): void {
         return;
       }
 
-      console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "claude.ai can now connect.")}\n`);
-      console.log(result.pasteBlock ?? "");
-      console.log("");
+      for (const line of enableSuccessLines(result)) console.log(line);
     });
 
   mcp
     .command("disable")
     .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
     .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)")
-    .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
+    .option("--admin-pass <pass>", "Admin password for the remote target instance; pass it explicitly with --admin-pass")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-flag-off", "Confirm FLAIR_MCP_OAUTH is already unset on the target instance's environment (skips the interactive confirm)")
     .option("--json", "Print machine-readable JSON instead of a human summary")
@@ -899,7 +964,7 @@ export function register(program: Command): void {
       // comment in `mcp enable` above.
       const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
       if (!adminPass) {
-        console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required.");
+        console.error("Error: --admin-pass <pass> is required for a REMOTE target. Pass the target instance's admin password explicitly.");
         process.exit(1);
       }
 

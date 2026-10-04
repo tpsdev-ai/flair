@@ -3,6 +3,7 @@ import {
   classifyRecord,
   FEDERATION_SYNC_TABLES,
   PRINCIPAL_OWNING_TABLES,
+  inboundChangesExistingPrincipalStatus,
 } from "../../resources/federation-classify.js";
 
 // classifyRecord is the pure decision function extracted from FederationSync.post.
@@ -143,5 +144,38 @@ describe("classifyRecord — skip categorization", () => {
     expect([...knownTables].sort()).toEqual([...FEDERATION_SYNC_TABLES].sort());
     expect(PRINCIPAL_OWNING_TABLES.has("Memory")).toBe(true);
     expect(PRINCIPAL_OWNING_TABLES.has("Soul")).toBe(false);
+  });
+});
+
+describe("inboundChangesExistingPrincipalStatus (flair#2108)", () => {
+  const agentRecord = (status: unknown) => ({ table: "Agent", id: "a1", data: { id: "a1", status }, updatedAt: "x", originatorInstanceId: "p" });
+
+  test("is true when an Agent record's status differs from an existing row's", () => {
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("deactivated"), { id: "a1", status: "active" })).toBe(true);
+    // updatedAt is not compared: a record older than the stored row is also true.
+    const older = { ...agentRecord("deactivated"), updatedAt: "2000-01-01T00:00:00.000Z" };
+    expect(inboundChangesExistingPrincipalStatus(older, { id: "a1", status: "active", updatedAt: "2100-01-01T00:00:00.000Z" })).toBe(true);
+  });
+
+  test("is false when the status is unchanged or there is no local row", () => {
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("active"), { id: "a1", status: "active" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("deactivated"), null)).toBe(false);
+  });
+
+  test("is false when an absent status meets `active`, on either side", () => {
+    // A missing or undefined `status` is active (resources/agent-status-guard.ts).
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("active"), { id: "a1" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus(agentRecord(undefined), { id: "a1" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus(agentRecord(undefined), { id: "a1", status: "active" })).toBe(false);
+    expect(inboundChangesExistingPrincipalStatus({ table: "Agent", id: "a1", data: { id: "a1" }, updatedAt: "x", originatorInstanceId: "p" }, { id: "a1", status: "active" })).toBe(false);
+  });
+
+  test("is true when an absent status meets a value other than `active`", () => {
+    expect(inboundChangesExistingPrincipalStatus(agentRecord("inactive"), { id: "a1" })).toBe(true);
+    expect(inboundChangesExistingPrincipalStatus(agentRecord(undefined), { id: "a1", status: "inactive" })).toBe(true);
+  });
+
+  test("is false for any non-Agent table", () => {
+    expect(inboundChangesExistingPrincipalStatus({ table: "Memory", id: "m1", data: { status: "x" }, updatedAt: "x", originatorInstanceId: "p" }, { id: "m1", status: "y" })).toBe(false);
   });
 });
