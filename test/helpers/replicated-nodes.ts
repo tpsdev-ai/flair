@@ -33,7 +33,7 @@
  * teardown kills only the PIDs `startHarper` started (stopHarper). It never
  * touches production (localhost:9925/9926, ~/.flair). Callers invoke
  * `assertOwnedInstance` to check an instance is the loopback temp instance.
- * Every wait here is bounded by an explicit timeout.
+ * HTTP requests have explicit timeouts; polling deadlines are checked between predicate calls.
  *
  * Fixtures use neutral names (node-a/node-b, host-a/host-b) — never a real
  * fleet host or agent.
@@ -46,7 +46,6 @@ import { startHarper, stopHarper, type HarperInstance } from "./harper-lifecycle
 export const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const SHIPPED_CONFIG = join(REPO_ROOT, "config.yaml");
 
-/** Every wait in this harness is capped by an explicit timeout. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONVERGENCE_TIMEOUT_MS = 60_000;
 export const DEFAULT_POLL_INTERVAL_MS = 250;
@@ -94,7 +93,7 @@ async function ops(h: HarperInstance, op: Record<string, unknown>, timeoutMs = D
 export interface ReplicationSupport {
   /** True when the build implements replication (the fan-out op succeeds). */
   supported: boolean;
-  /** The exact observed error when unsupported; null when supported. */
+  /** The observed error excerpt when unsupported; null when supported. */
   error: string | null;
 }
 
@@ -105,15 +104,14 @@ export interface ReplicationSupport {
  * which routes through `server.replication.replicateOperation`), and reads the
  * result. Self-contained: the node and its temp dir are always torn down.
  *
- * A non-"not implemented" failure is reported as `supported: false` with the
- * exact error rather than assumed — an unverified capability must never read as
- * "available".
+ * Failures return `supported: false` with an observed error excerpt.
  */
 export async function probeReplicationSupport(opts: { timeoutMs?: number } = {}): Promise<ReplicationSupport> {
   const workDir = makeNodeWorkDir("flair-test-2208-probe-");
   let inst: HarperInstance | undefined;
   try {
-    inst = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+    inst = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
+    assertOwnedInstance(inst, "probe");
     const res = await ops(inst, { operation: "set_configuration", replicated: true, logging: { level: "info" } }, opts.timeoutMs);
     if (res.status === 200 && !/not implemented/i.test(res.body)) {
       return { supported: true, error: null };
@@ -146,12 +144,13 @@ export interface ReplicatedPair {
 export async function startReplicatedPair(opts: { mutateConfig?: (shipped: string) => string } = {}): Promise<ReplicatedPair> {
   const workDirA = makeNodeWorkDir("flair-test-2208-a-", opts.mutateConfig);
   const workDirB = makeNodeWorkDir("flair-test-2208-b-", opts.mutateConfig);
-  const a = await startHarper({ cwd: workDirA, harperBinDir: REPO_ROOT });
+  const a = await startHarper({ cwd: workDirA, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
   let b: HarperInstance | undefined;
   try {
     const aPeerPort = new URL(a.opsURL).port;
     b = await startHarper({
       cwd: workDirB,
+      multiWorkerUnsafe: false,
       harperBinDir: REPO_ROOT,
       appendRootConfigYaml: replicationRouteConfigYaml("node-b", "node-a", aPeerPort),
     });
@@ -186,20 +185,23 @@ export function assertOwnedInstance(inst: HarperInstance, label: string): void {
 }
 
 /**
- * Poll `predicate` every `intervalMs` until it returns true or `timeoutMs`
- * elapses (checked between predicate calls; one predicate call may run past the deadline). Throws a named
- * error on timeout. Returns the elapsed milliseconds on success.
+ * Poll until success or timeout; check the deadline between predicate calls.
+ * A predicate may run past the deadline. Return milliseconds since `startMs`
+ * (or polling start) on success.
  */
 export async function waitUntil(
   predicate: () => Promise<boolean> | boolean,
-  opts: { timeoutMs: number; intervalMs?: number; what: string },
+  opts: { timeoutMs: number; intervalMs?: number; startMs?: number; what: string },
 ): Promise<number> {
   const intervalMs = opts.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const start = Date.now();
+  const start = opts.startMs ?? Date.now();
   const deadline = start + opts.timeoutMs;
   for (;;) {
-    if (await predicate()) return Date.now() - start;
     if (Date.now() >= deadline) throw new Error(`${opts.what} did not become true within ${opts.timeoutMs}ms`);
+    const matched = await predicate();
+    const elapsed = Date.now() - start;
+    if (elapsed > opts.timeoutMs) throw new Error(`${opts.what} did not become true within ${opts.timeoutMs}ms`);
+    if (matched) return elapsed;
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 }

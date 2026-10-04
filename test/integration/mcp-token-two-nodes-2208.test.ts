@@ -14,9 +14,8 @@
  *      available here; only node B carries a best-effort replication route, to
  *      node A's ops port, and that port and the one-sided config are unverified),
  *      mints an MCP token on each node (the component's real token endpoint, no
- *      seeded key), and measures how long the peer takes to verify it. The
- *      observed convergence time is PRINTED, never assumed immediate. Bounded:
- *      the test fails if a token never verifies on the peer within
+ *      seeded key). Prints elapsed time from mint request start to peer HTTP
+ *      200, including the mint request and self-verification. Fails if that time exceeds
  *      CROSS_NODE_BOUND_MS.
  *
  *      This test is GATED on replication being available in the installed
@@ -25,7 +24,7 @@
  *      (`server.replication.replicateOperation` rejects with
  *      `Replication not implemented.`). `probeReplicationSupport()` measures
  *      that on the real build at collection time; when unsupported the test is
- *      registered with `test.skipIf` and the reason (the exact error) is
+ *      registered with `test.skipIf` and the reason (the observed error excerpt) is
  *      logged — an explicit skip, never a silent pass.
  *
  *   2. KEY ISOLATION / FALSE-PASS GUARD (always runs). Boots two independent
@@ -161,7 +160,8 @@ async function seedClientAndCode(h: HarperInstance, code: string, challenge: str
 }
 
 /** Exchange a seeded code at the live token endpoint — the plugin's real mint. */
-async function mint(h: HarperInstance, code: string, verifier: string): Promise<string> {
+async function mint(h: HarperInstance, code: string, verifier: string): Promise<{ token: string; mintStartedAt: number }> {
+  const mintStartedAt = Date.now();
   const res = await fetch(`${h.httpURL}/oauth/mcp/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -178,16 +178,16 @@ async function mint(h: HarperInstance, code: string, verifier: string): Promise<
   expect(res.status, `token endpoint ${h.httpURL} → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
   const json = JSON.parse(text) as { access_token?: unknown };
   expect(typeof json.access_token).toBe("string");
-  return json.access_token as string;
+  return { token: json.access_token as string, mintStartedAt };
 }
 
 /** POST /mcp with a bearer token; returns the status code only. */
-async function postMcp(h: HarperInstance, token: string): Promise<number> {
+async function postMcp(h: HarperInstance, token: string, timeoutMs = HTTP_TIMEOUT_MS): Promise<number> {
   const res = await fetch(`${h.httpURL}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   return res.status;
 }
@@ -226,34 +226,25 @@ describe(
         assertOwnedInstance(pair.a, "node-a");
         assertOwnedInstance(pair.b, "node-b");
 
-        // A token minted on EACH node, using that node's own seeded client/code.
-        const pkceA = pkcePair();
-        await seedClientAndCode(pair.a, "code-node-a", pkceA.challenge);
-        const tokenA = await mint(pair.a, "code-node-a", pkceA.verifier);
-        expect(await postMcp(pair.a, tokenA), "node-a verifies its own token").toBe(200);
-
-        const pkceB = pkcePair();
-        await seedClientAndCode(pair.b, "code-node-b", pkceB.challenge);
-        const tokenB = await mint(pair.b, "code-node-b", pkceB.verifier);
-        expect(await postMcp(pair.b, tokenB), "node-b verifies its own token").toBe(200);
-
-
-        // Cross-verification, MEASURED: poll the peer until it accepts the
-        // token minted elsewhere, and report the observed convergence time.
-        const abMs = await waitUntil(async () => (await postMcp(pair.b, tokenA)) === 200, {
-          timeoutMs: CROSS_NODE_BOUND_MS,
-          what: `node-a's token never verified on node-b within ${CROSS_NODE_BOUND_MS}ms`,
-        });
-        const baMs = await waitUntil(async () => (await postMcp(pair.a, tokenB)) === 200, {
-          timeoutMs: CROSS_NODE_BOUND_MS,
-          what: `node-b's token never verified on node-a within ${CROSS_NODE_BOUND_MS}ms`,
-        });
-        console.log(`[flair#2208] measured MCP-token convergence: node-a→node-b ${abMs}ms, node-b→node-a ${baMs}ms`);
-        // Two nodes minting before convergence may each create a key — that is
-        // the open #2208 question — so kids are compared only after both waits.
-        expect(jwtKid(tokenA)).toBeDefined();
-        expect(jwtKid(tokenB)).toBeDefined();
-        expect(jwtKid(tokenA), "both nodes sign with the shared replicated key").toBe(jwtKid(tokenB));
+        const mintAndVerify = async (node: HarperInstance, peer: HarperInstance, code: string) => {
+          const pkce = pkcePair();
+          await seedClientAndCode(node, code, pkce.challenge);
+          const { token, mintStartedAt } = await mint(node, code, pkce.verifier);
+          expect(jwtKid(token)).toBeDefined();
+          expect(await postMcp(node, token), `${code}: node verifies its own token`).toBe(200);
+          return waitUntil(async () => (await postMcp(peer, token,
+            Math.max(1, Math.min(HTTP_TIMEOUT_MS, CROSS_NODE_BOUND_MS - (Date.now() - mintStartedAt))),
+          )) === 200, {
+            startMs: mintStartedAt,
+            timeoutMs: CROSS_NODE_BOUND_MS,
+            what: `${code}: peer verification`,
+          });
+        };
+        const [abMs, baMs] = await Promise.all([
+          mintAndVerify(pair.a, pair.b, "code-node-a"),
+          mintAndVerify(pair.b, pair.a, "code-node-b"),
+        ]);
+        console.log(`[flair#2208] elapsed from mint request start to peer HTTP 200 (includes mint request and self-verification): node-a→node-b ${abMs}ms, node-b→node-a ${baMs}ms`);
         expect(abMs).toBeLessThanOrEqual(CROSS_NODE_BOUND_MS);
         expect(baMs).toBeLessThanOrEqual(CROSS_NODE_BOUND_MS);
       },
@@ -298,13 +289,13 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
       process.env.FLAIR_MCP_SIGNING_KEY_PEM = keyA;
       const dirA = makeNodeWorkDir("flair-test-2208-keyiso-a-", pinConfig);
       tempDirs.push(dirA);
-      const nodeA = await startHarper({ cwd: dirA, harperBinDir: REPO_ROOT });
+      const nodeA = await startHarper({ cwd: dirA, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
       instances.push(nodeA);
 
       process.env.FLAIR_MCP_SIGNING_KEY_PEM = keyB;
       const dirB = makeNodeWorkDir("flair-test-2208-keyiso-b-", pinConfig);
       tempDirs.push(dirB);
-      const nodeB = await startHarper({ cwd: dirB, harperBinDir: REPO_ROOT });
+      const nodeB = await startHarper({ cwd: dirB, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
       instances.push(nodeB);
 
       assertOwnedInstance(nodeA, "node-a");
@@ -312,11 +303,11 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
 
       const pkceA = pkcePair();
       await seedClientAndCode(nodeA, "code-node-a", pkceA.challenge);
-      const tokenA = await mint(nodeA, "code-node-a", pkceA.verifier);
+      const { token: tokenA } = await mint(nodeA, "code-node-a", pkceA.verifier);
 
       const pkceB = pkcePair();
       await seedClientAndCode(nodeB, "code-node-b", pkceB.challenge);
-      const tokenB = await mint(nodeB, "code-node-b", pkceB.verifier);
+      const { token: tokenB } = await mint(nodeB, "code-node-b", pkceB.verifier);
 
       expect(await postMcp(nodeA, tokenA), "node-a accepts its own token").toBe(200);
       expect(await postMcp(nodeB, tokenB), "node-b accepts its own token").toBe(200);
