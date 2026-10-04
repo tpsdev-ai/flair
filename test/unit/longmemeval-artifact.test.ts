@@ -1,7 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { tempDir } from "../helpers/temp-dir.ts";
 import {
   buildArtifact, verifyArtifactHash, writeArtifact, hashRunResults, hashedContent, PROVENANCE_KEYS,
 } from "../bench/longmemeval/artifact";
@@ -64,7 +63,7 @@ describe("artifact — content addressing", () => {
 
   test("verifyArtifactHash round-trips a written artifact", () => {
     const art = buildArtifact(baseInput());
-    const path = writeArtifact(art, join(tmpdir(), "lme-artifact-test"));
+    const path = writeArtifact(art, tempDir("flair-lme-artifact-test-"));
     const written = JSON.parse(readFileSync(path, "utf8"));
     expect(verifyArtifactHash(written)).toBe(true);
   });
@@ -212,7 +211,7 @@ describe("reader-determinism probe — unhashed provenance (#1368)", () => {
     // a field that does not survive serialisation, and the probe record is the
     // newest thing in the file.
     const art = buildArtifact({ ...baseInput(), readerDeterminism: probeFixture() });
-    const path = writeArtifact(art, join(tmpdir(), "lme-artifact-test-1368"));
+    const path = writeArtifact(art, tempDir("flair-lme-artifact-test-1368-"));
     const written = JSON.parse(readFileSync(path, "utf8"));
     expect(written.readerDeterminism.questionIds).toEqual(["001be529", "00ca467f"]);
     expect(written.readerDeterminism.perQuestion[0].distinctCompletions).toBe(3);

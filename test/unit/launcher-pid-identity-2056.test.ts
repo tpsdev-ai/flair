@@ -12,7 +12,7 @@
 // the LIMITATION tests below pin that. A flair#1454 sidecar (flair-daemon.json)
 // is not required — a pre-sidecar instance, or the instance launchd starts, has
 // none — but it disagrees when it names a different pid, or a startTimeMs more
-// than 2000 ms from the process's start second (ps reports whole seconds), and
+// than 2000 ms from the process's start second (ps on macOS; /proc on Linux), and
 // then the launcher does not refuse and the pid is not used as PID-file
 // evidence. When the pid is not used, resolveInstanceServingPid returns the
 // first process listening on the port, if any. The Harper-shaped processes
@@ -31,6 +31,7 @@ import { spawnSync } from "node:child_process";
 import { connect, createServer } from "node:net";
 import { readProcessStartSecondMs, readProcessStartTimeMs } from "../../src/lib/process-start-time.js";
 import { isHarperProcessCommandLine, sidecarStartAgrees } from "../../src/lib/daemon-liveness.js";
+import { defaultReadProcessCmdline } from "../../src/lib/upgrade-exec-path.js";
 import { resolveInstanceServingPid } from "../../src/cli.ts";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
@@ -138,10 +139,12 @@ function psLstartSecond(pid: number): number {
   return sec;
 }
 
-/** The pid's start second as the TS check reads it (readProcessStartSecondMs). */
+/** The pid's start second from the same reader resolveInstanceServingPid uses. */
 function tsStartSecondMs(pid: number): number {
   const ms = readProcessStartSecondMs(pid);
+  expect(ms).not.toBeNull();
   if (ms === null) throw new Error(`could not read the start second of pid ${pid}`);
+  expect(ms % 1000).toBe(0);
   return ms;
 }
 
@@ -195,6 +198,16 @@ async function waitStarted(pid: number): Promise<number> {
     await Bun.sleep(20);
   }
   throw new Error(`pid ${pid} did not start with a readable start time`);
+}
+
+/** Wait for the Harper entry argv that the resolver will inspect. */
+async function waitHarperCommand(pid: number): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    const command = defaultReadProcessCmdline(pid);
+    if (command !== null && isHarperProcessCommandLine(command)) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`pid ${pid} did not expose a Harper-shaped command line`);
 }
 
 /** The refusal line the launcher prints for `pid`. */
@@ -305,6 +318,15 @@ describe("sidecarStartAgrees — within 2000 ms of the start second, in millisec
     const pid = startSleep();
     await waitStarted(pid);
     expect(tsStartSecondMs(pid)).toBe(psLstartSecond(pid) * 1000);
+  }, 30_000);
+
+  test.skipIf(process.platform !== "linux")("Linux: the reader agrees with ps and remains stable across a wall-clock second", async () => {
+    const pid = startSleep();
+    await waitStarted(pid);
+    const startSecondMs = tsStartSecondMs(pid);
+    expect(startSecondMs).toBe(psLstartSecond(pid) * 1000);
+    await Bun.sleep(1_050 - (Date.now() % 1_000));
+    expect(tsStartSecondMs(pid)).toBe(startSecondMs);
   }, 30_000);
 });
 
@@ -484,15 +506,41 @@ describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only whe
     const root = mkRoot();
     const pid = startHarperEntry(root);
     await waitStarted(pid);
+    await waitHarperCommand(pid);
     writeSidecar(root, pid, tsStartSecondMs(pid));
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     expect(resolveInstanceServingPid(root, await freePort())).toBe(pid);
+  }, 30_000);
+
+  test("unknown start second leaves a matching sidecar unconfirmed", () => {
+    const root = mkRoot();
+    // Inject a Harper-shaped command line so the time result is decisive.
+    writeSidecar(root, process.pid, Date.now());
+    writeFileSync(join(root, "hdb.pid"), `${process.pid}\n`);
+    let startReads = 0;
+    const deps = {
+      findListeningPids: () => [],
+      readCmdline: () => "node /opt/node_modules/harper/dist/bin/harper.js run .",
+    };
+    expect(resolveInstanceServingPid(root, 9926, {
+      ...deps,
+      readStartSecondMs: () => Math.floor(Date.now() / 1000) * 1000,
+    })).toBe(process.pid);
+    expect(resolveInstanceServingPid(root, 9926, {
+      ...deps,
+      readStartSecondMs: () => {
+        startReads++;
+        return null;
+      },
+    })).toBeNull();
+    expect(startReads).toBe(1);
   }, 30_000);
 
   test("a Harper-shaped stub with NO sidecar is returned", async () => {
     const root = mkRoot();
     const pid = startHarperEntry(root);
     await waitStarted(pid);
+    await waitHarperCommand(pid);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     expect(resolveInstanceServingPid(root, await freePort())).toBe(pid);
   }, 30_000);
@@ -501,6 +549,7 @@ describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only whe
     const root = mkRoot();
     const pid = startHarperEntry(root);
     await waitStarted(pid);
+    await waitHarperCommand(pid);
     writeSidecar(root, pid + 1, Date.now());
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     expect(resolveInstanceServingPid(root, await freePort())).toBeNull();
@@ -510,6 +559,7 @@ describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only whe
     const root = mkRoot();
     const pid = startHarperEntry(root);
     await waitStarted(pid);
+    await waitHarperCommand(pid);
     writeSidecar(root, pid, tsStartSecondMs(pid) + 60_000);
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     expect(resolveInstanceServingPid(root, await freePort())).toBeNull();
@@ -520,7 +570,9 @@ describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only whe
       const root = mkRoot();
       const pid = startHarperEntry(root);
       await waitStarted(pid);
-      writeSidecar(root, pid, tsStartSecondMs(pid) + offsetMs);
+      await waitHarperCommand(pid);
+      const startSecondMs = tsStartSecondMs(pid);
+      writeSidecar(root, pid, startSecondMs + offsetMs);
       writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
       expect(resolveInstanceServingPid(root, await freePort())).toBe(agrees ? pid : null);
     }, 30_000);

@@ -14,7 +14,7 @@ Agents sign every request to Flair with this key. Flair refuses unsigned request
 **This is the only secret material Flair manages.** Lose the key file and the agent is locked out (`flair agent rotate-key <id>` to issue a new pair).
 
 ## Flair admin password (Harper instance)
-- If not provided via `--admin-pass`, `--admin-pass-file`, `FLAIR_ADMIN_PASS`, or `HDB_ADMIN_PASSWORD`, a random password is generated and written to `~/.flair/admin-pass` (mode `0o600`). The password is **not** printed to the console.
+- Fresh local `flair init` writes the supplied or generated admin password to `~/.flair/admin-pass` (mode `0o600`).
 - The `--admin-pass-file <path>` option allows reading the password from a file (for pre-staged secrets).
 - The `--admin-pass <pass>` option is deprecated due to shell history exposure; use `--admin-pass-file` or environment variables instead. A warning is printed when this option is used.
 - Environment variables `FLAIR_ADMIN_PASS` and `HDB_ADMIN_PASSWORD` are also supported.
@@ -143,6 +143,15 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 - **`chmod 600` enforced** by `flair agent add`. Don't relax it.
 - **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate-key <id>`).
 - **Backup separately**, encrypted. The `flair backup` command excludes private keys by default. Roll your own backup of `~/.flair/keys/` via age-encrypted archive if you want offsite recovery.
+
+## Key cleanup
+
+`flair keys prune` reports node-shaped files (`flair_<hex8>.key` without `.pub`)
+as orphan candidates when absent from the ops Instance and Agent tables, after
+the sole ops Instance id matches the HTTP target's `HealthDetail.federation.instance.id`.
+An unavailable identity match or unreadable rows leave files unidentified.
+`--apply` leaves all node-shaped seeds in place: ownership cannot be proven from one target's tables;
+removal needs per-file ownership proof ([#2200](https://github.com/tpsdev-ai/flair/issues/2200)).
 
 ## What about a `flair secret` CLI?
 

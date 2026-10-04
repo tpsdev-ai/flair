@@ -276,8 +276,9 @@ export function isStartTimeMatch(actualMs: number, recordedMs: number, tolerance
 /**
  * Does a flair#1454 sidecar's `startTimeMs` agree with a process's start
  * second (flair#2056)? `startSecondMs` is the start time truncated to a whole
- * second, in epoch ms (the second `ps -o lstart=` reports). They agree when
- * they are within 2000 ms of each other, compared in milliseconds: a start
+ * second, in epoch ms. macOS reads the second `ps -o lstart=` reports; Linux
+ * derives it from `/proc` with a verified tick rate. They agree when they are
+ * within 2000 ms of each other, compared in milliseconds: a start
  * second of 12 s against a sidecar of 14.5 s is 2500 ms and does not agree.
  */
 export function sidecarStartAgrees(startSecondMs: number, sidecarStartMs: number): boolean {
@@ -342,7 +343,7 @@ export function procStartTimeToEpochMs(
   starttimeTicks: number,
   uptimeSeconds: number,
   nowMs: number,
-  clkTck = 100,
+  clkTck: number,
 ): number {
   const bootTimeMs = nowMs - uptimeSeconds * 1000;
   return bootTimeMs + (starttimeTicks / clkTck) * 1000;

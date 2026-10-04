@@ -94,4 +94,12 @@ Anything ineligible (no scope tag, flagged content, already decided) is left pen
 
 Durability is owner-controlled, including `permanent`: owners may create, change, archive and delete their own memories at every tier. Administrators may delete any owner’s memory. The permanent tier controls retention and bootstrap priority; it does not prevent an explicit owner deletion.
 
+What each tier actually guarantees:
+
+- permanent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it); it never decays; bootstrap considers the bootstrapping agent's own permanent memories before recent rows, subject to scope, expiry/closure and the token budget.
+- persistent — routine maintenance never reaps or age-archives it (an expired validTo archives an eligible row; an acquired expiresAt never reaps it).
+- standard — routine maintenance archives it once its validTo passes or, as a session note, after 30 days.
+- ephemeral — routine maintenance reaps it once its TTL (24h by default) passes.
+- No tier adds a flush, fsync, backup or replica acknowledgement: an explicit delete (owner or admin) or a store failure can end any of them.
+
 Soul is operator-authored identity, not a promotion target for learned candidates. `flair rem promote --to soul` is refused for stored candidate text even with operator credentials; promote learned claims to Memory instead.

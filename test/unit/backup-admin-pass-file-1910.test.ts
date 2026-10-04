@@ -28,10 +28,17 @@ beforeEach(() => {
   requests = [];
   server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
       requests.push({ path: url.pathname, auth: req.headers.get("authorization") ?? "" });
-      if (url.pathname === "/Agent/") return Response.json([]);
+      if (req.method === "POST") {
+        const body = await req.json().catch(() => ({})) as { operation?: string; exact_count?: boolean };
+        if (body.operation === "describe_table") {
+          if (body.exact_count !== true) return Response.json({ error: "exact_count must be true" }, { status: 400 });
+          return Response.json({ record_count: 0 });
+        }
+        return Response.json([]);
+      }
       return Response.json([]);
     },
   });
@@ -44,10 +51,11 @@ afterEach(() => {
 
 async function runCli(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  for (const key of ["FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD", "FLAIR_URL", "FLAIR_TARGET", "FLAIR_AGENT_ID", "FLAIR_TOKEN", "FLAIR_ADMIN_USER"]) {
+  for (const key of ["FLAIR_ADMIN_PASS", "FLAIR_OPS_TARGET", "HDB_ADMIN_PASSWORD", "FLAIR_URL", "FLAIR_TARGET", "FLAIR_AGENT_ID", "FLAIR_TOKEN", "FLAIR_ADMIN_USER"]) {
     delete env[key];
   }
   env.HOME = dir;
+  env.FLAIR_OPS_TARGET = `http://127.0.0.1:${server.port}`;
   const proc = Bun.spawn(["bun", cliPath, ...args], { env, stdout: "pipe", stderr: "pipe" });
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();

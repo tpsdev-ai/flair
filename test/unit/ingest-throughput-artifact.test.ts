@@ -5,9 +5,8 @@
  * (quietBox is provenance, ranking is content).
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { tempDir } from "../helpers/temp-dir.ts";
 import {
   buildArtifact, verifyArtifactHash, writeArtifact, hashRunResults, hashedContent, PROVENANCE_KEYS,
   aggregate,
@@ -137,7 +136,7 @@ describe("ingest-throughput artifact v2", () => {
 
   test("write + verify round-trip", () => {
     const art = buildArtifact(baseInput());
-    const dir = mkdtempSync(join(tmpdir(), "ingest-art-"));
+    const dir = tempDir("flair-ingest-art-");
     const path = writeArtifact(art, dir);
     const written = JSON.parse(readFileSync(path, "utf8"));
     expect(verifyArtifactHash(written)).toBe(true);

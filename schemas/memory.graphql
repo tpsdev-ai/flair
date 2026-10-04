@@ -140,6 +140,7 @@ type Memory @table(database: "flair") {
                                # that producer is a follow-up); additive/nullable, existing rows carry no
                                # entities, readers tolerate absent (same pattern as Presence.activityUpdatedAt).
                                # See docs/entity-vocabulary.md.
+  skillSubjectId: String @indexed  # Nullable, server-owned skill subject.
 }
 
 # Explicit entity-to-entity relationships with temporal validity.
@@ -413,4 +414,30 @@ type OrgSkillAssignmentHistory @table(database: "flair") {
   sourceClass: String!             # operator | internal
   previousHash: String             # sha256 of the stored row before the write; null on create
   at: String!
+}
+
+# InstructionVersion — single-row Soul and skill write history; Soul collection deletes are refused.
+# REST mutation verbs are refused; reads authorize soul and skill subjects.
+# The administrator operations API is an unaudited exception.
+type InstructionVersion @table(database: "flair") @export {
+  id: ID @primaryKey              # encodes subjectType + subjectId + version
+  subjectType: String! @indexed   # soul | skill
+  subjectId: String! @indexed     # canonical subject (soul: agentId:key)
+  agentId: String! @indexed       # owner
+  key: String                     # Soul key
+  version: BigInt!                # positive per-subject sequence
+  kind: String!                   # create | update | delete
+  rowId: ID!                      # affected physical row
+  valueHash: String               # sha256 of the value bytes; null on delete
+  previousVersionHash: String     # preceding record digest; null on the first record
+  recordHash: String!             # record digest over every other field
+  soulSnapshot: String            # serialized Soul state including its value
+  memoryId: ID                    # skill-version Memory reference
+  visibility: String              # retained skill read-scope metadata
+  actorKind: String!              # operator | agent | internal | instance
+  actorId: String                 # verified identity; null for unattributed internal calls
+  sourceClass: String!            # operator | internal | agent | federation | seed
+  createdAt: String!              # server ISO timestamp
+  guarded: Boolean!               # whether expectedVersion was compared
+  expectedVersion: ID             # the compared head; null on an unguarded write
 }
