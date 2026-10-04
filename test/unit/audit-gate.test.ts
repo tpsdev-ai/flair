@@ -153,14 +153,21 @@ describe("the committed allowlist", () => {
     // These are the advisories the npm-install observation surfaces that `bun
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
     // sources ["npm-install"] so the gate knows they are fixed for bun only.
-    // joi joined this class when the root override moved bun.lock off 17.13.4.
-    const npmOnly = ALLOWLIST.entries.filter((e) => ["fastify", "joi"].includes(e.package));
-    // Name the joi entries: a non-empty check alone could be satisfied by the
-    // fastify entries while the joi entries had gone missing.
-    expect(npmOnly.filter((e) => e.package === "joi").map((e) => e.ghsa).sort()).toEqual([
-      "GHSA-6h2x-m376-mqjq",
-      "GHSA-6w3j-5fw6-r9vr",
-      "GHSA-gg4h-3hg2-grpc",
+    // harper 5.3.x's shrinkwrap cleared the fastify, joi and moment entries
+    // from this class; the fast-uri ones remain.
+    const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fast-uri");
+    // Name the fast-uri entries: a non-empty check alone could be satisfied by
+    // another package's entries while fast-uri's had gone missing.
+    expect(npmOnly.map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-4c8g-83qw-93j6",
+      "GHSA-7p8r-x3mc-p8w7",
+      "GHSA-f65p-4m7j-42xc",
+      "GHSA-hrr3-gc8f-f4qj",
+      "GHSA-jqff-g426-hqxp",
+      "GHSA-q3j6-qgpj-74h6",
+      "GHSA-qw65-cvwx-89v3",
+      "GHSA-v2hh-gcrm-f6hx",
+      "GHSA-v39h-62p7-jpjc",
     ]);
     for (const e of npmOnly) {
       expect(e.sources).toEqual(["npm-install"]);
