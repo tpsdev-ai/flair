@@ -1,86 +1,146 @@
-/**
- * stale-sidecar-launchd-2075.test.ts — flair#2075 item 3.
- *
- * On a launchd install, `flair stop` returned from the launchd branch after
- * `launchctl unload`, before the port-based block that drops a stale identity
- * sidecar. So the #2055 leftover could still occur there. The launchd leg now
- * waits for the instance's recorded pid to exit, then runs the same
- * confirmed-dead cleanup the direct leg runs.
- *
- * Darwin-gated (the branch is `process.platform === "darwin"`). `launchctl` is
- * a shim on PATH that answers `unload` with exit 0 — no real launchd domain is
- * touched; HOME is a throwaway dir. The scratch tree is under a short root
- * (flair#2075 item 1) and the socket path is asserted to fit.
- */
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+/** Launchd stop verifies exit before attempting confirmed-dead sidecar cleanup. */
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { launchdLabel, launchdPlistPath } from "../../src/cli.ts";
-import { socketPathLimit } from "../../src/lib/socket-path-limit.ts";
 
-const isDarwin = process.platform === "darwin";
-const SHORT_ROOT = "/tmp";
-const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
-const repoRoot = join(import.meta.dirname, "..", "..");
+const repoRoot = resolve(import.meta.dirname, "../..");
 
-describe("flair#2075 item 3 — the launchd stop leg drops a leftover sidecar", () => {
-  let tmpHome: string;
+describe("launchd stop exit verification", () => {
+  let home: string;
   let dataDir: string;
   let shimBin: string;
-  let label: string;
-  let plistPath: string;
   let sidecar: string;
+  let child: ReturnType<typeof Bun.spawn> | undefined;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(SHORT_ROOT, "f2075l-"));
-    dataDir = join(tmpHome, ".flair", "data");
+    home = mkdtempSync(join(tmpdir(), "f2075-"));
+    dataDir = join(home, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
-    const agentsDir = join(tmpHome, "Library", "LaunchAgents");
+    const agentsDir = join(home, "Library", "LaunchAgents");
     mkdirSync(agentsDir, { recursive: true });
-    label = launchdLabel(dataDir);
-    plistPath = launchdPlistPath(label, agentsDir);
-    writeFileSync(plistPath, "<plist/>");
+    writeFileSync(launchdPlistPath(launchdLabel(dataDir), agentsDir), "<plist/>");
     sidecar = join(dataDir, "flair-daemon.json");
-    shimBin = mkdtempSync(join(SHORT_ROOT, "f2075s-"));
-    writeFileSync(join(shimBin, "launchctl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    expect(Buffer.byteLength(join(dataDir, "operations-server"), "utf8")).toBeLessThanOrEqual(socketPathLimit(process.platform));
+    shimBin = join(home, "bin");
+    mkdirSync(shimBin);
   });
 
-  afterEach(() => {
-    rmSync(tmpHome, { recursive: true, force: true });
-    rmSync(shimBin, { recursive: true, force: true });
-  });
-
-  async function confirmedDeadPid(): Promise<number> {
-    const p = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
-    const pid = (p as unknown as { pid: number }).pid;
-    await p.exited;
-    for (let i = 0; i < 100; i++) {
-      try { process.kill(pid, 0); } catch (err) {
-        if ((err as NodeJS.ErrnoException)?.code === "ESRCH") return pid;
-      }
-      await new Promise((r) => setTimeout(r, 20));
+  afterEach(async () => {
+    if (child) {
+      child.kill("SIGKILL");
+      await child.exited;
+      child = undefined;
     }
-    throw new Error(`pid ${pid} never reported ESRCH`);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  async function liveHarperHandler(mode: "delayed" | "stays"): Promise<number> {
+    const fixture = join(home, "handler.cjs");
+    writeFileSync(fixture, `
+const fs = require('node:fs');
+const path = require('node:path');
+const env = require(path.join(process.env.HARPER_TEST_ROOT, 'utility/environment/environmentManager.js'));
+const run = require(path.join(process.env.HARPER_TEST_ROOT, 'bin/run.js'));
+env.setProperty('ROOTPATH', process.env.ROOTPATH);
+run.addExitListeners();
+const exit = process.exit.bind(process);
+process.exit = () => {
+  fs.writeFileSync(process.env.REMOVED, String(!fs.existsSync(process.env.PIDFILE)));
+  ${mode === "delayed" ? "setTimeout(() => exit(0), 350);" : ""}
+};
+fs.writeFileSync(process.env.PIDFILE, String(process.pid));
+fs.writeFileSync(process.env.READY, 'ready');
+setInterval(() => {}, 1000);
+`);
+    child = Bun.spawn(["node", fixture], {
+      env: { ...process.env, HARPER_TEST_ROOT: join(repoRoot, "node_modules/harper/dist"), ROOTPATH: dataDir,
+        REMOVED: join(home, "removed"), PIDFILE: join(dataDir, "hdb.pid"), READY: join(home, "ready") },
+      stdout: "ignore", stderr: "pipe",
+    });
+    const deadline = Date.now() + 5000;
+    while (!existsSync(join(home, "ready")) && Date.now() < deadline && child.exitCode === null) await Bun.sleep(10);
+    if (!existsSync(join(home, "ready"))) throw new Error("Harper handler did not become ready");
+    process.kill(child.pid, 0);
+    writeFileSync(sidecar, JSON.stringify({ pid: child.pid, startTimeMs: Date.now(), port: 9, flairVersion: "test" }));
+    return child.pid;
   }
 
-  test.skipIf(!isDarwin)("the launchd unload leg drops a sidecar naming a confirmed-dead pid", async () => {
-    const dead = await confirmedDeadPid();
-    writeFileSync(join(dataDir, "hdb.pid"), `${dead}\n`);
-    writeFileSync(sidecar, JSON.stringify({ pid: dead, startTimeMs: Date.now() - 3_600_000, port: 9, flairVersion: "0.57.0" }));
-
-    const proc = Bun.spawn(["bun", cliPath, "stop"], {
-      cwd: repoRoot,
-      timeout: 20_000,
-      env: { ...(process.env as Record<string, string>), HOME: tmpHome, PATH: `${shimBin}:${process.env.PATH ?? ""}` },
-      stdout: "pipe",
-      stderr: "pipe",
+  async function stop(pid: number, unloadFails = false, accelerated = false) {
+    writeFileSync(join(shimBin, "launchctl"), unloadFails ? "#!/bin/sh\nexit 7\n" : `#!/bin/sh\nkill -TERM ${pid}\n`, { mode: 0o755 });
+    const runner = join(home, "stop.ts");
+    writeFileSync(runner, `
+const { program } = await import(${JSON.stringify(join(repoRoot, "src/cli.ts"))});
+Object.defineProperty(process, 'platform', { value: 'darwin' });
+${accelerated ? `
+const started = Date.now();
+let elapsed = 0;
+Date.now = () => started + elapsed;
+const timeout = globalThis.setTimeout;
+globalThis.setTimeout = ((fn, ms, ...args) => ms === 500
+  ? timeout(() => { elapsed += ms; fn(...args); }, 1)
+  : timeout(fn, ms, ...args));` : ""}
+await program.parseAsync(['bun', 'flair', 'stop']);
+`);
+    const proc = Bun.spawn(["bun", runner], {
+      cwd: repoRoot, timeout: 10_000,
+      env: { ...process.env, HOME: home, PATH: `${shimBin}:${process.env.PATH ?? ""}` },
+      stdout: "pipe", stderr: "pipe",
     });
-    const out = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text());
-    await proc.exited;
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+    ]);
+    return { out: stdout + stderr, code };
+  }
 
-    expect(out).toMatch(/launchd service unloaded/i);
-    // THE ASSERTION: the launchd leg dropped the leftover.
+  test("delayed exit after unload removes the sidecar after the recorded process exits", async () => {
+    const pid = await liveHarperHandler("delayed");
+    const result = await stop(pid);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("Flair stopped (launchd service unloaded)");
+    expect(readFileSync(join(home, "removed"), "utf8")).toBe("true");
+    expect(existsSync(join(dataDir, "hdb.pid"))).toBe(false);
+    expect(child?.exitCode).toBe(0);
     expect(existsSync(sidecar)).toBe(false);
-  }, 30_000);
+  }, 20_000);
+
+  test("unconfirmed exit reports a named failure and keeps the sidecar", async () => {
+    const pid = await liveHarperHandler("stays");
+    const result = await stop(pid, false, true);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`flair stop: launchd stop failed for ${dataDir} (pid ${pid})`);
+    expect(result.out).toContain(`Process ${pid} did not exit within 60000ms`);
+    expect(result.out).toContain("Fix: flair doctor --fix");
+    expect(result.out).not.toContain("Flair stopped");
+    expect(readFileSync(join(home, "removed"), "utf8")).toBe("true");
+    process.kill(pid, 0);
+    expect(existsSync(sidecar)).toBe(true);
+  }, 20_000);
+
+  test("unload failure reports a named failure and keeps the sidecar", async () => {
+    const pid = await liveHarperHandler("stays");
+    const result = await stop(pid, true);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`flair stop: launchd stop failed for ${dataDir} (pid ${pid})`);
+    expect(result.out).toContain("Fix: flair doctor --fix");
+    expect(result.out).not.toContain("Flair stopped");
+    expect(existsSync(join(home, "removed"))).toBe(false);
+    process.kill(pid, 0);
+    expect(existsSync(sidecar)).toBe(true);
+  }, 20_000);
+
+  for (const recorded of [null, "invalid"]) {
+    test(`unreadable recorded PID (${recorded ?? "missing"}) refuses before unloading`, async () => {
+      const pid = await liveHarperHandler("stays");
+      if (recorded === null) rmSync(join(dataDir, "hdb.pid"));
+      else writeFileSync(join(dataDir, "hdb.pid"), recorded);
+      const result = await stop(pid);
+      expect(result.code).toBe(1);
+      expect(result.out).toContain("(pid unknown)");
+      expect(result.out).toContain("Fix: flair doctor --fix");
+      expect(result.out).not.toContain("Flair stopped");
+      expect(existsSync(join(home, "removed"))).toBe(false);
+      expect(existsSync(sidecar)).toBe(true);
+    }, 20_000);
+  }
 });

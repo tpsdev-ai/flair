@@ -24,14 +24,7 @@ import { join } from "node:path";
 import { gatherDaemonEvidence, readSidecar } from "../../src/cli.ts";
 import { socketPathLimit } from "../../src/lib/socket-path-limit.ts";
 
-/**
- * A SHORT scratch root (flair#2075 item 1). Under macOS's default tmpdir()
- * (/var/folders/…/T) `<dataDir>/operations-server` came out at 110 bytes, over
- * the 103-byte sun_path cap, so `flair restart` refused BEFORE its stop leg and
- * the case failed. /tmp with a short prefix keeps the socket path well inside
- * the limit on every platform.
- */
-const SHORT_ROOT = "/tmp";
+const SHORT_ROOT = process.env.FLAIR_UNIT_TEMP_ROOT ?? "/tmp";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 const repoRoot = join(import.meta.dirname, "..", "..");
