@@ -93,3 +93,18 @@ export async function refuseReservedSeedWrite(table: string, ids: unknown[], con
   if (!ids.some((id) => isReservedSeedId(table, id))) return null;
   return reservedSeedWriteDenial(table, ids, context, await resolveAgentAuth(context));
 }
+
+/**
+ * The feed ingest's reserved-id decision (flair#2263): it refuses a reserved
+ * seed id outright — the operator source included — because the seed command
+ * (`flair init`) writes that row through `PUT /Memory/<id>`. The refusal names
+ * the seed command; `soulWriteSource` never exempts it.
+ */
+export function reservedSeedFeedWriteDenial(table: string, ids: unknown[]): Response | null {
+  const reserved = ids.find((id) => isReservedSeedId(table, id));
+  if (reserved === undefined) return null;
+  return FORBIDDEN(
+    `seed_id_reserved: ${table} ${JSON.stringify(String(reserved))} is written by the flair init seed; ` +
+      "the feed ingest does not write it",
+  );
+}

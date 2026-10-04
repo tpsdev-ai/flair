@@ -16,7 +16,7 @@ import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./mem
 import { buildProvenance } from "./provenance.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
-import { reservedSeedWriteDenial } from "./seed-reservation.js";
+import { reservedSeedFeedWriteDenial } from "./seed-reservation.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -34,9 +34,10 @@ export class FeedMemories extends Resource {
       return UNAUTH();
     }
 
-    // flair#2141 S2: check a body id against the operator-source seed
-    // reservation (resources/seed-reservation.ts).
-    const seedDenial = reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth);
+    // flair#2141 S2 / flair#2263: a reserved seed id is never written through
+    // the feed — not even as the operator. The seed command writes that row
+    // (PUT /Memory/<id>); the refusal names it.
+    const seedDenial = reservedSeedFeedWriteDenial("Memory", [content?.id, content?.supersedes]);
     if (seedDenial) return seedDenial;
 
     // No-forge attribution: use the kit's stampAttribution to stamp agentId
