@@ -12,6 +12,14 @@ const CLI = pathToFileURL(join(import.meta.dir, "../../src/cli.ts")).href;
 const sources = ["inline", "file", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD"] as const;
 const password = "fixture-explicit-admin-password";
 
+/** Mark `dataDir` as an already-installed instance so an `init --skip-start`
+ * fixture does not run Harper's installer (flair#2197). These cases exercise the
+ * admin-credential decision, not installation, and the installer needs Node —
+ * not this bun-hosted, offline, umask-varying fixture. */
+function markInstalled(dataDir: string): void {
+  writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
+}
+
 function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false, options: { umask?: number; columns?: string } = {}) {
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|TPS_TEST_ROOT$|ROOTPATH$)/.test(key),
@@ -62,6 +70,7 @@ describe("fresh init persists explicit admin credentials", () => {
         const passPath = join(home, ".flair", "admin-pass");
         mkdirSync(join(home, ".flair"));
         symlinkSync(dataDir, join(home, ".flair", "data"));
+        markInstalled(dataDir);
         expect(detectPersistedAdminUser(dataDir)).toBe(false);
         const result = runInit(home, dataDir, source, platform);
         expect(result.error).toBeUndefined();
@@ -198,6 +207,7 @@ describe("admin credential persistence refuses unassessed stores", () => {
       const dataDir = tempDir("d-");
       mkdirSync(join(home, ".flair"));
       symlinkSync(dataDir, join(home, ".flair", "data"));
+      markInstalled(dataDir);
       const result = runInit(home, dataDir, "inline", "linux", false, { umask });
       expect(result.status, result.stdout + result.stderr).toBe(0);
       const path = join(home, ".flair", "admin-pass");
