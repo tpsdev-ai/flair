@@ -12,7 +12,7 @@
  * The fix is a classifier with FIVE states, not a boolean:
  *
  *   RUNNING       identity-verified pid alive  +  flair-identified /Health 2xx
- *   NOT_RUNNING   no pidfile, or verified dead  +  port refused
+ *   NOT_RUNNING   no live recorded/last-known pid  +  port refused
  *   WEDGED        identity-VERIFIED pid alive   +  not serving   -> stop ACTS
  *   DISAGREEMENT  evidence conflicts, identity NOT verified       -> stop REFUSES
  *   UNKNOWN       insufficient evidence to classify               -> stop REFUSES
@@ -129,7 +129,7 @@ export interface DaemonEvidence {
   /** Non-null reason when the data dir is a symlink or world-writable. */
   dataDirUnsafe: string | null;
   pidfile: PidfileRead;
-  /** Liveness of the pidfile pid; null when there is no pid to test. */
+  lastKnownPid?: number;
   pidLiveness: PidLiveness | null;
   identity: IdentityResult;
   health: HealthResult;
@@ -156,7 +156,7 @@ export function classifyDaemonState(ev: DaemonEvidence, ctx: DaemonContext): Dae
     return { state: "UNKNOWN", detail: ev.pidfile.reason };
   }
 
-  const pid = ev.pidfile.kind === "present" ? ev.pidfile.pid : null;
+  const pid = ev.pidfile.kind === "present" ? ev.pidfile.pid : ev.lastKnownPid ?? null;
   const liveness = ev.pidLiveness;
 
   // THE INVARIANT: WEDGED is reachable only through a VERIFIED identity.
@@ -170,8 +170,7 @@ export function classifyDaemonState(ev: DaemonEvidence, ctx: DaemonContext): Dae
     return { state: "WEDGED", pid: ev.identity.pid };
   }
 
-  // No live pid recorded (absent, or the recorded pid is gone).
-  if (pid === null || liveness?.kind === "gone") {
+  if ((pid === null && liveness === null) || liveness?.kind === "gone") {
     if (ev.health.kind === "refused") {
       return { state: "NOT_RUNNING" };
     }
@@ -216,7 +215,7 @@ export function classifyDaemonState(ev: DaemonEvidence, ctx: DaemonContext): Dae
     return {
       state: "UNKNOWN",
       detail:
-        `could not determine whether the recorded pid ${pid} is alive (${liveness.reason}) — refusing to act on it`,
+        pid === null ? liveness.reason : `could not determine whether the recorded pid ${pid} is alive (${liveness.reason}) — refusing to act on it`,
     };
   }
 

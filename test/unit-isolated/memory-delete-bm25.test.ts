@@ -122,7 +122,7 @@ describe("flair#2041 — a request-owned delete reaches BM25 only after commit",
       delivered = emitCommittedDelete!(row.id); // committed table change feed
     };
 
-    expect(await memoryWithContext(ctx).delete(row.id)).toEqual({ ok: true });
+    expect(await memoryWithContext(ctx).delete(row.id)).toBe(true);
     expect(memoryStore.has(row.id)).toBe(true); // write is still staged
     expect(await lexicalIds()).toContain(row.id); // no pre-commit notification
     expect(delivered).toBeNull();
@@ -140,7 +140,7 @@ describe("flair#2041 — a request-owned delete reaches BM25 only after commit",
     const ctx = { request: { tpsAgent: "agent-a" } } as any;
     const owner = beginRequest(ctx);
 
-    expect(await memoryWithContext(ctx).delete(row.id)).toEqual({ ok: true });
+    expect(await memoryWithContext(ctx).delete(row.id)).toBe(true);
     expect(await lexicalIds()).toContain(row.id); // still indexed before abort
     owner.abort(new Error("later request failure"));
     await expect(owner.done).rejects.toThrow("later request failure");
@@ -151,7 +151,7 @@ describe("flair#2041 — a request-owned delete reaches BM25 only after commit",
   it("owned transaction: a context-less delete notifies after its own commit", async () => {
     const row = seedMemory({ id: "mem-owned-commit" });
     expect(await lexicalIds()).toContain(row.id);
-    expect(await memoryWithContext(undefined).delete(row.id)).toEqual({ ok: true });
+    expect(await memoryWithContext(undefined).delete(row.id)).toBe(true);
     expect(memoryStore.has(row.id)).toBe(false);
     expect(await lexicalIds()).not.toContain(row.id); // synchronous owned hook
   });
