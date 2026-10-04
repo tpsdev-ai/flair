@@ -1441,7 +1441,7 @@ export class Memory extends (databases as any).flair.Memory {
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
-    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content), query);
     if (contentSuffixDenial) return contentSuffixDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
@@ -1567,13 +1567,13 @@ export class Memory extends (databases as any).flair.Memory {
     return super.patch(content, query);
   }
 
-  async put(content: any) {
+  async put(content: any, query?: any) {
     const reembedding = content?.embedding === null && content?.embeddingModel === null;
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
-    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content), query);
     if (contentSuffixDenial) return contentSuffixDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
@@ -2017,8 +2017,7 @@ export class Memory extends (databases as any).flair.Memory {
     );
     if (seedDenial) return seedDenial;
     const contentSuffixDenial = refuseContentSuffixId(
-      [id, typeof id?.pathname === "string" ? decodeURIComponent(id.pathname) : undefined,
-        ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)],
+      [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], id,
     );
     if (contentSuffixDenial) return contentSuffixDenial;
     // Read stored ownership, not the read-scoped get() response. Enforce here

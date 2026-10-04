@@ -1,4 +1,4 @@
-- **Memory refuses an id ending in `.content` at every client write path.**
+- **Memory POST/PUT/PATCH/DELETE refuse an id ending in `.content`.**
   Harper reads a trailing `.content` on a by-id request as a property selector, so
   a by-id read naming such an id could be answered from the base id's record.
   POST/PUT/PATCH/DELETE on Memory and the memory feed now refuse it with

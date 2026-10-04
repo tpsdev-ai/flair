@@ -6,15 +6,6 @@
  * record whose id itself ends in `.content` could therefore be read as the base
  * id's record, and a client write could still create one (a collection POST did).
  *
- * This file pins the shipped rule against a live instance:
- *   - every client write path refuses an id ending in `.content` by name
- *     (POST/PUT/PATCH/DELETE on Memory, the memory feed, the bridge importer);
- *   - the middleware refuses an id segment carrying an encoded `/` before a
- *     declared suffix, rather than rewriting it to a different record;
- *   - the ordinary `/Memory/<id>.content` selector still works.
- *
- * Raw `insert` via the ops API seeds the rows the read cases probe, so no write
- * path can rewrite them.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -93,6 +84,8 @@ beforeAll(async () => {
   await seedAgent(harper, author);
   await seedAgent(harper, reader);
   await insertRow(harper, BASE, "BASE BODY");
+  await insertRow(harper, "mcs-put-url-existing", "PUT BASE BODY");
+  await insertRow(harper, "mcs-patch-url-existing", "PATCH BASE BODY");
   await insertRow(harper, DEL_BASE, "DEL BASE BODY");
   await insertRow(harper, DEL_OTHER_BASE, "DEL OTHER BASE BODY");
   await insertRow(harper, SLASH_BASE, "SLASH BASE BODY");
@@ -136,7 +129,7 @@ describe("flair#2199 — an encoded `/` before a declared suffix is refused, nev
   }, 30_000);
 });
 
-describe("flair#2199 — every client write path refuses an id ending in `.content`", () => {
+describe("flair#2199 — Memory resource writes and feed POST refuse an id ending in `.content`", () => {
   const cases: Array<{ name: string; method: string; path: string; body: unknown }> = [
     { name: "collection POST /Memory", method: "POST", path: "/Memory", body: { id: "mcs-post.content", agentId: author.id, content: "x" } },
     { name: "PUT to a `.content` address", method: "PUT", path: "/Memory/mcs-put.content", body: { id: "mcs-put.content", agentId: author.id, content: "x" } },
@@ -155,6 +148,30 @@ describe("flair#2199 — every client write path refuses an id ending in `.conte
     }, 30_000);
   }
 
+  for (const method of ["PUT", "PATCH"]) {
+    for (const state of ["existing", "missing"]) {
+      it(`${method} with a suffix only in the URL and a ${state} base row → 400 memory_id_content_suffix without writing rows`, async () => {
+        const id = `mcs-${method.toLowerCase()}-url-${state}`;
+        const readRows = async () => {
+          const res = await adminOp(harper, {
+            operation: "search_by_hash", database: "flair", table: "Memory",
+            hash_values: [id, `${id}.content`],
+          });
+          expect(res.status).toBe(200);
+          return res.json();
+        };
+        const before = await readRows();
+        expect(before.length).toBe(state === "existing" ? 1 : 0);
+        const res = await authSend(harper, author, method, `/Memory/${id}.content`, {
+          id, agentId: author.id, content: "CHANGED BODY",
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe("memory_id_content_suffix");
+        expect(await readRows()).toEqual(before);
+      }, 30_000);
+    }
+  }
+
   it("DELETE of a `.content` address → 400 memory_id_content_suffix and the base record is not deleted", async () => {
     const before = await authSend(harper, author, "GET", `/Memory/${DEL_BASE}`);
     expect(before.status).toBe(200);
@@ -169,9 +186,10 @@ describe("flair#2199 — every client write path refuses an id ending in `.conte
     expect((await after.json()).id).toBe(DEL_BASE);
   }, 30_000);
 
-  it("non-owner DELETE of a `.content` address is refused and the base record is not deleted", async () => {
+  it("non-owner DELETE of a `.content` address → 400 memory_id_content_suffix and the base record is not deleted", async () => {
     const res = await authSend(harper, reader, "DELETE", `/Memory/${DEL_OTHER_BASE}.content`);
-    expect([400, 403]).toContain(res.status);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("memory_id_content_suffix");
     const after = await authSend(harper, author, "GET", `/Memory/${DEL_OTHER_BASE}`);
     expect(after.status).toBe(200);
     const row = await after.json();

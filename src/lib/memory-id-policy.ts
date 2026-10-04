@@ -1,16 +1,6 @@
 /**
  * memory-id-policy.ts — the Memory record-id rule for the `.content` selector
- * (flair#2199). PURE: string logic only, so it is unit-testable and callable
- * from every Memory write path and from the auth middleware.
- *
- * Harper reads a trailing `.<declared attribute>` on a by-id Memory request as a
- * property selector, so `/Memory/<id>.content` addresses the record `<id>`. A
- * record whose id itself ends in `.content` may therefore be read as the base
- * id's record instead of itself. Such an id is refused at every client write
- * path.
- *
- * Pre-existing ids that end in `.content` are NOT migrated: an update through a
- * client write path is refused like a create.
+ * (flair#2199). PURE: string logic only.
  */
 
 /** The property suffix that a Memory id ending in `.content` collides with. */

@@ -1,10 +1,6 @@
 /**
  * memory-id-policy.test.ts — flair#2199.
  *
- * The pure rule behind the write refusal: a Memory id ending in the `.content`
- * property suffix can never be addressed by a by-id request, so it is refused at
- * every client write path. Also covers the encoded-slash predicate the auth
- * middleware uses to refuse an ambiguous read path.
  */
 import { describe, expect, test } from "bun:test";
 import {
