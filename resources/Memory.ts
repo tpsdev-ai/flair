@@ -586,18 +586,11 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
   return response;
 }
 
-/**
- * flair#2139 S2 — `_reindex` stays bookkeeping only. Compare only the fields
- * the submitted body SUPPLIES against the stored row (REINDEX_SKILL_FIELDS for
- * a skill, REINDEX_PLAIN_FIELDS otherwise); a supplied-but-different value, or
- * a skill tag on a plain row, refuses the reindex. Returns the first drifting
- * field, or null.
- */
 const REINDEX_SKILL_FIELDS = [
   "agentId", "visibility", "tags", "content", "trigger", "metadata", "durability", "supersedes", "validTo", "archived", "skillSubjectId",
   "expiresAt", "validFrom",
 ];
-const REINDEX_PLAIN_FIELDS = ["agentId", "visibility", "skillSubjectId", "supersedes", "validTo"];
+const REINDEX_PLAIN_FIELDS = ["agentId", "visibility", "skillSubjectId", "supersedes", "validTo", "validFrom", "expiresAt", "archived", "archivedAt", "archivedBy"];
 
 function reindexDrift(content: any, existing: Record<string, any>): string | null {
   const isSkill = rowIsSkill(existing);
@@ -989,9 +982,6 @@ export class Memory extends (databases as any).flair.Memory {
       readTarget = targetId != null ? { id: targetId } : {};
     }
     const result = await memoryByIdReadGate.call(this, readTarget, (t: any) => super.get(t));
-    // flair#2139 S2 — close-payload bypass: a retained (closed) skill payload a
-    // non-admin reader may not read must 404 like the version would (live-row
-    // semantics for a current skill are unchanged).
     if (nonAdminAgent && result && typeof result === "object" && !(result instanceof Response)) {
       if (!(await closedSkillPayloadReadable(result as any, auth.agentId))) return NOT_FOUND();
     }
@@ -1661,31 +1651,21 @@ export class Memory extends (databases as any).flair.Memory {
           { status: 404, headers: { "content-type": "application/json" } },
         );
       }
-      // flair#2139 S2 — bookkeeping only (see reindexDrift).
       const drift = reindexDrift(reindexBody, reindexExisting);
       if (drift) {
         return new Response(
           JSON.stringify({
             error: "reindex_would_change_row",
-            message: `the _reindex re-PUT may not change '${drift}'; it is bookkeeping only`,
+            message: `the _reindex re-PUT may not change '${drift}'`,
           }),
           { status: 409, headers: { "content-type": "application/json" } },
         );
       }
       stampInstanceToken(content, reindexExisting);
-      // A reindex is a re-PUT of the SAME row, never a lineage change: restore
-      // the stored server-owned subject id (the full-record PUT would otherwise
-      // drop it, breaking the skill's chain across changed physical ids).
-      if (typeof reindexExisting.skillSubjectId === "string" && reindexExisting.skillSubjectId.length > 0) {
-        content.skillSubjectId = reindexExisting.skillSubjectId;
-      }
-      // A skill field the body omits keeps its stored value, so a partial
-      // re-PUT cannot reopen a closed row or drop the skill tag.
-      if (rowIsSkill(reindexExisting)) {
-        for (const field of [...REINDEX_SKILL_FIELDS, "archivedAt", "archivedBy"]) {
-          if (!Object.prototype.hasOwnProperty.call(content, field) && reindexExisting[field] !== undefined) {
-            content[field] = reindexExisting[field];
-          }
+      const retainedFields = rowIsSkill(reindexExisting) ? REINDEX_SKILL_FIELDS : REINDEX_PLAIN_FIELDS;
+      for (const field of [...retainedFields, "archivedAt", "archivedBy"]) {
+        if (!Object.prototype.hasOwnProperty.call(content, field) && reindexExisting[field] !== undefined) {
+          content[field] = reindexExisting[field];
         }
       }
       // Keep the EXISTING row's STORED provenance byte-for-byte. The rest of

@@ -28,16 +28,6 @@ export function skillVersionVisibility(row: any): string {
   return defaultVisibilityForDurability(row?.durability);
 }
 
-/**
- * flair#2139 S2 — the close-payload bypass predicate. A reader who may not read
- * a skill VERSION must not be able to read a retained (CLOSED) payload of that
- * same skill through Memory's GET/search or the Feed replay. A CURRENT (open)
- * skill row keeps its ordinary live read semantics (this returns true). A closed
- * skill row is re-checked under decision 3: the reader must hold Memory read
- * permission against BOTH the retained row's own owner/visibility AND the
- * subject's CURRENT authority — the live head, or the head tombstone after a
- * logical delete. A missing or inconsistent authority state denies.
- */
 export async function closedSkillPayloadReadable(
   row: Record<string, any> | null | undefined,
   readerId: string,
@@ -49,16 +39,6 @@ export async function closedSkillPayloadReadable(
   const subjectId = typeof row.skillSubjectId === "string" && row.skillSubjectId.length > 0
     ? row.skillSubjectId
     : String(row.id);
-  let head: Record<string, any> | null;
-  try {
-    head = await resolveSkillHead(subjectId, String(row.id), undefined);
-  } catch {
-    return false;
-  }
-  if (head && String(head.id) !== String(row.id)) {
-    return skillRefReadable({ agentId: head.agentId, visibility: head.visibility }, readerId);
-  }
-  // No live head: the subject's current authority is its head tombstone.
   const headOf = read.headOf ?? ((sid: string) => readHead(SKILL_SUBJECT_TYPE, sid));
   let versionHead: Record<string, any> | null;
   try {
@@ -66,10 +46,12 @@ export async function closedSkillPayloadReadable(
   } catch {
     return false;
   }
-  if (!versionHead) return false;
+  if (!versionHead || versionHead.subjectType !== SKILL_SUBJECT_TYPE || versionHead.subjectId !== subjectId) return false;
+  if (!skillRefReadable(versionHead, versionHead.agentId)) return false;
   if (versionHead.kind === "delete") {
-    return skillRefReadable({ agentId: versionHead.agentId, visibility: versionHead.visibility }, readerId);
+    return versionHead.memoryId === null && skillRefReadable(versionHead, readerId);
   }
+  if (versionHead.kind !== "create" && versionHead.kind !== "update") return false;
   if (typeof versionHead.memoryId !== "string" || versionHead.memoryId.length === 0) return false;
   const memoryGet = read.memoryGet ?? ((id: string) => (databases as any).flair?.Memory?.get(id));
   let live: any;
@@ -78,7 +60,12 @@ export async function closedSkillPayloadReadable(
   } catch {
     return false;
   }
-  if (!live) return false;
+  if (!live || live.id !== versionHead.memoryId || live.skillSubjectId !== subjectId) return false;
+  if (live.agentId !== versionHead.agentId || !rowIsSkill(live) || live.archived === true) return false;
+  for (const end of [live.validTo, live.expiresAt]) {
+    if (end == null) continue;
+    if (typeof end !== "string" || !(Date.parse(end) > Date.now())) return false;
+  }
   return skillRefReadable({ agentId: live.agentId, visibility: live.visibility }, readerId);
 }
 
@@ -121,6 +108,7 @@ function okResponse(): Response {
 function isOpenLiveRow(row: Record<string, any> | null | undefined): boolean {
   if (!row || typeof row !== "object") return false;
   if (row.archived === true) return false;
+  if (row.expiresAt != null && (typeof row.expiresAt !== "string" || !(Date.parse(row.expiresAt) > Date.now()))) return false;
   if (typeof row.validTo === "string" && row.validTo.length > 0) return false;
   return true;
 }

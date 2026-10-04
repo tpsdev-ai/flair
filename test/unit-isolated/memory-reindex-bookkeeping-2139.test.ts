@@ -1,8 +1,3 @@
-/**
- * flair#2139 S2 — `_reindex` is bookkeeping only. A skill's expiresAt/validFrom
- * cannot be changed or dropped by a re-PUT, and a plain memory cannot be turned
- * into a skill. Isolated: owns the harper mock for Memory.ts.
- */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
@@ -122,4 +117,12 @@ describe("_reindex cannot turn a plain memory into a skill", () => {
     expect(status(await reindex(plain()))).toBe(200);
     expect(memoryStore.get("pm").content).toBe("a note");
   });
+});
+
+
+test("a partial plain-memory reindex retains lineage and lifecycle fields", async () => {
+  const protectedFields = { supersedes: "old", validTo: PAST, skillSubjectId: "subject", validFrom: FROM, expiresAt: PAST, archived: true, archivedAt: PAST, archivedBy: "alice" };
+  memoryStore.set("pm", { ...plain(), ...protectedFields });
+  expect(status(await reindex(plain()))).toBe(200);
+  expect(memoryStore.get("pm")).toMatchObject(protectedFields);
 });

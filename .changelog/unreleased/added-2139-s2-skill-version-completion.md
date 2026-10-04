@@ -1,12 +1,5 @@
 - **Retained skill payloads, `_reindex`, the seed lineage and org skill
-  references now honour slice 2's history rules.** A closed skill payload is
-  readable only under the same authority as its version, an admin `_reindex`
-  that would change a skill's stored instruction, owner, visibility, lineage,
-  `expiresAt` or `validFrom` fields, or give a plain memory the skill tag or a
-  different `skillSubjectId`, `supersedes` or `validTo`, is refused (and a
-  bookkeeping re-PUT preserves the subject), the operator's seed reservation
-  covers the whole logical lineage, and an org `skillRef` resolves to the
-  lineage's current live successor.
+  references now honour slice 2's history rules.**
 
   The transactional skill writer gains a per-step fault hook that is empty
   unless a test-only fixture outside the package installs it, so the real-Harper

@@ -448,8 +448,6 @@ async function readableRowEvent(
   } else if (!(await storedRowReadable(event.id, readerId, isAllowed, readStored))) {
     return false;
   }
-  // flair#2139 S2 close-payload bypass: a retained (closed) skill payload the
-  // reader may not read is withheld exactly as its version would be.
   return closedSkillPayloadReadable(row, readerId);
 }
 

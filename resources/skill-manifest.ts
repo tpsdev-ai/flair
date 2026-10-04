@@ -98,6 +98,7 @@ export interface OrgSkillInput {
    *  failed read). An opt-out applies only when this is a non-empty string
    *  and its Soul row's `originatorInstanceId` equals it. */
   instanceId: string | null;
+  refSubjects?: Map<string, string>;
 }
 
 const NO_ORG: OrgSkillInput = { assignments: [], rows: [], instanceId: null };
@@ -172,22 +173,12 @@ export function resolveSkillRef(name: string, rows: SkillRow[], agentId: string)
     ?? { kind: "unresolved", reason: "the agent has no live skill row with this name" };
 }
 
-/**
- * An org assignment's `skillRef`, resolved against the rows it may name
- * (flair#2139 S2). A `skillRef` names a PHYSICAL Memory id, and a skill update
- * supersedes: the referenced row may have been closed, with the lineage's live
- * head now a fresh successor id. So a ref resolves to a live row by id, or —
- * when the referenced row is no longer live — to the one live row whose carried
- * `skillSubjectId` is that ref (the current live successor). Assignment
- * authority and precedence are unchanged; only the physical-id resolution
- * follows the lineage.
- */
-function resolveOrgRef(skillRef: unknown, rows: SkillRow[]): SkillRefResolution {
+function resolveOrgRef(skillRef: unknown, rows: SkillRow[], refSubjects?: Map<string, string>): SkillRefResolution {
   if (typeof skillRef !== "string" || skillRef.length === 0) {
     return { kind: "unresolved", reason: "the skillRef is not a live skill row this agent can read" };
   }
   const byId = rows.filter((row) => row.id === skillRef);
-  const matches = byId.length > 0 ? byId : rows.filter((row) => row.skillSubjectId === skillRef);
+  const matches = byId.length > 0 ? byId : rows.filter((row) => row.skillSubjectId === (refSubjects?.get(skillRef) ?? skillRef));
   if (matches.length === 1) return { kind: "resolved", skillId: matches[0].id as string };
   if (matches.length === 0) return { kind: "unresolved", reason: "the skillRef is not a live skill row this agent can read" };
   return {
@@ -272,7 +263,7 @@ export function resolveSkillManifest(
       continue;
     }
     const ref = scope === "org"
-      ? resolveOrgRef(candidate.skillRef, org.rows)
+      ? resolveOrgRef(candidate.skillRef, org.rows, org.refSubjects)
       : resolveSkillRef(outcome.name, rows, agentId);
     if (ref.kind === "resolved") {
       skills.push({ name: outcome.name, skillId: ref.skillId, scope, priority: outcome.priority, source });

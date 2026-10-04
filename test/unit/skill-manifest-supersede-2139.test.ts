@@ -1,9 +1,3 @@
-// flair#2139 S2 completion — an unversioned org skillRef resolves to the
-// lineage's current LIVE SUCCESSOR (resources/skill-manifest.ts). A skill update
-// supersedes into a fresh physical Memory row that carries the referenced id as
-// its `skillSubjectId`; a reference naming the now-closed predecessor must
-// resolve forward, not go unresolved. Assignment authority and precedence are
-// unchanged.
 import { describe, expect, test } from "bun:test";
 import { resolveSkillManifest, type SkillManifestEntry } from "../../resources/skill-manifest.ts";
 
@@ -22,6 +16,12 @@ const org = (skillRef: string, rows: any[]) => ({
 
 const orgEntry = (skillId: string, priority = "standard"): SkillManifestEntry =>
   ({ name: "using-flair", skillId, scope: "org", priority, source: null });
+
+test("a non-root physical ref resolves by its canonical subject", () => {
+  const successor = skillRow("s2", "agent-ops", "using-flair", { visibility: "shared", skillSubjectId: "root" });
+  const input = { ...org("s1", [successor]), refSubjects: new Map([["s1", "root"]]) };
+  expect(resolveSkillManifest([], [], AGENT, input)).toEqual({ skills: [orgEntry("s2")], diagnostics: [] });
+});
 
 describe("resolveOrgRef — a superseded skillRef resolves to the live successor (flair#2139 S2)", () => {
   test("a ref naming the closed predecessor resolves to the successor carrying its subject", () => {

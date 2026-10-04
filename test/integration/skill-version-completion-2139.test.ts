@@ -1,12 +1,12 @@
 // ─── flair#2139 S2 COMPLETION (slice 2c) against a real Harper ──────────────
 //
-// The deferred items 1–5 of PR #2246, each exercised end-to-end through the real
+// The deferred items 1–3 and 5 of PR #2246, exercised through the real
 // resource boundary:
 //   (1) the decision-3 read predicate on RETAINED (closed) skill payloads via
 //       Memory GET/search — a reader who may not read a version cannot read its
 //       retained payload either; live-row semantics for a current skill are
 //       unchanged.
-//   (2) `_reindex` stays bookkeeping only — a re-PUT that would change a skill's
+//   (2) a re-PUT that would change a skill's
 //       instruction fields / ownership / visibility / lineage is refused, and a
 //       bookkeeping re-PUT preserves the subject.
 //   (3) the seed reservation covers the logical LINEAGE, not only the physical
@@ -167,6 +167,22 @@ describe("flair#2139 S2c (1) — retained closed skill payloads obey decision 3"
     expect((await call(A, "GET", memPath(id))).status).toBe(200);
   }, 120_000);
 
+  test("an expired successor denies its closed root through GET and search", async () => {
+    const id = nextId("expiry");
+    expect((await call(A, "PUT", memPath(id), skillBody(A, id, "before expiry", { visibility: "shared" }))).status).toBeLessThan(300);
+    const update = await call(A, "PUT", memPath(id), skillBody(A, id, "after expiry", { visibility: "shared" }));
+    expect(update.status, update.text).toBeLessThan(300);
+    const successor = await memoryRow(JSON.parse(update.text).id);
+    expect((await call(B, "GET", memPath(id))).status).toBe(200);
+    await ops({ operation: "upsert", database: "flair", table: "Memory", records: [{ ...successor, expiresAt: "2020-01-01T00:00:00.000Z" }] });
+    for (const reader of [A, B]) {
+      expect((await call(reader, "GET", memPath(id))).status).toBe(404);
+      const listed = await call(reader, "GET", searchByQuery("id", id));
+      expect(listed.status, listed.text).toBe(200);
+      expect(JSON.parse(listed.text).map((r: any) => r.id)).not.toContain(id);
+    }
+  }, 120_000);
+
   test("the by-id read of a current (open) skill keeps its live semantics", async () => {
     const id = nextId("live");
     await call(A, "PUT", memPath(id), skillBody(A, id, "live", { visibility: "shared" }));
@@ -197,9 +213,9 @@ describe("flair#2139 S2c (1) — retained closed skill payloads obey decision 3"
   }, 120_000);
 });
 
-// ─── Item 2: `_reindex` is bookkeeping only ─────────────────────────────────
+// ─── Item 2: protected reindex fields ──────────────────────────────────────
 
-describe("flair#2139 S2c (2) — _reindex is bookkeeping only", () => {
+describe("flair#2139 S2c (2) — protected reindex fields", () => {
   test("a re-PUT that would change a skill's content is refused (409)", async () => {
     const id = nextId("reindex");
     await call(A, "PUT", memPath(id), skillBody(A, id, "original"));
@@ -220,6 +236,16 @@ describe("flair#2139 S2c (2) — _reindex is bookkeeping only", () => {
     expect(after.content).toBe("steady");
     expect(after.agentId).toBe(A.id);
     expect(after.skillSubjectId).toBe(stored.skillSubjectId);
+  }, 120_000);
+
+  test("a partial plain reindex keeps stored lineage and lifecycle fields", async () => {
+    const id = nextId("plain-lineage");
+    const body = { id, agentId: A.id, content: "closed plain note", durability: "standard", visibility: "shared" };
+    const retained = { supersedes: "previous", validTo: "2020-01-01T00:00:00.000Z", validFrom: "2019-01-01T00:00:00.000Z", expiresAt: "2020-01-01T00:00:00.000Z", archived: true, archivedAt: now(), archivedBy: A.id };
+    await ops({ operation: "upsert", database: "flair", table: "Memory", records: [{ ...body, ...retained }] });
+    const result = await call(ADMIN_AGENT, "PUT", memPath(id), { ...body, _reindex: true });
+    expect(result.status, result.text).toBeLessThan(300);
+    expect(await memoryRow(id)).toMatchObject(retained);
   }, 120_000);
 
   test("a re-PUT cannot revive an expired skill", async () => {
