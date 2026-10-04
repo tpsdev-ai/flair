@@ -216,6 +216,55 @@ describe("flair#2139 S2c (1) — retained closed skill payloads obey decision 3"
 // ─── Item 2: protected reindex fields ──────────────────────────────────────
 
 describe("flair#2139 S2c (2) — protected reindex fields", () => {
+  for (const [field, value] of [["archivedAt", "2999-01-01T00:00:00.000Z"], ["archivedBy", "mallory"]] as const) {
+    test(`a skill's changed ${field} is refused without changing the stored row`, async () => {
+      const id = nextId(`skill-${field}`);
+      await ops({ operation: "upsert", database: "flair", table: "Memory", records: [{
+        ...skillBody(A, id, "original"), skillSubjectId: id, createdAt: now(),
+        archived: true, archivedAt: "2020-01-01T00:00:00.000Z", archivedBy: A.id,
+      }] });
+      const stored = await memoryRow(id);
+      const result = await call(ADMIN_AGENT, "PUT", memPath(id), { ...stored, [field]: value, _reindex: true });
+      expect(result.status, result.text).toBe(409);
+      expect(JSON.parse(result.text).error).toBe("reindex_would_change_row");
+      expect(await memoryRow(id)).toEqual(stored);
+    }, 120_000);
+  }
+
+  for (const [field, value] of [
+    ["content", "rewritten"], ["tags", ["other-tag"]], ["metadata", JSON.stringify({ source: "other" })], ["durability", "persistent"],
+  ] as const) {
+    test(`a plain row's changed ${field} is refused without changing the stored row`, async () => {
+      const id = nextId(`plain-${field}`);
+      await ops({ operation: "upsert", database: "flair", table: "Memory", records: [{
+        id, agentId: A.id, content: "original", tags: ["note"], metadata: JSON.stringify({ source: "original" }),
+        durability: "standard", visibility: "private", createdAt: now(),
+      }] });
+      const stored = await memoryRow(id);
+      const result = await call(ADMIN_AGENT, "PUT", memPath(id), { ...stored, [field]: value, _reindex: true });
+      expect(result.status, result.text).toBe(409);
+      expect(JSON.parse(result.text).error).toBe("reindex_would_change_row");
+      expect(await memoryRow(id)).toEqual(stored);
+    }, 120_000);
+  }
+
+  for (const kind of ["skill", "plain"]) {
+    test(`a same-values ${kind} re-PUT succeeds`, async () => {
+      const id = nextId(`${kind}-same-values`);
+      await ops({ operation: "upsert", database: "flair", table: "Memory", records: [{
+        id, agentId: A.id, content: "original", tags: [kind === "skill" ? "skill" : "note"],
+        metadata: JSON.stringify({ source: "original" }), durability: "persistent", visibility: "shared", createdAt: now(),
+        ...(kind === "skill" ? { skillSubjectId: id, trigger: "when original" } : {}),
+        archived: true, archivedAt: "2020-01-01T00:00:00.000Z", archivedBy: A.id,
+      }] });
+      const stored = await memoryRow(id);
+      const result = await call(ADMIN_AGENT, "PUT", memPath(id), { ...stored, _reindex: true });
+      expect(result.status, result.text).toBeLessThan(300);
+      expect(await memoryRow(id)).toMatchObject(stored);
+      expect(await versionsOf(id)).toEqual([]);
+    }, 120_000);
+  }
+
   test("a re-PUT that would change a skill's content is refused (409)", async () => {
     const id = nextId("reindex");
     await call(A, "PUT", memPath(id), skillBody(A, id, "original"));

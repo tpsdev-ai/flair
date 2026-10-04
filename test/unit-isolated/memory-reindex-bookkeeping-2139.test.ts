@@ -80,6 +80,42 @@ beforeEach(() => {
 
 const status = (res: unknown) => (res instanceof Response ? res.status : 200);
 
+describe("_reindex protected payload and archival fields", () => {
+  for (const [field, value] of [["archivedAt", FUTURE], ["archivedBy", "mallory"]] as const) {
+    test(`a skill's changed ${field} is refused without changing the stored row`, async () => {
+      const stored = { ...skill(), archived: true, archivedAt: PAST, archivedBy: "alice" };
+      memoryStore.set(stored.id, stored);
+      const result = await reindex({ ...stored, [field]: value });
+      expect(status(result)).toBe(409);
+      expect(await result.json()).toMatchObject({ error: "reindex_would_change_row" });
+      expect(memoryStore.get(stored.id)).toEqual(stored);
+    });
+  }
+
+  for (const [field, value] of [
+    ["content", "rewritten"], ["tags", ["other-tag"]], ["metadata", { source: "other" }], ["durability", "persistent"],
+  ] as const) {
+    test(`a plain row's changed ${field} is refused without changing the stored row`, async () => {
+      const stored = { ...plain(), tags: ["note"], metadata: { source: "original" } };
+      memoryStore.set(stored.id, stored);
+      const result = await reindex({ ...stored, [field]: value });
+      expect(status(result)).toBe(409);
+      expect(await result.json()).toMatchObject({ error: "reindex_would_change_row" });
+      expect(memoryStore.get(stored.id)).toEqual(stored);
+    });
+  }
+
+  for (const row of [skill, plain]) {
+    test(`a same-values ${row.name} re-PUT succeeds`, async () => {
+      const stored = { ...row(), tags: row === skill ? ["skill"] : ["note"], metadata: { source: "original" }, archived: true, archivedAt: PAST, archivedBy: "alice" };
+      memoryStore.set(stored.id, stored);
+      const body = JSON.parse(JSON.stringify(stored));
+      expect(status(await reindex(body))).toBe(200);
+      expect(memoryStore.get(stored.id)).toMatchObject(stored);
+    });
+  }
+});
+
 describe("_reindex cannot revive an expired skill", () => {
   test("a body that supplies a new expiresAt is refused", async () => {
     expect(status(await reindex({ ...skill(), expiresAt: FUTURE }))).toBe(409);

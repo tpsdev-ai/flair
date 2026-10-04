@@ -588,9 +588,9 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
 
 const REINDEX_SKILL_FIELDS = [
   "agentId", "visibility", "tags", "content", "trigger", "metadata", "durability", "supersedes", "validTo", "archived", "skillSubjectId",
-  "expiresAt", "validFrom",
+  "expiresAt", "validFrom", "archivedAt", "archivedBy",
 ];
-const REINDEX_PLAIN_FIELDS = ["agentId", "visibility", "skillSubjectId", "supersedes", "validTo", "validFrom", "expiresAt", "archived", "archivedAt", "archivedBy"];
+const REINDEX_PLAIN_FIELDS = ["agentId", "visibility", "skillSubjectId", "supersedes", "validTo", "validFrom", "expiresAt", "archived", "archivedAt", "archivedBy", "content", "tags", "metadata", "durability"];
 
 function reindexDrift(content: any, existing: Record<string, any>): string | null {
   const isSkill = rowIsSkill(existing);
