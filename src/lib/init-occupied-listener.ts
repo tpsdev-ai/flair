@@ -18,8 +18,7 @@
  * That pre-auth observation is a single read. It is not the operations-port
  * 401 check. A 401 names a pid only when the read before the insert and the
  * read after the 401 are the same sole PID. Several holders, or a holder
- * that changed during the request, stay "a Harper instance this init did
- * not start".
+ * that changed during the request, stay unattributed.
  *
  * These messages do not offer `flair stop`. `flair stop` cannot be promised
  * to act on this listener. The remedy is `kill <pid>` when one process is
@@ -110,7 +109,7 @@ export function stableAnsweredHolder(
   };
 }
 
-const UNATTRIBUTED = "a Harper instance this init did not start";
+const UNATTRIBUTED = "a Harper instance not attributed to this data directory";
 
 /**
  * Name the listener for an operator. A pid is included only when exactly one
@@ -176,7 +175,7 @@ export function foreignOccupiedListenerDetail(
 ): string {
   const lines = [
     `The process listening on port ${listener.port} is ${describeOccupiedListener(listener)}.`,
-    `This init will not send its admin password to a process it did not start.`,
+    `This init will not send its admin password to an unattributed process.`,
   ];
   if (expectedDataDir && foreignDataDirs(expectedDataDir, listener.dataDirs).length > 0) {
     lines.push(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);

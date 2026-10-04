@@ -16,7 +16,7 @@ const OWN_PID = 4242;
 
 beforeAll(() => ensureCliBuild(), 120_000);
 
-type Scenario = "own" | "free" | "missing-free" | "missing-listener" | "unknown" | "missing-error" | "missing-real-free" | "spawned" | "child-dead" | "other-child" | "post-unknown" | "root-mismatch" | "root-missing" | "install-race";
+type Scenario = "own" | "own-launchd" | "foreign-launchd" | "free" | "missing-free" | "missing-listener" | "unknown" | "missing-error" | "missing-real-free" | "spawned" | "child-dead" | "other-child" | "post-unknown" | "root-mismatch" | "root-missing" | "install-race";
 
 interface Event {
   kind: "probe" | "fetch" | "auth" | "tcp" | "closed";
@@ -31,7 +31,7 @@ function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
   const actions = join(home, "actions.json");
   writeFileSync(events, "");
   writeFileSync(actions, JSON.stringify([]));
-  if (scenario === "own") {
+  if (["own", "own-launchd", "foreign-launchd"].includes(scenario)) {
     const dataDir = join(home, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
@@ -103,19 +103,19 @@ function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
       harperBin: () => "fixture-harper.js",
       registerInitLaunchdService: async () => ({ kind: "managed", lines: [] }),
       repointMainServiceUnit: () => ({ kind: "unchanged" }),
-      resolveInstanceServingPid: ${scenario === "own" ? `() => ${OWN_PID}` : "fns.resolveInstanceServingPid"},
+      resolveInstanceServingPid: ${["own", "own-launchd", "foreign-launchd"].includes(scenario) ? `() => ${OWN_PID}` : "fns.resolveInstanceServingPid"},
     }) }));
     const stored = new Map();
     globalThis.fetch = async (url, options = {}) => {
       const authorized = new Headers(options.headers).get("Authorization") !== null;
       log({ kind: authorized ? "auth" : "fetch", url: String(url) });
-      if (!running && ${scenario !== "own"}) throw new Error("released port");
+      if ((!running && ${!["own", "own-launchd", "foreign-launchd"].includes(scenario)}) || (${["own-launchd", "foreign-launchd"].includes(scenario)} && String(url).includes(":" + ${OPS_PORT} + "/"))) throw new Error("released port");
       if (options.method === "PUT") stored.set(String(url), { id: decodeURIComponent(String(url).split("/").pop()), ...JSON.parse(options.body) });
       return new Response(JSON.stringify(stored.get(String(url)) ?? {}), { status: stored.has(String(url)) || /\\/health$/i.test(String(url)) ? 200 : 404 });
     };
     const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
     setOccupiedListenerLookupForTests({
-      pids: (port) => { log({ kind: "probe", port }); return running && ${scenario === "other-child"} ? [ownChild.pid + 1] : ${scenario === "own" ? `[${OWN_PID}]` : scenario === "free" ? "[]" : "null"}; },
+      pids: (port) => { log({ kind: "probe", port }); return running && ${scenario === "other-child"} ? [ownChild.pid + 1] : ${scenario === "own" ? `[${OWN_PID}]` : ["own-launchd", "foreign-launchd"].includes(scenario) ? `port === ${HTTP_PORT} ? [${scenario === "own-launchd" ? OWN_PID : OWN_PID + 1}] : []` : scenario === "free" ? "[]" : "null"}; },
       rootPath: () => ({ rootPath: null, environReadable: false }),
     });
     const realExit = process.exit;
@@ -151,6 +151,26 @@ test("re-init on this data directory's own adopted instance succeeds and attribu
   const firstAuth = events.findIndex(e => e.kind === "auth");
   const opsProbe = events.findIndex(e => e.kind === "probe" && e.port === OPS_PORT);
   expect(firstAuth).toBeGreaterThan(opsProbe);
+}, 30_000);
+
+test("flair#1693: re-init accepts the own launchd PID with unreadable ROOTPATH and an unused operations port", () => {
+  const { result, events, actions } = runPlain("own-launchd");
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  expect(result.stdout).toContain("Flair initialized");
+  expect(actions).toEqual([]);
+  expect(events.some(e => e.kind === "auth")).toBe(true);
+  expect(events.some(e => e.kind === "auth" && e.url?.includes(`:${OPS_PORT}/`))).toBe(false);
+}, 30_000);
+
+test("a listener differing from the own launchd PID refuses before credentials", () => {
+  const { result, events, actions } = runPlain("foreign-launchd");
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  expect(result.stderr).toContain("not attributed to this data directory");
+  expect(result.stderr).not.toContain("send its admin password to a process it did not start");
+  expect(actions).toEqual([]);
+  expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
 
 test("the from-scratch flow with just-released ports still succeeds and probes first", () => {

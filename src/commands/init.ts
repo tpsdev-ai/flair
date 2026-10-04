@@ -645,7 +645,6 @@ program
     }
     let alreadyRunning = false;
     let ownChild: ReturnType<typeof trackInitChild> | undefined;
-    let launchdManaged = false;
     const freeBeforeSpawn = new Set<number>();
     const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
       const installedAttributed = harperConfigPath(dataDir) !== null &&
@@ -653,10 +652,9 @@ program
         listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
         (listener.dataDirs.length === 1 ||
           cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
-      const attributed = ownChild?.attributes(listener, dataDir, freeBeforeSpawn) ||
-        ((!ownChild || launchdManaged) && installedAttributed);
+      const attributed = installedAttributed || ownChild?.attributes(listener, dataDir, freeBeforeSpawn);
       if (attributed) return;
-      console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
+      console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to this data directory (${dataDir}).`);
       console.error(foreignOccupiedListenerDetail(listener, dataDir));
       console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
       process.exit(1);
@@ -1036,7 +1034,6 @@ program
       console.log("Waiting for Harper health check...");
       await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS,
         () => attributeBeforeCredential(httpPort, httpBind.host));
-      await attributeBeforeCredential(opsPort, opsBindHost);
       console.log("Harper is healthy ✓");
 
       // flair#763: the socket now exists — apply its file mode (+ chgrp for the
@@ -1145,7 +1142,6 @@ program
           }
           const launchdExit = initLaunchdExitCode(launchdStep.kind);
           if (launchdExit !== 0) process.exit(launchdExit);
-          launchdManaged = launchdStep.kind === "managed";
         }
       }
 

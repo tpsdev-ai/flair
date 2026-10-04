@@ -502,7 +502,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       expect(msg).toContain("wrong username");
       expect(msg).toContain("--admin-pass");
       expect(msg).not.toContain("this-init-password");
-      expect(msg).not.toContain("a Harper instance this init did not start");
+      expect(msg).not.toContain("a Harper instance not attributed to this data directory");
     } finally {
       globalThis.fetch = orig;
     }
@@ -562,7 +562,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       throw new Error("expected seed to throw");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      expect(msg).toContain("a Harper instance this init did not start");
+      expect(msg).toContain("a Harper instance not attributed to this data directory");
       expect(msg).not.toContain("pid 42");
       expect(msg).not.toContain("pid 99");
       expect(msg).not.toContain("/var/before");
@@ -590,7 +590,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       throw new Error("expected seed to throw");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      expect(msg).toContain("a Harper instance this init did not start");
+      expect(msg).toContain("a Harper instance not attributed to this data directory");
       expect(msg).not.toContain("pid 42");
       expect(msg).not.toContain("pid 43");
       expect(msg).not.toContain("kill 42");
@@ -610,14 +610,14 @@ describe("occupied-listener messages (flair#1749)", () => {
       bodyText: '{"error":"Login failed"}',
       listener: { ...listenerBase, port: 19925 },
     });
-    expect(msg).toContain("a Harper instance this init did not start");
+    expect(msg).toContain("a Harper instance not attributed to this data directory");
     expect(msg).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
     expect(msg).toContain(HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT);
     expect(msg).not.toContain("flair stop");
     expect(msg).not.toMatch(/\bkill \d+/);
     expect(msg).not.toContain("wrong password");
     expect(describeOccupiedListener({ pids: [], dataDirs: [] })).toBe(
-      "a Harper instance this init did not start",
+      "a Harper instance not attributed to this data directory",
     );
   });
 
@@ -652,7 +652,7 @@ describe("occupied-listener messages (flair#1749)", () => {
       bodyText: "Login failed",
       listener: changed,
     });
-    expect(msg).toContain("a Harper instance this init did not start");
+    expect(msg).toContain("a Harper instance not attributed to this data directory");
     expect(msg).not.toContain("pid 111");
     expect(msg).not.toContain("kill 111");
     expect(msg).not.toMatch(/\bkill \d+/);
@@ -700,7 +700,7 @@ describe("occupied-listener messages (flair#1749)", () => {
     const who = describeOccupiedListener({ pids: [7, 8], dataDirs: ["/data/other"] });
     expect(who).not.toContain("pid 7");
     expect(who).not.toContain("pid 8");
-    expect(who).toContain("a Harper instance this init did not start");
+    expect(who).toContain("a Harper instance not attributed to this data directory");
     const msg = occupiedListenerAuthFailure({
       lead: "Operations API insert failed (401): ",
       bodyText: "Login failed",
@@ -735,7 +735,7 @@ describe("init ROOTPATH lookup (flair#1749)", () => {
     expect(notice).toContain("pid 9");
     expect(notice).toContain("kill 9");
     expect(notice).not.toContain("flair stop");
-    expect(notice).not.toContain("a Harper instance this init did not start");
+    expect(notice).not.toContain("a Harper instance not attributed to this data directory");
   });
 
   test("an unavailable ROOTPATH lookup is not a foreign directory", () => {
