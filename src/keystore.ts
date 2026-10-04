@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveHome } from "./lib/home.js";
+import { writeFilesAtomically } from "./lib/atomic-write.js";
 import {
   randomBytes,
   createCipheriv,
@@ -149,6 +150,97 @@ class FileKeyStore implements KeyStore {
 
 /** Singleton keystore instance. */
 export const keystore: KeyStore = new FileKeyStore();
+
+// ─── Seed ownership sidecars (flair#2200) ───────────────────────────────────
+/** File name suffix of a seed's ownership sidecar, appended to the seed path. */
+export const SEED_OWNER_SUFFIX = ".owner.json";
+
+/** The sidecar's schema version. */
+export const SEED_OWNER_VERSION = 1;
+
+/** What a seed's ownership sidecar records. */
+export interface SeedOwnerRecord {
+  v: number;
+  /** The Instance id the seed was minted for (equal to the seed's own file id). */
+  instanceId: string;
+  /** The data directory of the instance whose Instance table references that id. */
+  dataDir: string;
+}
+
+/** The outcome of reading a seed's ownership sidecar. */
+export type SeedOwnerRead =
+  | { state: "ok"; instanceId: string; dataDir: string }
+  | { state: "absent" }
+  | { state: "unreadable"; reason: string }
+  | { state: "malformed"; reason: string };
+
+/** The sidecar path for `instanceId` — the seed path plus the owner suffix. */
+export function seedOwnerPath(instanceId: string): string {
+  return `${keyPath(instanceId)}${SEED_OWNER_SUFFIX}`;
+}
+
+/** Serialize an ownership record to the exact bytes the sidecar holds. */
+export function serializeSeedOwner(record: SeedOwnerRecord): string {
+  return `${JSON.stringify(record)}\n`;
+}
+
+/** Parse sidecar bytes into a read result. Pure — no filesystem access. */
+export function parseSeedOwner(raw: string): SeedOwnerRead {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch (err) {
+    return { state: "malformed", reason: `not valid JSON (${err instanceof Error ? err.message : String(err)})` };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { state: "malformed", reason: "not a JSON object" };
+  }
+  const rec = value as Record<string, unknown>;
+  if (rec.v !== SEED_OWNER_VERSION) {
+    return { state: "malformed", reason: `unsupported owner-record version ${JSON.stringify(rec.v)}` };
+  }
+  if (typeof rec.instanceId !== "string" || rec.instanceId.trim() === "") {
+    return { state: "malformed", reason: "no instance id" };
+  }
+  if (typeof rec.dataDir !== "string" || rec.dataDir.trim() === "") {
+    return { state: "malformed", reason: "no data directory" };
+  }
+  return { state: "ok", instanceId: rec.instanceId, dataDir: rec.dataDir };
+}
+
+/** Read a sidecar from its path, distinguishing absent / unreadable / malformed. */
+export function readSeedOwnerAt(ownerPath: string): SeedOwnerRead {
+  if (!existsSync(ownerPath)) return { state: "absent" };
+  let raw: string;
+  try {
+    raw = readFileSync(ownerPath, "utf-8");
+  } catch (err) {
+    return { state: "unreadable", reason: err instanceof Error ? err.message : String(err) };
+  }
+  return parseSeedOwner(raw);
+}
+
+/** Read the ownership sidecar for `instanceId`, if any. */
+export function readSeedOwner(instanceId: string): SeedOwnerRead {
+  return readSeedOwnerAt(seedOwnerPath(instanceId));
+}
+
+/**
+ * Record an instance seed's owner: write the sidecar atomically (owner-only,
+ * mode 0600) beside the seed. The writer is the mint; a reader never invents
+ * one. Throws on a write failure — the caller decides whether that is fatal.
+ */
+export function recordSeedOwner(instanceId: string, dataDir: string): void {
+  const dir = keysDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFilesAtomically([
+    {
+      path: seedOwnerPath(instanceId),
+      content: serializeSeedOwner({ v: SEED_OWNER_VERSION, instanceId, dataDir }),
+      mode: 0o600,
+    },
+  ]);
+}
 
 // Export helpers for testing
 export { encryptSeed, decryptSeed, deriveKey, keyPath, keysDir };

@@ -49,7 +49,7 @@ describe("flair export: failed reads never create a complete-looking file (#1970
   beforeAll(() => {
     ensureCliBuild();
     scratch = mkdtempSync(join(tmpdir(), "flair-export-1970-home-"));
-  });
+  }, 120_000);
   afterAll(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
 
   test("a 5xx Agent read reports the failure and writes no file", async () => {
