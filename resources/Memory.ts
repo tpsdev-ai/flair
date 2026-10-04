@@ -22,7 +22,7 @@ import {
   projectRowsThroughPointers,
 } from "./memory-host-source.js";
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
-import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
+import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
@@ -586,22 +586,20 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
   return response;
 }
 
-const REINDEX_SKILL_FIELDS = [
-  "agentId", "visibility", "tags", "content", "trigger", "metadata", "durability", "supersedes", "validTo", "archived", "skillSubjectId",
-  "expiresAt", "validFrom", "archivedAt", "archivedBy",
-];
-const REINDEX_PLAIN_FIELDS = ["agentId", "visibility", "skillSubjectId", "supersedes", "validTo", "validFrom", "expiresAt", "archived", "archivedAt", "archivedBy", "content", "tags", "metadata", "durability"];
+const REINDEX_BOOKKEEPING_FIELDS = new Set<string>([
+  "embedding", "embeddingModel", "contentHash", "retrievalCount", "lastRetrieved", "usageCount",
+]);
+const REINDEX_PROTECTED_FIELDS = DECLARED_MEMORY_ATTRIBUTES.filter((field) => !REINDEX_BOOKKEEPING_FIELDS.has(field));
 
 function reindexDrift(content: any, existing: Record<string, any>): string | null {
   const isSkill = rowIsSkill(existing);
   if (!isSkill && rowIsSkill(content)) return "tags";
-  const fields = isSkill ? REINDEX_SKILL_FIELDS : REINDEX_PLAIN_FIELDS;
-  for (const field of fields) {
+  for (const field of REINDEX_PROTECTED_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(content, field)) continue;
     const submitted = content[field];
     const stored = existing[field];
     if (submitted === stored) continue;
-    if ((field === "tags" || field === "metadata") && JSON.stringify(submitted ?? null) === JSON.stringify(stored ?? null)) continue;
+    if ((field === "metadata" || Array.isArray(submitted)) && JSON.stringify(submitted ?? null) === JSON.stringify(stored ?? null)) continue;
     return field;
   }
   return null;
@@ -1602,8 +1600,6 @@ export class Memory extends (databases as any).flair.Memory {
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
-    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
-    if (authorityDenial) return authorityDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
     // Reindex migration bypass: admin-only escape hatch used by the
@@ -1662,8 +1658,7 @@ export class Memory extends (databases as any).flair.Memory {
         );
       }
       stampInstanceToken(content, reindexExisting);
-      const retainedFields = rowIsSkill(reindexExisting) ? REINDEX_SKILL_FIELDS : REINDEX_PLAIN_FIELDS;
-      for (const field of [...retainedFields, "archivedAt", "archivedBy"]) {
+      for (const field of REINDEX_PROTECTED_FIELDS) {
         if (!Object.prototype.hasOwnProperty.call(content, field) && reindexExisting[field] !== undefined) {
           content[field] = reindexExisting[field];
         }
@@ -1699,6 +1694,8 @@ export class Memory extends (databases as any).flair.Memory {
       return reindexed;
     }
 
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
+    if (authorityDenial) return authorityDenial;
     // Create/update ownership (same rule as post): a non-admin agent may only
     // write memories it owns, via resolveAgentAuth (gate annotation), not
     // context.user.username (the dormant-de-elevation fallback is "admin").

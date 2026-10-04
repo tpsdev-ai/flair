@@ -216,6 +216,39 @@ describe("flair#2139 S2c (1) — retained closed skill payloads obey decision 3"
 // ─── Item 2: protected reindex fields ──────────────────────────────────────
 
 describe("flair#2139 S2c (2) — protected reindex fields", () => {
+  for (const [field, value] of [
+    ["summary", "changed"], ["subject", "changed"], ["entities", ["changed"]],
+    ["parentId", "changed"], ["derivedFrom", ["changed"]], ["source", "changed"],
+    ["type", "changed"], ["sessionId", "changed"], ["lastReflected", "2999-01-01T00:00:00.000Z"],
+    ["createdAt", "2999-01-01T00:00:00.000Z"], ["_safetyFlags", ["changed"]],
+  ] as const) {
+    test(`declared drift ${field} through HTTP`, async () => {
+      const id = nextId(`declared-${field}`);
+      await ops({ operation: "upsert", database: "flair", table: "Memory", records: [{
+        ...skillBody(A, id, "original"), skillSubjectId: id, createdAt: now(),
+      }] });
+      const stored = await memoryRow(id);
+      const result = await call(ADMIN_AGENT, "PUT", memPath(id), { ...stored, [field]: value, _reindex: true });
+      expect(result.status, result.text).toBe(409);
+      expect(JSON.parse(result.text)).toEqual({
+        error: "reindex_would_change_row",
+        message: `the _reindex re-PUT may not change '${field}'`,
+      });
+      expect(await memoryRow(id)).toEqual(stored);
+    }, 120_000);
+  }
+
+  test("bookkeeping changes through HTTP", async () => {
+    const id = nextId("bookkeeping");
+    await ops({ operation: "upsert", database: "flair", table: "Memory", records: [{
+      ...skillBody(A, id, "original"), skillSubjectId: id, createdAt: now(), entities: ["entity"], derivedFrom: ["source"], _safetyFlags: ["flag"],
+    }] });
+    const stored = await memoryRow(id);
+    const result = await call(ADMIN_AGENT, "PUT", memPath(id), { ...stored, retrievalCount: 2, _reindex: true });
+    expect(result.status, result.text).toBe(200);
+    expect(await memoryRow(id)).toMatchObject({ ...stored, retrievalCount: 2 });
+  }, 120_000);
+
   for (const [field, value] of [["archivedAt", "2999-01-01T00:00:00.000Z"], ["archivedBy", "mallory"]] as const) {
     test(`a skill's changed ${field} is refused without changing the stored row`, async () => {
       const id = nextId(`skill-${field}`);

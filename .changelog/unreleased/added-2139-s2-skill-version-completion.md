@@ -9,3 +9,5 @@
   > **Heads-up:** an update that tightens a skill to private now also revokes
   > read access to its predecessor's retained payload through Memory GET/search
   > and the Feed replay, not only through the version read.
+
+  A closed skill row with no recorded version is no longer returned to non-admin readers through GET, search or feed.

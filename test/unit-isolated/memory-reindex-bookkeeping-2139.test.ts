@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { DECLARED_MEMORY_ATTRIBUTES } from "../../src/lib/memory-attributes.ts";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -13,6 +14,7 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
 let memoryStore: Map<string, any>;
 
 class BaseMemory {
+  getId() { return (this as any).id; }
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id ?? (this as any).id;
     return memoryStore.get(id) ?? null;
@@ -161,4 +163,80 @@ test("a partial plain-memory reindex retains lineage and lifecycle fields", asyn
   memoryStore.set("pm", { ...plain(), ...protectedFields });
   expect(status(await reindex(plain()))).toBe(200);
   expect(memoryStore.get("pm")).toMatchObject(protectedFields);
+});
+
+
+describe("_reindex declared fields", () => {
+  for (const [field, storedValue, changedValue] of [
+    ["summary", "original", "changed"],
+    ["subject", "original", "changed"],
+    ["entities", ["original"], ["changed"]],
+    ["parentId", "original", "changed"],
+    ["derivedFrom", ["original"], ["changed"]],
+    ["source", "original", "changed"],
+    ["type", "original", "changed"],
+    ["sessionId", "original", "changed"],
+    ["lastReflected", PAST, FUTURE],
+    ["createdAt", PAST, FUTURE],
+    ["_safetyFlags", ["original"], ["changed"]],
+  ] as const) {
+    test(`declared drift ${field}`, async () => {
+      for (const row of [skill, plain]) {
+        const stored = { ...row(), [field]: storedValue };
+        memoryStore.set(stored.id, stored);
+        const result = await reindex({ ...stored, [field]: changedValue });
+        expect(status(result)).toBe(409);
+        expect(await result.json()).toEqual({
+          error: "reindex_would_change_row",
+          message: `the _reindex re-PUT may not change '${field}'`,
+        });
+        expect(memoryStore.get(stored.id)).toEqual(stored);
+      }
+    });
+  }
+
+  test("bookkeeping changes return 200", async () => {
+    const bookkeeping = { embedding: [1, 0, 0, 0], embeddingModel: "mock-embedding-model", contentHash: "hash", retrievalCount: 2, lastRetrieved: FUTURE, usageCount: 3 };
+    expect(status(await reindex({ ...plain(), ...bookkeeping }))).toBe(200);
+    expect(memoryStore.get("pm")).toMatchObject(bookkeeping);
+  });
+});
+
+
+test("declared schema defaults to refusal", async () => {
+  const bookkeeping = new Set(["embedding", "embeddingModel", "contentHash", "retrievalCount", "lastRetrieved", "usageCount"]);
+  for (const field of DECLARED_MEMORY_ATTRIBUTES) {
+    if (bookkeeping.has(field)) continue;
+    const stored = { ...plain(), [field]: field === "id" ? "pm" : "original" };
+    memoryStore.set("pm", stored);
+    const resource: any = new (Memory as any)();
+    resource.id = "pm";
+    resource.getContext = () => undefined;
+    const result = await resource.put({ ...stored, [field]: "changed", _reindex: true });
+    expect(status(result), field).toBe(field === "id" ? 400 : 409);
+    if (field !== "id") expect(await result.json()).toEqual({
+      error: "reindex_would_change_row",
+      message: `the _reindex re-PUT may not change '${field}'`,
+    });
+    expect(memoryStore.get("pm"), field).toEqual(stored);
+  }
+});
+
+test("partial reindex retains omitted declared fields", async () => {
+  const stored = { ...plain(), summary: "summary", subject: "subject", entities: ["entity"], derivedFrom: ["source"], _safetyFlags: ["flag"], createdAt: PAST, updatedAt: PAST };
+  memoryStore.set("pm", stored);
+  expect(status(await reindex({ id: "pm" }))).toBe(200);
+  expect(memoryStore.get("pm")).toMatchObject(stored);
+  expect(status(await reindex(JSON.parse(JSON.stringify(stored))))).toBe(200);
+  expect(memoryStore.get("pm")).toMatchObject(stored);
+});
+
+
+test("anonymous reindex is refused", async () => {
+  const resource: any = new (Memory as any)();
+  resource.id = "pm";
+  resource.getContext = () => ({ request: { headers: new Headers() } });
+  const result = await resource.put({ ...plain(), retrievalCount: 2, _reindex: true });
+  expect(status(result)).toBe(401);
+  expect(memoryStore.get("pm")).toEqual(plain());
 });
