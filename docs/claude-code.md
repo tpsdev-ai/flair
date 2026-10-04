@@ -88,13 +88,14 @@ This is a prompt-driven CLI setup: Claude must choose to run these commands. For
 
 ## Hooks
 
-`@tpsdev-ai/flair-mcp` ships four Claude Code hooks. Each is a separate binary and each is optional. Each exits 0 on every failure it handles, but a hook can still delay the session start, the prompt or the compaction it runs for; the time budgets and limits of prompt recall and of the PreCompact hook are described below.
+`@tpsdev-ai/flair-mcp` ships five Claude Code hooks. Each is a separate binary and each is optional. Each exits 0 on every failure it handles, but a hook can still delay the session start, the prompt or the compaction it runs for; the time budgets and limits of prompt recall and of the PreCompact hook are described below.
 
 | Hook | Claude Code event | What it does | Install |
 |---|---|---|---|
 | `flair-session-start` | `SessionStart` | Loads bootstrap context (soul plus relevant memories) when a session opens. | `flair hook install` ([details](mcp-clients.md#auto-recall-on-session-start-optional-hook)) |
 | `flair-continuity-capture` | `PostToolUse` and `Stop` | Journals the agent's working state into the ephemeral memory tier, so the next session start can point at it with a one-line resume hint. | `flair hook install --continuity` |
 | `flair-prompt-recall` | `UserPromptSubmit` | Searches memory with each prompt and adds the relevant memories as context before the model answers. | By hand, below |
+| `flair-action-recall` | `PreToolUse` | Matches the pending Bash command against the agent's own triggered lessons and adds the matching ones as context on the next model request. | `flair hook install --action-recall` |
 | `flair-precompact` | `PreCompact` | Saves a bounded continuity record just before a compaction, for `flair-session-start` to show first afterwards. | By hand, [below](#continuity-across-compaction-flair-precompact-optional) |
 
 ### Per-prompt recall (`flair-prompt-recall`)
@@ -145,6 +146,24 @@ The same `npx -y -p @tpsdev-ai/flair-mcp@<version> flair-prompt-recall` invocati
 | Time budget in milliseconds, from the hook's start, 250 to 15000 | `FLAIR_PROMPT_RECALL_TIMEOUT_MS` | `promptRecallTimeoutMs` | `3000` |
 
 The environment wins over the config file, where the keys are top-level entries; a value that is missing or out of range falls through to the next source. Until the config file has been read, the hook's deadline uses the environment's budget or the default; a budget set in the config file applies from then on, still measured from the start. The hook reads `FLAIR_AGENT_ID`, `FLAIR_URL` and `FLAIR_KEY_PATH` like the other hooks. It never uses `FLAIR_ADMIN_USER` or `FLAIR_ADMIN_PASSWORD`: without an agent key the request goes out unsigned, Flair refuses it, and the prompt gets the one "unavailable" line.
+
+### Action recall (`flair-action-recall`)
+
+`flair hook install --action-recall` copies the version-matched hook and its runtime modules to `~/.flair/hooks/action-recall/<version>-<content hash>/` and probes that installed command. This Flair-owned directory survives npm cache eviction; uninstall removes it. Status probes a detected entry; absence is informational. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first. An incompatible SessionStart entry or held pin refuses installation.
+
+**How it decides.** A lesson opts in through its JSON `metadata` field:
+
+```json
+{ "flairActionRecall": { "v": 1, "triggers": [ { "verb": "git", "subcommands": ["push"], "flags": ["--force"], "paths": [] } ] } }
+```
+
+Write a new lesson with `client.memory.write(content, { type: "lesson", metadata: { flairActionRecall: { v: 1, triggers } } })`. For an existing lesson, `client.memory.update(id, content, { metadata: { flairActionRecall: { v: 1, triggers } } })` preserves other metadata keys.
+
+`verb` is a literal executable basename; `subcommands` are an exact contiguous argv prefix after it; `flags` are required members; `paths` are optional operand-glob alternatives matched against the command's operands, normalized against the payload `cwd`. A trigger with none of the three is rejected. At most 4 triggers per lesson, 3 subcommands, 8 flags and 2 path globs per trigger, each string at most 128 bytes. Set `triggers: []` through `client.memory.update` to disable recall at the next refresh.
+
+The hot path reads a per-session cache of the agent's own lessons under `~/.flair/action-recall/`, refreshed at session start through a signed, non-admin read. The cache expires five minutes after refresh starts, shortened by each lesson's valid expiry or end-of-validity timestamp. Between refreshes, a deletion, edit or supersession can stay visible until expiry.
+
+**What it never does.** It emits only `hookSpecificOutput.additionalContext` — never a permission decision, a question, replacement input or blocking output. It never executes or echoes the submitted command. Caught read and input errors produce no context. Missing, corrupt, wrong-mode, oversized or stale caches do not match. The reader checks path components for symlinks before opening and uses `O_NOFOLLOW` on the final component. A command it cannot read as one simple argv command (expansions, substitutions, assignments, redirects, comments, pipelines, lists, heredocs, compound commands) is silently not matched. At most three lessons are shown, each quoted line bounded, the whole output at most 4 KiB; excerpts are redacted before they are cached and quoted when shown. The hook does not read or use credentials, signs nothing and makes no network call.
 
 ## Multiple Projects
 

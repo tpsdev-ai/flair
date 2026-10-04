@@ -4,8 +4,10 @@
 import { createHash } from "node:crypto";
 import { databases } from "harper";
 import { authorizeSoulWrite } from "./soul-write-policy.js";
+import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
+import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
 
@@ -124,6 +126,25 @@ export function soulSubjectId(agentId: string, key: string): string {
   return `${agentId}:${key}`;
 }
 
+/** The subject type of a skill-tagged Memory row's version chain (flair#2139 S2). */
+export const SKILL_SUBJECT_TYPE = "skill";
+
+/** A retained skill read-scope reference: the owner and the effective visibility. */
+export interface InstructionReadRef {
+  agentId?: unknown;
+  visibility?: unknown;
+}
+
+/**
+ * Skill references require a nonempty owner and explicit private/shared visibility.
+ */
+export function skillRefReadable(ref: InstructionReadRef | null | undefined, readerId: string): boolean {
+  if (!ref || typeof ref !== "object") return false;
+  if (typeof ref.agentId !== "string" || ref.agentId.length === 0) return false;
+  if (ref.visibility !== PRIVATE_VISIBILITY && ref.visibility !== SHARED_VISIBILITY) return false;
+  return ref.agentId === readerId || ref.visibility === SHARED_VISIBILITY;
+}
+
 /** A version row carries the expectedVersion it compared iff it is guarded; otherwise null. */
 export function expectedVersionOf(input: RecordVersionInput): string | null {
   return input.expectedVersion ?? null;
@@ -154,12 +175,11 @@ function isTableLike(table: unknown): boolean {
 }
 
 /**
- * The subject's current head, or null when it has no history yet. Read through
- * the raw table handle: this runs inside the caller's append transaction and
- * has already dropped the thread's cached read snapshot (withKeyLock), so it
- * sees the last committed head under the subject lock.
+ * The subject's current head, or null when it has no history yet.
+ * The append caller reads under its subject lock and transaction after resetting
+ * the cached read snapshot; the read resource uses the same raw handle without a lock.
  */
-async function readHead(subjectType: string, subjectId: string, shared: any): Promise<Record<string, any> | null> {
+export async function readHead(subjectType: string, subjectId: string, shared?: any): Promise<Record<string, any> | null> {
   const table = (databases as any).flair?.InstructionVersion;
   if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
   for await (const row of table.search({
@@ -173,6 +193,46 @@ async function readHead(subjectType: string, subjectId: string, shared: any): Pr
     return row as Record<string, any>;
   }
   return null;
+}
+
+/** Server-derived attribution for an authorization outcome; never from a body. */
+const UNATTRIBUTED: VersionAttribution = { actorKind: "internal", actorId: null, sourceClass: "internal" };
+
+/**
+ * Dispatch authorization and attribution by subject type (flair#2139 S2). Soul
+ * uses Soul's operator/internal rule; skill uses the shared skill-write
+ * credential class (operator / agent / internal). An unrecognized subject type
+ * is refused, not silently attributed.
+ */
+export async function resolveVersionAuthorization(
+  subjectType: InstructionSubjectType,
+  context: any,
+): Promise<{ attribution: VersionAttribution; denied: Response | null }> {
+  if (subjectType === "soul") {
+    const { auth, source, denied } = await authorizeSoulWrite(context);
+    if (denied) return { attribution: UNATTRIBUTED, denied };
+    return {
+      attribution: {
+        actorKind: source === "operator" ? "operator" : "internal",
+        actorId: auth.kind === "agent" ? auth.agentId : null,
+        sourceClass: source!,
+      },
+      denied: null,
+    };
+  }
+  if (subjectType === "skill") {
+    const { auth, source, denied } = await authorizeSkillVersionWrite(context);
+    if (denied) return { attribution: UNATTRIBUTED, denied };
+    return {
+      attribution: {
+        actorKind: source!,
+        actorId: auth.kind === "agent" ? auth.agentId : null,
+        sourceClass: source!,
+      },
+      denied: null,
+    };
+  }
+  throw new Error(`instruction version: unknown subject type: ${String(subjectType)}`);
 }
 
 const LOCK_NAMESPACE = "flair-instruction-version";
@@ -195,13 +255,9 @@ export async function recordVersion(
   try {
     outcome = await withKeyLock(store, [LOCK_NAMESPACE, request.subjectType], () =>
       withOwnedTransaction(ctx, async (shared) => {
-        const { auth, source, denied } = await authorizeSoulWrite(shared);
-        if (denied) return { ok: false, response: denied } as RecordVersionOutcome;
-        const attribution: VersionAttribution = {
-          actorKind: source === "operator" ? "operator" : "internal",
-          actorId: auth.kind === "agent" ? auth.agentId : null,
-          sourceClass: source!,
-        };
+        const authorization = await resolveVersionAuthorization(request.subjectType, shared);
+        if (authorization.denied) return { ok: false, response: authorization.denied } as RecordVersionOutcome;
+        const attribution = authorization.attribution;
         const input = "prepare" in request ? await request.prepare(shared) : request;
         if (input === null) {
           const result = await mutateRow(shared);
@@ -219,7 +275,9 @@ export async function recordVersion(
         }
         const result = await mutateRow(shared);
         if (result instanceof Response && result.status >= 300) throw new RowMutationDenied(result);
-        if (input.kind !== "delete" && input.snapshot) {
+        // Only a Soul record carries a full stored snapshot; a skill record
+        // holds hashes and physical references, never a second content copy.
+        if (input.subjectType === "soul" && input.kind !== "delete" && input.snapshot) {
           const row = input.snapshot();
           if (!row) throw new Error("instruction version: stored snapshot unavailable");
           input.soulSnapshot = JSON.stringify(row);

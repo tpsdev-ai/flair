@@ -36,6 +36,7 @@ export interface Memory {
   durability: Durability;
   tags: string[];
   subject?: string;
+  metadata?: string | null;
   /** Writer-controlled sharing intent. Absent on records written before this
    *  field existed — the server treats absence as "shared" (migration-
    *  invariant: an existing memory keeps reading to exactly whoever holds a
@@ -137,6 +138,10 @@ export interface BootstrapResult {
   memoryCount: number;
   soulCount: number;
   tokenEstimate: number;
+  /** flair#1182/#2067 — resolved caller identity and read scope. Present on a
+   *  live server; a caller that needs it (the action-recall refresh) treats an
+   *  absent scope as "no cache". */
+  scope?: { agentId?: string; isAdmin?: boolean; reads?: string };
 }
 
 /** Client configuration. */

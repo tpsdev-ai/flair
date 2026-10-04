@@ -146,6 +146,9 @@ export type SessionStartHookBuildOptions = {
   /** Codex writes FLAIR_HOOK_HARNESS and keeps stderr visible (flair#1734).
    *  Claude Code keeps the #1007 silent wrapper. Default claude-code. */
   harness?: "claude-code" | "codex";
+  /** flair#2067 slice 2 — also enable the action-recall cache refresh on this
+   *  SessionStart entry (Claude Code only). */
+  actionRecall?: boolean;
 };
 
 export function buildSessionStartHookCommand(
@@ -165,6 +168,7 @@ export function buildSessionStartHookCommand(
   }
   const harness = opts?.harness ?? "claude-code";
   const envParts = harness === "codex" ? [`FLAIR_HOOK_HARNESS=${harness}`] : [];
+  if (opts?.actionRecall) envParts.push("FLAIR_ACTION_RECALL=1");
   envParts.push(`FLAIR_AGENT_ID=${agentId}`);
   if (flairUrl) envParts.push(`FLAIR_URL=${flairUrl}`);
   const env = envParts.join(" ");
@@ -198,6 +202,58 @@ export const SESSION_START_HOOK_INVOCATION_RE =
 
 export function isSessionStartHookInvocation(command: string): boolean {
   return typeof command === "string" && SESSION_START_HOOK_INVOCATION_RE.test(command);
+}
+
+/** Does this SessionStart command enable the action-recall refresh? */
+export function sessionStartEnablesActionRecall(command: string): boolean {
+  return typeof command === "string" && command.includes("FLAIR_ACTION_RECALL=1");
+}
+
+// ── the action-recall PreToolUse hook (flair#2067 slice 2) ──────────────────
+//
+// Runs the absolute runtime and artifact paths selected at installation.
+
+/** The exact substring identifying a Flair action-recall hook command. */
+export const ACTION_RECALL_HOOK_MARKER = "action-recall-hook.js";
+
+/** The Claude-only PreToolUse matcher written alongside our hook entry. */
+export const ACTION_RECALL_PRE_TOOL_USE_MATCHER = "Bash";
+
+/**
+ * Build the exact `command` string registered for the PreToolUse action-recall
+ * hook. Throws rather than emitting a quoted approximation when a value is
+ * unsafe. Artefact paths also allow `@`.
+ */
+export function buildActionRecallHookCommand(
+  bunPath: string,
+  artifactPath: string,
+  agentId: string,
+  flairUrl?: string,
+): string {
+  for (const [label, value] of [
+    ["agent id", agentId],
+    ["bun path", bunPath],
+    ["artefact path", artifactPath],
+  ] as const) {
+    if (!(label === "artefact path" ? /^[A-Za-z0-9._:@/-]+$/.test(value) : isHookCommandValueSafe(value))) {
+      throw new Error(
+        `${label} '${value}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -; artefact paths also allow @)`,
+      );
+    }
+  }
+  if (flairUrl != null && flairUrl !== "" && !isHookCommandValueSafe(flairUrl)) {
+    throw new Error(
+      `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    );
+  }
+  const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
+  const invocation = `${env} ${bunPath} ${artifactPath}`;
+  return String.raw`sh -c 'out=$(${invocation} 2>/dev/null) && [ -n "$out" ] && [ "${"$"}{#out}" -le 4096 ] && printf %s "$out" || true'`;
+}
+
+/** Match the artifact marker in commands without npx. */
+export function isFlairActionRecallCommand(command: string): boolean {
+  return typeof command === "string" && command.includes(ACTION_RECALL_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
 }
 
 /**

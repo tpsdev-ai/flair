@@ -63,7 +63,7 @@
     "node": "^22.18.0 || >=24.0.0"
   },
   "dependencies": {
-    "@harperfast/oauth": "2.5.0",
+    "@harperfast/oauth": "2.9.0",
     "@types/js-yaml": "4.0.9",
     "commander": "14.0.3",
     "harper": "5.2.8",
@@ -95,7 +95,8 @@
     "ip-address": "^10.5.1",
     "joi": "^17.13.7",
     "moment": "^2.31.0",
-    "@grpc/grpc-js": "^1.14.5"
+    "@grpc/grpc-js": "^1.14.5",
+    "http-cache-semantics": "^4.3.0"
   },
   "devDependencies": {
     "@playwright/test": "1.59.1",

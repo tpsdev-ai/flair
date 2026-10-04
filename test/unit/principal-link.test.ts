@@ -10,6 +10,7 @@
  */
 import { describe, test, expect } from "bun:test";
 import { Command } from "commander";
+import { agentInsertSchemaError } from "../helpers/agent-insert-schema.ts";
 import { register } from "../../src/commands/principal.ts";
 import {
   linkPrincipalMapping,
@@ -111,8 +112,10 @@ function mappingStub(opts: {
       return Response.json(hits);
     }
     if (body.operation === "insert" && body.table === "Agent") {
+      const error = agentInsertSchemaError(body.records ?? []);
+      if (error) return error;
       if (opts.failWrites) return new Response("nope", { status: 500 });
-      write(body.records ?? []);
+      for (const row of body.records ?? []) principals.set(row.id, { ...row });
       return Response.json({ message: "inserted" });
     }
     if ((body.operation === "upsert" || body.operation === "update") && body.table === "Credential") {
@@ -132,6 +135,23 @@ function mappingStub(opts: {
 }
 
 const SUBJECT = { idpSubject: "octocat", idpProvider: "github" };
+
+for (const field of ["name", "publicKey", "createdAt"]) {
+  test(`mapping fake rejects an Agent insert missing ${field}`, async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: [] });
+    const record: Record<string, unknown> = {
+      id: "self", name: "self", publicKey: "idp:github:octocat", createdAt: "2026-10-02T00:00:00.000Z",
+    };
+    delete record[field];
+    const response = await st.fetchImpl(HOSTED_OPS, {
+      method: "POST",
+      body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [record] }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: `Property ${field} is required` });
+    expect(st.principals.has("self")).toBe(false);
+  });
+}
 
 describe("flair principal link (flair#2115)", () => {
   test("maps the subject and prints the mapping", async () => {
@@ -484,7 +504,9 @@ describe("flair principal unlink (flair#2115)", () => {
   }
 
   test("unlink exits nonzero without Unlinked when readback fails", async () => {
-    const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials, failCredReadAt: 2 });
+    // Read 3 is the subject readback; reads 1-2 are the preflight and the
+    // flair#2222 pre-write guard.
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, credentials, failCredReadAt: 3 });
     const result = await invokeUnlink(st.fetchImpl);
     expect(result.exitCode).toBe(1);
     expect(result.logs).not.toContain("Unlinked");
@@ -500,7 +522,7 @@ describe("flair principal unlink (flair#2115)", () => {
     expect(result.logs).toContain("cred_c1, cred_c2");
     expect(result.errors).toBe("");
     expect(st.calls.map(c => c.body.operation)).toEqual([
-      "search_by_value", "search_by_conditions", "update", "search_by_conditions",
+      "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "update", "search_by_conditions",
     ]);
     expect([...st.rows.values()].every(row => row.status === "revoked")).toBe(true);
   });
@@ -770,12 +792,13 @@ describe("operations read predicates", () => {
                        "wrong-principal", "wrong-provider", "wrong-status", "invalid-label"] as const) {
     test(`post-write verification: ${fault} refuses and sends no further write`, async () => {
       const st = mappingStub({ expectedUrl: HOSTED_OPS });
-      let reads = 0;
       let writesAtRead = 0;
       const fetchImpl = (async (url: any, init?: RequestInit) => {
         const response = await st.fetchImpl(url, init);
         const query = JSON.parse(String(init?.body));
-        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || ++reads !== 2) return response;
+        // The invariant read-back is the first Credential read AFTER the write;
+        // the preflight and the flair#2222 pre-write guard both see no write yet.
+        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || st.writes().length === 0) return response;
         writesAtRead = st.writes().length;
         const rows = await response.json() as any[];
         const row = rows[0];
@@ -847,11 +870,11 @@ describe("legacy Credential mapping reads", () => {
   for (const createdAt of [undefined, 42]) {
     test(`post-write read accepts createdAt ${String(createdAt)}`, async () => {
       const st = mappingStub({ expectedUrl: HOSTED_OPS });
-      let reads = 0;
       const fetchImpl = (async (url: any, init?: RequestInit) => {
         const response = await st.fetchImpl(url, init);
         const query = JSON.parse(String(init?.body));
-        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || ++reads !== 2) return response;
+        // The invariant read-back is the first Credential read after the write.
+        if (query.table !== "Credential" || query.operation !== "search_by_conditions" || st.writes().length === 0) return response;
         const rows = await response.json() as any[];
         rows[0].createdAt = createdAt;
         return Response.json(rows);
@@ -881,4 +904,149 @@ describe("legacy Credential mapping reads", () => {
       expect(st.writes()).toEqual([]);
     });
   }
+});
+
+// ─── flair#2222 — a change between preflight and write refuses ───────────────
+//
+// Re-read Agent presence and canonicalized fields of principal-bearing IdP rows
+// before each write. Valid comparison differences refuse with mapping-changed-underneath;
+// invalid changed rows can fail earlier validation with missing-or-invalid-credential-field.
+// Both fail closed.
+
+describe("flair#2222 — the pre-write re-validation bound", () => {
+  const provisionParams = { hostedOrigin: HOSTED, ...ADMIN, principal: "self", principalKind: "human" as const, ...SUBJECT };
+
+  test("the missing-Agent path checks before both writes and accepts its own insert", async () => {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: [] });
+    const result = await provisionIdpIdentityMapping(provisionParams, { fetchImpl: st.fetchImpl });
+    expect(result.principalCreated).toBe(true);
+    expect(st.calls.map(c => `${c.body.operation}:${c.body.table}`)).toEqual([
+      "search_by_value:Agent", "search_by_conditions:Credential",
+      "search_by_value:Agent", "search_by_conditions:Credential", "insert:Agent",
+      "search_by_value:Agent", "search_by_conditions:Credential", "upsert:Credential",
+      "search_by_conditions:Credential",
+    ]);
+    expect(st.principals.get("self")).toMatchObject({ id: "self", admin: false, publicKey: "idp:github:octocat" });
+    expect(st.rows.get(result.credentialId)).toMatchObject({ principalId: "self", status: "active" });
+  });
+
+  for (const change of ["repoint", "add", "remove-agent"] as const) {
+    test(`the missing-Agent path refuses ${change} after insert without a Credential write or rollback`, async () => {
+      const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["bob", "carl"], credentials: [
+        { id: "cred_c1", principalId: "bob", ...SUBJECT },
+      ] });
+      const fetchImpl = (async (url: any, init?: RequestInit) => {
+        const response = await st.fetchImpl(url, init);
+        const op = JSON.parse(String(init?.body));
+        if (op.operation === "insert" && op.table === "Agent") {
+          if (change === "repoint") st.rows.get("cred_c1")!.principalId = "carl";
+          if (change === "add") st.rows.set("cred_c2", { ...st.rows.get("cred_c1"), id: "cred_c2", principalId: "carl" });
+          if (change === "remove-agent") st.principals.delete("self");
+        }
+        return response;
+      }) as typeof fetch;
+      const error = await provisionIdpIdentityMapping(provisionParams, { fetchImpl }).catch(e => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain("mapping-changed-underneath");
+      expect(error.message).toContain("Agent 'self' was created; no rollback was attempted");
+      expect(error.message).not.toContain("Nothing was written");
+      expect(st.writes().map(c => `${c.body.operation}:${c.body.table}`)).toEqual(["insert:Agent"]);
+      expect(st.principals.has("self")).toBe(change !== "remove-agent");
+      expect(st.rows.get("cred_c1")).toMatchObject({ principalId: change === "repoint" ? "carl" : "bob", status: "active" });
+      expect(st.rows.has("cred_c2")).toBe(change === "add");
+    });
+  }
+
+  test("the missing-Agent path refuses a change before insert without either write", async () => {
+    const st = raceStub({ principals: [], mutate: s => { s.principals.set("self", { id: "self" }); } });
+    await expect(provisionIdpIdentityMapping(provisionParams, { fetchImpl: st.fetchImpl })).rejects.toThrow("mapping-changed-underneath");
+    expect(st.writes()).toEqual([]);
+  });
+
+  test("lastUsedAt changes and principal-less legacy rows do not refuse a mapping write", async () => {
+    const st = raceStub({ principals: ["self"], credentials: [
+      { id: "cred_c1", principalId: "self", ...SUBJECT },
+    ], mutate: s => {
+      s.rows.get("cred_c1")!.lastUsedAt = "2026-10-03T00:00:00.000Z";
+      s.rows.set("cred_legacy", { id: "cred_legacy", kind: "idp", ...SUBJECT });
+    } });
+    const result = await provisionIdpIdentityMapping(provisionParams, { fetchImpl: st.fetchImpl });
+    expect(result.credentialId).toBe("cred_c1");
+    expect(st.writes()).toHaveLength(1);
+    expect(st.rows.has("cred_legacy")).toBe(true);
+  });
+
+  /** A stub whose store is changed ONCE, after the first subject read answers. */
+  function raceStub(opts: {
+    principals?: string[];
+    credentials?: Array<Record<string, any>>;
+    mutate: (st: ReturnType<typeof mappingStub>) => void;
+  }) {
+    const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: opts.principals, credentials: opts.credentials });
+    let injected = false;
+    const inner = st.fetchImpl;
+    const fetchImpl = (async (url: any, init?: any) => {
+      const res = await inner(url, init);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (!injected && body.operation === "search_by_conditions" && body.table === "Credential") {
+        injected = true;
+        opts.mutate(st);
+      }
+      return res;
+    }) as unknown as typeof fetch;
+    return { ...st, fetchImpl };
+  }
+
+  test("link refuses when the Credential row moved after the preflight", async () => {
+    const st = raceStub({
+      principals: ["alice", "bob", "carl"],
+      credentials: [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", principalId: "bob", status: "active" }],
+      mutate: (s) => { s.rows.get("cred_c1")!.principalId = "carl"; },
+    });
+    await expect(
+      linkPrincipalMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT, replace: true }, { fetchImpl: st.fetchImpl }),
+    ).rejects.toThrow(/mapping-changed-underneath/);
+    expect(st.writes()).toEqual([]);
+    expect(st.rows.get("cred_c1")!.principalId, "the concurrently changed row was not overwritten").toBe("carl");
+  });
+
+  test("unlink refuses when the Credential row moved after the preflight", async () => {
+    const st = raceStub({
+      principals: ["alice", "bob"],
+      credentials: [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", principalId: "alice", status: "active" }],
+      mutate: (s) => { s.rows.get("cred_c1")!.principalId = "bob"; },
+    });
+    await expect(
+      unlinkPrincipalMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "alice", ...SUBJECT }, { fetchImpl: st.fetchImpl }),
+    ).rejects.toThrow(/mapping-changed-underneath/);
+    expect(st.writes()).toEqual([]);
+    expect(st.rows.get("cred_c1")!.status).toBe("active");
+  });
+
+  test("the provisioner refuses when a concurrent link adds a subject row after the preflight", async () => {
+    const st = raceStub({
+      principals: ["self", "carl"],
+      credentials: [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", principalId: "self", status: "active" }],
+      mutate: (s) => {
+        s.rows.set("cred_c2", { id: "cred_c2", kind: "idp", status: "active", idpProvider: "okta", idpSubject: "octocat", principalId: "carl", createdAt: "2026-10-02T00:00:00.000Z" });
+      },
+    });
+    await expect(
+      provisionIdpIdentityMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "self", principalKind: "human", ...SUBJECT }, { fetchImpl: st.fetchImpl }),
+    ).rejects.toThrow(/mapping-changed-underneath/);
+    expect(st.writes()).toEqual([]);
+    expect([...st.rows.values()].filter((r) => r.status !== "revoked").length, "both rows survive").toBe(2);
+  });
+
+  test("the provisioner refuses when the principal Agent is removed after the preflight", async () => {
+    const st = raceStub({
+      principals: ["self"],
+      credentials: [{ id: "cred_c1", idpSubject: "octocat", idpProvider: "github", principalId: "self", status: "active" }],
+      mutate: (s) => { s.principals.delete("self"); },
+    });
+    await expect(
+      provisionIdpIdentityMapping({ hostedOrigin: HOSTED, ...ADMIN, principal: "self", principalKind: "human", ...SUBJECT }, { fetchImpl: st.fetchImpl }),
+    ).rejects.toThrow(/mapping-changed-underneath/);
+    expect(st.writes()).toEqual([]);
+  });
 });

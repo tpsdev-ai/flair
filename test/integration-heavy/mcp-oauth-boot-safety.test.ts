@@ -20,10 +20,23 @@
  *   2. BOOT-SAFETY + ${ENV} BACKSTOP (behavioral gate): the ACTUAL shipped
  *      config with FLAIR_MCP_* env unset boots CLEAN with /mcp 404 — i.e.
  *      oauth 2.5.0's normalizeBooleanField deleted the unresolved placeholder
- *      and the plugin default (disabled) applied. On oauth < 2.5.0 this test
+ *      and the plugin default (disabled) applied — and the unconfigured
+ *      github provider is skipped with the library's warning rather than
+ *      failing the boot over its redirectUri (2.8.1; HarperFast/oauth#259).
+ *      On oauth < 2.5.0 this test
  *      FAILS (truthy placeholder + unresolved issuer -> degraded boot, /mcp
  *      500). A red here is the dependency drift speaking — treat it as a
  *      positive control, not a flake.
+ *   2b. NO SIGNING KEY (flair#2194): the shipped config with FLAIR_MCP_OAUTH on
+ *      and NO signing key boots CLEAN — the block no longer declares
+ *      signingKeyPem, so @harperfast/oauth no longer refuses the load over that
+ *      unresolved placeholder.
+ *   2c. DECLARED PIN STILL FAILS (flair#2194): a config that DOES declare
+ *      `signingKeyPem: ${VAR}` with the variable unset still degrades the boot,
+ *      the load error naming the variable — the library's check is NOT loosened.
+ *   2d. NO PROVIDER (flair#2194): no-provider boot returns 404 for both
+ *      protected-resource forms and 401 for an unauthenticated /mcp request.
+ *      A token minted with a provider returns 401 after provider removal.
  *   3. MUTATION-PROVE (literal true): mcp.enabled: true + env unset -> boots
  *      DEGRADED. Proves test 2's clean-boot assertions CAN fire.
  *   4. GARBAGE VALUE (flair#1152 residual): FLAIR_MCP_OAUTH=maybe. Measured
@@ -35,8 +48,10 @@
  *      whenever the strict flag is off — NOT the component's AS; the test
  *      asserts the discriminating field.) If either reader's vocabulary ever
  *      changes, this test is the tripwire.
- *   5. ENABLED: shipped config VERBATIM + FLAIR_MCP_OAUTH=true -> /mcp
- *      mounts, the COMPONENT's AS metadata advertises CIMD, and the RFC 9728
+ *   5. ENABLED: shipped config VERBATIM + FLAIR_MCP_OAUTH=true (and the
+ *      github provider's client id, secret and redirectUri) -> /mcp
+ *      mounts, the component's github provider initializes, the COMPONENT's
+ *      AS metadata advertises CIMD, and the RFC 9728
  *      metadata carries the DERIVED `<issuer>/mcp` resource (flair#1180 — no
  *      composite literal). "true" is the ONE value both readers accept:
  *      flair's flag takes 1/true/yes/on but the component deletes anything
@@ -58,6 +73,7 @@ import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
 import { mcpOAuthEnabled } from "../../resources/mcp-oauth-flag.ts";
@@ -83,6 +99,7 @@ const MCP_ENV_KEYS = [
   "FLAIR_MCP_SIGNING_KEY_PEM",
   "OAUTH_GITHUB_CLIENT_ID",
   "OAUTH_GITHUB_CLIENT_SECRET",
+  "OAUTH_GITHUB_REDIRECT_URI",
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 beforeAll(() => {
@@ -159,7 +176,7 @@ describe("flair#1152 precondition: resolved @harperfast/oauth version", () => {
 // ─── 1. SHIPPED SHAPE (flair#1152 + flair#1180) ─────────────────────────────
 
 describe("flair#1152/#1180 shipped config shape", () => {
-  test("mcp.enabled is the whole-token env reference; no resource key; issuer whole-token", () => {
+  test("mcp.enabled is the whole-token env reference; no resource key; issuer whole-token; github redirectUri a whole-token reference", () => {
     const doc = yaml.load(readFileSync(SHIPPED_CONFIG, "utf-8")) as any;
     const mcp = doc["@harperfast/oauth"].mcp;
     // flair#1152: the on/off choice lives in the ENVIRONMENT. A literal here
@@ -176,6 +193,15 @@ describe("flair#1152/#1180 shipped config shape", () => {
     expect(mcp.issuer).toBe("${FLAIR_MCP_ISSUER}");
     // DCR stays explicitly disabled (flair#756) — untouched by the reshape.
     expect(mcp.dynamicClientRegistration.enabled).toBe(false);
+    // The github provider carries a whole-token redirectUri reference beside
+    // its credentials: since @harperfast/oauth 2.7.0 a CONFIGURED provider
+    // needs one, and 2.8.1 skips an UNCONFIGURED provider before that check
+    // (HarperFast/oauth#259). A literal here would re-introduce the
+    // packed-file revert problem the two credential references avoid.
+    const github = doc["@harperfast/oauth"].providers.github;
+    expect(github.clientId).toBe("${OAUTH_GITHUB_CLIENT_ID}");
+    expect(github.clientSecret).toBe("${OAUTH_GITHUB_CLIENT_SECRET}");
+    expect(github.redirectUri).toBe("${OAUTH_GITHUB_REDIRECT_URI}");
   });
 });
 
@@ -217,6 +243,187 @@ describe("flair#1136/#1152 boot-safety: shipped config with env-referenced mcp.e
         signal: AbortSignal.timeout(10_000),
       });
       expect(mcpRes.status).toBe(404);
+
+      // SHAPE (a): none of the OAUTH_GITHUB_* variables is set, so the github
+      // provider is UNCONFIGURED and @harperfast/oauth 2.8.1 skips it — with
+      // this warning, emitted before the provider's redirectUri is ever
+      // evaluated (HarperFast/oauth#259). On 2.8.0 the redirectUri check ran
+      // first and failed the plugin's load, which is what made this boot
+      // degraded. The shipped block now carries a redirectUri env reference;
+      // that this boot stays clean proves an unset credential pair still
+      // short-circuits.
+      const log = harper.getLog?.() ?? "";
+      expect(log).toContain("OAuth provider 'github' not configured. Missing: clientId, clientSecret");
+    },
+    120_000,
+  );
+});
+
+// ─── 2b. BOOT-SAFETY: MCP on with NO staged signing key (flair#2194) ─────────
+
+describe("flair#2194 boot-safety: shipped config with MCP on and no signing key", () => {
+  test(
+    "configured provider and no signing key boots clean",
+    async () => {
+      clearMcpEnv();
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
+      process.env.OAUTH_GITHUB_CLIENT_ID = "no-signing-key-client";
+      process.env.OAUTH_GITHUB_CLIENT_SECRET = "no-signing-key-secret";
+      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
+
+      const workDir = makeWorkDirWithShippedConfig("flair-no-signing-key-");
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+      });
+      instances.push(harper);
+
+      // Clean boot — the ops API answers 200 (a degraded boot answers 500).
+      const opsRes = await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) });
+      expect(opsRes.status).toBe(200);
+      const discovery = await fetch(`${harper.httpURL}/.well-known/oauth-protected-resource`, { signal: AbortSignal.timeout(10_000) });
+      expect(discovery.status).toBe(200);
+
+      // flair's /mcp is mounted and guarded (401 — not 404/disabled, not 500/degraded).
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
+      expect(mcpRes.status).toBe(401);
+
+      // The load did not stop on the signing key the way it did before the fix.
+      const log = harper.getLog?.() ?? "";
+      expect(log).not.toContain("mcp.signingKeyPem is the unresolved env placeholder");
+    },
+    120_000,
+  );
+});
+
+// ─── 2c/2d. DECLARED PIN FAILS / NO PROVIDER (flair#2194) ────────────────────
+
+describe("flair#2194: a declared signingKeyPem with an unset variable still fails the boot loudly", () => {
+  test(
+    "mcp.signingKeyPem declared with `${FLAIR_MCP_SIGNING_KEY_PEM}` unset: the plugin load is refused, naming the variable",
+    async () => {
+      clearMcpEnv();
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
+      process.env.OAUTH_GITHUB_CLIENT_ID = "declared-pin-client";
+      process.env.OAUTH_GITHUB_CLIENT_SECRET = "declared-pin-secret";
+      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
+      const workDir = makeWorkDirWithShippedConfig("flair-declared-pin-", (shipped) =>
+        shipped.replace("    enabled: ${FLAIR_MCP_OAUTH}", "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}"),
+      );
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      instances.push(harper);
+
+      // The library's hard check is intact: a DECLARED, unresolved pin degrades the boot.
+      const healthRes = await fetch(`${harper.httpURL}/health`, { signal: AbortSignal.timeout(10_000) });
+      expect(healthRes.status).toBe(500);
+      // The plugin's load error names the variable, in the instance's own log.
+      const log = harper.getLog?.() ?? "";
+      expect(log).toContain("mcp.signingKeyPem is the unresolved env placeholder");
+      expect(log).toContain("${FLAIR_MCP_SIGNING_KEY_PEM}");
+    },
+    120_000,
+  );
+});
+
+describe("flair#2194: MCP on with NO provider configured — fail-closed discovery", () => {
+  test("a token minted with a provider returns 401 after provider removal and restart", async () => {
+    clearMcpEnv();
+    const issuer = "https://provider-removal.flair.test";
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = issuer;
+    process.env.OAUTH_GITHUB_CLIENT_ID = "provider-removal-client";
+    process.env.OAUTH_GITHUB_CLIENT_SECRET = "provider-removal-secret";
+    process.env.OAUTH_GITHUB_REDIRECT_URI = `${issuer}/oauth`;
+    const workDir = makeWorkDirWithShippedConfig("flair-provider-removal-");
+    let harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+    instances.push(harper);
+    const verifier = randomBytes(32).toString("base64url");
+    const clientId = "provider-removal-client";
+    const redirectUri = `${issuer}/callback`;
+    for (const [table, records] of [
+      ["harper_oauth_mcp_clients", [{
+        client_id: clientId, grant_types: JSON.stringify(["authorization_code"]),
+        response_types: JSON.stringify(["code"]), redirect_uris: JSON.stringify([redirectUri]),
+        token_endpoint_auth_method: "none",
+      }]],
+      ["mcp_auth_codes", [{
+        code: "provider-removal-code", client_id: clientId, user: "provider-removal-agent",
+        resource: `${issuer}/mcp`, code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+        code_challenge_method: "S256", redirect_uri: redirectUri, scope: "", client_auth_method: "none",
+      }]],
+    ] as const) {
+      const res = await fetch(harper.opsURL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64") },
+        body: JSON.stringify({ operation: "insert", database: "oauth", table, records }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(res.status).toBe(200);
+    }
+    const mintRes = await fetch(`${harper.httpURL}/oauth/mcp/token`, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "authorization_code", client_id: clientId,
+        code: "provider-removal-code", code_verifier: verifier, redirect_uri: redirectUri }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(mintRes.status).toBe(200);
+    const { access_token: token } = await mintRes.json() as { access_token: string };
+    expect(typeof token).toBe("string");
+    const postMcp = () => fetch(`${harper.httpURL}/mcp`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect((await postMcp()).status).toBe(200);
+    const installDir = harper.installDir;
+    await stopHarper(harper, { keepInstallDir: true });
+    delete process.env.OAUTH_GITHUB_CLIENT_ID;
+    delete process.env.OAUTH_GITHUB_CLIENT_SECRET;
+    delete process.env.OAUTH_GITHUB_REDIRECT_URI;
+    harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, installDir });
+    instances.push(harper);
+    expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
+    expect(harper.getLog?.() ?? "").toContain("OAuth provider 'github' not configured. Missing: clientId, clientSecret");
+    const kid = JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString("utf8")).kid;
+    const keyRes = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64") },
+      body: JSON.stringify({ operation: "search_by_value", database: "oauth", table: "harper_oauth_mcp_keys",
+        search_attribute: "kid", search_value: kid, get_attributes: ["kid", "public_key_pem"] }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(keyRes.status).toBe(200);
+    const keys = await keyRes.json() as { kid: string; public_key_pem: string }[];
+    expect(keys).toHaveLength(1);
+    expect(keys[0]!.kid).toBe(kid);
+    expect(keys[0]!.public_key_pem).toContain("BEGIN PUBLIC KEY");
+    expect((await postMcp()).status).toBe(401);
+  }, 300_000);
+
+  test(
+    "no OAUTH_GITHUB_* set: boots clean, both protected-resource forms 404 and unauthenticated /mcp returns 401",
+    async () => {
+      clearMcpEnv();
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
+      const workDir = makeWorkDirWithShippedConfig("flair-no-provider-");
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      instances.push(harper);
+
+      const opsRes = await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) });
+      expect(opsRes.status).toBe(200);
+
+      // @harperfast/oauth 2.8.1 skips the uncredentialed github provider, so the
+      // plugin ends with none and clears its MCP config: no discovery documents.
+      for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"]) {
+        const res = await fetch(`${harper.httpURL}${path}`, { signal: AbortSignal.timeout(10_000) });
+        expect(res.status).toBe(404);
+      }
+      // /mcp is still mounted by flair and denies the unauthenticated request.
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
+      expect(mcpRes.status).toBe(401);
     },
     120_000,
   );
@@ -237,9 +444,12 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
       expect(mutated).not.toBe(shipped);
       const workDir = makeWorkDirWithShippedConfig("flair-mutation-prove-literal-", () => mutated);
 
-      // Harper boots but the plugin fails to load because the issuer
-      // ("${FLAIR_MCP_ISSUER}" literal, env unset) is not a valid URL.
-      // Harper catches the error and continues in a degraded state.
+      // Harper boots but the plugin fails to load: with mcp.enabled literal
+      // true the block is ACTIVE and the unresolved issuer ("${FLAIR_MCP_ISSUER}"
+      // literal, env unset) is not a valid URL. Harper catches the error and
+      // continues in a degraded state. (The signing key is no longer declared
+      // by the shipped block — flair#2194 — so the issuer is the first
+      // unresolved placeholder it validates.)
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
@@ -298,17 +508,11 @@ describe("flair#1152 garbage value: FLAIR_MCP_OAUTH=maybe", () => {
       // an assertion below flips — re-derive the whole table before shipping
       // that change.
       clearMcpEnv();
-      const { generateKeyPairSync } = await import("node:crypto");
-      const { privateKey } = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: "spki", format: "pem" },
-        privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      });
       process.env.FLAIR_MCP_OAUTH = "maybe";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = privateKey;
       process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
       process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
+      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
 
       const workDir = makeWorkDirWithShippedConfig("flair-garbage-value-");
       const harper = await startHarper({
@@ -378,17 +582,11 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
       // (and it is what buildSecretsBundle stages). With "1" this test fails:
       // /mcp is guarded (flair on) but the AS metadata 404s (component off).
       clearMcpEnv();
-      const { generateKeyPairSync } = await import("node:crypto");
-      const { privateKey } = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: "spki", format: "pem" },
-        privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      });
       process.env.FLAIR_MCP_OAUTH = "true";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = privateKey;
       process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
       process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
+      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
 
       const workDir = makeWorkDirWithShippedConfig("flair-enabled-");
       const harper = await startHarper({
@@ -396,6 +594,14 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
         harperBinDir: REPO_ROOT,
       });
       instances.push(harper);
+
+      // SHAPE (b): the github provider is CONFIGURED here — clientId,
+      // clientSecret AND the redirectUri the shipped block now references —
+      // so the component builds it. Provider construction is offline (GitHub
+      // is a static preset; no discovery or JWKS fetch — the constructor only
+      // validates config), so this line is the whole proof, no network needed.
+      const log = harper.getLog?.() ?? "";
+      expect(log).toContain("OAuth provider 'github' initialized (github)");
 
       // /mcp should be mounted (returns 401 without auth, not 404).
       const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
@@ -438,7 +644,7 @@ describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
     async () => {
       // The exact state a regression re-staging '1' in buildSecretsBundle
       // (src/lib/mcp-enable.ts) would deploy: the FULL enablement env —
-      // issuer, signing key, IdP credentials — with the flag spelled "1".
+      // issuer, IdP credentials — with the flag spelled "1".
       // flair's strict reader (resources/mcp-oauth-flag.ts) accepts 1/true/
       // yes/on; the component's coerceConfigBoolean accepts ONLY "true"/
       // "false" and DELETES anything else, so its disabled default applies.
@@ -447,17 +653,11 @@ describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
       // Fail-closed (no unauthenticated data path), but broken; case 5 pins
       // the one spelling that works, this pins the divergence itself.
       clearMcpEnv();
-      const { generateKeyPairSync } = await import("node:crypto");
-      const { privateKey } = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: "spki", format: "pem" },
-        privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      });
       process.env.FLAIR_MCP_OAUTH = "1";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = privateKey;
       process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
       process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
+      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
 
       const workDir = makeWorkDirWithShippedConfig("flair-broken-on-");
       const harper = await startHarper({
