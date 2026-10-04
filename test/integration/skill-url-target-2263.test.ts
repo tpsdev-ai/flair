@@ -117,6 +117,20 @@ describe("flair#2263 — the URL-bound id is the skill write target", () => {
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create", "update"]);
   }, 180_000);
 
+  test("PUT /Memory/<X> with a null body id creates the skill at X", async () => {
+    const id = nextId("null-skill");
+    const body = { id: null, agentId: A.id, content: "null-id skill", trigger: "when the url names the id", tags: ["skill"], durability: "persistent" };
+
+    const result = await call(A, "PUT", memPath(id), body);
+    expect(result.status, result.text.slice(0, 300)).toBeLessThan(300);
+    expect(JSON.parse(result.text).id).toBe(id);
+    const row = await memoryRow(id);
+    expect(row?.skillSubjectId).toBe(id);
+    const versions = await versionsOf(id);
+    expect(versions.map((v) => v.kind)).toEqual(["create"]);
+    expect(versions[0].memoryId).toBe(id);
+  }, 180_000);
+
   test("POST /Memory/<X> with a skill body that has only the URL id creates at X, and an identical retry writes a successor id with supersedes X and skillSubjectId X", async () => {
     const id = nextId("post-skill");
     const body = { agentId: A.id, content: "url-only post skill", trigger: "when the url names the id on post", tags: ["skill"], durability: "persistent" };

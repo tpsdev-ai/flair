@@ -85,6 +85,26 @@ test("with no body id, a concurrent edit under the lock refuses with 409 and wri
   } finally { table.search = original; }
 });
 
+test.each(["put", "post"])("a null body id on URL-bound %s refuses an addressed row changed under the lock with 409 skill_target_changed", async (method) => {
+  const row = skill("url-null-edit");
+  harnessState.memoryStore.set(row.id, row);
+  const original = table.search;
+  (table as any).search = (query: any) => {
+    if (query?.conditions?.some((c: any) => c.attribute === "skillSubjectId")) {
+      harnessState.memoryStore.set(row.id, { ...row, content: "concurrent edit" });
+    }
+    return original(query);
+  };
+  try {
+    const result = await writer(row.id)[method]({ id: null, agentId: row.agentId, content: row.content, tags: row.tags, durability: row.durability, trigger: "updated" });
+    expect(result.status).toBe(409);
+    expect(await result.json()).toEqual({ error: "skill_target_changed" });
+    expect(harnessState.memoryStore.get(row.id)?.content).toBe("concurrent edit");
+    expect(harnessState.memoryStore.size).toBe(1);
+    expect(versions.size).toBe(0);
+  } finally { table.search = original; }
+});
+
 test("two concurrent different reserved-seed PUTs (id only in the URL) refuse the stale one", async () => {
   const body = { agentId: "admin", content: "seed text", trigger: "t", tags: ["skill"], durability: "persistent", visibility: "shared" };
   const results = await Promise.all([

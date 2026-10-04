@@ -1118,7 +1118,7 @@ export class Memory extends (databases as any).flair.Memory {
     // the body omits `id`, thread the URL target in before the skill body is
     // classified, mirroring put().
     const postUrlTargetId = (this as any).getId?.();
-    if (content && typeof content === "object" && content.id === undefined &&
+    if (content && typeof content === "object" && content.id == null &&
       (typeof postUrlTargetId === "string" || typeof postUrlTargetId === "number")) {
       content.id = postUrlTargetId;
     }
@@ -1692,7 +1692,7 @@ export class Memory extends (databases as any).flair.Memory {
     // create's successor and the under-lock stale-snapshot check use the id this
     // write lands on.
     const urlTargetId = (this as any).getId?.();
-    if (content && typeof content === "object" && content.id === undefined &&
+    if (content && typeof content === "object" && content.id == null &&
       (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
       content.id = urlTargetId;
     }
