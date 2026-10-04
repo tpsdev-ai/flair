@@ -54,13 +54,13 @@
     "access": "public"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.8.1"
+    "openclaw": "2026.9.8"
   },
   "engines": {
-    "node": ">=22"
+    "node": "v26.10.0"
   },
   "dependencies": {
-    "@sinclair/typebox": "0.34.48",
+    "@sinclair/typebox": "0.34.52",
     "@tpsdev-ai/flair-client": "0.59.0"
   },
   "devDependencies": {

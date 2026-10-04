@@ -29,7 +29,7 @@
     ]
   },
   "engines": {
-    "node": ">=18"
+    "node": "v26.10.0"
   },
   "license": "Apache-2.0",
   "repository": {
@@ -52,14 +52,14 @@
     "zod": "3.25.76"
   },
   "peerDependencies": {
-    "n8n-workflow": "*",
-    "@langchain/core": "*",
-    "@langchain/classic": "*"
+    "n8n-workflow": "2.16.0",
+    "@langchain/core": "1.2.14",
+    "@langchain/classic": "1.0.52"
   },
   "devDependencies": {
-    "n8n-workflow": "1.119.0",
-    "@langchain/core": "1.1.44",
-    "@langchain/classic": "1.0.32",
+    "n8n-workflow": "1.120.31",
+    "@langchain/core": "1.2.12",
+    "@langchain/classic": "1.0.48",
     "typescript": "5.9.3"
   }
 }
