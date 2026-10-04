@@ -44,8 +44,7 @@ export interface OccupiedHarperListener {
    */
   dataDirs: string[];
   /**
-   * Whether the pid read succeeded. False (or absent) means the probe failed
-   * (no lsof), which is UNKNOWN — not "no listener".
+   * Whether the pid lookup returned an array. False means it returned null.
    */
   pidsKnown?: boolean;
 }

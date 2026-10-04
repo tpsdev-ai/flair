@@ -29,7 +29,7 @@ import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
 import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 
 import { join, resolve } from "node:path";
 import { localPortState } from "../lib/init-tcp-probe.js";
@@ -92,6 +92,27 @@ export type InitCli = {
 
 
 let cli: InitCli;
+
+function ownedInitPidfilePid(dataDir: string): number | null {
+  let fd: number | undefined;
+  try {
+    const uid = process.getuid?.();
+    if (uid === undefined) return null;
+    const dir = lstatSync(dataDir);
+    if (!dir.isDirectory() || dir.uid !== uid || (dir.mode & 0o022)) return null;
+    fd = openSync(join(dataDir, "hdb.pid"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const file = fstatSync(fd);
+    if (!file.isFile() || file.nlink !== 1 || file.size > 32 || file.uid !== uid || (file.mode & 0o022)) return null;
+    const value = readFileSync(fd, "utf8").trim();
+    if (!/^[1-9]\d*$/.test(value)) return null;
+    const pid = Number(value);
+    return Number.isSafeInteger(pid) ? pid : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 
 /** Bind the cli-locals this module depends on. */
 export function bindCli(fns: InitCli): void {
@@ -648,9 +669,9 @@ program
     const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
       const installedAttributed = harperConfigPath(dataDir) !== null &&
         listener.pids.length === 1 &&
+        ownedInitPidfilePid(dataDir) === listener.pids[0] &&
         listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
-        (listener.dataDirs.length === 1 ||
-          cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
+        cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0];
       const attributed = ownChild ? ownChild.attributes(listener, dataDir, freeBeforeSpawn) : installedAttributed;
       if (attributed) return;
       console.error(`Refusing init: port ${listener.port} ${answered}; its listener is not attributed to this data directory (${dataDir}).`);

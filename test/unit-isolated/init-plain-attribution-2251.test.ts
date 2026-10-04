@@ -4,7 +4,7 @@ import { HTTP_PORT, OPS_PORT, runPlain } from "../helpers/init-plain-attribution
 
 beforeAll(() => ensureCliBuild(), 120_000);
 
-test("re-init on this data directory's own adopted instance succeeds and attributes both ports", () => {
+test("injected matching PID and PID file pass both port gates", () => {
   const { result, events } = runPlain("own");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -18,7 +18,7 @@ test("re-init on this data directory's own adopted instance succeeds and attribu
   expect(firstAuth).toBeGreaterThan(opsProbe);
 }, 30_000);
 
-test("flair#1693: re-init accepts the own launchd PID with unreadable ROOTPATH and an unused operations port", () => {
+test("injected launchd PID and PID file pass the HTTP gate with an unused operations port", () => {
   const { result, events, actions } = runPlain("own-launchd");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -43,7 +43,7 @@ test("a listener differing from the own launchd PID refuses before credentials",
   expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
 
-test("the from-scratch flow with just-released ports still succeeds and probes first", () => {
+test("injected free ports enter the install and run branches", () => {
   const { result, events, actions } = runPlain("free");
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(0);

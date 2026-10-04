@@ -138,10 +138,13 @@ interface StubReady {
   pid: number;
 }
 
-function startStub(rootPath: string, role: "both" | "http" | "ops", logPath: string): Promise<StubReady> {
-  const scriptPath = join(scratch!, `stub-${role}.js`);
+function startStub(rootPath: string, role: "both" | "http" | "ops", logPath: string, harperEntry = false): Promise<StubReady> {
+  const scriptPath = harperEntry
+    ? join(scratch!, "node_modules", "harper", "dist", "bin", "harper.js")
+    : join(scratch!, `stub-${role}.js`);
+  if (harperEntry) mkdirSync(join(scratch!, "node_modules", "harper", "dist", "bin"), { recursive: true });
   writeFileSync(scriptPath, STUB_SCRIPT);
-  const child = spawn(process.execPath, [scriptPath], {
+  const child = spawn(process.execPath, [scriptPath, ...(harperEntry ? ["run", "."] : [])], {
     env: { ...process.env, ROOTPATH: rootPath, STUB_ROLE: role, STUB_LOG: logPath },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -438,8 +441,8 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     try { execFileSync("lsof", ["-v"], { stdio: "ignore" }); return true; }
     catch (e: any) { return e?.code !== "ENOENT"; }
   })();
-  if (!operationsFixtureSupported) console.info("Skipping operations 401 listener attribution: requires Linux ROOTPATH and lsof.");
-  test.skipIf(!operationsFixtureSupported)("the operations 401 does not name the HTTP pid (requires Linux ROOTPATH and lsof)", async () => {
+  if (!operationsFixtureSupported) console.info("Skipping live listener attribution: requires Linux and lsof.");
+  for (const decoyPort of ["http", "ops"] as const) test.skipIf(!operationsFixtureSupported)(`a ${decoyPort} listener declaring ROOTPATH without PID-file proof gets no credential`, async () => {
     scratch = mkdtempSync(join(tmpdir(), "flair-1749-"));
     const home = join(scratch, "home");
     const dataDir = join(scratch, "data");
@@ -450,13 +453,10 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     mkdirSync(dataDir, { recursive: true });
     mkdirSync(keysDir, { recursive: true });
 
-    // This data directory's own installed instance: both listeners are
-    // attributed to it, and the operations holder rejects the credential. A
-    // foreign operations holder no longer reaches the 401 — plain init
-    // attributes both configured ports first (flair#2251).
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
-    const httpHolder = await startStub(dataDir, "http", httpLog);
+    const httpHolder = await startStub(dataDir, "http", httpLog, decoyPort === "ops");
     const opsHolder = await startStub(dataDir, "ops", opsLog);
+    if (decoyPort === "ops") writeFileSync(join(dataDir, "hdb.pid"), `${httpHolder.pid}\n`);
     const { code, stdout, stderr } = await runInit([
       "--agent", "canary",
       "--port", String(httpHolder.httpPort),
@@ -473,18 +473,42 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     const output = stdout + stderr;
 
     expect(code).not.toBe(0);
-    expect(output).toContain("Operations API insert failed (401)");
-    expect(output).toContain(HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT);
-    expect(output).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
-    expect(output).not.toContain("wrong password");
-    expect(output).not.toContain("wrong username");
-    expect(output).not.toContain("admin credentials differ");
-    expect(output).not.toContain(`pid ${httpHolder.pid}`);
-    expect(output).not.toContain(`kill ${httpHolder.pid}`);
-    expect(output).toContain(`pid ${opsHolder.pid}`);
-    expect(output).toContain(`kill ${opsHolder.pid}`);
-    expect(httpHolder.pid).not.toBe(opsHolder.pid);
+    expect(output).toContain("Refusing init");
+    expect(output).toContain(`port ${decoyPort === "http" ? httpHolder.httpPort : opsHolder.opsPort}`);
+    expect(output).toContain("not attributed to this data directory");
+    expect(output).toContain("Remedy:");
+    const decoyRequests = readStubLog(decoyPort === "http" ? httpLog : opsLog);
+    expect(decoyRequests.length).toBeGreaterThan(0);
+    expect(decoyRequests.every(req => req.authorization === null)).toBe(true);
+    expect(readStubLog(decoyPort === "ops" ? httpLog : opsLog).every(req => req.authorization === null)).toBe(true);
     expect(children.every((child) => child.exitCode === null && child.killed === false)).toBe(true);
+  }, 40_000);
+
+  test.skipIf(!operationsFixtureSupported)("a PID-file listener reaches the operations 401 after authenticated health", async () => {
+    scratch = mkdtempSync(join(tmpdir(), "flair-1749-"));
+    const home = join(scratch, "home");
+    const dataDir = join(scratch, "data");
+    const keysDir = join(scratch, "keys");
+    const logPath = join(scratch, "requests.log");
+    mkdirSync(home);
+    mkdirSync(dataDir);
+    mkdirSync(keysDir);
+    writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
+    const listener = await startStub(dataDir, "both", logPath, true);
+    writeFileSync(join(dataDir, "hdb.pid"), `${listener.pid}\n`);
+    const { stdout, stderr } = await runInit([
+      "--agent", "canary",
+      "--port", String(listener.httpPort), "--ops-port", String(listener.opsPort),
+      "--data-dir", dataDir, "--keys-dir", keysDir, "--admin-pass", "this-init-password",
+      "--no-mcp", "--skip-soul", "--skip-hook", "--skip-claude-md", "--skip-smoke",
+    ], isolatedEnv(home));
+    expect(stdout + stderr).not.toContain("Refusing init");
+    expect(stdout + stderr).toContain("Operations API insert failed (401)");
+    expect(stdout + stderr).toContain(HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT);
+    expect(stdout + stderr).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
+    const requests = readStubLog(logPath);
+    expect(requests.some(req => req.url === "/health" && req.authorization !== null)).toBe(true);
+    expect(requests.some(req => req.method === "POST" && req.authorization !== null)).toBe(true);
   }, 40_000);
 
   test("self-started seed keeps today's credential 401 hint", async () => {

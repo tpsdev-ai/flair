@@ -206,29 +206,16 @@ describe("local init skip-start safety through the built CLI", () => {
     expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(false);
   }, 30_000);
 
-  test("an attributed installed listener permits skip-start and queues the seed", () => {
+  test("an installed config and matching ROOTPATH without a PID file refuse skip-start", () => {
     const f = fixture(true);
     const config = readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8");
     const result = runInit(f, ["--skip-start"], "local");
-    expect(result.status, result.stdout + result.stderr).toBe(0);
-    expect(result.stdout).toContain("using-flair skill: pending");
-    expect(readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8")).toBe(config);
-    expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(true);
-    expect(requests(f).every(r => r.authorization === null)).toBe(true);
-  }, 30_000);
-
-  test("an attributed HTTP listener does not authorize a foreign operations listener", () => {
-    const f = fixture(true);
-    const result = runInit(f, ["--skip-start"], "foreign-ops");
     expect(result.status, result.stdout + result.stderr).toBe(1);
-    expect(result.stderr).toContain(`port ${OPS_PORT}`);
-    expect(result.stderr).toContain("/foreign/ops");
-    expect(requests(f)).toEqual([
-      { url: `http://127.0.0.1:${HTTP_PORT}/health`, authorization: null },
-      { url: `http://127.0.0.1:${OPS_PORT}/`, authorization: null },
-    ]);
-    expect(existsSync(join(f.home, ".flair", "admin-pass"))).toBe(false);
-    expect(existsSync(join(f.home, ".flair", "keys"))).toBe(false);
+    expect(result.stderr).toContain(`port ${HTTP_PORT}`);
+    expect(result.stderr).toContain("not attributed");
+    expect(readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8")).toBe(config);
+    expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(false);
+    expect(requests(f).every(r => r.authorization === null)).toBe(true);
   }, 30_000);
   test("a stopped HTTP port does not authorize an occupied foreign operations port", () => {
     const f = fixture();

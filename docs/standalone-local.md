@@ -51,7 +51,7 @@ flair init --port 8000             # use a non-default port
 
 > **Non-interactive shell:** bare `flair init` with no `--agent` bootstraps the instance only and skips agent registration, MCP client wiring, and the smoke test. Pass flags explicitly: `flair init --agent <id> --client all`.
 
-> **Listener check:** before sending the admin credential, `flair init` attributes a listener on the configured HTTP or operations port to this data directory's own instance; one it cannot attribute is refused by name.
+> **Listener check:** `flair init` refuses a listener without matching PID-file or spawned-child socket evidence before sending the admin credential.
 
 ### 3. Lifecycle management
 

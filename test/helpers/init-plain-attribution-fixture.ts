@@ -32,6 +32,7 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
     const dataDir = join(home, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
+    writeFileSync(join(dataDir, "hdb.pid"), String(OWN_PID));
   }
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
@@ -172,4 +173,3 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
   const eventList: Event[] = readFileSync(events, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
   return { result, home, events: eventList, actions: JSON.parse(readFileSync(actions, "utf8")) as string[] };
 }
-

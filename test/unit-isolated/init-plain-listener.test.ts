@@ -87,8 +87,6 @@ for (const { skipStart, occupied } of [
     const result = spawnSync("bun", ["--eval", script], { cwd: home, env, encoding: "utf8", timeout: 20_000 });
     expect(result.error).toBeUndefined();
     if (occupied) {
-      // Plain init attributes the listener before any credential; an
-      // unattributed listener refuses by name and receives none (flair#2251).
       expect(result.status, result.stdout + result.stderr).toBe(1);
       expect(result.stderr).toContain("Refusing init");
       expect(result.stderr).toContain("port 20991");
