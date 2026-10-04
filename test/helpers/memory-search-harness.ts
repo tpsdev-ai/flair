@@ -18,6 +18,8 @@ import { mock } from "bun:test";
 export const harnessState = {
   memoryStore: new Map<string, any>(),
   pointerStore: new Map<string, any>(),
+  // flair#2213: Flair's deletion writers append records here in the row delete's transaction.
+  deletionStore: new Map<string, any>(),
   instanceRow: null as any,
   pointerSearchCalls: 0,
   failNextPointerPut: false,
@@ -39,6 +41,7 @@ export const harnessState = {
 export function resetHarnessState(): void {
   harnessState.memoryStore.clear();
   harnessState.pointerStore.clear();
+  harnessState.deletionStore.clear();
   harnessState.instanceRow = null;
   harnessState.pointerSearchCalls = 0;
   harnessState.failNextPointerPut = false;
@@ -154,7 +157,7 @@ export class BaseMemory {
   }
   async delete(id: any, ctx?: any) {
     stageOrRun(ctx, () => harnessState.memoryStore.delete(typeof id === "string" ? id : id?.id));
-    return { ok: true };
+    return true;
   }
   search(query?: any) {
     harnessState.baseSearchCalls++;
@@ -306,10 +309,21 @@ export class BaseMemoryHostSource {
   }
 }
 
+export class BaseMemoryDeletionHistory {
+  async put(row: any, ctx?: any) {
+    stageOrRun(ctx, () => harnessState.deletionStore.set(row.id, { ...row }));
+    return { ...row };
+  }
+  static put(row: any, ctx?: any) {
+    return new BaseMemoryDeletionHistory().put(row, ctx);
+  }
+}
+
 export const databasesMock = {
   flair: {
     Memory: BaseMemory,
     MemoryHostSource: BaseMemoryHostSource,
+    MemoryDeletionHistory: BaseMemoryDeletionHistory,
     Agent: { get: async () => null, search: async () => [] },
     Instance: {
       search: () => {

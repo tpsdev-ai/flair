@@ -1,7 +1,7 @@
 /**
  * memory.ts — `flair memory` command group (flair#1621 / epic #1618).
  *
- * Extracted from src/cli.ts with ZERO behavior change. This file owns the
+ * This file owns the
  * group's commander registration, action handlers, and group-specific
  * inline helpers (hygiene predicates). Shared CLI helpers (api,
  * resolveSigningAgentId, credential flags, --entities parse, …) stay in
@@ -17,6 +17,7 @@ import { resolveAdminUser } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
+import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
@@ -26,6 +27,7 @@ export type MemoryCli = {
   addSharedCredentialOptions: (cmd: Command) => Command;
   addSharedIdentityOption: (cmd: Command) => Command;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveHttpPort: (opts: { port?: string | number }) => number;
   parseEntitiesOptionOrExit: (csv: string) => string[];
   ENTITIES_OPTION_DESCRIPTION: string;
 };
@@ -458,7 +460,6 @@ export function register(program: Command): void {
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper ops API port (default: HTTP - 1)")
     .action(async (opts: any) => {
-      const opsPort = resolveOpsPort(opts);
       const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
       if (!adminPass) {
         console.error("❌ Admin password required (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD).");
@@ -472,9 +473,11 @@ export function register(program: Command): void {
       const apply: boolean = !!opts.apply;
 
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
+      const instance = await resolveLocalDeleteInstance(opts, resolveOpsPort, opsAuth);
       async function ops(body: unknown): Promise<unknown> {
-        const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+        const res = await fetch(instance.opsUrl, {
           method: "POST",
+          redirect: "error",
           headers: { "Content-Type": "application/json", Authorization: opsAuth },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(60_000),
@@ -536,20 +539,14 @@ export function register(program: Command): void {
         return;
       }
 
-      // Delete in chunks (Harper accepts batches of hash_values).
       const ids = Array.from(allIds);
-      const chunkSize = 200;
       let deleted = 0;
-      for (let i = 0; i < ids.length; i += chunkSize) {
-        const batch = ids.slice(i, i + chunkSize);
-        const result = await ops({
-          operation: "delete",
-          database: "flair",
-          table: "Memory",
-          hash_values: batch,
-        }) as { message?: string };
-        const m = /(\d+)\s*of\s*\d+\s*records/.exec(result.message ?? "");
-        deleted += m ? Number(m[1]) : batch.length;
+      for (const id of ids) {
+        await api("DELETE", `/Memory/${encodeRecordId(id)}`, undefined, {
+          baseUrl: instance.baseUrl, explicitAdminPass: adminPass,
+          adminUser: resolveAdminUser(undefined), agentId: null,
+        });
+        deleted++;
         process.stdout.write(`\r  Deleting ${deleted}/${ids.length} (${Math.round((deleted / ids.length) * 100)}%)`);
       }
       console.log(`\n\n✅ Deleted ${deleted} rows.`);

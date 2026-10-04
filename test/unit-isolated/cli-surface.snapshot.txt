@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=136 options=610
+# commands=138 options=616
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -18,7 +18,7 @@ flair
     -v, --version
       description: output the version number
       attr: version
-  subcommands: init, agent, keys, hook, mcp, principal, idp, grant, revoke, federation, rem, status, snapshot, upgrade, stop, start, restart, uninstall, reembed, test, deploy, fleet, doctor, quality, session, memory, search, bootstrap, relationship, soul, bridge, backup, restore, export, import, inspect, migrate-harness-memory, presence, workspace, orgevent, attention
+  subcommands: init, agent, keys, hook, mcp, principal, idp, grant, revoke, integrity, federation, rem, status, snapshot, upgrade, stop, start, restart, uninstall, reembed, test, deploy, fleet, doctor, quality, session, memory, search, bootstrap, relationship, soul, bridge, backup, restore, export, import, inspect, migrate-harness-memory, presence, workspace, orgevent, attention
 
 flair init
   description: One-command Flair setup — bootstrap the instance, register an agent, and wire MCP clients
@@ -848,6 +848,35 @@ flair revoke
     --port <port>
       description: Harper HTTP port
       attr: port
+    --ops-port <port>
+      description: Harper operations API port
+      attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+
+flair integrity
+  description: Detect missing checkpointed durable Memory IDs or changed or missing previously nonempty tokens
+  usage: [options] [command]
+  options: (none)
+  subcommands: check
+
+flair integrity check
+  description: Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed
+  usage: [options]
+  options:
+    --json
+      description: Print the verdict as JSON
+      attr: json
+    --accept
+      description: On an alert, advance the whole checkpoint only if no reported replacement lacks a token; otherwise write no checkpoint, even with other losses
+      attr: accept
+    --checkpoint <path>
+      description: Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)
+      attr: checkpoint
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
@@ -2726,6 +2755,7 @@ Commands:
   idp                                       Manage enterprise IdP configurations (XAA)
   grant [options] <from-agent> <to-agent>   Grant an agent read access to another agent's memories
   revoke [options] <from-agent> <to-agent>  Revoke a memory grant between two agents
+  integrity                                 Detect missing checkpointed durable Memory IDs or changed or missing previously nonempty tokens
   federation                                Manage federation (hub-and-spoke sync)
   rem                                       Memory hygiene and reflection
   status [options]                          Show Flair instance status, memory stats, and agent info
@@ -3602,6 +3632,46 @@ Revoke a memory grant between two agents
 
 Options:
   --port <port>        Harper HTTP port
+  --ops-port <port>    Harper operations API port
+  --admin-pass <pass>  Admin password (or set FLAIR_ADMIN_PASS env)
+  --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
+                       default: admin)
+  -h, --help           display help for command
+
+Global Options:
+  -v, --version        output the version number
+
+----- flair integrity -----
+Usage: flair integrity [options] [command]
+
+Detect missing checkpointed durable Memory IDs or changed or missing previously
+nonempty tokens
+
+Options:
+  -h, --help       display help for command
+
+Global Options:
+  -v, --version    output the version number
+
+Commands:
+  check [options]  Report missing checkpointed durable IDs or changed or missing
+                   previously nonempty tokens; rows created and lost entirely
+                   between scans are not observed
+  help [command]   display help for command
+
+----- flair integrity check -----
+Usage: flair integrity check [options]
+
+Report missing checkpointed durable IDs or changed or missing previously
+nonempty tokens; rows created and lost entirely between scans are not observed
+
+Options:
+  --json               Print the verdict as JSON
+  --accept             On an alert, advance the whole checkpoint only if no
+                       reported replacement lacks a token; otherwise write no
+                       checkpoint, even with other losses
+  --checkpoint <path>  Checkpoint file path (default:
+                       ~/.flair/integrity-checkpoint.json)
   --ops-port <port>    Harper operations API port
   --admin-pass <pass>  Admin password (or set FLAIR_ADMIN_PASS env)
   --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
