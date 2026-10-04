@@ -384,14 +384,16 @@ describe("redaction", () => {
     ["PGP", "-----BEGIN PGP PRIVATE KEY BLOCK-----\nsecret\n-----END PGP PRIVATE KEY BLOCK-----"],
   ]) {
     test(`buildExcerpt redacts ${label} credentials`, () => {
-      expect(buildExcerpt(`before ${secret} after`)).toBe("before [redacted] after");
+      const out = buildExcerpt(`before ${secret} after`);
+      expect(out.includes(secret)).toBe(false);
+      expect(out === "before [redacted] after").toBe(true);
     });
   }
   test("buildExcerpt redacts a secret-shaped string before caching", () => {
     const token = `ghp_${"A".repeat(36)}`;
     const out = buildExcerpt(`rotate ${token} now`);
-    expect(out).not.toContain(token);
-    expect(out).toContain("[redacted]");
+    expect(out.includes(token)).toBe(false);
+    expect(out.includes("[redacted]")).toBe(true);
   });
 });
 
