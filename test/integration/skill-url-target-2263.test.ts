@@ -118,4 +118,44 @@ describe("flair#2263 — the URL-bound id is the skill write target", () => {
     expect(successor.skillSubjectId).toBe(id);
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create", "update"]);
   }, 180_000);
+
+  test("POST /Memory/<X> with a skill body that has only the URL id lands at X, and an identical retry supersedes that same skill", async () => {
+    const id = nextId("post-skill");
+    const body = { agentId: A.id, content: "url-only post skill", trigger: "when the url names the id on post", tags: ["skill"], durability: "persistent" };
+
+    const first = await call(A, "POST", memPath(id), body);
+    expect(first.status, first.text.slice(0, 300)).toBeLessThan(300);
+    expect(JSON.parse(first.text).id).toBe(id);
+    const row = await memoryRow(id);
+    expect(row?.skillSubjectId).toBe(id);
+    const versions = await versionsOf(id);
+    expect(versions.map((v) => v.kind)).toEqual(["create"]);
+    expect(versions[0].memoryId).toBe(id);
+
+    // The identical retry addresses the skill now stored at X and supersedes
+    // it (one subject) rather than creating a second, independent skill.
+    const retry = await call(A, "POST", memPath(id), body);
+    expect(retry.status, retry.text.slice(0, 300)).toBeLessThan(300);
+    const successorId = JSON.parse(retry.text).id;
+    expect(successorId).not.toBe(id);
+    const successor = await memoryRow(successorId);
+    expect(successor.supersedes).toBe(id);
+    expect(successor.skillSubjectId).toBe(id);
+    expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create", "update"]);
+  }, 180_000);
+
+  test("POST /Memory/<X> refuses a stale target snapshot when a concurrent write lands first", async () => {
+    const id = nextId("post-stale");
+    const body = { agentId: A.id, content: "url-only post stale", trigger: "when the url names the id on a racing post", tags: ["skill"], durability: "persistent" };
+
+    const results = await Promise.all([
+      call(A, "POST", memPath(id), body),
+      call(A, "POST", memPath(id), body),
+    ]);
+    const statuses = results.map((r) => r.status).sort((a, b) => a - b);
+    expect(statuses[0]).toBeLessThan(300);
+    expect(statuses[1]).toBe(409);
+    const loser = results.find((r) => r.status === 409)!;
+    expect(JSON.parse(loser.text).error).toBe("skill_target_changed");
+  }, 180_000);
 });
