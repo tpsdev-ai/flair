@@ -29,7 +29,7 @@ export interface ProtoSafeRecordOptions {
   /**
    * Own keys to copy, in this order. Defaults to `Object.keys(source)`.
    * Pass only own keys: reading `source[key]` for a key the source does not own
-   * (e.g. a bare `__proto__`) returns an inherited value.
+* (e.g. a bare `__proto__`) can return an inherited value.
    */
   readonly keys?: readonly string[];
   /** Transform each value before it is stored — pass your own mapper to recurse. */

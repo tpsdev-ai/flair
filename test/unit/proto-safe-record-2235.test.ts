@@ -1,7 +1,7 @@
 /**
  * proto-safe-record-2235.test.ts — the shared null-prototype copy helper
  * (flair#2235). An own `__proto__` key is defined by JSON.parse; a copy that
- * goes through [[Set]] (Object.assign, or `target[key] = value`) either turns
+ * goes through [[Set]] (Object.assign, or `target[key] = value`) when the target inherits the `__proto__` setter either turns
  * it into the copy's prototype or drops it, so a comparison silently ignores
  * it. protoSafeRecord keeps it as own data.
  */
