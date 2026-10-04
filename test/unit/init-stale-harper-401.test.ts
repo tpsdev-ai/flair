@@ -444,8 +444,6 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     mkdirSync(dataDir, { recursive: true });
     mkdirSync(keysDir, { recursive: true });
 
-    // HTTP listener's ROOTPATH is this init's data dir, so it is not a
-    // foreign directory and init continues to the operations insert.
     const httpHolder = await startStub(dataDir, "http", httpLog);
     const opsHolder = await startStub(join(scratch, "ops-harper"), "ops", opsLog);
     const { code, stdout, stderr } = await runInit([
@@ -472,7 +470,6 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     expect(output).not.toContain("admin credentials differ");
     expect(output).not.toContain(`pid ${httpHolder.pid}`);
     expect(output).not.toContain(`kill ${httpHolder.pid}`);
-    // The operations holder is named only when verified on that port.
     if (output.includes(`pid ${opsHolder.pid}`)) {
       expect(output).toContain(`kill ${opsHolder.pid}`);
     } else {
@@ -489,7 +486,6 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     }
     expect(httpHolder.pid).not.toBe(opsHolder.pid);
     expect(children.every((child) => child.exitCode === null && child.killed === false)).toBe(true);
-    // Literal, and above the 30_000 spawn timeout: the gate does not read CASE_BUDGET_MS.
   }, 40_000);
 
   test("self-started seed keeps today's credential 401 hint", async () => {

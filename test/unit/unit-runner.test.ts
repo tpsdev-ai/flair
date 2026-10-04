@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createSandboxHome } from "../helpers/sandbox-home.ts";
 import {
   CI_JOB_LIMIT_MS,
   CI_OUTSIDE_LANE_MS,
+  DARWIN_TEMP_BASE,
   KEEP_GOING_LANE_BUDGET_MS,
   KEEP_GOING_LIMITS,
   ROOT_STEP_TIMEOUT_MS,
@@ -15,6 +16,7 @@ import {
   runUnitSteps,
   unitEnvironment,
   unitPlan,
+  unitTempBase,
 } from "../../scripts/test-unit.ts";
 
 const root = join(import.meta.dir, "../..");
@@ -334,20 +336,19 @@ describe("shared unit lane", () => {
   test("the temp-dir leak guard fails the lane, and keep-going names it, even when every step passed (flair#1889, flair#2030)", () => {
     for (const keepGoing of [false, true]) {
       const home = fixture();
-      // The leak lands in THIS process's temp dir, the one the guard watches.
-      const leak = join(tmpdir(), `flair-unit-runner-leak-${process.pid}-${keepGoing ? "keep-going" : "fail-fast"}`);
-      fixtures.push(leak); // removed after the test, so the lane running this file sees no leak
+      // The leak lands in the step's own TMPDIR, the dir the guard watches.
+      const leakName = `flair-unit-runner-leak-${process.pid}-${keepGoing ? "keep-going" : "fail-fast"}`;
+      fixtures.push(join(process.env.TMPDIR ?? tmpdir(), leakName)); // removed when a nested lane reused the caller's root
       const { result: code, errors } = captureErrors(() => runUnitSteps(
-        [{ name: "succeeds but leaves a flair-* temp dir", cwd: home, args: ["-e", `require("node:fs").mkdirSync(${JSON.stringify(leak)})`], files: [] }],
+        [{ name: "succeeds but leaves a flair-* temp dir", cwd: home, args: ["-e", `require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, ${JSON.stringify(leakName)}))`], files: [] }],
         process.execPath,
         home,
         { keepGoing },
       ));
       // The step itself succeeded; only the guard can fail the lane.
-      expect(existsSync(leak)).toBe(true);
       expect(code).toBe(1);
       expect(errors).toContain("Temp-dir leak guard FAILED");
-      expect(errors).toContain(basename(leak));
+      expect(errors).toContain(leakName);
       if (keepGoing) {
         expect(errors).toContain("ran 1 step, 0 failed");
         expect(errors).toContain("Guard failures:\n  - temp-dir leak guard: the unit lane left 1 new flair-* directory");
@@ -419,4 +420,125 @@ describe("shared unit lane", () => {
     expect(code).toBe(0);
     expect(logs).toMatch(/quick step: \d+ s/);
   });
+
+  test("the darwin temp base is /private/tmp; other platforms keep the OS temp dir (flair#2137)", () => {
+    expect(DARWIN_TEMP_BASE).toBe("/private/tmp");
+    expect(unitTempBase("darwin", {})).toBe(DARWIN_TEMP_BASE);
+    expect(unitTempBase("linux", {})).toBeUndefined();
+    expect(unitTempBase("win32", {})).toBeUndefined();
+    // An explicit base overrides the platform default (the lane's own seam).
+    expect(unitTempBase("linux", { FLAIR_UNIT_TEMP_BASE: "/short" })).toBe("/short");
+    expect(unitTempBase("darwin", { FLAIR_UNIT_TEMP_BASE: " /short " })).toBe("/short");
+  });
+
+  test("a short temp base runs a step under the lane's fresh root, and the leak guard watches that root (flair#2137)", () => {
+    const base = fixture();
+    const home = fixture();
+    const seen = join(base, "child-tmpdir.txt");
+    // The step records its TMPDIR, then leaves a flair-* dir in it.
+    const script =
+      `const fs = require("node:fs"), path = require("node:path");` +
+      `fs.writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ root: process.env.TMPDIR, marker: process.env.FLAIR_UNIT_TEMP_ROOT, gid: fs.statSync(process.env.TMPDIR).gid }));` +
+      `fs.mkdirSync(path.join(process.env.TMPDIR, "flair-2137-leak"));`;
+    const savedTmpdir = process.env.TMPDIR;
+    const savedBase = process.env.FLAIR_UNIT_TEMP_BASE;
+    const { result: code, errors } = (() => {
+      process.env.FLAIR_UNIT_TEMP_BASE = base;
+      try {
+        return captureErrors(() => runUnitSteps(
+          [{ name: "leaks into its TMPDIR", cwd: base, args: ["-e", script], files: [] }],
+          process.execPath,
+          home,
+        ));
+      } finally {
+        if (savedBase === undefined) delete process.env.FLAIR_UNIT_TEMP_BASE;
+        else process.env.FLAIR_UNIT_TEMP_BASE = savedBase;
+      }
+    })();
+    const child = JSON.parse(readFileSync(seen, "utf8"));
+    const childTmpdir = child.root;
+    expect(child.marker).toBe(childTmpdir);
+    if (process.getgid) expect(child.gid).toBe(process.getgid());
+    expect(dirname(childTmpdir)).toBe(realpathSync(base));
+    expect(basename(childTmpdir)).toMatch(/^f[a-zA-Z0-9]{6}$/);
+    expect(code).toBe(1);
+    expect(errors).toContain("Temp-dir leak guard FAILED");
+    expect(errors).toContain("flair-2137-leak");
+    expect(errors).toContain(childTmpdir);
+    expect(readdirSync(base).filter((name) => name.startsWith("f"))).toEqual([]);
+    expect(process.env.TMPDIR).toBe(savedTmpdir);
+  });
+
+  test("the leak guard still watches the lane's root after a test replaced process.env (flair#2137)", () => {
+    const base = fixture();
+    const home = fixture();
+    const script = `const fs = require("node:fs"), path = require("node:path"); fs.mkdirSync(path.join(process.env.TMPDIR, "flair-2137-replaced"));`;
+    const originalEnv = process.env;
+    process.env = { ...originalEnv, FLAIR_UNIT_TEMP_BASE: base };
+    try {
+      const { result: code, errors } = captureErrors(() => runUnitSteps(
+        [{ name: "leaks after env replacement", cwd: base, args: ["-e", script], files: [] }],
+        process.execPath,
+        home,
+      ));
+      expect(code).toBe(1);
+      expect(errors).toContain("flair-2137-replaced");
+    } finally {
+      process.env = originalEnv;
+    }
+  });
+
+  test("a short temp base with no leak passes and still removes its root (flair#2137)", () => {
+    const base = fixture();
+    const home = fixture();
+    const savedTmpdir = process.env.TMPDIR;
+    const savedBase = process.env.FLAIR_UNIT_TEMP_BASE;
+    const code = (() => {
+      process.env.FLAIR_UNIT_TEMP_BASE = base;
+      try {
+        return runUnitSteps(
+          [{ name: "clean step", cwd: base, args: ["-e", "process.exit(0)"], files: [] }],
+          process.execPath,
+          home,
+        );
+      } finally {
+        if (savedBase === undefined) delete process.env.FLAIR_UNIT_TEMP_BASE;
+        else process.env.FLAIR_UNIT_TEMP_BASE = savedBase;
+      }
+    })();
+    expect(code).toBe(0);
+    expect(readdirSync(base).filter((name) => name.startsWith("f"))).toEqual([]);
+    expect(process.env.TMPDIR).toBe(savedTmpdir);
+  });
+  test("the cli-v2 socket path fits with a 13-digit timestamp and 21-digit random suffix (flair#2137)", () => {
+    const suffix = (2 ** -53).toString(36).slice(2);
+    expect(suffix.length).toBe(21);
+    const socket = join(DARWIN_TEMP_BASE, "fXXXXXX", `flair-cli-test-9999999999999-${suffix}`, ".flair/data/operations-server");
+    expect(Buffer.byteLength(socket)).toBe(101);
+    expect(Buffer.byteLength(socket.replace("flair-cli-test-", "flair-cli-errors-"))).toBe(103);
+  });
+
+  test("a nested runner reuses the caller's root and leaves its leak visible (flair#1889, flair#2137)", () => {
+    for (const marked of [false, true]) {
+      if (!marked && process.platform !== "darwin") continue;
+      const base = fixture();
+      const seen = join(base, "nested.json");
+      const script = `
+        import { runUnitSteps } from ${JSON.stringify(join(root, "scripts/test-unit.ts"))};
+        import { writeFileSync, existsSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        const root = tmpdir();
+        ${marked ? "" : "delete process.env.FLAIR_UNIT_TEMP_ROOT;"}
+        const code = runUnitSteps([{ name: "nested leak", cwd: root, files: [], args: ["-e", 'require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, "flair-nested-leak"))'] }], process.execPath, root);
+        writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ code, root, after: tmpdir(), exists: existsSync(root + "/flair-nested-leak") }));
+      `;
+      expect(runUnitSteps([{ name: "nested runner", cwd: root, files: [], args: ["-e", script] }], process.execPath, base)).toBe(1);
+      const result = JSON.parse(readFileSync(seen, "utf8"));
+      expect(result.code).toBe(1);
+      expect(result.after).toBe(result.root);
+      expect(result.exists).toBe(true);
+      rmSync(join(result.root, "flair-nested-leak"), { recursive: true, force: true });
+    }
+  });
+
 });
