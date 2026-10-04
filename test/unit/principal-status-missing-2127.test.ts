@@ -99,7 +99,7 @@ describe("principal disable/enable read the principal first (#2127)", () => {
     ensureCliBuild();
     scratch = mkdtempSync(join(tmpdir(), "flair-2127-home-"));
     stub = await startStub();
-  });
+  }, 120_000);
   afterAll(async () => {
     stub.server.closeAllConnections();
     await new Promise<void>((resolve) => stub.server.close(() => resolve()));
