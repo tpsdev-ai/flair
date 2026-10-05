@@ -632,7 +632,23 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
 
 // ─── 6. LEGACY "1" (flair#1285 / flair#1322): boot guard refuses ─────────────
 
+/** Local spawn captures the child log. External mode's getLog is "". */
+function expectLegacyFlagRefusalLog(instance: { external: boolean; getLog?: () => string }): void {
+  if (instance.external) return;
+  const log = instance.getLog?.() ?? "";
+  expect(log).toContain("Set FLAIR_MCP_OAUTH=true.");
+  expect(log).not.toContain("[mcp-oauth] /mcp mounted");
+}
+
 describe("flair#1322 legacy FLAIR_MCP_OAUTH=1: boot guard refuses to mount /mcp", () => {
+  test("local spawn asserts the remedy line; external mode does not read an empty log", () => {
+    expectLegacyFlagRefusalLog({
+      external: false,
+      getLog: () => "Set FLAIR_MCP_OAUTH=true.\n",
+    });
+    expectLegacyFlagRefusalLog({ external: true, getLog: () => "" });
+  });
+
   test(
     "shipped config with FLAIR_MCP_OAUTH=1 stays up, does not mount /mcp, and logs the remedy",
     async () => {
@@ -659,9 +675,8 @@ describe("flair#1322 legacy FLAIR_MCP_OAUTH=1: boot guard refuses to mount /mcp"
       });
       expect(opsRes.status).toBe(200);
 
-      const log = harper.getLog?.() ?? "";
-      expect(log).toContain("Set FLAIR_MCP_OAUTH=true.");
-      expect(log).not.toContain("[mcp-oauth] /mcp mounted");
+      // External mode (HARPER_HTTP_URL) captures no child log: getLog() is "".
+      expectLegacyFlagRefusalLog(harper);
 
       const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
         signal: AbortSignal.timeout(10_000),

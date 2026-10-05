@@ -155,7 +155,7 @@ function componentAbsentError(): Error {
       "      enabled: ${FLAIR_MCP_OAUTH}\n" +
       "      issuer: ${FLAIR_MCP_ISSUER}\n" +
       "\n" +
-      "Then set FLAIR_MCP_OAUTH=true and set FLAIR_MCP_ISSUER (or FLAIR_PUBLIC_URL) to this instance's public origin.",
+      "Then set FLAIR_MCP_OAUTH=true and set FLAIR_MCP_ISSUER to this instance's public origin.",
   );
 }
 

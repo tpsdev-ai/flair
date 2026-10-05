@@ -316,8 +316,9 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
       expect(msg).toContain("config.yaml");
       // Must name the flag the operator set.
       expect(msg).toContain("FLAIR_MCP_OAUTH");
-      // Must name the env var for the issuer.
+      // The example's issuer is ${FLAIR_MCP_ISSUER}. FLAIR_PUBLIC_URL does not fill it.
       expect(msg).toContain("FLAIR_MCP_ISSUER");
+      expect(msg).not.toContain("FLAIR_PUBLIC_URL");
       // The example is the mcp block, not the old providers block.
       expect(msg).toContain("mcp:");
       expect(msg).not.toContain("authorizationEndpoint");
