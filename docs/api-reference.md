@@ -153,6 +153,7 @@ the same identity plane.
 |--------|------|------|--------------|
 | GET | `/Memory`, `/Memory/<id>` | Ed25519 | open-within-org. By-id deny = 404. |
 | POST / PUT / PATCH | `/Memory` | Ed25519 | Own `agentId` only. Auto-embed on write. Visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`). Identified client older than 0.18.0 → **426** `stale_flair_client` (missing version is served). |
+| PATCH | `/Memory/<id>`, body `{"embedding": null, "embeddingModel": null}` | Ed25519 | Owner or admin. Re-embeds the stored row, writing `embedding`, `embeddingModel` and `updatedAt` (what `flair reembed` sends). |
 | DELETE | `/Memory/<id>` | Ed25519 | Owner or admin. `permanent` owner-delete is allowed. |
 | POST | `/SemanticSearch` | Ed25519 | Hybrid semantic + lexical. Same read-scope as Memory. Default scoring is `raw`. |
 | POST | `/BootstrapMemories` | Ed25519 | Cold-start context (soul + predicted memories + optional org events). |

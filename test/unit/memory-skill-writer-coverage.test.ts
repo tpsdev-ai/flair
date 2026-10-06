@@ -43,8 +43,10 @@ add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
 
 // ── REJECTING skill-writer sinks (400 skill_write_path) ──
-add("Memory", ["writer:super.patch#1"],
+add("Memory", ["writer:super.patch#2"],
   "Skill-writer: REJECTS skill-tagged patches (400 skill_write_path) — patch() routes past put()'s gate (flair#1542).");
+add("Memory", ["writer:super.patch#1"],
+  "Re-embed request (flair#2296): writes embedding, embeddingModel and updatedAt only, no skill content.");
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: REJECTS skill-tagged starter memories (400 skill_write_path) — admin-only seed bypasses the gate (flair#1542).");
 
