@@ -144,18 +144,13 @@ export function resolveInitAdminPasswordRefuseReason(
  * Harper 5 uses RocksDB: the whole `system` database is ONE column-family
  * database at `database/system`, and each table's primary store is a column
  * family named `<table>/` (Harper names a table's primary store with a
- * trailing slash). From Harper 5.3 a create-time UUID is stamped onto every
- * physical family name, so the primary store is `<table>/@<uuid>`; either name
- * identifies the user store in its own layout (flair#2147).
+ * trailing slash).
  */
 export const HARPER_SYSTEM_DB_REL = join("database", "system");
 export const HDB_USER_PRIMARY_CF = "hdb_user/";
 
 /**
- * Whether a RocksDB column family is the `hdb_user` primary store: the bare
- * `hdb_user/` (Harper 5.2 and earlier) or its Harper 5.3 generation-suffixed
- * form `hdb_user/@<uuid>`. Attribute families such as `hdb_user/hash@<uuid>`
- * carry an extra path segment and never match.
+ * Match `hdb_user/` or the `hdb_user/@` prefix.
  */
 export function isHdbUserPrimaryColumn(column: string): boolean {
   return column === HDB_USER_PRIMARY_CF || column.startsWith(`${HDB_USER_PRIMARY_CF}@`);

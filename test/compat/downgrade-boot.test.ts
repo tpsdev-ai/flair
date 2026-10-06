@@ -18,7 +18,7 @@
 //     promptly, naming both versions and a remedy) — the stamp-capable path —
 //     or boots successfully (pre-stamp baseline, the transition case).
 //
-// Scenario (mirrors a real operator downgrade; uses npm's nested install strategy):
+// Scenario (npm's nested install layout):
 //   1. Boot the CURRENT BUILD (this worktree's own `dist/`, via
 //      `startHarper()` — same mechanism test/integration/*.test.ts and
 //      test/compat/federation-mixed-version.test.ts use) against a FRESH,
@@ -29,15 +29,8 @@
 //      (`stopHarper(inst, { keepInstallDir: true })` — flair#637's harness
 //      addition to test/helpers/harper-lifecycle.ts).
 //   4. Boot the previously-published npm baseline (`@tpsdev-ai/flair@0.59.0`,
-//      PINNED — the last published release running Harper 5.2; installed fresh
-//      from the public registry) against THAT SAME data directory,
+//      installed with npm's nested strategy) against THAT SAME data directory,
 //      through the baseline's OWN CLI (`node <baseline>/dist/cli.js start`).
-//      No re-init, no `--purge`, no touching the files by hand — exactly what a
-//      real `flair stop && npm install -g @tpsdev-ai/flair@<previous> &&
-//      flair start` downgrade does. Driving the CLI (not `startHarper`) is
-//      load-bearing: flair's backwards-engine guard lives in `flair start` and
-//      runs BEFORE Harper is spawned, so an engine change is refused before the
-//      older Harper can open — and modify — the newer store (flair#1047).
 //   5. If it boots: read the memory and presence rows back through the
 //      baseline's own HTTP surface — a clean boot that can't actually see
 //      its own data isn't "downgrade works", it's a different failure mode.
@@ -81,14 +74,6 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 
 const NODE_BIN = process.env.NODE_BIN ?? "node";
 
-// ─── Pinned baseline (flair#2147 round 5) ───────────────────────────────────
-// The baseline is PINNED, not `@latest`. `@latest` moves with each release;
-// once a release ships Harper 5.3 the baseline's engine would equal this build's
-// (5.3.1), the engine-change branch below would be skipped, and the cross-engine
-// refusal assertions would stop running. 0.59.0 is the last npm-published
-// @tpsdev-ai/flair whose `harper` dependency is 5.2.x (5.2.8) — its engine
-// differs from this build's, so the refusal path always runs. Re-pin only to a
-// still-5.2 release.
 const BASELINE_NPM_VERSION = "0.59.0";
 
 // ─── Outcome classification (flair#1050) ────────────────────────────────────
@@ -458,17 +443,6 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
 
     // ── 4. Boot the npm baseline against the SAME data dir ─────────────────
     //
-    // Two paths, chosen by whether the engine moved:
-    //
-    //   - Engine CHANGED: drive the baseline's OWN CLI (`flair start`). Its
-    //     backwards-engine guard runs BEFORE Harper is spawned, so the older
-    //     engine never opens the newer store (flair#1047). Capture the refusal
-    //     and hash the data dir before/after; its regular-file
-    //     paths and contents must be unchanged.`startHarper` would bypass the guard entirely (it
-    //     spawns Harper directly) — the very path that let an older Harper
-    //     MODIFY 11 database files before its installer refused (flair#637).
-    //   - Engine SAME: no guard to run; boot through `startHarper` and assert
-    //     the store is served and readable.
     if (engineVersionChanged) {
       const baselineEnv = instanceEnv(current!, homeRoot);
       dataDirHashBefore = hashDataDir(dataDir!);
@@ -567,7 +541,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     expect(res.status).toBeGreaterThan(0);
   }, CLI_TIMEOUT_MS);
 
-  test("memory written by the current build is readable via the npm baseline after downgrade", async () => {
+  test("memory read when the npm baseline boots", async () => {
     if (engineVersionChanged) {
       // Baseline refused — the "loud refusal" branch of the invariant.
       // Data readability is not expected; the recovery path is the snapshot.
@@ -582,7 +556,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     expect(rows.some((r) => String(r.content ?? "").includes(memoryMarker))).toBe(true);
   }, CLI_TIMEOUT_MS);
 
-  test("presence written by the current build is readable via the npm baseline after downgrade", async () => {
+  test("presence read when the npm baseline boots", async () => {
     if (engineVersionChanged) {
       // Baseline refused — the "loud refusal" branch of the invariant.
       // Data readability is not expected; the recovery path is the snapshot.

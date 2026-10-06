@@ -9,7 +9,7 @@ function packageRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
-/** Write the running engine's version stamp into this instance's data dir. */
+/** Attempt to stamp the default HOME data directory with the running engine version. */
 export function stampEngineVersionOnBoot(dataDir: string = join(
   (process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME) || homedir(), ".flair", "data",
 )): void {

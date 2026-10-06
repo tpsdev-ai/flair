@@ -88,15 +88,6 @@ export function repoRoot() {
  * (`.github/install-weight-budget.json` → `minPackages`) rather than a literal
  * in this script, so the number is reviewed with the rest of the ratchet instead
  * of moving in a diff nobody reads.
- *
- * Measured baselines: 0.53.0 (the last good release, no bundleDependencies)
- * reported "added 543 packages" on npm 10.9.4 / node 22 (this file's Linux CI
- * box) and 560 on npm 11; the broken 0.54.1 reported 50 (npm 10) / 44 (npm 11
- * on macOS). harper 5.3.1's slimmer tree — its npm-shrinkwrap drops modules
- * 5.2.8 carried, and the optional full-text binding is trimmed — measured 492
- * added on npm 10.9.4 / node 22 for this build; the floor (490) sits just under
- * that and above a 10% collapse (443). Re-measure and move the field with a
- * comment if a release legitimately changes the tree by >40 packages.
  */
 export function readMinPackages(root = repoRoot()) {
   const raw = JSON.parse(readFileSync(join(root, BUDGET_REL), "utf8"));

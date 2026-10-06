@@ -343,8 +343,6 @@ describe("the committed allowlist", () => {
     // These are the advisories the npm-install observation surfaces that `bun
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
     // sources ["npm-install"] so the gate knows they are fixed for bun only.
-    // harper 5.3.x's shrinkwrap cleared the fastify, joi and moment entries
-    // from this class; the fast-uri ones remain.
     const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fast-uri");
     // Name the fast-uri entries: a non-empty check alone could be satisfied by
     // another package's entries while fast-uri's had gone missing.

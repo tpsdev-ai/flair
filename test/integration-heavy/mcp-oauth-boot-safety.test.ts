@@ -131,11 +131,6 @@ function makeWorkDirWithShippedConfig(prefix: string, mutate?: (shipped: string)
   // the JS resources (mcp-oauth.ts, etc.).
   symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
   symlinkSync(join(REPO_ROOT, "dist"), join(workDir, "dist"));
-  // The app must ship flair's schema alongside dist/. Without schemas/*.graphql
-  // harper defines no @table classes, so flair's table-backed resource modules
-  // throw at import (`databases.flair` is undefined) and a route with no other
-  // handler answers 500 where 5.2.8 answered 404. Copy the directory (a symlinked
-  // schemas/ is not picked up by harper's schema glob), matching the packed package.
   cpSync(join(REPO_ROOT, "schemas"), join(workDir, "schemas"), { recursive: true });
   if (mutate) {
     const shipped = readFileSync(SHIPPED_CONFIG, "utf-8");

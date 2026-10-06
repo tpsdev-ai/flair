@@ -697,7 +697,7 @@ now checks it for real, nightly, alongside the mixed-version federation suite (b
 from `.github/workflows/federation-compat.yml`'s `bun test test/compat/`): it boots the
 current build, writes a memory and a presence row, stops it *without* wiping the data
 directory, then starts a pinned earlier Flair release that uses the previous storage engine (`@tpsdev-ai/flair` 0.59.0) against that
-exact same directory through its OWN CLI. The test requires the two Harper engines to
+same directory through its own CLI in npm's nested layout. The test requires the two Harper engines to
 differ, and confirms the older CLI's backwards-engine guard refuses the store *before*
 Harper is spawned, naming the engine change, with regular-file paths and contents in the
 data directory unchanged.
@@ -724,13 +724,8 @@ recovery as the 5.1 → 5.2 break: `flair snapshot restore <path>`. The
 the flair#1050 invariant (it boots Harper via `startHarper`, so the CLI stamp
 phrasing is not on that path).
 
-**Engine-version break: Harper 5.2 → 5.3.** Harper 5.3's RocksDB storage format is
-one-way — a build older than 5.3 opens the bare store names and reads tables created
-under 5.3 as empty — so an older flair **cannot safely read or serve data written by a
-5.3 flair**. This release attempts to write an `engine-version.txt` stamp into
-`~/.flair/data` at boot; the write is best effort. An older guarded Flair
-refuses before Harper opens the store when it finds both the engine stamp and its own
-installed Harper version; otherwise it does not refuse.
+**Engine-version break: Harper 5.2 → 5.3.** This release attempts to write an `engine-version.txt` stamp into
+`~/.flair/data` at boot; the write is best effort. With a readable stamp and a known installed Harper version, an older guarded Flair refuses before Harper opens the store if the stamp is newer or the versions cannot be compared. A failed write can leave a stale stamp.
 The remedy is the same as the breaks above: restore
 the pre-upgrade snapshot (`flair snapshot restore <path>`) or a `flair backup` export
 taken on the older version.

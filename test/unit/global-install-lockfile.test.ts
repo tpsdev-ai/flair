@@ -143,7 +143,6 @@ describe("the reviewed floor (flair#1683)", () => {
   });
 
   test("sits below the healthy baseline and above the broken shape", () => {
-    // harper 5.3.1 (this baseline): 492 added on npm 10.9.4 / node 22.
     expect(MIN).toBeLessThan(492);
     expect(MIN).toBeGreaterThan(50); // 0.54.1, npm 10
     expect(MIN).toBeGreaterThan(44); // 0.54.1, npm 11 / macOS
