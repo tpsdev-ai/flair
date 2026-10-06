@@ -548,6 +548,32 @@
       "removeWhen": "harper ships a build resolving stream-json > 3.4.0 (the patched line), or flair stops depending on harper."
     },
     {
+      "ghsa": "GHSA-mjw6-4jj6-33hc",
+      "package": "stream-json",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> stream-json",
+      "reason": "Prototype pollution in stream-json's Assembler (fixed in 3.6.0). stream-json@1.9.1 is an exact transitive pin of harper (harper 5.2.8 on main; harper 5.3.1, the current latest, still pins 1.9.1), so it cannot be overridden from this repo (harper ships an npm-shrinkwrap and the override is bun-only, flair#1498/#1510). flair does not import stream-json. In harper 5.2.8 its only importer is node_modules/harper/dist/dataLayer/bulkLoad.js (StreamArray + Batch in insertJson), reached through fileLoad only when the file type is JSON; the CSV load operations pass a fixed CSV type to the same function (bulkLoad.js csvURLLoad, csvFileLoad) and parse with papaparse, so the one caller that can select JSON is the authenticated import_from_s3 operation, by the S3 object key's extension. flair never calls a bulk-load operation, and the default flair install binds harper's operations server to 127.0.0.1 and an owner-only domain socket. StreamArray builds each element through the Assembler, so that path is in scope; it requires an operations-API caller with insert permission on the target table. Same retirement as GHSA-528h-pc64-c93x.",
+      "sources": ["bun", "npm-install"],
+      "approvedBy": "tps-flint",
+      "added": "2026-10-06",
+      "expires": "2026-12-03",
+      "removeWhen": "harper ships a build resolving stream-json >= 3.6.0, or flair stops depending on harper."
+    },
+    {
+      "ghsa": "GHSA-hqr4-qq8f-hg3x",
+      "package": "stream-json",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> stream-json",
+      "reason": "Quadratic re-scan in stream-json's JSONC parser and verifier (fixed after 3.5.0). The advisory range covers 1.9.1, but the installed 1.9.1 package ships no JSONC parser or verifier (its modules are Parser, Assembler, Disassembler, Emitter, Stringer, filters, streamers, utils and jsonl; no file mentions JSONC), so the affected code is not present. stream-json@1.9.1 is an exact transitive pin of harper (harper 5.2.8 on main; harper 5.3.1, the current latest, still pins 1.9.1), so it cannot be overridden from this repo (harper ships an npm-shrinkwrap and the override is bun-only, flair#1498/#1510). flair does not import stream-json. In harper 5.2.8 its only importer is node_modules/harper/dist/dataLayer/bulkLoad.js (StreamArray + Batch in insertJson), reached through fileLoad only when the file type is JSON; the CSV load operations pass a fixed CSV type to the same function (bulkLoad.js csvURLLoad, csvFileLoad) and parse with papaparse, so the one caller that can select JSON is the authenticated import_from_s3 operation, by the S3 object key's extension. flair never calls a bulk-load operation, and the default flair install binds harper's operations server to 127.0.0.1 and an owner-only domain socket.",
+      "sources": ["bun", "npm-install"],
+      "approvedBy": "tps-flint",
+      "added": "2026-10-06",
+      "expires": "2026-12-03",
+      "removeWhen": "harper ships a build resolving stream-json > 3.5.0, or flair stops depending on harper; re-check this entry if harper moves to a stream-json major that includes the JSONC parser."
+    },
+    {
       "ghsa": "GHSA-gg4h-3hg2-grpc",
       "package": "joi",
       "severity": "low",
