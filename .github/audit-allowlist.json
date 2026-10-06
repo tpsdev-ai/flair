@@ -659,6 +659,66 @@
       "added": "2026-10-02",
       "expires": "2026-10-16",
       "removeWhen": "npm's latest node-forge release is outside the affected range (the gate then blocks this entry): reassess; a maintainer removes the entry once harper resolves a fixed release or drops node-forge"
+    },
+    {
+      "ghsa": "GHSA-x6jw-m9v5-85vh",
+      "package": "simple-git",
+      "severity": "critical",
+      "class": "remediation-available",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "reason": "Gap in simple-git's unsafe-operation guard (affected >=3.15.0 <4.0.1; the 3.x line has no fix). simple-git@3.36.0 reaches the workspace lockfile only through @tpsdev-ai/flair-bench -> node-llama-cpp@3.18.1 (packages/flair-bench/package.json:36), which declares simple-git ^3.33.0; every node-llama-cpp release through 3.22.1, the latest, declares ^3.36.0, so no node-llama-cpp upgrade reaches 4.x. The npm install of the packed @tpsdev-ai/flair tarball contains no simple-git, so a default flair install does not carry it; installs of the separate, opt-in flair-bench package do. The guard matters only when input the caller does not control reaches simple-git's arguments. node-llama-cpp imports simple-git at module load (node_modules/node-llama-cpp/dist/bindings/utils/cloneLlamaCppRepo.js:2) but calls it only to clone llama.cpp source when no prebuilt binary loads and no source checkout exists (dist/bindings/getLlama.js:287-314 -> buildAndLoadLlamaBinary, getLlama.js:471-475 -> dist/bindings/utils/compileLLamaCpp.js:55-56 -> cloneLlamaCppRepo.js:16-86). That clone passes literal options (cloneLlamaCppRepo.js:55-57, 73-78) and no environment overrides, and its repository and release come from node-llama-cpp's built-in defaults or the operator's own NODE_LLAMA_CPP_REPO / NODE_LLAMA_CPP_REPO_RELEASE (dist/config.js:44-49). The other importer, dist/utils/gitReleaseBundles.js, runs simple-git only in node-llama-cpp's own CI bundle step (dist/cli/commands/source/commands/DownloadCommand.js:206-208). flair-bench calls getLlama() with default options (packages/flair-bench/src/engine.ts:30) and ships prebuilt binaries for seven platforms as optional dependencies (packages/flair-bench/package.json:39-45). No flair, flair-bench or request-derived input reaches simple-git's arguments. Remediation-available, deferred: simple-git 4.0.2 (published 2026-09-26, past the 7-day bake time) fixes this and pins @simple-git/argv-parser 2.0.1, but taking it needs a root override outside node-llama-cpp's declared range. 4.x keeps the named simpleGit export node-llama-cpp imports, but its v4 upgrade notes change how the library is loaded and which option forms it accepts, and no test in this repo reaches node-llama-cpp's clone path, so flair-bench's suite passing would not show the override is safe. That override belongs in a separate, test-gated dependency PR that exercises the source-build path.",
+      "added": "2026-10-06",
+      "expires": "2026-10-20",
+      "removeWhen": "a separate, test-gated PR overrides simple-git to >=4.0.2 after exercising node-llama-cpp's source-build clone, or node-llama-cpp ships a release declaring simple-git >=4.0.1 and flair-bench moves to it, or flair-bench drops node-llama-cpp."
+    },
+    {
+      "ghsa": "GHSA-858h-whjf-mvg5",
+      "package": "simple-git",
+      "severity": "high",
+      "class": "remediation-available",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "reason": "Gap in simple-git's unsafe-operations plugin (affected <=3.36.0, fixed in 4.0.0; 3.36.0 is the last 3.x release, so the 3.x line has no fix). Same dependency path, reachability and deferral as GHSA-x6jw-m9v5-85vh: simple-git@3.36.0 arrives only through @tpsdev-ai/flair-bench -> node-llama-cpp@3.18.1 (simple-git ^3.33.0; every node-llama-cpp release through 3.22.1 declares ^3.36.0), and the npm install of the packed @tpsdev-ai/flair tarball contains no simple-git. node-llama-cpp calls simple-git only for its source-build clone of llama.cpp when no prebuilt binary loads (node_modules/node-llama-cpp/dist/bindings/utils/cloneLlamaCppRepo.js:16-86, reached from dist/bindings/getLlama.js:287-314), with literal options (cloneLlamaCppRepo.js:55-57, 73-78) and a repository and release from node-llama-cpp's defaults or the operator's own environment (dist/config.js:44-49); no flair, flair-bench or request-derived input reaches simple-git's arguments. Remediation-available, deferred: the fix needs a root override onto simple-git 4.0.2, outside node-llama-cpp's declared range, and no test in this repo reaches the clone path; that override belongs in a separate, test-gated dependency PR.",
+      "added": "2026-10-06",
+      "expires": "2026-10-20",
+      "removeWhen": "a separate, test-gated PR overrides simple-git to >=4.0.2 after exercising node-llama-cpp's source-build clone, or node-llama-cpp ships a release declaring simple-git >=4.0.0 and flair-bench moves to it, or flair-bench drops node-llama-cpp."
+    },
+    {
+      "ghsa": "GHSA-g4wm-2vf7-vfgr",
+      "package": "simple-git",
+      "severity": "high",
+      "class": "remediation-available",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "reason": "Gap in simple-git's handling of git configuration includes (affected <=3.36.0, fixed in 4.0.0; 3.36.0 is the last 3.x release, so the 3.x line has no fix). Same dependency path, reachability and deferral as GHSA-x6jw-m9v5-85vh: simple-git@3.36.0 arrives only through @tpsdev-ai/flair-bench -> node-llama-cpp@3.18.1 (simple-git ^3.33.0; every node-llama-cpp release through 3.22.1 declares ^3.36.0), and the npm install of the packed @tpsdev-ai/flair tarball contains no simple-git. node-llama-cpp calls simple-git only for its source-build clone of llama.cpp when no prebuilt binary loads (node_modules/node-llama-cpp/dist/bindings/utils/cloneLlamaCppRepo.js:16-86, reached from dist/bindings/getLlama.js:287-314), with literal options (cloneLlamaCppRepo.js:55-57, 73-78) and a repository and release from node-llama-cpp's defaults or the operator's own environment (dist/config.js:44-49); no flair, flair-bench or request-derived input reaches simple-git's arguments. Remediation-available, deferred: the fix needs a root override onto simple-git 4.0.2, outside node-llama-cpp's declared range, and no test in this repo reaches the clone path; that override belongs in a separate, test-gated dependency PR.",
+      "added": "2026-10-06",
+      "expires": "2026-10-20",
+      "removeWhen": "a separate, test-gated PR overrides simple-git to >=4.0.2 after exercising node-llama-cpp's source-build clone, or node-llama-cpp ships a release declaring simple-git >=4.0.0 and flair-bench moves to it, or flair-bench drops node-llama-cpp."
+    },
+    {
+      "ghsa": "GHSA-v5rq-49vh-5v5c",
+      "package": "@simple-git/argv-parser",
+      "severity": "critical",
+      "class": "remediation-available",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git -> @simple-git/argv-parser",
+      "reason": "Gap in the unsafe-editor detection simple-git relies on (affected <2.0.1, fixed in @simple-git/argv-parser 2.0.1). @simple-git/argv-parser@1.1.1 is pulled by simple-git@3.36.0 (^1.1.0); only simple-git 4.0.2 depends on 2.0.1, so this retires with the simple-git move. Same dependency path, reachability and deferral as GHSA-x6jw-m9v5-85vh: it arrives only through @tpsdev-ai/flair-bench -> node-llama-cpp@3.18.1, and the npm install of the packed @tpsdev-ai/flair tarball contains neither package. simple-git loads it to inspect the arguments and environment of the commands it runs (node_modules/simple-git/dist/cjs/index.js:1196); node-llama-cpp's only runtime simple-git calls are its source-build clone of llama.cpp when no prebuilt binary loads (node_modules/node-llama-cpp/dist/bindings/utils/cloneLlamaCppRepo.js:16-86), which passes literal options (cloneLlamaCppRepo.js:55-57, 73-78) and no environment overrides. No flair, flair-bench or request-derived input reaches it. Remediation-available, deferred with simple-git: overriding argv-parser alone to 2.x would cross simple-git 3.36.0's declared ^1.1.0 range, and the simple-git 4.0.2 override belongs in a separate, test-gated dependency PR.",
+      "added": "2026-10-06",
+      "expires": "2026-10-20",
+      "removeWhen": "the simple-git entries retire (simple-git >=4.0.2, which pins @simple-git/argv-parser 2.0.1, reaches bun.lock through a test-gated override or a node-llama-cpp release), or flair-bench drops node-llama-cpp."
     }
   ]
 }
