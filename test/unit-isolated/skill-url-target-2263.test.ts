@@ -65,6 +65,15 @@ test("a skill PUT whose id is only in the URL creates at that id", async () => {
   expect(versions.get("skill:url-only:1")?.memoryId).toBe("url-only");
 });
 
+test.each(["put", "post"])("a null body id on URL-bound %s creates at the URL id", async (method) => {
+  const result = await writer("url-null")[method]({ id: null, agentId: "owner", content: "c1", trigger: "t", tags: ["skill"], durability: "persistent", visibility: "shared" });
+  expect(result.id).toBe("url-null");
+  expect(harnessState.memoryStore.get("url-null")?.skillSubjectId).toBe("url-null");
+  expect(harnessState.memoryStore.size).toBe(1);
+  expect(versions.get("skill:url-null:1")?.kind).toBe("create");
+  expect(versions.get("skill:url-null:1")?.memoryId).toBe("url-null");
+});
+
 test("with no body id, a concurrent edit under the lock refuses with 409 and writes nothing", async () => {
   const row = skill("url-edit");
   harnessState.memoryStore.set(row.id, row);
@@ -120,6 +129,35 @@ test("two concurrent different reserved-seed PUTs (id only in the URL) refuse th
   expect(versions.size).toBe(1);
 });
 
+test("a null body id on the URL-bound feed creates at the URL id", async () => {
+  const resource = feed();
+  resource.getId = () => "feed-null";
+  const result = await resource.post({ id: null, agentId: "admin", content: "c1", trigger: "t", tags: ["skill"], durability: "persistent" });
+  expect(result.id).toBe("feed-null");
+  expect(harnessState.memoryStore.get("feed-null")?.skillSubjectId).toBe("feed-null");
+  expect(versions.get("skill:feed-null:1")?.memoryId).toBe("feed-null");
+});
+
+test("the feed refuses a URL-bound seed id when the body id is null", async () => {
+  const resource = feed();
+  resource.getId = () => SEED_SKILL_ROW_ID;
+  const result = await resource.post({ id: null, agentId: "admin", content: "c1", trigger: "t", tags: ["skill"], durability: "persistent" });
+  expect(result.status).toBe(403);
+  expect((await result.json()).error).toStartWith("seed_id_reserved");
+  expect(harnessState.memoryStore.size).toBe(0);
+  expect(versions.size).toBe(0);
+});
+
+test("the feed refuses a body id that differs from its URL-bound id", async () => {
+  const resource = feed();
+  resource.getId = () => "feed-url";
+  const result = await resource.post({ id: "feed-body", agentId: "admin", content: "c1", trigger: "t", tags: ["skill"], durability: "persistent" });
+  expect(result.status).toBe(400);
+  expect((await result.json()).error).toBe("id_target_mismatch");
+  expect(harnessState.memoryStore.size).toBe(0);
+  expect(versions.size).toBe(0);
+});
+
 function seedRow(content: string): any {
   return {
     id: SEED_SKILL_ROW_ID, agentId: "admin", tags: ["skill"], content,
@@ -139,6 +177,16 @@ async function manifest(agentId = "reader") {
   });
 }
 
+test("an operator feed write whose array id stringifies to the seed id is refused", async () => {
+  harnessState.memoryStore.set(SEED_SKILL_ROW_ID, seedRow(currentSeed().content));
+  const before = { ...harnessState.memoryStore.get(SEED_SKILL_ROW_ID) };
+  const result = await feed().post({ id: [SEED_SKILL_ROW_ID], agentId: "admin", content: "fed", trigger: "t", tags: ["skill"], durability: "persistent" });
+  expect(result.status).toBe(403);
+  expect((await result.json()).error).toStartWith("seed_id_reserved");
+  expect(harnessState.memoryStore.get(SEED_SKILL_ROW_ID)).toEqual(before);
+  expect(versions.size).toBe(0);
+});
+
 test("an operator feed write that names the seed id is refused and the seed row survives a re-seed", async () => {
   harnessState.memoryStore.set(SEED_SKILL_ROW_ID, seedRow(currentSeed().content));
   const before = harnessState.memoryStore.get(SEED_SKILL_ROW_ID);
@@ -153,7 +201,6 @@ test("an operator feed write that names the seed id is refused and the seed row 
   expect(asSupersedes.status).toBe(403);
   expect((await asSupersedes.json()).error).toStartWith("seed_id_reserved");
 
-  // The seed row is byte-identical, still open, and still the org manifest's row.
   expect(harnessState.memoryStore.get(SEED_SKILL_ROW_ID)).toEqual(before);
   expect(harnessState.memoryStore.get(SEED_SKILL_ROW_ID)?.validTo).toBeUndefined();
   expect(harnessState.memoryStore.has("feed-new")).toBe(false);

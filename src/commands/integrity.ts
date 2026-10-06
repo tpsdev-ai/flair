@@ -1,0 +1,239 @@
+/**
+ * integrity.ts — `flair integrity check` (flair#2213).
+ *
+ * Operator-invoked, one-shot: compare the live Memory corpus over the operations
+ * API with the checkpoint. `--json` for machines, human output
+ * otherwise. A corpus or checkpoint read failure reports UNKNOWN and leaves the
+ * checkpoint unchanged.
+ *
+ * Command group lives here (flair#2213), bound via bindIntegrityCli() the same
+ * way the other extracted command groups are.
+ */
+import { Command } from "commander";
+import { readExactTableCount } from "../lib/ops-table-count.js";
+import { writeConfirmed } from "../lib/instance-identity-row.js";
+import { resolveHome } from "../lib/home.js";
+import {
+  compareScan,
+  deletionRecordsToPrune,
+  emptyCheckpoint,
+  integrityCheckpointPath,
+  readCheckpoint,
+  unknownVerdict,
+  writeCheckpoint,
+  type DeletionRecordLite,
+  type IntegrityVerdict,
+  type MemoryRowLite,
+  type IntegrityCheckpoint,
+} from "../lib/memory-integrity.js";
+
+export type IntegrityCli = {
+  resolveOpsPort: (...args: any[]) => any;
+  resolveAdminUser: (...args: any[]) => any;
+};
+
+let cli: IntegrityCli;
+
+export function bindIntegrityCli(fns: IntegrityCli): void {
+  cli = fns;
+}
+
+const OPS_TIMEOUT_MS = 30_000;
+
+async function pruneDeletionHistory(opsPort: number | string, auth: string, checkpoint: IntegrityCheckpoint, deletions: readonly DeletionRecordLite[]): Promise<void> {
+  const ids = deletionRecordsToPrune(checkpoint, deletions);
+  for (let offset = 0; offset < ids.length; offset += 256) {
+    const res = await fetch(opsUrl(opsPort), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ operation: "delete", database: "flair", table: "MemoryDeletionHistory", hash_values: ids.slice(offset, offset + 256) }),
+      signal: AbortSignal.timeout(OPS_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`operations API deletion history retention failed (${res.status})`);
+    const body = await res.json();
+    if (!ids.slice(offset, offset + 256).every(id => writeConfirmed(body, "deleted_hashes", id))) {
+      throw new Error("operations API deletion history retention was not confirmed");
+    }
+  }
+}
+
+function opsUrl(opsPort: number | string): string {
+  return typeof opsPort === "number" ? `http://127.0.0.1:${opsPort}/` : `${String(opsPort).replace(/\/$/, "")}/`;
+}
+
+/**
+ * Read Memory ids, durability, instanceToken and deletion records through
+ * the operations API. Throws on any read failure — the caller reports UNKNOWN.
+ */
+async function readCorpus(
+  opsPort: number | string,
+  auth: string,
+): Promise<{ rows: MemoryRowLite[]; deletions: DeletionRecordLite[] }> {
+  const opsPost = async (body: Record<string, unknown>, context: string): Promise<unknown> => {
+    const res = await fetch(opsUrl(opsPort), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(OPS_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`operations API ${context} failed (${res.status}): ${text.slice(0, 300)}`);
+    }
+    return res.json();
+  };
+  const search = async (table: string, attributes: string[]): Promise<any[]> => {
+    const expected = await readExactTableCount(opsPost, table);
+    const body = await opsPost({
+      operation: "search_by_value",
+      database: "flair",
+      table,
+      search_attribute: "id",
+      search_value: "*",
+      get_attributes: attributes,
+    }, `${table} search`);
+    if (!Array.isArray(body)) throw new Error(`operations API ${table} search returned a non-array body`);
+    const ids = new Set<string>();
+    for (const row of body) {
+      if (!row || typeof row.id !== "string" || !row.id.trim() || ids.has(row.id)) {
+        throw new Error(`operations API ${table} search returned an invalid or duplicate id`);
+      }
+      ids.add(row.id);
+    }
+    if (ids.size !== expected) {
+      throw new Error(`${table}: server reports ${expected} rows, integrity read ${ids.size}; retry integrity check when writes are paused`);
+    }
+    const after = await readExactTableCount(opsPost, table);
+    if (after !== expected) {
+      throw new Error(`${table}: source count changed from ${expected} to ${after}; integrity read ${ids.size}; retry integrity check when writes are paused`);
+    }
+    return body;
+  };
+
+  const memoryRows = await search("Memory", ["id", "durability", "instanceToken"]);
+  const deletionRows = await search("MemoryDeletionHistory", ["id", "memoryId", "memoryInstanceToken", "durability", "at"]);
+
+  const rows: MemoryRowLite[] = [];
+  for (const r of memoryRows) {
+    if (!r || typeof r.id !== "string" || r.id.length === 0) throw new Error("operations API Memory search returned an invalid id");
+    rows.push({ id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard", instanceToken: typeof r.instanceToken === "string" ? r.instanceToken : null });
+  }
+  const deletions: DeletionRecordLite[] = [];
+  for (const d of deletionRows) {
+    if (!d || typeof d.id !== "string" || !d.id || typeof d.memoryId !== "string" || !d.memoryId) {
+      throw new Error("operations API MemoryDeletionHistory search returned an invalid id");
+    }
+    deletions.push({
+      id: d.id,
+      memoryId: d.memoryId,
+      memoryInstanceToken: typeof d.memoryInstanceToken === "string" ? d.memoryInstanceToken : null,
+      durability: typeof d.durability === "string" ? d.durability : null,
+      at: typeof d.at === "string" ? d.at : "",
+    });
+  }
+  return { rows, deletions };
+}
+
+function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
+  const lines: string[] = [];
+  const counts = v.counts;
+  lines.push(`Integrity scan: ${v.status.toUpperCase()}`);
+  lines.push(v.status === "unknown" ? "  corpus: unavailable" : `  corpus: ${v.total} rows (permanent ${counts.permanent}, persistent ${counts.persistent}, standard ${counts.standard}, ephemeral ${counts.ephemeral})`);
+  lines.push(`  checkpoint: ${checkpointPath}`);
+  if (v.status === "unknown") {
+    lines.push(`  ⚠️  UNKNOWN — scan failed: ${v.reason}`);
+    lines.push(v.checkpointWritten ? "  checkpoint advanced before retention failed." : "  The checkpoint was not changed.");
+    return lines.join("\n");
+  }
+  if (v.status === "baseline") {
+    lines.push("  baseline established from this scan (no prior checkpoint).");
+    return lines.join("\n");
+  }
+  if (v.attributedDeletes.length > 0) {
+    lines.push(`  ${v.attributedDeletes.length} history-backed attribution(s):`);
+    for (const d of v.attributedDeletes.slice(0, 20)) lines.push(`    - ${d.id} (${d.tier}) at ${d.at}`);
+    if (v.attributedDeletes.length > 20) lines.push(`    … ${v.attributedDeletes.length - 20} more`);
+  }
+  if (v.tierChanges.length > 0) {
+    lines.push(`  ${v.tierChanges.length} tier change(s) observed:`);
+    for (const c of v.tierChanges.slice(0, 20)) lines.push(`    - ${c.id}: ${c.from} -> ${c.to}`);
+    if (v.tierChanges.length > 20) lines.push(`    … ${v.tierChanges.length - 20} more`);
+  }
+  if (v.losses.length > 0) {
+    lines.push(`  ❌ ${v.losses.length} UNEXPLAINED durable row loss(es) — no new matching deletion record:`);
+    for (const l of v.losses) lines.push(`    - ${l.id} (${l.tier}${l.reason ? `, ${l.reason}` : ""})`);
+  }
+  for (const [tier, delta] of Object.entries(v.unexplainedDecrease)) {
+    lines.push(`  ❌ unexplained ${tier} decrease of ${delta} not accounted for by the id set`);
+  }
+  if (v.checkpointWritten) lines.push("  checkpoint advanced.");
+  else lines.push("  checkpoint NOT advanced (unresolved loss).");
+  return lines.join("\n");
+}
+
+export function register(program: Command): void {
+  const integrity = program
+    .command("integrity")
+    .description("Detect missing checkpointed durable Memory IDs or changed or missing previously nonempty tokens");
+
+  integrity
+    .command("check")
+    .description("Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed")
+    .option("--json", "Print the verdict as JSON")
+    .option("--accept", "On an alert, advance the whole checkpoint only if no reported replacement lacks a token; otherwise write no checkpoint, even with other losses")
+    .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
+    .action(async (opts) => {
+      const opsPort = cli.resolveOpsPort(opts);
+      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      const adminUser = cli.resolveAdminUser(opts.adminUser);
+      const checkpointPath: string = opts.checkpoint ?? integrityCheckpointPath(resolveHome());
+      const scannedAt = new Date().toISOString();
+
+      if (!adminPass) {
+        console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for integrity check");
+        process.exit(1);
+      }
+      const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+
+      let verdict: IntegrityVerdict;
+      let checkpointWritten = false;
+      try {
+        const { rows, deletions } = await readCorpus(opsPort, auth);
+        const read = readCheckpoint(checkpointPath);
+        if (read.kind === "unreadable") {
+          verdict = unknownVerdict(`checkpoint unreadable: ${read.reason}`, scannedAt);
+        } else if (read.kind === "absent") {
+          const cp = emptyCheckpoint(scannedAt, rows, deletions);
+          writeCheckpoint(checkpointPath, cp);
+          checkpointWritten = true;
+          verdict = { ...compareScan({ checkpoint: cp, rows, deletions, scannedAt }), status: "baseline", checkpointWritten: true };
+          await pruneDeletionHistory(opsPort, auth, cp, deletions);
+        } else {
+          verdict = compareScan({ checkpoint: read.checkpoint, rows, deletions, scannedAt });
+          const missingTokenLoss = verdict.losses.some(loss => loss.reason === "replaced" &&
+            rows.some(row => row.id === loss.id && !row.instanceToken));
+          if (verdict.status === "healthy" || (opts.accept && !missingTokenLoss)) {
+            const cp = emptyCheckpoint(scannedAt, rows, deletions, read.checkpoint.historyIds);
+            writeCheckpoint(checkpointPath, cp);
+            checkpointWritten = true;
+            verdict.checkpointWritten = true;
+            await pruneDeletionHistory(opsPort, auth, cp, deletions);
+          }
+        }
+      } catch (err) {
+        verdict = unknownVerdict(err instanceof Error ? err.message : String(err), scannedAt);
+        verdict.checkpointWritten = checkpointWritten;
+      }
+
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(verdict)}\n`);
+      } else {
+        console.log(renderHuman(verdict, checkpointPath));
+      }
+      // Exit codes: 0 healthy/baseline, 2 alert, 3 unknown.
+      process.exit(verdict.status === "alert" ? 2 : verdict.status === "unknown" ? 3 : 0);
+    });
+}

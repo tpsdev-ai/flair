@@ -7,16 +7,16 @@ import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-gu
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
-import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
 import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
-import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
+import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
-import { reservedSeedFeedWriteDenial } from "./seed-reservation.js";
+import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -34,10 +34,7 @@ export class FeedMemories extends Resource {
       return UNAUTH();
     }
 
-    // flair#2141 S2 / flair#2263: a reserved seed id is never written through
-    // the feed — not even as the operator. The seed command writes that row
-    // (PUT /Memory/<id>); the refusal names it.
-    const seedDenial = reservedSeedFeedWriteDenial("Memory", [content?.id, content?.supersedes]);
+    const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
     if (seedDenial) return seedDenial;
 
     // No-forge attribution: use the kit's stampAttribution to stamp agentId
@@ -64,7 +61,14 @@ export class FeedMemories extends Resource {
     if (attr.denied) return attr.denied;
 
     // Guard against body-supplied id targeting another agent's record.
-    const existingRecord = content?.id ? await (databases as any).flair.Memory.get(content.id) : null;
+    const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => null);
+    if (resolvedExisting.denial) return resolvedExisting.denial;
+    const existingRecord = resolvedExisting.row;
+    const urlTargetId = (this as any).getId?.();
+    if (content && typeof content === "object" && content.id == null &&
+      (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
+      content.id = urlTargetId;
+    }
     if (content?.id) {
       if (existingRecord && existingRecord.agentId !== content.agentId) {
         return FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
@@ -173,6 +177,8 @@ export class FeedMemories extends Resource {
         ? `${agentId}-${randomUUID()}`
         : String(content.id ?? `${agentId}-${Date.now()}-${randomUUID()}`);
       const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: addressed, predecessor });
+      const seedLineageDenial = reservedSeedSubjectDenial("Memory", [subjectId], ctx, auth);
+      if (seedLineageDenial) return seedLineageDenial;
       const addressedId = addressed ? String(addressed.id) : predecessor ? String(predecessor.id) : null;
       const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
       const outcome = await runSkillVersionWrite({
@@ -370,8 +376,8 @@ export class FeedMemories extends Resource {
     const readStored = (id: any) => (databases as any).flair.Memory.get(id);
     const replaysHistory = request.startTime !== undefined || request.previousCount !== undefined;
     for await (const event of subscription) {
-      if (!(await readableRowEvent(event, scope.isAllowed, readStored))) continue;
-      if (replaysHistory && !(await storedRowReadable(event?.id, scope.isAllowed, readStored))) continue;
+      if (!(await readableRowEvent(event, auth.agentId, scope.isAllowed, readStored))) continue;
+      if (replaysHistory && !(await storedRowReadable(event?.id, auth.agentId, scope.isAllowed, readStored))) continue;
       yield event;
     }
   }
@@ -435,14 +441,19 @@ function scopedSubscriptionRequest(callerRequest: any, rowFilter: (record: any) 
  */
 async function readableRowEvent(
   event: any,
+  readerId: string,
   isAllowed: (record: any) => boolean,
   readStored: (id: any) => Promise<any> | any,
 ): Promise<boolean> {
   if (!event || (event.type !== "put" && event.type !== "invalidate")) return false;
   const row = event.value;
   if (row == null || typeof row !== "object") return false;
-  if (typeof row.agentId === "string" && row.visibility !== undefined) return isAllowed(row);
-  return storedRowReadable(event.id, isAllowed, readStored);
+  if (typeof row.agentId === "string" && row.visibility !== undefined) {
+    if (!isAllowed(row)) return false;
+  } else if (!(await storedRowReadable(event.id, readerId, isAllowed, readStored))) {
+    return false;
+  }
+  return closedSkillPayloadReadable(row, readerId);
 }
 
 /**
@@ -459,6 +470,7 @@ async function readableRowEvent(
  */
 async function storedRowReadable(
   id: any,
+  readerId: string,
   isAllowed: (record: any) => boolean,
   readStored: (id: any) => Promise<any> | any,
 ): Promise<boolean> {
@@ -470,5 +482,6 @@ async function storedRowReadable(
     return false;
   }
   if (stored == null || typeof stored !== "object" || typeof stored.agentId !== "string") return false;
-  return isAllowed(stored);
+  if (!isAllowed(stored)) return false;
+  return closedSkillPayloadReadable(stored, readerId);
 }

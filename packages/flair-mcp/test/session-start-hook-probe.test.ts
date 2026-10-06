@@ -1,5 +1,5 @@
 import { describe, test, expect, afterEach } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,15 +69,8 @@ describe("isProbeMode", () => {
 });
 
 describe("probe mode short-circuits the whole hook (spawned entry point)", () => {
-  // flair#1796: the case below spends a FIXED ~3 s blocked in its positive
-  // control (the normal leg is deliberately killed at its deadline), so even on
-  // an idle machine it costs ~3.05 s — ~60% of bun's 5000 ms default per-test
-  // timeout. Under a loaded lane the two cold child spawns can consume the
-  // remaining ~2 s, and bun then fails the case at ~5002 ms with a bare
-  // "timed out", discarding the child's stdout/stderr. The explicit budget sits
-  // ABOVE the sum of this case's own child deadlines (15 s + 3 s = 18 s), so a
-  // genuinely hung child is reported by spawnSync — naming the leg and showing
-  // its output — before bun's timer can fire.
+  // flair#1796: give spawned legs their own deadlines and leave enough case
+  // budget for both to report a named failure before bun's per-test timer.
   const PROBE_DEADLINE_MS = 15_000;
   const NORMAL_DEADLINE_MS = 3_000;
   const CASE_BUDGET_MS = 20_000;
@@ -97,9 +90,8 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
   // pass anywhere under 20 s. Keep an alarm on the PROBE leg's measured wall
   // time alone. Bound from measured lane numbers on this 2-core host (60
   // samples each): idle min/median/max = 21/23/37 ms; under a 6x parallel
-  // whole-suite load, 39/88/270 ms. 2000 ms is ~7x the loaded max and sits
-  // below the positive control's fixed 3 s, so ordinary spawn variance is not an
-  // alarm while a genuinely-slow probe leg is.
+  // whole-suite load, 39/88/270 ms. 2000 ms is ~7x the loaded max, so
+  // ordinary spawn variance is not an alarm while a slow probe leg is.
   const PROBE_LEG_BOUND_MS = 2_000;
 
   // If the entry point is not where this file thinks it is, FAIL loudly — an
@@ -110,19 +102,19 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
 
   test(
     "FLAIR_HOOK_PROBE with a real identity → inert output, exit 0, and the key file never opened",
-    () => {
+    async () => {
       // Asserted through a SIDE EFFECT rather than a timing margin, so this
       // detects the short-circuit being removed rather than merely being slow.
       //
-      // FLAIR_KEY_PATH points at a FIFO. Anything that constructs the Flair
-      // client and starts a signed request opens that path for reading, which
-      // blocks forever because nothing will ever write to it. So:
-      //   probe mode  → never opens it → prints {} and exits 0
-      //   normal mode → opens it       → never exits
-      // The second leg is the positive control: without it, the first would pass
-      // just as happily if the hook had stopped doing anything at all.
+      // FLAIR_KEY_PATH points at a FIFO. A writer waiting to open the FIFO
+      // creates a sentinel once a reader opens it. Probe mode must leave it
+      // blocked; normal mode must release it by attempting the key read. The
+      // client now opens non-blocking and rejects non-regular files, so normal
+      // mode also exits 0 with inert output.
       const dir = mkdtempSync(join(tmpdir(), "flair-hook-probe-"));
       const fifo = join(dir, "identity.key");
+      const opened = join(dir, "key-opened");
+      let writer: ReturnType<typeof spawn> | undefined;
       try {
         const made = spawnSync("mkfifo", [fifo], { encoding: "utf-8" });
         // A missing mkfifo must FAIL, not silently skip the whole assertion.
@@ -134,6 +126,19 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
           FLAIR_URL: "http://127.0.0.1:1",
           FLAIR_KEY_PATH: fifo,
         };
+
+        writer = spawn("sh", ["-c", 'printf "ready\\n"; : > "$1" && : > "$2"', "sh", fifo, opened], {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("FIFO writer did not start")), 2_000);
+          writer!.once("error", reject);
+          writer!.once("exit", (code) => reject(new Error(`FIFO writer exited before opening the key (status ${code})`)));
+          writer!.stdout!.once("data", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
 
         const probeStart = performance.now();
         const probed = spawnSync(process.execPath, [ENTRY], {
@@ -151,6 +156,7 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
         expect(probed.signal).toBeNull();
         expect(probed.status).toBe(0);
         expect(probed.stdout).toBe(NOOP);
+        expect(existsSync(opened)).toBe(false); // probe never opened the key
         // flair#1796 (follow-up F2): the 20 s case budget absorbs load, so a
         // slow-but-not-hung probe leg would pass silently. Alarm on the PROBE
         // leg's own measured duration, named with the leg, the measured ms and
@@ -166,8 +172,30 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
           timeout: NORMAL_DEADLINE_MS,
           env: { ...env, FLAIR_HOOK_PROBE: "" },
         });
-        expect(normal.status).toBeNull(); // killed at the deadline — it did open the key
+        if (normal.signal !== null || normal.status !== 0) {
+          throw new Error(childOverranDeadline("hook entry point", "normal", NORMAL_DEADLINE_MS, normal));
+        }
+        expect(normal.stdout).toBe(NOOP);
+        // The writer runs in another process, so its sentinel is a direct
+        // signal that normal mode opened the FIFO. Give it time to finish
+        // after the hook's asynchronous open/close sequence.
+        const keyOpened = await new Promise<boolean>((resolve) => {
+          if (existsSync(opened)) return resolve(true);
+          const poll = setInterval(() => {
+            if (existsSync(opened)) {
+              clearInterval(poll);
+              clearTimeout(deadline);
+              resolve(true);
+            }
+          }, 10);
+          const deadline = setTimeout(() => {
+            clearInterval(poll);
+            resolve(false);
+          }, 2_000);
+        });
+        expect(keyOpened, "normal mode must open FLAIR_KEY_PATH").toBe(true);
       } finally {
+        writer?.kill();
         rmSync(dir, { recursive: true, force: true });
       }
     },

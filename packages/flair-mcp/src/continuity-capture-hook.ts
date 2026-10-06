@@ -36,6 +36,7 @@
  */
 
 import { isProbeMode, readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
+import { isDirectRun } from "./is-direct-run.js";
 import { memoryPutPath } from "./record-id-path.js";
 import {
   buildJournalRow,
@@ -47,6 +48,8 @@ import {
   type CaptureHookInput,
   type ContinuityClient,
 } from "./continuity.js";
+
+export { isDirectRun };
 
 /** Read all of stdin. Resolves on EOF, with a short fallback for manual runs
  *  where nothing is piped (so it never hangs). */
@@ -213,12 +216,10 @@ async function main(): Promise<void> {
   }
 }
 
+// Only run when executed as a script, not when imported by tests.
 const importMeta = import.meta as ImportMeta & { main?: boolean };
 const isMain =
-  importMeta.main === true ||
-  (typeof process !== "undefined" &&
-    process.argv[1] != null &&
-    import.meta.url === `file://${process.argv[1]}`);
+  typeof process !== "undefined" && isDirectRun(import.meta.url, process.argv[1], importMeta.main);
 
 if (isMain) {
   void main().catch(() => {});

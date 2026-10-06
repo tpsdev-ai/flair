@@ -1,6 +1,5 @@
 // ─── flair#2263 — a skill PUT whose id is only in the URL ───────────────────
 //
-// Skill creates whose bodies omit `id` use the URL id. Updates retain the lineage and follow the existing successor or reserved-id rules; the locked stale check compares the addressed row.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
@@ -38,8 +37,8 @@ function ed25519(who: TestAgent, method: string, path: string): string {
   return `TPS-Ed25519 ${who.id}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}`;
 }
 
-async function call(auth: TestAgent, method: string, path: string, body?: unknown) {
-  const headers: Record<string, string> = { "Content-Type": "application/json", Authorization: ed25519(auth, method, path) };
+async function call(auth: TestAgent | "basic", method: string, path: string, body?: unknown) {
+  const headers: Record<string, string> = { "Content-Type": "application/json", Authorization: auth === "basic" ? basicAuth() : ed25519(auth, method, path) };
   const res = await fetch(harper.httpURL + path, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -105,8 +104,6 @@ describe("flair#2263 — the URL-bound id is the skill write target", () => {
     expect(versions.map((v) => v.kind)).toEqual(["create"]);
     expect(versions[0].memoryId).toBe(id);
 
-    // The identical retry addresses the skill now stored at X. It supersedes
-    // that skill (one subject) rather than creating a second, independent one.
     const retry = await call(A, "PUT", memPath(id), body);
     expect(retry.status, retry.text.slice(0, 300)).toBeLessThan(300);
     const successorId = JSON.parse(retry.text).id;
@@ -115,6 +112,32 @@ describe("flair#2263 — the URL-bound id is the skill write target", () => {
     expect(successor.supersedes).toBe(id);
     expect(successor.skillSubjectId).toBe(id);
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create", "update"]);
+  }, 180_000);
+
+  test("an operator feed write whose array id stringifies to the seed id is refused", async () => {
+    const id = "skill:using-flair";
+    const before = await memoryRow(id);
+    const versions = await versionsOf(id);
+    const result = await call("basic", "POST", "/FeedMemories", {
+      id: [id], agentId: harper.admin.username, content: "fed", trigger: "t", tags: ["skill"], durability: "persistent",
+    });
+    expect(result.status, result.text.slice(0, 300)).toBe(403);
+    expect(JSON.parse(result.text).error).toStartWith("seed_id_reserved");
+    expect(await memoryRow(id)).toEqual(before);
+    expect(await versionsOf(id)).toEqual(versions);
+  }, 180_000);
+
+  test("the feed refuses a body id that differs from its URL-bound id", async () => {
+    const id = nextId("feed-url");
+    const bodyId = nextId("feed-body");
+    const result = await call(A, "POST", `/FeedMemories/${encodeURIComponent(id)}`, {
+      id: bodyId, agentId: A.id, content: "feed skill", trigger: "t", tags: ["skill"], durability: "persistent",
+    });
+    expect(result.status, result.text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(result.text).error).toBe("id_target_mismatch");
+    expect(await memoryRow(id)).toBeNull();
+    expect(await memoryRow(bodyId)).toBeNull();
+    expect(await versionsOf(bodyId)).toEqual([]);
   }, 180_000);
 
   test("PUT /Memory/<X> with a null body id creates the skill at X", async () => {
@@ -144,8 +167,6 @@ describe("flair#2263 — the URL-bound id is the skill write target", () => {
     expect(versions.map((v) => v.kind)).toEqual(["create"]);
     expect(versions[0].memoryId).toBe(id);
 
-    // The identical retry addresses the skill now stored at X and supersedes
-    // it (one subject) rather than creating a second, independent skill.
     const retry = await call(A, "POST", memPath(id), body);
     expect(retry.status, retry.text.slice(0, 300)).toBeLessThan(300);
     const successorId = JSON.parse(retry.text).id;

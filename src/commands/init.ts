@@ -29,18 +29,16 @@ import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
 import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 
 import { join, resolve } from "node:path";
-import { createConnection } from "node:net";
+import { localPortState } from "../lib/init-tcp-probe.js";
+import { trackInitChild } from "../lib/init-spawn-attribution.js";
 import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
 import {
-  commandArg,
   foreignOccupiedListenerDetail,
-  describeOccupiedListener,
-  staleHarperBeforeAuthNotice,
   type OccupiedHarperListener,
   type OperationsPortAttribution,
 } from "../lib/init-occupied-listener.js";
@@ -91,21 +89,29 @@ export type InitCli = {
   STARTUP_TIMEOUT_MS: any;
 };
 
-async function localPortAcceptsTcp(port: number): Promise<boolean> {
-  return new Promise((resolveConnected) => {
-    const socket = createConnection({ host: "127.0.0.1", port });
-    const finish = (connected: boolean): void => {
-      socket.destroy();
-      resolveConnected(connected);
-    };
-    socket.setTimeout(1000);
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
-    socket.once("timeout", () => finish(false));
-  });
-}
 
 let cli: InitCli;
+
+function ownedInitPidfilePid(dataDir: string): number | null {
+  let fd: number | undefined;
+  try {
+    const uid = process.getuid?.();
+    if (uid === undefined) return null;
+    const dir = lstatSync(dataDir);
+    if (!dir.isDirectory() || dir.uid !== uid || (dir.mode & 0o022)) return null;
+    fd = openSync(join(dataDir, "hdb.pid"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const file = fstatSync(fd);
+    if (!file.isFile() || file.nlink !== 1 || file.size > 32 || file.uid !== uid || (file.mode & 0o022)) return null;
+    const value = readFileSync(fd, "utf8").trim();
+    if (!/^[1-9]\d*$/.test(value)) return null;
+    const pid = Number(value);
+    return Number.isSafeInteger(pid) ? pid : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 
 /** Bind the cli-locals this module depends on. */
 export function bindCli(fns: InitCli): void {
@@ -657,32 +663,63 @@ program
       process.exit(1);
     }
     let alreadyRunning = false;
+    let ownChild: ReturnType<typeof trackInitChild> | undefined;
+    const freeBeforeSpawn = new Set<number>();
+    const refuseUnattributedListener = (listener: OccupiedHarperListener): void => {
+      const installedAttributed = harperConfigPath(dataDir) !== null &&
+        listener.pids.length === 1 &&
+        ownedInitPidfilePid(dataDir) === listener.pids[0] &&
+        listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
+        cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0];
+      const attributed = ownChild ? ownChild.attributes(listener, dataDir, freeBeforeSpawn) : installedAttributed;
+      if (attributed) return;
+      const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
+      console.error(`Refusing init: port ${listener.port}${pid}: attribution to this data directory was not confirmed.`);
+      console.error(foreignOccupiedListenerDetail(listener));
+      process.exit(1);
+    };
+    const refuseFreePort = (listener: OccupiedHarperListener): void => {
+      const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
+      console.error(`Refusing init: port ${listener.port}${pid}: TCP readiness check failed.`);
+      console.error("Remedy: start the instance, then rerun init.");
+      process.exit(1);
+    };
+    const attributeBeforeCredential = async (port: number, host: string): Promise<void> => {
+      const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+      let listener = readOccupiedListener(port);
+      let state = await localPortState(port, host);
+      while (ownChild && state === "free" && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        listener = readOccupiedListener(port);
+        state = await localPortState(port, host);
+      }
+      if (state === "free") refuseFreePort(listener);
+      if (state === "listening") listener = readOccupiedListener(port);
+      if (state === "unknown") refuseUnknownListener(listener);
+      refuseUnattributedListener(listener);
+    };
+    const refuseUnknownListener = (listener: OccupiedHarperListener): void => {
+      const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
+      console.error(`Refusing init: port ${listener.port}${pid}: TCP probe was inconclusive.`);
+      console.error("Remedy: check TCP connectivity, then rerun init.");
+      process.exit(1);
+    };
     if (opts.skipStart && !agentId) {
-      let healthStatus: number | undefined;
       try {
         const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
         if (res.status > 0) {
           alreadyRunning = true;
-          healthStatus = res.status;
         }
       } catch {}
-      const refuseUnattributedListener = (listener: OccupiedHarperListener, answered: string): void => {
-        const attributed = harperConfigPath(dataDir) !== null &&
-          listener.pids.length === 1 &&
-          listener.dataDirs.every(dir => canonicalLexicalPath(dir) === canonicalLexicalPath(dataDir)) &&
-          (listener.dataDirs.length === 1 ||
-            cli.resolveInstanceServingPid(dataDir, listener.port, { findListeningPids: () => [] }) === listener.pids[0]);
-        if (attributed) return;
-        console.error(`Refusing init: port ${listener.port} ${answered}; listener ${describeOccupiedListener(listener)} is not attributed to an installed Harper in ${dataDir}.`);
-        console.error(foreignOccupiedListenerDetail(listener, dataDir));
-        console.error("Remedy: free that port or choose --port and --ops-port for this data directory, then rerun init.");
-        process.exit(1);
-      };
       const httpListener = readOccupiedListener(httpPort);
-      alreadyRunning ||= httpListener.pids.length > 0 || await localPortAcceptsTcp(httpPort);
+      const httpState = await localPortState(httpPort, httpBind.host);
+      alreadyRunning ||= httpListener.pids.length > 0 || httpState === "listening";
       if (alreadyRunning) {
-        refuseUnattributedListener(httpListener, healthStatus === undefined ? "has a listener without a /health response" : `answered /health with HTTP ${healthStatus}`);
+        if (httpState === "free") refuseFreePort(httpListener);
+        refuseUnattributedListener(httpListener);
         console.log(`Harper already running on port ${httpPort} — skipping start`);
+      } else if (httpState === "unknown") {
+        refuseUnknownListener(httpListener);
       }
       const opsListener = readOccupiedListener(opsPort);
       let opsAnswer: number | undefined;
@@ -690,14 +727,42 @@ program
         const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
         if (res.status > 0) opsAnswer = res.status;
       } catch {}
-      if (opsAnswer !== undefined || opsListener.pids.length > 0 || await localPortAcceptsTcp(opsPort)) {
-        refuseUnattributedListener(opsListener, opsAnswer === undefined ? "has a listener" : `answered with HTTP ${opsAnswer}`);
+      const opsState = await localPortState(opsPort, opsBindHost);
+      if (opsAnswer !== undefined || opsListener.pids.length > 0 || opsState === "listening") {
+        if (opsState === "free") refuseFreePort(opsListener);
+        refuseUnattributedListener(opsListener);
+      } else if (opsState === "unknown") {
+        refuseUnknownListener(opsListener);
       }
     } else if (!opts.skipStart) {
       try {
         const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
-        if (res.status > 0) alreadyRunning = true;
-      } catch { /* not running */ }
+        if (res.status > 0) {
+          alreadyRunning = true;
+        }
+      } catch {}
+      const httpListener = readOccupiedListener(httpPort);
+      const httpState = await localPortState(httpPort, httpBind.host);
+      if (alreadyRunning || httpListener.pids.length > 0 || httpState === "listening") {
+        if (httpState === "free") refuseFreePort(httpListener);
+        refuseUnattributedListener(httpListener);
+        alreadyRunning = true;
+      } else if (httpState === "unknown") {
+        refuseUnknownListener(httpListener);
+      }
+      const opsListener = readOccupiedListener(opsPort);
+      let opsAnswer: number | undefined;
+      try {
+        const res = await fetch(`http://127.0.0.1:${opsPort}/`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) opsAnswer = res.status;
+      } catch {}
+      const opsState = await localPortState(opsPort, opsBindHost);
+      if (opsAnswer !== undefined || opsListener.pids.length > 0 || opsState === "listening") {
+        if (opsState === "free") refuseFreePort(opsListener);
+        refuseUnattributedListener(opsListener);
+      } else if (opsState === "unknown") {
+        refuseUnknownListener(opsListener);
+      }
     }
     const explicitCredential = !!(
       opts.adminPassFile || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || opts.adminPass
@@ -726,12 +791,6 @@ program
         httpPort,
         adminPassPath,
       });
-      // The port is already taken and this data dir has no admin user.
-      // The unauthenticated /health probe already ran. This is one read of
-      // that port's listener — not the before-and-after 401 attribution.
-      // Name it and exit before any Authorization header is sent. Do not
-      // signal it. `flair stop` cannot be promised to act on this listener
-      // (flair#1749).
       if (reason === "foreign-instance") {
         const listener = readOccupiedListener(httpPort);
         const head = initAdminPassRefusalMessage(reason, {
@@ -739,8 +798,9 @@ program
           httpPort,
           adminPassPath,
           offerFlairStop: false,
+          pid: listener.pids.length === 1 ? listener.pids[0] : undefined,
         });
-        console.error(`${head}\n${foreignOccupiedListenerDetail(listener, dataDir)}`);
+        console.error(`${head}\n${foreignOccupiedListenerDetail(listener)}`);
       } else {
         console.error(message);
       }
@@ -853,17 +913,9 @@ program
     readyOpsSocketPosture(dataDir);
 
     let skippedOwnStart = false;
-    if (!opts.skipStart) {
-      if (alreadyRunning) {
-        console.log(`Harper already running on port ${httpPort} — skipping start`);
-        const httpListener = readOccupiedListener(httpPort);
-        const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
-        if (notice) {
-          console.error(notice);
-          process.exit(1);
-        }
-        skippedOwnStart = true;
-      }
+    if (!opts.skipStart && alreadyRunning) {
+      console.log(`Harper already running on port ${httpPort} — skipping start`);
+      skippedOwnStart = true;
     }
 
     if (!alreadyRunning) {
@@ -985,7 +1037,20 @@ program
         // count are set via HARPER_SET_CONFIG — no need for dev mode.
         if (willStart) {
           console.log(`Starting Harper on port ${httpPort}...`);
+          for (const [port, host] of [[httpPort, httpBind.host], [opsPort, opsBindHost]] as const) {
+            const listener = readOccupiedListener(port);
+            const state = await localPortState(port, host);
+            if (state === "unknown") refuseUnknownListener(listener);
+            if (listener.pids.length > 0 || state !== "free") {
+              const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
+              console.error(`Refusing init: port ${port}${pid}: pre-start port check failed.`);
+              console.error(foreignOccupiedListenerDetail(listener));
+              process.exit(1);
+            }
+            freeBeforeSpawn.add(port);
+          }
           const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
+          ownChild = trackInitChild(proc);
           proc.unref();
           // flair#1454: write the identity sidecar immediately after spawn so
           // `flair stop` and `flair status` can classify this daemon's state
@@ -997,7 +1062,8 @@ program
 
     if (!opts.skipStart) {
       console.log("Waiting for Harper health check...");
-      await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+      await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS,
+        () => attributeBeforeCredential(httpPort, httpBind.host));
       console.log("Harper is healthy ✓");
 
       // flair#763: the socket now exists — apply its file mode (+ chgrp for the
@@ -1205,6 +1271,7 @@ program
         }
         return;
       }
+      await attributeBeforeCredential(httpPort, httpBind.host);
       await seedUsingFlairSkillViaRest(`http://127.0.0.1:${httpPort}`, adminUser, adminPass);
       clearSkillSeedPending(dataDir);
     };
@@ -1235,15 +1302,9 @@ program
 
       const httpUrl = `http://127.0.0.1:${httpPort}`;
       if (!opts.skipStart) {
-        // Seed agent via operations API. Unlike the pre-auth observation,
-        // which is one read, a 401 names a pid only when the read before the
-        // insert and the read after the rejection are the same sole PID. The
-        // HTTP port's holder is not an input and is not assumed to have caused
-        // the rejection. Several holders, or a holder that changed during the
-        // request, stay unattributed. Init started Harper itself → no listener,
-        // and that 401 keeps the credential hint.
         console.log(`Seeding agent '${agentId}' via operations API...`);
         const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
+        await attributeBeforeCredential(opsPort, opsBindHost);
         await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
         console.log(`Agent '${agentId}' registered ✓`);
 

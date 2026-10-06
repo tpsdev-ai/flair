@@ -20,6 +20,8 @@ const AGENT = "agent-1";
 
 let memoryStore: Map<string, any>;
 let pointerStore: Map<string, any>;
+// This mock applies writes immediately; it does not model transaction rollback.
+let deletionStore: Map<string, any>;
 let failNextMemoryRead: boolean;
 
 function fromStore(): AsyncIterable<any> {
@@ -42,7 +44,7 @@ const databasesMock = {
       search: () => fromStore(),
       delete: async (id: string) => {
         memoryStore.delete(id);
-        return { ok: true };
+        return true;
       },
       update: async (id: string, data: any) => {
         memoryStore.set(id, { ...memoryStore.get(id), ...data });
@@ -54,6 +56,9 @@ const databasesMock = {
       get: async () => null,
       put: async (row: any) => row,
       delete: async (id: string) => { pointerStore.delete(id); return { ok: true }; },
+    },
+    MemoryDeletionHistory: {
+      put: async (row: any) => { deletionStore.set(row.id, { ...row }); return { ...row }; },
     },
     Agent: { get: async () => null, search: async () => [] },
   },
@@ -84,6 +89,7 @@ const adminCtx = () => ({ tpsAgent: "admin", tpsAgentIsAdmin: true });
 beforeEach(() => {
   memoryStore = new Map();
   pointerStore = new Map();
+  deletionStore = new Map();
   failNextMemoryRead = false;
 });
 

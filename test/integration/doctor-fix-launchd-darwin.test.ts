@@ -56,7 +56,7 @@ import {
   parseLaunchctlList,
   pickInstancePid,
 } from "../../src/lib/launchd-management.ts";
-import { readProcessStartTimeMs } from "../../src/lib/process-start-time.ts";
+import { readProcessStartSecondMs, readProcessStartTimeMs } from "../../src/lib/process-start-time.ts";
 import { verifyIdentity } from "../../src/lib/daemon-liveness.ts";
 import {
   buildDirectSpawnEnv,
@@ -79,44 +79,12 @@ const ADMIN_PASS = "test123";
 const SEED_IDS = ["b3b-mem-1", "b3b-mem-2", "b3b-mem-3"] as const;
 const PROMPT_RE =
   /Please enter a password|readline was closed|ERR_USE_AFTER_CLOSE|Please enter a destination for Harper|\[hidden\]/i;
-// flair#1807: the child's OWN deadline + PER-CASE budgets, recounted from each
-// case body against harper-lifecycle's REAL bounds (this host cannot run the
-// file — it is darwin-gated). Deadline = max observed ~30.6 s + margin, rounded
-// to 60 s (main's manual kill was 180 s; main's case budget was 240 s).
-//
-// ROUND 3: one uniform 540 s constant did not match the cases, and a hang in a
-// LATE case hit the JOB timeout first (an anonymous cancellation). Each case's
-// budget is now its own worst-case SUM + margin. Per-wait bounds used here:
-//   startHarper          = install 20 s + awaitStartup 45 s + the two
-//                          waitForHealth calls IN PARALLEL 60 s = 125 s
-//   stopHarper           = killProcess (SIGKILL 3 s) + waitForLocksFree 5 s = 8 s
-//   adminOp (ops fetch)  = 30 s    waitForHttp = its argument
-//   waitDead             = its argument    runDoctorFix/runInit = 60 s deadline
-//   launchctl list = 5 s   launchctl unload + bootout = 10 s + 10 s = 20 s
-// Helper sums:
-//   populateDataDir     = startHarper 125 + 2 x adminOp 60 + stopHarper 8 = 193 s
-//   doctorFixToManaged  = runDoctorFix 60 + waitForHttp 60 + launchctl 5 = 125 s
-//   newSandbox          = populateDataDir 193 + doctorFixToManaged 125 = 318 s
-//   snapshotBeforeFix   = waitForHttp 30 + adminOp 30 = 60 s
-//   stopManagedHarper   = unload 20 + waitDead 20 + (list 5 + lsof 5) = 50 s
-//   directSpawnDetached = waitForHttp 60 + (list 5 + lsof 5) = 70 s
-//   assertNoRebootstrap = waitForHttp 30 + adminOp 30 = 60 s
-// Cases (sum -> budget):
-//   corrupt-plist   newSandbox 318 + snapshot 60 + stop 50 + doctorFix 125
-//                   + assertManaged 20 + noRebootstrap 60 = 633 -> 660 s
-//   adopt-detached  newSandbox 318 + snapshot 60 + 10 + stop 50 + directSpawn 70
-//                   + 20 + doctorFix 125 + assertManaged 20 + noRebootstrap 60
-//                   + 2 s = 735 -> 760 s
-//   adopt-no-pass   newSandbox 318 + snapshot 60 + 10 + stop 50 + directSpawn 70
-//                   + doctorFix 125 + assertManaged 20 + noRebootstrap 60 = 713 -> 740 s
-//   refuse-no-pass  newSandbox 318 + stop 50 + runDoctorFix 60 = 428 -> 450 s
-//   init-unchanged  newSandbox 318 + runInit 60 + assertManaged 20 = 398 -> 420 s
-const CHILD_DEADLINE_MS = 60_000;
-const CORRUPT_PLIST_CASE_BUDGET_MS = 660_000;
-const ADOPT_DETACHED_CASE_BUDGET_MS = 760_000;
-const ADOPT_NO_PASS_CASE_BUDGET_MS = 740_000;
-const REFUSE_NO_PASS_CASE_BUDGET_MS = 450_000;
-const INIT_UNCHANGED_CASE_BUDGET_MS = 420_000;
+const CHILD_DEADLINE_MS = 90_000;
+const CORRUPT_PLIST_CASE_BUDGET_MS = 750_000;
+const ADOPT_DETACHED_CASE_BUDGET_MS = 850_000;
+const ADOPT_NO_PASS_CASE_BUDGET_MS = 830_000;
+const REFUSE_NO_PASS_CASE_BUDGET_MS = 540_000;
+const INIT_UNCHANGED_CASE_BUDGET_MS = 510_000;
 
 /** Jobs this file loaded. Unloaded on afterEach and on process exit. */
 const LOADED_JOBS = new Set<{ label: string; plistPath: string }>();
@@ -147,7 +115,7 @@ function requireCliBuild(): void {
 }
 
 function launchctlList(label: string): { code: number | null; stdout: string } {
-  const res = spawnSync("launchctl", ["list", label], { encoding: "utf-8", timeout: 5_000 });
+  const res = spawnSync("launchctl", ["list", label], { encoding: "utf-8", timeout: 5_000, killSignal: "SIGKILL" });
   return { code: res.status, stdout: res.stdout ?? "" };
 }
 
@@ -427,7 +395,7 @@ function boundDiag(text: string): string {
 }
 
 function runDiag(cmd: string, args: string[]): string {
-  const res = spawnSync(cmd, args, { encoding: "utf-8", timeout: 5_000 });
+  const res = spawnSync(cmd, args, { encoding: "utf-8", timeout: 5_000, killSignal: "SIGKILL" });
   const how = res.error ? `error: ${res.error.message}` : res.signal ? `signal ${res.signal}` : `exit ${res.status}`;
   return `$ ${cmd} ${args.join(" ")} -> ${how}\n${res.stdout ?? ""}${res.stderr ? `[stderr]\n${res.stderr}` : ""}`;
 }
@@ -473,7 +441,7 @@ function dumpDiagnostics(sb: Sandbox, why: string): void {
     section(`launchctl print gui/${uid}/${sb.label}`, runDiag("launchctl", ["print", `gui/${uid}/${sb.label}`]));
     // The preflight's two domain reads: the domain probe's exit code, and the
     // head of print-disabled (its "disabled services" block is what it parses).
-    const domain = spawnSync("launchctl", ["print", `gui/${uid}`], { encoding: "utf-8", timeout: 5_000 });
+    const domain = spawnSync("launchctl", ["print", `gui/${uid}`], { encoding: "utf-8", timeout: 5_000, killSignal: "SIGKILL" });
     out.push(`launchctl print gui/${uid} -> exit ${domain.status}${domain.signal ? ` signal ${domain.signal}` : ""}`);
     section(`launchctl print-disabled gui/${uid} (head)`, runDiag("launchctl", ["print-disabled", `gui/${uid}`]).slice(0, 1_500));
   }
@@ -540,10 +508,10 @@ function diagnosed(body: () => Promise<void>): () => Promise<void> {
 }
 
 function unloadJob(label: string, plistPath: string): void {
-  spawnSync("launchctl", ["unload", plistPath], { encoding: "utf-8", timeout: 10_000 });
+  spawnSync("launchctl", ["unload", plistPath], { encoding: "utf-8", timeout: 10_000, killSignal: "SIGKILL" });
   const uid = process.getuid?.();
   if (uid !== undefined) {
-    spawnSync("launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf-8", timeout: 10_000 });
+    spawnSync("launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf-8", timeout: 10_000, killSignal: "SIGKILL" });
   }
 }
 
@@ -613,8 +581,8 @@ async function populateDataDir(sb: Sandbox): Promise<void> {
 }
 
 async function doctorFixToManaged(sb: Sandbox): Promise<{ stdout: string; stderr: string }> {
-  const result = await runDoctorFix(sb.tmpHome, sb.httpPort);
   trackJob(sb.label, sb.plistPath);
+  const result = await runDoctorFix(sb.tmpHome, sb.httpPort);
   await waitForHttp(sb.httpURL, 60_000);
   const after = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
   if (after.state !== "managed") {
@@ -675,61 +643,54 @@ function refreshPortsFromConfig(sb: Sandbox): void {
 }
 
 async function teardown(sb: Sandbox): Promise<void> {
+  const managedPid = parseLaunchctlList(launchctlList(sb.label).stdout).pid;
+  const managedStart = managedPid === null ? null : readProcessStartSecondMs(managedPid);
+  const restored = verifyIdentity({
+    pidfilePid: readPidFile(sb.dataDir),
+    sidecar: readSidecar(sb.dataDir),
+    readStartTime: readProcessStartTimeMs,
+  });
+  const restoredPid = restored.kind === "verified" ? restored.pid : null;
+  const restoredStart = restoredPid === null ? null : readProcessStartSecondMs(restoredPid);
   unloadJob(sb.label, sb.plistPath);
   LOADED_JOBS.forEach((j) => {
     if (j.label === sb.label) LOADED_JOBS.delete(j);
   });
-  if (sb.direct && sb.direct.pid && isAlive(sb.direct.pid)) {
+  const stopOwned = async (pid: number, stillOwned: () => boolean): Promise<void> => {
+    if (!stillOwned() || !isAlive(pid)) return;
+    try { process.kill(pid, "SIGTERM"); } catch { return; }
     try {
-      process.kill(sb.direct.pid, "SIGTERM");
+      await waitDead(pid, 2_000);
     } catch {
-      /* already gone */
+      if (!stillOwned()) return;
+      try { process.kill(pid, "SIGKILL"); } catch { return; }
+      await waitDead(pid, 2_000);
     }
-    try {
-      await waitDead(sb.direct.pid, 8_000);
-    } catch {
-      try {
-        process.kill(sb.direct.pid, "SIGKILL");
-      } catch {
-        /* gone */
-      }
-    }
-  }
-  if (sb.populate) {
-    try {
-      await stopHarper(sb.populate, { keepInstallDir: true });
-    } catch {
-      /* best effort */
-    }
-  }
-  // launchd is already unloaded above, so KeepAlive cannot resurrect this pidfile kill.
-  const pid = readPidFile(sb.dataDir);
-  if (pid && isAlive(pid)) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      /* gone */
-    }
-    try {
-      await waitDead(pid, 8_000);
-    } catch {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        /* gone */
-      }
-    }
-  }
+  };
+  const results = await Promise.allSettled([
+    sb.direct?.pid
+      ? stopOwned(sb.direct.pid, () => sb.direct!.exitCode === null && sb.direct!.signalCode === null)
+      : Promise.resolve(),
+    managedPid !== null && managedStart !== null
+      ? stopOwned(managedPid, () => readProcessStartSecondMs(managedPid) === managedStart)
+      : Promise.resolve(),
+    restoredPid !== null && restoredStart !== null && restoredPid !== managedPid && restoredPid !== sb.direct?.pid
+      ? stopOwned(restoredPid, () => readProcessStartSecondMs(restoredPid) === restoredStart)
+      : Promise.resolve(),
+    sb.populate ? stopHarper(sb.populate, { keepInstallDir: true }) : Promise.resolve(),
+  ]);
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map((r) => r.reason), `teardown failed for ${sb.tmpHome}`);
   rmSync(sb.tmpHome, { recursive: true, force: true });
 }
 
 afterEach(async () => {
-  while (live.length) {
-    const sb = live.pop();
-    if (sb) await teardown(sb);
-  }
+  const cases = live.splice(0);
+  const results = await Promise.allSettled(cases.map(teardown));
   lastCliRun = undefined;
-});
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map((r) => r.reason), "fixture teardown failed");
+}, 60_000);
 
 function assertNoPrompt(log: string, cliOut: string): void {
   expect(log, `StandardErrorPath contained a readline/prompt:\n${log}`).not.toMatch(PROMPT_RE);
@@ -1046,4 +1007,29 @@ test.skipIf(!isDarwin)(
     expect(managed.state, managed.detail).toBe("managed");
   }),
   INIT_UNCHANGED_CASE_BUDGET_MS,
+);
+
+test.skipIf(!isDarwin)(
+  "built flair stop verifies the managed Harper exited and removes its sidecar",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    const pid = instancePid(sb.dataDir, sb.httpPort);
+    expect(pid).not.toBeNull();
+    if (pid === null) throw new Error("managed Harper PID is unreadable");
+    expect(isAlive(pid)).toBe(true);
+    writeDirectSidecar(sb, pid);
+    const result = spawnSync(nodeBin(), [CLI_JS, "stop", "--port", String(sb.httpPort)], {
+      cwd: REPO_ROOT,
+      env: doctorEnv(sb.tmpHome),
+      encoding: "utf8",
+      timeout: 90_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("Flair stopped (launchd service unloaded)");
+    expect(isAlive(pid)).toBe(false);
+    expect(existsSync(join(sb.dataDir, "flair-daemon.json"))).toBe(false);
+  }),
+  750_000,
 );

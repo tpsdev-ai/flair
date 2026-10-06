@@ -81,6 +81,8 @@ Flair uses Ed25519 signatures. The client auto-discovers your key from:
 3. `~/.flair/keys/{agentId}.key`
 4. `~/.tps/secrets/flair/{agentId}-priv.key`
 
+`loadPrivateKey(path)` remains synchronous; `loadPrivateKeyBounded(path)` returns a Promise and caps the file read for callers with a deadline.
+
 Generate a key with the Flair CLI:
 
 ```bash

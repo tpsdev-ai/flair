@@ -95,13 +95,32 @@ export async function refuseReservedSeedWrite(table: string, ids: unknown[], con
 }
 
 /**
- * The feed ingest's reserved-id decision (flair#2263): it refuses a reserved
- * seed id outright — the operator source included — because the seed command
- * (`flair init`) writes that row through `PUT /Memory/<id>`. The refusal names
- * the seed command; `soulWriteSource` never exempts it.
+ * The LINEAGE form of the reservation (flair#2139 S2). A skill update SUPERSEDES
+ * into a fresh physical Memory row that carries the stable logical
+ * `skillSubjectId` forward, so reserving the seed's physical id alone would let
+ * another caller enter the seed's lineage through a successor row whose own id
+ * is not the reserved one. This denies a write whose skill SUBJECT is reserved
+ * unless the caller has the operator source, exactly as the physical-id check
+ * does. `subjectIds` are the resolved logical subject ids the write targets.
  */
+export function reservedSeedSubjectDenial(
+  table: string,
+  subjectIds: unknown[],
+  context: unknown,
+  auth: AgentAuthVerdict,
+): Response | null {
+  const reserved = subjectIds.find((id) => isReservedSeedId(table, id));
+  if (reserved === undefined) return null;
+  if (auth.kind === "anonymous") return UNAUTH();
+  if (soulWriteSource(context, auth)) return null;
+  return FORBIDDEN(
+    `seed_subject_reserved: the ${table} ${JSON.stringify(String(reserved))} lineage requires the operator source ` +
+      "(an authenticated Basic administrator or deliberate internal call)",
+  );
+}
+
 export function reservedSeedFeedWriteDenial(table: string, ids: unknown[]): Response | null {
-  const reserved = ids.find((id) => isReservedSeedId(table, id));
+  const reserved = ids.find((id) => id != null && isReservedSeedId(table, String(id)));
   if (reserved === undefined) return null;
   return FORBIDDEN(
     `seed_id_reserved: ${table} ${JSON.stringify(String(reserved))} is written by the flair init seed; ` +

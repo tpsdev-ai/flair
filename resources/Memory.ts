@@ -22,11 +22,11 @@ import {
   projectRowsThroughPointers,
 } from "./memory-host-source.js";
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
-import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
+import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
-import { buildSkillSuccessorRow, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
@@ -54,10 +54,11 @@ import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
+import { recordMemoryDeletion } from "./memory-deletion-history.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
-import { refuseReservedSeedWrite, reservedSeedWriteDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
+import { refuseReservedSeedWrite, reservedSeedWriteDenial, reservedSeedSubjectDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -586,6 +587,25 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
   return response;
 }
 
+const REINDEX_BOOKKEEPING_FIELDS = new Set<string>([
+  "embedding", "embeddingModel", "contentHash", "retrievalCount", "lastRetrieved", "usageCount",
+]);
+const REINDEX_PROTECTED_FIELDS = DECLARED_MEMORY_ATTRIBUTES.filter((field) => !REINDEX_BOOKKEEPING_FIELDS.has(field));
+
+function reindexDrift(content: any, existing: Record<string, any>): string | null {
+  const isSkill = rowIsSkill(existing);
+  if (!isSkill && rowIsSkill(content)) return "tags";
+  for (const field of REINDEX_PROTECTED_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(content, field)) continue;
+    const submitted = content[field];
+    const stored = existing[field];
+    if (submitted === stored) continue;
+    if ((field === "metadata" || Array.isArray(submitted)) && JSON.stringify(submitted ?? null) === JSON.stringify(stored ?? null)) continue;
+    return field;
+  }
+  return null;
+}
+
 /**
  * Read-modify-write close of a superseded record, with the SAME transaction
  * detachment discipline as findConservativeDedupMatch (each discrete Harper
@@ -785,6 +805,11 @@ async function writeSkillCreateOrUpdate(
       ? String(content.id ?? `${content.agentId}-${randomUUID()}`)
       : `${content.agentId}-${randomUUID()}`;
   const subjectId = deriveSkillSubjectId({ newPhysicalId: successorId, storedHead: storedRow, predecessor: explicitPredecessor });
+  // flair#2139 S2 — the reservation covers the whole logical lineage: a write
+  // whose subject is the seed's requires the operator source, not only one that
+  // names the seed's physical id.
+  const seedLineageDenial = reservedSeedSubjectDenial("Memory", [subjectId], ctx, auth);
+  if (seedLineageDenial) return seedLineageDenial;
   const addressedId = storedRow ? String(storedRow.id) : explicitPredecessor ? String(explicitPredecessor.id) : null;
   const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
   let unchangedHead: Record<string, any> | null = null;
@@ -862,6 +887,8 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
   let closedId = "";
   const now = new Date().toISOString();
   const subjectId = String(record.skillSubjectId ?? record.id);
+  const seedLineageDenial = reservedSeedSubjectDenial("Memory", [subjectId], ctx, auth);
+  if (seedLineageDenial) return seedLineageDenial;
   const outcome = await runSkillVersionWrite({
     ctx,
     subjectId,
@@ -954,6 +981,9 @@ export class Memory extends (databases as any).flair.Memory {
       readTarget = targetId != null ? { id: targetId } : {};
     }
     const result = await memoryByIdReadGate.call(this, readTarget, (t: any) => super.get(t));
+    if (nonAdminAgent && result && typeof result === "object" && !(result instanceof Response)) {
+      if (!(await closedSkillPayloadReadable(result as any, auth.agentId))) return NOT_FOUND();
+    }
     // flair#1940 A3 (by-ID surface): the pointer is projected for THIS reader
     // BEFORE the trust block is attached. Admin/internal stay unfiltered (they
     // read the unredacted row, like every other field); a non-admin agent is
@@ -1054,6 +1084,9 @@ export class Memory extends (databases as any).flair.Memory {
         rows = [];
         const projected = await projectRowsThroughPointers(batch, readerAgentId);
         for (const row of projected) {
+          // flair#2139 S2 — close-payload bypass (see get()): filter a retained
+          // closed skill payload the reader may not read. Open rows pass.
+          if (!(await closedSkillPayloadReadable(row, readerAgentId))) continue;
           yield await applyHitStats(row, ctx);
         }
       };
@@ -1114,9 +1147,6 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
-    // flair#2263: a URL-bound POST (POST /Memory/<id>) addresses that id; when
-    // the body omits `id`, thread the URL target in before the skill body is
-    // classified, mirroring put().
     const postUrlTargetId = (this as any).getId?.();
     if (content && typeof content === "object" && content.id == null &&
       (typeof postUrlTargetId === "string" || typeof postUrlTargetId === "number")) {
@@ -1576,8 +1606,6 @@ export class Memory extends (databases as any).flair.Memory {
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
-    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
-    if (authorityDenial) return authorityDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
     // Reindex migration bypass: admin-only escape hatch used by the
@@ -1605,6 +1633,7 @@ export class Memory extends (databases as any).flair.Memory {
       // A1-iv items 1/3: strip a client-supplied server-stamped field, then
       // PRESERVE the existing row's incarnation token (reindex is a re-PUT of
       // an existing row, never a reincarnation).
+      const reindexBody = { ...content };
       stripServerStampedFields(content);
       // flair#1965 r3: resolve the stored row by the URL-BOUND target id (never a
       // body id alone); a body id that disagrees with the address, or a lookup
@@ -1624,7 +1653,22 @@ export class Memory extends (databases as any).flair.Memory {
           { status: 404, headers: { "content-type": "application/json" } },
         );
       }
+      const drift = reindexDrift(reindexBody, reindexExisting);
+      if (drift) {
+        return new Response(
+          JSON.stringify({
+            error: "reindex_would_change_row",
+            message: `the _reindex re-PUT may not change '${drift}'`,
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
       stampInstanceToken(content, reindexExisting);
+      for (const field of REINDEX_PROTECTED_FIELDS) {
+        if (!Object.prototype.hasOwnProperty.call(content, field) && reindexExisting[field] !== undefined) {
+          content[field] = reindexExisting[field];
+        }
+      }
       // Keep the EXISTING row's STORED provenance byte-for-byte. The rest of
       // the row is filtered above and may gain an absent incarnation token.
       // The body's provenance was stripped above so it cannot be forged;
@@ -1656,6 +1700,8 @@ export class Memory extends (databases as any).flair.Memory {
       return reindexed;
     }
 
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
+    if (authorityDenial) return authorityDenial;
     // Create/update ownership (same rule as post): a non-admin agent may only
     // write memories it owns, via resolveAgentAuth (gate annotation), not
     // context.user.username (the dormant-de-elevation fallback is "admin").
@@ -1685,12 +1731,6 @@ export class Memory extends (databases as any).flair.Memory {
     if (resolvedExisting.denial) return resolvedExisting.denial;
     const preExisting = resolvedExisting.row;
     const requestedPayload = { ...content };
-    // flair#2263: the URL-bound target is the write target for a skill body that
-    // omits `id`, exactly as resolveStoredRow's read above uses it. A body `id`
-    // that disagrees with the address is already refused, so a body id present
-    // here equals the target; when absent, thread the target id in so the skill
-    // create's successor and the under-lock stale-snapshot check use the id this
-    // write lands on.
     const urlTargetId = (this as any).getId?.();
     if (content && typeof content === "object" && content.id == null &&
       (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
@@ -2051,16 +2091,33 @@ export class Memory extends (databases as any).flair.Memory {
     // owned here can use the synchronous hook after the shared write returns.
     // Capture ownership before the helper changes the context's transaction.
     const requestOwnsTransaction = isJoinableTransaction(ctx);
+    const deletionActor = auth.kind === "agent" ? auth.agentId : null;
+    const deletionSourceClass: "agent" | "admin" | "internal" =
+      auth.kind === "internal" ? "internal" : auth.isAdmin ? "admin" : "agent";
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
-      const d = await (databases as any).flair.Memory.delete(id, c);
       const deletedId = typeof id === "string" ? id : record?.id;
-      if (typeof deletedId === "string" && deletedId.length > 0) {
-        const pointerDenial = await deletePointerRow(deletedId, c);
-        if (pointerDenial) return pointerDenial;
+      if (typeof deletedId !== "string" || !deletedId) return false;
+      const stored = await (databases as any).flair.Memory.get(deletedId, c);
+      if (!stored) return false;
+      if (auth.kind === "agent" && !auth.isAdmin &&
+          isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+        return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
       }
+      const d = await (databases as any).flair.Memory.delete(deletedId, c);
+      if (d !== true) throw new Error("Memory row delete was not confirmed");
+      const pointerDenial = await deletePointerRow(deletedId, c);
+      if (pointerDenial) return pointerDenial;
+      await recordMemoryDeletion({
+        memoryId: deletedId,
+        memoryInstanceToken: stored.instanceToken ?? null,
+        durability: stored.durability ?? null,
+        actor: deletionActor,
+        sourceClass: deletionSourceClass,
+      }, c);
       return d;
     });
     if (deleteResult instanceof Response) return deleteResult;
+    if (deleteResult === false) return false;
     // Use the RESOLVED deleted id (a by-record delete carries only `id`, so the
     // stored row's id is the fallback). An owned transaction has committed;
     // a request-owned write waits for the committed change feed instead.

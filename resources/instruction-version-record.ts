@@ -7,6 +7,7 @@ import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
+import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
@@ -335,6 +336,11 @@ export async function recordVersion(
           expectedVersion: expected,
         };
         record.recordHash = recordDigest(record);
+        // flair#2139 S2 — test-only per-step fault injection (see
+        // skill-write-fault.ts). Fires after the Memory-side successor/close
+        // writes rode this same transaction, so the append failure aborts them
+        // too: no successor, no close, no version.
+        if (input.subjectType === "skill") maybeThrowSkillWriteFault("append", input.agentId);
         await table.create(record, shared);
         return { ok: true, result, version: id } as RecordVersionOutcome;
       }),
