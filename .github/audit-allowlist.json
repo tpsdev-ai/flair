@@ -615,6 +615,21 @@
       "removeWhen": "harper ships a shrinkwrap resolving joi >=17.13.7"
     },
     {
+      "ghsa": "GHSA-wr44-6hxh-3jwq",
+      "package": "joi",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> joi",
+      "reason": "Prototype replacement through message codes in joi's message compilation (fixed in 17.13.8). Resolved inside harper's pinned npm-shrinkwrap (joi 17.13.4; harper 5.2.8 through 5.2.15, the latest 5.2 release, depend on joi 17.13.4 exactly; harper 5.3.0 and 5.3.1 depend on 17.13.8), which npm honours over root overrides (flair#1498/#1510). The root override (joi ^17.13.7) already resolves 17.13.8 in bun.lock, so only npm installs carry the pin. flair imports no joi. The fix is confined to joi's handling of message-code keys when it compiles or merges message configuration (node_modules/harper/node_modules/joi/lib/messages.js compile and merge). Every harper call that supplies joi message configuration passes an object literal whose codes are fixed in harper's source (for example node_modules/harper/dist/components/operationsValidation.js:105, dist/dataLayer/schema.js:72-90, dist/security/certificateVerification/configValidation.js:41-49, dist/validation/statusValidator.js:70-72, dist/validation/deleteValidator.js:48); the helpers.message calls pass a string (for example dist/validation/common_validators.js:90, dist/validation/readLogValidator.js:65), which joi compiles as a single template without iterating codes (joi lib/messages.js:16-18); and no harper validate call passes a messages option (dist/validation/validationWrapper.js:89, dist/validation/configValidator.js:396-400, dist/security/certificateVerification/configValidation.js:90-93 set only abortEarly, allowUnknown and errors.wrap). No flair or harper code builds joi message configuration from request data, so a default flair install does not reach the affected path.",
+      "added": "2026-10-06",
+      "expires": "2026-12-03",
+      "removeWhen": "flair's harper dependency moves to 5.3.0 or later (harper 5.3.0's shrinkwrap resolves joi 17.13.8), or flair stops depending on harper."
+    },
+    {
       "ghsa": "GHSA-4p3w-j4w9-5jqw",
       "package": "moment",
       "severity": "moderate",
