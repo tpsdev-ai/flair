@@ -683,16 +683,20 @@ export function register(program: Command): void {
         console.log(`Removing agent '${agentName}' (${id}) with ${memoryCount} memories...`);
       }
 
-      // Delete all memories
+      // Delete all memories through the server's physical-removal path. A
+      // skill-tagged row expands to its whole lineage there, so superseded
+      // version rows go too (the user-facing DELETE route would only close the
+      // head). The path records each durable deletion in the same transaction
+      // and reports how many rows it confirmed removed.
       if (memoryCount > 0) {
         console.log(`Deleting ${memoryCount} memories...`);
-        for (const mem of (Array.isArray(memories) ? memories : [])) {
-          if (!mem?.id) continue;
-          await api("DELETE", `/Memory/${encodeRecordId(mem.id)}`, undefined, {
-            baseUrl: instance.baseUrl,
-            explicitAdminPass: adminPass, adminUser, agentId: null,
-          });
-        }
+        const memoryIds = (Array.isArray(memories) ? memories : [])
+          .map((mem: any) => mem?.id)
+          .filter((memId: unknown): memId is string => typeof memId === "string" && memId.length > 0);
+        await api("POST", "/MemoryPurge", { ids: memoryIds }, {
+          baseUrl: instance.baseUrl,
+          explicitAdminPass: adminPass, adminUser, agentId: null,
+        });
       }
 
       // Delete all souls

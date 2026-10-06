@@ -6,7 +6,7 @@ import { bindCli as bindAgent, register as registerAgent, type AgentCli } from "
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete process.env.FLAIR_PUBLIC;
 installMemoryHarperMock();
-const { Memory } = await import("../../resources/Memory.ts");
+const { MemoryPurge } = await import("../../resources/MemoryPurge.ts");
 const originalFetch = globalThis.fetch;
 const originalPass = process.env.FLAIR_ADMIN_PASS;
 const originalOpsPort = process.env.FLAIR_OPS_PORT;
@@ -20,21 +20,22 @@ let deletes: string[];
 let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
 const row = { id: "owner-compact-/m", agentId: "owner", durability: "permanent", content: "junk" };
-const api = async (method: string, path: string, _body: any, options: any) => {
-  expect(method).toBe("DELETE");
+const api = async (method: string, path: string, body: any, options: any) => {
+  expect(method).toBe("POST");
+  expect(path).toBe("/MemoryPurge");
   expect(options.agentId).toBeNull();
   expect(options.explicitAdminPass).toBe("secret");
   requests.push(`${method}:${options.baseUrl}`);
+  const ids: string[] = Array.isArray(body?.ids) ? body.ids : [];
+  deletes.push(...ids);
   if (options.baseUrl === "http://127.0.0.1:29926") {
-    otherInstance.delete(decodeURIComponent(path.slice("/Memory/".length)));
-    return;
+    for (const id of ids) otherInstance.delete(id);
+    return { removed: ids.length };
   }
   expect(options.baseUrl).toBe(expectedBaseUrl);
-  const id = decodeURIComponent(path.slice("/Memory/".length));
-  deletes.push(id);
-  const r: any = new (Memory as any)();
+  const r: any = new (MemoryPurge as any)();
   r.getContext = () => ({ request: { tpsAgent: "admin", tpsAgentIsAdmin: true } });
-  return r.delete(id);
+  return r.post({ ids });
 };
 beforeEach(() => {
   resetHarnessState();
@@ -111,7 +112,7 @@ for (const kind of ["hygiene", "remove"] as const) {
       await invoke(kind, source === "--ops-port" ? [source, "19925"] : []);
       expect(deletes).toEqual([row.id]);
       expect(otherInstance.has(row.id)).toBe(true);
-      expect(requests.filter(r => r.startsWith("DELETE:"))).toEqual(["DELETE:http://127.0.0.1:19926"]);
+      expect(requests.filter(r => r.endsWith(":19926"))).toEqual(["POST:http://127.0.0.1:19926"]);
       expect(opsResolutions).toBe(1);
       expect(httpResolutions).toBe(0);
     });

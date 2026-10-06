@@ -342,3 +342,106 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
     }
   }, 300_000);
 });
+
+// ─── post-merge audit (#2225 finding 1) ──────────────────────────────────────
+// A destructive CLI delete that reports a row as removed must leave no Memory
+// row stored. A skill-tagged row is the case the REST delete route versions
+// instead of removing, so it is pinned here explicitly.
+describe("audit #2225 — CLI deletes leave no skill-tagged Memory row stored", () => {
+ async function putSkill(id: string, agentId: string, content: string): Promise<void> {
+ // Right after boot the InstructionVersion per-key lock can answer 503
+ // (instruction_version_lock_unavailable); retry that one status, bounded.
+ let status = 0;
+ let text = "";
+ for (let attempt = 0; attempt < 60; attempt++) {
+ const res = await fetch(`${harper.httpURL}/Memory/${encodeURIComponent(id)}`, {
+ method: "PUT",
+ headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+ body: JSON.stringify({ id, agentId, content, trigger: `when to ${content}`, tags: ["skill"], durability: "persistent" }),
+ signal: AbortSignal.timeout(30_000),
+ });
+ status = res.status;
+ text = await res.text();
+ if (status !== 503 || !text.includes("instruction_version_lock_unavailable")) break;
+ await new Promise((r) => setTimeout(r, 500));
+ }
+ expect(status, text.slice(0, 300)).toBeLessThan(300);
+ }
+
+ async function storedRows(id: string): Promise<any[]> {
+ const rows = await ops({
+ operation: "search_by_value",
+ database: "flair",
+ table: "Memory",
+ search_attribute: "id",
+ search_value: id,
+ get_attributes: ["id", "agentId", "tags", "validTo"],
+ });
+ return Array.isArray(rows) ? rows.filter((r: any) => r?.id === id) : [];
+ }
+
+ test("agent remove physically removes the removed agent's skill-tagged Memory row", async () => {
+ const home = scratchHome();
+ const agentId = "agent-skill-owner";
+ const skillId = "agent-skill-owner-skill-1";
+ await insertAgent(agentId);
+ await putSkill(skillId, agentId, "a skill owned by the agent being removed");
+ expect(await storedRows(skillId)).toHaveLength(1);
+
+ const run = await runCli(
+ ["agent", "remove", agentId, "--force", "--keep-keys", "--ops-port", String(opsPort())],
+ home,
+ );
+ expect(run.code, run.out).toBe(0);
+ expect(run.out).toContain(`Agent '${agentId}' removed successfully`);
+ const left = await storedRows(skillId);
+ expect(left, `still stored after a reported removal: ${JSON.stringify(left)}`).toEqual([]);
+ }, 300_000);
+
+ test("agent remove completes and removes every version row of an updated skill", async () => {
+ const home = scratchHome();
+ const agentId = "agent-skill-updated";
+ const skillId = "agent-skill-updated-skill-1";
+ await insertAgent(agentId);
+ await putSkill(skillId, agentId, "first version of the skill");
+ await putSkill(skillId, agentId, "second version of the skill");
+ const before = await ops({
+ operation: "search_by_value", database: "flair", table: "Memory",
+ search_attribute: "agentId", search_value: agentId, get_attributes: ["id", "validTo"],
+ });
+ expect(before.length).toBe(2);
+
+ const run = await runCli(
+ ["agent", "remove", agentId, "--force", "--keep-keys", "--ops-port", String(opsPort())],
+ home,
+ );
+ const agentLeft = await ops({
+ operation: "search_by_value", database: "flair", table: "Agent",
+ search_attribute: "id", search_value: agentId, get_attributes: ["id"],
+ });
+ expect(run.code, `${run.out}\nAgent rows left: ${JSON.stringify(agentLeft)}`).toBe(0);
+ expect(agentLeft).toEqual([]);
+ const left = await ops({
+ operation: "search_by_value", database: "flair", table: "Memory",
+ search_attribute: "agentId", search_value: agentId, get_attributes: ["id", "validTo"],
+ });
+ expect(left, `still stored after agent remove: ${JSON.stringify(left)}`).toEqual([]);
+ }, 300_000);
+
+ test("memory hygiene --apply physically removes a matched skill-tagged row it reports as deleted", async () => {
+ const home = scratchHome();
+ const skillId = "agent-hygskill-compact-1";
+ await insertAgent("agent-hygskill");
+ await putSkill(skillId, "agent-hygskill", "a skill row matched by the compact-id pattern");
+ expect(await storedRows(skillId)).toHaveLength(1);
+
+ const run = await runCli(
+ ["memory", "hygiene", "--apply", "--pattern", "compact-id", "--ops-port", String(opsPort())],
+ home,
+ );
+ expect(run.code, run.out).toBe(0);
+ expect(run.out).toContain("Deleted");
+ const left = await storedRows(skillId);
+ expect(left, `still stored after hygiene reported it deleted: ${JSON.stringify(left)}`).toEqual([]);
+ }, 300_000);
+});

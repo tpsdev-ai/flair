@@ -540,15 +540,15 @@ export function register(program: Command): void {
       }
 
       const ids = Array.from(allIds);
-      let deleted = 0;
-      for (const id of ids) {
-        await api("DELETE", `/Memory/${encodeRecordId(id)}`, undefined, {
-          baseUrl: instance.baseUrl, explicitAdminPass: adminPass,
-          adminUser: resolveAdminUser(undefined), agentId: null,
-        });
-        deleted++;
-        process.stdout.write(`\r  Deleting ${deleted}/${ids.length} (${Math.round((deleted / ids.length) * 100)}%)`);
-      }
+      // Remove the matched rows through the server's physical-removal path: a
+      // skill-tagged row expands to its whole lineage there, each durable
+      // deletion is recorded in the same transaction, and the count returned is
+      // the rows that path confirmed removed, not the rows matched.
+      const purge = await api("POST", "/MemoryPurge", { ids }, {
+        baseUrl: instance.baseUrl, explicitAdminPass: adminPass,
+        adminUser: resolveAdminUser(undefined), agentId: null,
+      });
+      const deleted = typeof purge?.removed === "number" ? purge.removed : 0;
       console.log(`\n\n✅ Deleted ${deleted} rows.`);
       console.log("");
       console.log("Note: this is a local-instance delete. Federated peers will keep their copies until");
