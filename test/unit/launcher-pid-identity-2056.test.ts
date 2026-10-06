@@ -41,8 +41,9 @@ const MARKER = "STUB-HARPER-RAN";
 // Bounds for a start-time read of a just-spawned pid (flair#2130). A fresh
 // fork's start time is not always answerable on the first read — macOS
 // `ps -o lstart=` (and Linux /proc) can briefly return nothing — so a single
-// null read is "not yet readable", not "unreadable". Re-read within a hard
-// bound instead of failing on the first attempt.
+// null read is "not yet readable", not "unreadable". Retry an unsuccessful
+// read until the cutoff instead of failing on the first attempt; a read
+// already in flight at the cutoff may still finish after it.
 const START_TIME_READ_TIMEOUT_MS = 5_000;
 const START_TIME_READ_POLL_MS = 25;
 
@@ -166,8 +167,9 @@ function sleepSync(ms: number): void {
 /**
  * The pid's start second from the same reader resolveInstanceServingPid uses,
  * read with a bounded retry (flair#2130). A process spawned a moment ago can
- * have a start time the reader cannot answer for yet, so poll until it answers
- * or the bound expires; only a null AFTER the bound is a real failure.
+ * have a start time the reader cannot answer for yet, so retry until it
+ * answers. The cutoff is checked only after an unsuccessful read, so a read in
+ * flight at the cutoff may still answer; only a null after the cutoff fails.
  */
 function readStartSecondWithin(
   pid: number,
