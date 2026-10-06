@@ -20,8 +20,7 @@ gating gaps.
   dispatches to the curated tool.
 - `resources/mcp-tools.ts` — the 18 tools in `resources/mcp-tools.ts`, delegating to resource handlers or the team-directory resolver
   (Memory / SemanticSearch / BootstrapMemories / Soul / WorkspaceState /
-  OrgEvent / AttentionQuery / RecordUsage / the team-directory resolver). No raw CRUD surface — the only path to the datastore through `/mcp`
-  is one of the 18 tools in `resources/mcp-tools.ts`. Curated **by construction**.
+  OrgEvent / AttentionQuery / RecordUsage / the team-directory resolver).
 - `resources/mcp-oauth.ts` — registers `server.http(withMCPAuth(mcpHandler),
   { urlPath: '/mcp' })` **only when `FLAIR_MCP_OAUTH` is on.** `/mcp` runs on its
   own dispatch chain; flair's default auth-middleware does not run for it.

@@ -107,8 +107,6 @@ function changesPublishedAddress(content: any, stored: any, replaces: boolean): 
  *   - a server-stamped ISO time for a publication,
  *   - `null` for a withdrawal,
  *   - `undefined` when the write does not touch publication.
- * A non-operator write to the stamp, or an address change on a published row
- * without a preceding withdrawal, is refused here.
  */
 async function resolvePublicationStamp(
   self: any,
@@ -136,14 +134,8 @@ async function resolvePublicationStamp(
  * Anonymous HTTP is denied on every path; non-admin agents are scoped to their own
  * agentId. Mirrors the WorkspaceState pattern.
  *
- * Team directory (flair#2141 S3a): `directoryPublishedAt` is the
- * operator-stamped publication of an exact `agentId`/`platform`/`email`
- * `tps-mail` binding. Publication, withdrawal and removal of a published entry
- * are operator-only (see `requireOperator`); ownership and address are frozen
- * once published (change the address by withdrawing first, then republishing);
- * timestamps and the publication stamp are server-stamped; and the validate +
- * commit pair runs inside one owned transaction so a concurrent withdrawal
- * cannot interleave. Reads are unchanged: owner-scoped, anonymous denied.
+ * Integration resource publication writes require an operator source and stamp
+ * the time. Resource writes freeze a published address until withdrawal.
  */
 export class Integration extends (databases as any).flair.Integration {
   private _auth() {

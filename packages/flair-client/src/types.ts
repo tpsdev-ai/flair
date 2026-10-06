@@ -145,7 +145,7 @@ export interface BootstrapResult {
 }
 
 /** One team-directory entry — an active agent-kind principal with an
- *  operator-published tps-mail contact (flair#2141 S3a). */
+ *  published tps-mail contact (flair#2141 S3a). */
 export interface TeamDirectoryEntry {
   /** Stable Agent ID. */
   agentId: string;
@@ -155,7 +155,7 @@ export interface TeamDirectoryEntry {
   platform: string;
   /** The published address. */
   email: string;
-  /** The server-stamped publication time. */
+  /** The stored publication time, normalized to ISO. */
   publishedAt: string;
   /** The home instance id, or null when it is not resolvable. */
   homeInstanceId: string | null;
@@ -164,7 +164,6 @@ export interface TeamDirectoryEntry {
 /** A page of the team directory (flair#2141 S3a). */
 export interface TeamDirectoryResult {
   entries: TeamDirectoryEntry[];
-  /** Opaque cursor for the next page, or null when this page is the last. */
   nextCursor: string | null;
   hasMore: boolean;
   limit: number;

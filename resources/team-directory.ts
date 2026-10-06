@@ -2,7 +2,7 @@
  * team-directory.ts — the ONE team-directory resolver (flair#2141 S3a).
  *
  * Answers "who is in this office, and how do I reach them" from Flair's own
- * records: the active agent-kind principals, joined to their operator-published
+ * records: the active agent-kind principals, joined to their published
  * `tps-mail` `Integration` contact. One resolver serves the `team_directory`
  * MCP tool, `GET /TeamDirectory` and the flair client.
  *
@@ -13,8 +13,7 @@
  * gate below: `resolveAgentAuth` must return a VERIFIED agent — `anonymous`,
  * `internal`, and a MISSING context (which resolves to `internal`) all grant
  * nothing — and a FRESH local `Agent` read must show that same principal as an
- * active agent-kind row. Publication authority is separate: an operator source
- * (resources/Integration.ts) is the only writer of a publication stamp.
+ * active agent-kind row.
  *
  * ─── Unavailable is never a cached success ──────────────────────────────────
  * A failed or unreadable Agent/Integration read returns an explicit
@@ -63,7 +62,7 @@ export interface TeamDirectoryEntry {
   platform: string;
   /** The published address. */
   email: string;
-  /** The server-stamped publication time. */
+  /** The stored publication time, normalized to ISO. */
   publishedAt: string;
   /** The home instance id, or null when the instance identity is not resolvable. */
   homeInstanceId: string | null;
@@ -71,7 +70,6 @@ export interface TeamDirectoryEntry {
 
 export interface TeamDirectoryResult {
   entries: TeamDirectoryEntry[];
-  /** Opaque cursor for the next page, or null when this page is the last. */
   nextCursor: string | null;
   hasMore: boolean;
   limit: number;
@@ -98,12 +96,7 @@ export function utf8Bytes(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
-/**
- * A principal is a directory member candidate when its `kind` is absent or
- * `agent` AND its `status` is absent or `active` — the same permissive legacy
- * defaults bootstrap's roster uses (isTeammate, resources/memory-bootstrap-lib.ts):
- * a pre-1.0 row missing either field is a legacy agent/active, never excluded.
- */
+/** Missing kind/status fields retain legacy agent/active compatibility. */
 export function isActiveAgentPrincipal(record: { id?: unknown; kind?: unknown; status?: unknown } | null | undefined): boolean {
   if (!record || typeof record.id !== "string" || record.id === "") return false;
   if (record.kind !== undefined && record.kind !== "agent") return false;
@@ -164,7 +157,7 @@ export async function resolveDirectoryReader(context: unknown): Promise<{ agentI
 
 /**
  * Read every directory candidate entry from local records. Returns a `Response`
- * on an unreadable store, never an empty array (unavailable != empty).
+ * on an unreadable store.
  */
 async function collectEntries(): Promise<TeamDirectoryEntry[] | Response> {
   const active = new Map<string, any>();
@@ -227,13 +220,11 @@ function compareAgentIds(a: string, b: string): number {
 
 /** Drop the fewest trailing entries needed to fit the serialized response cap. */
 function clampResponse(result: TeamDirectoryResult): TeamDirectoryResult {
-  let entries = result.entries;
-  while (entries.length > 0 && utf8Bytes(JSON.stringify({ ...result, entries })) > TEAM_DIRECTORY_MAX_RESPONSE_BYTES) {
-    entries = entries.slice(0, -1);
+  while (result.entries.length > 0 && utf8Bytes(JSON.stringify(result)) > TEAM_DIRECTORY_MAX_RESPONSE_BYTES) {
+    const entries = result.entries.slice(0, -1);
+    result = { ...result, entries, nextCursor: entries.at(-1)?.agentId ?? null, hasMore: true };
   }
-  if (entries.length === result.entries.length) return result;
-  const last = entries[entries.length - 1];
-  return { ...result, entries, nextCursor: last ? last.agentId : null, hasMore: true };
+  return result;
 }
 
 export interface TeamDirectoryQuery {
@@ -275,8 +266,6 @@ export async function resolveTeamDirectory(
   const cursor = typeof query.cursor === "string" && query.cursor !== "" ? query.cursor : null;
   if (cursor) candidates = candidates.filter((e) => compareAgentIds(e.agentId, cursor) > 0);
 
-  // Reauthorize each page: this call already re-ran the reader gate and the
-  // fresh Agent read above, so a revoked reader never receives a later page.
   const page = candidates.slice(0, limit);
   const hasMore = candidates.length > page.length;
   const nextCursor = hasMore && page.length > 0 ? page[page.length - 1].agentId : null;

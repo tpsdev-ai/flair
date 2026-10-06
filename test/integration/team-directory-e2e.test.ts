@@ -1,24 +1,11 @@
 // team-directory-e2e.test.ts — the S3a team-directory seam, end to end on a
 // real Harper (test/helpers/harper-lifecycle.ts).
 //
-// The unit suite (test/unit/team-directory.test.ts) drives the resolver against
-// a mocked `databases.flair`. This file exercises the REAL components on the
-// other side of the seams the resolver depends on:
-//
-//   publish:  an operator (Basic admin) POST /Integration reaches the real
-//             Integration resource, runs its validate + commit inside the
-//             resource's owned transaction, and stamps `directoryPublishedAt`.
-//   resolve:  GET /TeamDirectory (the real HTTP route + the shared resolver) and
-//             packages/flair-client's `teamDirectory.list()` both read the
-//             published entry back.
-//   refusal:  a non-operator (a verified agent) publish is refused with the
-//             resource's refusal shape, and an anonymous route read is refused.
-//   stdio:    the `team_directory` stdio binding runs in-process against the same
-//             Harper, through the flair client.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cp, mkdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
@@ -28,6 +15,7 @@ import { STDIO_TOOL_HANDLERS } from "../../packages/flair-mcp/src/adapter-tools"
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; keyPath: string }
 
 let keyDir: string;
+let appDir: string;
 let reader: TestAgent;
 let subject: TestAgent;
 let readerClient: FlairClient;
@@ -108,23 +96,51 @@ async function getTeamDirectory(a?: TestAgent): Promise<Response> {
   return fetch(`${harper.httpURL}/TeamDirectory`, { method: "GET", headers });
 }
 
-describe("team directory e2e (real Integration resource -> GET /TeamDirectory -> flair client -> stdio binding)", () => {
+async function embeddedCall(name: string, args: Record<string, unknown>, sub = "td-reader-sub"): Promise<any> {
+  const res = await fetch(`${harper.httpURL}/AgentFleet/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+    body: JSON.stringify({ op: "mcpRpc", sub, rpc: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } } }),
+  });
+  expect(res.status).toBe(200);
+  const out: any = await res.json();
+  expect(out.ok).toBe(true);
+  expect(out.value.status).toBe(200);
+  return out.value.rpc;
+}
+
+describe("team directory on Harper", () => {
   const publishedEmail = `td-${randomUUID().slice(0, 8)}@example.test`;
 
   beforeAll(async () => {
     keyDir = mkdtempSync(join(tmpdir(), "flair-td-e2e-keys-"));
     reader = mkAgent("td-reader");
     subject = mkAgent("td-subject");
-    harper = await startHarper();
+    appDir = mkdtempSync(join(tmpdir(), "flair-td-e2e-app-"));
+    await cp(join(process.cwd(), "test/fixtures/inproc-app"), appDir, { recursive: true });
+    await mkdir(join(appDir, "node_modules", "@tpsdev-ai"), { recursive: true });
+    await symlink(process.cwd(), join(appDir, "node_modules", "@tpsdev-ai", "flair"), "dir");
+    harper = await startHarper({ cwd: appDir, harperBinDir: process.cwd() });
     assertOwnInstance(harper);
     await registerAgent(reader);
     await registerAgent(subject);
+    expect((await adminOp({ operation: "insert", database: "flair", table: "Agent", records: [
+      { id: "td-human", name: "td-human", kind: "human", status: "active", role: "agent", publicKey: "pending", createdAt: new Date().toISOString() },
+    ] })).status).toBe(200);
+    expect((await adminOp({ operation: "insert", database: "flair", table: "Credential", records: [
+      { id: "td-reader-credential", kind: "idp", principalId: reader.id, idpSubject: "td-reader-sub", status: "active", createdAt: new Date().toISOString() },
+      { id: "td-human-credential", kind: "idp", principalId: "td-human", idpSubject: "td-human-sub", status: "active", createdAt: new Date().toISOString() },
+    ] })).status).toBe(200);
+    expect((await adminOp({ operation: "insert", database: "flair", table: "Soul", records: [
+      { id: "td-reader-role", agentId: reader.id, key: "role", value: "reviewer", priority: "standard", createdAt: new Date().toISOString() },
+    ] })).status).toBe(200);
     readerClient = new FlairClient({ agentId: reader.id, url: harper.httpURL, keyPath: reader.keyPath });
   }, 240_000);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (keyDir) rmSync(keyDir, { recursive: true, force: true });
+    if (appDir) rmSync(appDir, { recursive: true, force: true });
   });
 
   test("a non-operator publish is refused by the real resource (refusal shape)", async () => {
@@ -183,4 +199,48 @@ describe("team directory e2e (real Integration resource -> GET /TeamDirectory ->
     expect(structured.entries[0].email).toBe(publishedEmail);
     expect(result.content[0].text).toContain(publishedEmail);
   });
+
+  test("embedded tools/call returns the published entry", async () => {
+    const rpc = await embeddedCall("team_directory", { id: subject.id, limit: 1 });
+    expect(rpc.error).toBeUndefined();
+    expect(rpc.result.isError).toBe(false);
+    expect(rpc.result.structuredContent.entries.map((e: any) => e.agentId)).toEqual([subject.id]);
+    expect(rpc.result.structuredContent.entries[0].email).toBe(publishedEmail);
+    expect(JSON.parse(rpc.result.content[0].text)).toEqual(rpc.result.structuredContent);
+  });
+
+  test("embedded tools/call refuses a human reader and invalid limit type", async () => {
+    const rpc = await embeddedCall("team_directory", {}, "td-human-sub");
+    expect(rpc.error).toBeUndefined();
+    expect(rpc.result.isError).toBe(true);
+    expect(rpc.result.structuredContent).toEqual({ error: "team_directory_reader_not_active", status: 403 });
+    expect(JSON.parse(rpc.result.content[0].text)).toEqual(rpc.result.structuredContent);
+    const invalid = await embeddedCall("team_directory", { limit: "1" });
+    expect(invalid.error.code).toBe(-32602);
+    expect(invalid.result).toBeUndefined();
+  });
+
+  for (const roster of [true, false]) {
+    for (const includeContext of [true, false]) {
+      for (const includeSoul of [true, false]) {
+        test(`bootstrap directory hint with roster=${roster}, context=${includeContext}, soul=${includeSoul}`, async () => {
+          expect((await adminOp({ operation: "update", database: "flair", table: "Agent", records: [
+            { id: subject.id, status: roster ? "active" : "deactivated" },
+          ] })).status).toBe(200);
+          const res = await fetch(`${harper.httpURL}/BootstrapMemories`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: ed25519Header(reader, "POST", "/BootstrapMemories") },
+            body: JSON.stringify({ includeContext, includeSoul }),
+          });
+          expect(res.status).toBe(200);
+          const body: any = await res.json();
+          expect(body.directoryHint).toBe("Need a teammate? Call the `team_directory` tool (MCP) or `GET /TeamDirectory` for this office's active agents with published tps-mail addresses.");
+          expect(body.soul.role).toBe(includeSoul ? "reviewer" : undefined);
+          expect(body.sections.team).toBe(roster ? 1 : 0);
+          expect(body.context.includes("## Team")).toBe(roster && includeContext);
+          if (roster && includeContext) expect(body.context).toContain(body.directoryHint);
+        });
+      }
+    }
+  }
 });

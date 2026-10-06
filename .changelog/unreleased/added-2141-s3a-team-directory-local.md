@@ -1,4 +1,4 @@
-- **Team directory: an operator publishes an agent's tps-mail address, and any verified active agent finds it.**
-  `Integration.directoryPublishedAt` records an operator-approved contact. Publication, withdrawal and
-  removal of a published entry are operator-only; the address is frozen until an explicit withdrawal, and
-  the publication stamp is server-set. Bootstrap carries a fixed directory hint (flair#2141).
+- **Team directory lists active agents with published tps-mail contacts.**
+  Integration resource writes require an operator source for publication, withdrawal and
+  removal of a published entry; they freeze the address until withdrawal and stamp publication time.
+  Bootstrap carries a fixed directory hint (flair#2141).

@@ -801,16 +801,6 @@ async function recordUsage(agent: ResolvedAgent, args: any) {
 
 type ToolImpl = (agent: ResolvedAgent, args: any) => Promise<any>;
 
-/**
- * team_directory (flair#2141 S3a) — the team directory, from Flair's own
- * records. A THIN wrapper over resources/team-directory.ts's one resolver.
- * The resolver owns authority (a verified active agent, read via
- * `resolveAgentAuth` plus a fresh local Agent read), filtering (active
- * agent-kind principals with a matching, operator-published `tps-mail` contact)
- * and the caps. The delegation context carries the RESOLVED agent, so a tool
- * call can never read as another identity; a resolver refusal unwraps to
- * `{ error, status }` like every other tool.
- */
 async function teamDirectory(agent: ResolvedAgent, args: any) {
   // Lazy import so this module keeps no top-level Harper link (the same reason
   // the handler classes above load on first use).
@@ -1361,7 +1351,6 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         // identity block in MemoryBootstrap's response tail).
         "soulTokens", "memoryTokens", "trustTokens", "eventsTokens", "scaffoldTokens",
         "skillsTokens", "skillDiagnosticsTokens",
-        // flair#2141 S3a — the fixed team-directory discovery hint, always present.
         "directoryHint",
       ],
       fieldTypes: {

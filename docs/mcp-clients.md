@@ -310,7 +310,7 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | `flair_workspace_set` | Set this agent's workspace state (ref, label, provider, task, phase, summary) in the Office Space |
 | `flair_orgevent` | Publish an org-wide coordination event (claim, release, or status), attributed to the caller |
 | `flair_catchup` | Drain this agent's own org-event catch-up feed. Page with `after`; advance the watermark with `ack` |
-| `team_directory` | List the office's active agents with an operator-published tps-mail address, from Flair's own records. Filter by `id` or `name`; page with `cursor`/`limit`. Any verified active agent may read; publication is operator-only |
+| `team_directory` | List active agents with published tps-mail contacts. Filter by `id` or `name`; page with `cursor`/`limit` |
 | `record_usage` | Report that recalled memories were actually used (`memoryId` or `memoryIds`, plus optional `attribution`). Drives `usageCount` / `usageBoost` |
 
 For ordinary signed agents, Flair enforces write ownership server-side: they can write only under their authenticated agent ID. Administrator credentials and administrator agent roles have broader authority. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).

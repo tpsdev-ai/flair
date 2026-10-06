@@ -245,9 +245,6 @@ describe("Integration.delete() — ownership check uses the raw record (super.ge
 });
 
 // ─── flair#2141 S3a — the team-directory publication gate ────────────────────
-// A published `directoryPublishedAt` is an operator-approved contact. These
-// cases live here (not a second file) because this file owns the one
-// process-global `harper` mock for resources/Integration.ts.
 
 // A verified Basic administrator — the operator source.
 const operatorCtx = () => ({
@@ -294,7 +291,7 @@ describe("Integration directory publication — non-operator refusals", () => {
     expect(integrationStore.get("int-1").directoryPublishedAt).toBe("2026-09-01T00:00:00.000Z");
   });
 
-  it("a published address cannot be changed without withdrawal first (409)", async () => {
+  it("put refuses an address change without an explicit withdrawal (409)", async () => {
     seedPublished();
     const i = makeIntegration(agentCtx("agent-a"), "int-1");
     const res = await (i as any).put({ id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "new@example.test" });
@@ -317,7 +314,7 @@ describe("Integration directory publication — non-operator refusals", () => {
     }
   });
 
-  it("an owner cannot delete a published entry (403); a withdrawal is the routine hide", async () => {
+  it("a runtime owner cannot delete a published entry (403)", async () => {
     seedPublished();
     const i = makeIntegration(agentCtx("agent-a"), "int-1");
     const res = await (i as any).delete("int-1");

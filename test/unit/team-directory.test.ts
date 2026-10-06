@@ -12,7 +12,7 @@
  *   - the caps (50 entries, 256 UTF-8 bytes for agentId/name/email, 64 KiB response);
  *   - pagination;
  *   - unavailable storage is a 503, never an empty success;
- *   - the shared Peer.status vocabulary matches schemas/federation.graphql and
+ *   - the CLI vocabulary matches the Peer.status schema comment and
  *     omits `active` (an Instance.status value).
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
@@ -277,9 +277,9 @@ describe("caps and pagination", () => {
     addAgent("reader");
     const candidate = [];
     for (let i = 0; i < 50; i++) {
-      const id = `agent-${String(i).padStart(2, "0")}`;
+      const id = `agent-${String(i).padStart(2, "0")}${"x".repeat(248)}`;
       const name = "\u0001".repeat(256);
-      const email = "\u0002".repeat(256);
+      const email = "\u0002" + "x".repeat(255);
       const publishedAt = "2026-10-01T00:00:00.000Z";
       addAgent(id, { name });
       addContact(`c-${i}`, { agentId: id, email, directoryPublishedAt: publishedAt });
@@ -308,7 +308,7 @@ describe("caps and pagination", () => {
 });
 
 describe("pure helpers", () => {
-  it("isActiveAgentPrincipal uses the permissive legacy defaults", () => {
+  it("isActiveAgentPrincipal accepts missing kind/status fields", () => {
     expect(isActiveAgentPrincipal({ id: "a" })).toBe(true);
     expect(isActiveAgentPrincipal({ id: "a", kind: "agent", status: "active" })).toBe(true);
     expect(isActiveAgentPrincipal({ id: "a", kind: "human" })).toBe(false);
@@ -325,7 +325,7 @@ describe("pure helpers", () => {
   });
 });
 
-describe("Peer.status vocabulary is shared and schema-consistent (flair#2141 item 6)", () => {
+describe("documented Peer.status CLI vocabulary (flair#2141 item 6)", () => {
   it("matches the Peer.status comment in schemas/federation.graphql exactly", () => {
     const schema = readFileSync(join(import.meta.dir, "../../schemas/federation.graphql"), "utf8");
     const line = schema.split("\n").find((l) => l.includes("status: String") && l.includes("paired"));
@@ -334,14 +334,14 @@ describe("Peer.status vocabulary is shared and schema-consistent (flair#2141 ite
     expect(quoted).toEqual([...PEER_STATUS_VALUES]);
   });
 
-  it("membership excludes revoked, and `active` is not a Peer status", () => {
+  it("the classifier excludes revoked and active", () => {
     expect(PEER_MEMBERSHIP_STATUSES).toEqual([PEER_STATUS.PAIRED, PEER_STATUS.CONNECTED, PEER_STATUS.DISCONNECTED]);
     expect(isPeerMemberStatus(PEER_STATUS.REVOKED)).toBe(false);
     expect(isPeerMemberStatus("active")).toBe(false);
     expect(PEER_STATUS_VALUES as readonly string[]).not.toContain("active");
   });
 
-  it("the CLI renders peer status from the shared vocabulary, not a hardcoded `active`", () => {
+  it("the CLI imports the classifier and omits the retired color condition", () => {
     const src = readFileSync(join(import.meta.dir, "../../src/commands/federation.ts"), "utf8");
     expect(src).toContain('from "../lib/peer-status.js"');
     // The retired literal: `active` used to color a peer status green.

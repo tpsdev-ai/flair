@@ -699,13 +699,13 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "team_directory",
-    "description": "Find your teammates and how to reach them, from Flair's own records: active agent-kind principals with an operator-published tps-mail address. Any verified active agent may read; publication and withdrawal are operator-only. Returns each entry's stable Agent ID, display label, home instance and published platform/address, paginated with a cursor.",
+    "description": "List active agent-kind principals with published tps-mail contacts. Filter by id or name; page with cursor and limit.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
-          "description": "Resolve one agent exactly by its stable Agent ID."
+          "description": "Filter by stable Agent ID."
         },
         "name": {
           "type": "string",
