@@ -8,12 +8,13 @@ import { tempDir } from "../helpers/temp-dir.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const CLI = pathToFileURL(join(ROOT, "dist/cli.js")).href;
+const TCP_PROBE = pathToFileURL(join(ROOT, "dist/lib/init-tcp-probe.js")).href;
 const INIT = pathToFileURL(join(ROOT, "dist/commands/init.js")).href;
 const PASSWORD = "own-listener-password";
 
 beforeAll(() => ensureCliBuild(), 120_000);
 
-function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "unrelated" | "sidecar-pid" | "sidecar-start" | "many", skipStart: boolean) {
+function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "declared" | "unrelated" | "sidecar-pid" | "sidecar-start" | "many", skipStart: boolean) {
   const home = tempDir("iol-");
   const dataDir = join(home, "data");
   const log = join(home, "requests.jsonl");
@@ -32,10 +33,11 @@ function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "unrelated
     import { spawn } from "node:child_process";
     import { appendFileSync, writeFileSync } from "node:fs";
     import { once } from "node:events";
+    mock.module(${JSON.stringify(TCP_PROBE)}, () => ({ localPortState: async () => "listening" }));
     const child = spawn("node", ${JSON.stringify(proof === "unrelated" ? ["-e", "console.log('ready'); setTimeout(() => {}, 60000)"] : [entry, "run", "."])}, { stdio: ["ignore", "pipe", "ignore"] });
     await once(child.stdout, "data");
     try {
-      if (${proof !== "missing"}) writeFileSync(${JSON.stringify(join(dataDir, "hdb.pid"))}, String(child.pid));
+      if (${proof !== "missing" && proof !== "declared"}) writeFileSync(${JSON.stringify(join(dataDir, "hdb.pid"))}, String(child.pid));
       if (${proof === "sidecar-pid" || proof === "sidecar-start"}) writeFileSync(${JSON.stringify(join(dataDir, "flair-daemon.json"))}, JSON.stringify({ pid: ${proof === "sidecar-pid" ? "child.pid + 1" : "child.pid"}, startTimeMs: 0, port: 20991 }));
       const init = await import(${JSON.stringify(INIT)});
       const bindCli = init.bindCli;
@@ -57,7 +59,7 @@ function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "unrelated
       const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
       setOccupiedListenerLookupForTests({
         pids: port => ${proof === "many" ? "[child.pid, child.pid + 1]" : proof === "other-pid" ? "port === 20990 ? [child.pid + 1] : [child.pid]" : "[child.pid]"},
-        rootPath: () => ({ rootPath: ${proof === "foreign" ? '"/another/data"' : "null"}, environReadable: ${proof === "foreign"} }),
+        rootPath: () => ({ rootPath: ${proof === "foreign" ? '"/another/data"' : proof === "declared" ? JSON.stringify(dataDir) : "null"}, environReadable: ${proof === "foreign" || proof === "declared"} }),
       });
       process.exit = code => { throw Object.assign(new Error("fixture exit"), { exitCode: code ?? 0 }); };
       try {
@@ -77,7 +79,7 @@ function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "unrelated
 }
 
 for (const skipStart of [false, true]) {
-  test(`re-init accepts matching PID-file proof without ROOTPATH, skip-start=${skipStart}`, () => {
+  test(`injected listening probe and PID matching the PID file pass the gate, skip-start=${skipStart}`, () => {
     const result = runInit("own", skipStart);
     expect(result.error).toBeUndefined();
     expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -85,20 +87,15 @@ for (const skipStart of [false, true]) {
     expect(result.requests.some(r => r.authorization !== null)).toBe(!skipStart);
   }, 30_000);
 
-  for (const proof of ["foreign", "other-pid", "missing", "unrelated", "sidecar-pid", "sidecar-start", "many"] as const) {
-    test(`re-init with ${proof} proof, skip-start=${skipStart}`, () => {
+  for (const proof of ["foreign", "other-pid", "missing", "declared", "unrelated", "sidecar-pid", "sidecar-start", "many"] as const) {
+    test(`injected ${proof} listener fixture, skip-start=${skipStart}`, () => {
       const result = runInit(proof, skipStart);
       expect(result.error).toBeUndefined();
-      if (!skipStart && proof !== "foreign") {
-        expect(result.status, result.stdout + result.stderr).toBe(0);
-        expect(result.requests.some(r => r.authorization !== null)).toBe(true);
-        return;
-      }
       expect(result.status, result.stdout + result.stderr).toBe(1);
-      expect(result.stderr).toContain(skipStart ? "not attributed" : "different data directory");
+      expect(result.stderr).toContain("attribution to this data directory was not confirmed");
       expect(result.requests.length).toBeGreaterThan(0);
       expect(result.requests.every(r => r.authorization === null)).toBe(true);
-      expect(existsSync(join(result.home, ".flair", "admin-pass"))).toBe(!skipStart);
+      expect(existsSync(join(result.home, ".flair", "admin-pass"))).toBe(false);
     }, 30_000);
   }
 }

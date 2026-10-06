@@ -218,6 +218,40 @@ function memoryFeedCases(phase: string) {
     }
   }, 30_000);
 
+  test("replay withholds a closed skill after its successor expires", async () => {
+    const root = `${p}-expired-skill-root`;
+    const body = { id: root, content: "skill v1", trigger: "when assigned", tags: ["skill"], durability: "persistent", visibility: "shared" };
+    await feedWrite(A, body);
+    await feedWrite(A, { ...body, content: "skill v2" });
+    const query = await adminOp(harper, { operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "skillSubjectId", search_value: root, get_attributes: ["*"] });
+    expect(query.status).toBe(200);
+    const heads = (await query.json() as any[]).filter((row) => !row.validTo && row.archived !== true);
+    expect(heads).toHaveLength(1);
+    expect(await readStatus(B, `/Memory/${root}`)).toBe(200);
+    const before = await openAs(B, "/FeedMemories");
+    try {
+      const sentinel = `${p}-expiry-before`;
+      await feedWrite(B, { id: sentinel, content: `${p} before expiry` });
+      await before.waitFor((e) => e.id === sentinel, "before-expiry sentinel");
+      expect(before.events().map((e) => e.id)).toContain(root);
+    } finally {
+      await before.stop();
+    }
+    const expired = await adminOp(harper, { operation: "upsert", database: "flair", table: "Memory", records: [{ ...heads[0], expiresAt: "2020-01-01T00:00:00.000Z" }] });
+    expect(expired.status).toBe(200);
+    await expired.arrayBuffer();
+    expect(await readStatus(B, `/Memory/${root}`)).toBe(404);
+    const after = await openAs(B, "/FeedMemories");
+    try {
+      const sentinel = `${p}-expiry-after`;
+      await feedWrite(B, { id: sentinel, content: `${p} after expiry` });
+      await after.waitFor((e) => e.id === sentinel, "after-expiry sentinel");
+      expect(after.events().map((e) => e.id)).not.toContain(root);
+    } finally {
+      await after.stop();
+    }
+  }, 120_000);
+
   test("live updates: B receives changes to A's org-visible record, never to A's private records", async () => {
     const feed = await openAs(B, "/FeedMemories");
     try {

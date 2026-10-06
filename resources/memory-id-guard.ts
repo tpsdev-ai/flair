@@ -13,7 +13,7 @@ export function contentSuffixIdDenial(id: string): Response {
   return new Response(
     JSON.stringify({
       error: CONTENT_SUFFIX_ID_ERROR,
-      message: `Memory ids must not end in "${MEMORY_CONTENT_SELECTOR_SUFFIX}": the suffix collides with the Memory property selector.`,
+      message: `Memory ids must not end in "${MEMORY_CONTENT_SELECTOR_SUFFIX}".`,
     }),
     { status: 400, headers: { "content-type": "application/json" } },
   );
@@ -21,7 +21,7 @@ export function contentSuffixIdDenial(id: string): Response {
 
 /**
  * Refuse a write when any of its named ids (the URL-bound id and/or a body id)
- * ends in the `.content` suffix; null when none does.
+ * ends in the `.content` suffix.
  */
 export function refuseContentSuffixId(ids: unknown[], target?: { pathname?: unknown }): Response | null {
   const rawId = typeof target?.pathname === "string"

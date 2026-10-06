@@ -3,7 +3,6 @@
  * (flair#2199). PURE: string logic only.
  */
 
-/** The property suffix that a Memory id ending in `.content` collides with. */
 export const MEMORY_CONTENT_SELECTOR_SUFFIX = ".content";
 
 /**

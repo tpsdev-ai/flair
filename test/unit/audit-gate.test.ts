@@ -1,7 +1,8 @@
 import { describe, it, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 // @ts-expect-error — plain .mjs helper, no type declarations by design.
 import {
   isVulnerable,
@@ -10,6 +11,7 @@ import {
   flattenNpmAdvisories,
   parseNpmAuditOutput,
   registryUrlFor,
+  vendorPinnedNodeProblems,
 } from "../../scripts/audit-gate.mjs";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -71,11 +73,187 @@ describe("the gate refuses to run bun-only", () => {
     // tarball lane is skipped would merge with the npm observation never made.
     const res = spawnSync("node", [join(REPO_ROOT, "scripts", "audit-gate.mjs")], {
       encoding: "utf8",
+      timeout: 5_000,
     });
     expect(res.status).not.toBe(0);
     expect(res.stderr).toContain("--npm-install-prefix");
     expect(res.stderr).toContain("npm-install observation");
+  }, 6_000);
+});
+
+// ─── Vendor-pinned entries cover their npm-audit-reported nodes ──────────────
+
+describe("vendor-pinned npm-install nodes", () => {
+  const harperNode = "node_modules/harper/node_modules/fastify";
+  const hoistedNode = "node_modules/fastify";
+  const advisory = (nodes: string[], nodeVersions = {}) => ({
+    ghsa: "GHSA-w2qp-rph6-63g4", package: "fastify", nodes, nodeVersions,
   });
+
+  function withInstalledHarper(run: (prefix: string) => void, node = harperNode) {
+    const prefix = mkdtempSync(join(tmpdir(), "flair-audit-nodes-"));
+    try {
+      const harperRoot = node.slice(0, node.indexOf("node_modules/harper/") + "node_modules/harper".length);
+      mkdirSync(join(prefix, node), { recursive: true });
+      writeFileSync(join(prefix, harperRoot, "npm-shrinkwrap.json"), JSON.stringify({
+        packages: { "node_modules/fastify": { version: "5.11.3" } },
+      }));
+      writeFileSync(join(prefix, node, "package.json"), JSON.stringify({ version: "5.11.3" }));
+      run(prefix);
+    } finally {
+      rmSync(prefix, { recursive: true, force: true });
+    }
+  }
+
+  it("allows an advisory whose nodes are all under harper with matching pins", () => {
+    withInstalledHarper((prefix) => {
+      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix)).toEqual([]);
+    });
+  });
+
+  it("allows harper nested below the packed Flair package", () => {
+    const nestedNode = "node_modules/@tpsdev-ai/flair/node_modules/harper/node_modules/fastify";
+    withInstalledHarper((prefix) => {
+      expect(vendorPinnedNodeProblems(advisory([nestedNode]), prefix)).toEqual([]);
+    }, nestedNode);
+  });
+
+  it("blocks and names a hoisted node even when the same advisory has a harper node", () => {
+    withInstalledHarper((prefix) => {
+      const problems = vendorPinnedNodeProblems(advisory([harperNode, hoistedNode]), prefix);
+      expect(problems.join("\n")).toContain(hoistedNode);
+      expect(problems.join("\n")).toContain("extend the allowlist schema and add a separate, justified entry scoped to that node");
+    });
+  });
+
+  it("blocks a node whose installed version differs from harper's shrinkwrap pin", () => {
+    withInstalledHarper((prefix) => {
+      writeFileSync(join(prefix, harperNode, "package.json"), JSON.stringify({ version: "5.12.0" }));
+      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n")).toContain(
+        "installed version 5.12.0",
+      );
+    });
+  });
+
+  it("blocks a version supplied by audit data that differs from harper's pin", () => {
+    withInstalledHarper((prefix) => {
+      const problems = vendorPinnedNodeProblems(advisory([harperNode], { [harperNode]: "5.12.0" }), prefix);
+      expect(problems.join("\n")).toContain("audit version 5.12.0");
+    });
+  });
+
+  it("refuses an empty version supplied by audit data", () => {
+    withInstalledHarper((prefix) => {
+      const problems = vendorPinnedNodeProblems(advisory([harperNode], { [harperNode]: "" }), prefix);
+      expect(problems.join("\n")).toContain("missing or invalid version");
+    });
+  });
+
+  it("refuses empty node evidence and an unreadable shrinkwrap", () => {
+    withInstalledHarper((prefix) => {
+      expect(vendorPinnedNodeProblems(advisory([]), prefix).join("\n")).toContain("reported no nodes");
+      rmSync(join(prefix, "node_modules/harper/npm-shrinkwrap.json"));
+      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n")).toContain(
+        "Restore readable package and shrinkwrap evidence",
+      );
+    });
+  });
+
+  it("refuses a shrinkwrap whose package rows cannot be parsed", () => {
+    withInstalledHarper((prefix) => {
+      writeFileSync(join(prefix, "node_modules/harper/npm-shrinkwrap.json"), "{invalid");
+      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n")).toContain(
+        "Restore readable package and shrinkwrap evidence",
+      );
+    });
+  });
+
+  it("refuses a missing installed package version", () => {
+    withInstalledHarper((prefix) => {
+      writeFileSync(join(prefix, harperNode, "package.json"), "{}");
+      expect(vendorPinnedNodeProblems(advisory([harperNode]), prefix).join("\n")).toContain(
+        "missing or invalid version",
+      );
+    });
+  });
+
+  function runFixtureGate(nodes: string[], installedVersion = "5.11.3") {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-gate-"));
+    try {
+      mkdirSync(join(root, "scripts"));
+      mkdirSync(join(root, ".github"));
+      mkdirSync(join(root, "bin"));
+      mkdirSync(join(root, "home"));
+      mkdirSync(join(root, "tmp"));
+      mkdirSync(join(root, harperNode), { recursive: true });
+      writeFileSync(join(root, "node_modules/harper/npm-shrinkwrap.json"), JSON.stringify({
+        packages: { "node_modules/fastify": { version: "5.11.3" } },
+      }));
+      writeFileSync(join(root, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
+      writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
+      const entry = ALLOWLIST.entries.find((e: { ghsa: string }) => e.ghsa === "GHSA-w2qp-rph6-63g4");
+      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
+        policy: ALLOWLIST.policy, entries: [entry],
+      }));
+      writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
+      const report = { vulnerabilities: { fastify: { nodes, via: [{
+        url: "https://github.com/advisories/GHSA-w2qp-rph6-63g4", severity: "moderate", range: "<5.12.1",
+      }] } } };
+      writeFileSync(join(root, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(report)}'\n`);
+      chmodSync(join(root, "bin/bun"), 0o755);
+      chmodSync(join(root, "bin/npm"), 0o755);
+      writeFileSync(join(root, "offline.mjs"), "globalThis.fetch = async () => { throw new Error('fixture offline'); };\n");
+      const snapshot = () => readdirSync(root, { recursive: true }).sort().map((name) => {
+        const path = join(root, name);
+        return [name, statSync(path).isFile() ? readFileSync(path).toString("base64") : "<dir>"];
+      });
+      const before = snapshot();
+      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), "--npm-install-prefix", root], {
+        encoding: "utf8",
+        timeout: 10_000,
+        env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-10-01" },
+      });
+      return { res, wrote: JSON.stringify(snapshot()) !== JSON.stringify(before) };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("passes the gate for a harper-only node", () => {
+    const { res, wrote } = runFixtureGate([harperNode]);
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+    expect(wrote).toBe(false);
+  }, 12_000);
+
+  it("blocks a mixed-node advisory in the gate and names the hoisted node", () => {
+    const { res, wrote } = runFixtureGate([harperNode, hoistedNode]);
+    expect(res.error).toBeUndefined();
+    expect(res.status).not.toBe(0);
+    expect(res.stdout).toContain(hoistedNode);
+    expect(res.stdout).not.toContain("FIXED-FOR-BUN-ONLY");
+    expect(res.stdout).not.toContain("PASS —");
+    expect(wrote).toBe(false);
+  }, 12_000);
+
+  it("does not report a blocked pin mismatch as fixed for bun only", () => {
+    const { res } = runFixtureGate([harperNode], "5.12.0");
+    expect(res.error).toBeUndefined();
+    expect(res.status).not.toBe(0);
+    expect(res.stdout).toContain("installed version 5.12.0");
+    expect(res.stdout).not.toContain("FIXED-FOR-BUN-ONLY");
+  }, 12_000);
+
+  it("refuses unknown node evidence with a nonzero gate exit and no success output or writes", () => {
+    const { res, wrote } = runFixtureGate([]);
+    expect(res.error).toBeUndefined();
+    expect(res.status).not.toBe(0);
+    expect(res.stdout).toContain("reported no nodes");
+    expect(res.stdout).toContain("Inspect the npm-install audit report");
+    expect(res.stdout).not.toContain("PASS —");
+    expect(wrote).toBe(false);
+  }, 12_000);
 });
 
 // ─── Allowlist integrity ─────────────────────────────────────────────────────
@@ -241,6 +419,28 @@ describe("flattenNpmAdvisories", () => {
 
   it("returns [] for a clean tree", () => {
     expect(flattenNpmAdvisories({ vulnerabilities: {} })).toEqual([]);
+  });
+
+  it("keeps a per-node version when the audit report carries one", () => {
+    const node = "node_modules/harper/node_modules/fastify";
+    const flat = flattenNpmAdvisories({
+      packages: { [node]: { version: "5.12.0" } },
+      vulnerabilities: { fastify: { nodes: [node], via: [{
+        url: "https://github.com/advisories/GHSA-w2qp-rph6-63g4", severity: "moderate",
+      }] } },
+    });
+    expect(flat[0].nodeVersions[node]).toBe("5.12.0");
+  });
+
+  it("preserves an audit package row with no version for fail-closed validation", () => {
+    const node = "node_modules/harper/node_modules/fastify";
+    const flat = flattenNpmAdvisories({
+      packages: { [node]: {} },
+      vulnerabilities: { fastify: { nodes: [node], via: [{
+        url: "https://github.com/advisories/GHSA-w2qp-rph6-63g4", severity: "moderate",
+      }] } },
+    });
+    expect(flat[0].nodeVersions[node]).toBeNull();
   });
 
   it("skips transitive container vulnerabilities whose via is a bare name", () => {

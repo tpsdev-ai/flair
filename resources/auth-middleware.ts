@@ -49,9 +49,7 @@ function stripMemorySelection(rawUrl: string): string {
   const dot = decodedSeg.indexOf(".");
   // An encoded `/` in the id segment makes the segment ambiguous: the trailing
   // `.<declared attribute>` could be part of the id, or a selector on a
-  // slash-containing id. Never rewrite such a path here — the middleware refuses
-  // it above (see isAmbiguousEncodedSlashSelector), and this guard keeps the
-  // rewrite rule honest if that refusal is ever bypassed.
+  // slash-containing id.
   if (!idSegmentHasEncodedSlash(seg) &&
       dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1))) {
     // Rebuild the id from its decoded form. Harper decodes the path it is handed,
@@ -90,9 +88,7 @@ function decodePathSegment(raw: string): string {
  * `/` (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
  * stripMemorySelection. Such a segment is ambiguous — the trailing
  * `.<declared attribute>` could be part of the id or a selector on an id that
- * contains a slash — so the middleware refuses it rather than map the request to
- * a record other than the id it names (flair#2199). An encoded-slash path with
- * no declared suffix is not ambiguous and is routed as-is.
+ * contains a slash (flair#2199).
  */
 function isAmbiguousEncodedSlashSelector(rawUrl: string): boolean {
   const q = rawUrl.indexOf("?");
@@ -800,9 +796,7 @@ server.http(async (request: any, nextLayer: any) => {
   if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(url.pathname)) {
     // flair#2199: an id segment carrying an encoded `/` before a declared
     // property suffix is ambiguous — the suffix could be part of the id or a
-    // selector on a slash-containing id. Refuse it instead of rewriting the
-    // path, so a non-admin read is never answered from a record other than the
-    // id the path names.
+    // selector on a slash-containing id.
     if (isAmbiguousEncodedSlashSelector(request.url)) {
       return new Response(method === "HEAD" ? null : JSON.stringify({
         error: "ambiguous_memory_id",

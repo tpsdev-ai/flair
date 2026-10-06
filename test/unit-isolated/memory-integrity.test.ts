@@ -227,7 +227,7 @@ class BaseMemory {
   }
   static async delete(id: any) {
     memoryStore.delete(typeof id === "string" ? id : id?.id);
-    return { ok: true };
+    return true;
   }
 }
 

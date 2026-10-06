@@ -102,6 +102,17 @@ describe("bridge import credential flags (socket-free CLI)", () => {
     writeFileSync(preload, `import { appendFileSync } from "node:fs";
 import { mem0MemoryBridge } from ${JSON.stringify(join(CLI_PATH, "..", "bridges/builtins/mem0.js"))};
 import { BridgeRuntimeError } from ${JSON.stringify(join(CLI_PATH, "..", "bridges/types.js"))};
+if (process.env.FLAIR_OPTION_PROBE) {
+  mem0MemoryBridge.options = JSON.parse('{"__proto__":{"env":"FLAIR_OPTION_VALUE"}}');
+  mem0MemoryBridge.import = async function* (opts, ctx) {
+    ctx.log.info("option probe", {
+      own: Object.hasOwn(opts, "__proto__"),
+      value: opts["__proto__"],
+      nullPrototype: Object.getPrototypeOf(opts) === null,
+      user: opts.user,
+    });
+  };
+}
 if (process.env.FLAIR_OUTPUT_PROBE) {
   mem0MemoryBridge.import = async function* (opts, ctx) {
     const key = opts.apiKey;
@@ -175,6 +186,17 @@ globalThis.fetch = async (_input, init) => {
       });
     });
   }
+
+  test("a declared __proto__ env option reaches the built CLI plugin as own data", async () => {
+    const result = await cli(["mem0", "--user", "u1", "--agent", "a1", "--url", "http://127.0.0.1:1", "--dry-run"], {
+      FLAIR_OPTION_PROBE: "1", FLAIR_OPTION_VALUE: "declared-value",
+    });
+    expect(result.code).toBe(0);
+    expect(result.fetches).toBe(0);
+    expect(JSON.parse(result.stderr.trim()).meta).toEqual({
+      own: true, value: "declared-value", nullPrototype: true, user: "u1",
+    });
+  }, 25_000);
 
   for (const probe of ["log", "structured", "trust", "trust-fallback"]) {
     test(`emitted ${probe} output redacts raw, JSON-escaped and URI-encoded keys`, async () => {

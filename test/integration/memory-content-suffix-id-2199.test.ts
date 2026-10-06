@@ -1,10 +1,8 @@
 /**
  * memory-content-suffix-id-2199.test.ts — flair#2199, real Harper.
  *
- * Harper reads a trailing `.<declared attribute>` on a by-id Memory request as a
- * property selector, so `/Memory/<id>.content` addresses the record `<id>`. A
- * record whose id itself ends in `.content` could therefore be read as the base
- * id's record, and a client write could still create one (a collection POST did).
+ * Harper reads `.content` after the first dot in a by-id Memory path as a
+ * property selector: `/Memory/x.content` addresses record `x`.
  *
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";

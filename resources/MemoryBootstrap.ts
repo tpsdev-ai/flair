@@ -651,16 +651,28 @@ export class BootstrapMemories extends Resource {
     const org: OrgSkillInput = { assignments: [], rows: [], instanceId: null };
     if (orgRows.length > 0
       && receivesOrgSkills(await withDetachedTxnAsync(ctx, () => (databases as any).flair.Agent.get(agentId)))) {
-      const refRows: any[] = [];
+      const refRows = new Map<string, any>();
+      org.refSubjects = new Map();
       for (const ref of new Set(orgRows.map((row) => row.skillRef).filter((ref) => typeof ref === "string"))) {
+        const referenced: any = await withDetachedTxnAsync(ctx, () => (databases as any).flair.Memory.get(ref));
+        const subject = referenced && Array.isArray(referenced.tags) && referenced.tags.includes(SKILL_TAG)
+          && typeof referenced.skillSubjectId === "string" && referenced.skillSubjectId.length > 0
+          ? referenced.skillSubjectId : ref;
+        org.refSubjects.set(ref, subject);
         const refQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
-          conditions: [{ attribute: "id", comparator: "equals", value: ref }],
+          conditions: [{
+            operator: "or",
+            conditions: [
+              { attribute: "id", comparator: "equals", value: ref },
+              { attribute: "skillSubjectId", comparator: "equals", value: subject },
+            ],
+          }],
           select: SKILL_ROW_SELECT,
         }));
-        for await (const record of refQuery as AsyncIterable<any>) refRows.push(record);
+        for await (const record of refQuery as AsyncIterable<any>) refRows.set(record.id, record);
       }
       org.assignments = orgRows;
-      org.rows = resolvableSkillRows(refRows, scope.isAllowed);
+      org.rows = resolvableSkillRows([...refRows.values()], scope.isAllowed);
       org.instanceId = await localInstanceId();
     }
     if (skillAssignments.length > 0 || org.assignments.length > 0) {
