@@ -2,24 +2,6 @@
 /**
  * Flair capture hook for Claude Code (flair#2068) — the hot path.
  *
- * Registered (opt-in) for the `PostToolUseFailure`, `PostToolUse` and `Stop`
- * events via `flair hook install --capture`. On every fire it reads the hook payload, plans at most
- * ONE candidate memory (a failed command paired with its fix, or a decision
- * stated in the turn's final text) and appends it to a local spool — then
- * returns. It makes NO network call on the hot path: a detached background
- * flush (this same binary, `--flush`) drains the spool through Flair's normal
- * write path. When Flair is down the spool waits, bounded; the agent never
- * blocks on its own diary.
- *
- * HARD CONTRACT
- *   - NEVER writes to stdout: a PostToolUse/Stop hook's stdout is
- *     harness-interpreted surface and this hook has nothing to say to it.
- *   - Exit 0 on every path, including a malformed payload, a missing identity,
- *     an unwritable spool or a failed flush.
- *   - The payload is read up to a fixed cap and the read has an internal
- *     deadline, so a stuck stdin cannot hang the agent.
- *   - Nothing is stored before it is redacted (see ./capture.ts).
- *
  * CONFIG (env):
  *   FLAIR_AGENT_ID   (required — absent ⇒ capture nothing)
  *   FLAIR_URL, FLAIR_KEY_PATH   (flush only, via flair-client)

@@ -1,25 +1,10 @@
-/**
- * capture-hook-entry.test.ts — flair#2068: the `flair-capture` ENTRY POINT,
- * spawned as its own process.
- *
- * The spawned cases check exit 0 and ZERO bytes on stdout and stderr for a
- * Stop payload (a PostToolUse/Stop hook's stdout is harness-interpreted
- * surface), that an error-then-fix sequence stages exactly one candidate, and
- * that a malformed payload stages nothing. No network call is made: the flush
- * is a separate process and needs FLAIR_CAPTURE_FLUSH_SPEC, which these tests
- * omit.
- *
- * Spawns the SOURCE entry, not dist/, for the reason recorded in
- * session-start-hook-probe.test.ts: this lane builds flair-client but never
- * this package, so dist/ is not guaranteed to exist. Hermetic: each test gets
- * its own temp HOME and FLAIR_CAPTURE_DIR inside it.
- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { installCapturePackage } from "../../../test/helpers/capture-package.ts";
 import { pendingPath, spoolPath } from "../src/capture-spool.ts";
 
 const ENTRY = join(import.meta.dir, "..", "src", "capture-hook.ts");
@@ -59,7 +44,6 @@ function run(payload: unknown): Promise<{ status: number | null; signal: string 
   });
 }
 
-/** A failed Bash call, in the PostToolUseFailure shape Claude Code 2.1.287 builds. */
 function failure(command: string): Record<string, unknown> {
   return {
     session_id: "s1",
@@ -83,7 +67,7 @@ function records(): unknown[] {
 }
 
 describe("capture entry point (spawned)", () => {
-  test("a decision turn exits 0 with no output and stages one candidate", async () => {
+  test("a cue-matching turn exits 0 with no output and stages one candidate", async () => {
     const res = await run({ hook_event_name: "Stop", session_id: "s1", last_assistant_message: "Decision: prefer host-a for embeddings." });
     expect(res.status).toBe(0);
     expect(res.stderr).toBe("");
@@ -91,7 +75,7 @@ describe("capture entry point (spawned)", () => {
     expect(records().length).toBe(1);
   });
 
-  test("an error-then-fix sequence stages exactly one candidate and no output", async () => {
+  test("a failed call and matching success stage exactly one candidate and no output", async () => {
     const failed = await run(failure("bun test foo"));
     expect(failed.status).toBe(0);
     expect(failed.stdout).toBe("");
@@ -136,4 +120,15 @@ describe("capture entry point (spawned)", () => {
     expect(stderr).toBe("");
     expect(records().length).toBe(0);
   });
+  test("the packed flair-capture bin handles --flush without reading a Stop payload", () => {
+    const fixture = installCapturePackage(home);
+    execFileSync("npx", ["--offline", "-y", "-p", fixture.spec, "flair-capture", "--flush"], {
+      cwd: fixture.cwd,
+      env: { ...fixture.env, FLAIR_AGENT_ID: "agent-a", FLAIR_CAPTURE_DIR: dir },
+      input: JSON.stringify({ hook_event_name: "Stop", last_assistant_message: "Decision: prefer host-a for embeddings." }),
+      timeout: 10_000, stdio: ["pipe", "pipe", "pipe"],
+    });
+    expect(existsSync(spoolPath(dir, "agent-a"))).toBe(false);
+  }, 120_000);
+
 });

@@ -1,9 +1,8 @@
-- **`flair hook install --capture` wires Claude Code PostToolUseFailure, PostToolUse and Stop hooks that stage failed-command fixes and stated decisions as candidate memories (flair#2068).**
+- **`flair hook install --capture` wires Claude Code PostToolUseFailure, PostToolUse and Stop hooks that stage command follow-ups and cue-matching sentences as candidate memories (flair#2068).**
 
-  The hook redacts one candidate, appends it to a bounded, private spool under
-  `~/.flair/capture/`, and returns without a network call; a detached background
-  flush writes it through Flair's normal path, so a candidate may be written
-  later or be evicted before it is. Install and status probe the provisioned copy;
+  The hook may redact a candidate and append it to a bounded, private spool under
+  `~/.flair/capture/`. Network writes run in a detached flush; a candidate may
+  wait or be evicted before a write. Install and status probe the provisioned copy;
   uninstall removes every matching entry for all three events and the provisioned
   directory.
 

@@ -1,20 +1,3 @@
-/**
- * Hook runtime provisioning (flair#2067, flair#2068).
- *
- * A Flair-owned, version-matched copy of a hook entry point and the modules it
- * imports, provisioned under `~/.flair/hooks/<key>/<version>-<content hash>/`,
- * so a hook survives npm cache eviction and can be executed by a stable
- * absolute path. The provisioning, the never-lower-safe copy checks and the
- * "does the installed command actually work?" certification are ONE
- * descriptor-driven mechanism shared by every hook that needs it — the
- * action-recall PreToolUse hook (flair#2067) and the capture PostToolUse/Stop
- * hook (flair#2068). Adding a third hook is a descriptor, not a second
- * mechanism.
- *
- * The concrete certification probe stays per-hook (what "working" means
- * differs), but the copy/provision/verify scaffolding below is common.
- */
-
 import { accessSync, chmodSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -34,7 +17,6 @@ export type ActionRecallRuntimeResult =
   | { ok: true; runtime: ActionRecallRuntime }
   | { ok: false; reason: string };
 
-/** Everything that differs between two provisioned hook artifacts. */
 export interface HookArtifactDescriptor {
   /** Install subdirectory under ~/.flair/hooks, e.g. "action-recall". */
   readonly key: string;
@@ -142,7 +124,6 @@ function packageVersion(packageDir: string): string | null {
   }
 }
 
-/** True when `path` is a built, version-matched hook artifact of `descriptor`. */
 export function isBuiltHookArtifact(path: string, descriptor: HookArtifactDescriptor): boolean {
   if (!isRegularFile(path)) return false;
   try {

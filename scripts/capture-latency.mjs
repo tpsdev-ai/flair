@@ -56,6 +56,7 @@ function measureInProcess(runs, home, stubBin) {
   const dir = join(home, "inproc");
   const program = `
     import { appendRecord, flushStampPath, readSpool, runCapture, spoolPath, CAPTURE_SPOOL_MAX_RECORDS } from ${JSON.stringify(SPOOL_SOURCE)};
+    import { captureHash } from ${JSON.stringify(join(ROOT, "packages/flair-mcp/src/capture.ts"))};
     import { kickBackgroundFlush } from ${JSON.stringify(HOOK_SOURCE)};
     import { readFileSync, rmSync, statSync } from "node:fs";
     import { performance } from "node:perf_hooks";
@@ -64,7 +65,7 @@ function measureInProcess(runs, home, stubBin) {
     const spawns = ${JSON.stringify(join(home, "spawns.log"))};
     const env = { FLAIR_AGENT_ID: agent, FLAIR_CAPTURE_DIR: dir, FLAIR_CAPTURE_FLUSH_SPEC: "@tpsdev-ai/flair-mcp@0.0.0-latency", PATH: ${JSON.stringify(stubBin)} + ":/usr/bin:/bin", FLAIR_LATENCY_SPAWNS: spawns };
     for (let i = 0; i < CAPTURE_SPOOL_MAX_RECORDS; i++) {
-      appendRecord(dir, agent, { kind: "decision", content: "x".repeat(380) + i, dedupKey: "fill" + i, provenance: { hook: "Stop", sessionId: "lat", cwd: "/repo/" + "d".repeat(40), capturedAt: new Date().toISOString() } });
+      appendRecord(dir, agent, { kind: "decision", content: "x".repeat(380) + i, dedupKey: captureHash("fill" + i), provenance: { hook: "Stop", sessionId: "lat", cwd: "/repo/" + "d".repeat(40), capturedAt: new Date().toISOString() } });
     }
     const deps = { env, dir, kickFlush: () => kickBackgroundFlush(env) };
     const resetSlot = () => rmSync(flushStampPath(dir, agent), { force: true });

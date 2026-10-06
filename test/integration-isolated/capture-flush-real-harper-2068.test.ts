@@ -1,28 +1,15 @@
-// flair#2068 — the capture background flush, driven through the PRODUCTION
-// client path against a real Harper instance.
-//
-// runCaptureFlush() writes each staged candidate with `PUT /Memory/<id>` through
-// a dynamically loaded FlairClient (the same @tpsdev-ai/flair-client the
-// published hook resolves), NOT an injected request(). Every other flush test
-// injects a fake client; this one closes that seam: it stages one candidate,
-// drains the spool with the real client, and reads the PERSISTED row back — its
-// id, content, the `meta` object and the provenance fields.
-//
-// HOME-isolated: helpers/harper-lifecycle spawns Harper with HOME/ROOTPATH in a
-// fresh temp dir, never ~/.flair. The flush's client factory reads FLAIR_URL and
-// FLAIR_KEY_PATH from process.env, so this file sets those (restoring them
-// afterward), which is why it lives in test/integration-isolated — its own
-// process, no env bleed into sibling integration files.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
+import { execFileSync, spawn } from "node:child_process";
+import { installCapturePackage } from "../helpers/capture-package";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 import { FlairClient } from "../../packages/flair-client/src/client";
-import { buildCaptureMemoryRow } from "../../packages/flair-mcp/src/capture";
-import { appendRecord, readSpool, runCaptureFlush } from "../../packages/flair-mcp/src/capture-spool";
+import { buildCaptureMemoryRow, captureHash, planStop } from "../../packages/flair-mcp/src/capture";
+import { appendRecord, readSpool } from "../../packages/flair-mcp/src/capture-spool";
 import { memoryPutPath } from "../../packages/flair-mcp/src/record-id-path";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -51,7 +38,6 @@ async function registerAgent(harper: HarperInstance, agent: TestAgent): Promise<
 
 let harper: HarperInstance;
 let keyDir: string;
-const savedEnv: Record<string, string | undefined> = {};
 
 describe("flair#2068 — capture flush through the production client path against real Harper", () => {
   beforeAll(async () => {
@@ -60,10 +46,6 @@ describe("flair#2068 — capture flush through the production client path agains
   }, 180_000);
 
   afterAll(async () => {
-    for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
     if (harper) await stopHarper(harper);
     if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
   });
@@ -77,33 +59,23 @@ describe("flair#2068 — capture flush through the production client path agains
     const keyPath = join(keyDir, `${agent.id}.key`);
     await writeFile(keyPath, Buffer.from(agent.secretKey.slice(0, 32)));
 
-    // Point the flush's default client factory at this instance. Saved for the
-    // afterAll restore.
-    for (const key of ["FLAIR_URL", "FLAIR_KEY_PATH", "FLAIR_AGENT_ID"]) {
-      savedEnv[key] ??= process.env[key];
-    }
-    process.env.FLAIR_URL = harper.httpURL;
-    process.env.FLAIR_KEY_PATH = keyPath;
-    process.env.FLAIR_AGENT_ID = agent.id;
-
-    // Stage ONE candidate in the real spool (no flush kicked).
     const dir = join(keyDir, "capture");
     const candidate = {
       kind: "decision" as const,
       content: "Decision: prefer the staged-capture path for the flush check.",
-      dedupKey: `dedup-${agent.id}`,
+      dedupKey: captureHash(`dedup-${agent.id}`),
       provenance: { hook: "Stop" as const, sessionId: `sess-${agent.id}`, cwd: "/work/agent-a", capturedAt: "2026-10-03T00:00:00.000Z" },
     };
     expect(appendRecord(dir, agent.id, candidate)).toBe("appended");
     const staged = readSpool(dir, agent.id);
     expect(staged.length).toBe(1);
 
-    // Drain with NO makeClient: the real defaultClientFactory loads
-    // @tpsdev-ai/flair-client and PUTs /Memory/<id>.
-    const outcome = await runCaptureFlush({ env: { FLAIR_AGENT_ID: agent.id, FLAIR_CAPTURE_DIR: dir }, dir });
-    expect(outcome.flushed).toBe(1);
-    expect(outcome.remaining).toBe(0);
-    expect(readSpool(dir, agent.id).length).toBe(0);
+    const fixture = installCapturePackage(join(keyDir, "npm"));
+    const binEnv = { ...fixture.env, FLAIR_AGENT_ID: agent.id, FLAIR_URL: harper.httpURL, FLAIR_KEY_PATH: keyPath, FLAIR_CAPTURE_DIR: dir };
+    execFileSync("npx", ["--offline", "-y", "-p", fixture.spec, "flair-capture", "--flush"], {
+      cwd: fixture.cwd, env: binEnv, timeout: 30_000, stdio: "pipe",
+    });
+    expect(readSpool(dir, agent.id)).toHaveLength(0);
 
     // Read the PERSISTED row back through the real client's read path.
     const expected = buildCaptureMemoryRow(
@@ -127,5 +99,33 @@ describe("flair#2068 — capture flush through the production client path agains
     expect(stored.meta.dedupKey).toBe(candidate.dedupKey);
     expect(stored.meta.capturedAt).toBe(candidate.provenance.capturedAt);
     expect(stored.meta.sessionId).toBe(candidate.provenance.sessionId);
+
+    const entry = join(fixture.cwd, "node_modules/@tpsdev-ai/flair-mcp/dist/capture-hook.js");
+    const child = spawn(process.execPath, [entry], {
+      cwd: fixture.cwd, env: { ...binEnv, FLAIR_CAPTURE_FLUSH_SPEC: fixture.spec },
+      stdio: ["pipe", "pipe", "pipe"], timeout: 10_000,
+    });
+    const exited = new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    const payload = { hook_event_name: "Stop", session_id: "auto-flush", last_assistant_message: "Decision: choose PostgreSQL for the analytics warehouse." };
+    const automaticRow = buildCaptureMemoryRow(planStop(payload, new Date().toISOString())!, agent.id);
+    child.stdin.end(JSON.stringify(payload));
+    expect(await exited).toBe(0);
+    const deadline = Date.now() + 30_000;
+    let automatic: any;
+    while (Date.now() < deadline) {
+      try {
+        automatic = await client.request("GET", memoryPutPath(automaticRow.id));
+        if (automatic && readSpool(dir, agent.id).length === 0) break;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(automatic?.content).toBe(automaticRow.content);
+    expect(automatic?.meta.sessionId).toBe("auto-flush");
+    expect(automatic?.meta.source).toBe("claude-code-capture");
+    expect(automatic?.visibility).toBe("private");
+    expect(readSpool(dir, agent.id)).toHaveLength(0);
   }, 120_000);
 });

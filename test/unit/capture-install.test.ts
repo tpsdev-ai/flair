@@ -1,12 +1,3 @@
-/**
- * Capture installer (flair#2068) — `flair hook install|uninstall|status
- * --capture`. A fresh temp dir stands in for HOME on every test, torn down
- * after. Never touches the real ~/.claude or ~/.flair.
- *
- * The modules under test (installCaptureHooks / uninstallCaptureHooks /
- * captureHookStatus) did not exist on main, so this file is red there by
- * construction.
- */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -224,4 +215,41 @@ describe("flair hook install --capture", () => {
     expect(after.hooks?.Stop ?? []).toEqual([]);
     expect(after.hooks?.PostToolUseFailure ?? []).toEqual([]);
   });
+  for (const spec of ["missing", "@tpsdev-ai/flair-mcp@0.0.1", "@other/package@0.59.0"]) {
+    it(`status rejects the ${spec} flush spec in a settings file`, () => {
+      expect(install().ok).toBe(true);
+      const config = settings();
+      for (const event of ["PostToolUseFailure", "PostToolUse", "Stop"]) {
+        const command = config.hooks[event][0].hooks[0].command;
+        config.hooks[event][0].hooks[0].command = command.replace(
+          / FLAIR_CAPTURE_FLUSH_SPEC=\S+/,
+          spec === "missing" ? "" : ` FLAIR_CAPTURE_FLUSH_SPEC=${spec}`,
+        );
+      }
+      writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+      const observed = captureHookStatus(home, "claude-code");
+      expect(observed.installed).toBe(false);
+      expect(observed.runtimeFailure).toContain("current flush spec");
+    });
+  }
+
+  for (const variant of ["identical", "different command", "different matcher"]) {
+    it(`status rejects a duplicate with ${variant} in a settings file`, () => {
+      expect(install().ok).toBe(true);
+      const config = settings();
+      const duplicate = JSON.parse(JSON.stringify(config.hooks.PostToolUse[0]));
+      if (variant === "different command") duplicate.hooks[0].command = duplicate.hooks[0].command.replace("FLAIR_AGENT_ID=me", "FLAIR_AGENT_ID=other");
+      if (variant === "different matcher") duplicate.matcher = "Read";
+      config.hooks.PostToolUse.push(duplicate);
+      config.hooks.Stop[0].hooks.push({ ...config.hooks.Stop[0].hooks[0] });
+      writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+      const observed = captureHookStatus(home, "claude-code");
+      expect(observed.installed).toBe(false);
+      expect(observed.problems).toContain("PostToolUse has duplicate capture entries");
+      expect(observed.problems).toContain("Stop has duplicate capture entries");
+      if (variant === "different command") expect(observed.problems).toContain("PostToolUse carries a different command");
+      if (variant === "different matcher") expect(observed.problems).toContain("PostToolUse carries an unexpected matcher");
+    });
+  }
+
 });

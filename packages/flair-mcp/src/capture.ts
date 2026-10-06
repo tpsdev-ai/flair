@@ -1,44 +1,9 @@
-/**
- * Capture-at-the-point-of-learning core (flair#2068).
- *
- * The Claude Code `PostToolUseFailure` + `PostToolUse` + `Stop` hooks share ONE
- * pure module: it turns a hook payload into at most one *candidate memory* (or,
- * for a failed command, a pending error to pair with its later fix), with the
- * whole decision made here so the hot path is a thin, testable shell.
- *
- * WHAT IT CAPTURES
- *   - A failed Bash command (a `PostToolUseFailure` event), and the later
- *     successful call (a `PostToolUse` event) that fixes it, become ONE
- *     candidate memory (deduplicated, bounded).
- *   - A turn whose final assistant text states a decision or correction becomes
- *     ONE candidate memory. A turn with none produces nothing.
- *
- * REDACTION IS PART OF PLANNING, NOT OF STORAGE. Every string that could carry a
- * credential — the failed command, the error excerpt, the fix summary, an
- * extracted decision sentence — goes through the shared credential redactor
- * (./secret-redaction.ts) HERE, before the candidate is returned, so a
- * secret-shaped string never reaches the spool or Flair. This is deliberately
- * stricter than the continuity journal (./continuity.ts), which discards the
- * command entirely: capture keeps the command as the subject of the memory, so
- * it must redact it.
- *
- * BOUNDS. Every stored string is hard-bounded (with a visible ellipsis) so a
- * hook payload cannot grow the spool without limit. The spool's own record and
- * byte caps live in ./capture-spool.ts.
- *
- * This module imports no client, no fs and no network: it must load in the hot
- * path the same way ./action-recall-hook.ts does.
- */
-
 import { createHash } from "node:crypto";
 
 import { redactSecrets } from "./secret-redaction.js";
 
 // ── bounds ──────────────────────────────────────────────────────────────────
 
-/** Hard character bound applied to every stored string. Load-bearing, exactly
- *  as in the continuity journal: it keeps a candidate a summary instead of a
- *  dump. Raising it is a security regression, not an enhancement. */
 export const CAPTURE_BOUND_CHARS = 400;
 
 /** The one secret-shaped replacement the redactor emits, re-exported so callers
@@ -79,22 +44,19 @@ export interface CaptureProvenance {
 }
 
 export interface CaptureCandidate {
-  kind: "error-fix" | "decision";
-  /** The full memory content — already redacted and hard-bounded. */
+  kind: "error-follow-up" | "decision";
   content: string;
   /** Deterministic identity of this learning. Two candidates derived from the
-   *  same pair/sentence share it, so capture is idempotent. */
+   *  same pair/sentence share it. */
   dedupKey: string;
   provenance: CaptureProvenance;
 }
 
-/** A failed command awaiting its fix, held locally (never in Flair) until the
- *  fix arrives or the bound evicts it. */
+/** A failed command awaiting a possible matching follow-up, held locally (never in Flair) until the
+ *  follow-up arrives or the bound evicts it. */
 export interface PendingError {
   signature: string;
-  /** Redacted + bounded. */
   command: string;
-  /** Redacted + bounded error excerpt. */
   error: string;
   /** The pending error's provenance (cwd/session) for the eventual memory. */
   provenance: CaptureProvenance;
@@ -106,7 +68,6 @@ export type PostToolUseAction =
 
 // ── bounding + redaction ────────────────────────────────────────────────────
 
-/** HARD truncate at CAPTURE_BOUND_CHARS with a visible ellipsis. */
 export function hardBoundCapture(text: string, max: number = CAPTURE_BOUND_CHARS): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`;
 }
@@ -130,8 +91,7 @@ export function captureHash(text: string): string {
 
 /** The record id derived from a dedup key: deterministic, URL-safe, and short
  *  enough for a single `/Memory/<id>` path segment. Flushing the same
- *  candidate twice targets the SAME id, which is what makes capture
- *  idempotent. */
+ *  candidate twice targets the same id. */
 export function captureRecordId(dedupKey: string): string {
   return `cap-${dedupKey.slice(0, 32)}`;
 }
@@ -142,12 +102,6 @@ function asNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
-/**
- * The pairing signature of a command: its executable basename plus the first
- * following token (a subcommand or first operand), lower-cased. Enough to pair
- * "git push origin main" failing with "git push --force" succeeding, without
- * pairing unrelated commands. Returns null for an empty/unsafe command.
- */
 export function commandSignature(command: string): string | null {
   const tokens = command.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return null;
@@ -158,7 +112,7 @@ export function commandSignature(command: string): string | null {
 }
 
 /** A path-shaped token appearing anywhere in a command, if any (used so an
- *  Edit/Write to a file named in a failure counts as its fix). */
+ *  Edit/Write to a file named in a failure can match it). */
 export function referencedPath(text: string): string | null {
   const match = text.match(/(?:^|\s)([A-Za-z0-9._/-]*\/[A-Za-z0-9._/-]+|[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,8})(?=\s|$)/);
   return match ? match[1]! : null;
@@ -180,11 +134,6 @@ function toolInputRecord(input: CaptureHookInput): Record<string, unknown> {
 function provenanceFor(input: CaptureHookInput, hook: CaptureHookName, capturedAt: string, tool?: string): CaptureProvenance {
   const sessionId = asNonEmptyString(input.session_id);
   const cwd = asNonEmptyString(input.cwd);
-  // Provenance strings are captured strings too: a credential-shaped session id
-  // or cwd is redacted and hard-bounded with the SAME discipline as the memory
-  // content, BEFORE it is returned — so it never reaches the spool record or the
-  // Flair row (flair#2068 round 2). A field the harness did not send stays
-  // absent, exactly as before.
   return {
     hook,
     ...(tool ? { tool } : {}),
@@ -196,7 +145,7 @@ function provenanceFor(input: CaptureHookInput, hook: CaptureHookName, capturedA
 
 /**
  * A successful tool call's summary, bounded + redacted — what a later
- * candidate memory names as the fix.
+ * candidate memory names as a possible matching follow-up.
  */
 function fixSummary(tool: string, toolInput: Record<string, unknown>): string | null {
   if (tool === "Bash") {
@@ -208,7 +157,7 @@ function fixSummary(tool: string, toolInput: Record<string, unknown>): string | 
   return path ? cleanCaptureText(path) : null;
 }
 
-/** Does a successful call resolve one of the pending errors? */
+/** Does a successful call match one of the pending errors? */
 function resolvingIndex(tool: string, toolInput: Record<string, unknown>, pending: PendingError[]): number {
   if (tool === "Bash") {
     const command = fixSummary(tool, toolInput);
@@ -237,11 +186,11 @@ function errorFixCandidate(error: PendingError, tool: string, toolInput: Record<
   const fix = fixSummary(tool, toolInput);
   if (!fix) return null;
   const content = cleanCaptureText(
-    `A command failed and was later fixed. Failed: ${error.command}. Error: ${error.error}. Fixed by: ${fix}.`,
+    `A command failed. Failed: ${error.command}. Error: ${error.error}. Possible matching follow-up: ${fix}.`,
   );
-  const dedupKey = captureHash(`error-fix\0${error.command}\0${fix}`);
+  const dedupKey = captureHash(`error-follow-up\0${error.command}\0${fix}`);
   const provenance = provenanceFor({ session_id: error.provenance.sessionId, cwd: error.provenance.cwd }, "PostToolUse", capturedAt, tool);
-  return { kind: "error-fix", content, dedupKey, provenance };
+  return { kind: "error-follow-up", content, dedupKey, provenance };
 }
 
 /**
@@ -265,7 +214,7 @@ export function planPostToolUseFailure(input: CaptureHookInput, capturedAt: stri
 }
 
 /**
- * Plan the PostToolUse half: a successful call that resolves a pending error
+ * Plan the PostToolUse half: a successful call that matches a pending error
  * turns it into a single candidate.
  */
 export function planPostToolUse(input: CaptureHookInput, pending: PendingError[], capturedAt: string): PostToolUseAction {
@@ -293,8 +242,8 @@ const DECISION_CUES =
   /\b(?:decision|decided|we(?:'ll| will| should) use|instead of|correction|correcting|i was wrong|chose|choose to|prefer(?:red)?|the right approach|note to self|going forward|from now on|to be clear|we agreed)\b/i;
 
 /**
- * Split assistant prose into sentences and return the FIRST explicit
- * decision/correction sentence, redacted + bounded, or null. One sentence at
+ * Split assistant prose into sentences and return the first cue-matching
+ * sentence, redacted + bounded, or null. One sentence at
  * most: a turn states one decision for the purpose of this capture.
  */
 export function extractDecision(text: string): string | null {
@@ -344,12 +293,6 @@ export interface CaptureMemoryRow {
   createdAt: string;
 }
 
-/**
- * Build the Flair memory row a candidate flushes into, through the normal
- * write path: a stable id (so re-flushing overwrites the same record),
- * authorship provenance in `meta`, tags, and an EXPLICIT private visibility so
- * an agent's own captured learning never leaks to another agent.
- */
 export function buildCaptureMemoryRow(candidate: CaptureCandidate, agentId: string, now: Date = new Date()): CaptureMemoryRow {
   return {
     id: captureRecordId(candidate.dedupKey),
@@ -365,9 +308,6 @@ export function buildCaptureMemoryRow(candidate: CaptureCandidate, agentId: stri
       dedupKey: candidate.dedupKey,
       capturedAt: candidate.provenance.capturedAt,
       ...(candidate.provenance.tool ? { tool: candidate.provenance.tool } : {}),
-      // Redacted and bounded again here, so the row carries no credential-shaped
-      // session id even if a caller hands this builder a raw candidate
-      // (flair#2068 round 2).
       ...(candidate.provenance.sessionId ? { sessionId: cleanCaptureText(candidate.provenance.sessionId) } : {}),
     },
     createdAt: now.toISOString(),

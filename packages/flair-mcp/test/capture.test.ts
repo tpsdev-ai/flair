@@ -1,11 +1,3 @@
-/**
- * Capture core + spool (flair#2068) — the pure planning, the local spool and
- * the background flush through Flair's normal write path.
- *
- * These modules did not exist on main, so this file is red there by
- * construction. A fresh temp dir stands in for HOME and FLAIR_CAPTURE_DIR is
- * pinned inside it on every test; the real ~/.flair is never touched.
- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +7,7 @@ import {
   CAPTURE_BOUND_CHARS,
   buildCaptureMemoryRow,
   captureRecordId,
+  captureHash,
   extractDecision,
   planPostToolUse,
   planPostToolUseFailure,
@@ -50,8 +43,6 @@ const SECRET = `ghp_${"a".repeat(24)}`;
 const BEARER = "Authorization: Bearer abcdefghijklmnopqrstuvwx123";
 const env = () => ({ FLAIR_AGENT_ID: "agent-a", FLAIR_CAPTURE_DIR: dir });
 
-// Payload shapes as Claude Code 2.1.287 builds them: a failed call arrives as
-// PostToolUseFailure with `error`, a successful one as PostToolUse.
 function failedBash(command: string, error = "Exit code 1\nError: boom", extra: Record<string, unknown> = {}) {
   return JSON.stringify({
     session_id: "s1",
@@ -99,14 +90,14 @@ function stop(text: string) {
 }
 
 describe("capture planning", () => {
-  test("a decision sentence is extracted; a turn with none produces nothing", () => {
+  test("a Decision cue is extracted; a routine turn produces nothing", () => {
     expect(extractDecision("I refactored the parser and ran the tests.")).toBeNull();
     expect(planStop(JSON.parse(stop("I refactored the parser and ran the tests.")) as never, new Date().toISOString())).toBeNull();
     const decision = extractDecision("Decision: we will use host-a instead of host-b for the cache.");
     expect(decision).toContain("host-a instead of host-b");
   });
 
-  test("a failed command records a pending error, and its later fix yields one candidate", () => {
+  test("a failed command and a matching success yield one candidate", () => {
     const t = new Date().toISOString();
     const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo")) as never, t);
     if (!failed) throw new Error("expected a pending error");
@@ -114,10 +105,20 @@ describe("capture planning", () => {
     const fixed = planPostToolUse(JSON.parse(okBash("bun test foo")) as never, pending, t);
     expect(fixed.action).toBe("candidate");
     if (fixed.action !== "candidate") throw new Error("expected a candidate");
-    expect(fixed.candidate.kind).toBe("error-fix");
+    expect(fixed.candidate.kind).toBe("error-follow-up");
     expect(fixed.candidate.content).toContain("Failed: bun test foo");
     expect(fixed.candidate.content).toContain("boom");
     expect(fixed.resolved).toBe(0);
+  });
+
+  test("different push targets are labeled as a possible matching follow-up", () => {
+    const t = new Date().toISOString();
+    const failed = planPostToolUseFailure(JSON.parse(failedBash("git push origin main")), t)!;
+    const result = planPostToolUse(JSON.parse(okBash("git push origin feature")), [failed], t);
+    expect(result.action).toBe("candidate");
+    if (result.action !== "candidate") throw new Error("expected candidate");
+    expect(result.candidate.content).toContain("Possible matching follow-up: git push origin feature");
+    expect(result.candidate.content).not.toContain("fixed");
   });
 
   test("an interrupted call, a non-Bash failure and an empty error are not pending errors", () => {
@@ -132,7 +133,7 @@ describe("capture planning", () => {
     expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
   });
 
-  test("an unrelated successful command does not pair with a pending error", () => {
+  test("git status does not pair with a pending bun test error", () => {
     const t = new Date().toISOString();
     const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo")) as never, t);
     if (!failed) throw new Error("expected a pending error");
@@ -187,13 +188,13 @@ describe("capture redaction, end to end (pending file, spool file, flushed row)"
     });
   }
 
-  test("a secret in an Edit/Write file_path used as the fix never reaches disk or Flair", async () => {
+  test("a secret in an Edit/Write file_path used as a follow-up never reaches disk or Flair", async () => {
     const path = `/repo/${SECRET}/config.json`;
     expect(runCapture(failedBash(`cat ${path}`, `cat: ${path}: No such file or directory`), { env: env(), dir }).reason).toBe("error-recorded");
     const pending = readFileSync(pendingPath(dir, "agent-a"), "utf-8");
     expect(runCapture(okWrite(path), { env: env(), dir }).reason).toBe("appended");
     const spool = readFileSync(spoolPath(dir, "agent-a"), "utf-8");
-    expect(spool).toContain("Fixed by: /repo/[redacted]/config.json");
+    expect(spool).toContain("Possible matching follow-up: /repo/[redacted]/config.json");
     for (const text of [pending, spool, await flushRows()]) {
       expect(text).not.toContain(SECRET);
     }
@@ -232,7 +233,7 @@ describe("capture redaction, end to end (pending file, spool file, flushed row)"
 });
 
 describe("capture spool", () => {
-  test("one memory from an error-then-fix sequence, flushed once", async () => {
+  test("one candidate from a failed call and a matching success, flushed once", async () => {
     const kicked: string[] = [];
     const deps = { env: env(), dir, kickFlush: () => kicked.push("x") };
     expect(runCapture(failedBash("bun test foo"), deps).reason).toBe("error-recorded");
@@ -251,7 +252,7 @@ describe("capture spool", () => {
     expect(readSpool(dir, "agent-a").length).toBe(0);
   });
 
-  test("a turn that states a decision produces one memory; a turn with none produces nothing", () => {
+  test("a cue-matching turn stages a candidate; a routine turn does not", () => {
     expect(runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir }).reason).toBe("appended");
     expect(runCapture(stop("I updated the README and fixed a typo."), { env: env(), dir }).reason).toBe("not-capturable");
     expect(readSpool(dir, "agent-a").length).toBe(1);
@@ -269,11 +270,55 @@ describe("capture spool", () => {
       appendRecord(dir, "agent-a", {
         kind: "decision",
         content: `decision number ${i}`,
-        dedupKey: `k${i}`,
+        dedupKey: captureHash(`k${i}`),
         provenance: { hook: "Stop", capturedAt: new Date().toISOString() },
       });
     }
     expect(readSpool(dir, "agent-a").length).toBe(CAPTURE_SPOOL_MAX_RECORDS);
+  });
+
+  test("malformed spool records ahead of a valid record are excluded from the flush", async () => {
+    runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
+    const valid = readSpool(dir, "agent-a")[0]!;
+    const malformed = [
+      { ...valid, dedupKey: "../bad" },
+      ...[[], {}, { ...valid.provenance, sessionId: {} }, { ...valid.provenance, cwd: 12 },
+        { ...valid.provenance, tool: [] }, { ...valid.provenance, hook: "Bogus" },
+        { ...valid.provenance, capturedAt: null }].map((provenance) => ({ ...valid, provenance })),
+    ];
+    writeFileSync(spoolPath(dir, "agent-a"), JSON.stringify({ records: [...malformed, valid] }));
+    expect(readSpool(dir, "agent-a")).toEqual([valid]);
+    const rows: unknown[] = [];
+    const result = await runCaptureFlush({ env: env(), dir, makeClient: () => recordingClient(rows) });
+    expect(result.flushed).toBe(1);
+    expect(result.remaining).toBe(0);
+    expect(rows).toHaveLength(1);
+  });
+
+  test("a row construction failure leaves that record and attempts the next", async () => {
+    runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
+    runCapture(stop("Decision: prefer host-b for search."), { env: env(), dir });
+    let calls = 0;
+    const rows: any[] = [];
+    const result = await runCaptureFlush({
+      env: env(), dir, makeClient: () => recordingClient(rows),
+      now: () => { if (calls++ === 0) throw new Error("bad clock"); return new Date(); },
+    });
+    expect(result.flushed).toBe(1);
+    expect(result.remaining).toBe(1);
+    expect(rows[0].content).toContain("host-b");
+    expect(readSpool(dir, "agent-a")[0]!.content).toContain("host-a");
+  });
+
+  test("malformed pending provenance is skipped ahead of a valid pending error", () => {
+    runCapture(failedBash("bun test foo"), { env: env(), dir });
+    const valid = JSON.parse(readFileSync(pendingPath(dir, "agent-a"), "utf8")).pending[0];
+    writeFileSync(pendingPath(dir, "agent-a"), JSON.stringify({ pending: [
+      { ...valid, provenance: null }, { ...valid, provenance: { sessionId: {} } }, valid,
+    ] }));
+    expect(runCapture(okBash("bun test foo"), { env: env(), dir }).reason).toBe("appended");
+    expect(readSpool(dir, "agent-a")).toHaveLength(1);
+    expect(readSpool(dir, "agent-a")[0]!.provenance.sessionId).toBe("s1");
   });
 
   test("a Flair write failure leaves the record staged, bounded", async () => {
@@ -305,7 +350,7 @@ describe("capture spool", () => {
     expect(left[0]!.content).toContain("host-b");
   });
 
-  test("every spool and pending write waits for the per-agent lock", () => {
+  test("Stop and failure writes refuse a held per-agent lock", () => {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(lockPath(dir, "agent-a"), "held");
     expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("refused");

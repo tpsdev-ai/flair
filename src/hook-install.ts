@@ -1622,8 +1622,8 @@ export function continuityHookStatus(homeDir: string, harness: Harness): Continu
 // ── capture hooks (flair#2068) ───────────────────────────────────────────────
 //
 // The PostToolUseFailure + PostToolUse + Stop hooks that capture at the point
-// of learning: a failed command paired with its later fix, and decisions stated
-// in a turn's final text, staged in a bounded local spool and flushed in the
+// of learning: a failed command paired with a possible matching follow-up, and cue-matching
+// sentences in a turn's final text, staged in a bounded local spool and flushed in the
 // background through Flair's normal write path. Claude Code only (the matchers
 // are Claude tool names). INSTALLING THE HOOKS IS THE OPT-IN, so absence renders as "not
 // enabled", never a failure. The command and provisioning reuse the
@@ -1651,9 +1651,6 @@ export interface CaptureStatus {
   installed: boolean;
   state: "installed" | "absent" | "partial" | "stale";
   runtimeFailure?: string;
-  /** Events that are missing, or whose wired command or matcher is not the
-   *  expected capture hook (flair#2068 round 2). Empty only when all three
-   *  events are wired as expected. */
   problems: string[];
 }
 
@@ -1665,17 +1662,22 @@ function describeCaptureActions(actions: Record<CaptureHookEvent, HookDeltaActio
   return CAPTURE_HOOK_EVENTS.map((event) => `${event}: ${actions[event]}`).join(", ");
 }
 
-function findCaptureEntry(config: any, event: CaptureHookEvent): { group: any; hookIndex: number; groupIndex: number } | null {
+function findCaptureEntries(config: any, event: CaptureHookEvent): Array<{ group: any; hookIndex: number; groupIndex: number }> {
+  const entries: Array<{ group: any; hookIndex: number; groupIndex: number }> = [];
   const groups = config?.hooks?.[event];
-  if (!Array.isArray(groups)) return null;
+  if (!Array.isArray(groups)) return entries;
   for (let gi = 0; gi < groups.length; gi++) {
     const hooks = groups[gi]?.hooks;
     if (!Array.isArray(hooks)) continue;
     for (let hi = 0; hi < hooks.length; hi++) {
-      if (isFlairCaptureCommand(hooks[hi]?.command)) return { group: groups[gi], hookIndex: hi, groupIndex: gi };
+      if (isFlairCaptureCommand(hooks[hi]?.command)) entries.push({ group: groups[gi], hookIndex: hi, groupIndex: gi });
     }
   }
-  return null;
+  return entries;
+}
+
+function findCaptureEntry(config: any, event: CaptureHookEvent) {
+  return findCaptureEntries(config, event)[0] ?? null;
 }
 
 /** The command the wired capture events agree on (the most common one; ties go
@@ -1769,6 +1771,7 @@ export function computeCaptureHookRemoval(config: any): CaptureDelta {
 function captureCommandFailure(command: unknown): string | null {
   const parts = parseCaptureCommand(typeof command === "string" ? command : "");
   if (!parts) return "capture command is not an installer command";
+  if (parts.flushSpec !== captureFlushSpec()) return "capture command requires the current flush spec";
   try {
     const rebuilt = buildCaptureHookCommand(parts.bunPath, parts.artifactPath, parts.agentId, parts.flairUrl, parts.flushSpec);
     if (command !== rebuilt) return "capture command is not an installer command";
@@ -1923,7 +1926,8 @@ export function captureHookStatus(homeDir: string, harness: Harness): CaptureSta
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   const config = read.parsed ?? {};
-  const entries = CAPTURE_HOOK_EVENTS.map((event) => findCaptureEntry(config, event));
+  const matching = CAPTURE_HOOK_EVENTS.map((event) => findCaptureEntries(config, event));
+  const entries = matching.map((entries) => entries[0] ?? null);
   const commands = CAPTURE_HOOK_EVENTS.map((event, i) => {
     const entry = entries[i];
     if (!entry) return null;
@@ -1936,24 +1940,32 @@ export function captureHookStatus(homeDir: string, harness: Harness): CaptureSta
   // The expected command is the one the wired events agree on; an event whose
   // command differs from it is named below (flair#2068 round 2).
   const expected = expectedCaptureCommand(commands);
+  let runtimeFailure: string | null = null;
+  const checked = new Map<string, string | null>();
   for (const [i, event] of CAPTURE_HOOK_EVENTS.entries()) {
-    if (commands[i] === null) problems.push(`${event} missing`);
-    else if (commands[i] !== expected) problems.push(`${event} carries a different command`);
+    const matches = matching[i]!;
+    if (matches.length === 0) problems.push(`${event} missing`);
+    if (matches.length > 1) problems.push(`${event} has duplicate capture entries`);
+    for (const entry of matches) {
+      const command = entry.group.hooks[entry.hookIndex].command as string;
+      if (command !== expected) problems.push(`${event} carries a different command`);
+      const want = CAPTURE_HOOK_MATCHERS[event];
+      const matcher = entry.group.matcher;
+      if (want === null ? matcher != null && matcher !== "" : matcher !== want) {
+        problems.push(`${event} carries an unexpected matcher`);
+      }
+      if (!checked.has(command)) checked.set(command, captureCommandFailure(command));
+      const failure = checked.get(command);
+      if (failure) {
+        runtimeFailure ??= failure;
+        problems.push(`${event}: ${failure}`);
+      }
+    }
   }
   if (presentCount < CAPTURE_HOOK_EVENTS.length) {
     return { path, harness, installed: false, state: "partial", problems };
   }
-  const matcherOk = CAPTURE_HOOK_EVENTS.every((event, i) => {
-    const want = CAPTURE_HOOK_MATCHERS[event];
-    if (want === null) return true;
-    const matcher = entries[i]!.group.matcher;
-    if (matcher === want) return true;
-    problems.push(`${event} matcher is '${typeof matcher === "string" ? matcher : "(none)"}', expected '${want}'`);
-    return false;
-  });
-  const runtimeFailure = captureCommandFailure(expected);
-  if (runtimeFailure) problems.push(runtimeFailure);
-  if (runtimeFailure || !matcherOk || problems.length > 0) {
+  if (runtimeFailure || problems.length > 0) {
     return { path, harness, installed: false, state: "stale", ...(runtimeFailure ? { runtimeFailure } : {}), problems };
   }
   return { path, harness, installed: true, state: "installed", problems };

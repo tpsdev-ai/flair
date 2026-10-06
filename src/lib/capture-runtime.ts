@@ -1,14 +1,3 @@
-/**
- * Capture runtime provisioning + certification (flair#2068).
- *
- * The capture hook is a second consumer of the descriptor-driven provisioning
- * in ./action-recall-runtime.ts: the same versioned, Flair-owned copy under
- * `~/.flair/hooks/capture/<version>-<hash>/`, the same never-lower-safe copy
- * checks, and the same "execute the provisioned command and check what it did"
- * certification. Only the descriptor and the probe (what "working" means for
- * this hook) live here.
- */
-
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -67,14 +56,6 @@ function probeSecret(nonce: string): string {
   return `ghp_${createHash("sha256").update(nonce).digest("hex").slice(0, 24)}`;
 }
 
-/**
- * Certification: run the provisioned command against a synthetic Stop payload
- * whose decision sentence carries a nonce and a secret-shaped token, then read
- * back the local spool. Working means: the command executed (exit 0), it
- * staged exactly one candidate, the candidate contains the nonce, and the
- * secret was redacted — so the probe proves execution, spooling AND redaction,
- * not merely that a file exists.
- */
 export function probeCaptureRuntime(runtime: ActionRecallRuntime, agentId = "flair-probe", flairUrl = "http://localhost:19926", command?: string): string | null {
   const failure = `capture self-test failed (${runtime.bunPath}, ${runtime.artifactPath})`;
   if (!isSupportedExecutable(runtime) || !isBuiltHookArtifact(runtime.artifactPath, CAPTURE_ARTIFACT)) return failure;
@@ -109,8 +90,6 @@ export function probeCaptureRuntime(runtime: ActionRecallRuntime, agentId = "fla
     if (!content.includes(nonce)) return failure;
     if (content.includes(secret)) return failure;
     if (!content.includes("[redacted]")) return failure;
-    // A non-capturable payload must stage nothing: proves the hook plans, not
-    // merely appends.
     writeFileSync(join(dir, `${agentId}.spool.json`), `${JSON.stringify({ v: 1, agentId, records: [] })}\n`, { mode: 0o600 });
     execFileSync("/bin/sh", ["-c", installedCommand], {
       input: JSON.stringify({ hook_event_name: "Stop", session_id: "probe", last_assistant_message: "Routine turn; nothing to record." }),
