@@ -15,7 +15,7 @@
 import { Command } from "commander";
 
 import * as render from "../render.js";
-import { unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { continuityWriteBlockers, probeSessionStartHookDelivery, readClientMcpBlock } from "../doctor-client.js";
 import {
   installHook,
@@ -40,6 +40,7 @@ import {
 } from "../hook-install.js";
 import { resolveActionRecallRuntime } from "../lib/action-recall-runtime.js";
 import { resolveHome } from "../lib/home.js";
+import { sessionStartHookPinFindings } from "../lib/owned-pins.js";
 
 export type HookCli = {
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
@@ -229,8 +230,17 @@ export function register(program: Command): void {
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
+      // flair#2291: `hook status` reads the ONE shared stale-pin finding
+      // (sessionStartHookPinFindings) and hands it to hookStatus, so a present
+      // but stale hook is reported red here, the way `doctor` reports it.
+      const pinFinding = sessionStartHookPinFindings(home).find(
+        (f) => f.reading.target.id === harness,
+      ) ?? null;
       const status = hookStatus(home, harness, {
         deliveryProbe: (command) => probeSessionStartHookDelivery(command),
+        stalePinFinding: pinFinding
+          ? { pin: pinFinding.reading.pin, direction: pinFinding.direction }
+          : null,
       });
 
       // Continuity pair (flair#1257) — reported alongside the SessionStart
@@ -292,6 +302,17 @@ export function register(program: Command): void {
 
       if (!status.wired) {
         console.log(`  ${render.icons.error} ${hookStatusHeadline(status)}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
+        renderContinuity();
+        renderActionRecall();
+        console.log("");
+        process.exit(1);
+      }
+
+      // flair#2291: a wired hook is not necessarily the INSTALLED adapter. A
+      // stale pin is red here, the same finding `doctor` fails on.
+      if (status.pinStale) {
+        console.log(`  ${render.icons.error} SessionStart hook: pinned to flair-mcp@${status.stalePin} (installed CLI is ${flairCliVersion()}) — the hook still launches the OLD adapter on every session`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
         renderContinuity();
         renderActionRecall();

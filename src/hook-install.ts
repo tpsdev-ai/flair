@@ -875,6 +875,11 @@ export interface HookStatusResult {
   /** What status verified, not what it configured (flair#1734). */
   delivery: HookDeliveryState;
   deliveryReasons: string[];
+  /** True when the shared stale-pin finding (see HookStatusOptions.stalePinFinding)
+   *  names this harness's hook as BEHIND the installed CLI (flair#2291). */
+  pinStale: boolean;
+  /** The stale pin that finding named, else null. */
+  stalePin: string | null;
 }
 
 /** Injectable so `hook status` can classify a real run without unit tests spawning npx. */
@@ -888,6 +893,20 @@ export type HookDeliveryProbe = (command: string) => {
 
 export interface HookStatusOptions {
   deliveryProbe?: HookDeliveryProbe;
+  /**
+   * The ONE shared stale-pin finding for this harness, computed by the command
+   * from owned-pins' `sessionStartHookPinFindings` (flair#2291). `hook status`
+   * renders the finding's `behind` direction red, matching `doctor`. Absent or
+   * null means no stale pin. */
+  stalePinFinding?: HookPinFinding | null;
+}
+
+/** The subset of owned-pins' SessionStart-hook pin finding `hook status` needs.
+ *  Structurally compatible with `sessionStartHookPinFindings`'s result, kept as
+ *  a local shape so this module does not depend on owned-pins (flair#2291). */
+export interface HookPinFinding {
+  pin: string | null;
+  direction: "ahead" | "behind" | "unknown";
 }
 
 /**
@@ -1050,12 +1069,14 @@ export function hookStatusFailureLine(status: Pick<HookStatusResult, "silenced" 
 /** Read-only report: is the hook wired, does it look right, and which agent
  *  / Flair instance does it point at (recovered from the wired command). */
 export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOptions = {}): HookStatusResult {
+  const pinStale = opts.stalePinFinding?.direction === "behind";
+  const stalePin = pinStale ? opts.stalePinFinding?.pin ?? null : null;
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   if (read.parseError) {
     return {
       harness, path, wired: false, correctShape: false, silenced: false, stderrDiscarded: false,
-      parseError: read.parseError, delivery: "absent", deliveryReasons: [],
+      parseError: read.parseError, delivery: "absent", deliveryReasons: [], pinStale: false, stalePin: null,
     };
   }
 
@@ -1064,7 +1085,7 @@ export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOp
   if (!existing) {
     return {
       harness, path, wired: false, correctShape: false, silenced: false, stderrDiscarded: false,
-      parseError: null, delivery: "absent", deliveryReasons: [],
+      parseError: null, delivery: "absent", deliveryReasons: [], pinStale: false, stalePin: null,
     };
   }
 
@@ -1081,6 +1102,7 @@ export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOp
     stderrDiscarded: hookCommandDiscardsStderr(command),
     agentId: env.agentId, flairUrl: env.flairUrl, command, parseError: null,
     delivery: assessed.delivery, deliveryReasons: assessed.deliveryReasons,
+    pinStale, stalePin,
   };
 }
 

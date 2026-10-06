@@ -27,9 +27,13 @@ import {
 } from "../install/clients.js";
 import {
   checkSessionStartHook,
+  fixSessionStartHook,
+  hookHarnessFromSettingsPath,
   isFlairHookCommand,
   SESSION_START_HOOK_INVOCATION_RE,
   readClientMcpBlock,
+  sessionStartHookHint,
+  type ApplyOrReportResult,
 } from "../doctor-client.js";
 import {
   decodeWiringSpec,
@@ -344,6 +348,46 @@ export function sessionStartHookPinFindings(
     reading,
     direction: pinDirection(reading.pin, expectedVersion),
   }));
+}
+
+/**
+ * Apply-or-re-pin for a wiring command's SessionStart-hook leg (flair#2291).
+ *
+ * The ONE composition of "add when absent, re-pin when present-but-stale,
+ * report when already current" a wiring command can call. A present hook is
+ * judged against `sessionStartHookPinFindings` (the one stale-pin finding) and
+ * re-pinned through `repinSessionStartHookGuarded` (the one guarded writer); a
+ * present hook whose pin is current (or unpinned) stays a byte-identical
+ * "already wired". This is the composition `flair init` calls for each client's
+ * hook leg — the fifth path (#1485, #1516, #1571, #1779, #2291) closed by shape
+ * rather than by one more per-command check.
+ */
+export function applyOrRepinSessionStartHook(
+  homeDir: string,
+  agentId: string,
+  skip: boolean,
+  settingsPath?: string,
+): ApplyOrReportResult {
+  const existing = checkSessionStartHook(homeDir, settingsPath);
+  if (existing.present) {
+    const harness = hookHarnessFromSettingsPath(existing.path);
+    const stale = sessionStartHookPinFindings(homeDir).some(
+      (f) => f.reading.target.id === harness,
+    );
+    if (!stale) {
+      return { applied: false, ok: true, message: `SessionStart hook already wired in ${existing.path}` };
+    }
+    const repin = repinSessionStartHookGuarded(homeDir, harness);
+    return { applied: repin.action === "update", ok: repin.ok, message: repin.message };
+  }
+
+  const hint = sessionStartHookHint(agentId, existing.path);
+  if (skip) {
+    return { applied: false, ok: false, message: "SessionStart hook skipped (--skip-hook)", hint };
+  }
+
+  const fix = fixSessionStartHook(homeDir, agentId, settingsPath ?? existing.path);
+  return { applied: fix.ok, ok: fix.ok, message: fix.message, hint: fix.ok ? undefined : hint };
 }
 
 /** A stale MCP-client pin, annotated with its direction (flair#1789). */

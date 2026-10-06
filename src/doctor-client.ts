@@ -1929,7 +1929,7 @@ export function applyOrReportClaudeMdBootstrap(cwd: string, homeDir: string, ski
   return { applied: fix.ok, ok: fix.ok, message: fix.message, hint: fix.ok ? undefined : hint };
 }
 
-function sessionStartHookHint(agentId: string, path: string): string {
+export function sessionStartHookHint(agentId: string, path: string): string {
   const snippet = {
     hooks: {
       SessionStart: [
