@@ -113,7 +113,7 @@ Commits must be authored under your own GitHub identity: the address GitHub assi
 
 ## What a maintainer does with your PR
 
-1. Confirms the linked issue is accepted.
+1. Confirms the linked issue has the `accepted` label or was opened by a maintainer.
 2. Waits for the required checks and both reviews, and resolves review-bot findings.
 3. Records the go on the PR and squash-merges.
 
