@@ -30,6 +30,7 @@ let identityReadMs = 0;
 let finalProbe: "timeout" | "error" | "garbage" | "self" | "empty" | "whitespace" | "exit1" | "exit1-stderr" | "exit1-stdout" | "exit1-signal" | "exit1-error" | "exit0-error" = "empty";
 let healthAfterTerm: "refused" | "hang" | "late-refused" | "refuse-on-abort" = "refused";
 let accelerateProbe = false;
+let spawnCalls = 0;
 const identityChecks: number[] = [];
 const identityBudgets: number[] = [];
 const finalProbeTimeouts: number[] = [];
@@ -90,7 +91,7 @@ mock.module("node:child_process", () => ({
     if (cmd === "ps") return `node /fixture/node_modules/harper/dist/bin/harper.js run .`;
     throw new Error(`unexpected execFileSync: ${cmd}`);
   },
-  spawn: () => { throw new Error("unexpected process spawn"); },
+  spawn: () => { spawnCalls++; throw new Error("unexpected process spawn"); },
   spawnSync: (cmd: string, args: string[]) => {
     commands.push([cmd, ...args].join(" "));
     if (cmd === "plutil") return { status: 0, stdout: "OK" };
@@ -171,6 +172,7 @@ beforeEach(() => {
   finalProbe = "empty";
   healthAfterTerm = "refused";
   accelerateProbe = false;
+  spawnCalls = 0;
   for (const items of [commands, signals, identityChecks, identityBudgets, finalProbeTimeouts, healthChecks]) items.length = 0;
   writeFileSync(join(dataDir, "hdb.pid"), String(pid));
   writeFileSync(join(dataDir, "flair-daemon.json"), JSON.stringify({ pid, port, startTimeMs: started, flairVersion: "test" }));
@@ -268,6 +270,29 @@ for (const outcome of ["error", "garbage", "self", "empty", "whitespace", "exit1
     expect(result.detail).toContain(outcome === "self" ? "port still occupied" : "Final listener probe failed");
   });
 }
+
+// Post-merge audit (#2207 finding 1): once the repair has stopped the direct
+// instance and observed it exit, a later listener-probe failure must still go
+// through the attempt to bring that instance back, and report the state it left.
+for (const outcome of ["timeout", "error", "garbage"] as const) {
+  test(`audit #2207: a final listener probe ${outcome} after the direct process exited still attempts a direct restart`, async () => {
+    exitsOnTerm = true;
+    finalProbe = outcome;
+    const result = await failedStop();
+    expect(signals).toEqual(["SIGTERM"]);
+    expect(spawnCalls).toBe(1);
+    expect(result.detail).toMatch(/restart/i);
+  });
+}
+
+// The stop failure where the process was NOT observed to exit (it survived
+// SIGTERM) must keep today's behaviour: nothing was stopped, so no restart.
+test("a stop failure where the process survived SIGTERM attempts no restart", async () => {
+  const result = await failedStop();
+  expect(result.detail).toContain("not observed to exit before the deadline");
+  expect(spawnCalls).toBe(0);
+  expect(result.detail).not.toMatch(/restart/i);
+});
 
 test("the final listener probe gets only the shared deadline's remaining time", async () => {
   exitsOnTerm = true;
