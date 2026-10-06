@@ -97,7 +97,8 @@
     "moment": "^2.31.0",
     "@grpc/grpc-js": "^1.14.5",
     "http-cache-semantics": "^4.3.0",
-    "proxy-addr": "^2.0.8"
+    "proxy-addr": "^2.0.8",
+    "@modelcontextprotocol/sdk": "~1.31.0"
   },
   "devDependencies": {
     "@playwright/test": "1.59.1",
