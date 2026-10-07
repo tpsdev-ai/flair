@@ -36,12 +36,18 @@ function versionInput(
 ): RecordVersionInput {
   const agentId = str(row.agentId);
   const key = str(row.key);
-  const previousSubjectId = previous && previous.key !== key
-    ? soulSubjectId(str(previous.agentId), str(previous.key)) : null;
+  const previousAgentId = str(previous?.agentId);
+  const previousKey = str(previous?.key);
+  // A subject is `agentId:key`, so an identity change is a change to EITHER
+  // half: the previous window closes and a fresh one opens under the new
+  // subject, exactly as a key change already did.
+  const identityChanged = !!previous && (previousAgentId !== agentId || previousKey !== key);
+  const previousSubjectId = identityChanged ? soulSubjectId(previousAgentId, previousKey) : null;
   return {
     subjectType: "soul", subjectId: soulSubjectId(agentId, key), agentId, key,
     kind, rowId: String(row.id), snapshot,
-    previousSubjectId, previousKey: previousSubjectId ? previous.key : null,
+    previousSubjectId, previousKey: previousSubjectId ? previousKey : null,
+    previousAgentId: previousSubjectId ? previousAgentId : null,
     previousRowId: previousSubjectId ? String(previous.id) : null,
   };
 }

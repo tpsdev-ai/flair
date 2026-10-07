@@ -476,4 +476,42 @@ describe("Soul resource version snapshots", () => {
       expect([...store.values()]).toEqual([occupied]);
     }
   });
+
+  test("an operator PUT that changes only agentId closes the old window and opens the new one", async () => {
+    const id = "agent-a:role";
+    soulStore.set(id, { id, agentId: "agent-a", key: "role", value: "before", createdAt: NOW });
+    const result = await soul(id).put({ agentId: "agent-b", key: "role", value: "after" });
+    expect(result instanceof Response).toBe(false);
+    const oldVersions = [...store.values()].filter((v) => v.subjectId === "agent-a:role");
+    const newVersions = [...store.values()].filter((v) => v.subjectId === "agent-b:role");
+    expect(oldVersions.map((v) => v.kind)).toEqual(["delete"]);
+    expect(oldVersions[0].agentId).toBe("agent-a");
+    expect(newVersions.map((v) => v.kind)).toEqual(["update"]);
+    expect(newVersions[0].agentId).toBe("agent-b");
+    expect(newVersions[0].previousVersionHash).toBeNull();
+  });
+
+  test("an operator PATCH that changes only agentId closes the old window and opens the new one", async () => {
+    const id = "agent-a:role";
+    soulStore.set(id, { id, agentId: "agent-a", key: "role", value: "before", createdAt: NOW });
+    const result = await soul(id).patch({ agentId: "agent-b" });
+    expect(result instanceof Response).toBe(false);
+    const oldVersions = [...store.values()].filter((v) => v.subjectId === "agent-a:role");
+    const newVersions = [...store.values()].filter((v) => v.subjectId === "agent-b:role");
+    expect(oldVersions.map((v) => v.kind)).toEqual(["delete"]);
+    expect(newVersions.map((v) => v.kind)).toEqual(["update"]);
+    expect(newVersions[0].agentId).toBe("agent-b");
+  });
+
+  test("an identity no-op update continues the same window and opens no new one", async () => {
+    const id = "agent-a:role";
+    soulStore.set(id, { id, agentId: "agent-a", key: "role", value: "before", createdAt: NOW });
+    expect((await soul(id).put({ agentId: "agent-a", key: "role", value: "v1" })) instanceof Response).toBe(false);
+    expect((await soul(id).patch({ value: "v2" })) instanceof Response).toBe(false);
+    const versions = [...store.values()];
+    expect(new Set(versions.map((v) => v.subjectId))).toEqual(new Set(["agent-a:role"]));
+    expect(versions.map((v) => v.kind)).toEqual(["update", "update"]);
+    expect(versions.some((v) => v.kind === "delete")).toBe(false);
+    expect(versions.map((v) => Number(v.version))).toEqual([1, 2]);
+  });
 });

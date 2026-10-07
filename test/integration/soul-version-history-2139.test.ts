@@ -338,6 +338,46 @@ describe("flair#2139 S1 — Soul lifecycle leaves a chained history", () => {
     expect(JSON.parse(versions[2].soulSnapshot)).toEqual(row);
   }, 120_000);
 
+  test("an operator update that changes only a Soul's agentId closes the old window and opens the new one", async () => {
+    // PUT — the verb the operator CLI's `soul set` and `restore` issue.
+    const putKey = `iv-agentid-put-${sfx}`;
+    const putId = `${A.id}:${putKey}`;
+    await createSoul(putId, A.id, putKey, "before");
+    const put = await call("basic", "PUT", soulPath(putId), { id: putId, agentId: B.id, key: putKey, value: "after" });
+    expect(put.status, put.text.slice(0, 200)).toBeLessThan(300);
+    expect((await versionsOf(`${A.id}:${putKey}`)).map((r) => r.kind)).toEqual(["create", "delete"]);
+    const putNew = await versionsOf(`${B.id}:${putKey}`);
+    expect(putNew.map((r) => r.kind)).toEqual(["update"]);
+    expect(putNew[0].agentId).toBe(B.id);
+    expect(putNew[0].previousVersionHash).toBeNull();
+
+    // PATCH.
+    const patchKey = `iv-agentid-patch-${sfx}`;
+    const patchId = `${A.id}:${patchKey}`;
+    await createSoul(patchId, A.id, patchKey, "before");
+    const patch = await call("basic", "PATCH", soulPath(patchId), { agentId: B.id });
+    expect(patch.status, patch.text.slice(0, 200)).toBeLessThan(300);
+    expect((await versionsOf(`${A.id}:${patchKey}`)).map((r) => r.kind)).toEqual(["create", "delete"]);
+    const patchNew = await versionsOf(`${B.id}:${patchKey}`);
+    expect(patchNew.map((r) => r.kind)).toEqual(["update"]);
+    expect(patchNew[0].agentId).toBe(B.id);
+  }, 180_000);
+
+  test("an identity no-op Soul update opens no new window", async () => {
+    const key = `iv-agentid-noop-${sfx}`;
+    const id = `${A.id}:${key}`;
+    await createSoul(id, A.id, key, "before");
+    const put = await call("basic", "PUT", soulPath(id), { id, agentId: A.id, key, value: "v1" });
+    expect(put.status, put.text.slice(0, 200)).toBeLessThan(300);
+    const patch = await call("basic", "PATCH", soulPath(id), { value: "v2" });
+    expect(patch.status, patch.text.slice(0, 200)).toBeLessThan(300);
+    const versions = await versionsOf(`${A.id}:${key}`);
+    expect(versions.map((r) => r.kind)).toEqual(["create", "update", "update"]);
+    expect(versions.map((r) => Number(r.version))).toEqual([1, 2, 3]);
+    expect(versions.some((r) => r.kind === "delete")).toBe(false);
+    expect(await versionsOf(`${B.id}:${key}`)).toEqual([]);
+  }, 120_000);
+
   test("ordinary and key-change duplicate ids preserve the prior version and Soul row", async () => {
     for (const collision of ["ordinary", "tombstone", "successor"]) {
       const key = `iv-duplicate-${collision}-${sfx}`;

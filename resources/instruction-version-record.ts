@@ -42,12 +42,15 @@ export interface RecordVersionInput {
   /** The addressable version id the caller compared against; null ⇒ unguarded. */
   expectedVersion?: string | null;
   /**
-   * A logical-key change: when set, the write first appends a delete tombstone
-   * to this closed subject, in the same transaction, before the subject's own
-   * record. The old subject's chain is closed, never silently moved.
+   * A subject-identity change: when set, the write first appends a delete
+   * tombstone to this closed subject, in the same transaction, before the
+   * subject's own record. The old subject's chain is closed, never silently
+   * moved.
    */
   previousSubjectId?: string | null;
   previousKey?: string | null;
+  /** The closed subject's own agentId; the tombstone is about the OLD subject. */
+  previousAgentId?: string | null;
   previousRowId?: string | null;
 }
 
@@ -292,7 +295,7 @@ export async function recordVersion(
             id: versionId(input.subjectType, input.previousSubjectId, oldSequence),
             subjectType: input.subjectType,
             subjectId: input.previousSubjectId,
-            agentId: input.agentId,
+            agentId: input.previousAgentId ?? input.agentId,
             key: input.previousKey ?? null,
             version: oldSequence,
             kind: "delete",
