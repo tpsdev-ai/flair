@@ -157,7 +157,8 @@ export interface TeamDirectoryEntry {
   email: string;
   /** The stored publication time, normalized to ISO. */
   publishedAt: string;
-  /** The home instance id, or null when it is not resolvable. */
+  /** The entry's home instance id — the instance that published this entry's
+   *  contact; null when it is not resolvable. */
   homeInstanceId: string | null;
 }
 
