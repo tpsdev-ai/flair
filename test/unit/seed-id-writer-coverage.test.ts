@@ -9,9 +9,10 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  *
  * The guarded Resource paths require the operator source: an authenticated
  * Basic administrator or a deliberate internal call. No storage hook sees
- * every Memory write, so those paths call one decision
- * (`reservedSeedWriteDenial`) before writing. This test inventories raw Memory
- * write sites in its supported source patterns and classifies each as:
+ * every Memory write, so those paths call a reserved-id decision before
+ * writing (`reservedSeedWriteDenial`, or `reservedSeedFeedWriteDenial` for the
+ * feed, which refuses a reserved seed id outright). This test inventories raw
+ * Memory write sites in its supported source patterns and classifies each as:
  *
  *   GUARDED     — the decision runs on the ids this write can land on;
  *   OPERATOR    — the route already requires the operator source;
@@ -37,6 +38,7 @@ add("Memory", [
   "writer:(databases as any).flair.Memory.put#2",
   "writer:super.put#1",
   "writer:super.patch#1",
+  "writer:super.patch#2",
   "writer:(databases as any).flair.Memory.delete#1",
 ], "GUARDED: Memory.post/put/patch/delete call the decision on the URL and body ids first (the put _reindex branch included).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
@@ -132,7 +134,7 @@ function methodBody(src: string, signature: string): string {
 
 test("each GUARDED path runs the decision before it writes", () => {
   const memory = readFileSync("resources/Memory.ts", "utf8");
-  for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any) {", "  async patch(content: any, query?: any) {"]) {
+  for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {", "  async patch(content: any, query?: any) {"]) {
     const body = methodBody(memory, signature);
     const check = body.indexOf('refuseReservedSeedWrite("Memory", writeTargetIds(this, content)');
     expect(check, `${signature} does not call the decision`).toBeGreaterThan(-1);
@@ -152,7 +154,7 @@ test("each GUARDED path runs the decision before it writes", () => {
   expect(memory.match(/validateAndAuthorizeSupersedes\(content, auth, ctx\)/g)?.length).toBe(2);
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
-  const feedCheck = feed.indexOf('reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth)');
+  const feedCheck = feed.indexOf('reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes])');
   expect(feedCheck).toBeGreaterThan(-1);
   expect(feed.indexOf(".flair.Memory.put(")).toBeGreaterThan(feedCheck);
 

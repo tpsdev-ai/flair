@@ -1,7 +1,6 @@
 /**
  * reembed.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair reembed`.
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
@@ -36,14 +35,34 @@ function resolveOpsPort(...args: any[]): any {
   return cli.resolveOpsPort(...args);
 }
 
+/**
+ * flair#2296: re-embed one stored row. The PATCH body names only the two
+ * embedding fields; the server embeds the stored row and writes embedding,
+ * embeddingModel and updatedAt.
+ */
+export async function reembedRow(baseUrl: string, agentId: string, keyPath: string, id: string, intendedModel: string): Promise<boolean> {
+  const res = await authFetch(baseUrl, agentId, keyPath, "PATCH", `/Memory/${encodeRecordId(id)}`, {
+    embedding: null, embeddingModel: null,
+  });
+  if (!res.ok) return false;
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return false;
+  }
+  const model = (body as { embeddingModel?: unknown } | null)?.embeddingModel;
+  return model === intendedModel;
+}
+
 export function register(program: Command): void {
 // ─── flair reembed ────────────────────────────────────────────────────────────
 //
 // ROOT-CAUSE GUARD — recall graph correctness (recall-hnsw-graph-heal).
-// `flair reembed` replaces the stored embedding of many rows IN PLACE (it
-// clears embedding/embeddingModel, then re-PUTs through Memory.put()'s regen
-// branch — the same bulk in-place re-embed path resources/migrations/
-// embedding-stamp.ts uses). Historically, an OLDER (pre-fix) Harper's
+// `flair reembed` replaces the stored embedding of many rows IN PLACE (one
+// PATCH per row, which Memory.patch() completes from the stored row; a bulk
+// in-place re-embed like resources/migrations/embedding-stamp.ts's).
+// Historically, an OLDER (pre-fix) Harper's
 // INCREMENTAL HNSW update left stale/asymmetric reverse edges under bulk
 // re-embed, which collapsed prod recall in July. That engine bug is FIXED in
 // the Harper this ships against (5.1.22) — its update path reconstructs the
@@ -206,10 +225,7 @@ program
           const batch = memories.slice(i, i + batchSize);
           for (const memory of batch) {
             try {
-              const updateRes = await authFetch(baseUrl, agent, privPath, "PUT", `/Memory/${encodeRecordId(memory.id)}`, {
-                id: memory.id, content: memory.content, embedding: undefined, embeddingModel: undefined, agentId: memory.agentId || agent,
-              });
-              if (updateRes.ok) processed++;
+              if (await reembedRow(baseUrl, agent, privPath, memory.id, currentModel)) processed++;
               else errors++;
             } catch { errors++; }
           }
@@ -300,10 +316,7 @@ program
       const batch = candidates.slice(i, i + batchSize);
       for (const memory of batch) {
         try {
-          const updateRes = await authFetch(baseUrl, agentId, privPath, "PUT", `/Memory/${encodeRecordId(memory.id)}`, {
-            id: memory.id, content: memory.content, embedding: undefined, embeddingModel: undefined, agentId: memory.agentId || opts.agent,
-          });
-          if (updateRes.ok) processed++;
+          if (await reembedRow(baseUrl, agentId, privPath, memory.id, currentModel)) processed++;
           else errors++;
         } catch { errors++; }
       }

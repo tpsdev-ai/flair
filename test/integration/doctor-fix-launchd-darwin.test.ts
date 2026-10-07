@@ -27,9 +27,9 @@
 //     would be a different (failing) shape than production.
 //   - Teardown unloads the job BEFORE deleting HOME. KeepAlive:true means a
 //     leftover loaded job outlives the fixture directory. An exit hook
-//     unloads any still-tracked label; it does not signal by pid.
+//     attempts to unload still-tracked labels; it does not signal by pid.
 //
-// Darwin-gated via test.skipIf(!isDarwin) so Linux CI reports a skip.
+// Skipped outside Darwin and when HARPER_HTTP_URL is set.
 // NOT in the #1012 inventory (scripts/check-darwin-gated-tests.mjs skips
 // test/integration*): that inventory re-runs every file, including from a
 // 60s visibility test, and a real Harper boot does not fit. The macOS
@@ -47,7 +47,7 @@ import {
   writeFileSync,
   chmodSync,
 } from "node:fs";
-import type { Dirent } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -69,8 +69,15 @@ import {
 } from "../../src/cli.ts";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.ts";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.ts";
+import { cleanupLaunchdSandbox, unloadJob, type TrackedLaunchdJob } from "../helpers/launchd-job-cleanup.ts";
 
 const isDarwin = process.platform === "darwin";
+const externalHarper = process.env.HARPER_HTTP_URL !== undefined;
+// Every fixture case gates on this one predicate. The "inherited external Harper
+// URL" case re-runs this file with HARPER_HTTP_URL set and requires 0 pass, so a
+// case gated on isDarwin alone fails it.
+const skipFixtureCase = !isDarwin || externalHarper;
+if (externalHarper) console.log("doctor-fix-launchd-darwin: skipped; HARPER_HTTP_URL is set; requires locally spawned Harper");
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI_JS = join(REPO_ROOT, "dist", "cli.js");
 const MODELS_DIR = join(REPO_ROOT, "models");
@@ -86,8 +93,7 @@ const ADOPT_NO_PASS_CASE_BUDGET_MS = 830_000;
 const REFUSE_NO_PASS_CASE_BUDGET_MS = 540_000;
 const INIT_UNCHANGED_CASE_BUDGET_MS = 510_000;
 
-/** Jobs this file loaded. Unloaded on afterEach and on process exit. */
-const LOADED_JOBS = new Set<{ label: string; plistPath: string }>();
+const LOADED_JOBS = new Set<TrackedLaunchdJob>();
 
 /** The last CLI run (doctor --fix / init) — printed by dumpDiagnostics when a case fails. */
 interface CliRun {
@@ -286,6 +292,21 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
     await new Promise((r) => setTimeout(r, 400));
   }
   throw new Error(`no response from ${url} within ${timeoutMs}ms (${last})`);
+}
+
+// Returns the socket's stat once it exists, so a caller reads its mode from this one stat.
+async function waitForSocket(path: string, timeoutMs: number): Promise<Stats> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const st = statSync(path);
+      if (st.isSocket()) return st;
+    } catch {
+      // not there yet
+    }
+    if (Date.now() >= deadline) throw new Error(`${path} did not appear as a socket within ${timeoutMs} ms`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 async function waitDead(pid: number, timeoutMs: number): Promise<void> {
@@ -507,14 +528,6 @@ function diagnosed(body: () => Promise<void>): () => Promise<void> {
   };
 }
 
-function unloadJob(label: string, plistPath: string): void {
-  spawnSync("launchctl", ["unload", plistPath], { encoding: "utf-8", timeout: 10_000, killSignal: "SIGKILL" });
-  const uid = process.getuid?.();
-  if (uid !== undefined) {
-    spawnSync("launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf-8", timeout: 10_000, killSignal: "SIGKILL" });
-  }
-}
-
 function trackJob(label: string, plistPath: string): void {
   LOADED_JOBS.add({ label, plistPath });
 }
@@ -523,14 +536,14 @@ function unloadTracked(): void {
   for (const job of LOADED_JOBS) {
     try {
       unloadJob(job.label, job.plistPath);
-    } catch {
-      /* best effort */
+      LOADED_JOBS.delete(job);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
     }
   }
-  LOADED_JOBS.clear();
 }
 
-if (isDarwin) {
+if (!skipFixtureCase) {
   process.on("exit", unloadTracked);
 }
 
@@ -581,7 +594,6 @@ async function populateDataDir(sb: Sandbox): Promise<void> {
 }
 
 async function doctorFixToManaged(sb: Sandbox): Promise<{ stdout: string; stderr: string }> {
-  trackJob(sb.label, sb.plistPath);
   const result = await runDoctorFix(sb.tmpHome, sb.httpPort);
   await waitForHttp(sb.httpURL, 60_000);
   const after = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
@@ -602,6 +614,7 @@ async function newSandbox(): Promise<Sandbox> {
   mkdirSync(launchAgentsDir, { recursive: true });
   const label = launchdLabel(dataDir);
   const plistPath = launchdPlistPath(label, launchAgentsDir);
+  trackJob(label, plistPath);
   const sb: Sandbox = {
     tmpHome,
     dataDir,
@@ -652,41 +665,42 @@ async function teardown(sb: Sandbox): Promise<void> {
   });
   const restoredPid = restored.kind === "verified" ? restored.pid : null;
   const restoredStart = restoredPid === null ? null : readProcessStartSecondMs(restoredPid);
-  unloadJob(sb.label, sb.plistPath);
-  LOADED_JOBS.forEach((j) => {
-    if (j.label === sb.label) LOADED_JOBS.delete(j);
+  await cleanupLaunchdSandbox(LOADED_JOBS, sb.launchAgentsDir, async () => {
+    const stopOwned = async (pid: number, stillOwned: () => boolean): Promise<void> => {
+      if (!stillOwned() || !isAlive(pid)) return;
+      try { process.kill(pid, "SIGTERM"); } catch { return; }
+      try {
+        await waitDead(pid, 2_000);
+      } catch {
+        if (!stillOwned()) return;
+        try { process.kill(pid, "SIGKILL"); } catch { return; }
+        await waitDead(pid, 2_000);
+      }
+    };
+    const results = await Promise.allSettled([
+      sb.direct?.pid
+        ? stopOwned(sb.direct.pid, () => sb.direct!.exitCode === null && sb.direct!.signalCode === null)
+        : Promise.resolve(),
+      managedPid !== null && managedStart !== null
+        ? stopOwned(managedPid, () => readProcessStartSecondMs(managedPid) === managedStart)
+        : Promise.resolve(),
+      restoredPid !== null && restoredStart !== null && restoredPid !== managedPid && restoredPid !== sb.direct?.pid
+        ? stopOwned(restoredPid, () => readProcessStartSecondMs(restoredPid) === restoredStart)
+        : Promise.resolve(),
+      sb.populate ? stopHarper(sb.populate, { keepInstallDir: true }) : Promise.resolve(),
+    ]);
+    const failures = results.filter((r) => r.status === "rejected");
+    if (failures.length) throw new AggregateError(failures.map((r) => r.reason), `teardown failed for ${sb.tmpHome}`);
+    rmSync(sb.tmpHome, { recursive: true, force: true });
   });
-  const stopOwned = async (pid: number, stillOwned: () => boolean): Promise<void> => {
-    if (!stillOwned() || !isAlive(pid)) return;
-    try { process.kill(pid, "SIGTERM"); } catch { return; }
-    try {
-      await waitDead(pid, 2_000);
-    } catch {
-      if (!stillOwned()) return;
-      try { process.kill(pid, "SIGKILL"); } catch { return; }
-      await waitDead(pid, 2_000);
-    }
-  };
-  const results = await Promise.allSettled([
-    sb.direct?.pid
-      ? stopOwned(sb.direct.pid, () => sb.direct!.exitCode === null && sb.direct!.signalCode === null)
-      : Promise.resolve(),
-    managedPid !== null && managedStart !== null
-      ? stopOwned(managedPid, () => readProcessStartSecondMs(managedPid) === managedStart)
-      : Promise.resolve(),
-    restoredPid !== null && restoredStart !== null && restoredPid !== managedPid && restoredPid !== sb.direct?.pid
-      ? stopOwned(restoredPid, () => readProcessStartSecondMs(restoredPid) === restoredStart)
-      : Promise.resolve(),
-    sb.populate ? stopHarper(sb.populate, { keepInstallDir: true }) : Promise.resolve(),
-  ]);
-  const failures = results.filter((r) => r.status === "rejected");
-  if (failures.length) throw new AggregateError(failures.map((r) => r.reason), `teardown failed for ${sb.tmpHome}`);
-  rmSync(sb.tmpHome, { recursive: true, force: true });
 }
 
 afterEach(async () => {
-  const cases = live.splice(0);
-  const results = await Promise.allSettled(cases.map(teardown));
+  const cases = [...live];
+  const results = await Promise.allSettled(cases.map(async (sb) => {
+    await teardown(sb);
+    live.splice(live.indexOf(sb), 1);
+  }));
   lastCliRun = undefined;
   const failures = results.filter((r) => r.status === "rejected");
   if (failures.length) throw new AggregateError(failures.map((r) => r.reason), "fixture teardown failed");
@@ -846,7 +860,144 @@ function assertDirectSidecar(sb: Sandbox, spawnedPid: number): void {
   });
 }
 
-test.skipIf(!isDarwin)(
+test.skipIf(skipFixtureCase)(
+  "cleanup refusal retains the fixture label and root",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    const refusedCleanup = cleanupLaunchdSandbox(LOADED_JOBS, sb.launchAgentsDir, async () => {
+      rmSync(sb.tmpHome, { recursive: true, force: true });
+    }, (label, path) => unloadJob(label, path, (args, timeout) => {
+      if (args[0] !== "print") return { status: 1, stderr: "fixture refusal" };
+      return spawnSync("launchctl", args, { encoding: "utf-8", timeout });
+    }));
+    await expect(refusedCleanup).rejects.toThrow(`launchd cleanup ${sb.label}: job is still loaded`);
+    expect([...LOADED_JOBS].some(job => job.label === sb.label)).toBe(true);
+    expect(existsSync(sb.tmpHome)).toBe(true);
+    expect(launchctlList(sb.label).code).toBe(0);
+  }),
+  900_000,
+);
+
+test.skipIf(skipFixtureCase)(
+  "inherited external Harper URL skips fixture cases",
+  async () => {
+    let requests = 0;
+    const external = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++;
+        return new Response("unexpected external request", { status: 500 });
+      },
+    });
+    try {
+      const child = Bun.spawn([process.execPath, "test", import.meta.path], {
+        cwd: REPO_ROOT,
+        env: { ...process.env, HARPER_HTTP_URL: String(external.url) },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 20_000,
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(code, stderr).toBe(0);
+      expect(stdout).toContain("HARPER_HTTP_URL is set; requires locally spawned Harper");
+      expect(stderr).toMatch(/0 pass/);
+      expect(requests).toBe(0);
+    } finally {
+      external.stop(true);
+    }
+  },
+  30_000,
+);
+
+test.skipIf(skipFixtureCase)(
+  "adopt listener-probe failure attempts restoration of a real Harper instance",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    await stopManagedHarper(sb);
+    const directPid = await directSpawnDetached(sb);
+    assertDirectSidecar(sb, directPid);
+    const shimDir = join(sb.tmpHome, "probe-bin");
+    const failedProbe = join(sb.tmpHome, "failed-probe");
+    mkdirSync(shimDir);
+    writeFileSync(join(shimDir, "lsof"), `#!/bin/sh
+if ! /bin/kill -0 "$ADOPT_TEST_PID" 2>/dev/null && [ ! -e "$ADOPT_TEST_PROBE" ]; then
+  touch "$ADOPT_TEST_PROBE"
+  exit 2
+fi
+exec /usr/sbin/lsof "$@"
+`, { mode: 0o700 });
+    const script = `import { repairLaunchdManagement } from ${JSON.stringify(CLI_JS)};
+const result = await repairLaunchdManagement(${JSON.stringify(sb.dataDir)}, ${sb.httpPort});
+console.log("REPAIR_RESULT:" + JSON.stringify(result));`;
+    // Async, never spawnSync: the direct Harper is THIS runner's child
+    // (directSpawnDetached), and only a running event loop reaps it. Blocked in
+    // spawnSync, the stopped Harper stayed a zombie, which kill(pid, 0) reports
+    // alive — both doctor's liveness probe and the shim's guard — so the stop
+    // ran out its deadline and the fault was never injected (CI, 605498d6). In
+    // production the direct process is reparented to launchd, which reaps it.
+    const child = spawn(nodeBin(), ["--input-type=module", "-e", script], {
+      cwd: REPO_ROOT,
+      env: {
+        ...doctorEnv(sb.tmpHome),
+        PATH: `${shimDir}:${process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin"}`,
+        ADOPT_TEST_PID: String(directPid),
+        ADOPT_TEST_PROBE: failedProbe,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    const startedAt = Date.now();
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+      const timer = setTimeout(() => child.kill("SIGKILL"), 180_000);
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on("close", (code, signal) => {
+        clearTimeout(timer);
+        resolveExit({ code, signal });
+      });
+    });
+    lastCliRun = { what: "repairLaunchdManagement (lsof fault)", exitCode: exit.code, signal: exit.signal, elapsedMs: Date.now() - startedAt, stdout, stderr };
+    const result = { stdout, stderr };
+    expect(exit.signal, stdout + stderr).toBeNull();
+    expect(exit.code, stdout + stderr).toBe(0);
+    expect(existsSync(failedProbe), `the lsof shim never failed a probe after the direct process exited:\n${stdout}${stderr}`).toBe(true);
+    const line = result.stdout.split("\n").find((value) => value.startsWith("REPAIR_RESULT:"));
+    expect(line).toBeDefined();
+    const repair = JSON.parse(line!.slice("REPAIR_RESULT:".length));
+    expect(repair.kind).toBe("failed");
+    expect(repair.detail).toContain("Final listener probe failed");
+    expect(repair.detail).toContain("Flair was restarted directly");
+    expect(repair.remedy).toEqual(["flair doctor --fix"]);
+    expect(isAlive(directPid)).toBe(false);
+    const restoredPid = instancePid(sb.dataDir, sb.httpPort);
+    expect(restoredPid).not.toBeNull();
+    expect(restoredPid).not.toBe(directPid);
+    expect(launchctlList(sb.label).code).not.toBe(0);
+    expect(isAlive(restoredPid!)).toBe(true);
+    const health = await fetch(`${sb.httpURL}/Health`, { signal: AbortSignal.timeout(2_000) });
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ ok: true });
+  }),
+  850_000,
+);
+
+test.skipIf(skipFixtureCase)(
   "corrupt or missing launchd plist: doctor --fix regenerates and comes up managed",
   diagnosed(async () => {
     requireCliBuild();
@@ -871,7 +1022,7 @@ test.skipIf(!isDarwin)(
   CORRUPT_PLIST_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(skipFixtureCase)(
   "detached direct-spawned instance: doctor --fix adopts into launchd, bouncing once",
   diagnosed(async () => {
     requireCliBuild();
@@ -906,9 +1057,10 @@ test.skipIf(!isDarwin)(
     // doctor classify treats 0700 and 0600 as default-clean. Group/world bits
     // (0755) are the canary-red finding — do not allow-list those.
     const socketPath = join(sb.dataDir, "operations-server");
-    expect(existsSync(socketPath), "ops socket must exist after adopt").toBe(true);
+    // HTTP up does not mean the operations socket is bound yet: wait for it, bounded.
+    const socketStat = await waitForSocket(socketPath, 10_000);
     expect(statSync(sb.dataDir).mode & 0o777, "data dir must be 0700 after first adopt start").toBe(0o700);
-    const socketMode = statSync(socketPath).mode & 0o777;
+    const socketMode = socketStat.mode & 0o777;
     expect(socketMode & 0o077, "ops socket must be owner-only after first adopt start").toBe(0);
     expect(
       socketMode === 0o600 || socketMode === 0o700,
@@ -922,7 +1074,7 @@ test.skipIf(!isDarwin)(
   ADOPT_DETACHED_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(skipFixtureCase)(
   "adopt with NO pass file and a proven env credential: doctor writes the 0600 file and adopts (flair#1685)",
   diagnosed(async () => {
     requireCliBuild();
@@ -955,7 +1107,7 @@ test.skipIf(!isDarwin)(
   ADOPT_NO_PASS_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(skipFixtureCase)(
   "regenerate with NO pass file, no live process, and no env credential: refuse and write no plist (flair#1685)",
   diagnosed(async () => {
     requireCliBuild();
@@ -985,7 +1137,7 @@ test.skipIf(!isDarwin)(
   REFUSE_NO_PASS_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(skipFixtureCase)(
   "flair init on an already-adopted instance leaves the plist byte-identical (flair#1693)",
   diagnosed(async () => {
     requireCliBuild();
@@ -1009,7 +1161,7 @@ test.skipIf(!isDarwin)(
   INIT_UNCHANGED_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(skipFixtureCase)(
   "built flair stop verifies the managed Harper exited and removes its sidecar",
   diagnosed(async () => {
     requireCliBuild();

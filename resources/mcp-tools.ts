@@ -1,5 +1,5 @@
 /**
- * mcp-tools.ts — the 17 curated flair tools for the Model-2 custom /mcp handler.
+ * mcp-tools.ts — the 18 curated flair tools for the Model-2 custom /mcp handler.
  * Curated BY CONSTRUCTION: this module implements a fixed set of tools, each a
  * thin wrapper over the existing flair Resource handler. No business logic is
  * re-implemented — the wrapped handlers (Memory / SemanticSearch /
@@ -14,7 +14,7 @@
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
  *   memory_basement · memory_restore · skill_store · skill_search · skill_get ·
  *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent ·
- *   attention · record_usage
+ *   attention · record_usage · team_directory
  *
  * ── The scoping seam ────────────────────────────────────────────────────────
  * The /mcp handler resolves the OAuth token's `sub` → a flair `Agent` id, then
@@ -801,6 +801,19 @@ async function recordUsage(agent: ResolvedAgent, args: any) {
 
 type ToolImpl = (agent: ResolvedAgent, args: any) => Promise<any>;
 
+async function teamDirectory(agent: ResolvedAgent, args: any) {
+  // Lazy import so this module keeps no top-level Harper link (the same reason
+  // the handler classes above load on first use).
+  const { resolveTeamDirectory } = await import("./team-directory.js");
+  const result = await resolveTeamDirectory(delegationContext(agent), {
+    id: args?.id,
+    name: args?.name,
+    cursor: args?.cursor,
+    limit: args?.limit,
+  });
+  return unwrap(result);
+}
+
 // ── flair#1213 — the connector CONSUMER CONTRACT, co-located with each tool ──
 //
 // Each ToolEntry below carries a declarative `contract`: the SHAPE and
@@ -1338,6 +1351,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         // identity block in MemoryBootstrap's response tail).
         "soulTokens", "memoryTokens", "trustTokens", "eventsTokens", "scaffoldTokens",
         "skillsTokens", "skillDiagnosticsTokens",
+        "directoryHint",
       ],
       fieldTypes: {
         agentId: "string", soul: "object", memories: "array", predicted: "array",
@@ -1351,6 +1365,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         eventWatermark: "string", eventsHasMore: "boolean", eventsRemaining: "number",
         skills: "array", skillDiagnostics: "array", skillsTruncated: "number",
         skillDiagnosticsTruncated: "number", skillsTokens: "number", skillDiagnosticsTokens: "number",
+        directoryHint: "string",
       },
       invariants: {
         // count == delivered — the historical count/charge/deliver drift.
@@ -1493,6 +1508,20 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
       },
     },
   },
+  team_directory: {
+        impl: teamDirectory,
+    contract: {
+      summary: "{ entries: TeamDirectoryEntry[], nextCursor, hasMore, limit, generatedAt } — active agent-kind principals with a published tps-mail contact.",
+      requiredFields: ["entries", "nextCursor", "hasMore", "limit", "generatedAt"],
+      fieldTypes: { entries: "array", hasMore: "boolean", limit: "number", generatedAt: "string" },
+      invariants: {
+        selfDescribingEmpty: [{ path: "entries", type: "array" }],
+        containerRules: [{ container: "entries", requiredFields: ["agentId", "name", "platform", "email", "publishedAt", "homeInstanceId"] }],
+        fullyResolved: true,
+      },
+      errorShape: { trigger: "a caller that is not a verified active agent", fields: ["error", "status"] },
+    },
+  },
   record_usage: {
         impl: recordUsage,
     contract: {
@@ -1504,7 +1533,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   },
 });
 
-/** The tool definitions for a tools/list response (exactly the 17 curated tools). */
+/** The tool definitions for a tools/list response (exactly the 18 curated tools). */
 export function listToolDefs(): McpToolDef[] {
   return Object.values(TOOLS).map((t) => t.def);
 }

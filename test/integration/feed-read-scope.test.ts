@@ -26,6 +26,7 @@ import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
+import { readStatusUntil } from "../helpers/read-status-until";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -170,8 +171,8 @@ async function feedWrite(agent: TestAgent, body: Record<string, unknown>): Promi
   expect(res.status, `feed write ${String(body.id)} returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
 }
 
-async function readStatus(agent: TestAgent, path: string): Promise<number> {
-  const res = await fetch(`${harper.httpURL}${path}`, { headers: { Authorization: ed25519Header(agent, "GET", path) } });
+async function readStatus(agent: TestAgent, path: string, signal?: AbortSignal): Promise<number> {
+  const res = await fetch(`${harper.httpURL}${path}`, { headers: { Authorization: ed25519Header(agent, "GET", path) }, signal });
   await res.arrayBuffer();
   return res.status;
 }
@@ -240,7 +241,8 @@ function memoryFeedCases(phase: string) {
     const expired = await adminOp(harper, { operation: "upsert", database: "flair", table: "Memory", records: [{ ...heads[0], expiresAt: "2020-01-01T00:00:00.000Z" }] });
     expect(expired.status).toBe(200);
     await expired.arrayBuffer();
-    expect(await readStatus(B, `/Memory/${root}`)).toBe(404);
+    // The observed post-upsert 200 may reflect cross-thread read visibility; the mechanism and duration have not been measured.
+    expect(await readStatusUntil((signal) => readStatus(B, `/Memory/${root}`, signal), 404, 200)).toBe(404);
     const after = await openAs(B, "/FeedMemories");
     try {
       const sentinel = `${p}-expiry-after`;

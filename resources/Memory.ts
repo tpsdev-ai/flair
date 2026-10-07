@@ -59,6 +59,7 @@ import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-track
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 import { refuseReservedSeedWrite, reservedSeedWriteDenial, reservedSeedSubjectDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
+import { refuseContentSuffixId } from "./memory-id-guard.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -913,6 +914,13 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
   });
 }
 
+/** flair#2296: a PATCH body that sets both embedding fields to null and nothing else (an `id` aside). */
+function isReembedPatch(content: any): boolean {
+  if (!content || typeof content !== "object" || Array.isArray(content)) return false;
+  if (content.embedding !== null || content.embeddingModel !== null) return false;
+  return Object.keys(content).every((key) => key === "id" || key === "embedding" || key === "embeddingModel");
+}
+
 export class Memory extends (databases as any).flair.Memory {
   /**
    * Self-authorize now that the global gate is non-rejecting. Closes the P0
@@ -1106,6 +1114,8 @@ export class Memory extends (databases as any).flair.Memory {
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
+    if (contentSuffixDenial) return contentSuffixDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // Rate limiting — use authenticated agent ID, not client-supplied body field
@@ -1147,6 +1157,11 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
+    const postUrlTargetId = (this as any).getId?.();
+    if (content && typeof content === "object" && content.id == null &&
+      (typeof postUrlTargetId === "string" || typeof postUrlTargetId === "number")) {
+      content.id = postUrlTargetId;
+    }
     const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
@@ -1467,10 +1482,14 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   async patch(content: any, query?: any) {
+    // flair#2296: decided on the body as sent; the guards below add fields to it.
+    const reembedRequest = isReembedPatch(content);
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content), query);
+    if (contentSuffixDenial) return contentSuffixDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
     // flair#1383 — patch() routes past put(), so it needs its own refuse.
@@ -1558,6 +1577,30 @@ export class Memory extends (databases as any).flair.Memory {
     const resolvedStored = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedStored.denial) return resolvedStored.denial;
     const existingForSkill = resolvedStored.row;
+    // flair#2296: a re-embed request (`flair reembed`). The vector is computed
+    // from the stored row, and the PATCH writes embedding, embeddingModel and
+    // updatedAt, so no other stored field is rewritten. It changes no skill
+    // content, so the skill refusal below does not apply to it.
+    if (reembedRequest) {
+      if (!existingForSkill) return NOT_FOUND();
+      const auth = await resolveAgentAuth((this as any).getContext?.());
+      if (auth.kind === "agent" && !auth.isAdmin &&
+          isForbiddenOwnerMutation(existingForSkill, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+        return FORBIDDEN("forbidden: cannot write memory owned by another agent");
+      }
+      const embedText = skillEmbedText(existingForSkill);
+      if (typeof embedText !== "string" || embedText.length === 0) {
+        return Response.json({ error: "reembed_no_text", message: "the stored row has no text to embed" }, { status: 422 });
+      }
+      const embedding = await getEmbedding(embedText, "document");
+      if (!embedding || embedding.length === 0 || !embedding.every((value) => typeof value === "number" && Number.isFinite(value))) {
+        return Response.json({ error: "embedding_unavailable", message: "the embedding engine returned no vector; the stored row is unchanged, retry" }, { status: 503 });
+      }
+      const fields = { id: existingForSkill.id, embedding, embeddingModel: getModelId(), updatedAt: new Date().toISOString() };
+      await super.patch(fields, query);
+      noteWriteStamp(fields.embeddingModel);
+      return Response.json({ id: fields.id, embeddingModel: fields.embeddingModel, updatedAt: fields.updatedAt });
+    }
     const skillDenial = rejectSkillWritePath(content) ?? rejectSkillWritePath(existingForSkill);
     if (skillDenial) return skillDenial;
     // ── flair#1960 r2: a SEMANTIC patch re-stamps provenance ────────────────
@@ -1595,12 +1638,14 @@ export class Memory extends (databases as any).flair.Memory {
     return super.patch(content, query);
   }
 
-  async put(content: any) {
+  async put(content: any, query?: any) {
     const reembedding = content?.embedding === null && content?.embeddingModel === null;
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content), query);
+    if (contentSuffixDenial) return contentSuffixDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
     // Reindex migration bypass: admin-only escape hatch used by the
@@ -1726,6 +1771,11 @@ export class Memory extends (databases as any).flair.Memory {
     if (resolvedExisting.denial) return resolvedExisting.denial;
     const preExisting = resolvedExisting.row;
     const requestedPayload = { ...content };
+    const urlTargetId = (this as any).getId?.();
+    if (content && typeof content === "object" && content.id == null &&
+      (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
+      content.id = urlTargetId;
+    }
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
@@ -1925,10 +1975,6 @@ export class Memory extends (databases as any).flair.Memory {
 
     // Re-generate embedding if content changed (no-op if the dedup gate above
     // already computed one for this content). flair#504 Phase 2: 'document'
-    // — this is also the regen branch `flair reembed` triggers (clears
-    // embedding/embeddingModel then hits this put()), so it's what actually
-    // re-embeds a stale row WITH the prefix once stage 2 runs. flair#1542:
-    // skill-tagged rows embed from `trigger` (skillEmbedText), not `content`.
     const embedText = skillEmbedText(content);
     if (embedText && !content.embedding) {
       const vec = await getEmbedding(embedText, "document");
@@ -2058,6 +2104,10 @@ export class Memory extends (databases as any).flair.Memory {
       "Memory", [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], ctx, auth,
     );
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(
+      [id, ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)], id,
+    );
+    if (contentSuffixDenial) return contentSuffixDenial;
     // Read stored ownership, not the read-scoped get() response. Enforce here
     // as well as middleware so MCP/in-process callers have the same policy.
     const record = await super.get(id);

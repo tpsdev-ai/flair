@@ -1,9 +1,3 @@
-/**
- * Resolve the runtime for the action-recall PreToolUse hook (flair#2067 slice 2).
- *
- * Probe the installed command against an isolated cache before accepting it.
- */
-
 import { accessSync, chmodSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -22,6 +16,21 @@ export interface ActionRecallRuntime {
 export type ActionRecallRuntimeResult =
   | { ok: true; runtime: ActionRecallRuntime }
   | { ok: false; reason: string };
+
+export interface HookArtifactDescriptor {
+  /** Install subdirectory under ~/.flair/hooks, e.g. "action-recall". */
+  readonly key: string;
+  /** The built entry file under dist/, e.g. "action-recall-hook.js". */
+  readonly artifactFile: string;
+  /** The npm bin name the package.json must map to `dist/<artifactFile>`. */
+  readonly binName: string;
+  /** The build marker prefix stamped by scripts/write-hook-build-markers.mjs. */
+  readonly marker: string;
+  /** The dist modules copied alongside the entry. */
+  readonly runtimeFiles: readonly string[];
+  /** The env var that overrides the artifact path (tests / isolated repros). */
+  readonly envArtifact: string;
+}
 
 export function isExecutableFile(path: string): boolean {
   try {
@@ -80,8 +89,8 @@ export function resolveBunPath(env: NodeJS.ProcessEnv = process.env): string | n
 }
 
 /** The built artefact path, given the flair-mcp package directory. */
-export function actionRecallArtifactForPackage(packageDir: string): string {
-  return join(packageDir, "dist", "action-recall-hook.js");
+export function hookArtifactForPackage(packageDir: string, descriptor: HookArtifactDescriptor): string {
+  return join(packageDir, "dist", descriptor.artifactFile);
 }
 
 /** Locate the installed @tpsdev-ai/flair-mcp package directory. */
@@ -97,7 +106,9 @@ export function resolveFlairMcpPackageDir(fromUrl: string, env: NodeJS.ProcessEn
     const npxDir = join(cache, "_npx");
     for (const entry of readdirSync(npxDir).sort()) {
       const packageDir = join(npxDir, entry, "node_modules", FLAIR_MCP_PACKAGE);
-      if (isBuiltActionRecallArtifact(actionRecallArtifactForPackage(packageDir))) return packageDir;
+      if (isBuiltHookArtifact(hookArtifactForPackage(packageDir, ACTION_RECALL_ARTIFACT), ACTION_RECALL_ARTIFACT)) {
+        return packageDir;
+      }
     }
   } catch {}
   return null;
@@ -113,28 +124,23 @@ function packageVersion(packageDir: string): string | null {
   }
 }
 
-function isBuiltActionRecallArtifact(path: string): boolean {
+export function isBuiltHookArtifact(path: string, descriptor: HookArtifactDescriptor): boolean {
   if (!isRegularFile(path)) return false;
   try {
     const packageDir = dirname(dirname(path));
     const pkg = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
-    return path === actionRecallArtifactForPackage(packageDir)
+    return path === hookArtifactForPackage(packageDir, descriptor)
       && pkg.name === FLAIR_MCP_PACKAGE
       && pkg.version === flairCliVersion()
-      && pkg.bin?.["flair-action-recall"] === "dist/action-recall-hook.js"
-      && readFileSync(path, "utf8").split("\n", 3).includes(`// flair-action-recall-built@${pkg.version}`);
+      && pkg.bin?.[descriptor.binName] === `dist/${descriptor.artifactFile}`
+      && readFileSync(path, "utf8").split("\n", 3).includes(`// ${descriptor.marker}@${pkg.version}`);
   } catch {
     return false;
   }
 }
 
-const RUNTIME_FILES = [
-  "action-recall-hook.js", "action-recall-run.js", "action-recall-cache.js",
-  "action-recall.js", "env-guard.js", "secret-redaction.js",
-];
-
-export function actionRecallInstallRoot(homeDir: string): string {
-  return join(homeDir, ".flair", "hooks", "action-recall");
+export function hookInstallRoot(homeDir: string, descriptor: HookArtifactDescriptor): string {
+  return join(homeDir, ".flair", "hooks", descriptor.key);
 }
 
 function privateDirectory(path: string): void {
@@ -152,24 +158,31 @@ function ensurePrivateDirectory(path: string): void {
   chmodSync(path, 0o700);
 }
 
-function actionRecallInstallation(runtime: ActionRecallRuntime, homeDir: string) {
+function hookInstallation(runtime: ActionRecallRuntime, homeDir: string, descriptor: HookArtifactDescriptor) {
   const source = dirname(dirname(runtime.artifactPath));
   const files = new Map<string, Buffer>([["package.json", readFileSync(join(source, "package.json"))]]);
-  for (const name of RUNTIME_FILES) files.set(`dist/${name}`, readFileSync(join(source, "dist", name)));
+  for (const name of descriptor.runtimeFiles) files.set(`dist/${name}`, readFileSync(join(source, "dist", name)));
   const hash = createHash("sha256");
   for (const [name, bytes] of files) hash.update(name).update("\0").update(bytes).update("\0");
-  const root = actionRecallInstallRoot(homeDir);
+  const root = hookInstallRoot(homeDir, descriptor);
   const destination = join(root, `${flairCliVersion()}-${hash.digest("hex")}`);
-  return { files, destination, installed: { ...runtime, artifactPath: actionRecallArtifactForPackage(destination) } };
+  return { files, destination, installed: { ...runtime, artifactPath: hookArtifactForPackage(destination, descriptor) } };
 }
 
-export function plannedActionRecallRuntime(runtime: ActionRecallRuntime, homeDir: string): ActionRecallRuntime {
-  return actionRecallInstallation(runtime, homeDir).installed;
+export function plannedHookRuntime(runtime: ActionRecallRuntime, homeDir: string, descriptor: HookArtifactDescriptor): ActionRecallRuntime {
+  return hookInstallation(runtime, homeDir, descriptor).installed;
 }
 
-export function provisionActionRecallRuntime(runtime: ActionRecallRuntime, homeDir: string, agentId: string, flairUrl: string): ActionRecallRuntime {
-  const { files, destination, installed } = actionRecallInstallation(runtime, homeDir);
-  const root = actionRecallInstallRoot(homeDir);
+export function provisionHookRuntime(
+  runtime: ActionRecallRuntime,
+  homeDir: string,
+  agentId: string,
+  flairUrl: string,
+  descriptor: HookArtifactDescriptor,
+  probe: (runtime: ActionRecallRuntime, agentId: string, flairUrl: string, command?: string) => string | null,
+): ActionRecallRuntime {
+  const { files, destination, installed } = hookInstallation(runtime, homeDir, descriptor);
+  const root = hookInstallRoot(homeDir, descriptor);
   ensurePrivateDirectory(join(homeDir, ".flair"));
   ensurePrivateDirectory(join(homeDir, ".flair", "hooks"));
   ensurePrivateDirectory(root);
@@ -185,7 +198,7 @@ export function provisionActionRecallRuntime(runtime: ActionRecallRuntime, homeD
         throw new Error(`unsafe hook file: ${path}`);
       }
     }
-    const failure = probeActionRecallRuntime(installed, agentId, flairUrl);
+    const failure = probe(installed, agentId, flairUrl);
     if (failure) throw new Error(failure);
     return installed;
   } catch (error) {
@@ -195,15 +208,104 @@ export function provisionActionRecallRuntime(runtime: ActionRecallRuntime, homeD
   try {
     privateDirectory(join(stage, "dist"));
     for (const [name, bytes] of files) writeFileSync(join(stage, name), bytes, { mode: 0o600, flag: "wx" });
-    const failure = probeActionRecallRuntime({ ...runtime, artifactPath: actionRecallArtifactForPackage(stage) }, agentId, flairUrl);
+    const failure = probe({ ...runtime, artifactPath: hookArtifactForPackage(stage, descriptor) }, agentId, flairUrl);
     if (failure) throw new Error(failure);
     renameSync(stage, destination);
-    const installedFailure = probeActionRecallRuntime(installed, agentId, flairUrl);
+    const installedFailure = probe(installed, agentId, flairUrl);
     if (installedFailure) throw new Error(installedFailure);
     return installed;
   } finally {
     rmSync(stage, { recursive: true, force: true });
   }
+}
+
+export function isWorkingHookRuntime(
+  runtime: ActionRecallRuntime,
+  descriptor: HookArtifactDescriptor,
+  probe: (runtime: ActionRecallRuntime, agentId: string, flairUrl: string, command?: string) => string | null,
+): boolean {
+  return probe(runtime, "flair-probe", "http://localhost:19926") === null;
+}
+
+export interface ResolveOptions {
+  env?: NodeJS.ProcessEnv;
+  /** import.meta.url of the calling module (for package resolution). */
+  fromUrl: string;
+}
+
+/**
+ * Resolve paths and probe the artifact.
+ */
+export function resolveHookRuntime(
+  opts: ResolveOptions,
+  descriptor: HookArtifactDescriptor,
+  probe: (runtime: ActionRecallRuntime, agentId: string, flairUrl: string, command?: string) => string | null,
+): ActionRecallRuntimeResult {
+  const env = opts.env ?? process.env;
+  const artifactOverride = env[descriptor.envArtifact];
+  let artifactPath: string | null = null;
+  if (artifactOverride !== undefined) {
+    artifactPath = artifactOverride;
+  } else {
+    const packageDir = resolveFlairMcpPackageDir(opts.fromUrl, env);
+    if (packageDir) {
+      const version = packageVersion(packageDir);
+      if (version !== null && version !== flairCliVersion()) {
+        return {
+          ok: false,
+          reason: `@tpsdev-ai/flair-mcp@${version} does not match the running flair@${flairCliVersion()}; reinstall both at the same version`,
+        };
+      }
+      if (version === null) {
+        return { ok: false, reason: `cannot read the version of ${FLAIR_MCP_PACKAGE}` };
+      }
+      artifactPath = hookArtifactForPackage(packageDir, descriptor);
+    }
+  }
+  if (!artifactPath || !isBuiltHookArtifact(artifactPath, descriptor)) {
+    return {
+      ok: false,
+      reason: `the ${descriptor.key} artefact ${artifactPath ?? FLAIR_MCP_PACKAGE} is not a version-matched built hook; run npx -y -p ${FLAIR_MCP_PACKAGE}@${flairCliVersion()} node --version, then retry`,
+    };
+  }
+  const bunPath = resolveBunPath(env);
+  if (!bunPath) {
+    return { ok: false, reason: `no supported Bun executable found (${SUPPORTED_BUN_RANGE}); install Bun and re-run (or set FLAIR_BUN_PATH)` };
+  }
+  const runtime = { bunPath, artifactPath };
+  const reason = probe(runtime, "flair-probe", "http://localhost:19926");
+  return reason ? { ok: false, reason } : { ok: true, runtime };
+}
+
+// ── the action-recall descriptor + probe (flair#2067) ───────────────────────
+
+export const ACTION_RECALL_ARTIFACT: HookArtifactDescriptor = {
+  key: "action-recall",
+  artifactFile: "action-recall-hook.js",
+  binName: "flair-action-recall",
+  marker: "flair-action-recall-built",
+  runtimeFiles: ["action-recall-hook.js", "action-recall-run.js", "action-recall-cache.js", "action-recall.js", "env-guard.js", "secret-redaction.js"],
+  envArtifact: "FLAIR_ACTION_RECALL_ARTIFACT",
+};
+
+export function actionRecallArtifactForPackage(packageDir: string): string {
+  return hookArtifactForPackage(packageDir, ACTION_RECALL_ARTIFACT);
+}
+
+function isBuiltActionRecallArtifact(path: string): boolean {
+  return isBuiltHookArtifact(path, ACTION_RECALL_ARTIFACT);
+}
+
+export function actionRecallInstallRoot(homeDir: string): string {
+  return hookInstallRoot(homeDir, ACTION_RECALL_ARTIFACT);
+}
+
+export function plannedActionRecallRuntime(runtime: ActionRecallRuntime, homeDir: string): ActionRecallRuntime {
+  return plannedHookRuntime(runtime, homeDir, ACTION_RECALL_ARTIFACT);
+}
+
+export function provisionActionRecallRuntime(runtime: ActionRecallRuntime, homeDir: string, agentId: string, flairUrl: string): ActionRecallRuntime {
+  return provisionHookRuntime(runtime, homeDir, agentId, flairUrl, ACTION_RECALL_ARTIFACT, probeActionRecallRuntime);
 }
 
 export function probeActionRecallRuntime(runtime: ActionRecallRuntime, agentId = "flair-probe", flairUrl = "http://localhost:19926", command?: string): string | null {
@@ -249,48 +351,6 @@ export function isWorkingActionRecallRuntime(runtime: ActionRecallRuntime): bool
   return probeActionRecallRuntime(runtime) === null;
 }
 
-export interface ResolveOptions {
-  env?: NodeJS.ProcessEnv;
-  /** import.meta.url of the calling module (for package resolution). */
-  fromUrl: string;
-}
-
-/**
- * Resolve paths and require the installed command to pass its cache probe.
- */
 export function resolveActionRecallRuntime(opts: ResolveOptions): ActionRecallRuntimeResult {
-  const env = opts.env ?? process.env;
-  const artifactOverride = env.FLAIR_ACTION_RECALL_ARTIFACT;
-  let artifactPath: string | null = null;
-  if (artifactOverride !== undefined) {
-    artifactPath = artifactOverride;
-  } else {
-    const packageDir = resolveFlairMcpPackageDir(opts.fromUrl, env);
-    if (packageDir) {
-      const version = packageVersion(packageDir);
-      if (version !== null && version !== flairCliVersion()) {
-        return {
-          ok: false,
-          reason: `@tpsdev-ai/flair-mcp@${version} does not match the running flair@${flairCliVersion()}; reinstall both at the same version`,
-        };
-      }
-      if (version === null) {
-        return { ok: false, reason: `cannot read the version of ${FLAIR_MCP_PACKAGE}` };
-      }
-      artifactPath = actionRecallArtifactForPackage(packageDir);
-    }
-  }
-  if (!artifactPath || !isBuiltActionRecallArtifact(artifactPath)) {
-    return {
-      ok: false,
-      reason: `the action-recall artefact ${artifactPath ?? FLAIR_MCP_PACKAGE} is not a version-matched built hook; run npx -y -p ${FLAIR_MCP_PACKAGE}@${flairCliVersion()} node --version, then retry`,
-    };
-  }
-  const bunPath = resolveBunPath(env);
-  if (!bunPath) {
-    return { ok: false, reason: `no supported Bun executable found (${SUPPORTED_BUN_RANGE}); install Bun and re-run (or set FLAIR_BUN_PATH)` };
-  }
-  const runtime = { bunPath, artifactPath };
-  const reason = probeActionRecallRuntime(runtime);
-  return reason ? { ok: false, reason } : { ok: true, runtime };
+  return resolveHookRuntime(opts, ACTION_RECALL_ARTIFACT, probeActionRecallRuntime);
 }

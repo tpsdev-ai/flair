@@ -31,6 +31,9 @@ import {
   installActionRecall,
   uninstallActionRecall,
   actionRecallHookStatus,
+  installCaptureHooks,
+  uninstallCaptureHooks,
+  captureHookStatus,
   isSupportedHarness,
   SUPPORTED_HARNESSES,
   hookInstallHint,
@@ -39,6 +42,7 @@ import {
   type Harness,
 } from "../hook-install.js";
 import { resolveActionRecallRuntime } from "../lib/action-recall-runtime.js";
+import { resolveCaptureRuntime } from "../lib/capture-runtime.js";
 import { resolveHome } from "../lib/home.js";
 import { sessionStartHookPinFindings } from "../lib/owned-pins.js";
 
@@ -102,6 +106,7 @@ export function register(program: Command): void {
     .option("--url <url>", "Flair URL to wire (else FLAIR_TARGET/FLAIR_URL, else this harness's MCP wiring, else the local default)")
     .option("--continuity", "Wire the continuity capture hooks instead (PostToolUse + Stop — flair#1257; installing them IS the opt-in)")
     .option("--action-recall", "Wire the Claude Code PreToolUse action-recall hook instead (flair#2067)")
+    .option("--capture", "Wire the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks instead (flair#2068)")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
@@ -114,6 +119,31 @@ export function register(program: Command): void {
       }
       const flairUrl = resolveHookFlairUrl(opts, home, harness);
       const dryRun = !!opts.dryRun;
+
+      if (opts.capture) {
+        const resolved = resolveCaptureRuntime({ fromUrl: import.meta.url });
+        if (!resolved.ok) {
+          const reason = "reason" in resolved ? resolved.reason : "unknown error";
+          console.error(`Capture hook not installed: ${reason}`);
+          process.exit(1);
+        }
+        const result = installCaptureHooks({
+          homeDir: home,
+          harness,
+          agentId,
+          flairUrl,
+          dryRun,
+          runtime: resolved.runtime,
+        });
+        console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook install --capture")}${dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
+        console.log(`  ${result.ok ? render.icons.ok : render.icons.error} ${result.message}`);
+        if (result.backupPath) {
+          console.log(`     ${render.wrap(render.c.dim, `backup: ${result.backupPath}`)}`);
+        }
+        console.log("");
+        if (!result.ok) process.exit(1);
+        return;
+      }
 
       if (opts.actionRecall) {
         const resolved = resolveActionRecallRuntime({ fromUrl: import.meta.url });
@@ -178,10 +208,23 @@ export function register(program: Command): void {
     .option("--dry-run", "Print the exact JSON delta without writing")
     .option("--continuity", "Remove the continuity capture hooks instead (PostToolUse + Stop — flair#1257)")
     .option("--action-recall", "Remove the Claude Code PreToolUse action-recall hook instead (flair#2067)")
+    .option("--capture", "Remove the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks instead (flair#2068)")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
       const dryRun = !!opts.dryRun;
+
+      if (opts.capture) {
+        const result = uninstallCaptureHooks({ homeDir: home, harness, dryRun });
+        console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook uninstall --capture")}${dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
+        console.log(`  ${result.ok ? render.icons.ok : render.icons.error} ${result.message}`);
+        if (result.backupPath) {
+          console.log(`     ${render.wrap(render.c.dim, `backup: ${result.backupPath}`)}`);
+        }
+        console.log("");
+        if (!result.ok) process.exit(1);
+        return;
+      }
 
       if (opts.actionRecall) {
         const result = uninstallActionRecall({ homeDir: home, harness, dryRun });
@@ -227,6 +270,7 @@ export function register(program: Command): void {
     .description("Show whether the SessionStart hook is wired, its shape, and which Flair instance it targets")
     .option("--harness <name>", `Target harness (${SUPPORTED_HARNESSES.join(", ")})`, "claude-code")
     .option("--action-recall", "Also report the Claude Code PreToolUse action-recall hook (flair#2067)")
+    .option("--capture", "Also report the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks (flair#2068)")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
@@ -287,6 +331,25 @@ export function register(program: Command): void {
         }
       };
 
+      // Capture (flair#2068) — reported only when `--capture` is passed.
+      const renderCapture = (): void => {
+        if (!opts.capture) return;
+        if (harness !== "claude-code") {
+          console.log(`  ${render.icons.info} capture: Claude Code only`);
+          return;
+        }
+        const capture = captureHookStatus(home, harness);
+        if (capture.installed) {
+          console.log(`  ${render.icons.ok} capture: PostToolUseFailure + PostToolUse + Stop wired`);
+        } else if (capture.state === "absent") {
+          console.log(`  ${render.icons.info} capture: not enabled ${render.wrap(render.c.dim, `(opt-in: ${hookInstallHint(harness, "--capture")})`)}`);
+        } else {
+          process.exitCode = 1;
+          const what = capture.problems.length > 0 ? ` (${capture.problems.join("; ")})` : "";
+          console.log(`  ${render.icons.warn} capture: ${capture.state}${what} ${render.wrap(render.c.dim, `(re-run: ${hookInstallHint(harness, "--capture")})`)}`);
+        }
+      };
+
       console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook status")}\n`);
       console.log(`  ${render.wrap(render.c.dim, "Harness:")} ${status.harness}`);
       console.log(`  ${render.wrap(render.c.dim, "Config:")}  ${status.path}`);
@@ -302,6 +365,7 @@ export function register(program: Command): void {
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
         renderContinuity();
         renderActionRecall();
+        renderCapture();
         console.log("");
         process.exit(1);
       }
@@ -346,6 +410,7 @@ export function register(program: Command): void {
       }
       renderContinuity();
       renderActionRecall();
+      renderCapture();
       console.log("");
     });
 }
