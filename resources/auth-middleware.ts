@@ -8,6 +8,7 @@ import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } 
 import { checkHttpRateLimit } from "./rate-limit.js";
 import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
 import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
+import { idSegmentHasEncodedSlash, MEMORY_CONTENT_SELECTOR_SUFFIX } from "../src/lib/memory-id-policy.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
 //
@@ -46,7 +47,11 @@ function stripMemorySelection(rawUrl: string): string {
   const seg = pathPart.slice(slash + 1);
   const decodedSeg = decodePathSegment(seg);
   const dot = decodedSeg.indexOf(".");
-  if (dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1))) {
+  // An encoded `/` in the id segment makes the segment ambiguous: the trailing
+  // `.<declared attribute>` could be part of the id, or a selector on a
+  // slash-containing id.
+  if (!idSegmentHasEncodedSlash(seg) &&
+      dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1))) {
     // Rebuild the id from its decoded form. Harper decodes the path it is handed,
     // so this re-encoded segment addresses the SAME id, without the property.
     pathPart = `${pathPart.slice(0, slash + 1)}${encodeURIComponent(decodedSeg.slice(0, dot))}`;
@@ -76,6 +81,24 @@ function decodePathSegment(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+/**
+ * True when a Memory by-id read path names an id segment that carries an encoded
+ * `/` (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
+ * stripMemorySelection. Such a segment is ambiguous — the trailing
+ * `.<declared attribute>` could be part of the id or a selector on an id that
+ * contains a slash (flair#2199).
+ */
+function isAmbiguousEncodedSlashSelector(rawUrl: string): boolean {
+  const q = rawUrl.indexOf("?");
+  const pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
+  const slash = pathPart.lastIndexOf("/");
+  const seg = pathPart.slice(slash + 1);
+  if (!idSegmentHasEncodedSlash(seg)) return false;
+  const decodedSeg = decodePathSegment(seg);
+  const dot = decodedSeg.indexOf(".");
+  return dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1));
 }
 
 // [start, end) ranges of every `select(...)` call in a query string, accounting
@@ -770,7 +793,16 @@ server.http(async (request: any, nextLayer: any) => {
   // contract, applied in `Memory.get`/`Memory.search`). The by-id
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
-  if (!request.tpsAgentIsAdmin && method === "GET" && isMemoryReadPath(url.pathname)) {
+  if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(url.pathname)) {
+    // flair#2199: an id segment carrying an encoded `/` before a declared
+    // property suffix is ambiguous — the suffix could be part of the id or a
+    // selector on a slash-containing id.
+    if (isAmbiguousEncodedSlashSelector(request.url)) {
+      return new Response(method === "HEAD" ? null : JSON.stringify({
+        error: "ambiguous_memory_id",
+        message: `a Memory request whose id segment contains an encoded '/' before a "${MEMORY_CONTENT_SELECTOR_SUFFIX}" (or other property) suffix is refused: the suffix cannot be told from part of the id`,
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
     const stripped = stripMemorySelection(request.url);
     if (stripped !== request.url) request.url = stripped;
   }

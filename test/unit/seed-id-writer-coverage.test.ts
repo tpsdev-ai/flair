@@ -133,7 +133,7 @@ function methodBody(src: string, signature: string): string {
 
 test("each GUARDED path runs the decision before it writes", () => {
   const memory = readFileSync("resources/Memory.ts", "utf8");
-  for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any) {", "  async patch(content: any, query?: any) {"]) {
+  for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {", "  async patch(content: any, query?: any) {"]) {
     const body = methodBody(memory, signature);
     const check = body.indexOf('refuseReservedSeedWrite("Memory", writeTargetIds(this, content)');
     expect(check, `${signature} does not call the decision`).toBeGreaterThan(-1);

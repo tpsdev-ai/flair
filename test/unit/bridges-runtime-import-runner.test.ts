@@ -166,4 +166,24 @@ describe("runImport: end-to-end against an injected putMemory", () => {
     });
     expect(seen[0].id).toBe("l1");
   });
+
+  test("flair#2199: refuses an imported memory id ending in .content", async () => {
+    let thrown: any = null;
+    try {
+      await runImport({
+        bridgeName: "agentic-stack",
+        source: (async function* () {
+          yield { id: "notes.content", agentId: "alice", content: "x" } as any;
+        })(),
+        cwd: dir,
+        agentId: "alice",
+        putMemory: async () => {},
+      });
+    } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(BridgeRuntimeError);
+    expect(thrown.detail.op).toBe("import");
+    expect(thrown.detail.field).toBe("id");
+    expect(thrown.detail.record).toBe(1);
+    expect(thrown.detail.got).toBe("notes.content");
+  });
 });

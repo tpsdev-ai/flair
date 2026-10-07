@@ -17,6 +17,7 @@ import { buildProvenance } from "./provenance.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
+import { refuseContentSuffixId } from "./memory-id-guard.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -35,7 +36,9 @@ export class FeedMemories extends Resource {
     }
 
     const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
     if (seedDenial) return seedDenial;
+    if (contentSuffixDenial) return contentSuffixDenial;
 
     // No-forge attribution: use the kit's stampAttribution to stamp agentId
     // from the authenticated principal, never from the body.
