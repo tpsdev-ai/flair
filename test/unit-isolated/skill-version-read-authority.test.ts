@@ -19,8 +19,30 @@ class VersionTable {
     rows.sort((a, b) => b.version - a.version);
     for (const row of rows.slice(0, query.limit)) yield row;
   }
-  async get(id: string) { return versions.get(id); }
-  async *search() { yield* versions.values(); }
+  async get(target: any) {
+    const id = typeof target === "string" ? target : target?.id;
+    const row = versions.get(id);
+    if (!row) return row;
+    // Model Harper's own get: a `select`/`property` target is projected here,
+    // from the stored row, so a decision made on the result sees only the
+    // projected shape (the defect this suite pins).
+    const select = typeof target === "object" ? target?.select : undefined;
+    const property = typeof target === "object" ? target?.property : undefined;
+    if (property != null) return row[property];
+    if (Array.isArray(select)) { const picked: Row = {}; for (const key of select) picked[key] = row[key]; return picked; }
+    if (typeof select === "string") return row[select];
+    return row;
+  }
+  async *search(query?: any) {
+    // Model Harper applying the query's page to the scan (conditions are not
+    // modelled — the resource's pushed scope is not what this suite checks).
+    let rows = [...versions.values()];
+    const offset = typeof query?.offset === "number" ? query.offset : 0;
+    const limit = typeof query?.limit === "number" ? query.limit : undefined;
+    if (offset > 0) rows = rows.slice(offset);
+    if (limit != null) rows = rows.slice(0, limit);
+    yield* rows;
+  }
 }
 
 mock.module("harper", () => ({ databases: { flair: {
@@ -64,6 +86,43 @@ describe("skill version authority", () => {
     const listed = [];
     for await (const row of await resource().search() as AsyncGenerator<Row>) listed.push(row.id);
     expect(listed).toEqual(["old", "head"]);
+  });
+
+  test("paging counts only readable rows (the page is applied over the filtered stream)", async () => {
+    versions.clear();
+    const row = (id: string, subjectType: string) => ({ id, subjectType, subjectId: id, agentId: "owner", visibility: "shared", kind: "create", memoryId: null, version: 1 });
+    versions.set("r1", row("r1", "soul"));
+    versions.set("u1", row("u1", "unknown"));
+    versions.set("r2", row("r2", "soul"));
+    versions.set("u2", row("u2", "unknown"));
+    versions.set("r3", row("r3", "soul"));
+    const page = async (query?: any) => {
+      const out: string[] = [];
+      for await (const r of await resource().search(query) as AsyncGenerator<Row>) out.push(r.id);
+      return out;
+    };
+    expect(await page({ limit: 2 })).toEqual(["r1", "r2"]);
+    expect(await page({ limit: 2, offset: 1 })).toEqual(["r2", "r3"]);
+    expect(await page({ offset: 1 })).toEqual(["r2", "r3"]);
+    expect(await page({ limit: 2, offset: 2 })).toEqual(["r3"]);
+    expect(await page({ limit: 0 })).toEqual([]);
+    expect(await page()).toEqual(["r1", "r2", "r3"]);
+  });
+
+  test("a select/property read authorizes the full row before projecting", async () => {
+    const selected = await resource().get({ id: "old", select: ["id"] });
+    expect(selected).not.toBeInstanceOf(Response);
+    expect((selected as Row).id).toBe("old");
+    expect((selected as Row).subjectType).toBeUndefined();
+
+    const property = await resource().get({ id: "old", property: "subjectType" });
+    expect(property).toBe("skill");
+
+    // A row the reader may not read is still denied when a selection is asked for.
+    versions.get("old")!.visibility = "private";
+    const denied = await resource().get({ id: "old", select: ["id"] });
+    expect(denied).toBeInstanceOf(Response);
+    expect((denied as Response).status).toBe(404);
   });
 
   for (const [label, patch] of [

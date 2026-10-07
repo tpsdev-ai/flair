@@ -23,6 +23,7 @@ import type {
   SearchResult,
   BootstrapResult,
   Relationship,
+  TeamDirectoryResult,
 } from "./types.js";
 
 const DEFAULT_URL = "http://localhost:19926";
@@ -152,6 +153,9 @@ export class FlairClient {
   readonly memory: MemoryApi;
   readonly relationship: RelationshipApi;
   readonly soul: SoulApi;
+  /** Team directory (flair#2141 S3a) — the same resolver as the `/mcp`
+   *  `team_directory` tool and `GET /TeamDirectory`. */
+  readonly teamDirectory: TeamDirectoryApi;
   /** flair#718 authorship-provenance — see FlairClientConfig.claimedClient's
    *  doc (types.ts). `undefined` when neither config nor FLAIR_CLIENT is set;
    *  MemoryApi reads this to (optionally) stamp memory write payloads. */
@@ -190,6 +194,7 @@ export class FlairClient {
     this.memory = new MemoryApi(this);
     this.relationship = new RelationshipApi(this);
     this.soul = new SoulApi(this);
+    this.teamDirectory = new TeamDirectoryApi(this);
   }
 
   private async resolveKey(): Promise<KeyObject | null> {
@@ -819,6 +824,22 @@ class SoulApi {
   async list(): Promise<SoulEntry[]> {
     const params = new URLSearchParams({ agentId: this.client.agentId });
     return this.client.request("GET", `/Soul?${params}`);
+  }
+}
+
+// ─── Team directory API (flair#2141 S3a) ────────────────────────────────────
+
+class TeamDirectoryApi {
+  constructor(private client: FlairClient) {}
+
+  async list(opts: { id?: string; name?: string; cursor?: string; limit?: number } = {}): Promise<TeamDirectoryResult> {
+    const params = new URLSearchParams();
+    if (opts.id) params.set("id", opts.id);
+    if (opts.name) params.set("name", opts.name);
+    if (opts.cursor) params.set("cursor", opts.cursor);
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return this.client.request("GET", `/TeamDirectory${qs ? `?${qs}` : ""}`);
   }
 }
 

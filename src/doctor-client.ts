@@ -404,6 +404,97 @@ export function isFlairContinuityCommand(command: string): boolean {
   );
 }
 
+// ── the capture PostToolUseFailure/PostToolUse/Stop hook (flair#2068) ──────
+//
+// Runs the provisioned absolute runtime + artifact paths (same Flair-owned
+// provisioning as the action-recall hook). One binary serves all three events; the
+// payload's hook_event_name tells it which fired. Unlike the SessionStart and
+// action-recall hooks it emits NOTHING to the harness, so the wrapper discards
+// both streams and absorbs failure (`>/dev/null 2>/dev/null || true`).
+
+/** Matches this substring unless npx is bounded by whitespace or string edges; a match does not prove ownership. */
+export const CAPTURE_HOOK_MARKER = "capture-hook.js";
+
+/** Tools considered for a possible matching follow-up. */
+export const CAPTURE_POST_TOOL_USE_MATCHER = "Write|Edit|NotebookEdit|Bash";
+
+export const CAPTURE_POST_TOOL_USE_FAILURE_MATCHER = "Bash";
+
+/** The hook events the capture hook registers under. */
+export const CAPTURE_HOOK_EVENTS = ["PostToolUseFailure", "PostToolUse", "Stop"] as const;
+export type CaptureHookEvent = (typeof CAPTURE_HOOK_EVENTS)[number];
+
+/** The matcher each capture event's group carries (Stop has none). */
+export const CAPTURE_HOOK_MATCHERS: Record<CaptureHookEvent, string | null> = {
+  PostToolUseFailure: CAPTURE_POST_TOOL_USE_FAILURE_MATCHER,
+  PostToolUse: CAPTURE_POST_TOOL_USE_MATCHER,
+  Stop: null,
+};
+
+/** The pinned spec the background flush resolves through npx, so the flush
+ *  runs the published package and its flair-client dependency rather than the
+ *  dependency-free hot-path copy. */
+export function captureFlushSpec(): string {
+  return `${FLAIR_MCP_PACKAGE}@${flairCliVersion()}`;
+}
+
+/**
+ * Build the exact `command` string registered for every capture hook event.
+ */
+export function buildCaptureHookCommand(
+  bunPath: string,
+  artifactPath: string,
+  agentId: string,
+  flairUrl?: string,
+  flushSpec?: string | null,
+): string {
+  for (const [label, value] of [
+    ["agent id", agentId],
+    ["bun path", bunPath],
+    ["artefact path", artifactPath],
+  ] as const) {
+    if (!(label === "artefact path" ? /^[A-Za-z0-9._:@/-]+$/.test(value) : isHookCommandValueSafe(value))) {
+      throw new Error(
+        `${label} '${value}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -; artefact paths also allow @)`,
+      );
+    }
+  }
+  if (flairUrl != null && flairUrl !== "" && !isHookCommandValueSafe(flairUrl)) {
+    throw new Error(
+      `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    );
+  }
+  if (flushSpec != null && flushSpec !== "" && !/^@[A-Za-z0-9._/-]+@[A-Za-z0-9._-]+$/.test(flushSpec)) {
+    throw new Error(`flush spec '${flushSpec}' is not a safe pinned package spec`);
+  }
+  const parts = [`FLAIR_AGENT_ID=${agentId}`];
+  if (flairUrl) parts.push(`FLAIR_URL=${flairUrl}`);
+  if (flushSpec) parts.push(`FLAIR_CAPTURE_FLUSH_SPEC=${flushSpec}`);
+  return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null 2>/dev/null || true'`;
+}
+
+export function isFlairCaptureCommand(command: string): boolean {
+  return typeof command === "string" && command.includes(CAPTURE_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
+}
+
+/** The bun/artifact/agent/url/spec a wired capture command carries, or null. */
+export interface CaptureCommandParts {
+  bunPath: string;
+  artifactPath: string;
+  agentId: string;
+  flairUrl?: string;
+  flushSpec?: string;
+}
+
+export function parseCaptureCommand(command: string): CaptureCommandParts | null {
+  if (typeof command !== "string") return null;
+  const match = /^sh -c 'FLAIR_AGENT_ID=(\S+)(?: FLAIR_URL=(\S+))?(?: FLAIR_CAPTURE_FLUSH_SPEC=(\S+))? (\S+) (\S+) >\/dev\/null 2>\/dev\/null \|\| true'$/.exec(command);
+  if (!match) return null;
+  const [, agentId, flairUrl, flushSpec, bunPath, artifactPath] = match;
+  if (!agentId || !bunPath || !artifactPath) return null;
+  return { bunPath, artifactPath, agentId, ...(flairUrl ? { flairUrl } : {}), ...(flushSpec ? { flushSpec } : {}) };
+}
+
 /** The two hook events continuity registers under. */
 export const CONTINUITY_HOOK_EVENTS = ["PostToolUse", "Stop"] as const;
 export type ContinuityHookEvent = (typeof CONTINUITY_HOOK_EVENTS)[number];

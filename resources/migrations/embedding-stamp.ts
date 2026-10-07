@@ -28,8 +28,7 @@
  * runner loops until processed=0 — and a re-run is idempotent.
  *
  * Reuses Memory's OWN regen branch — never duplicates embedding logic —
- * via the SAME mechanism `flair reembed` (src/cli.ts) already uses in
- * production: a genuine `PUT /Memory/:id` HTTP request (admin-authenticated
+ * via a genuine `PUT /Memory/:id` HTTP request (admin-authenticated
  * loopback), not an in-process call on `databases.flair.Memory` directly.
  * The one exception is a row whose id ends in `.content`, which that request
  * cannot address (see regenContentSuffixRow below).

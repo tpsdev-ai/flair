@@ -1,0 +1,1 @@
+- **The feed replay test polls after expiring a successor (#2316).** `feed-read-scope.test.ts` retries 200 reads for a 404 with a 5 s deadline covering sleeps, requests and body consumption; expiry fails and other statuses return immediately. The observed post-upsert 200 may reflect cross-thread read visibility; the mechanism and duration have not been measured.

@@ -90,6 +90,7 @@ beforeAll(async () => {
   await insertRow(harper, BASE, "BASE BODY");
   await insertRow(harper, "mcs-put-url-existing", "PUT BASE BODY");
   await insertRow(harper, "mcs-patch-url-existing", "PATCH BASE BODY");
+  await insertRow(harper, "mcs-post-url-existing", "POST BASE BODY");
   await insertRow(harper, DEL_BASE, "DEL BASE BODY");
   await insertRow(harper, DEL_OTHER_BASE, "DEL OTHER BASE BODY");
   await insertRow(harper, SLASH_BASE, "SLASH BASE BODY");
@@ -143,6 +144,7 @@ describe("flair#2199 — an encoded `/` before a declared suffix is refused, nev
 describe("flair#2199 — Memory resource writes and feed POST refuse an id ending in `.content`", () => {
   const cases: Array<{ name: string; method: string; path: string; body: unknown }> = [
     { name: "collection POST /Memory", method: "POST", path: "/Memory", body: { id: "mcs-post.content", agentId: author.id, content: "x" } },
+    { name: "POST to a `.content` address", method: "POST", path: "/Memory/mcs-post.content", body: { id: "mcs-post", agentId: author.id, content: "x" } },
     { name: "PUT to a `.content` address", method: "PUT", path: "/Memory/mcs-put.content", body: { id: "mcs-put.content", agentId: author.id, content: "x" } },
     { name: "PATCH to a `.content` address", method: "PATCH", path: "/Memory/mcs-patch.content", body: { id: "mcs-patch.content", agentId: author.id, content: "x" } },
     { name: "PUT with an encoded-slash `.content` id", method: "PUT", path: "/Memory/mcs-s%2Fput.content", body: { id: "mcs-s/put.content", agentId: author.id, content: "x" } },
@@ -159,7 +161,7 @@ describe("flair#2199 — Memory resource writes and feed POST refuse an id endin
     }, 30_000);
   }
 
-  for (const method of ["PUT", "PATCH"]) {
+  for (const method of ["PUT", "PATCH", "POST"]) {
     for (const state of ["existing", "missing"]) {
       it(`${method} with a suffix only in the URL and a ${state} base row → 400 memory_id_content_suffix without writing rows`, async () => {
         const id = `mcs-${method.toLowerCase()}-url-${state}`;

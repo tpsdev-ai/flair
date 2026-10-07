@@ -1662,6 +1662,25 @@ describe("Memory PUT/PATCH URL suffix refusal", () => {
   }
 });
 
+describe("Memory POST URL suffix refusal", () => {
+  for (const existing of [true, false]) {
+    it(`post refuses a parsed URL suffix with a clean body id (${existing ? "existing" : "missing"} row)`, async () => {
+      const id = "url-post-suffix-target";
+      const row = { id, agentId: "agent-owner", content: "keep" };
+      if (existing) memoryStore.set(id, row);
+      const m: any = makeMemory(agentCtx("agent-owner"));
+      const res = await m.post({ id, agentId: "agent-owner", content: "changed" }, {
+        id, pathname: `/${id}.content`, property: "content",
+      });
+      expect(res).toBeInstanceOf(Response);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("memory_id_content_suffix");
+      expect(memoryStore.get(id)).toEqual(existing ? row : undefined);
+      expect(memoryStore.has(`${id}.content`)).toBe(false);
+    });
+  }
+});
+
 describe("Memory.delete() — ownership check uses the raw record (super.get), not the new scoped get()", () => {
   it("refuses a parsed `.content` DELETE target before checking ownership", async () => {
     const ownershipRead = spyOn(BaseMemory.prototype, "get");

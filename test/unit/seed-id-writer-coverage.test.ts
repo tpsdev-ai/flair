@@ -38,6 +38,7 @@ add("Memory", [
   "writer:(databases as any).flair.Memory.put#2",
   "writer:super.put#1",
   "writer:super.patch#1",
+  "writer:super.patch#2",
   "writer:(databases as any).flair.Memory.delete#1",
 ], "GUARDED: Memory.post/put/patch/delete call the decision on the URL and body ids first (the put _reindex branch included).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
