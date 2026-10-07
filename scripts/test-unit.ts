@@ -45,18 +45,20 @@ export interface UnitStep {
 // CI job's own limit cancels the job mid-step, and neither the later steps, the
 // final summary nor the end-of-lane guards ever run. Every number below is
 // derived from that job: `.github/workflows/test.yml`, job `test-unit`,
-// `timeout-minutes: 15`. Measured on 22 recent `Unit Tests (node N)` legs
-// (2026-10-02) plus a local run on the same tree:
+// `timeout-minutes: 18`. Measured on 22 recent `Unit Tests (node N)` legs
+// (2026-10-02) plus a local run on the same tree, then raised again after a
+// 2026-10-07 node 24 leg ran past the previous 780 s cap:
 //   - the job's own steps outside the lane (setup before it, the skip-count
 //     check and post steps after it): at most 53 s (2026-09-29);
 //   - the whole lane: 401–510 s, and 456 s locally;
 //   - `root unit tests`, the one long step: 252–327 s (280 s locally);
 //   - every other step at most 33 s; in that
 //     set the median is 1–2 s.
-// The budget is whole-lane headroom: about 1.53× the slowest measured lane
-// (510 s), still subject to each step's own limit below; the old 510 s
-// budget sat at that worst lane's length and killed whichever late step was running
-// on a busy runner (flair#2224: `flair-mcp` on #2220, `adk-flair-js` on main).
+// The #2224 budget was about 1.53× that 510 s lane. It was raised to 960 s
+// after a 2026-10-07 node 24 leg ran past 780 s. Each step's own limit below
+// still applies. The old 510 s budget sat at that worst lane's length and
+// killed whichever late step was running on a busy runner (flair#2224:
+// `flair-mcp` on #2220, `adk-flair-js` on main).
 // unit-runner.test.ts pins the job limit and re-checks the arithmetic, so a
 // change to either side fails there first.
 //
@@ -65,13 +67,16 @@ export interface UnitStep {
 // time-limited: these numbers describe a CI runner, and a slower machine must
 // not turn a slow step into a failure.
 
-/** The CI job limit the lane has to report inside (`timeout-minutes: 15`). */
-export const CI_JOB_LIMIT_MS = 15 * 60_000;
+/** The CI job limit the lane has to report inside (`timeout-minutes: 18`). */
+export const CI_JOB_LIMIT_MS = 18 * 60_000;
 /** Reserved for the job's own steps outside the lane: 53 s measured, 67 s spare. */
 export const CI_OUTSIDE_LANE_MS = 120_000;
 /**
- * Keep-going's whole-lane budget: 900 − 120 = 780 s, about 1.53× the slowest
- * measured lane (510 s). A step still running when it runs out is killed and every later
+ * Keep-going's whole-lane budget: 1080 − 120 = 960 s. The #2224 lane (510 s)
+ * still fits the old 1.5× rule. A 2026-10-07 node 24 leg was killed at the
+ * previous 780 s cap during flair-mcp (root shards 136/179/86/106 s) and
+ * would have finished near 790 s. 960 s leaves about 170 s past that.
+ * A step still running when it runs out is killed and every later
  * step is reported as not run, so the summary and both guards are expected to
  * print before the job limit however many steps hang, provided the job's steps
  * outside the lane stay within the reserve above (an observed margin, not a
@@ -81,13 +86,13 @@ export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
 /**
  * The default per-step limit: 100 s, 3× the slowest ordinary step (33 s). One
  * hung step costs at most that, so the rest of the slowest lane still runs
- * inside the budget (510 + 100 = 610 s ≤ 780 s).
+ * inside the budget (510 + 100 = 610 s ≤ 960 s).
  */
 export const STEP_TIMEOUT_MS = 100_000;
 /**
  * `root unit tests`' own limit: 450 s, 1.37× its slowest measured run (327 s).
  * If it hangs, the other ~183 s of the lane still fits (183 + 450 = 633 s ≤
- * 780 s).
+ * 960 s).
  */
 export const ROOT_STEP_TIMEOUT_MS = 450_000;
 

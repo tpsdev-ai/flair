@@ -1,0 +1,1 @@
+- **The unit lane's whole-lane time budget rises from 780 s to 960 s.** A node 24 leg on 2026-10-07 ran past 780 s and was killed during the flair-mcp package tests (root shards 136 s, 179 s, 86 s, and 106 s). The job cap is 18 minutes, and the 120 s reserve for the job's other steps is unchanged. A lane that still runs past 960 s is stopped the same way.
