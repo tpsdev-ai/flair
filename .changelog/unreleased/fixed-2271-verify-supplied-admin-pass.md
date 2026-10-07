@@ -1,8 +1,8 @@
-- **`flair init` refuses unverified supplied credentials on existing installs unless `--reset-admin-pass` requests rotation (Closes #2271).**
+- **`flair init` checks supplied credentials before replacing an existing admin-pass without `--reset-admin-pass` (Closes #2271).**
 
-  Without `--reset-admin-pass`, a supplied credential authenticates as `admin`
-  against the admin-only `/FederationPeers` resource on a running install.
-  A stopped install with an existing pass file or persisted admin user refuses
-  the write; start the instance and re-run init, or use `flair init --reset-admin-pass`.
+  Without `--reset-admin-pass`, supplied credentials are checked against
+  the admin-only `/FederationPeers` resource before writes on a running install.
+  A stopped `--skip-start` init can reuse an identical securely read credential.
+  Other supplied credentials on stopped existing installs are refused.
   A fresh install (no pass file and no persisted admin user) writes the supplied
   value without verification.

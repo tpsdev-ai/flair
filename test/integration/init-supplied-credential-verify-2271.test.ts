@@ -239,6 +239,18 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentia
         }, 150_000);
       }
     }
+    for (const source of ["inline", "file", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD"] as const) {
+      test(`${source}: stopped config-only init preserves an identical saved credential`, async () => {
+        const before = readFileSync(adminPassPath);
+        const { args, env } = credential(source, installedPassword);
+        const r = await runInit([...baseArgs(), "--agent", "stopped-config-2271", ...args], env);
+        expect(r.code, r.out).toBe(0);
+        expect(r.out).toContain("Agent registration deferred");
+        expect(r.out).not.toContain("verified");
+        expect(readFileSync(adminPassPath).equals(before)).toBe(true);
+        expect(existsSync(join(home, ".flair", "keys", "stopped-config-2271.key"))).toBe(true);
+      }, 150_000);
+    }
     test("a persisted admin without a pass file refuses a supplied credential", async () => {
       rmSync(adminPassPath);
       const r = await runInit([...baseArgs(), "--admin-pass", installedPassword]);

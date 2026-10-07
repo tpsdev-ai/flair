@@ -1,7 +1,6 @@
 /**
  * init.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair init` (first-run provisioning: config, admin pass, launchd service, soul wizard).
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
@@ -815,6 +814,16 @@ program
 
     const persistSuppliedAdminPass = async (): Promise<void> => {
       if (resolveInitAdminPasswordSource(false, passwordCtx) !== "re-persist") return;
+      if (opts.skipStart && !alreadyRunning && existsSync(adminPassPath)) {
+        try {
+          const saved = lstatSync(adminPassPath);
+          if (saved.isFile() && (typeof process.getuid !== "function" || saved.uid === process.getuid()) &&
+              readAdminPassFileSecure(adminPassPath) === adminPass) return;
+        } catch (err: unknown) {
+          console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(1);
+        }
+      }
       if (!alreadyRunning && (existsSync(adminPassPath) || persistedAdminUser)) {
         console.error(
           `Refusing to replace ${adminPassPath}: an existing install is stopped. ` +
@@ -884,8 +893,6 @@ program
       const fileExists = existsSync(adminPassPath);
       const decision = resolveInitAdminPasswordSource(fileExists, passwordCtx);
       if (decision === "reuse-existing") {
-        // flair#827: an admin-pass file already on disk means a PRIOR `flair
-        // init` already bootstrapped Harper's admin user with this password.
         try {
           adminPass = readAdminPassFileSecure(adminPassPath);
         } catch (err: any) {

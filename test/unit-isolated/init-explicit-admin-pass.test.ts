@@ -20,13 +20,14 @@ function markInstalled(dataDir: string): void {
   writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
 }
 
-function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false, options: { umask?: number; columns?: string } = {}) {
+function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false, options: { umask?: number; columns?: string; agent?: string } = {}) {
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|TPS_TEST_ROOT$|ROOTPATH$)/.test(key),
   ));
   Object.assign(env, { HOME: home, USERPROFILE: home, NO_COLOR: "1" });
   const args = ["init", "--data-dir", dataDir, "--port", "9", "--ops-port", "8",
     "--skip-start", "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md"];
+  if (options.agent) args.push("--agent", options.agent);
   if (source === "inline") args.push("--admin-pass", password);
   else if (source === "file") {
     const input = join(home, "input-pass");
@@ -35,7 +36,11 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
   } else env[source] = password;
   const script = `
     Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
-    globalThis.fetch = async () => { throw new Error("offline fixture"); };
+    globalThis.fetch = async () => {
+      const { appendFileSync } = await import("node:fs");
+      appendFileSync(${JSON.stringify(join(home, "requests.jsonl"))}, "request\\n");
+      throw new Error("offline fixture");
+    };
     const socketLimitPath = ${JSON.stringify(new URL("../../src/lib/socket-path-limit.ts", import.meta.url).href)};
     const socketLimit = await import(socketLimitPath);
     const { mock: mockSocketLimit } = await import("bun:test");
@@ -94,6 +99,50 @@ describe("fresh init persists explicit admin credentials", () => {
         expect(doctor()).toContain("admin-pass file missing; Harper still has a persisted admin user");
       }, 60_000);
     }
+  }
+
+  for (const source of sources) {
+    for (const persisted of [false, true]) {
+      test(`${source}: stopped skip-start reuses identical saved bytes, persisted=${persisted}`, () => {
+        const home = tempDir("i-");
+        const dataDir = tempDir("d-");
+        const passPath = join(home, ".flair", "admin-pass");
+        mkdirSync(join(home, ".flair"));
+        markInstalled(dataDir);
+        if (persisted) {
+          mkdirSync(join(dataDir, "system"));
+          writeFileSync(join(dataDir, "system", "hdb_user.mdb"), "fixture-user");
+        }
+        writeFileSync(passPath, password + "\n\n", { mode: 0o600 });
+        const before = readFileSync(passPath);
+        const beforeStat = statSync(passPath);
+        const result = runInit(home, dataDir, source, "linux", false, { agent: "config-only" });
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(readFileSync(passPath)).toEqual(before);
+        expect(statSync(passPath).ino).toBe(beforeStat.ino);
+        expect(statSync(passPath).mtimeMs).toBe(beforeStat.mtimeMs);
+        expect(existsSync(join(home, "requests.jsonl"))).toBe(false);
+        expect(existsSync(join(home, ".flair", "keys", "config-only.key"))).toBe(true);
+        expect(result.stdout).toContain("Agent registration deferred");
+        expect(result.stdout).not.toContain("verified");
+      });
+    }
+  }
+
+  for (const posture of ["symlink", "foreign-owner", "open-mode"] as const) {
+    test(`identical supplied password refuses a saved ${posture} file`, () => {
+      const home = tempDir("i-");
+      const dataDir = tempDir("d-");
+      const passPath = join(home, ".flair", "admin-pass");
+      mkdirSync(join(home, ".flair"));
+      const target = posture === "symlink" ? join(home, "target") : passPath;
+      writeFileSync(target, password + "\n", { mode: posture === "open-mode" ? 0o644 : 0o600 });
+      if (posture === "symlink") symlinkSync(target, passPath);
+      const result = runInit(home, dataDir, "inline", "linux", posture === "foreign-owner");
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      expect(result.stderr).toContain(posture === "open-mode" ? "too open" : "existing install is stopped");
+      expect(readFileSync(target, "utf8")).toBe(password + "\n");
+    });
   }
 
   for (const dangling of [false, true]) {

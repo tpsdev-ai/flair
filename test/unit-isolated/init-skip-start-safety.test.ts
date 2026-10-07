@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.ts";
@@ -100,12 +100,34 @@ describe("local init skip-start safety through the built CLI", () => {
       expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(true);
       expect(readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8")).toBe(config);
       const key = readFileSync(join(f.home, ".flair", "keys", "canary.key"));
+      const passPath = join(f.home, ".flair", "admin-pass");
+      const pass = readFileSync(passPath);
+      const passStat = statSync(passPath);
       const rerun = runInit(f, ["--skip-start", flag, "canary"]);
       expect(rerun.status, rerun.stdout + rerun.stderr).toBe(0);
       expect(readFileSync(join(f.home, ".flair", "keys", "canary.key"))).toEqual(key);
+      expect(readFileSync(passPath)).toEqual(pass);
+      expect(statSync(passPath).ino).toBe(passStat.ino);
+      expect(statSync(passPath).mtimeMs).toBe(passStat.mtimeMs);
       expect(requests(f)).toEqual([]);
     }, 30_000);
   }
+
+  test("--agent with --skip-start refuses a different supplied password without requests", () => {
+    const f = fixture(true);
+    const passPath = join(f.home, ".flair", "admin-pass");
+    writeFileSync(passPath, "saved-password\n", { mode: 0o600 });
+    const before = readFileSync(passPath);
+    const dataDir = join(f.home, "d");
+    mkdirSync(dataDir);
+    writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
+    const result = runInit(f, ["--data-dir", dataDir, "--skip-start", "--agent", "canary"]);
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toContain("existing install is stopped");
+    expect(readFileSync(passPath)).toEqual(before);
+    expect(requests(f)).toEqual([]);
+    expect(existsSync(join(f.home, ".flair", "keys"))).toBe(false);
+  }, 30_000);
 
   test("--agent with --skip-start refuses --reset-admin-pass without requests or writes", () => {
     const f = fixture(true);
