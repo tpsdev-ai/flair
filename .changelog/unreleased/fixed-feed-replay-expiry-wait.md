@@ -1,0 +1,1 @@
+- **The feed replay test waits for an expired successor to be visible (#2316).** `feed-read-scope.test.ts` now waits, within 5 s, for the closed skill to read 404 after an operations-API write expires its successor, instead of reading once. That write commits on Harper's main thread and REST reads run on worker threads, so one read could still see the previous row.

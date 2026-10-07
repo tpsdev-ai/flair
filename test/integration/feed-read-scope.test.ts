@@ -176,6 +176,19 @@ async function readStatus(agent: TestAgent, path: string): Promise<number> {
   return res.status;
 }
 
+// A write through the operations API commits on Harper's main thread, while REST
+// reads run on worker threads that can briefly still see the previous row
+// (flair#2316). Wait, within a bound, for the status the write should produce.
+async function readStatusUntil(agent: TestAgent, path: string, want: number, timeoutMs = 5_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let status = await readStatus(agent, path);
+  while (status !== want && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    status = await readStatus(agent, path);
+  }
+  return status;
+}
+
 async function openAs(agent: TestAgent, path: string): Promise<Feed> {
   return openFeed(`${harper.httpURL}${path}`, ed25519Header(agent, "GET", path));
 }
@@ -240,7 +253,7 @@ function memoryFeedCases(phase: string) {
     const expired = await adminOp(harper, { operation: "upsert", database: "flair", table: "Memory", records: [{ ...heads[0], expiresAt: "2020-01-01T00:00:00.000Z" }] });
     expect(expired.status).toBe(200);
     await expired.arrayBuffer();
-    expect(await readStatus(B, `/Memory/${root}`)).toBe(404);
+    expect(await readStatusUntil(B, `/Memory/${root}`, 404)).toBe(404);
     const after = await openAs(B, "/FeedMemories");
     try {
       const sentinel = `${p}-expiry-after`;
