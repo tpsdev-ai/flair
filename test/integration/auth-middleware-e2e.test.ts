@@ -9,7 +9,7 @@
 // MODEL: test/integration/ed25519-auth-hnsw.test.ts — boots Harper via
 // startHarper(), seeds data via the ops API, sends real HTTP requests with
 // TPS-Ed25519 / Basic headers, asserts HTTP status codes.
-import { assertTpsRouteOutcome, tpsRoutePath } from "../helpers/tps-ed25519-outcomes.ts";
+import { assertTpsRouteOutcome, tpsRouteBody, tpsRoutePath } from "../helpers/tps-ed25519-outcomes.ts";
 import { TPS_ED25519_ROUTES } from "../helpers/tps-ed25519-routes.ts";
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
@@ -411,7 +411,7 @@ describe("auth-middleware e2e (real Harper)", () => {
           Authorization: ed25519Header(agent, method, requestPath, { tamper }),
           "Content-Type": "application/json",
         },
-        ...(method === "POST" ? { body: "{}" } : {}),
+        ...(method === "POST" ? { body: tpsRouteBody(path) } : {}),
         redirect: "manual",
       });
       const invalid = await send(true);
