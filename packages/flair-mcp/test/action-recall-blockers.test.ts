@@ -32,6 +32,11 @@ test("refresh refuses unknown successful response shapes instead of publishing a
 
 for (const delayedFile of ["generation", "binding"]) {
   test(`a deadline during ${delayedFile} publication cannot publish or bind late`, async () => {
+    // The deadline has to outlast directory creation and the earlier write.
+    // A 50 ms budget expired before binding sync on the node 26 shared lane
+    // (pre-sync work ~115 ms), so `delayed` stayed false. The stall is the
+    // whole budget, measured from refresh start, so sync still lands past it.
+    const deadlineMs = 2_000;
     const realOpen = fs.open;
     let delayed = false;
     const openSpy = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
@@ -42,19 +47,19 @@ for (const delayedFile of ["generation", "binding"]) {
         handle.sync = async () => {
           delayed = true;
           await realSync();
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise(resolve => setTimeout(resolve, deadlineMs));
         };
       }
       return handle;
     });
     try {
-      const result = await refreshActionRecallCache(client([]), { ...opts(), deadlineMs: 50 });
+      const result = await refreshActionRecallCache(client([]), { ...opts(), deadlineMs });
       expect(delayed).toBe(true);
-      expect(result.ok).toBe(false);
+      expect(result).toEqual({ ok: false, reason: "timeout" });
       expect(await readBinding(dir(), { url, principal, session })).toBeNull();
       if (delayedFile === "generation") expect(await fs.readdir(join(dir(), sha256Hex(instance)))).toEqual([]);
     } finally { openSpy.mockRestore(); }
-  });
+  }, 15_000);
 }
 
 test("double-quote backslashes preserve non-special characters and match the real argv", () => {
