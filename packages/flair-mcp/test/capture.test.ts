@@ -378,11 +378,10 @@ describe("capture spool", () => {
     expect(runCapture(failedBash("bun test foo"), { env: env(), dir }).reason).toBe("refused");
     expect(existsSync(spoolPath(dir, "agent-a"))).toBe(false);
     expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
-    // A lock left by a process that died holding it is broken.
     const old = new Date(Date.now() - 60_000);
     utimesSync(lockPath(dir, "agent-a"), old, old);
-    expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("appended");
-    expect(existsSync(lockPath(dir, "agent-a"))).toBe(false);
+    expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("refused");
+    expect(existsSync(lockPath(dir, "agent-a"))).toBe(true);
   });
 
   test("the flush holds the per-agent lock for its whole run and releases it", async () => {

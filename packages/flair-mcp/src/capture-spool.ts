@@ -10,6 +10,7 @@
  *   <dir>/<agentId>.lock
  */
 
+import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -49,18 +50,9 @@ export const CAPTURE_LOCK_WAIT_MS = 200;
 
 export const CAPTURE_LOCK_STALE_MS = 5000;
 
-/** One background flush bounds its asynchronous setup and every write by this
- *  deadline: the client factory and each write get only the time left. A flush
- *  that reaches the deadline stops writing and leaves whatever it did not write
- *  in the spool, including a record that belongs to another agent; the next
- *  flush tries again. The final spool rewrite is a synchronous local write that
- *  follows the last write. */
+/** Deadline for asynchronous client setup and writes. */
 export const CAPTURE_FLUSH_DEADLINE_MS = 5000;
 
-/** While a flush holds the per-agent lock it refreshes the lock's mtime this
- *  often, keeping the lock fresh for the stale rule; a flush whose process dies
- *  stops refreshing, and its lock is reclaimed by the same CAPTURE_LOCK_STALE_MS
- *  rule the hot path uses. */
 export const CAPTURE_LOCK_REFRESH_MS = 1000;
 
 // ── paths ───────────────────────────────────────────────────────────────────
@@ -116,27 +108,15 @@ const sleepCell = new Int32Array(new SharedArrayBuffer(4));
  *  return LOCK_BUSY when it is not free within CAPTURE_LOCK_WAIT_MS. */
 function withCaptureLock<T>(dir: string, agentId: string, fn: () => T): T | typeof LOCK_BUSY {
   ensureCaptureDir(dir);
-  const path = lockPath(dir, agentId);
   const deadline = Date.now() + CAPTURE_LOCK_WAIT_MS;
   for (;;) {
-    let fd: number | null = null;
-    try {
-      fd = openSync(path, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    if (fd !== null) {
-      closeSync(fd);
+    const held = acquireSpoolLock(dir, agentId);
+    if (held) {
       try {
         return fn();
       } finally {
-        try { unlinkSync(path); } catch {}
+        held.release();
       }
-    }
-    try {
-      if (Date.now() - statSync(path).mtimeMs > CAPTURE_LOCK_STALE_MS) unlinkSync(path);
-    } catch {
-      // Released meanwhile.
     }
     if (Date.now() >= deadline) return LOCK_BUSY;
     Atomics.wait(sleepCell, 0, 0, 2);
@@ -380,36 +360,64 @@ async function defaultClientFactory(agentId: string): Promise<CaptureClient> {
   });
 }
 
-/** Take the per-agent lock without waiting: `{ release }` on success, null when
- *  another holder has it. A lock whose mtime is older than CAPTURE_LOCK_STALE_MS
- *  is taken over by the same stale rule the hot path uses, so a flush whose
- *  process died while holding it does not block later flushes beyond that
- *  interval. */
-function acquireSpoolLock(dir: string, agentId: string): { release: () => void } | null {
+function acquireSpoolLock(dir: string, agentId: string): { release: () => void; isOwned: () => boolean; refresh: () => void } | null {
   ensureCaptureDir(dir);
   const path = lockPath(dir, agentId);
-  const create = (): number | null => {
+  const identity = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
+  const readIdentity = (): string | null => {
+    try { return readFileSync(path, "utf8"); } catch { return null; }
+  };
+  const isOwned = (): boolean => readIdentity() === identity;
+  const release = (): void => {
+    try { if (isOwned()) unlinkSync(path); } catch {}
+  };
+  const create = (): boolean => {
+    let fd: number;
     try {
-      return openSync(path, "wx", 0o600);
+      fd = openSync(path, "wx", 0o600);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      return false;
+    }
+    try {
+      writeFileSync(fd, identity);
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
+      closeSync(fd);
+    }
+    return true;
+  };
+  if (!create()) {
+    const previous = readIdentity();
+    if (previous === null) return null;
+    try {
+      const owner = JSON.parse(previous) as { pid?: unknown; nonce?: unknown };
+      if (!owner || typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 ||
+          typeof owner.nonce !== "string" || owner.nonce.length === 0) return null;
+      try {
+        process.kill(owner.pid, 0);
+        return null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") return null;
+      }
+      if (readIdentity() !== previous) return null;
+      unlinkSync(path);
+    } catch {
       return null;
     }
-  };
-  let fd = create();
-  if (fd === null) {
-    try {
-      if (Date.now() - statSync(path).mtimeMs > CAPTURE_LOCK_STALE_MS) {
-        unlinkSync(path);
-        fd = create();
-      }
-    } catch {
-      // Released meanwhile.
-    }
+    if (!create()) return null;
   }
-  if (fd === null) return null;
-  closeSync(fd);
-  return { release: () => { try { unlinkSync(path); } catch {} } };
+  return {
+    release,
+    isOwned,
+    refresh: () => {
+      if (!isOwned()) throw new Error("capture lock ownership lost");
+      const now = new Date();
+      utimesSync(path, now, now);
+    },
+  };
 }
 
 /** Await `task`, or reject once `timeoutMs` elapses. `onTimeout` runs at the
@@ -431,10 +439,10 @@ function withDeadline<T>(task: Promise<T>, timeoutMs: number, label: string, onT
 /** One flush write, bounded by `timeoutMs`. The abort signal reaches a real
  *  client so it cancels the underlying fetch at the bound; the race is the bound
  *  whether or not the client honours the signal. */
-function writeWithDeadline(client: CaptureClient, path: string, row: unknown, timeoutMs: number): Promise<unknown> {
+function writeWithDeadline(client: CaptureClient, path: string, row: unknown, timeoutMs: number, signal: AbortSignal): Promise<unknown> {
   const controller = new AbortController();
   return withDeadline(
-    Promise.resolve().then(() => client.request("PUT", path, row, { signal: controller.signal })),
+    Promise.resolve().then(() => client.request("PUT", path, row, { signal: AbortSignal.any([controller.signal, signal]) })),
     timeoutMs,
     "capture flush write",
     () => controller.abort(),
@@ -451,13 +459,23 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
 
   const now = deps.now ?? (() => new Date());
-  // Hold the per-agent lock for the whole flush — the same lock the hot path and
-  // the final rewrite take — so a second flush cannot start and a capture cannot
-  // interleave. A second flush that cannot take it returns "busy" without waiting.
   const held = acquireSpoolLock(dir, agentId);
   if (!held) return { flushed: 0, remaining: records.length, reason: "busy" };
-  const heldPath = lockPath(dir, agentId);
-  const beat = setInterval(() => { try { const t = new Date(); utimesSync(heldPath, t, t); } catch {} }, CAPTURE_LOCK_REFRESH_MS);
+  const controller = new AbortController();
+  let lost = false;
+  let rejectLost!: (error: Error) => void;
+  const lockLost = new Promise<never>((_resolve, reject) => { rejectLost = reject; });
+  const beat = setInterval(() => {
+    try {
+      held.refresh();
+    } catch {
+      lost = true;
+      controller.abort();
+      rejectLost(new Error("capture lock refresh failed"));
+      clearInterval(beat);
+      held.release();
+    }
+  }, CAPTURE_LOCK_REFRESH_MS);
   beat.unref?.();
   const deadlineAt = Date.now() + (deps.deadlineMs ?? CAPTURE_FLUSH_DEADLINE_MS);
   try {
@@ -465,7 +483,7 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
     let client: CaptureClient;
     try {
       // Race the client setup against the deadline as well.
-      client = await withDeadline(Promise.resolve().then(() => makeClient(agentId)), deadlineAt - Date.now(), "capture flush client");
+      client = await withDeadline(Promise.race([Promise.resolve().then(() => makeClient(agentId)), lockLost]), deadlineAt - Date.now(), "capture flush client");
     } catch (error) {
       warn(`flush skipped (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`);
       return { flushed: 0, remaining: records.length, reason: "write-failed" };
@@ -474,30 +492,24 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
     const written = new Set<string>();
     for (const record of records) {
       const remainingMs = deadlineAt - Date.now();
-      if (remainingMs <= 0) break;
+      if (remainingMs <= 0 || lost || !held.isOwned()) break;
       try {
         const row = buildCaptureMemoryRow(
           { kind: record.kind, content: record.content, dedupKey: record.dedupKey, provenance: record.provenance },
           agentId,
           now(),
         );
-        await writeWithDeadline(client, memoryPutPath(row.id), row, remainingMs);
+        await Promise.race([writeWithDeadline(client, memoryPutPath(row.id), row, remainingMs, controller.signal), lockLost]);
         written.add(record.dedupKey);
       } catch (error) {
         warn(`capture write skipped (${error instanceof Error ? error.message : String(error)})`);
       }
     }
     let remaining = records.length;
-    if (written.size > 0) {
-      // Drop only the records that were written, starting from the whole file so
-      // a record that belongs to another agent is kept. The flush holds the lock,
-      // so no append can interleave this rewrite.
+    if (written.size > 0 && !lost && held.isOwned()) {
       const staged = readSpoolFile(dir, agentId);
       if (staged !== null) {
-        const kept = staged.filter((r) => {
-          const key = (r as { dedupKey?: unknown } | null)?.dedupKey;
-          return !(typeof key === "string" && written.has(key));
-        });
+        const kept = staged.filter((r) => !(isSpoolRecord(r, agentId) && written.has(r.dedupKey)));
         atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, kept as CaptureSpoolRecord[]));
         remaining = readSpool(dir, agentId).length;
       }
