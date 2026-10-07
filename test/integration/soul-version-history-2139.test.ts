@@ -410,14 +410,17 @@ describe("flair#2139 S1 — Soul lifecycle leaves a chained history", () => {
     const key = "b:c";
     const id = `legacy-row-${sfx}`;
     const subjectId = `${agentId}:${key}`;
+    const createdAt = now();
+    const soul = { id, agentId, key, value: "before", durability: "permanent", createdAt, updatedAt: createdAt };
     const legacy = {
       id: `soul:${subjectId}:1`, subjectType: "soul", subjectId, agentId, key, version: 1,
-      kind: "create", rowId: id, valueHash: null, previousVersionHash: null, soulSnapshot: null,
+      kind: "create", rowId: id, valueHash: createHash("sha256").update(soul.value, "utf8").digest("hex"),
+      previousVersionHash: null, soulSnapshot: JSON.stringify(soul),
       memoryId: null, visibility: null, actorKind: "operator", actorId: null, sourceClass: "operator",
-      createdAt: now(), guarded: false, expectedVersion: null, recordHash: "",
+      createdAt, guarded: false, expectedVersion: null, recordHash: "",
     };
     legacy.recordHash = recordHashOf(legacy);
-    await upsert("Soul", [{ id, agentId, key, value: "before" }]);
+    await upsert("Soul", [soul]);
     await upsert("InstructionVersion", [legacy]);
     const read = await call(B, "GET", versionPath(legacy.id));
     expect(read.status, read.text).toBe(200);
