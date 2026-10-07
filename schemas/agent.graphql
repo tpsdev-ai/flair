@@ -76,6 +76,9 @@ type Integration @table(database: "flair") @export {
   email: String
   encryptedCredential: String
   metadata: String
+  # Null or absent means unpublished. Integration resource publication writes
+  # stamp an ISO time for a tps-mail binding.
+  directoryPublishedAt: String
   createdAt: String!
   updatedAt: String
 }

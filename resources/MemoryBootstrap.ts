@@ -2,7 +2,7 @@ import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
-import { isTeammate, formatTeamLine, isZeroRowNoOpEvent } from "./memory-bootstrap-lib.js";
+import { isTeammate, directoryHint, isZeroRowNoOpEvent } from "./memory-bootstrap-lib.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { isValidEntity } from "./entity-vocab.js";
 import { withDetachedTxn, withDetachedTxnAsync } from "./table-helpers.js";
@@ -734,8 +734,8 @@ export class BootstrapMemories extends Resource {
       for await (const record of (databases as any).flair.Agent.search()) {
         if (isTeammate(record, agentId)) teammateIds.push(record.id);
       }
-      const line = formatTeamLine(teammateIds);
-      if (line) sections.team.push(line);
+      const line = directoryHint();
+      if (teammateIds.length > 0) sections.team.push(line);
     } catch {
       // Agent table may not exist in older / standalone deployments
     }
@@ -1804,6 +1804,7 @@ export class BootstrapMemories extends Resource {
       // never absent, so "empty" is distinguishable from "unsupported").
       agentId,
       ...(taskRetrievalHint ? { taskRetrievalHint } : {}),
+      directoryHint: directoryHint(),
       scope: scopeInfo,
       soul: soulMap,
       // flair#2141 S1b — always present (`[]` when none), whatever includeSoul
@@ -1840,6 +1841,7 @@ export class BootstrapMemories extends Resource {
       sections: {
         soul: sections.soul.length,
         skills: sections.skills.length,
+        // Fixed directory hint when a roster exists.
         team: sections.team.length,
         permanent: sections.permanent.length,
         recent: sections.recent.length,

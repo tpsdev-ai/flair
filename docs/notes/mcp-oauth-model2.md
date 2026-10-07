@@ -6,7 +6,7 @@
 > Do NOT enable in production until Sherlock signs off on live enablement.
 
 This is the **Model 2** native-MCP path: a custom in-process `/mcp` JSON-RPC
-handler guarded by `@harperfast/oauth`'s `withMCPAuth`, serving the 17 tools in `resources/mcp-tools.ts`
+handler guarded by `@harperfast/oauth`'s `withMCPAuth`, serving the 18 tools in `resources/mcp-tools.ts`
 with a per-agent OAuth identity. It is distinct from the
 native-application-MCP surface (design A / `FLAIR_MCP_ENABLED`); Model 2 does not
 use Harper's native MCP transport, so it is not blocked by the Harper native-MCP
@@ -18,10 +18,9 @@ gating gaps.
   Streamable HTTP: `initialize` / `tools/list` / `tools/call` / `ping`. On
   `tools/call` it resolves the verified token `sub` → a flair `Agent`, then
   dispatches to the curated tool.
-- `resources/mcp-tools.ts` — the 17 tools in `resources/mcp-tools.ts`, each a thin wrapper over the existing resource handler
+- `resources/mcp-tools.ts` — the 18 tools in `resources/mcp-tools.ts`, delegating to resource handlers or the team-directory resolver
   (Memory / SemanticSearch / BootstrapMemories / Soul / WorkspaceState /
-  OrgEvent / AttentionQuery / RecordUsage). No raw CRUD surface — the only path to the datastore through `/mcp`
-  is one of the 17 tools in `resources/mcp-tools.ts`. Curated **by construction**.
+  OrgEvent / AttentionQuery / RecordUsage / the team-directory resolver).
 - `resources/mcp-oauth.ts` — registers `server.http(withMCPAuth(mcpHandler),
   { urlPath: '/mcp' })` **only when `FLAIR_MCP_OAUTH` is on.** `/mcp` runs on its
   own dispatch chain; flair's default auth-middleware does not run for it.

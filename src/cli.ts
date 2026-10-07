@@ -7525,10 +7525,14 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     if (p.arm === "adopt") {
       const stop = await stopDirectProcessForAdopt(p.port, p.dataDir);
       if (stop) {
-        if (done.unloadedPrior && (stop.kind === "failed" || stop.kind === "refused")) {
-          stop.detail += " Previously loaded launchd jobs were unloaded.";
+        if (done.unloadedPrior && (stop.failure.kind === "failed" || stop.failure.kind === "refused")) {
+          stop.failure.detail += " Previously loaded launchd jobs were unloaded.";
         }
-        return stop;
+        if (stop.observedExit && stop.failure.kind === "failed") {
+          done.stopped = true;
+          throw new Error(stop.failure.detail);
+        }
+        return stop.failure;
       }
       done.stopped = true;
     }
@@ -7719,9 +7723,14 @@ async function restoreAfterFailedRepair(
   };
 }
 
+interface AdoptStopOutcome {
+  failure: LaunchdRepairResult;
+  observedExit: boolean;
+}
+
 /**
  * Clean-stop the direct (non-launchd) process serving `dataDir`+`port` for the
- * adopt path (flair#1573 slice b2). Returns a `failed` result when the process
+ * adopt path (flair#1573 slice b2). Returns a failure outcome when the process
  * cannot be attributed (never stop a foreign process) or the port is still
  * occupied after the stop; returns null when the port is free and the caller
  * should proceed to regenerate + load.
@@ -7731,10 +7740,12 @@ async function restoreAfterFailedRepair(
  * verdict refuses rather than gambling on a recycled pid. The stop is SIGTERM +
  * wait for exit — never kill -9.
  */
-async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise<LaunchdRepairResult | null> {
+async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise<AdoptStopOutcome | null> {
   const evidence = await gatherDaemonEvidence(port, dataDir);
   const state = classifyDaemonState(evidence, { port, dataDir });
   const stopDeadline = Date.now() + ADOPT_STOP_TIMEOUT_MS;
+  let observedExit = false;
+  const failure = (result: LaunchdRepairResult): AdoptStopOutcome => ({ failure: result, observedExit });
   const timeoutResult = (stage: string): LaunchdRepairResult => ({
     kind: "failed",
     detail: `Timed out after ${ADOPT_STOP_TIMEOUT_MS}ms ${stage} for ${dataDir}. No replacement launchd job was loaded.`,
@@ -7764,11 +7775,13 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
         ? `${identity.kind}, observed at ${new Date(identityObservedAt).toISOString()}`
         : "not observed before the deadline";
       if (result.kind === "failed") result.detail += ` ${signalResult}; not observed to exit before the deadline (liveness: ${liveness.kind}; identity: ${identityDetail}).`;
-      return result;
+      return failure(result);
     }
+    // The signalled process exited before the shared deadline (flair#2284).
+    observedExit = true;
   }
   const stateDecision = decideAdoptStop(state, { kind: "refused" });
-  if (stateDecision !== "proceed") return stateDecision;
+  if (stateDecision !== "proceed") return failure(stateDecision);
   let health: HealthResult = { kind: "unreachable" };
   while (Date.now() < stopDeadline) {
     health = await probeHealthBeforeDeadline(port, stopDeadline);
@@ -7778,11 +7791,11 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
     if (remaining <= 0) break;
     await new Promise((r) => setTimeout(r, Math.min(250, remaining)));
   }
-  if (Date.now() >= stopDeadline) return timeoutResult(`waiting for port ${port} to free (last health probe: ${health.kind})`);
+  if (Date.now() >= stopDeadline) return failure(timeoutResult(`waiting for port ${port} to free (last health probe: ${health.kind})`));
   const decision = decideAdoptStop(state, health);
-  if (decision !== "proceed") return decision;
+  if (decision !== "proceed") return failure(decision);
   const listenerTimeout = Math.min(2_000, stopDeadline - Date.now());
-  if (listenerTimeout <= 0) return timeoutResult(`checking the final listener on port ${port}`);
+  if (listenerTimeout <= 0) return failure(timeoutResult(`checking the final listener on port ${port}`));
   let output: string;
   let noMatch = false;
   try {
@@ -7796,29 +7809,29 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
       output = "";
       noMatch = true;
     } else {
-      return {
+      return failure({
         kind: "failed",
         detail: `Final listener probe failed for port ${port} (${err?.code ?? err?.signal ?? err?.status ?? "unknown error"}). No replacement launchd job was loaded.`,
         remedy: ["Check lsof; run flair doctor --fix after resolving the probe failure"],
-      };
+      });
     }
   }
-  if (Date.now() >= stopDeadline) return timeoutResult(`checking the final listener on port ${port}`);
+  if (Date.now() >= stopDeadline) return failure(timeoutResult(`checking the final listener on port ${port}`));
   if (noMatch) return null;
   if (typeof output !== "string" || output.trim() === "") {
-    return { kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] };
+    return failure({ kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] });
   }
   const lines = output.trim().split("\n");
   if (lines.some((line) => !/^[1-9][0-9]*$/.test(line.trim()) || !Number.isSafeInteger(Number(line.trim())))) {
-    return { kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] };
+    return failure({ kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] });
   }
   const listeners = lines.map(Number);
   if (listeners.length > 0) {
-    return {
+    return failure({
       kind: "failed",
       detail: `port still occupied after stopping the direct process (listener pid ${listeners.join(", ")})`,
       remedy: ["flair stop", "flair doctor --fix"],
-    };
+    });
   }
   return null;
 }

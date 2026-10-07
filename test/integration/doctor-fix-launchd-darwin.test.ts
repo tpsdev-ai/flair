@@ -847,6 +847,88 @@ function assertDirectSidecar(sb: Sandbox, spawnedPid: number): void {
 }
 
 test.skipIf(!isDarwin)(
+  "adopt listener-probe failure attempts restoration of a real Harper instance",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    await stopManagedHarper(sb);
+    const directPid = await directSpawnDetached(sb);
+    assertDirectSidecar(sb, directPid);
+    const shimDir = join(sb.tmpHome, "probe-bin");
+    const failedProbe = join(sb.tmpHome, "failed-probe");
+    mkdirSync(shimDir);
+    writeFileSync(join(shimDir, "lsof"), `#!/bin/sh
+if ! /bin/kill -0 "$ADOPT_TEST_PID" 2>/dev/null && [ ! -e "$ADOPT_TEST_PROBE" ]; then
+  touch "$ADOPT_TEST_PROBE"
+  exit 2
+fi
+exec /usr/sbin/lsof "$@"
+`, { mode: 0o700 });
+    const script = `import { repairLaunchdManagement } from ${JSON.stringify(CLI_JS)};
+const result = await repairLaunchdManagement(${JSON.stringify(sb.dataDir)}, ${sb.httpPort});
+console.log("REPAIR_RESULT:" + JSON.stringify(result));`;
+    // Async, never spawnSync: the direct Harper is THIS runner's child
+    // (directSpawnDetached), and only a running event loop reaps it. Blocked in
+    // spawnSync, the stopped Harper stayed a zombie, which kill(pid, 0) reports
+    // alive — both doctor's liveness probe and the shim's guard — so the stop
+    // ran out its deadline and the fault was never injected (CI, 605498d6). In
+    // production the direct process is reparented to launchd, which reaps it.
+    const child = spawn(nodeBin(), ["--input-type=module", "-e", script], {
+      cwd: REPO_ROOT,
+      env: {
+        ...doctorEnv(sb.tmpHome),
+        PATH: `${shimDir}:${process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin"}`,
+        ADOPT_TEST_PID: String(directPid),
+        ADOPT_TEST_PROBE: failedProbe,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    const startedAt = Date.now();
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+      const timer = setTimeout(() => child.kill("SIGKILL"), 180_000);
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on("close", (code, signal) => {
+        clearTimeout(timer);
+        resolveExit({ code, signal });
+      });
+    });
+    lastCliRun = { what: "repairLaunchdManagement (lsof fault)", exitCode: exit.code, signal: exit.signal, elapsedMs: Date.now() - startedAt, stdout, stderr };
+    const result = { stdout, stderr };
+    expect(exit.signal, stdout + stderr).toBeNull();
+    expect(exit.code, stdout + stderr).toBe(0);
+    expect(existsSync(failedProbe), `the lsof shim never failed a probe after the direct process exited:\n${stdout}${stderr}`).toBe(true);
+    const line = result.stdout.split("\n").find((value) => value.startsWith("REPAIR_RESULT:"));
+    expect(line).toBeDefined();
+    const repair = JSON.parse(line!.slice("REPAIR_RESULT:".length));
+    expect(repair.kind).toBe("failed");
+    expect(repair.detail).toContain("Final listener probe failed");
+    expect(repair.detail).toContain("Flair was restarted directly");
+    expect(repair.remedy).toEqual(["flair doctor --fix"]);
+    expect(isAlive(directPid)).toBe(false);
+    const restoredPid = instancePid(sb.dataDir, sb.httpPort);
+    expect(restoredPid).not.toBeNull();
+    expect(restoredPid).not.toBe(directPid);
+    expect(launchctlList(sb.label).code).not.toBe(0);
+    expect(isAlive(restoredPid!)).toBe(true);
+    const health = await fetch(`${sb.httpURL}/Health`, { signal: AbortSignal.timeout(2_000) });
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ ok: true });
+  }),
+  850_000,
+);
+
+test.skipIf(!isDarwin)(
   "corrupt or missing launchd plist: doctor --fix regenerates and comes up managed",
   diagnosed(async () => {
     requireCliBuild();

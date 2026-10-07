@@ -144,6 +144,33 @@ export interface BootstrapResult {
   scope?: { agentId?: string; isAdmin?: boolean; reads?: string };
 }
 
+/** One team-directory entry — an active agent-kind principal with an
+ *  published tps-mail contact (flair#2141 S3a). */
+export interface TeamDirectoryEntry {
+  /** Stable Agent ID. */
+  agentId: string;
+  /** Display label (the agent's name, else its id). */
+  name: string;
+  /** The published channel platform (`tps-mail`). */
+  platform: string;
+  /** The published address. */
+  email: string;
+  /** The stored publication time, normalized to ISO. */
+  publishedAt: string;
+  /** The home instance id, or null when it is not resolvable. */
+  homeInstanceId: string | null;
+}
+
+/** A page of the team directory (flair#2141 S3a). */
+export interface TeamDirectoryResult {
+  entries: TeamDirectoryEntry[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
+  /** Server-stamped freshness of this page. */
+  generatedAt: string;
+}
+
 /** Client configuration. */
 export interface FlairClientConfig {
   /** Flair server URL. Default: http://localhost:19926 */

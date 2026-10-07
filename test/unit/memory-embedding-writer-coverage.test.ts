@@ -58,6 +58,7 @@ add("Federation", ["writer:table.put#1"], "LATCH",
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — noteWriteStamp (slice 1); current-space re-embed.");
+add("Memory", ["writer:super.patch#1"], "GATED", "Memory.patch() re-embed request (flair#2296) — stamps getModelId() + noteWriteStamp.");
 
 // ── ECHO: re-writes an EXISTING local row's own stamp (no new space) ──
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
@@ -95,7 +96,7 @@ add("MemoryMaintenance", ["writer:table.delete#1"], "OTHER_TABLE",
   "MemoryHostSource pointer cascade (A1') — not the Memory table, never an embeddingModel.");
 add("MemoryPurge", ["writer:memory.delete#1"], "NON_EMBED",
   "Physical removal — a delete; never writes embeddingModel.");
-add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
+add("Memory", ["writer:patchRecord#1", "writer:super.patch#2", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "derivedFrom/lastReflected patch, patch(), and delete() — never write embeddingModel.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
 add("hit-tracking", [

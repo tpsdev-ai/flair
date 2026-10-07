@@ -30,6 +30,8 @@ let identityReadMs = 0;
 let finalProbe: "timeout" | "error" | "garbage" | "self" | "empty" | "whitespace" | "exit1" | "exit1-stderr" | "exit1-stdout" | "exit1-signal" | "exit1-error" | "exit0-error" = "empty";
 let healthAfterTerm: "refused" | "hang" | "late-refused" | "refuse-on-abort" = "refused";
 let accelerateProbe = false;
+let recoveryPortHeld = false;
+let spawnCalls = 0;
 const identityChecks: number[] = [];
 const identityBudgets: number[] = [];
 const finalProbeTimeouts: number[] = [];
@@ -90,7 +92,7 @@ mock.module("node:child_process", () => ({
     if (cmd === "ps") return `node /fixture/node_modules/harper/dist/bin/harper.js run .`;
     throw new Error(`unexpected execFileSync: ${cmd}`);
   },
-  spawn: () => { throw new Error("unexpected process spawn"); },
+  spawn: () => { spawnCalls++; throw new Error("unexpected process spawn"); },
   spawnSync: (cmd: string, args: string[]) => {
     commands.push([cmd, ...args].join(" "));
     if (cmd === "plutil") return { status: 0, stdout: "OK" };
@@ -120,16 +122,21 @@ const kill = spyOn(process, "kill").mockImplementation(((target: number, signal:
 const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (_input: unknown, options: RequestInit) => {
   if (signalled) {
     healthChecks.push(elapsed);
+    if (recoveryPortHeld && elapsed >= 60_000) {
+      return new Response(JSON.stringify({ ok: true, version: "0.0.0", searchReady: true, buildCommit: null }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (healthAfterTerm === "refuse-on-abort") {
       return new Promise((_resolve, reject) => options.signal!.addEventListener("abort", () => {
         reject(Object.assign(new Error("refused"), { cause: { code: "ECONNREFUSED" } }));
       }, { once: true }));
     }
-    if (healthAfterTerm === "hang") {
+    if (healthAfterTerm === "hang" && elapsed < 60_000) {
       accelerateProbe = true;
       return { json: () => new Promise(() => {}), status: 200 };
     }
-    if (healthAfterTerm === "late-refused") elapsed += 59_750;
+    if (healthAfterTerm === "late-refused" && elapsed < 59_750) elapsed += 59_750;
     throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
   }
   return new Response(JSON.stringify({ ok: true, version: "0.0.0", searchReady: true }), {
@@ -171,6 +178,8 @@ beforeEach(() => {
   finalProbe = "empty";
   healthAfterTerm = "refused";
   accelerateProbe = false;
+  recoveryPortHeld = false;
+  spawnCalls = 0;
   for (const items of [commands, signals, identityChecks, identityBudgets, finalProbeTimeouts, healthChecks]) items.length = 0;
   writeFileSync(join(dataDir, "hdb.pid"), String(pid));
   writeFileSync(join(dataDir, "flair-daemon.json"), JSON.stringify({ pid, port, startTimeMs: started, flairVersion: "test" }));
@@ -208,6 +217,7 @@ test("a direct process surviving SIGTERM consumes only the shared 60s stop deadl
   expect(result.detail).toContain("not observed to exit before the deadline");
   expect(result.detail).toContain("SIGTERM sent");
   expect(result.detail).toContain(dataDir);
+  expect(spawnCalls).toBe(0);
   expect(identityChecks).toEqual([100]);
   expect(identityBudgets).toEqual([2_000]);
   expect(result.detail).toContain(`identity: verified, observed at ${new Date(started + 100).toISOString()}`);
@@ -220,6 +230,7 @@ test("a direct process surviving SIGTERM consumes only the shared 60s stop deadl
 test("a slow identity read is bounded before the shared deadline", async () => {
   identityReadMs = 10_000;
   const result = await failedStop();
+  expect(spawnCalls).toBe(0);
   expect(identityBudgets).toEqual([2_000]);
   expect(identityChecks).toEqual([]);
   expect(result.detail).toContain(`identity: unverified, observed at ${new Date(started + 2_000).toISOString()}`);
@@ -234,6 +245,7 @@ for (const code of ["EPERM", "EINVAL"]) {
     expect(elapsed).toBe(60_000);
     expect(result.detail).toContain(`SIGTERM failed (${code})`);
     expect(result.detail).toContain("identity: unverified");
+    expect(spawnCalls).toBe(0);
     expect(result.detail).toContain(`liveness: ${code === "EPERM" ? "eperm" : "unknown"}`);
     expect(identityChecks).toEqual([0]);
     expect(healthChecks).toEqual([]);
@@ -245,6 +257,7 @@ test("ESRCH at the deadline is reported without claiming the process is still al
   identityAfterTerm = null;
   const result = await failedStop();
   expect(result.detail).toContain("liveness: gone");
+  expect(spawnCalls).toBe(0);
   expect(result.detail).not.toContain("still alive");
   expect(elapsed).toBe(60_000);
   expect(identityChecks).toEqual([0]);
@@ -269,13 +282,51 @@ for (const outcome of ["error", "garbage", "self", "empty", "whitespace", "exit1
   });
 }
 
+for (const outcome of ["timeout", "error", "garbage"] as const) {
+  test(`a final listener probe ${outcome} after exit attempts a restart when the recovery port probe refuses`, async () => {
+    exitsOnTerm = true;
+    finalProbe = outcome;
+    const result = await failedStop();
+    expect(signals).toEqual(["SIGTERM"]);
+    expect(spawnCalls).toBe(1);
+    expect(result.detail).toContain("restarting it directly FAILED");
+    expect(result.detail).toContain("Flair is DOWN");
+    expect(result.remedy).toEqual(["flair start"]);
+  });
+}
+
+test("a stop failure with no exit confirmed before the deadline attempts no restart", async () => {
+  const result = await failedStop();
+  expect(result.detail).toContain("not observed to exit before the deadline");
+  expect(spawnCalls).toBe(0);
+  expect(result.detail).not.toMatch(/restart/i);
+});
+
 test("the final listener probe gets only the shared deadline's remaining time", async () => {
   exitsOnTerm = true;
   healthAfterTerm = "late-refused";
   finalProbe = "timeout";
-  await failedStop();
+  const result = await failedStop();
+  expect(spawnCalls).toBe(1);
+  expect(result.detail).toContain("restarting it directly FAILED");
+  expect(result.detail).toContain("Flair is DOWN");
+  expect(result.remedy).toEqual(["flair start"]);
+  expect(healthChecks).toEqual([0, 60_000]);
   expect(finalProbeTimeouts).toEqual([250]);
   expect(elapsed).toBe(60_000);
+});
+
+test("recovery refuses a restart when its port check finds a listener after the stop deadline", async () => {
+  exitsOnTerm = true;
+  healthAfterTerm = "late-refused";
+  finalProbe = "timeout";
+  recoveryPortHeld = true;
+  const result = await failedStop();
+  expect(elapsed).toBe(60_000);
+  expect(spawnCalls).toBe(0);
+  expect(result.detail).toContain(`port ${port} is not free (ok)`);
+  expect(result.detail).toContain("Flair was NOT restarted directly");
+  expect(result.remedy).toEqual(["flair status", "flair start"]);
 });
 
 test("the stop path's wait for a hanging health body is bounded by the shared deadline", async () => {
@@ -284,6 +335,9 @@ test("the stop path's wait for a hanging health body is bounded by the shared de
   accelerateProbe = true;
   const result = await failedStop();
   expect(result.detail).toContain("last health probe: unreachable");
+  expect(spawnCalls).toBe(1);
+  expect(result.detail).toContain("Flair is DOWN");
+  expect(result.remedy).toEqual(["flair start"]);
   expect(elapsed).toBe(60_000);
   expect(finalProbeTimeouts).toEqual([]);
 });
@@ -318,6 +372,7 @@ test("a stop failure reports that an idle prior launchd job was unloaded", async
 test("a liveness probe reaching the deadline does not start another sleep", async () => {
   deadlineDuringLiveness = true;
   await failedStop();
+  expect(spawnCalls).toBe(0);
   expect(elapsed).toBe(60_000);
   expect(sleep.mock.calls.filter((call: unknown[]) => Number(call[1]) <= 500)).toEqual([]);
   expect(identityChecks).toEqual([0]);
