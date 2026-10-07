@@ -125,6 +125,38 @@ test("raw Memory write sites detected by the inventory are classified for the re
   expect([...classified.keys()].filter((key) => !sites.some((site) => site.key === key))).toEqual([]);
 });
 
+/**
+ * The end of a guard decision that STOPS the method on a denial:
+ * `const X = [await ]<call>(...);` immediately followed by `if (X) return X;`
+ * (or `if (X.denial) return X.denial;` when `denialField` is given). -1 when
+ * the decision is absent or its denial is not returned right there, so a
+ * decision whose result is ignored fails the checks below.
+ */
+function denialReturnEnd(body: string, call: string, denialField?: string): number {
+  const escaped = call.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const result = denialField ? `\\1\\.${denialField}` : "\\1";
+  const re = new RegExp(`const (\\w+) = (?:await )?${escaped}\\([\\s\\S]*?\\);\\s*if \\(${result}\\) return ${result};`);
+  const match = re.exec(body);
+  return match ? match.index + match[0].length : -1;
+}
+
+/** The end of `recordSkip("<reason>");` immediately followed by `continue;`; -1 otherwise. */
+function skipContinueEnd(src: string, reason: string): number {
+  const match = new RegExp(`recordSkip\\("${reason}"\\);\\s*continue;`).exec(src);
+  return match ? match.index + match[0].length : -1;
+}
+
+const WRITES = ["super.put(", "super.patch(", "writeMemoryRowPost(", ".flair.Memory.put(", ".flair.Memory.post(", ".flair.Memory.delete("];
+
+/** Every write in `body` (each of `writes`) sits after `stop`. */
+function expectWritesAfter(body: string, stop: number, label: string, writes: string[] = WRITES): void {
+  expect(stop, `${label}: the decision is missing or its denial does not stop the method`).toBeGreaterThan(-1);
+  for (const write of writes) {
+    const at = body.indexOf(write);
+    if (at !== -1) expect(at, `${label}: ${write} before the decision stops the method`).toBeGreaterThan(stop);
+  }
+}
+
 /** The body of `  async <name>(` up to the next class method. */
 function methodBody(src: string, signature: string): string {
   const start = src.indexOf(signature);
@@ -133,62 +165,55 @@ function methodBody(src: string, signature: string): string {
   return src.slice(start, next === -1 ? undefined : next);
 }
 
-test("each GUARDED path runs the decision before it writes", () => {
+test("each GUARDED path runs the decision, and its denial stops the path before it writes", () => {
   const memory = readFileSync("resources/Memory.ts", "utf8");
   for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {", "  async patch(content: any, query?: any) {"]) {
     const body = methodBody(memory, signature);
-    const check = body.indexOf('refuseReservedSeedWrite("Memory", writeTargetIds(this, content)');
-    expect(check, `${signature} does not call the decision`).toBeGreaterThan(-1);
-    expect(body.indexOf("if (seedDenial) return seedDenial;"), signature).toBeGreaterThan(check);
-    for (const write of ["super.put(", "super.patch(", "writeMemoryRowPost(", ".flair.Memory.put("]) {
-      const at = body.indexOf(write);
-      if (at !== -1) expect(at, `${signature}: ${write} before the decision`).toBeGreaterThan(check);
-    }
+    expect(body, `${signature} does not call the decision`).toContain('refuseReservedSeedWrite("Memory", writeTargetIds(this, content)');
+    expectWritesAfter(body, denialReturnEnd(body, "refuseReservedSeedWrite"), signature);
   }
   const del = methodBody(memory, "  async delete(id: any) {");
-  const delCheck = del.indexOf('reservedSeedWriteDenial(\n      "Memory", [id,');
-  expect(delCheck, "delete() does not call the decision on its id").toBeGreaterThan(-1);
-  expect(del.indexOf(".flair.Memory.delete(")).toBeGreaterThan(delCheck);
+  expect(del, "delete() does not call the decision on its id").toContain('reservedSeedWriteDenial(\n      "Memory", [id,');
+  expectWritesAfter(del, denialReturnEnd(del, "reservedSeedWriteDenial"), "delete()");
 
   const supersede = memory.slice(memory.indexOf("async function validateAndAuthorizeSupersedes("));
-  expect(supersede.slice(0, supersede.indexOf("\n}\n"))).toContain('reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth)');
-  expect(memory.match(/validateAndAuthorizeSupersedes\(content, auth, ctx\)/g)?.length).toBe(2);
+  const supersedeBody = supersede.slice(0, supersede.indexOf("\n}\n"));
+  expect(supersedeBody).toContain('reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth)');
+  expect(supersedeBody, "the supersede decision's denial is not returned").toMatch(/const seedDenial = reservedSeedWriteDenial\("Memory", \[content\.supersedes\], ctx, auth\);\s*if \(seedDenial\) return refuse\(seedDenial\);/);
+  for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {"]) {
+    const body = methodBody(memory, signature);
+    expect(body, `${signature} does not validate supersedes`).toContain("validateAndAuthorizeSupersedes(content, auth, ctx,");
+    // The _reindex branch of put() writes earlier but never reaches a supersede;
+    // the new-row write and the close must come after the denial returns.
+    expectWritesAfter(body, denialReturnEnd(body, "validateAndAuthorizeSupersedes", "denial"), `${signature} supersedes`,
+      ["writeMemoryRowPost(", ".flair.Memory.put(", "closeSupersededIfNeeded("]);
+  }
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
-  const feedCheck = feed.indexOf('reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth)');
-  expect(feedCheck).toBeGreaterThan(-1);
-  expect(feed.indexOf(".flair.Memory.put(")).toBeGreaterThan(feedCheck);
+  expect(feed).toContain('reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth)');
+  expectWritesAfter(feed, denialReturnEnd(feed, "reservedSeedWriteDenial"), "FeedMemories.post");
 
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const skip = federation.indexOf('recordSkip("seed_id_not_federated")');
-  expect(skip).toBeGreaterThan(-1);
+  const skip = skipContinueEnd(federation, "seed_id_not_federated");
+  expect(skip, "the seed skip does not stop the record").toBeGreaterThan(-1);
   expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
 });
 
-test("each GUARDED path runs the .content-suffix id decision before it writes", () => {
+test("each GUARDED path runs the .content-suffix id decision, and its denial stops the path before it writes", () => {
   const memory = readFileSync("resources/Memory.ts", "utf8");
   for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {", "  async patch(content: any, query?: any) {"]) {
     const body = methodBody(memory, signature);
-    const check = body.indexOf("refuseContentSuffixId(");
-    expect(check, `${signature} does not run the .content-suffix decision`).toBeGreaterThan(-1);
-    for (const write of ["super.put(", "super.patch(", "writeMemoryRowPost(", ".flair.Memory.put("]) {
-      const at = body.indexOf(write);
-      if (at !== -1) expect(at, `${signature}: ${write} before the decision`).toBeGreaterThan(check);
-    }
+    expectWritesAfter(body, denialReturnEnd(body, "refuseContentSuffixId"), signature);
   }
   const del = methodBody(memory, "  async delete(id: any) {");
-  const delCheck = del.indexOf("refuseContentSuffixId(");
-  expect(delCheck, "delete() does not run the decision on its id").toBeGreaterThan(-1);
-  expect(del.indexOf(".flair.Memory.delete(")).toBeGreaterThan(delCheck);
+  expectWritesAfter(del, denialReturnEnd(del, "refuseContentSuffixId"), "delete()");
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
-  const feedCheck = feed.indexOf("refuseContentSuffixId(");
-  expect(feedCheck).toBeGreaterThan(-1);
-  expect(feed.indexOf(".flair.Memory.put(")).toBeGreaterThan(feedCheck);
+  expectWritesAfter(feed, denialReturnEnd(feed, "refuseContentSuffixId"), "FeedMemories.post");
 
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const skip = federation.indexOf('recordSkip("content_suffix_id_not_federated")');
-  expect(skip, "the federation merge does not skip a .content-suffixed Memory id").toBeGreaterThan(-1);
+  const skip = skipContinueEnd(federation, "content_suffix_id_not_federated");
+  expect(skip, "the federation merge does not skip a .content-suffixed Memory id, or the skip does not stop the record").toBeGreaterThan(-1);
   expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
 });
 

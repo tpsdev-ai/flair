@@ -871,10 +871,11 @@ export class FederationSync extends Resource {
           continue;
         }
 
-        // flair#2199 follow-up: a Memory id that ends in the `.content`
-        // property suffix addresses no distinct record (Harper reads the suffix
-        // as a selector), so a federated row carrying one is skipped — the same
-        // discipline the seed reservation applies just above.
+        // flair#2307: Harper's REST by-id path reads a trailing `.content` as a
+        // property selector, and the Memory write paths refuse such an id, so a
+        // federated Memory row whose id ends in `.content` is skipped, as the
+        // seed reservation does just above. A legacy row with such an id that
+        // already exists on the sending peer is therefore not federated.
         if (record.table === "Memory" && endsWithContentSelectorSuffix(mergedData.id)) {
           recordSkip("content_suffix_id_not_federated");
           continue;

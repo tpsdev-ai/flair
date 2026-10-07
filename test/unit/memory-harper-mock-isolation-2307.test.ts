@@ -3,9 +3,11 @@
  *
  * `test/unit/memory-selection-middleware-1940.test.ts` and
  * `test/unit-isolated/memory-integrity.test.ts` both mock the `harper` module
- * (bun's `mock.module` is process-global). Each must keep its own in-memory
- * state, so one `bun test` invocation that loads BOTH files is green. This runs
- * that combined invocation in a child process and pins the guarantee.
+ * (bun's `mock.module` is process-global, and both read the shared `agentStore`
+ * from test/helpers/harper-mock). Their mocks present a compatible surface, and
+ * the middleware file re-registers its mock right before it imports
+ * auth-middleware. This runs one `bun test` invocation that loads both files, in
+ * each order, in a child process, and requires it to pass.
  */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";

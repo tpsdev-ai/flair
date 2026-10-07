@@ -59,7 +59,7 @@ import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-track
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 import { refuseReservedSeedWrite, reservedSeedWriteDenial, reservedSeedSubjectDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
-import { refuseContentSuffixId, resolveMemoryReferenceId } from "./memory-id-guard.js";
+import { refuseContentSuffixId, resolveMemoryReferenceId, supersedesTargetMissing, supersedesTargetUnreadable } from "./memory-id-guard.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -614,11 +614,17 @@ function reindexDrift(content: any, existing: Record<string, any>): string | nul
  * wrap around a multi-await async function would not protect the later
  * call). Does NOT swallow failures — throws so the caller can
  * log it. Never called before the new record is already written.
+ *
+ * flair#2307: `expectedOwner`, when given, is the owner the authorization read
+ * saw; a row whose owner differs now is not closed (throws instead).
  */
-async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>): Promise<void> {
+async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>, expectedOwner?: string): Promise<void> {
   const existing = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(oldId));
   if (!existing) {
     throw new Error(`supersede-close: record ${oldId} not found`);
+  }
+  if (expectedOwner !== undefined && existing.agentId !== expectedOwner) {
+    throw new Error(`supersede-close: record ${oldId} is no longer owned by the authorized owner`);
   }
   const closed = { ...existing, ...patch };
   stripUndeclaredMemoryAttributes(closed);
@@ -661,8 +667,19 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  *
  * Validates the `supersedes` field's shape and, for a cross-agent supersede,
  * requires a "write" MemoryGrant from the target's owner (reuses the existing
- * agent-auth/grant machinery — no parallel auth logic). Returns a Response to
- * short-circuit with (400/403), or null to continue.
+ * agent-auth/grant machinery — no parallel auth logic). Returns `denial` (a
+ * Response to short-circuit with) or the `close` the write is authorized to
+ * perform once the new record is written (null: close nothing).
+ *
+ * flair#2307: `content.supersedes` is already the canonical id
+ * (canonicalizeSupersedes), so the reserved-id check, the authorization read,
+ * the stored reference and the close all name the same row. For a non-admin
+ * agent, a failed target read refuses (supersedesTargetUnreadable) and a
+ * missing target refuses (supersedesTargetMissing) — except a reference that is
+ * unchanged from the stored row's own `supersedes` (a re-PUT of a successor
+ * whose predecessor was since deleted), which is kept and closes nothing. The
+ * close carries the owner the read saw, and closeSupersededRecord refuses a
+ * row whose owner differs by then.
  *
  * flair#704: an explicit `supersedes: null` — the shape most JSON writers
  * produce for an unset optional field (`JSON.stringify({supersedes: undefined})`
@@ -679,49 +696,77 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  * closeSupersededIfNeeded) already treats it as unset with no further
  * changes needed.
  */
-async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict, ctx: any): Promise<Response | null> {
+async function validateAndAuthorizeSupersedes(
+  content: any,
+  auth: AgentAuthVerdict,
+  ctx: any,
+  stored: Record<string, any> | null,
+): Promise<{ denial: Response | null; close: SupersedeClose | null }> {
+  const refuse = (denial: Response) => ({ denial, close: null });
   if (content.supersedes === null) {
     delete content.supersedes;
   }
   if (content.supersedes !== undefined && typeof content.supersedes !== "string") {
-    return new Response(JSON.stringify({ error: "supersedes must be a string (memory ID)" }), {
+    return refuse(new Response(JSON.stringify({ error: "supersedes must be a string (memory ID)" }), {
       status: 400, headers: { "Content-Type": "application/json" },
-    });
+    }));
   }
   // flair#2141 S2: superseding closes the target row, so a reserved seed id
   // needs operator authority here too (resources/seed-reservation.ts).
   const seedDenial = reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth);
-  if (seedDenial) return seedDenial;
-  if (content.supersedes && auth.kind === "agent" && !auth.isAdmin) {
-    // flair#2199 follow-up: enforce authority against the record the reference
-    // RESOLVES to — decode it and drop a trailing declared-attribute selector —
-    // never against the literal string, so a suffix or encoding on the
-    // reference cannot name a record the caller is not allowed to supersede.
-    const targetId = resolveMemoryReferenceId(content.supersedes) ?? content.supersedes;
-    const target = await (databases as any).flair.Memory.get(targetId).catch(() => null);
-    if (target && target.agentId !== auth.agentId) {
-      if (!(await hasWriteGrant(auth.agentId, target.agentId))) {
-        return FORBIDDEN("forbidden: cannot supersede a memory owned by another agent without a write grant");
-      }
-    }
+  if (seedDenial) return refuse(seedDenial);
+  if (!content.supersedes) return { denial: null, close: null };
+  if (auth.kind !== "agent" || auth.isAdmin) return { denial: null, close: { id: content.supersedes } };
+  let target: any;
+  try {
+    target = await (databases as any).flair.Memory.get(content.supersedes);
+  } catch (err) {
+    return refuse(supersedesTargetUnreadable(err));
   }
-  return null;
+  if (!target) {
+    if (stored?.supersedes === content.supersedes) return { denial: null, close: null };
+    return refuse(supersedesTargetMissing());
+  }
+  if (target.agentId !== auth.agentId && !(await hasWriteGrant(auth.agentId, target.agentId))) {
+    return refuse(FORBIDDEN("forbidden: cannot supersede a memory owned by another agent without a write grant"));
+  }
+  return { denial: null, close: { id: content.supersedes, ownerId: target.agentId } };
+}
+
+/** The close a write is authorized to perform on its `supersedes` target. */
+interface SupersedeClose {
+  id: string;
+  /** The owner the authorization read saw (agent callers only). */
+  ownerId?: string;
+}
+
+/**
+ * flair#2307: resolve a write's `supersedes` reference to its canonical id ONCE
+ * (resolveMemoryReferenceId), before anything reads it, and store that id back
+ * on the body. Every later use — the skill body's predecessor read, the
+ * reserved-id check, the authorization read, the stored reference and the
+ * close — then names the same row. A non-string is left for the shape check.
+ */
+function canonicalizeSupersedes(content: any): void {
+  if (content && typeof content === "object" && typeof content.supersedes === "string") {
+    content.supersedes = resolveMemoryReferenceId(content.supersedes);
+  }
 }
 
 /**
  * Close the superseded record — called AFTER the new record has already been
  * written (write-new-BEFORE-close-old). Safe failure state is
  * two active records (recoverable), never a tombstoned-old-with-lost-new.
- * Failure is logged (observable), never silently swallowed. No-op if
- * `content.supersedes` is not set.
+ * Failure is logged (observable), never silently swallowed. No-op when
+ * validateAndAuthorizeSupersedes authorized no close.
  */
-async function closeSupersededIfNeeded(ctx: any, content: any, methodLabel: "post" | "put"): Promise<void> {
-  if (!content.supersedes) return;
+async function closeSupersededIfNeeded(ctx: any, content: any, close: SupersedeClose | null, methodLabel: "post" | "put"): Promise<void> {
+  if (!close) return;
   try {
-    await closeSupersededRecord(ctx, content.supersedes, {
+    await closeSupersededRecord(ctx, close.id, {
       validTo: content.validFrom ?? content.createdAt,
       updatedAt: content.createdAt ?? content.updatedAt,
-    });
+    }, close.ownerId);
   } catch (err) {
     // Constant format string + structured data: memory ids are agent-controlled,
     // so interpolating them into console.error's format position (with a trailing
@@ -730,7 +775,7 @@ async function closeSupersededIfNeeded(ctx: any, content: any, methodLabel: "pos
     console.error(
       "Memory.closeSuperseded: failed to close superseded record after writing new record " +
       "(observable, not silent; new record is safely written, old record remains active until retried)",
-      { method: methodLabel, supersededId: content.supersedes, newRecordId: content.id, err },
+      { method: methodLabel, supersededId: close.id, newRecordId: content.id, err },
     );
   }
 }
@@ -1156,6 +1201,7 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
+    canonicalizeSupersedes(content);
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
@@ -1289,8 +1335,8 @@ export class Memory extends (databases as any).flair.Memory {
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with put() — see validateAndAuthorizeSupersedes doc).
-    const supersedesError = await validateAndAuthorizeSupersedes(content, auth, ctx);
-    if (supersedesError) return supersedesError;
+    const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, postStored);
+    if (supersede.denial) return supersede.denial;
 
     // Temporal validity: validFrom defaults to now, validTo left null for active facts.
     if (!content.validFrom) {
@@ -1452,7 +1498,7 @@ export class Memory extends (databases as any).flair.Memory {
     // old record and then lose the new one if the write failed afterward.
     // Now the safe failure state is two active records (recoverable), never
     // a lost write — and the failure is logged, never silently swallowed.
-    await closeSupersededIfNeeded(ctx, content, "post");
+    await closeSupersededIfNeeded(ctx, content, supersede.close, "post");
 
     // flair#744 slice A: citation-on-write — POST-COMMIT, fully
     // failure-isolated. The write above already succeeded and `result` is
@@ -1737,6 +1783,7 @@ export class Memory extends (databases as any).flair.Memory {
     const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedExisting.denial) return resolvedExisting.denial;
     const preExisting = resolvedExisting.row;
+    canonicalizeSupersedes(content);
     const requestedPayload = { ...content };
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
@@ -1869,8 +1916,8 @@ export class Memory extends (databases as any).flair.Memory {
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
     // this too: it's the only HTTP-reachable create path).
-    const supersedesError = await validateAndAuthorizeSupersedes(content, auth, ctx);
-    if (supersedesError) return supersedesError;
+    const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, preExisting);
+    if (supersede.denial) return supersede.denial;
     if (content.supersedes && !content.validFrom) {
       content.validFrom = content.createdAt;
     }
@@ -2045,7 +2092,7 @@ export class Memory extends (databases as any).flair.Memory {
     noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
 
     // ── THEN close the superseded record (see post()) ───────────────────────
-    await closeSupersededIfNeeded(ctx, content, "put");
+    await closeSupersededIfNeeded(ctx, content, supersede.close, "put");
 
     // flair#744 slice A: citation-on-write — POST-COMMIT, fully
     // failure-isolated (see post()'s identical comment above).

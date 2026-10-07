@@ -1,11 +1,10 @@
 /**
  * memory-supersede-authority-2307.test.ts — flair#2307 item 4, real Harper.
  *
- * A Memory write that carries `supersedes` must enforce the cross-agent write
- * grant against the record the reference RESOLVES to — the way Harper resolves a
- * by-id path (decode, then drop a trailing declared-attribute selector) — not
- * against the literal reference string. Otherwise a suffix or encoding on the
- * reference names a record the caller is not allowed to supersede.
+ * A Memory write that carries `supersedes` resolves the reference once, the way
+ * Harper resolves a by-id path (decode, then drop a trailing declared-attribute
+ * selector), and uses that id for the cross-agent write-grant check, the stored
+ * reference and the close. A failed or missing target read refuses the write.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -59,6 +58,14 @@ async function seedAgent(harper: HarperInstance, agent: TestAgent): Promise<void
   });
   expect(res.status, `seed agent returned ${res.status}`).toBe(200);
 }
+async function readRows(harper: HarperInstance, ids: string[]): Promise<Map<string, any>> {
+  const res = await adminOp(harper, {
+    operation: "search_by_hash", database: "flair", table: "Memory", hash_values: ids, get_attributes: ["*"],
+  });
+  const text = await res.text();
+  expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  return new Map((JSON.parse(text) as any[]).map((row) => [String(row.id), row]));
+}
 async function insertRow(harper: HarperInstance, id: string, agentId: string, content: string): Promise<void> {
   const res = await adminOp(harper, {
     operation: "insert", database: "flair", table: "Memory",
@@ -68,6 +75,11 @@ async function insertRow(harper: HarperInstance, id: string, agentId: string, co
 }
 
 let harper: HarperInstance;
+/** [the attacker's own row, the literal reference string] */
+const CANONICAL_CASES: Array<[string, string]> = [
+  ["msw-own-a", "msw-own-a.agentId"],
+  ["msw-own-b", "msw-own-b%2EagentId"],
+];
 const owner = mkAgent("msw-owner");
 const attacker = mkAgent("msw-attacker");
 
@@ -78,6 +90,12 @@ beforeAll(async () => {
   await seedAgent(harper, attacker);
   for (const id of ["msw-victim", "msw-victim-b", "msw-victim-c"]) {
     await insertRow(harper, id, owner.id, "VICTIM BODY");
+  }
+  // Rows the attacker owns, each beside a raw-table row (owned by `owner`) whose
+  // id is the literal suffixed or encoded reference.
+  for (const [own, literal] of CANONICAL_CASES) {
+    await insertRow(harper, own, attacker.id, "ATTACKER OWN BODY");
+    await insertRow(harper, literal, owner.id, "OWNER LITERAL BODY");
   }
 }, 240_000);
 
@@ -106,5 +124,45 @@ describe("flair#2307 item 4 — supersede authority is enforced against the reso
     });
     expect(res.status).toBe(403);
     expect((await res.json()).error).toContain("cannot supersede");
+  }, 30_000);
+});
+
+describe("flair#2307 — one canonical id is authorized, stored and closed", () => {
+  for (const [own, literal] of CANONICAL_CASES) {
+    it(`a reference written as ${JSON.stringify(literal)} stores and closes ${own}, never the raw-table row ${JSON.stringify(literal)}`, async () => {
+      const successor = `${own}-successor`;
+      const res = await authSend(harper, attacker, "PUT", `/Memory/${successor}`, {
+        id: successor, agentId: attacker.id, content: `successor of ${own}, long enough for the gate`, supersedes: literal,
+      });
+      expect(res.status, (await res.text()).slice(0, 300)).toBeLessThan(300);
+      const rows = await readRows(harper, [own, literal, successor]);
+      expect(rows.get(successor)?.supersedes).toBe(own);
+      expect(rows.get(own)?.validTo, `${own} was not closed`).toBeTruthy();
+      expect(rows.get(literal)?.validTo ?? null, `${literal} (owned by another agent) was closed`).toBeNull();
+      expect(rows.get(literal)?.agentId).toBe(owner.id);
+    }, 30_000);
+  }
+
+  it("a target whose read fails refuses the write with supersedes_target_unreadable and writes nothing", async () => {
+    // Harper refuses a primary-key lookup longer than its key-size limit, so
+    // this reference's read fails.
+    const reference = "msw-oversize-".padEnd(2100, "x");
+    const res = await authSend(harper, attacker, "PUT", "/Memory/msw-new-unreadable", {
+      id: "msw-new-unreadable", agentId: attacker.id, content: "unreadable-target successor long enough for the gate", supersedes: reference,
+    });
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body).slice(0, 300)).toBe(400);
+    expect(body.error).toBe("supersedes_target_unreadable");
+    expect((await readRows(harper, ["msw-new-unreadable"])).size).toBe(0);
+  }, 30_000);
+
+  it("a target that does not exist refuses the write with supersedes_target_missing and writes nothing", async () => {
+    const res = await authSend(harper, attacker, "PUT", "/Memory/msw-new-missing", {
+      id: "msw-new-missing", agentId: attacker.id, content: "missing-target successor long enough for the gate", supersedes: "msw-nowhere",
+    });
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body).slice(0, 300)).toBe(409);
+    expect(body.error).toBe("supersedes_target_missing");
+    expect((await readRows(harper, ["msw-new-missing", "msw-nowhere"])).size).toBe(0);
   }, 30_000);
 });

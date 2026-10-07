@@ -31,6 +31,8 @@
  * via the SAME mechanism `flair reembed` (src/cli.ts) already uses in
  * production: a genuine `PUT /Memory/:id` HTTP request (admin-authenticated
  * loopback), not an in-process call on `databases.flair.Memory` directly.
+ * The one exception is a row whose id ends in `.content`, which that request
+ * cannot address (see regenContentSuffixRow below).
  *
  * THIS IS LOAD-BEARING, confirmed empirically while building
  * test/integration/migrations-embedding-stamp-e2e.test.ts against real
@@ -134,7 +136,9 @@
  * re-embed, ship a structural reindex trigger with it.
  */
 import { databases } from "harper";
+import { isDeepStrictEqual } from "node:util";
 import { getEmbedding, getModelId } from "../embeddings-provider.js";
+import { withOwnedTransaction } from "../request-transaction.js";
 import { harperPortValue } from "../../src/lib/harper-port-value.js";
 import { DEFAULT_HTTP_PORT } from "../a2a-url.js";
 import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
@@ -146,9 +150,10 @@ export { EMBEDDING_STAMP_ID };
 
 export interface MemoryTableLike {
   search(query: unknown): AsyncIterable<Record<string, unknown>>;
-  get(id: string): Promise<Record<string, unknown> | null>;
+  /** `context` carries the owned transaction of the content-suffix fallback below. */
+  get(id: string, context?: unknown): Promise<Record<string, unknown> | null>;
   /** The raw table write handle, used only for the content-suffix fallback below. */
-  put(row: Record<string, unknown>): Promise<unknown>;
+  put(row: Record<string, unknown>, context?: unknown): Promise<unknown>;
 }
 
 function defaultMemoryTable(): MemoryTableLike {
@@ -223,25 +228,52 @@ async function regenViaHttpPut(
   }
 }
 
+/** A vector this migration may stamp as current: a non-empty array of finite numbers. */
+function isUsableEmbedding(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length > 0 && value.every((n) => typeof n === "number" && Number.isFinite(n));
+}
+
+/** The seams the content-suffix fallback reaches; injectable for unit tests. */
+export interface ContentSuffixRegenDeps {
+  embed: (text: string) => Promise<unknown>;
+  inTransaction: <T>(fn: (txn: unknown) => Promise<T>) => Promise<T>;
+}
+
+const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
+  embed: (text) => getEmbedding(text, "document"),
+  inTransaction: (fn) => withOwnedTransaction(undefined, fn),
+};
+
 /**
- * Re-embed a legacy row whose id ends in the `.content` property suffix. Such
- * an id cannot be addressed by the loopback `PUT /Memory/:id` the regen path
- * uses — Harper reads the suffix as a selector, and the write path refuses the
- * id — so the row would otherwise stay pending forever and /HealthDetail would
- * name this migration indefinitely. Compute the embedding here and write the
- * row through the raw table handle, which the by-id write guard does not cover.
- * Returns true iff the row was written; a failure leaves it in its current
- * (queryable, stale) state for the next cycle, never partially written.
+ * Re-embed a legacy row whose id ends in the `.content` property suffix. The
+ * loopback `PUT /Memory/:id` the regen path uses cannot address such an id
+ * (Harper's REST by-id path reads the suffix as a selector, and the write path
+ * refuses the id), so this computes the embedding itself and writes through the
+ * raw table handle.
+ *
+ * Writes only when the provider returned a usable vector, and only onto a row
+ * that still exists and is unchanged since `existing` was read: the re-read,
+ * comparison and write share one owned transaction (the MemoryMaintenance
+ * pattern), and the write changes only `embedding` and `embeddingModel`.
+ * Returns true iff it wrote; otherwise the row is left as it is (still pending
+ * if it was) for the next cycle.
  */
 async function regenContentSuffixRow(
   table: MemoryTableLike,
+  id: string,
   existing: Record<string, unknown>,
   current: string,
+  deps: ContentSuffixRegenDeps,
 ): Promise<boolean> {
   try {
-    const embedding = await getEmbedding(String(existing.content ?? ""), "document");
-    await table.put({ ...existing, embedding, embeddingModel: current });
-    return true;
+    const embedding = await deps.embed(String(existing.content ?? ""));
+    if (!isUsableEmbedding(embedding)) return false;
+    return await deps.inTransaction(async (txn) => {
+      const fresh = await table.get(id, txn);
+      if (!fresh || !isDeepStrictEqual(fresh, existing)) return false;
+      await table.put({ ...fresh, embedding, embeddingModel: current }, txn);
+      return true;
+    });
   } catch {
     return false;
   }
@@ -261,6 +293,7 @@ export function createEmbeddingStampMigration(
   getCurrentModelId: () => string = getModelId,
   regen: (id: string, existing: Record<string, unknown>) => Promise<boolean> = (id, existing) =>
     regenViaHttpPut(id, existing, fetch),
+  contentSuffixRegen: ContentSuffixRegenDeps = defaultContentSuffixRegenDeps,
 ): Migration {
   function staleCondition() {
     // OR-combined: `not_equals <current>` catches a stale non-null model
@@ -352,7 +385,7 @@ export function createEmbeddingStampMigration(
         if (isCurrentSpaceStamp(existing.embeddingModel as string | null | undefined, current)) continue; // already current-space (incl. bare equivalent) — idempotent skip
 
         const ok = endsWithContentSelectorSuffix(id)
-          ? await regenContentSuffixRow(table, existing, current)
+          ? await regenContentSuffixRow(table, id, existing, current, contentSuffixRegen)
           : await regen(id, existing);
         if (ok) touchedIds.push(id);
         // A failed regen leaves the row untouched (still matching

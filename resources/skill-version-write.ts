@@ -10,6 +10,7 @@ import type { AgentAuthVerdict } from "./agent-auth.js";
 import { FORBIDDEN } from "./record-type-kit.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
+import { supersedesTargetUnreadable } from "./memory-id-guard.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
 function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
@@ -133,9 +134,16 @@ export function skillWriteConflict(error: string): Response {
 }
 
 export async function prepareSkillBody(content: any, stored: Record<string, any> | null) {
-  const predecessor = typeof content.supersedes === "string" && content.supersedes.length > 0
-    ? await (databases as any).flair.Memory.get(content.supersedes)
-    : null;
+  let predecessor: any = null;
+  if (typeof content.supersedes === "string" && content.supersedes.length > 0) {
+    // flair#2307: a failed read of the `supersedes` target refuses the write
+    // with a named error; it is never read as "no predecessor".
+    try {
+      predecessor = await (databases as any).flair.Memory.get(content.supersedes);
+    } catch (err) {
+      return supersedesTargetUnreadable(err);
+    }
+  }
   if (!rowIsSkill(content) && !rowIsSkill(stored) && !rowIsSkill(predecessor)) {
     return { content, predecessor };
   }

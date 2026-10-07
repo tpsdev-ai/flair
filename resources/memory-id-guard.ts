@@ -38,10 +38,11 @@ export function refuseContentSuffixId(ids: unknown[], target?: { pathname?: unkn
  * The record id a Memory reference resolves to, the way Harper resolves a
  * by-id path: decode it, then drop a trailing `.<declared attribute>` selector
  * (Harper splits at the FIRST dot and treats the remainder as a property ONLY
- * when it names a declared attribute). A reference that is not a string, or
- * that carries no such selector, resolves to its decoded form. Used so a
- * `supersedes` reference is authorized against the record it actually
- * addresses, whatever suffix or encoding it carries (flair#2199 follow-up).
+ * when it names a declared attribute). A reference that carries no such
+ * selector resolves to its decoded form; a non-string resolves to undefined.
+ * Memory.ts resolves a `supersedes` reference with this once, before anything
+ * reads it, and uses the result for the reserved-id check, the authorization
+ * read, the stored reference and the close (flair#2307).
  */
 export function resolveMemoryReferenceId(ref: unknown): string | undefined {
   if (typeof ref !== "string") return undefined;
@@ -49,4 +50,37 @@ export function resolveMemoryReferenceId(ref: unknown): string | undefined {
   const dot = decoded.indexOf(".");
   if (dot > -1 && DECLARED.has(decoded.slice(dot + 1))) return decoded.slice(0, dot);
   return decoded;
+}
+
+/** The named error for a `supersedes` target whose read failed (flair#2307). */
+export const SUPERSEDES_TARGET_UNREADABLE_ERROR = "supersedes_target_unreadable";
+/** The named error for a `supersedes` target that does not exist (flair#2307). */
+export const SUPERSEDES_TARGET_MISSING_ERROR = "supersedes_target_missing";
+
+/**
+ * Refuse a write whose `supersedes` target could not be read. A client error
+ * from the read (an id Harper cannot look up) answers 400; anything else 503,
+ * since a retry can succeed. Nothing has been written when this is returned.
+ */
+export function supersedesTargetUnreadable(err: unknown): Response {
+  const code = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+  const status = typeof code === "number" && code >= 400 && code < 500 ? 400 : 503;
+  return new Response(
+    JSON.stringify({
+      error: SUPERSEDES_TARGET_UNREADABLE_ERROR,
+      message: "the record named by `supersedes` could not be read; nothing was written",
+    }),
+    { status, headers: { "content-type": "application/json" } },
+  );
+}
+
+/** Refuse a write whose `supersedes` names a record that does not exist. */
+export function supersedesTargetMissing(): Response {
+  return new Response(
+    JSON.stringify({
+      error: SUPERSEDES_TARGET_MISSING_ERROR,
+      message: "the record named by `supersedes` does not exist; nothing was written",
+    }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  );
 }

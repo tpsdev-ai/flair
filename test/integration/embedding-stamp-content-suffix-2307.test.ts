@@ -3,11 +3,14 @@
  *
  * The embedding-stamp migration re-embeds a stale Memory row through a
  * loopback `PUT /Memory/:id`. A legacy row whose id already ends in the
- * `.content` property suffix cannot be addressed that way (Harper reads the
- * suffix as a selector, and the by-id write guard refuses the id), so on a tree
- * without this fix the row stays pending forever and /HealthDetail names the
- * migration indefinitely. This pins that such a row converges, and that
- * /HealthDetail stops naming the migration.
+ * `.content` property suffix cannot be addressed that way (Harper's REST by-id
+ * path reads the suffix as a selector, and the by-id write guard refuses the
+ * id), so before this change the row stayed pending and /HealthDetail kept
+ * naming the migration. This pins the success path: with a working embedding
+ * provider and no concurrent change, such a row is re-embedded and
+ * /HealthDetail stops naming the migration. The provider-failure, concurrent
+ * edit and deletion paths are pinned in
+ * test/unit-isolated/embedding-stamp-content-suffix-2307.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { rm } from "node:fs/promises";
