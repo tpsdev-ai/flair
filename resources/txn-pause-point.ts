@@ -3,7 +3,8 @@
  * Claims an arm file, writes pause/release markers, and waits for go or its limit.
  * Pinned by test/unit/txn-pause-point.test.ts and used by
  * test/integration/supersede-close-contention-2307.test.ts and
- * test/integration/embedding-stamp-contention-2307.test.ts.
+ * test/integration/embedding-stamp-contention-2307.test.ts and
+ * test/integration/integration-row-write-serialization-2340.test.ts.
  */
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +16,7 @@ export const PAUSE_LIMIT_MS = 20_000;
 const POLL_MS = 20;
 
 /** One point per owned transaction that writes from a row it read. */
-export type TxnPausePoint = "supersede-close" | "embedding-stamp-content-suffix";
+export type TxnPausePoint = "supersede-close" | "embedding-stamp-content-suffix" | "integration-row-write";
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
