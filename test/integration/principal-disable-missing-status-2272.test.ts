@@ -143,7 +143,7 @@ describe("flair#2272 — a principal with no status is active, so disable/enable
     }), "POST /AgentSeed");
     await expectOk(await adminOp({
       operation: "update", database: "flair", table: "Agent",
-      records: [{ id: seed.id, kind: "agent", publicKey: seed.publicKey, updatedAt: new Date().toISOString() }],
+      records: [{ id: seed.id, name: seed.id, kind: "agent", publicKey: seed.publicKey, createdAt: (await rawRow(seed.id)).createdAt, updatedAt: new Date().toISOString() }],
     }), "store the seeded principal's key");
 
     // The `explicit` principal with `status: "active"`.
@@ -209,7 +209,7 @@ describe("flair#2272 — a principal with no status is active, so disable/enable
     }), "add Basic user");
     await expectOk(await adminOp({
       operation: "insert", database: "flair", table: "Agent",
-      records: [{ id: basicUser, name: basicUser, kind: "human", role: "admin", createdAt: new Date().toISOString() }],
+      records: [{ id: basicUser, name: basicUser, kind: "human", role: "admin", publicKey: mkPrincipal(basicUser).publicKey, createdAt: new Date().toISOString() }],
     }), "insert no-status Basic principal");
     expect("status" in (await rawRow(basicUser))).toBe(false);
 
