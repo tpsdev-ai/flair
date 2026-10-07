@@ -277,10 +277,10 @@ jobs:
           import { spawnSync } from "node:child_process";
           const path = "src/cli.ts";
           const source = readFileSync(path, "utf8");
-          const original = 'if (process.platform === "darwin") {\n      const out = execFileSync("ps",';
+          const original = 'if (process.platform === "darwin") return readDarwinProcessState(pid);';
           if (source.split(original).length !== 2) throw new Error("Darwin state reader not uniquely found");
           try {
-            writeFileSync(path, source.replace(original, 'if (process.platform === "darwin") { return null; }\n    if (false) {\n      const out = execFileSync("ps",'));
+            writeFileSync(path, source.replace(original, 'if (process.platform === "darwin") return null;'));
             const result = spawnSync("bun", ["test", "test/unit/pid-liveness-zombie-2313.test.ts", "--test-name-pattern", "a real Darwin zombie reads as gone through the default probe"], {
               encoding: "utf8", timeout: 30000, killSignal: "SIGKILL",
             });

@@ -85,6 +85,32 @@ async function waitForZombie(pid: number): Promise<string> {
   throw new Error(`pid ${pid} never became a zombie (last state: ${state})`);
 }
 
+/** The state string the test's own `/bin/ps` read sees (Darwin). */
+function darwinState(pid: number): string {
+  const result = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], {
+    encoding: "utf-8",
+    env: { ...process.env, LC_ALL: "C" },
+    timeout: 1000,
+    killSignal: "SIGKILL",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.status).toBe(0);
+  return result.stdout.trim();
+}
+
+/** Prove the child is a zombie via the test's own `ps` read BEFORE asserting. */
+async function waitForDarwinZombie(pid: number): Promise<void> {
+  const deadline = Date.now() + ZOMBIE_WAIT_MS;
+  let state = "";
+  while (Date.now() < deadline) {
+    state = darwinState(pid);
+    if (state.startsWith("Z")) return;
+    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
+  }
+  throw new Error(`pid ${pid} never became a Darwin zombie (last state: ${state})`);
+}
+
 /** A 127.0.0.1 port nothing is listening on. */
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -121,25 +147,13 @@ describe("flair#2313 — the shared probe reports an unreaped zombie as exited",
   test.skipIf(!IS_DARWIN)("a real Darwin zombie reads as gone through the default probe", async () => {
     const { zombiePid, helper } = await spawnZombieHelper();
     try {
-      const deadline = Date.now() + ZOMBIE_WAIT_MS;
-      let state = "";
-      while (Date.now() < deadline) {
-        const result = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(zombiePid)], {
-          encoding: "utf-8",
-          env: { ...process.env, LC_ALL: "C" },
-          timeout: 1000,
-          killSignal: "SIGKILL",
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        expect(result.error).toBeUndefined();
-        expect(result.status).toBe(0);
-        state = result.stdout.trim();
-        if (state.startsWith("Z")) break;
-        await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
+      await waitForDarwinZombie(zombiePid);
+      // The Darwin state read is what flaked under a loaded runner (#2330), so
+      // read the same zombie through the default probe 20 times (flair#2330).
+      for (let i = 0; i < 20; i++) {
+        expect(darwinState(zombiePid)).toMatch(/^Z/);
+        expect(probePidLiveness(zombiePid).kind).toBe("gone");
       }
-      expect(state.startsWith("Z")).toBe(true);
-      expect(() => process.kill(zombiePid, 0)).not.toThrow();
-      expect(probePidLiveness(zombiePid).kind).toBe("gone");
     } finally {
       helper.kill("SIGKILL");
     }

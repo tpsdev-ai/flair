@@ -5134,29 +5134,46 @@ export function readSidecar(dataDir: string): SidecarRead {
 }
 
 /**
- * The kernel's state character for an existing pid, or null when it cannot be
- * read (flair#2313). Linux reads field 3 of `/proc/<pid>/stat`; Darwin reads the
- * first character of `ps -o stat=`. A read failure returns null — the caller
- * treats that as "not exited", never as exited (fail safe).
+ * Timeout for one Darwin `ps -o stat=` state read (flair#2330). The read runs
+ * only after signal 0 says the pid exists; a read that fails or returns nothing
+ * is retried once by `probePidLiveness`. A loaded macOS runner intermittently
+ * exceeded the former 2s budget, and the timed-out read returned null, so the
+ * fail-safe reported a zombie `alive`. 5s leaves headroom for a slow spawn.
  */
-function readProcessState(pid: number): string | null {
+const DARWIN_STATE_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * The Darwin process-state read: the first character of `/bin/ps -o stat=` (the
+ * invocation the zombie test reads with), with LC_ALL=C and a raised budget
+ * (flair#2330). A failure or empty output returns null — the caller treats that
+ * as "not exited", never as exited (fail safe).
+ */
+function readDarwinProcessState(pid: number): string | null {
   try {
-    if (process.platform === "linux") {
-      return parseProcStatState(readFileSync(`/proc/${pid}/stat`, "utf-8"));
-    }
-    if (process.platform === "darwin") {
-      const out = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
-        encoding: "utf-8",
-        env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
-        timeout: 2000,
-        killSignal: "SIGKILL",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      return out.length > 0 ? out[0] : null;
-    }
+    const out = execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf-8",
+      env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
+      timeout: DARWIN_STATE_READ_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out.length > 0 ? out[0] : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The kernel's state character for an existing pid, or null when it cannot be
+ * read (flair#2313). Linux reads field 3 of `/proc/<pid>/stat`; Darwin reads the
+ * first character of `/bin/ps -o stat=` (flair#2330). A read failure returns
+ * null — the caller treats that as "not exited", never as exited (fail safe).
+ */
+function readProcessState(pid: number): string | null {
+  if (process.platform === "linux") {
+    try { return parseProcStatState(readFileSync(`/proc/${pid}/stat`, "utf-8")); } catch { return null; }
+  }
+  if (process.platform === "darwin") return readDarwinProcessState(pid);
   return null;
 }
 
@@ -5172,8 +5189,13 @@ function readProcessState(pid: number): string | null {
  * state stays `alive` — a read failure must never report a live process as
  * exited.
  *
- * The state reader is injectable so the unreadable branch is unit-testable
- * without a real unreadable process.
+ * A read that fails or returns nothing is retried ONCE (flair#2330): under load
+ * a single read can fail while the pid is still there, and one failed read made
+ * a zombie read as `alive`. Only a read that keeps failing is unreadable, and
+ * an unreadable state stays `alive` (fail safe).
+ *
+ * The state reader is injectable so the unreadable and retried branches are
+ * unit-testable without a real unreadable process.
  */
 export function probePidLiveness(
   pid: number,
@@ -5187,7 +5209,39 @@ export function probePidLiveness(
     // classifier's unknown state (flair#2055).
     return livenessFromKillError(err?.code);
   }
-  return isExitedState(readState(pid)) ? { kind: "gone" } : { kind: "alive" };
+  let state = readState(pid);
+  if (state === null) state = readState(pid);
+  return isExitedState(state) ? { kind: "gone" } : { kind: "alive" };
+}
+
+/**
+ * Poll the process-liveness probe for `pid` until it reports `gone` or
+ * `deadlineMs` passes; return whether `gone` was read and the last read
+ * (flair#2330). This is `flair doctor`'s stop wait.
+ *
+ * The probe is re-read on EVERY poll, so a single failed or empty state read —
+ * which `probePidLiveness` reports as `alive` (fail safe) — does not end the
+ * wait: the next poll reads the pid's state again, and a zombie is reported
+ * `gone` on a later poll within the wait. `gone` counts only when it is read
+ * BEFORE the deadline; a read that succeeds only at the deadline is a timeout
+ * the caller reports (flair#2205). `readState` is injectable so a failing or
+ * slow read is unit-testable.
+ */
+export async function waitForPidGone(
+  pid: number,
+  deadlineMs: number,
+  readState: (pid: number) => string | null = readProcessState,
+  pollMs: number = HEALTH_POLL_INTERVAL_MS,
+): Promise<{ gone: boolean; last: PidLiveness }> {
+  while (Date.now() < deadlineMs) {
+    const last = probePidLiveness(pid, readState);
+    if (Date.now() >= deadlineMs) return { gone: false, last };
+    if (last.kind === "gone") return { gone: true, last };
+    const remaining = deadlineMs - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((r) => setTimeout(r, Math.min(pollMs, remaining)));
+  }
+  return { gone: false, last: probePidLiveness(pid, readState) };
 }
 
 /**
@@ -7809,13 +7863,9 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
       readStartTime: (pid) => readProcessStartTimeMs(pid, Math.min(stopDeadline, Date.now() + 2_000)),
     });
     const identityObservedAt = Date.now();
-    while (Date.now() < stopDeadline && probePidLiveness(state.pid).kind !== "gone") {
-      const remaining = stopDeadline - Date.now();
-      if (remaining <= 0) break;
-      await new Promise((r) => setTimeout(r, Math.min(HEALTH_POLL_INTERVAL_MS, remaining)));
-    }
-    if (Date.now() >= stopDeadline) {
-      const liveness = probePidLiveness(state.pid);
+    const stopGone = await waitForPidGone(state.pid, stopDeadline);
+    if (!stopGone.gone) {
+      const liveness = stopGone.last;
       const result = timeoutResult(`waiting for direct Harper process ${state.pid} to exit`);
       const identityDetail = identityObservedAt < stopDeadline
         ? `${identity.kind}, observed at ${new Date(identityObservedAt).toISOString()}`

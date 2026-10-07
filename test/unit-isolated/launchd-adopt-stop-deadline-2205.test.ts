@@ -89,7 +89,7 @@ mock.module("node:child_process", () => ({
       if (finalProbe === "whitespace") return " \t\n";
       return "";
     }
-    if (cmd === "ps") return `node /fixture/node_modules/harper/dist/bin/harper.js run .`;
+    if (cmd === "/bin/ps" || cmd === "ps") return `node /fixture/node_modules/harper/dist/bin/harper.js run .`;
     throw new Error(`unexpected execFileSync: ${cmd}`);
   },
   spawn: () => { spawnCalls++; throw new Error("unexpected process spawn"); },
