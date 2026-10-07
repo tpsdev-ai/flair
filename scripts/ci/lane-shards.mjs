@@ -12,7 +12,7 @@
 //   Every command refuses an argument it does not take, with exit status 2.
 
 import { readdirSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { testFiles } from "./test-files.mjs";
 import { SHARDS, assignShards, listUnitFiles } from "./unit-shards.mjs";
@@ -49,6 +49,14 @@ export const WORKSPACE_PACKAGES = [
   "adk-flair-js",
   "cursor-wake-runner",
 ];
+
+/**
+ * `packages/*` directories that hold test files the Bun lane cannot run (their
+ * tests are written in another language), so they are left out of the plan by
+ * name. This is an explicit decision, not a default: any other directory that
+ * holds test files and is absent from the plan makes the verifier fail.
+ */
+export const NON_JS_TEST_PACKAGES = ["adk-flair", "hermes-flair"];
 
 /**
  * @param {string} [root]
@@ -174,11 +182,12 @@ export function shardSteps(index, of = LANE_SHARDS, steps = unitPlan()) {
 }
 
 /**
- * Every test file the lane runs, discovered from disk — independently of the
- * step plan, so a file dropped from the assignment (or from the plan) is
- * reported missing instead of silently shrinking the corpus. It must match the
- * union of `unitPlan()`'s step files on a clean tree; lane-shards.test.ts
- * pins that.
+ * Every test file the lane's steps run, found on disk. It walks the same
+ * `packages/*` names as the plan, so it reports a file dropped from the
+ * assignment (or added to a step the assignment does not run) as missing, but
+ * it cannot see a whole package the plan omits — `discoveredTestPackages`
+ * covers that. On a clean tree it equals the union of `unitPlan()`'s step
+ * files; lane-shards.test.ts pins that.
  */
 export function listLaneFiles(root = ROOT) {
   const found = [
@@ -191,6 +200,53 @@ export function listLaneFiles(root = ROOT) {
     found.push(...testFiles(join(root, "packages", pkg, dir), true));
   }
   return found.sort();
+}
+
+/** Name patterns that mark a package as holding tests: JS/TS test files, and Python ones the Bun lane cannot run. */
+const JS_TEST_FILE = /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/;
+const NON_JS_TEST_FILE = /^(?:test_.*|.*_test)\.py$/;
+
+/** Every file under `dir` whose name matches `pattern`; skips node_modules and dot directories. */
+function matchingFiles(dir, pattern, found = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    const file = join(dir, entry.name);
+    if (entry.isDirectory()) matchingFiles(file, pattern, found);
+    else if (entry.isFile() && pattern.test(entry.name)) found.push(file);
+  }
+  return found;
+}
+
+/**
+ * Every `packages/*` directory that holds test files, found on disk rather than
+ * read off the plan. `jsTestPackages` hold JS/TS test files and must all be in
+ * the plan; `nonJsTestPackages` hold only tests in another language, which the
+ * plan may omit only when the package is named in NON_JS_TEST_PACKAGES.
+ */
+export function discoveredTestPackages(root = ROOT) {
+  const base = join(root, "packages");
+  const jsTestPackages = [];
+  const nonJsTestPackages = [];
+  for (const entry of readdirSync(base, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    const dir = join(base, entry.name);
+    if (matchingFiles(dir, JS_TEST_FILE).length) jsTestPackages.push(entry.name);
+    else if (matchingFiles(dir, NON_JS_TEST_FILE).length) nonJsTestPackages.push(entry.name);
+  }
+  return { jsTestPackages: jsTestPackages.sort(), nonJsTestPackages: nonJsTestPackages.sort() };
+}
+
+/** The `packages/*` names whose test files the plan's steps carry. */
+export function plannedTestPackages(steps, root = ROOT) {
+  const base = join(root, "packages");
+  const names = new Set();
+  for (const step of shardedSteps(steps)) {
+    for (const file of step.files) {
+      const rel = relative(base, file);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) names.add(rel.split(sep)[0]);
+    }
+  }
+  return [...names].sort();
 }
 
 export function laneShardPlans(steps, of = LANE_SHARDS) {
@@ -237,7 +293,7 @@ export function commandFiles(step) {
   return files;
 }
 
-export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
+export function laneCoverage(steps, shards, allFiles = listLaneFiles(), root = ROOT) {
   const corpusSteps = new Set(shardedSteps(steps).map(step => step.name));
   const setup = new Set(sharedSteps(steps).map(step => step.name));
   const corpusFiles = new Set(allFiles);
@@ -289,6 +345,8 @@ export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
       }
     }
   }
+  const discovered = discoveredTestPackages(root);
+  const planned = new Set(plannedTestPackages(steps, root));
   return {
     totalSteps: corpusSteps.size,
     coveredSteps: seenSteps.size,
@@ -304,12 +362,14 @@ export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
     invalidTestSteps: [...invalidTestSteps],
     fileMismatches: [...fileMismatches.values()],
     invalidCommands: [...invalidCommands],
+    missingTestPackages: discovered.jsTestPackages.filter(name => !planned.has(name)),
+    unlistedTestPackages: discovered.nonJsTestPackages.filter(name => !NON_JS_TEST_PACKAGES.includes(name)),
     empty: shards.flatMap((shard, index) => (shard.some(isShardedStep) ? [] : [index + 1])),
   };
 }
 
-export function verifyLaneShards(of = LANE_SHARDS, steps = unitPlan(), allFiles = listLaneFiles()) {
-  return laneCoverage(steps, laneShardPlans(steps, of), allFiles);
+export function verifyLaneShards(of = LANE_SHARDS, steps = unitPlan(), allFiles = listLaneFiles(), root = ROOT) {
+  return laneCoverage(steps, laneShardPlans(steps, of), allFiles, root);
 }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -361,7 +421,8 @@ if (isEntryPoint) {
       }
       const res = verifyLaneShards(of);
       const bad = res.missingSteps.length || res.duplicatedSteps.length || res.unknownSteps.length ||
-        res.missingFiles.length || res.duplicatedFiles.length || res.unknownFiles.length || res.empty.length || res.invalidSharedSteps.length || res.invalidTestSteps.length || res.fileMismatches.length;
+        res.missingFiles.length || res.duplicatedFiles.length || res.unknownFiles.length || res.empty.length || res.invalidSharedSteps.length || res.invalidTestSteps.length || res.fileMismatches.length ||
+        res.missingTestPackages.length || res.unlistedTestPackages.length;
       process.stdout.write(
         `lane shards of ${of}: ${res.coveredSteps}/${res.totalSteps} steps and ` +
           `${res.coveredFiles}/${res.totalFiles} files covered, ` +
@@ -375,6 +436,8 @@ if (isEntryPoint) {
         }
         if (res.invalidSharedSteps.length) process.stderr.write(`setup not once in every shard: ${res.invalidSharedSteps.join(", ")}\n`);
         if (res.invalidTestSteps.length) process.stderr.write(`partitioned steps must only run tests: ${res.invalidTestSteps.join(", ")}\n`);
+        if (res.missingTestPackages.length) process.stderr.write(`packages with tests missing from the plan: ${res.missingTestPackages.join(", ")}\n`);
+        if (res.unlistedTestPackages.length) process.stderr.write(`packages with non-JS tests not in the allowlist: ${res.unlistedTestPackages.join(", ")}\n`);
         if (res.empty.length) process.stderr.write(`empty shards: ${res.empty.join(", ")}\n`);
         if (res.missingSteps.length) process.stderr.write(`missing steps: ${res.missingSteps.join(", ")}\n`);
         if (res.missingFiles.length) process.stderr.write(`missing files: ${res.missingFiles.join(", ")}\n`);

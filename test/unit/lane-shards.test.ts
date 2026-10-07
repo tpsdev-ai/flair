@@ -7,15 +7,20 @@ import { spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { load as loadYaml } from "js-yaml";
 import {
   LANE_SHARDS,
+  NON_JS_TEST_PACKAGES,
   ROOT,
+  WORKSPACE_PACKAGES,
   assignLaneShards,
   commandFiles,
+  discoveredTestPackages,
   isShardedStep,
   laneCoverage,
   laneShardPlans,
   listLaneFiles,
+  plannedTestPackages,
   shardSteps,
   sharedSteps,
   unitPlan,
@@ -79,6 +84,29 @@ describe("lane-shards — the plan", () => {
     expect(listLaneFiles(ROOT).length).toBeGreaterThan(100);
   });
 
+  test("every package that holds tests on disk is in the plan or allowlisted", () => {
+    const { jsTestPackages, nonJsTestPackages } = discoveredTestPackages(ROOT);
+    const res = verifyLaneShards(LANE_SHARDS);
+    expect(res.missingTestPackages).toEqual([]);
+    expect(res.unlistedTestPackages).toEqual([]);
+    expect(jsTestPackages).toEqual([...WORKSPACE_PACKAGES].sort());
+    expect(nonJsTestPackages).toEqual([...NON_JS_TEST_PACKAGES].sort());
+    expect(plannedTestPackages(unitPlan(ROOT), ROOT)).toEqual([...WORKSPACE_PACKAGES].sort());
+  });
+
+  test("a package whose tests are on disk but not in the plan fails the verifier", () => {
+    const root = fixtureRoot(["packages/x/test/a.test.ts"]);
+    const res = verifyLaneShards(LANE_SHARDS, unitPlan(root), listLaneFiles(root), root);
+    expect(res.missingTestPackages).toEqual(["x"]);
+  });
+
+  test("a package whose only tests are non-JS must be named in the allowlist", () => {
+    const root = fixtureRoot(["packages/py-pkg/tests/test_thing.py"]);
+    const res = verifyLaneShards(LANE_SHARDS, unitPlan(root), listLaneFiles(root), root);
+    expect(res.missingTestPackages).toEqual([]);
+    expect(res.unlistedTestPackages).toEqual(["py-pkg"]);
+  });
+
   test("a step's files are covered exactly once across shards", () => {
     const res = verifyLaneShards(LANE_SHARDS);
     expect(res.missingSteps).toEqual([]);
@@ -103,7 +131,7 @@ describe("lane-shards — the plan", () => {
     const owners = shards.filter(shard => shard.some(step => step.files.includes(file)));
     expect(owners).toHaveLength(1);
     // And the whole plan still partitions cleanly with the planted file present.
-    const res = laneCoverage(steps, shards, listLaneFiles(root));
+    const res = laneCoverage(steps, shards, listLaneFiles(root), root);
     expect(res.missingFiles).toEqual([]);
     expect(res.duplicatedFiles).toEqual([]);
   });
@@ -214,7 +242,7 @@ test("command coverage reports declared-only and command-only files", () => {
   const added = join(root, "test/unit-isolated/placeholder.test.ts");
   const changed = { ...step, args: ["test", step.files[0], added] };
   const plan = steps.map(item => item === step ? changed : item);
-  const res = verifyLaneShards(2, plan, listLaneFiles(root));
+  const res = verifyLaneShards(2, plan, listLaneFiles(root), root);
   expect(res.fileMismatches).toEqual([{ step: step.name, declaredOnly: step.files.slice(1).sort(), commandOnly: [added] }]);
   expect(res.missingFiles).toContain(missing);
   expect(res.duplicatedFiles).toContain(added);
@@ -240,11 +268,11 @@ test("directory and literal glob targets agree with Bun discovery", () => {
       expect(result.status).toBe(0);
       const ran = result.stdout.split("\n").filter(line => line.startsWith("ran:")).map(line => join(root, "targets", line.slice(4))).sort();
       expect(commandFiles(step)).toEqual(ran);
-      expect(laneCoverage([step], [[step]], ran).fileMismatches).toEqual([]);
+      expect(laneCoverage([step], [[step]], ran, root).fileMismatches).toEqual([]);
     }
   }
   const step = { name: "fixture", cwd: root, args: ["test", "./targets/"], files: [join(root, "targets/a.test.ts")] };
-  expect(laneCoverage([step], [[step]], step.files).fileMismatches[0].commandOnly).toHaveLength(names.length - 1);
+  expect(laneCoverage([step], [[step]], step.files, root).fileMismatches[0].commandOnly).toHaveLength(names.length - 1);
 });
 
 test("an unmatched target retains coverage of matched command files", () => {
@@ -253,7 +281,7 @@ test("an unmatched target retains coverage of matched command files", () => {
   const step = { name: "fixture", cwd: root, args: ["test", file, "./test/unit/*.test.ts"], files: [file] };
   const result = spawnSync(process.execPath, step.args, { cwd: root, encoding: "utf8", timeout: 20_000 });
   expect(result.status).toBe(0);
-  const res = laneCoverage([step], [[step]], [file]);
+  const res = laneCoverage([step], [[step]], [file], root);
   expect(res.coveredFiles).toBe(1);
   expect(res.invalidCommands).toEqual(["fixture: unmatched target: ./test/unit/*.test.ts"]);
 });
@@ -351,6 +379,50 @@ describe("lane-shards — CLI", () => {
   }
 });
 
+type Matrix = Record<string, unknown>;
+
+/**
+ * The matrix combinations GitHub Actions actually runs: the cartesian product of
+ * the axes, minus every `exclude` entry that matches a combination in full, plus
+ * every `include` entry (merged into each combination it does not overwrite,
+ * otherwise added on its own). Resolving the effective matrix — rather than
+ * reading the `shard:` list — is what catches an `exclude` that drops a leg.
+ */
+function effectiveMatrix(matrix: Matrix): Matrix[] {
+  const axes = Object.entries(matrix).filter(([key, value]) => key !== "include" && key !== "exclude" && Array.isArray(value));
+  let combos: Matrix[] = axes.reduce<Matrix[]>(
+    (acc, [key, values]) => acc.flatMap(combo => (values as unknown[]).map(value => ({ ...combo, [key]: value }))),
+    [{}],
+  );
+  const asEntries = (value: unknown): Matrix[] => Array.isArray(value) ? value as Matrix[] : [];
+  const matches = (combo: Matrix, entry: Matrix) => Object.entries(entry).every(([key, value]) => combo[key] === value);
+  combos = combos.filter(combo => !asEntries(matrix.exclude).some(entry => matches(combo, entry)));
+  for (const entry of asEntries(matrix.include)) {
+    let merged = false;
+    combos = combos.map(combo => {
+      if (Object.keys(entry).some(key => key in combo && combo[key] !== entry[key])) return combo;
+      merged = true;
+      return { ...combo, ...entry };
+    });
+    if (!merged) combos.push({ ...entry });
+  }
+  return combos;
+}
+
+/** The shard indices the effective matrix runs, sorted. */
+function shardValues(matrix: Matrix): number[] {
+  const values = new Set<number>();
+  for (const combo of effectiveMatrix(matrix)) {
+    if (combo.shard !== undefined) values.add(Number(combo.shard));
+  }
+  return [...values].sort((a, b) => a - b);
+}
+
+function workflowMatrix(text: string): Matrix {
+  const doc = loadYaml(text) as { jobs: Record<string, { strategy: { matrix: Matrix } }> };
+  return doc.jobs["test-unit"].strategy.matrix;
+}
+
 describe("lane-shards — the workflow runs it", () => {
   const workflow = readFileSync(join(ROOT, ".github", "workflows", "test.yml"), "utf8");
 
@@ -358,12 +430,23 @@ describe("lane-shards — the workflow runs it", () => {
     expect(workflow).toContain("node scripts/ci/lane-shards.mjs --verify");
   });
 
-  test("CI runs one lane shard per matrix leg, sized to LANE_SHARDS", () => {
+  test("CI runs every lane shard (effective matrix, exclude and include resolved)", () => {
     expect(workflow).toMatch(/run: bun run test:unit --keep-going --shard \$\{\{ matrix\.shard \}\} --of 2/);
-    const matrix = workflow.match(/^ {8}shard: \[([^\]]*)\]$/m);
-    expect(matrix).not.toBeNull();
-    const values = (matrix?.[1] ?? "").split(",").map(v => v.trim()).filter(Boolean);
-    expect(values).toEqual(Array.from({ length: LANE_SHARDS }, (_, i) => String(i + 1)));
+    expect(shardValues(workflowMatrix(workflow))).toEqual(Array.from({ length: LANE_SHARDS }, (_, i) => i + 1));
+  });
+
+  test("an exclude that drops a shard fails the effective-matrix check", () => {
+    const base = { "node-version": ["22", "24"], shard: [1, 2] };
+    expect(shardValues(base)).toEqual([1, 2]);
+    expect(shardValues({ ...base, exclude: [{ shard: 2 }] })).toEqual([1]);
+    // An exclude narrowed by another axis leaves that shard running elsewhere.
+    expect(shardValues({ ...base, exclude: [{ "node-version": "24", shard: 2 }] })).toEqual([1, 2]);
+    expect(shardValues({ ...base, include: [{ shard: 3 }] })).toEqual([1, 2, 3]);
+    // And through the workflow text: the check the CI actually runs.
+    const mutated = workflow.replace(/^( {8}shard: \[[^\]]*\]\n)/m, "$1        exclude:\n          - shard: 2\n");
+    expect(mutated).not.toBe(workflow);
+    expect(shardValues(workflowMatrix(mutated))).not.toEqual(Array.from({ length: LANE_SHARDS }, (_, i) => i + 1));
+    expect(shardValues(workflowMatrix(mutated))).toEqual([1]);
   });
 
   test("--shard/--of are accepted by the runner's own argument parser", () => {
