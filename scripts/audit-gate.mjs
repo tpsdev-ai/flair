@@ -166,14 +166,14 @@ function jsonShapeOf(value) {
   return keys.length === 0 ? "an empty object" : `an object with keys ${keys.slice(0, 6).join(", ")}`;
 }
 
-/** The remedy every refused audit stage names, so an operator knows what to do. */
+/** The remedy a report-shape refusal names, so an operator knows what to do. */
 const AUDIT_REMEDY = "Re-run the stage; if it keeps failing, check registry access.";
 
 /**
- * Why `parsed` is not a JSON report object at all, or null when it is one. Both
- * `npm audit` and `bun audit` answer a failure they cannot express as a report
- * with the envelope `{ "error": { code, summary, detail } }`. Reading that as a
- * zero-advisory report is how the gate passed on an audit that never ran.
+ * Why `parsed` is not a JSON report object at all, or null when it is one. An
+ * audit stage that fails in a way it cannot express as a report — npm audit
+ * writes `{ "error": { code, summary, detail } }` and nothing else — must not
+ * be read as a report with zero advisories.
  */
 function errorEnvelopeRefusal(parsed) {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {

@@ -491,7 +491,7 @@ describe("parseNpmAuditOutput", () => {
     });
   }
 
-  it("names the stage and the remedy in every refusal", () => {
+  it("names the stage and the remedy for each non-report refusal", () => {
     for (const value of Object.values(NON_REPORTS)) {
       let err: Error | undefined;
       try {
