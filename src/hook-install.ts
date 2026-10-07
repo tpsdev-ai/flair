@@ -1143,6 +1143,15 @@ export interface ActionRecallMutationResult {
   actions: { preToolUse: HookDeltaAction; sessionStart: HookDeltaAction | "skipped" } | null;
 }
 
+/** True when EVERY hook in the group was written by Flair for this feature, so
+ *  Flair owns the group exclusively and may repair its matcher in place. A
+ *  group holding even one hook Flair did not write is SHARED: its matcher is
+ *  the user's and must not be touched (flair#2264). */
+function hookGroupIsFlairOnly(group: any, isOurs: (command: any) => boolean): boolean {
+  const hooks = group?.hooks;
+  return Array.isArray(hooks) && hooks.length > 0 && hooks.every((h: any) => isOurs(h?.command));
+}
+
 /** Find the PreToolUse group carrying an action-recall hook command. */
 function findActionRecallEntry(config: any): { groupIndex: number; hookIndex: number; group: any } | null {
   const groups = config?.hooks?.PreToolUse;
@@ -1183,11 +1192,23 @@ function computeActionRecallInstall(
 
   const existing = findActionRecallEntry(newConfig);
   if (existing) {
-    const hook = newConfig.hooks.PreToolUse[existing.groupIndex].hooks[existing.hookIndex];
-    if (hook.type !== "command" || hook.command !== command || existing.group.matcher !== ACTION_RECALL_PRE_TOOL_USE_MATCHER) {
-      hook.command = command;
-      hook.type = "command";
-      existing.group.matcher = ACTION_RECALL_PRE_TOOL_USE_MATCHER;
+    const group = existing.group;
+    const hook = group.hooks[existing.hookIndex];
+    if (hookGroupIsFlairOnly(group, isFlairActionRecallCommand)) {
+      if (hook.type !== "command" || hook.command !== command || group.matcher !== ACTION_RECALL_PRE_TOOL_USE_MATCHER) {
+        hook.command = command;
+        hook.type = "command";
+        group.matcher = ACTION_RECALL_PRE_TOOL_USE_MATCHER;
+        preToolUse = "update";
+      }
+    } else {
+      // The group also holds the user's hooks (flair#2264): its matcher is
+      // theirs, so leave it alone and move our entry into a dedicated group.
+      group.hooks.splice(existing.hookIndex, 1);
+      newConfig.hooks.PreToolUse.push({
+        matcher: ACTION_RECALL_PRE_TOOL_USE_MATCHER,
+        hooks: [{ type: "command", command }],
+      });
       preToolUse = "update";
     }
   } else {
@@ -1712,15 +1733,27 @@ export function computeCaptureHookInstall(config: any, runtime: ActionRecallRunt
         actions[event] = "update";
         changed = true;
       }
-      const hook = existing.group.hooks[existing.hookIndex];
-      const matcherCurrent = wantMatcher === null
-        ? existing.group.matcher == null || existing.group.matcher === ""
-        : existing.group.matcher === wantMatcher;
-      if (hook.type !== "command" || hook.command !== command || !matcherCurrent) {
-        hook.command = command;
-        hook.type = "command";
-        if (wantMatcher === null) delete existing.group.matcher;
-        else existing.group.matcher = wantMatcher;
+      const group = existing.group;
+      const hook = group.hooks[existing.hookIndex];
+      if (hookGroupIsFlairOnly(group, isFlairCaptureCommand)) {
+        const matcherCurrent = wantMatcher === null
+          ? group.matcher == null || group.matcher === ""
+          : group.matcher === wantMatcher;
+        if (hook.type !== "command" || hook.command !== command || !matcherCurrent) {
+          hook.command = command;
+          hook.type = "command";
+          if (wantMatcher === null) delete group.matcher;
+          else group.matcher = wantMatcher;
+          actions[event] = "update";
+          changed = true;
+        }
+      } else {
+        // The group also holds the user's hooks (flair#2264): its matcher is
+        // theirs, so leave it alone and move our entry into a dedicated group.
+        group.hooks.splice(existing.hookIndex, 1);
+        const dedicated: any = { hooks: [{ type: "command", command }] };
+        if (wantMatcher !== null) dedicated.matcher = wantMatcher;
+        newConfig.hooks[event].push(dedicated);
         actions[event] = "update";
         changed = true;
       }
