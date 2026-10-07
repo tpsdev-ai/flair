@@ -12,6 +12,7 @@ import { hookSettingsPath } from "../hook-install.js";
 import { ClientId, claudeCodeMcpEntry, detectClients, renderWiringSummary, wireAntigravity, wireClaudeCodeJson, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
 import { DEFAULT_ADMIN_USER, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
 import {
+  INIT_RESET_ADMIN_PASS_COMMAND,
   detectPersistedAdminUser,
   executeAdminPasswordRotate,
   initAdminPassRefusalMessage,
@@ -67,6 +68,7 @@ export type InitCli = {
   repointMainServiceUnit: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   writeAdminPassFile: (...args: any[]) => any;
+  proveAdminPassAgainstInstance: (port: number, adminPass: string) => Promise<string | null>;
   resolveOpsBindHost: (...args: any[]) => any;
   resolveHttpBindFor: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
@@ -200,6 +202,10 @@ function resolveHttpPort(...args: any[]): any {
 
 function writeAdminPassFile(...args: any[]): any {
   return cli.writeAdminPassFile(...args);
+}
+
+function proveAdminPassAgainstInstance(port: number, adminPass: string): Promise<string | null> {
+  return cli.proveAdminPassAgainstInstance(port, adminPass);
 }
 
 function resolveOpsBindHost(...args: any[]): any {
@@ -807,6 +813,28 @@ program
       process.exit(1);
     };
 
+    // flair#2271: a supplied admin credential must not replace the stored
+    // `~/.flair/admin-pass` until it has been proven against the running
+    // instance. Reuse the same authenticated probe the CLI already uses to
+    // check an admin credential (an admin-gated `GET /HealthDetail`). A fresh
+    // install has no running instance to prove against, so the credential is
+    // written as before.
+    const persistSuppliedAdminPass = async (): Promise<void> => {
+      if (resolveInitAdminPasswordSource(false, passwordCtx) !== "re-persist") return;
+      if (alreadyRunning) {
+        const failure = await proveAdminPassAgainstInstance(httpPort, adminPass);
+        if (failure) {
+          console.error(
+            `Refusing to replace ${adminPassPath}: the supplied admin credential does not authenticate ` +
+              `against the running instance on port ${httpPort} (${failure}). The stored file is unchanged. ` +
+              `To rotate the instance's admin password instead, run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
+          );
+          process.exit(1);
+        }
+      }
+      writeAdminPassFile(adminPassPath, adminPass + "\n");
+    };
+
     // Read from file if provided
     if (opts.adminPassFile) {
       try {
@@ -819,8 +847,8 @@ program
       if (opts.resetAdminPass) {
         refuseIfNeeded(false);
         pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
-      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
-        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else {
+        await persistSuppliedAdminPass();
       }
     } else if (process.env.FLAIR_ADMIN_PASS) {
       adminPass = process.env.FLAIR_ADMIN_PASS;
@@ -828,8 +856,8 @@ program
       if (opts.resetAdminPass) {
         refuseIfNeeded(false);
         pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
-      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
-        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else {
+        await persistSuppliedAdminPass();
       }
     } else if (process.env.HDB_ADMIN_PASSWORD) {
       adminPass = process.env.HDB_ADMIN_PASSWORD;
@@ -837,8 +865,8 @@ program
       if (opts.resetAdminPass) {
         refuseIfNeeded(false);
         pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
-      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
-        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else {
+        await persistSuppliedAdminPass();
       }
     } else if (opts.adminPass) {
       // Inline admin pass (deprecated)
@@ -847,8 +875,8 @@ program
       if (opts.resetAdminPass) {
         refuseIfNeeded(false);
         pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
-      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
-        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else {
+        await persistSuppliedAdminPass();
       }
     } else {
       passwordSource = "generated";

@@ -4650,6 +4650,7 @@ bindInitCli({
   repointMainServiceUnit,
   resolveHttpPort,
   writeAdminPassFile,
+  proveAdminPassAgainstInstance,
   resolveOpsBindHost,
   resolveHttpBindFor,
   resolveOpsPort,
@@ -6303,7 +6304,7 @@ function resolveAdminPassAvailability(path: string): AdminPassAvailability {
  * credential was sent at all), so success here means THIS credential was
  * accepted by THIS instance. Never logs the secret.
  */
-async function proveAdminPassAgainstInstance(
+export async function proveAdminPassAgainstInstance(
   port: number,
   adminPass: string,
 ): Promise<string | null> {
