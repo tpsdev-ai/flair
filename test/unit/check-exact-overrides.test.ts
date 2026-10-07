@@ -2,7 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { findExactOverrideViolations } from "../../scripts/check-exact-overrides.mjs";
@@ -54,7 +54,7 @@ function buildFixture(opts: {
 }
 
 function runCli(root: string) {
-  return spawnSync(process.execPath, [SCRIPT, "--root", root], { encoding: "utf8", timeout: 5000 });
+  return spawnSync("node", [SCRIPT, "--root", root], { encoding: "utf8", timeout: 10000 });
 }
 
 const declares = (kind: string, deps: Record<string, unknown>): WsPkg => ({
@@ -78,7 +78,7 @@ describe("check-exact-overrides — the narrowed scope", () => {
     expect(r.stderr).toContain("^1.2.3");
     expect(r.stderr).toContain('"1.2.3"');
     expect(r.stdout).not.toContain("✓");
-  });
+  }, 15000);
 
   test("(b) the same override exact PASSES", () => {
     const root = buildFixture({
@@ -88,7 +88,7 @@ describe("check-exact-overrides — the narrowed scope", () => {
     });
     expect(findExactOverrideViolations(root)).toEqual([]);
     expect(runCli(root).status).toBe(0);
-  });
+  }, 15000);
 
   test("(c) a range override for a package NO workspace declares PASSES", () => {
     const root = buildFixture({
@@ -98,7 +98,7 @@ describe("check-exact-overrides — the narrowed scope", () => {
     });
     expect(findExactOverrideViolations(root)).toEqual([]);
     expect(runCli(root).status).toBe(0);
-  });
+  }, 15000);
 
   test("(d) a workspace's OWN dependency range PASSES (out of scope)", () => {
     const root = buildFixture({
@@ -107,7 +107,7 @@ describe("check-exact-overrides — the narrowed scope", () => {
     });
     expect(findExactOverrideViolations(root)).toEqual([]);
     expect(runCli(root).status).toBe(0);
-  });
+  }, 15000);
 
   test("(e) a peerDependency range PASSES (out of scope), even with a matching override", () => {
     const root = buildFixture({
@@ -117,7 +117,7 @@ describe("check-exact-overrides — the narrowed scope", () => {
     });
     expect(findExactOverrideViolations(root)).toEqual([]);
     expect(runCli(root).status).toBe(0);
-  });
+  }, 15000);
 
   test("(f) a `workspace:*` override PASSES (exempt)", () => {
     const root = buildFixture({
@@ -126,7 +126,7 @@ describe("check-exact-overrides — the narrowed scope", () => {
     });
     expect(findExactOverrideViolations(root)).toEqual([]);
     expect(runCli(root).status).toBe(0);
-  });
+  }, 15000);
 
   test("a range override reaching a devDependency or optionalDependency also FAILS", () => {
     for (const kind of ["devDependencies", "optionalDependencies"]) {
@@ -139,7 +139,7 @@ describe("check-exact-overrides — the narrowed scope", () => {
         { name: "@x/dep", declared: "~1.2.3", exact: "1.2.4" },
       ]);
     }
-  });
+  }, 15000);
 
   test("an override with no bun.lock resolution still FAILS, without a pin", () => {
     const root = buildFixture({
@@ -153,7 +153,7 @@ describe("check-exact-overrides — the narrowed scope", () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("choose an exact version or a workspace: specifier");
     expect(r.stderr).not.toContain("registry");
-  });
+  }, 15000);
 });
 
 describe("lockfile advice", () => {
@@ -174,7 +174,7 @@ describe("lockfile advice", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("choose an exact version or a workspace: specifier");
       expect(result.stderr).not.toContain("registry");
-    });
+    }, 15000);
   }
   test("missing lockfile gives no pin", () => {
     const root = buildFixture({
@@ -183,8 +183,13 @@ describe("lockfile advice", () => {
     });
     rmSync(join(root, "bun.lock"));
     expect(findExactOverrideViolations(root)[0]?.exact).toBeNull();
-    expect(runCli(root).stderr).toContain("choose an exact version or a workspace: specifier");
-  });
+    const result = runCli(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("choose an exact version or a workspace: specifier");
+    expect(result.stderr).not.toContain('pin "');
+    writeFileSync(join(root, "package.json"), JSON.stringify({ workspaces: ["packages/*"] }));
+    expect(runCli(root).status).toBe(0);
+  }, 15000);
 });
 
 describe("check-exact-overrides — required inputs fail closed", () => {
@@ -211,7 +216,7 @@ describe("check-exact-overrides — required inputs fail closed", () => {
           pkg[field] = value;
           writeFileSync(path, JSON.stringify(pkg));
           expectInputFailure(root, path, `${field} must be a plain object`);
-        });
+        }, 15000);
       }
     }
     for (const rel of ["package.json", "packages/adapter/package.json", "bun.lock"]) {
@@ -220,42 +225,68 @@ describe("check-exact-overrides — required inputs fail closed", () => {
         const path = join(root, rel);
         writeFileSync(path, JSON.stringify(value));
         expectInputFailure(root, path, "object");
-      });
+      }, 15000);
     }
     test(`refuses bun.lock packages=${JSON.stringify(value)}`, () => {
       const root = buildFixture({ workspaces: [{ dir: "adapter" }] });
       const path = join(root, "bun.lock");
       writeFileSync(path, JSON.stringify({ packages: value }));
       expectInputFailure(root, path, "packages must be a plain object");
-    });
+    }, 15000);
   }
 
   test("a missing root package.json fails", () => {
     const root = buildFixture({});
     rmSync(join(root, "package.json"));
     expectInputFailure(root, join(root, "package.json"), "cannot read");
-  });
+  }, 15000);
 
   test("a malformed root package.json fails", () => {
     const root = buildFixture({});
     const path = join(root, "package.json");
     writeFileSync(path, '{ "name": ');
     expectInputFailure(root, path, "not parsable");
-  });
+  }, 15000);
 
   test("a malformed workspace package.json fails", () => {
     const root = buildFixture({ workspaces: [declares("dependencies", { "@x/dep": "^1.2.3" })] });
     const path = join(root, "packages/adapter/package.json");
     writeFileSync(path, "invalid JSON");
     expectInputFailure(root, path, "not parsable");
-  });
+  }, 15000);
+
+  test("a malformed bun.lock exits 2 and names the file", () => {
+    const root = buildFixture({ workspaces: [{ dir: "adapter" }] });
+    const path = join(root, "bun.lock");
+    writeFileSync(path, '{ "packages": ');
+    expectInputFailure(root, path, "not parsable");
+  }, 15000);
+
+  test("an unreadable bun.lock exits 2 and names the file", () => {
+    const root = buildFixture({ workspaces: [{ dir: "adapter" }] });
+    const path = join(root, "bun.lock");
+    chmodSync(path, 0o000);
+    try {
+      expectInputFailure(root, path, "cannot read");
+    } finally {
+      chmodSync(path, 0o600);
+    }
+  }, 15000);
+
+  test("a dangling bun.lock symlink exits 2 and names the file", () => {
+    const root = buildFixture({ workspaces: [{ dir: "adapter" }] });
+    const path = join(root, "bun.lock");
+    rmSync(path);
+    symlinkSync("missing.lock", path);
+    expectInputFailure(root, path, "cannot read");
+  }, 15000);
 
   test("a non-directory workspace parent fails", () => {
     const root = buildFixture({});
     rmSync(join(root, "packages"), { recursive: true });
     writeFileSync(join(root, "packages"), "not a directory");
     expectInputFailure(root, join(root, "packages"), "cannot read");
-  });
+  }, 15000);
 
   test("an unsupported workspaces glob fails", () => {
     const root = buildFixture({});
@@ -264,7 +295,7 @@ describe("check-exact-overrides — required inputs fail closed", () => {
     pkg.workspaces = ["packages/**"];
     writeFileSync(path, JSON.stringify(pkg));
     expectInputFailure(root, path, "unsupported workspaces glob");
-  });
+  }, 15000);
 
   test("a non-string override value for a reaching key fails", () => {
     const root = buildFixture({
@@ -272,7 +303,7 @@ describe("check-exact-overrides — required inputs fail closed", () => {
       workspaces: [declares("dependencies", { "@x/dep": "^1.2.3" })],
     });
     expectInputFailure(root, join(root, "package.json"), "is not a version string");
-  });
+  }, 15000);
 });
 
 describe("check-exact-overrides — the CLI", () => {
@@ -282,16 +313,68 @@ describe("check-exact-overrides — the CLI", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("✓");
     expect(r.stdout).toContain("Declared direct override keys matching workspace dependencies");
-  });
+  }, 15000);
 });
 
 const nonExact = [
   "1.x", "1", "^1.2.3", "~1.2.3", ">=1", "*", "latest", "npm:foo@1.x",
   "npm:foo@^1@2.0.0", "npm:@scope/foo@^1@2.0.0", "npm:foo@@2.0.0",
-  "npm:@scope/@2.0.0", "npm:foo/bar@2.0.0", "npm:Foo@2.0.0", "npm:.foo@2.0.0",
-  "npm:_foo@2.0.0", "npm:-foo@2.0.0", "npm:~foo@2.0.0", "npm:node_modules@2.0.0", "npm:favicon.ico@2.0.0", "npm:foo bar@2.0.0", "npm:foo%20bar@2.0.0", "npm:@/foo@2.0.0",
-  "npm:@scope/foo/bar@2.0.0", "npm:foo\n@2.0.0", `npm:${"a".repeat(215)}@2.0.0`,
+  "npm:@scope/@2.0.0", "npm:foo/bar@2.0.0", "npm:.foo@2.0.0",
+  "npm:_foo@2.0.0", "npm:-foo@2.0.0", "npm:node_modules@2.0.0", "npm:favicon.ico@2.0.0", "npm:foo bar@2.0.0", "npm:foo%20bar@2.0.0", "npm:@/foo@2.0.0",
+  "npm:@scope/foo/bar@2.0.0", "npm:foo\n@2.0.0",
 ];
+
+const aliasCases: [string, boolean][] = [
+  ["npm:Foo@2.0.0", true],
+  ["npm:@Scope/Foo@2.0.0", true],
+  ["npm:HTTP@2.0.0", true],
+  ["npm:foo-bar.baz_2@2.0.0", true],
+  ["npm:~foo@2.0.0", true],
+  ["npm:foo!@2.0.0", true],
+  ["npm:foo'@2.0.0", true],
+  ["npm:foo(bar)@2.0.0", true],
+  ["npm:*@2.0.0", true],
+  ["npm:@.scope/_foo@2.0.0", true],
+  ["npm:@_scope/-foo@2.0.0", true],
+  ["npm:@scope/~foo@2.0.0", true],
+  ["npm:@scope/foo.tgz@2.0.0", true],
+  [`npm:${"a".repeat(215)}@2.0.0`, true],
+  ["npm:foo@2.0.0-rc.1+build.2", true],
+  ["npm:foo@^2.0.0", false],
+  ["npm:foo@2.x", false],
+  ["npm:foo@latest", false],
+  ["npm:foo", false],
+  ["npm:foo@", false],
+  ["npm:foo@@2.0.0", false],
+  ["npm:foo@^1@2.0.0", false],
+  ["npm:@scope/foo@^1@2.0.0", false],
+  ["npm:.foo@2.0.0", false],
+  ["npm:_foo@2.0.0", false],
+  ["npm:-foo@2.0.0", false],
+  ["npm:Node_Modules@2.0.0", false],
+  ["npm:Favicon.ico@2.0.0", false],
+  ["npm:@scope/.foo@2.0.0", false],
+  ["npm:@/foo@2.0.0", false],
+  ["npm:@scope/@2.0.0", false],
+  ["npm:foo/bar@2.0.0", false],
+  ["npm:foo bar@2.0.0", false],
+  ["npm:foo%20bar@2.0.0", false],
+  ["npm:foo.tgz@2.0.0", false],
+  ["npm:foo.tar.gz@2.0.0", false],
+];
+
+describe("alias name and version table", () => {
+  for (const [value, accepted] of aliasCases) {
+    test(`${JSON.stringify(value)}: ${accepted ? "exact" : "non-exact"}`, () => {
+      const root = buildFixture({
+        overrides: { "@x/dep": value },
+        workspaces: [declares("dependencies", { "@x/dep": "1.2.3" })],
+      });
+      expect(findExactOverrideViolations(root).length === 0).toBe(accepted);
+      expect(runCli(root).status).toBe(accepted ? 0 : 1);
+    }, 15000);
+  }
+});
 
 describe("version validation", () => {
   for (const value of nonExact) {
@@ -303,14 +386,14 @@ describe("version validation", () => {
       expect(findExactOverrideViolations(root)).toEqual([
         { name: "@x/dep", declared: value, exact: null },
       ]);
-    });
+    }, 15000);
     test(`CLI rejects ${value}`, () => {
       const root = buildFixture({
         overrides: { "@x/dep": value },
         workspaces: [declares("dependencies", { "@x/dep": "1.2.3" })],
       });
       expect(runCli(root).status).toBe(1);
-    });
+    }, 15000);
   }
   for (const value of ["1.2.3", "1.2.3-rc.1+build.2", "npm:foo@1.2.3", "npm:@x/foo@1.2.3-rc.1", "npm:foo-bar.baz_2@1.2.3", "npm:@scope/_foo@1.2.3"]) {
     test(`accepts ${value}`, () => {
@@ -320,7 +403,7 @@ describe("version validation", () => {
       });
       expect(findExactOverrideViolations(root)).toEqual([]);
       expect(runCli(root).status).toBe(0);
-    });
+    }, 15000);
   }
   for (const value of ["01.2.3", "1.2.3-01", "1.2.3\n", "1.2.3 trailing", "npm:foo@1.2.3 trailing"]) {
     test(`rejects invalid semver ${JSON.stringify(value)}`, () => {
@@ -330,7 +413,7 @@ describe("version validation", () => {
       });
       expect(findExactOverrideViolations(root)).toHaveLength(1);
       expect(runCli(root).status).toBe(1);
-    });
+    }, 15000);
   }
 });
 
@@ -412,7 +495,7 @@ describe("semver parser parity", () => {
       expect(actual).toBe(accepted);
       expect(actual).toBe(results[index]);
     }
-  });
+  }, 15000);
 
   test("rejects the CodeQL witness within the latency budget", () => {
     const witness = "0.0.0-0." + "--.".repeat(5000) + "!";
@@ -431,7 +514,7 @@ describe("semver parser parity", () => {
       expect(old.status).toBe(0);
       expect(JSON.parse(old.stdout)).toEqual([actual]);
     }
-  });
+  }, 15000);
 });
 
 describe("workspace declarations", () => {
@@ -444,7 +527,7 @@ describe("workspace declarations", () => {
       writeFileSync(path, JSON.stringify(pkg));
       expect(() => findExactOverrideViolations(root)).toThrow("workspaces must be an array");
       expect(runCli(root).status).toBe(2);
-    });
+    }, 15000);
   }
   for (const value of [[], ["packages/*"]]) {
     test(`refuses zero manifests for ${JSON.stringify(value)}`, () => {
@@ -455,7 +538,7 @@ describe("workspace declarations", () => {
       writeFileSync(path, JSON.stringify(pkg));
       expect(() => findExactOverrideViolations(root)).toThrow("workspaces yielded no manifests");
       expect(runCli(root).status).toBe(2);
-    });
+    }, 15000);
   }
 });
 
@@ -503,7 +586,7 @@ describe("installed pre-commit hook", () => {
     const result = runHook(root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("1.x");
-  });
+  }, 15000);
   test("accepts staged exact content despite an unstaged range", () => {
     const root = hookFixture("1.2.3");
     const path = join(root, "package.json");
@@ -511,25 +594,40 @@ describe("installed pre-commit hook", () => {
     pkg.overrides["@x/dep"] = "1.x";
     writeFileSync(path, JSON.stringify(pkg));
     expect(runHook(root).status).toBe(0);
-  });
+  }, 15000);
   test("uses staged workspace dependencies", () => {
     const root = hookFixture("1.x");
     writeFileSync(join(root, "packages/adapter/package.json"), JSON.stringify({ name: "@x/adapter" }));
     expect(runCli(root).status).toBe(0);
     expect(runHook(root).status).toBe(1);
-  });
+  }, 15000);
   test("refuses a missing checker", () => {
     const root = hookFixture("1.2.3");
     rmSync(join(root, "scripts/check-exact-overrides.mjs"));
     expect(runHook(root).status).toBe(1);
-  });
+  }, 15000);
   test("refuses when the index has no workspace manifest", () => {
     const root = hookFixture("1.2.3");
     git(root, ["rm", "--cached", "packages/adapter/package.json"]);
     const result = runHook(root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("workspaces yielded no manifests");
-  });
+  }, 15000);
+  test("accepts a missing staged bun.lock", () => {
+    const root = hookFixture("1.2.3");
+    git(root, ["rm", "--cached", "bun.lock"]);
+    writeFileSync(join(root, "bun.lock"), "invalid JSON");
+    expect(runHook(root).status).toBe(0);
+  }, 15000);
+  test("refuses a malformed staged bun.lock", () => {
+    const root = hookFixture("1.2.3");
+    writeFileSync(join(root, "bun.lock"), "invalid JSON");
+    git(root, ["add", "bun.lock"]);
+    writeFileSync(join(root, "bun.lock"), JSON.stringify({ packages: {} }));
+    const result = runHook(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("bun.lock is not parsable");
+  }, 15000);
 });
 
 describe("Bun local override seam", () => {

@@ -4,10 +4,10 @@
  * dependencies, devDependencies and optionalDependencies are checked;
  * peerDependencies and workspace packages' own ranges are out of scope.
  * workspace: values are exempt.
+ * Alias names use npm's URL-friendly legacy grammar, except unscoped archive
+ * names (.tgz/.tar.gz); versions use strict SemVer. No npm-parser comparison.
  *
  * Usage: node scripts/check-exact-overrides.mjs [--root <dir>] [--staged]
- * Exit 0: checked values are exact semvers, exact npm: alias targets or exempt.
- * Exit 1: a checked value is a non-exact specifier.
  */
 
 import { execFileSync } from "node:child_process";
@@ -117,18 +117,16 @@ function isExactSemver(value) {
 }
 
 function isPackageName(name) {
-  if (name.length === 0 || name.length > 214) return false;
+  if (!name || /^[._-]/.test(name)) return false;
+  if (["node_modules", "favicon.ico"].includes(name.toLowerCase())) return false;
   if (name.startsWith("@")) {
     const parts = name.slice(1).split("/");
     return (
-      parts.length === 2 && matchesWhole(parts[0], /^[a-z0-9._~!'()*-]+$/) &&
-      matchesWhole(parts[1], /^[a-z0-9_-][a-z0-9._-]*$/)
+      parts.length === 2 && parts.every((part) => matchesWhole(part, /^[A-Za-z0-9._~!'()*-]+$/)) &&
+      !parts[1].startsWith(".")
     );
   }
-  return (
-    name !== "node_modules" && name !== "favicon.ico" &&
-    matchesWhole(name, /^[a-z0-9][a-z0-9._-]*$/)
-  );
+  return matchesWhole(name, /^[A-Za-z0-9._~!'()*-]+$/);
 }
 
 function isExactVersion(value) {
@@ -137,7 +135,9 @@ function isExactVersion(value) {
   if (value.startsWith("npm:")) {
     const at = value.lastIndexOf("@");
     const name = value.slice("npm:".length, at);
-    return isPackageName(name) && isExactSemver(value.slice(at + 1));
+    return isPackageName(name) &&
+      (name.startsWith("@") || !/[.](?:tgz|tar[.]gz)$/i.test(name)) &&
+      isExactSemver(value.slice(at + 1));
   }
   return false;
 }
@@ -211,14 +211,29 @@ function workspaceManifests(root, rootPkg, staged) {
 }
 
 function makeResolver(root, staged) {
+  const path = join(root, "bun.lock");
+  let raw;
+  try {
+    if (staged && !execFileSync("git", ["ls-files", "--cached", "-z", "--", "bun.lock"], {
+      cwd: root, encoding: "utf8",
+    })) return () => null;
+    raw = readText(root, "bun.lock", staged);
+  } catch (err) {
+    if (!staged && err?.code === "ENOENT" && !readdirSync(root).includes("bun.lock")) {
+      return () => null;
+    }
+    throw new Error(
+      `cannot read ${path} (${err instanceof Error ? err.message : String(err)}). Maintainer: restore bun.lock.`,
+    );
+  }
   let lock;
   try {
-    const raw = readText(root, "bun.lock", staged);
     lock = JSON.parse(raw.replace(/,(\s*[}\]])/g, "$1"));
-  } catch {
-    return () => null;
+  } catch (err) {
+    throw new Error(
+      `${path} is not parsable (${err instanceof Error ? err.message : String(err)}). Maintainer: regenerate bun.lock.`,
+    );
   }
-  const path = join(root, "bun.lock");
   if (!isPlainObject(lock)) {
     throw new Error(`${path} must be a plain object. Maintainer: regenerate bun.lock.`);
   }
