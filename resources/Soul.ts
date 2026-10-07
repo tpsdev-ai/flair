@@ -38,9 +38,6 @@ function versionInput(
   const key = str(row.key);
   const previousAgentId = str(previous?.agentId);
   const previousKey = str(previous?.key);
-  // A subject is `agentId:key`, so an identity change is a change to EITHER
-  // half: the previous window closes and a fresh one opens under the new
-  // subject, exactly as a key change already did.
   const identityChanged = !!previous && (previousAgentId !== agentId || previousKey !== key);
   const previousSubjectId = identityChanged ? soulSubjectId(previousAgentId, previousKey) : null;
   return {

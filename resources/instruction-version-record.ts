@@ -26,7 +26,7 @@ export interface VersionAttribution {
 
 export interface RecordVersionInput {
   subjectType: InstructionSubjectType;
-  /** Canonical subject: `agentId:key` for soul; a stable logical skill id for skill. */
+  /** Encoded Soul pair or stable logical skill id. */
   subjectId: string;
   agentId: string;
   key?: string | null;
@@ -41,12 +41,7 @@ export interface RecordVersionInput {
   snapshot?: () => Record<string, any>;
   /** The addressable version id the caller compared against; null ⇒ unguarded. */
   expectedVersion?: string | null;
-  /**
-   * A subject-identity change: when set, the write first appends a delete
-   * tombstone to this closed subject, in the same transaction, before the
-   * subject's own record. The old subject's chain is closed, never silently
-   * moved.
-   */
+  /** Previous Soul identity; occupied destinations are refused before closing it. */
   previousSubjectId?: string | null;
   previousKey?: string | null;
   /** The closed subject's own agentId; the tombstone is about the OLD subject. */
@@ -127,7 +122,9 @@ export function subjectTypeReadable(subjectType: unknown): boolean {
 
 /** Canonical subject for a Soul row. */
 export function soulSubjectId(agentId: string, key: string): string {
-  return `${agentId}:${key}`;
+  return agentId.includes(":") || key.includes(":")
+    ? `:${JSON.stringify([agentId, key])}`
+    : `${agentId}:${key}`;
 }
 
 /** The subject type of a skill-tagged Memory row's version chain (flair#2139 S2). */
@@ -183,13 +180,17 @@ function isTableLike(table: unknown): boolean {
  * The append caller reads under its subject lock and transaction after resetting
  * the cached read snapshot; the read resource uses the same raw handle without a lock.
  */
-export async function readHead(subjectType: string, subjectId: string, shared?: any): Promise<Record<string, any> | null> {
+export async function readHead(subjectType: string, subjectId: string, shared?: any, soulIdentity?: { agentId: string; key: string }): Promise<Record<string, any> | null> {
   const table = (databases as any).flair?.InstructionVersion;
   if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
   for await (const row of table.search({
     conditions: [
       { attribute: "subjectType", comparator: "equals", value: subjectType },
       { attribute: "subjectId", comparator: "equals", value: subjectId },
+      ...(soulIdentity ? [
+        { attribute: "agentId", comparator: "equals", value: soulIdentity.agentId },
+        { attribute: "key", comparator: "equals", value: soulIdentity.key },
+      ] : []),
     ],
     sort: { attribute: "version", descending: true },
     limit: 1,
@@ -197,6 +198,14 @@ export async function readHead(subjectType: string, subjectId: string, shared?: 
     return row as Record<string, any>;
   }
   return null;
+}
+
+async function readSoulHead(agentId: string, key: string, shared: any): Promise<Record<string, any> | null> {
+  const identity = { agentId, key };
+  const subjectId = soulSubjectId(agentId, key);
+  const head = await readHead("soul", subjectId, shared, identity);
+  if (head || subjectId === `${agentId}:${key}`) return head;
+  return readHead("soul", `${agentId}:${key}`, shared, identity);
 }
 
 /** Server-derived attribution for an authorization outcome; never from a body. */
@@ -273,7 +282,24 @@ export async function recordVersion(
         const expected = expectedVersionOf(input);
         const table = (databases as any).flair?.InstructionVersion;
         if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
-        const head = await readHead(input.subjectType, input.subjectId, shared);
+        const identityChanged = input.subjectType === "soul" && input.previousSubjectId != null && (
+          (input.previousAgentId ?? input.agentId) !== input.agentId || input.previousKey !== input.key
+        );
+        if (identityChanged) {
+          const souls = (databases as any).flair?.Soul;
+          if (typeof souls?.search !== "function") throw new Error("flair: the Soul table is unavailable");
+          for await (const row of souls.search({ conditions: [
+            { attribute: "agentId", comparator: "equals", value: input.agentId },
+            { attribute: "key", comparator: "equals", value: input.key },
+          ] }, shared)) {
+            if (String(row.id) !== input.rowId) {
+              return { ok: false, response: jsonResponse(409, { error: "soul_subject_occupied" }) } as RecordVersionOutcome;
+            }
+          }
+        }
+        const head = input.subjectType === "soul"
+          ? await readSoulHead(input.agentId, input.key ?? "", shared)
+          : await readHead(input.subjectType, input.subjectId, shared);
         if (expected != null && (!head || head.id !== expected)) {
           return { ok: false, response: staleHeadResponse(expected, head) } as RecordVersionOutcome;
         }
@@ -287,14 +313,14 @@ export async function recordVersion(
           input.soulSnapshot = JSON.stringify(row);
           input.value = typeof row.value === "string" ? row.value : null;
         }
-        // A logical-key change closes the old subject first, in this transaction.
-        if (input.previousSubjectId && input.previousSubjectId !== input.subjectId) {
-          const oldHead = await readHead(input.subjectType, input.previousSubjectId, shared);
+        if (identityChanged) {
+          const previousSubjectId = soulSubjectId(input.previousAgentId ?? input.agentId, input.previousKey ?? "");
+          const oldHead = await readSoulHead(input.previousAgentId ?? input.agentId, input.previousKey ?? "", shared);
           const oldSequence = oldHead ? BigInt(oldHead.version as any) + 1n : 1n;
           const oldRecord: Record<string, unknown> = {
-            id: versionId(input.subjectType, input.previousSubjectId, oldSequence),
+            id: versionId(input.subjectType, previousSubjectId, oldSequence),
             subjectType: input.subjectType,
-            subjectId: input.previousSubjectId,
+            subjectId: previousSubjectId,
             agentId: input.previousAgentId ?? input.agentId,
             key: input.previousKey ?? null,
             version: oldSequence,
