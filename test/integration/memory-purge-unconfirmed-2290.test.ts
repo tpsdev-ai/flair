@@ -2,13 +2,19 @@
  * memory-purge-unconfirmed-2290.test.ts — POST /MemoryPurge when Harper skips
  * a queued delete at commit.
  *
- * Runs against a composed copy of the built component whose pointer-table
- * adapter (test/helpers/host-pointer-failing-component.ts,
- * CONCURRENT_WRITE_ADAPTER_SRC) commits a newer write of the Memory row in a
- * separate transaction before deleting the pointer row. The purge's queued
- * delete of that row then loses at commit, so the row is still stored
- * afterwards. The call must fail by name, keep no deletion-history record for
- * the row, and must not list it as removed.
+ * Runs against a composed copy of the built component that adds a test-only
+ * module (test/helpers/host-pointer-failing-component.ts,
+ * CONCURRENT_WRITE_MODULE_SRC). For a row whose Memory id carries a marker, the
+ * module commits a newer write of a row in a separate transaction right after
+ * the purge stages its own write, so the purge's staged delete loses to that
+ * write at commit:
+ *   skip-memory-delete   the Memory row (after the purge stages its delete);
+ *   skip-history-delete  the deletion-history record (after the purge stages
+ *                        its cleanup delete);
+ *   skip-pointer-delete  the pointer row (after the purge stages its delete).
+ * The call must fail by name and leave each row as the committed store has it:
+ * a row still stored keeps its pointer row, and a record the purge cannot
+ * confirm removed is named in the reply.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -16,9 +22,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import {
-  componentWithFailingHostPointer,
-  ADAPTER_REL,
-  CONCURRENT_WRITE_ADAPTER_SRC,
+  componentWithConcurrentWrites,
+  CONCURRENT_WRITE_MODULE_REL,
+  CONCURRENT_WRITE_MODULE_SRC,
   type FailingComponent,
 } from "../helpers/host-pointer-failing-component";
 
@@ -26,6 +32,7 @@ let harper: HarperInstance;
 let component: FailingComponent;
 
 const adminBasic = () => `Basic ${btoa(`${harper.admin.username}:${harper.admin.password}`)}`;
+const POINTER = { v: 1, host: "openclaw", kind: "run", id: "run-bbbbbbbb" };
 
 async function adminOp(op: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -42,9 +49,37 @@ async function adminOp(op: Record<string, unknown>): Promise<any> {
 const rows = (table: string, attribute: string, value: string) =>
   adminOp({ operation: "search_by_value", database: "flair", table, search_attribute: attribute, search_value: value, get_attributes: ["*"] });
 
+/** Seed a permanent Memory row and, when asked, its pointer row. */
+async function seed(id: string, withPointer: boolean): Promise<void> {
+  const instanceToken = randomUUID();
+  await adminOp({
+    operation: "insert", database: "flair", table: "Memory",
+    records: [{ id, agentId: "agent-a", content: "original", durability: "permanent", createdAt: new Date().toISOString(), archived: false, instanceToken }],
+  });
+  if (!withPointer) return;
+  await adminOp({
+    operation: "insert", database: "flair", table: "MemoryHostSource",
+    records: [{ memoryId: id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: instanceToken, receivedAt: new Date().toISOString() }],
+  });
+  expect((await rows("MemoryHostSource", "memoryId", id)).length).toBe(1); // the pointer row is seeded
+}
+
+async function purge(ids: string[]): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${harper.httpURL}/MemoryPurge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: adminBasic() },
+    body: JSON.stringify({ ids }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await res.text();
+  let body: any = text;
+  try { body = JSON.parse(text); } catch { /* keep the text for the assertion message */ }
+  return { status: res.status, body };
+}
+
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
-  component = componentWithFailingHostPointer({ adapterSrc: CONCURRENT_WRITE_ADAPTER_SRC });
+  component = componentWithConcurrentWrites();
   harper = await startHarper({ cwd: component.dir });
   for (const url of [harper.httpURL, harper.opsURL]) {
     expect(["9925", "9926"], `${url} must be this test's own Harper`).not.toContain(new URL(url).port);
@@ -56,27 +91,58 @@ afterAll(async () => {
   if (component) component.cleanup();
 });
 
-describe("POST /MemoryPurge confirms removal against the committed store", () => {
-  it("a delete that loses to a newer write fails the call by name, keeps no history record, and is not listed as removed", async () => {
-    expect(readFileSync(join(component.dir, ADAPTER_REL), "utf8")).toBe(CONCURRENT_WRITE_ADAPTER_SRC); // the composed copy carries the test adapter
-    const id = `purge-unconfirmed-${Date.now()}`;
-    await adminOp({
-      operation: "insert", database: "flair", table: "Memory",
-      records: [{ id, agentId: "agent-a", content: "original", durability: "permanent", createdAt: new Date().toISOString(), archived: false, instanceToken: randomUUID() }],
-    });
+describe("POST /MemoryPurge confirms every delete against the committed store", () => {
+  it("ctrl: with no concurrent write, the row and its pointer row are removed and its history record is written", async () => {
+    expect(readFileSync(join(component.dir, CONCURRENT_WRITE_MODULE_REL), "utf8")).toBe(CONCURRENT_WRITE_MODULE_SRC); // the composed copy carries the test module
+    const id = `purge-plain-${Date.now()}`;
+    await seed(id, true);
+    const { status, body } = await purge([id]);
+    expect(status, JSON.stringify(body).slice(0, 300)).toBe(200);
+    expect(body).toEqual({ removed: 1, removedIds: [id] });
+    expect(await rows("Memory", "id", id)).toEqual([]);
+    expect(await rows("MemoryHostSource", "memoryId", id)).toEqual([]);
+    expect((await rows("MemoryDeletionHistory", "memoryId", id)).length).toBe(1);
+  }, 60_000);
 
-    const res = await fetch(`${harper.httpURL}/MemoryPurge`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: adminBasic() },
-      body: JSON.stringify({ ids: [id] }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    const text = await res.text();
-    expect(res.status, text.slice(0, 300)).toBe(409);
-    expect(JSON.parse(text)).toMatchObject({ error: "memory_purge_unconfirmed", ids: [id], removedIds: [] });
+  it("a row delete that loses to a newer write fails the call by name; the row keeps its pointer row and no history record", async () => {
+    const id = `purge-skip-memory-delete-${Date.now()}`;
+    await seed(id, true);
+    const pointerBefore = JSON.stringify(await rows("MemoryHostSource", "memoryId", id));
+
+    const { status, body } = await purge([id]);
+    expect(status, JSON.stringify(body).slice(0, 300)).toBe(409);
+    expect(body).toMatchObject({ error: "memory_purge_unconfirmed", ids: [id], removedIds: [] });
 
     const stored = await rows("Memory", "id", id);
     expect(stored.map((r: any) => r.content)).toEqual(["rewritten by a separate transaction"]); // the newer write won
+    expect(JSON.stringify(await rows("MemoryHostSource", "memoryId", id))).toBe(pointerBefore); // the stored row's pointer row is unchanged
     expect(await rows("MemoryDeletionHistory", "memoryId", id)).toEqual([]);
+  }, 60_000);
+
+  it("a history-record delete that loses to a newer write fails the call by name and names the record", async () => {
+    const id = `purge-skip-memory-delete-skip-history-delete-${Date.now()}`;
+    await seed(id, false);
+
+    const { status, body } = await purge([id]);
+    expect(status, JSON.stringify(body).slice(0, 300)).toBe(500);
+    expect(body).toMatchObject({ error: "memory_purge_history_cleanup_unconfirmed", ids: [id], stillStoredIds: [id], removedIds: [] });
+
+    expect((await rows("Memory", "id", id)).map((r: any) => r.content)).toEqual(["rewritten by a separate transaction"]); // the row is still stored
+    const history = await rows("MemoryDeletionHistory", "memoryId", id);
+    expect(history.length).toBe(1); // the record the cleanup could not remove
+    expect(body.historyIds).toEqual([history[0].id]); // the reply names it
+  }, 60_000);
+
+  it("a pointer-row delete that loses to a newer write fails the call by name after the row is removed", async () => {
+    const id = `purge-skip-pointer-delete-${Date.now()}`;
+    await seed(id, true);
+
+    const { status, body } = await purge([id]);
+    expect(status, JSON.stringify(body).slice(0, 300)).toBe(500);
+    expect(body).toMatchObject({ error: "memory_purge_pointer_cleanup_failed", ids: [id], removedIds: [id] });
+
+    expect(await rows("Memory", "id", id)).toEqual([]); // the row is removed
+    expect((await rows("MemoryHostSource", "memoryId", id)).length).toBe(1); // its pointer row is left, and reported
+    expect((await rows("MemoryDeletionHistory", "memoryId", id)).length).toBe(1); // the removal is recorded
   }, 60_000);
 });
