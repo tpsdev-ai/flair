@@ -13,6 +13,20 @@ test("cleanup leaves an untracked legacy label alone", async () => {
   expect(jobs.size).toBe(0);
 });
 
+test("cleanup does not unload a tracked job outside the sandbox LaunchAgents directory", async () => {
+  const sandboxJob = { label: "ai.tpsdev.flair.fixture", plistPath: "/fixture/LaunchAgents/instance.plist" };
+  const externalJob = { label: "ai.tpsdev.flair.external", plistPath: "/other/LaunchAgents/instance.plist" };
+  const jobs = new Set([sandboxJob, externalJob]);
+  const calls: Array<[string, string]> = [];
+  let removed = false;
+  await cleanupLaunchdSandbox(jobs, "/fixture/LaunchAgents", async () => {
+    removed = true;
+  }, (label, plistPath) => { calls.push([label, plistPath]); });
+  expect(calls).toEqual([[sandboxJob.label, sandboxJob.plistPath]]);
+  expect(removed).toBe(true);
+  expect([...jobs]).toEqual([externalJob]);
+});
+
 test("unload checks both command results and verifies absence", () => {
   const calls: string[] = [];
   const run: CleanupCommand = args => {

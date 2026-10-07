@@ -207,6 +207,8 @@ export const bridge: MemoryBridge = {
 };
 ```
 
+**`opts`** contains the option values passed to the plugin as own properties. For `import` it is a null-prototype record, so inherited methods such as `opts.hasOwnProperty` are not available: test for a key with `Object.hasOwn(opts, key)`, which works for `export` too.
+
 **`BridgeContext`** gives you:
 
 - `ctx.fetch` — instrumented, rate-limited HTTP. **Always use this instead of the global `fetch`** — it's how the runtime applies per-bridge throttling and audit logging.
