@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
+repo=$(pwd -P)
 scratch=$(mktemp -d "${TMPDIR:-${RUNNER_TEMP:?}}/expiry-mutations.XXXXXX")
+cleanup() {
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+mkdir "$scratch/repo"
+tar --exclude=./.git --exclude=./node_modules -cf - . | tar -xf - -C "$scratch/repo"
+ln -s "$repo/node_modules" "$scratch/repo/node_modules"
+cd "$scratch/repo"
 cp resources/AgentSeed.ts "$scratch/AgentSeed.ts"
 cp resources/Federation.ts "$scratch/Federation.ts"
 restore() {
   cp "$scratch/AgentSeed.ts" resources/AgentSeed.ts
   cp "$scratch/Federation.ts" resources/Federation.ts
 }
-cleanup() {
-  restore
-  rm -rf "$scratch"
-}
-trap cleanup EXIT
 suite=test/integration/feed-ephemeral-expiry-e2e.test.ts
 bun test "$suite"
 for path in AgentSeed Federation; do
@@ -44,5 +48,3 @@ PYCODE
   grep -E '^ 1 fail$' "$scratch/$path.log"
   grep -F 'expect(received).toBeGreaterThanOrEqual(expected)' "$scratch/$path.log"
 done
-restore
-bun run build
