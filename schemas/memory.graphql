@@ -437,7 +437,7 @@ type OrgSkillAssignmentHistory @table(database: "flair") {
 type InstructionVersion @table(database: "flair") @export {
   id: ID @primaryKey              # encodes subjectType + subjectId + version
   subjectType: String! @indexed   # soul | skill
-  subjectId: String! @indexed     # canonical subject (soul: agentId:key)
+  subjectId: String! @indexed     # Soul: agentId:key or colon-prefixed JSON pair
   agentId: String! @indexed       # owner
   key: String                     # Soul key
   version: BigInt!                # positive per-subject sequence
