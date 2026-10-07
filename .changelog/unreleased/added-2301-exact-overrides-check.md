@@ -1,6 +1,4 @@
-- **Root `overrides` that reach a workspace dependency must be exact versions.**
-  A CI step and the pre-commit hook enforce it. bun re-checks the registry manifest
-  for a ranged dependency of a workspace on a warm install once its cached copy is
-  older than its 300 s max-age, so a range costs a manifest request per install.
-  A workspace package's own dependency ranges and `peerDependencies` are out of scope,
-  and `workspace:` specifiers are exempt (flair#2301).
+- Check declared direct root override keys matching workspace dependencies,
+  devDependencies or optionalDependencies in CI and staged manifests in pre-commit.
+  Accept exact semvers, exact npm: alias targets and workspace: specifiers.
+  Workspace packages' own ranges and peerDependencies are out of scope (flair#2301).

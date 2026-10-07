@@ -1,18 +1,17 @@
-/** Types for scripts/check-exact-overrides.mjs (flair#2301). */
-
 export interface OverrideViolation {
-  /** The root `overrides` key (the package name). */
   name: string;
-  /** The range the override declares. */
+  /** The declared non-exact specifier. */
   declared: string;
-  /** The version bun.lock resolves for the package, or null when it has none. */
+  /** Lockfile version suggestion, or null. */
   exact: string | null;
 }
 
 /**
- * Every root `overrides` entry whose key a workspace package declares under
- * `dependencies`, `devDependencies` or `optionalDependencies`, and whose value
- * is a version range rather than an exact version. Throws when a required input
- * (the root manifest, a workspace manifest) cannot be read or parsed.
+ * Check declared direct override keys matching workspace dependencies,
+ * devDependencies or optionalDependencies; workspace: values are exempt.
+ * Throws on input/checker errors, including no workspace manifests.
  */
-export function findExactOverrideViolations(repoRoot: string): OverrideViolation[];
+export function findExactOverrideViolations(
+  repoRoot: string,
+  options?: { staged?: boolean },
+): OverrideViolation[];

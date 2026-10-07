@@ -104,14 +104,7 @@ jobs:
         # that workspace package ships. Local dev hides it (bun symlinks);
         # only consumers of the published tarball see the staleness.
         run: node scripts/check-workspace-deps.mjs
-      - name: "Check root overrides that reach a workspace dependency are exact"
-        # bun 1.3.10 re-checks the registry manifest for a ranged dependency of
-        # a workspace on every warm install once its cached copy is older than
-        # its 300 s max-age. CI restores a cache older than that, so a range
-        # costs one manifest request per install — about 300 s through Socket
-        # Firewall on the run that fixed the MCP SDK range (flair#2301). Only a
-        # root override whose key a workspace package declares is checked; a
-        # workspace's own ranges and peerDependencies are out of scope.
+      - name: "Check declared direct override keys matching workspace dependencies"
         run: node scripts/check-exact-overrides.mjs
       - name: "Check version declarations in sync"
         # The release version is declared outside package.json too (e.g.

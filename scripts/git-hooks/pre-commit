@@ -7,7 +7,7 @@
 #
 # Each check matches a CI gate exactly so they can't drift:
 #   - check-workspace-deps.mjs  → CI test-unit (workspace internal-dep lockstep)
-#   - check-exact-overrides.mjs → CI test-unit (root overrides reaching a workspace dep are exact)
+#   - check-exact-overrides.mjs → CI test-unit (declared direct keys matching workspace deps)
 #   - check-dep-ages.mjs         → CI test-unit (supply-chain bake time, ≥7d)
 #   - check-impl-term-leaks.sh   → CI Doc/Code Lint (no Bead refs in user-facing docs)
 #
@@ -44,14 +44,11 @@ if [ -f scripts/check-workspace-deps.mjs ]; then
     fi
 fi
 
-if [ -f scripts/check-exact-overrides.mjs ]; then
-    if ! node scripts/check-exact-overrides.mjs >/dev/null 2>&1; then
-        red "✗ exact-overrides check failed"
-        node scripts/check-exact-overrides.mjs >&2 || true
-        FAIL=1
-    else
-        green "✓ exact overrides"
-    fi
+if ! node scripts/check-exact-overrides.mjs --staged; then
+    red "✗ staged exact-overrides check failed"
+    FAIL=1
+else
+    green "✓ staged exact overrides"
 fi
 
 if [ -f scripts/check-dep-ages.mjs ] && [ -z "$FLAIR_PRECOMMIT_SKIP_DEP_AGES" ]; then
