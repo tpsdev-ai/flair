@@ -20,8 +20,8 @@ afterEach(() => {
 });
 
 function seed(id: string) {
-  harnessState.memoryStore.set(id, { id, agentId: "owner", durability: "permanent" });
-  harnessState.pointerStore.set(id, { memoryId: id });
+  harnessState.memoryStore.set(id, { id, agentId: "owner", content: "original", createdAt: "2026-10-07T00:00:00.000Z", durability: "permanent" });
+  harnessState.pointerStore.set(id, { memoryId: id, hostSource: '{"v":1,"host":"openclaw","kind":"run","id":"run-bbbbbbbb"}', authorId: "owner", receivedAt: "2026-10-07T00:00:00.000Z" });
 }
 
 async function purge(ids: string[]) {
@@ -104,4 +104,73 @@ for (const failure of ["throw", "skip"] as const) {
     expect(harnessState.pointerStore.has("removed")).toBe(true);
     expect([...harnessState.deletionStore.values()].map((row) => row.memoryId)).toEqual(["removed"]);
   });
+}
+
+for (const failure of ["search", "unavailable", "memory-read"] as const) {
+  test(`pointer confirmation ${failure} returns the named 500`, async () => {
+    seed("removed");
+    if (failure === "search") {
+      spies.push(spyOn(databasesMock.flair.MemoryHostSource, "search").mockImplementation(() => { throw new Error("pointer read failed"); }));
+    } else if (failure === "unavailable") {
+      spies.push(spyOn(databasesMock.flair.MemoryHostSource, "search").mockImplementation(() => { throw new Error("unused"); }));
+      (databasesMock.flair.MemoryHostSource as any).search = undefined;
+    } else {
+      spies.push(spyOn(databasesMock.flair.MemoryHostSource, "delete").mockResolvedValue({ ok: true }));
+      const originalGet = databasesMock.flair.Memory.get;
+      let reads = 0;
+      spies.push(spyOn(databasesMock.flair.Memory, "get").mockImplementation(async (...args) => {
+        if (++reads === 5) throw new Error("memory confirmation read failed");
+        return originalGet(...args);
+      }));
+    }
+    const { status, body } = await purge(["removed"]);
+    expect(status).toBe(500);
+    expect(body).toMatchObject({
+      error: "memory_purge_pointer_cleanup_failed", removedIds: ["removed"], stillStoredIds: [],
+      message: `could not confirm pointer-row deletion for rows in removedIds (${failure === "search"
+        ? "pointer read failed" : failure === "unavailable" ? "MemoryHostSource table unavailable" : "memory confirmation read failed"})`,
+    });
+    expect(harnessState.memoryStore.has("removed")).toBe(false);
+    expect(harnessState.deletionStore.size).toBe(1);
+  });
+}
+
+test("history cleanup failure takes precedence over pointer confirmation failure", async () => {
+  seed("stored");
+  seed("removed");
+  keepMemory("stored");
+  spies.push(spyOn(historyTable, "delete").mockResolvedValue(undefined));
+  spies.push(spyOn(databasesMock.flair.MemoryHostSource, "search").mockImplementation(() => { throw new Error("pointer read failed"); }));
+  const { status, body } = await purge(["stored", "removed"]);
+  expect(status).toBe(500);
+  expect(body).toMatchObject({
+    error: "memory_purge_history_cleanup_unconfirmed", stillStoredIds: ["stored"], removedIds: ["removed"],
+  });
+});
+
+test("pointer delete failure remains named when confirmation also fails", async () => {
+  seed("removed");
+  spies.push(spyOn(databasesMock.flair.MemoryHostSource, "delete").mockRejectedValue(new Error("pointer delete failed")));
+  spies.push(spyOn(databasesMock.flair.MemoryHostSource, "search").mockImplementation(() => { throw new Error("pointer read failed"); }));
+  const { status, body } = await purge(["removed"]);
+  expect(status).toBe(500);
+  expect(body).toMatchObject({
+    error: "memory_purge_pointer_cleanup_failed", removedIds: ["removed"],
+    message: "the pointer-row delete for rows in removedIds failed (pointer delete failed)",
+  });
+});
+
+for (const thrown of [null, undefined]) {
+  for (const stage of ["delete", "search"] as const) {
+    test(`pointer ${stage} throwing ${String(thrown)} returns the named 500`, async () => {
+      seed("removed");
+      spies.push(spyOn(databasesMock.flair.MemoryHostSource, stage).mockImplementation(() => { throw thrown; }));
+      const { status, body } = await purge(["removed"]);
+      expect(status).toBe(500);
+      expect(body.error).toBe("memory_purge_pointer_cleanup_failed");
+      expect(body.message).toBe(stage === "delete"
+        ? `the pointer-row delete for rows in removedIds failed (${String(thrown)})`
+        : `could not confirm pointer-row deletion for rows in removedIds (${String(thrown)})`);
+    });
+  }
 }

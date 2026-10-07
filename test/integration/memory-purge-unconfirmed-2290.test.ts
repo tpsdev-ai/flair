@@ -91,7 +91,7 @@ afterAll(async () => {
   if (component) component.cleanup();
 });
 
-describe("POST /MemoryPurge confirms every delete against the committed store", () => {
+describe("POST /MemoryPurge", () => {
   it("ctrl: with no concurrent write, the row and its pointer row are removed and its history record is written", async () => {
     expect(readFileSync(join(component.dir, CONCURRENT_WRITE_MODULE_REL), "utf8")).toBe(CONCURRENT_WRITE_MODULE_SRC); // the composed copy carries the test module
     const id = `purge-plain-${Date.now()}`;
@@ -167,5 +167,19 @@ describe("POST /MemoryPurge confirms every delete against the committed store", 
     expect((await rows("MemoryHostSource", "memoryId", removedId)).length).toBe(1);
     expect(await rows("MemoryDeletionHistory", "memoryId", storedId)).toEqual([]);
     expect((await rows("MemoryDeletionHistory", "memoryId", removedId)).length).toBe(1);
+  }, 60_000);
+
+  it("pointer confirmation failure returns the named 500 after the row deletion commits", async () => {
+    const id = `purge-fail-pointer-confirmation-${Date.now()}`;
+    await seed(id, true);
+    const { status, body } = await purge([id]);
+    expect(status, JSON.stringify(body).slice(0, 300)).toBe(500);
+    expect(body).toMatchObject({
+      error: "memory_purge_pointer_cleanup_failed", removedIds: [id], stillStoredIds: [],
+      message: "could not confirm pointer-row deletion for rows in removedIds (test component: forced pointer confirmation failure)",
+    });
+    expect(await rows("Memory", "id", id)).toEqual([]);
+    expect(await rows("MemoryHostSource", "memoryId", id)).toEqual([]);
+    expect((await rows("MemoryDeletionHistory", "memoryId", id)).length).toBe(1);
   }, 60_000);
 });

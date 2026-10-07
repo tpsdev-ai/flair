@@ -29,15 +29,15 @@
  *
  * Reply, checked in this order: unconfirmed history cleanup fails the call
  * (500 memory_purge_history_cleanup_unconfirmed, with the record ids); a failed
- * pointer delete, or a pointer row left after step 4, fails it (500
- * memory_purge_pointer_cleanup_failed). A later successful maintenance sweep
+ * pointer delete or confirmation read, or a pointer row left after step 4,
+ * fails it (500 memory_purge_pointer_cleanup_failed). A later successful maintenance sweep
  * can remove leftover pointers while their Memory rows remain absent. A target
  * still stored fails it (409 memory_purge_unconfirmed). Otherwise the reply is
  * `{ removed, removedIds }`.
  *
  * This is a separate path from the user-facing `DELETE /Memory/<id>` route.
- * A skill-tagged row deleted through the REST route is versioned — its head is
- * closed, not removed — and that route's semantics are unchanged.
+ * An accepted DELETE of a non-reserved skill closes its head; the reserved
+ * `using-flair` seed is physically deleted.
  */
 import { Resource, databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
@@ -162,7 +162,7 @@ export class MemoryPurge extends Resource {
 
     // 4. Pointer rows of the rows step 2 found gone. A row stored again under
     // the same id before this transaction keeps its pointer row.
-    let pointerError: unknown = null;
+    let pointerError: string | null = null;
     if (removedIds.length > 0) {
       try {
         await withOwnedTransaction(ctx, async (c) => {
@@ -171,17 +171,22 @@ export class MemoryPurge extends Resource {
           }
         });
       } catch (err) {
-        pointerError = err;
+        pointerError = errorText(err);
       }
     }
     const pointerLeft: string[] = [];
-    const pointers = await storedPointerIds(removedIds);
-    if (pointers.size > 0) {
-      await withOwnedTransaction(ctx, async (c) => {
-        for (const id of removedIds) {
-          if (pointers.has(id) && !(await memory.get(id, c))) pointerLeft.push(id);
-        }
-      });
+    let pointerConfirmationError: string | null = null;
+    try {
+      const pointers = await storedPointerIds(removedIds);
+      if (pointers.size > 0) {
+        await withOwnedTransaction(ctx, async (c) => {
+          for (const id of removedIds) {
+            if (pointers.has(id) && !(await memory.get(id, c))) pointerLeft.push(id);
+          }
+        });
+      }
+    } catch (err) {
+      pointerConfirmationError = errorText(err);
     }
 
     if (historyLeft.size > 0) {
@@ -197,12 +202,14 @@ export class MemoryPurge extends Resource {
         removedIds,
       });
     }
-    if (pointerError !== null || pointerLeft.length > 0) {
+    if (pointerError !== null || pointerConfirmationError !== null || pointerLeft.length > 0) {
       return reply(500, {
         error: "memory_purge_pointer_cleanup_failed",
         message: `${pointerError !== null
-          ? `the pointer-row delete for rows in removedIds failed (${errorText(pointerError)})`
-          : "rows in removedIds still have a pointer row after its delete"}`,
+          ? `the pointer-row delete for rows in removedIds failed (${pointerError})`
+          : pointerConfirmationError !== null
+            ? `could not confirm pointer-row deletion for rows in removedIds (${pointerConfirmationError})`
+            : "rows in removedIds still have a pointer row after its delete"}`,
         ids: pointerLeft,
         stillStoredIds: stillStored,
         removedIds,

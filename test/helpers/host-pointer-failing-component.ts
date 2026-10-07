@@ -37,7 +37,7 @@ export const FAILING_ADAPTER_SRC = FAILING_ADAPTER_JS;
 export const CONCURRENT_WRITE_MODULE_REL = join("dist", "resources", "zz-test-concurrent-write.js");
 
 /** A test-only module for a composed copy (see `componentWithConcurrentWrites`).
- *  It wraps three table methods. Right after the caller stages its own write,
+ *  Right after the caller stages its own write,
  *  the wrapper commits a newer write of the same row in a separate transaction,
  *  so the caller's staged delete loses to that write at commit. A row opts in
  *  by a marker in its Memory id:
@@ -47,16 +47,15 @@ export const CONCURRENT_WRITE_MODULE_REL = join("dist", "resources", "zz-test-co
  *                         of that history record;
  *    skip-pointer-delete  a pointer-row delete for the row → a newer write of
  *                         that pointer row.
- *  Every other call reaches the real table unchanged. */
-export const CONCURRENT_WRITE_MODULE_SRC = `// Test-only module (composed copy only): commits a newer write of a row in a
-// separate transaction right after the caller stages a write, for rows whose
-// Memory id carries a marker.
-import { databases } from "harper";
+ */
+export const CONCURRENT_WRITE_MODULE_SRC = `import { databases } from "harper";
 const { Memory, MemoryDeletionHistory, MemoryHostSource } = databases.flair;
 const historyPut = MemoryDeletionHistory.put;
 const historyDelete = MemoryDeletionHistory.delete;
 const pointerPut = MemoryHostSource.put;
 const pointerDelete = MemoryHostSource.delete;
+const pointerSearch = MemoryHostSource.search;
+const pointerConfirmationFailures = new Set();
 async function separately(fn) {
   const separate = {};
   await globalThis.transaction(separate, () => fn(separate));
@@ -84,6 +83,7 @@ MemoryDeletionHistory.delete = async function (id, ...rest) {
 };
 MemoryHostSource.delete = async function (memoryId, ...rest) {
   const result = await pointerDelete.call(this, memoryId, ...rest);
+  if (typeof memoryId === "string" && memoryId.includes("fail-pointer-confirmation")) pointerConfirmationFailures.add(memoryId);
   if (typeof memoryId === "string" && memoryId.includes("skip-pointer-delete")) {
     await separately(async (s) => {
       const row = await MemoryHostSource.get(memoryId, s);
@@ -91,6 +91,14 @@ MemoryHostSource.delete = async function (memoryId, ...rest) {
     });
   }
   return result;
+};
+MemoryHostSource.search = function (query, ...rest) {
+  const failed = query?.conditions?.find((c) => pointerConfirmationFailures.has(c.value));
+  if (failed) {
+    pointerConfirmationFailures.delete(failed.value);
+    throw new Error("test component: forced pointer confirmation failure");
+  }
+  return pointerSearch.call(this, query, ...rest);
 };
 `;
 

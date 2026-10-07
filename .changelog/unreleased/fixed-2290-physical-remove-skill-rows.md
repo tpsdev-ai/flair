@@ -13,5 +13,5 @@
   confirmed fails the command. Either command fails when the response does not list every
   requested id as removed, and `agent remove` stops before deleting anything when its Memory
   scan fails or returns an unexpected response. The user-facing `DELETE /Memory/<id>` route
-  is unchanged: a skill-tagged row deleted through it is still versioned, its head closed
-  rather than removed.
+  is unchanged. An accepted DELETE of a non-reserved skill closes its head; the reserved
+  `using-flair` seed is physically deleted.

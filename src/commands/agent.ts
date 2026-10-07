@@ -693,8 +693,9 @@ export function register(program: Command): void {
 
       // Delete the scanned memories through the server's physical-removal
       // path. A skill-tagged row expands to its whole lineage there, so
-      // superseded version rows go too (the user-facing DELETE route would only
-      // close the head). A response that does not list every scanned id as
+      // superseded version rows go too. An accepted DELETE of a non-reserved
+      // skill closes its head; the reserved `using-flair` seed is physically
+      // deleted. A response that does not list every scanned id as
       // removed stops the command before the Agent record is deleted.
       if (memoryCount > 0) {
         console.log(`Deleting ${memoryCount} memories...`);
