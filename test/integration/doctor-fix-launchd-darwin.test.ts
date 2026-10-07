@@ -47,7 +47,7 @@ import {
   writeFileSync,
   chmodSync,
 } from "node:fs";
-import type { Dirent } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -295,7 +295,7 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
 }
 
 // Returns the socket's stat once it exists, so a caller reads its mode from this one stat.
-async function waitForSocket(path: string, timeoutMs: number): Promise<ReturnType<typeof statSync>> {
+async function waitForSocket(path: string, timeoutMs: number): Promise<Stats> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
