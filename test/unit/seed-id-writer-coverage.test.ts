@@ -166,7 +166,7 @@ function methodBody(src: string, signature: string): string {
   return src.slice(start, next === -1 ? undefined : next);
 }
 
-test("each GUARDED path runs the decision, and its denial stops the path before it writes", () => {
+test("the listed entry paths run the decision, and its denial stops the path before it writes", () => {
   const memory = readFileSync("resources/Memory.ts", "utf8");
   for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {", "  async patch(content: any, query?: any) {"]) {
     const body = methodBody(memory, signature);
@@ -200,7 +200,7 @@ test("each GUARDED path runs the decision, and its denial stops the path before 
   expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
 });
 
-test("each GUARDED path runs the .content-suffix id decision on the ids it writes, and its denial stops the path before it writes", () => {
+test("the listed entry paths run the .content-suffix id decision on the ids it writes, and its denial stops the path before it writes", () => {
   // The decision's inputs: the bound id and body ids (writeTargetIds), and for
   // the by-id methods the request target too, so a suffix only in the URL counts.
   const memory = readFileSync("resources/Memory.ts", "utf8");

@@ -261,10 +261,8 @@ class RowChangedBeforeCommit extends Error {}
  * (`skillEmbedText`: a skill row's `trigger` when present, else `content`); a
  * row with no such text is not embedded.
  *
- * Writes only when the provider returned a usable vector, and only onto a row
- * that still exists and is unchanged since `existing` was read: the re-read,
- * comparison and write share one owned transaction (the MemoryMaintenance
- * pattern), and the write changes only `embedding` and `embeddingModel`.
+ * Writes a usable vector in an owned transaction, staging only changes to
+ * `embedding` and `embeddingModel`.
  *
  * Harper 5.2.8 has no compare-and-set on a table write: a transaction does not
  * fail when a row it read is changed by another write before it commits;

@@ -1,7 +1,7 @@
 /**
  * supersede-close-contention-2307.test.ts — flair#2307, real Harper.
  *
- * The close of a superseded row (closeSupersededRecord in resources/Memory.ts)
+ * The ordinary Memory close (closeSupersededRecord in resources/Memory.ts)
  * reads the target and writes it in one owned transaction. These cases change
  * the target AFTER that transaction has read it and BEFORE it writes: the
  * spawned Harper carries the test-only pause (resources/txn-pause-point.ts,
@@ -9,7 +9,9 @@
  * are set for this file's Harper only), the test arms it, starts a successor
  * write that supersedes the target, waits until the close is paused inside its
  * transaction, commits a competing change to the target, then releases the
- * close.
+ * close. The change is visible at the committed re-read, which aborts; a change
+ * after that re-read and before commit follows Harper's timestamp order
+ * (see the PR residual-gap note).
  *
  *   - an owner change (a raw table update, as an operator would make): the
  *     competing owner is kept, and the row is not closed;
@@ -157,7 +159,7 @@ afterAll(async () => {
 });
 
 describe("flair#2307 — the supersede close under a change committed after its read (real Harper)", () => {
-  it("an owner change committed while the close is paused is kept, and the row is not closed", async () => {
+  it("an owner change visible at the committed re-read aborts the ordinary close", async () => {
     const { response, competed, released } = await withPausedClose(
       () => authSend(harper, owner, "PUT", "/Memory/scc-owner-swap-next", {
         id: "scc-owner-swap-next", agentId: owner.id, supersedes: "scc-owner-swap",
@@ -178,7 +180,7 @@ describe("flair#2307 — the supersede close under a change committed after its 
     expect(target?.validTo ?? null, "the close landed on a row whose owner changed after the close's read").toBeNull();
   }, 60_000);
 
-  it("a content edit committed while the close is paused is kept, and the row is closed", async () => {
+  it("a content edit visible at the committed re-read retries the ordinary close", async () => {
     const EDITED = "Edit target body AFTER the owner's edit, long enough for the gate.";
     const { response, competed, released } = await withPausedClose(
       () => authSend(harper, owner, "PUT", "/Memory/scc-edit-next", {

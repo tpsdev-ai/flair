@@ -17,19 +17,13 @@
   409) unless the reference is unchanged from the stored row's. A write refused
   for its `supersedes` target changes no row, including its `derivedFrom`
   sources: their `lastReflected` is stamped only after the new row is written.
-  The close of a superseded row re-reads it and writes in one owned
-  transaction; for a non-admin agent's write it also compares, inside that
-  transaction, the row's owner with the owner the authorization read saw, and
-  does not close a row whose owner differs. With its write staged and before
-  it commits, the close re-reads the committed row; if the row changed since
-  the transaction read it, the transaction is aborted and the close starts
-  over from the committed row (at most three attempts), so a competing change
-  committed in that interval is kept and the owner comparison sees it. A
-  federated Memory row whose id ends in `.content` is skipped
+  For ordinary Memory writes, a change visible at the close's committed re-read
+  aborts its transaction; the close retries with the owner comparison (at most
+  three attempts). A federated Memory row whose id ends in `.content` is skipped
   (`content_suffix_id_not_federated`), so such a legacy row is not federated.
   The embedding-stamp migration re-embeds a stale row whose id ends in
   `.content` from the text Memory embeds for it (a skill row's `trigger`, else
-  its `content`), only when the embedding provider returns a usable vector and
-  the row is unchanged since it was read, including at a re-read of the
-  committed row after its write is staged and before it commits; otherwise
-  this migration does not stamp the row, and the row stays pending.
+  its `content`), only when the embedding provider returns a usable vector.
+  A change visible at its committed re-read aborts the migration transaction.
+  For both paths, a change after that re-read and before commit is settled by
+  Harper's timestamp order (see the PR body's residual-gap note).

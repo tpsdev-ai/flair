@@ -616,7 +616,7 @@ class CloseTargetChanged extends Error {}
 const SUPERSEDE_CLOSE_ATTEMPTS = 3;
 
 /**
- * Read-modify-write close of a superseded record. Does NOT swallow failures —
+ * Read-modify-write close for ordinary Memory writes. Does NOT swallow failures —
  * throws so the caller can log it. Never called before the new record is
  * already written.
  *
@@ -739,11 +739,11 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  * agent, a failed target read refuses (supersedesTargetUnreadable) and a
  * missing target refuses (supersedesTargetMissing) — except a reference that is
  * unchanged from the stored row's own `supersedes` (a re-PUT of a successor
- * whose predecessor was since deleted), which is kept and closes nothing. The
- * close carries the owner the read saw; closeSupersededRecord re-reads the row,
- * compares that owner and writes in one owned transaction, and does not close a
- * row whose owner differs. An admin or internal write closes its target without
- * the authorization read (no owner comparison).
+ * whose predecessor was since deleted), which is kept and closes nothing.
+ * For ordinary Memory writes, the close carries the owner the read saw;
+ * closeSupersededRecord aborts on a change visible at its committed re-read.
+ * Later changes follow Harper's timestamp order (see the PR residual-gap note).
+ * An admin or internal write has no authorization read or owner comparison.
  *
  * flair#704: an explicit `supersedes: null` — the shape most JSON writers
  * produce for an unset optional field (`JSON.stringify({supersedes: undefined})`

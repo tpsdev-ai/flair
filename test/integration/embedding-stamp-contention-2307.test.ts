@@ -10,7 +10,9 @@
  * (resources/txn-pause-point.ts, enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION
  * and FLAIR_TEST_PAUSE_DIR, set for this file's Harper only), the test arms it
  * before the row exists, waits until a migration cycle is paused inside that
- * transaction, commits a competing content change, then releases it.
+ * transaction, commits a competing content change, then releases it. The change
+ * is visible at the committed re-read, which aborts; a change after that re-read
+ * and before commit follows Harper's timestamp order (PR residual-gap note).
  *
  * The competing content is kept, and the row stays pending: it keeps its stale
  * stamp and vector rather than being stamped current with the vector of the
@@ -56,15 +58,15 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   }
   return false;
 }
-/** The file's text once it exists (read, never stat-then-read); null on timeout. */
+/** Non-empty release text; null on timeout. */
 async function readWhenPresent(path: string, timeoutMs: number): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      return readFileSync(path, "utf8");
-    } catch {
-      await new Promise((r) => setTimeout(r, 50));
-    }
+      const text = readFileSync(path, "utf8");
+      if (text) return text;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 50));
   }
   return null;
 }

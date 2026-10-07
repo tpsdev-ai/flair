@@ -91,7 +91,7 @@ add("promotion-stamp", ["writer:table.put#1"],
 add("migrations/graph-heal", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.put#1"],
-  "Migration re-embed of a server-selected row whose id ends in `.content`: embeds skillEmbedText(row) (a skill's trigger) and changes only embedding/embeddingModel on the stored row, unchanged since it was read — preserves existing content/tags, not a new skill write.");
+  "Content-suffix migration embeds skillEmbedText(row), staging embedding/embeddingModel; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
 add("migrations/visibility-backfill", ["writer:table.put#1"],

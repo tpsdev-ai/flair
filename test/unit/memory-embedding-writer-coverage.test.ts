@@ -71,7 +71,7 @@ add("promotion-stamp", ["writer:table.put#1"], "ECHO",
 add("migrations/graph-heal", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
 add("migrations/embedding-stamp", ["writer:table.put#1"], "ECHO",
-  "The content-suffix fallback writes a locally computed, non-empty vector with getCurrentModelId() onto a server-selected row unchanged since it was read; it writes nothing otherwise. No foreign stamp.");
+  "Content-suffix fallback: locally computed vector/current model; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
 add("migrations/visibility-backfill", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"], "ECHO",

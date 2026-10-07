@@ -883,7 +883,8 @@ describe("supersede transaction (write-new-before-close-old fix)", () => {
 // ─── flair#2307: one canonical supersede target ─────────────────────────────
 // The `supersedes` reference is resolved once; the reserved-id check, the
 // authorization read, the stored reference and the close all use that id. A
-// failed or missing target read refuses the write.
+// failed target read refuses; a non-admin agent's missing target refuses unless
+// the stored reference is unchanged.
 describe("flair#2307: a supersede authorizes, stores and closes one target", () => {
   const SUCCESSOR = "Successor text for the canonical target, long enough for the gate.";
 
@@ -948,7 +949,7 @@ describe("flair#2307: a supersede authorizes, stores and closes one target", () 
     expect(memoryStore.has("sup-old")).toBe(false); // assertion: nothing re-created by a close
   });
 
-  it("a target whose owner changed after authorization is not closed", async () => {
+  it("the ordinary close checks the authorized owner", async () => {
     memoryStore.set("sup-swap", { id: "sup-swap", agentId: "agent-1", content: "Own row, long enough for the gate." });
     const realPost = BaseMemory.post;
     const postSpy = spyOn(BaseMemory, "post").mockImplementation(async (content: any, ctx?: any) => {
@@ -997,7 +998,7 @@ describe("flair#2307: a supersede authorizes, stores and closes one target", () 
     return { state, restore: () => { getSpy.mockRestore(); postSpy.mockRestore(); } };
   }
 
-  it("an owner change between the close's read and its commit is kept, and the row is not closed", async () => {
+  it("an owner change visible at the committed re-read aborts the ordinary close", async () => {
     memoryStore.set("sup-race", { id: "sup-race", agentId: "agent-1", content: "Own row, long enough for the gate." });
     const race = changeTargetAfterCloseRead("sup-race", (row) => ({ ...row, agentId: "agent-other" }));
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
@@ -1015,7 +1016,7 @@ describe("flair#2307: a supersede authorizes, stores and closes one target", () 
     expect(memoryStore.get("sup-race").validTo).toBeUndefined();
   });
 
-  it("a content edit between the close's read and its commit is kept, and the close lands on the edited row", async () => {
+  it("a content edit visible at the committed re-read retries the ordinary close", async () => {
     memoryStore.set("sup-edit", { id: "sup-edit", agentId: "agent-1", content: "Own row before the edit, long enough for the gate." });
     const race = changeTargetAfterCloseRead("sup-edit", (row) => ({ ...row, content: "Own row AFTER the edit, long enough for the gate." }));
     let res: any;

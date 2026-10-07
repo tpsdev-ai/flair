@@ -4,13 +4,9 @@
  *
  * That row is re-embedded through the raw table handle (the loopback
  * `PUT /Memory/:id` cannot address it), from the text Memory's write paths
- * embed for it (a skill row's `trigger`, else `content`). The write must happen
- * only when the provider returned a usable vector, and only onto a row that
- * still exists and is unchanged since the migration read it, including a
- * change committed after the transaction read it and before it commits (the
- * transaction stand-in below commits a staged write regardless, as Harper has
- * no compare-and-set); otherwise this migration does not stamp the row, and a
- * still-existing stale row stays pending.
+ * embed for it (a skill row's `trigger`, else `content`). A change visible at
+ * the committed re-read aborts; later changes follow Harper's timestamp order
+ * (see the PR residual-gap note).
  *
  * Runs in its own process (test/unit-isolated): it mocks
  * resources/embeddings-provider.ts, which other unit files import for real.
@@ -115,7 +111,7 @@ beforeEach(() => {
   afterStage = null;
 });
 
-describe("flair#2307 — the content-suffix re-embed writes only a usable vector onto an unchanged row", () => {
+describe("flair#2307 — the content-suffix re-embed validates the vector and committed re-read", () => {
   it("a usable vector is stamped current, and the rest of the row is kept", async () => {
     const result = await migration().run(10);
     expect(result).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
@@ -164,7 +160,7 @@ describe("flair#2307 — the content-suffix re-embed writes only a usable vector
     ["edited", () => store.set(LEGACY_ID, { ...store.get(LEGACY_ID)!, content: "edited after the read" })],
     ["deleted", () => store.delete(LEGACY_ID)],
   ] as const) {
-    it(`a row ${name} after the transaction read it, before it commits, is not stamped`, async () => {
+    it(`a row ${name} before the committed re-read aborts the stamp`, async () => {
       afterStage = () => {
         afterStage = null;
         change(); // a competing write commits while this transaction's write is staged
