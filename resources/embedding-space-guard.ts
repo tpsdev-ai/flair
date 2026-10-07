@@ -79,14 +79,21 @@ export function stripEnginePrefix(stamp: string): string {
 }
 
 /**
- * The RAW stamp forms that all denote the CURRENT embedding space: the
- * engine-qualified id `getModelId()` returns, plus its one-time bare-name
- * equivalent. A stamp comparator (the migration's staleCondition, the CLI's
- * `--stale-only`) treats a row as current-space iff its stamp is one of these,
- * so a bare-stamped legacy row is never re-embedded as "stale". De-duplicated
- * so a bare `currentModelId` (a unit-test injection) yields a single form.
+ * The RAW stamp forms that denote the CURRENT embedding space. For the gguf
+ * engine (the default stamp) that is the qualified id plus its one-time
+ * bare-name equivalent, so a legacy bare row is not re-embedded. A different
+ * engine prefix does not include the bare form — that row was embedded by
+ * gguf. De-duplicated so a bare `currentModelId` (a unit-test injection)
+ * yields a single form.
  */
 export function currentSpaceRawForms(currentModelId: string): string[] {
+  const engine = currentModelId.includes(":")
+    ? currentModelId.slice(0, currentModelId.indexOf(":"))
+    : EMBEDDING_ENGINE;
+  // The bare-name equivalent is the same space only for the gguf engine
+  // (today's default stamp). Another engine — the opt-in flair backend —
+  // must not treat a legacy bare stamp as current.
+  if (engine !== EMBEDDING_ENGINE) return [currentModelId];
   return [...new Set([currentModelId, stripEnginePrefix(currentModelId)])];
 }
 

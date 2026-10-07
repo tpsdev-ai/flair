@@ -1,0 +1,3 @@
+- **Opt-in in-process embeddings via `FLAIR_EMBEDDINGS_ENGINE=flair`.** Unset, Flair still embeds with harper-fabric-embeddings and the same stamp. Set it to `flair` to use Flair's own node-llama-cpp backend (exact optional peer `3.18.1`, the same prebuilt harper-fabric-embeddings already ships) and a SHA-256-pinned nomic model file (flair#2300). A default install does not pull node-llama-cpp's CUDA prebuilts.
+
+  > **Heads-up:** `FLAIR_EMBEDDINGS_ENGINE=flair` changes the embedding stamp, so existing rows read as stale until they are re-embedded. Leave the variable unset to keep today's engine and stamp.

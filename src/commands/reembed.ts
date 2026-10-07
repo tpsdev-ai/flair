@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { authFetch, defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
+import { cliEmbeddingStamp, isCliCurrentSpace } from "../lib/embedding-model-stamp.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { existsSync } from "node:fs";
 
@@ -90,32 +91,22 @@ program
     // reachable from (or bundled into) the CLI binary. THE GATE is now ON
     // (flipped, re-baselined through the ratchet gate — see
     // embeddings-provider.ts's file header and PR #689 for the park history
-    // this flip revisits), so `currentModel` here is `<base>+searchprefix` —
-    // matching getModelId()'s gate-on return exactly. If
+    // this flip revisits). `currentModel` is getModelId()'s stamp
+    // (`gguf:<base>+searchprefix` by default; `node-llama-cpp@<version>:<id>+searchprefix`
+    // when FLAIR_EMBEDDINGS_ENGINE=flair). If
     // EMBEDDING_PREFIXES_ENABLED or EMBEDDING_VARIANT ever changes in
     // embeddings-provider.ts, update this block too — a drift here silently
     // breaks `--stale-only`: it would compare every row's embeddingModel
     // against the WRONG current-model string, so rows would read as already
     // "current" (or as needing re-embed) out of sync with what getModelId()
     // is actually stamping new writes with.
-    const EMBEDDING_PREFIXES_ENABLED = true; // MUST mirror resources/embeddings-provider.ts's gate
-    const EMBEDDING_VARIANT = "searchprefix";
-    // embedding-space-guard slice 1: getModelId() now stamps the ENGINE-QUALIFIED
-    // id `<engine>:<base>[+searchprefix]`. Duplicated as a literal here (separate
-    // build target — see above). A row is CURRENT-SPACE iff its stamp is the
-    // qualified id OR its one-time bare-name equivalent (today's corpus, stamped
-    // before the qualifier). Treat BOTH as current so `--stale-only` never
-    // re-embeds an already-correct bare-stamped row — that would loop forever
-    // (Memory.put re-stamps it QUALIFIED, still "!= bare" under a single-value
-    // check). Keep in lockstep with resources/embeddings-provider.ts's
-    // getModelId()/EMBEDDING_ENGINE and resources/embedding-space-guard.ts's
-    // normalizeStamp().
-    const EMBEDDING_ENGINE = "gguf";
-    const baseModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
-    const bareCurrentModel = EMBEDDING_PREFIXES_ENABLED ? `${baseModel}+${EMBEDDING_VARIANT}` : baseModel;
-    const currentModel = `${EMBEDDING_ENGINE}:${bareCurrentModel}`;
-    const isCurrentSpace = (stamp: string | undefined | null): boolean =>
-      stamp === currentModel || stamp === bareCurrentModel;
+    // Must match getModelId(). The formula lives in src/lib/embedding-model-stamp.ts
+    // because this build target cannot import resources/. The gguf path still
+    // treats the bare name as current; the flair path does not.
+    const stamp = cliEmbeddingStamp();
+    const currentModel = stamp.currentModel;
+    const isCurrentSpace = (value: string | undefined | null): boolean =>
+      isCliCurrentSpace(value, stamp);
 
     if (agentId) {
       console.log(`Re-embedding memories for agent: ${agentId}`);

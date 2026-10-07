@@ -24,6 +24,7 @@
  * It is not the product engagement decision.
  */
 import { createRequire } from "node:module";
+import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
 
 export const METAL_PREBUILT = "@node-llama-cpp/mac-arm64-metal";
 
@@ -109,14 +110,33 @@ export function detectUsableMetalBackend(input: MetalDetectInput = {}): boolean 
   }
 }
 
+/**
+ * Which package's dependency graph holds `@node-llama-cpp/*` prebuilts.
+ * Unset / `hfe` stays on harper-fabric-embeddings. `flair` uses Flair's own
+ * `node-llama-cpp` dependency.
+ */
+export function embedPrebuiltAnchor(
+  env: NodeJS.ProcessEnv = process.env,
+  resolvePackage: (name: string) => string = (name) => createRequire(import.meta.url).resolve(name),
+): "node-llama-cpp" | "harper-fabric-embeddings" {
+  if (resolveEmbeddingsEngine(env) !== "flair") return "harper-fabric-embeddings";
+  try {
+    resolvePackage("node-llama-cpp");
+    return "node-llama-cpp";
+  } catch {
+    // Optional peer is absent (#887). The platform addon is still the one
+    // harper-fabric-embeddings installed.
+    return "harper-fabric-embeddings";
+  }
+}
+
 function defaultResolveMetal(specifier: string): string {
   const fromHere = createRequire(import.meta.url);
   try {
     return fromHere.resolve(specifier);
   } catch {
-    // Optional dep lives on harper-fabric-embeddings; try from its graph.
-    const hfe = fromHere.resolve("harper-fabric-embeddings");
-    return createRequire(hfe).resolve(specifier);
+    const anchor = fromHere.resolve(embedPrebuiltAnchor());
+    return createRequire(anchor).resolve(specifier);
   }
 }
 

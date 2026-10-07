@@ -108,6 +108,10 @@
  * description for that distinction.
  */
 
+import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
+import { BUILTIN_EMBEDDING_MODEL } from "./embeddings/models.js";
+import { readNodeLlamaCppVersion } from "./embeddings/version.js";
+
 /**
  * The nomic search-prefix `inputType` — closed union, not `string`. See the
  * file header: the VALUES `'document'`/`'query'` are what HFE 0.3.0's engine
@@ -444,6 +448,19 @@ export const EMBEDDING_ENGINE = "gguf";
  * see its own comment) — the two must never drift.
  */
 export function getModelId(): string {
+  const suffix = prefixesEnabled() ? `+${EMBEDDING_VARIANT}` : "";
+  // Opt-in engine only. Unset / hfe keeps the gguf stamp byte-for-byte.
+  if (resolveEmbeddingsEngine() === "flair") {
+    const version = readNodeLlamaCppVersion();
+    const id = BUILTIN_EMBEDDING_MODEL.id;
+    if (id.includes(":") || version.includes(":")) {
+      throw new Error(
+        `[embeddings] flair stamp parts must not contain ':' — reserved for the <engine>:<model> split; ` +
+          `got engine node-llama-cpp@${JSON.stringify(version)} model ${JSON.stringify(id)}`,
+      );
+    }
+    return `node-llama-cpp@${version}:${id}${suffix}`;
+  }
   const base = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
   // The bare-name override must not collide with the `<engine>:<model>` stamp
   // format — a ':' in the base makes the qualified stamp ambiguous
@@ -456,7 +473,6 @@ export function getModelId(): string {
         `<engine>:<model> embedding stamp (embedding-space-guard slice 1); got ${JSON.stringify(base)}`,
     );
   }
-  const suffix = prefixesEnabled() ? `+${EMBEDDING_VARIANT}` : "";
   return `${EMBEDDING_ENGINE}:${base}${suffix}`;
 }
 

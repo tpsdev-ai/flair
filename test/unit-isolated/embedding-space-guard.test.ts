@@ -76,6 +76,14 @@ describe("embedding-space-guard — pure core (bare-name → gguf: equivalence)"
     expect(currentSpaceRawForms(BARE)).toEqual([BARE]); // a bare current dedups to one form (unit-test injection)
   });
 
+  it("a non-gguf engine stamp does not treat the legacy bare name as current", () => {
+    const flair = "node-llama-cpp@3.22.1:nomic-embed-text-v1.5-Q4_K_M+searchprefix";
+    expect(currentSpaceRawForms(flair)).toEqual([flair]);
+    expect(isCurrentSpaceStamp(BARE, flair)).toBe(false);
+    expect(isCurrentSpaceStamp(CURRENT, flair)).toBe(false);
+    expect(isCurrentSpaceStamp(flair, flair)).toBe(true);
+  });
+
   it("isCurrentSpaceStamp: bare AND qualified both count as current", () => {
     expect(isCurrentSpaceStamp(BARE, CURRENT)).toBe(true);
     expect(isCurrentSpaceStamp(CURRENT, CURRENT)).toBe(true);

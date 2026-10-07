@@ -1,7 +1,11 @@
 /**
- * embeddings-boot.ts — registers harper-fabric-embeddings as Harper's
- * `embedding`/`default` model backend DIRECTLY, in-process, on every boot
- * (flair#694 fix; invariants at flair#695).
+ * embeddings-boot.ts — registers the embedding backend DIRECTLY, in-process,
+ * on every boot (flair#694 fix; invariants at flair#695).
+ *
+ * Default (FLAIR_EMBEDDINGS_ENGINE unset or `hfe`): harper-fabric-embeddings.
+ * `FLAIR_EMBEDDINGS_ENGINE=flair`: Flair's node-llama-cpp backend, registered
+ * with the same `models.registerBackend('embedding', 'default', …)` slot.
+ * Unset, the HFE path below is unchanged.
  *
  * ─── Why this file exists (flair#694) ──────────────────────────────────────
  * The previous mechanism (removed by this change) delivered the registration
@@ -85,6 +89,8 @@
  * keyword-only search, matching the pre-existing degrade contract.
  */
 import { availableParallelism } from "node:os";
+import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
+import { activateFlairBackend, requireHarperModels } from "./embeddings/register.js";
 import { resolveModelsDir } from "./embeddings-provider.js";
 import {
   applyEmbedGpuChoice,
@@ -213,6 +219,10 @@ export async function registerEmbeddingsBackend(): Promise<void> {
   if (registered) return;
   registered = true;
   try {
+    if (resolveEmbeddingsEngine() === "flair") {
+      await registerFlairEmbeddings();
+      return;
+    }
     const { register } = await import("harper-fabric-embeddings");
     const modelPath = benchModelPathOverride();
     const threads = resolveEmbedThreads();
@@ -267,6 +277,41 @@ export async function registerEmbeddingsBackend(): Promise<void> {
     console.error(
       `[embeddings] backend registration skipped: ${(err as Error)?.message ?? String(err)}`
     );
+  }
+}
+
+/**
+ * In-tree engine (FLAIR_EMBEDDINGS_ENGINE=flair). Verifies the registry file
+ * and loads it before registerBackend. A mismatch or a missing models
+ * directory throws here, which the caller logs and does not register.
+ */
+async function registerFlairEmbeddings(): Promise<void> {
+  const g = globalThis as { models?: unknown };
+  const models = requireHarperModels(g.models);
+  const threads = resolveEmbedThreads();
+  const choice = resolveEmbedGpuChoice();
+  const modelsDir = resolveModelsDir();
+  const explicitModelPath = benchModelPathOverride();
+  const activate = () => activateFlairBackend({
+    modelsDir,
+    models,
+    threads,
+    gpuLayers: choice.gpuLayers,
+    explicitModelPath,
+  });
+  if (choice.gpuLayers <= 0) {
+    const engine = await activate();
+    console.log(formatEmbedGpuLogLine(applyEmbedGpuChoice(choice, engine)));
+    return;
+  }
+  setEmbedGpuStatement(previewEmbedGpuStatement(choice));
+  console.log(formatEmbedGpuRequestLine(choice));
+  try {
+    const { value: engine, gpuType } = await readGpuTypeFromWarmup(activate);
+    console.log(formatEmbedGpuLogLine(applyEmbedGpuChoice(choice, engine, () => gpuType)));
+  } catch (err) {
+    applyEmbedGpuChoice(choice);
+    throw err;
   }
 }
 
