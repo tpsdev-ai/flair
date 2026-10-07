@@ -11,6 +11,7 @@ import { DEFAULT_ADMIN_USER, defaultAdminPassPath, readAdminPassFileSecure } fro
 import { seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { reconcilePendingSkillSeed, skillSeedPendingPath } from "../lib/skill-seed-pending.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
+import { decideStartOnUnknown, probePortListening } from "../lib/stop-start-recovery.js";
 import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, verifyLaunchdManagement } from "../lib/launchd-management.js";
 import {
   LaunchdValidationRefusal,
@@ -385,10 +386,17 @@ program
         console.error(`   port: ${port}`);
         console.error(`   To inspect: flair doctor`);
         process.exit(1);
-      case "UNKNOWN":
-        console.error(`⚠️  ${state.detail}`);
-        console.error(`   Refusing to start — could not determine whether Flair is running.`);
+      case "UNKNOWN": {
+        // flair#2350: "no pid recorded and the health check did not respond".
+        // The health probe is a bounded request; verify the port directly
+        // before refusing, so a port with nothing listening starts. Any other
+        // outcome (a listener, or an undecidable probe) still refuses.
+        const probe = await probePortListening(port);
+        const decision = decideStartOnUnknown({ detail: state.detail, port, probe });
+        for (const line of decision.lines) console.error(line);
+        if (decision.proceed) break;
         process.exit(1);
+      }
     }
 
     if (!existsSync(dataDir)) {
