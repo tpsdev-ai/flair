@@ -1,4 +1,4 @@
-import { beforeEach, describe, test, expect } from "bun:test";
+import { beforeEach, describe, test, expect, mock } from "bun:test";
 import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -55,6 +55,8 @@ describe("loadCodePlugin: rejections", () => {
       await loadCodePlugin(discovered({ source: "project-yaml" }));
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
+    expect(thrown.detail.field).toBe("source");
+    expect(thrown.detail.expected).toBe("npm-package");
     expect(thrown.detail.hint).toMatch(/Shape B/);
   });
 
@@ -67,6 +69,9 @@ describe("loadCodePlugin: rejections", () => {
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.field).toBe("(import)");
+    expect(thrown.detail.expected).toBe("importable npm package");
+    expect(thrown.detail.got).toBe("import error");
+    expect(thrown.detail.hint).toContain("ENOENT: no such package");
   });
 
   test("rejects when module has no bridge export", async () => {
@@ -76,6 +81,8 @@ describe("loadCodePlugin: rejections", () => {
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.field).toBe("exports");
+    expect(thrown.detail.expected).toBe("named `bridge` export or default export implementing MemoryBridge");
+    expect(thrown.detail.got).toBe("exports=notABridge");
   });
 
   test("rejects when bridge.name mismatches the package name", async () => {
@@ -86,6 +93,8 @@ describe("loadCodePlugin: rejections", () => {
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.field).toBe("name");
+    expect(thrown.detail.expected).toBe('"example" (from package name flair-bridge-example)');
+    expect(thrown.detail.got).toBe('"different-name"');
     expect(thrown.detail.hint).toMatch(/must match/);
   });
 
@@ -97,13 +106,11 @@ describe("loadCodePlugin: rejections", () => {
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.field).toBe("kind");
+    expect(thrown.detail.expected).toBe('"file" | "api"');
+    expect(thrown.detail.got).toBe('"unknown"');
   });
 
   test("rejects a bridge with neither import nor export methods (surfaces as no-bridge-export)", async () => {
-    // When a module's bridge candidate has no import/export, isBridgeLike
-    // returns false — we can't tell it apart from "not a bridge at all" —
-    // so we surface as the exports error. Either field is acceptable;
-    // what matters is the operator sees *something* with enough context.
     const mod = { bridge: { name: "example", version: 1, kind: "api" } };
     let thrown: any = null;
     try {
@@ -111,6 +118,8 @@ describe("loadCodePlugin: rejections", () => {
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.field).toBe("exports");
+    expect(thrown.detail.expected).toBe("named `bridge` export or default export implementing MemoryBridge");
+    expect(thrown.detail.got).toBe("exports=bridge");
   });
 });
 
@@ -150,22 +159,26 @@ describe("loadCodePlugin: package entry files", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(BridgeRuntimeError);
       expect((error as BridgeRuntimeError).detail.field).toBe(field);
+      expect((error as BridgeRuntimeError).detail.expected).toBe("entry inside package directory");
+      expect((error as BridgeRuntimeError).detail.got).toBe("../outside.mjs");
     }
     expect(imported).toBe(false);
   });
 
   test("refuses an entry symlink outside the package", async () => {
     const outside = tempDir("flair-bridge-outside-");
-    writeFileSync(join(outside, "entry.mjs"), "");
+    writeFileSync(join(outside, "entry.mjs"), `export const bridge = {
+      name: "example", version: 1, kind: "api", async *import() {}
+    };`);
     symlinkSync(join(outside, "entry.mjs"), join(packageDir, "linked.mjs"));
     writeFileSync(join(packageDir, "package.json"), JSON.stringify({ exports: "./linked.mjs" }));
-    try {
-      await loadCodePlugin(discovered());
-      throw new Error("accepted escaping symlink");
-    } catch (error) {
-      expect(error).toBeInstanceOf(BridgeRuntimeError);
-      expect((error as BridgeRuntimeError).detail.field).toBe("exports");
-    }
+    const importer = mock((spec: string) => import(spec));
+    const error = await loadCodePlugin(discovered(), { importer }).catch((error) => error);
+    expect(importer).not.toHaveBeenCalled();
+    expect(error).toBeInstanceOf(BridgeRuntimeError);
+    expect(error.detail.field).toBe("exports");
+    expect(error.detail.expected).toBe("entry inside package directory");
+    expect(error.detail.got).toBe("./linked.mjs");
   });
 
   test("loads a package discovered through a directory symlink", async () => {
