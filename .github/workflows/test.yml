@@ -45,7 +45,7 @@ jobs:
     # "Unit Tests (22)"), so this can no longer be the bare "Unit Tests" the
     # branch-protection required check expects — see the `test-unit-gate` job
     # below, which reports that fixed context instead.
-    name: "Unit Tests (node ${{ matrix.node-version }})"
+    name: "Unit Tests (node ${{ matrix.node-version }}, shard ${{ matrix.shard }})"
     runs-on: ubuntu-latest
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
     # hung 16+ min on 2026-07-04, blocking merge on a required check. 15 min
@@ -70,6 +70,13 @@ jobs:
         # Active LTS 2026-10). Node 25 was Current-only and reached EOL 2026-06-01
         # when 26 superseded it — deliberately excluded, it's already dead upstream.
         node-version: ["22", "24", "26"]
+        # flair#2311: the shared unit lane is split into shards by scripts/ci/
+        # lane-shards.mjs (LANE_SHARDS); each leg below runs one shard, so a
+        # leg runs part of the lane instead of all of it. lane-shards.test.ts
+        # pins this list to LANE_SHARDS. The added value keeps the matrix legs'
+        # check names distinct; the required check stays the aggregate
+        # "Unit Tests" gate (test-unit-gate) below.
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: "Check for local file: deps"
@@ -161,6 +168,9 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - name: Verify root unit shard coverage
         run: node scripts/ci/unit-shards.mjs --verify
+      # flair#2311: verify command/file agreement and the lane partition.
+      - name: Verify lane shard coverage
+        run: node scripts/ci/lane-shards.mjs --verify --of 2
       - name: Shared unit lane (root, isolated and workspace tests)
         # --keep-going (flair#2030): keep attempting later steps until the lane budget
         # runs out and report every failure (and any unrun step) in one
@@ -168,7 +178,11 @@ jobs:
         # instead of one per round. GitHub also sets CI=true, which enables it
         # implicitly; the flag is passed explicitly so the behaviour does not
         # depend on the runner's environment. Local runs stay fail-fast.
-        run: bun run test:unit --keep-going
+        # flair#2311: run one lane shard per leg. The shard count is LANE_SHARDS
+        # (scripts/ci/lane-shards.mjs); each shard runs the lane's shared setup
+        # steps plus its own test-bearing steps, and every shard keeps the
+        # per-step limits and keep-going semantics described above.
+        run: bun run test:unit --keep-going --shard ${{ matrix.shard }} --of 2
       # Keep the platform execution/skip check visible independently of the unit lane.
       - name: "Darwin-gated unit tests: report skip count (flair#1012)"
         run: bun scripts/check-darwin-gated-tests.mjs
