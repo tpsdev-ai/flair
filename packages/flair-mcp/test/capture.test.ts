@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   CAPTURE_BOUND_CHARS,
+  CAPTURE_VERSION,
   buildCaptureMemoryRow,
   captureRecordId,
   captureHash,
@@ -319,6 +320,27 @@ describe("capture spool", () => {
     expect(runCapture(okBash("bun test foo"), { env: env(), dir }).reason).toBe("appended");
     expect(readSpool(dir, "agent-a")).toHaveLength(1);
     expect(readSpool(dir, "agent-a")[0]!.provenance.sessionId).toBe("s1");
+  });
+
+  test("a spool record for a different agent id is neither flushed nor attributed", async () => {
+    const foreign = {
+      v: CAPTURE_VERSION,
+      agentId: "agent-b",
+      kind: "decision",
+      content: "Decision: prefer host-b for search.",
+      dedupKey: captureHash("foreign"),
+      provenance: { hook: "Stop", capturedAt: new Date().toISOString() },
+    };
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(spoolPath(dir, "agent-a"), JSON.stringify({ v: CAPTURE_VERSION, agentId: "agent-a", records: [foreign] }));
+    // Read tolerates the file as it is but keeps only this agent's records.
+    expect(readSpool(dir, "agent-a")).toEqual([]);
+    const rows: unknown[] = [];
+    const outcome = await runCaptureFlush({ env: env(), dir, makeClient: () => recordingClient(rows) });
+    expect(outcome.flushed).toBe(0);
+    expect(rows).toEqual([]);
+    // Left where it is — not re-homed to this agent.
+    expect((JSON.parse(readFileSync(spoolPath(dir, "agent-a"), "utf-8")) as { records: unknown[] }).records).toEqual([foreign]);
   });
 
   test("a Flair write failure leaves the record staged, bounded", async () => {

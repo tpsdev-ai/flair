@@ -7,6 +7,7 @@
  *   <dir>/<agentId>.spool.json    staged candidates (bounded)
  *   <dir>/<agentId>.pending.json  failed commands awaiting a matching follow-up (bounded)
  *   <dir>/<agentId>.flush.stamp   last background-flush time (cooldown)
+ *   <dir>/<agentId>.flush.lock    flush-in-progress marker (owner pid + start)
  *   <dir>/<agentId>.lock
  */
 
@@ -49,6 +50,16 @@ export const CAPTURE_LOCK_WAIT_MS = 200;
 
 export const CAPTURE_LOCK_STALE_MS = 5000;
 
+/** One background flush runs for at most this long; client setup and every write
+ *  count against it. A flush stops at the deadline and leaves whatever it did not
+ *  write in the spool; the next flush tries again. */
+export const CAPTURE_FLUSH_DEADLINE_MS = 5000;
+
+/** A flush-in-progress marker older than this is treated as stranded even while
+ *  its owner pid is alive (a reused pid), so a stranded marker does not block a
+ *  later flush. */
+export const CAPTURE_FLUSH_MARKER_STALE_MS = 60000;
+
 // ── paths ───────────────────────────────────────────────────────────────────
 
 /** Where the spool lives. FLAIR_CAPTURE_DIR overrides the default. */
@@ -73,6 +84,10 @@ export function pendingPath(dir: string, agentId: string): string {
 
 export function flushStampPath(dir: string, agentId: string): string {
   return join(dir, `${agentId}.flush.stamp`);
+}
+
+export function flushLockPath(dir: string, agentId: string): string {
+  return join(dir, `${agentId}.flush.lock`);
 }
 
 export function lockPath(dir: string, agentId: string): string {
@@ -319,7 +334,7 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
 /** The one client surface the flush touches — structurally satisfied by the
  *  real FlairClient, injectable in tests. */
 export interface CaptureClient {
-  request<T = unknown>(method: string, path: string, body?: unknown): Promise<T>;
+  request<T = unknown>(method: string, path: string, body?: unknown, opts?: { signal?: AbortSignal }): Promise<T>;
 }
 
 export interface FlushDeps {
@@ -328,12 +343,15 @@ export interface FlushDeps {
   now?: () => Date;
   makeClient?: (agentId: string) => CaptureClient | Promise<CaptureClient>;
   warn?: (message: string) => void;
+  /** Override the overall flush deadline (see CAPTURE_FLUSH_DEADLINE_MS). Tests
+   *  pass a short value so a hung write is observed without waiting the default. */
+  deadlineMs?: number;
 }
 
 export interface FlushOutcome {
   flushed: number;
   remaining: number;
-  reason: "flushed" | "nothing" | "no-agent-id" | "write-failed";
+  reason: "flushed" | "nothing" | "no-agent-id" | "write-failed" | "busy";
 }
 
 /** LAZY on purpose: flair-client resolves via its built dist/, and this module
@@ -349,6 +367,88 @@ async function defaultClientFactory(agentId: string): Promise<CaptureClient> {
   });
 }
 
+/** True when a process with `pid` exists right now. `EPERM` means it exists but
+ *  is owned by another user — still alive. Anything else (ESRCH) is gone. */
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Take the per-agent flush marker, or null when another live flush holds it.
+ * The marker file carries the owner's pid and start time and is taken over only
+ * when that owner has exited, or when the start time is older than
+ * CAPTURE_FLUSH_MARKER_STALE_MS (a reused pid). It is separate from the spool's
+ * data lock, which a flush takes only for its final rewrite, so candidates are
+ * still staged during the flush's writes.
+ */
+function acquireFlushMarker(dir: string, agentId: string, startedAt: number): { release: () => void } | null {
+  ensureCaptureDir(dir);
+  const path = flushLockPath(dir, agentId);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd: number;
+    try {
+      fd = openSync(path, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let owner: { pid?: unknown; startedAt?: unknown } = {};
+      try {
+        owner = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; startedAt?: unknown };
+      } catch {
+        owner = {};
+      }
+      const ownerPid = typeof owner.pid === "number" ? owner.pid : Number.NaN;
+      const ownerStarted = typeof owner.startedAt === "number" ? owner.startedAt : Number.NaN;
+      const stranded = !Number.isFinite(ownerStarted) || startedAt - ownerStarted > CAPTURE_FLUSH_MARKER_STALE_MS;
+      if (processAlive(ownerPid) && !stranded) return null;
+      // Owner exited, or the marker is ancient: take it over.
+      try { unlinkSync(path); } catch {}
+      continue;
+    }
+    try {
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt }));
+      return { release: () => { try { unlinkSync(path); } catch {} } };
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return null;
+}
+
+/** Await `task`, or reject once `timeoutMs` elapses. `onTimeout` runs at the
+ *  bound (used to abort an in-flight write) before the rejection. */
+function withDeadline<T>(task: Promise<T>, timeoutMs: number, label: string, onTimeout?: () => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(`${label} deadline`));
+    }, timeoutMs);
+    timer.unref?.();
+    task.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+/** One flush write, bounded by `timeoutMs`. The abort signal reaches a real
+ *  client so it cancels the underlying fetch at the bound; the race is the bound
+ *  whether or not the client honours the signal. */
+function writeWithDeadline(client: CaptureClient, path: string, row: unknown, timeoutMs: number): Promise<unknown> {
+  const controller = new AbortController();
+  return withDeadline(
+    Promise.resolve().then(() => client.request("PUT", path, row, { signal: controller.signal })),
+    timeoutMs,
+    "capture flush write",
+    () => controller.abort(),
+  );
+}
+
 export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcome> {
   const env = deps.env ?? process.env;
   const warn = deps.warn ?? (() => {});
@@ -359,44 +459,53 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
 
   const now = deps.now ?? (() => new Date());
-  const makeClient = deps.makeClient ?? defaultClientFactory;
-  let client: CaptureClient;
+  const marker = acquireFlushMarker(dir, agentId, Date.now());
+  if (!marker) return { flushed: 0, remaining: records.length, reason: "busy" };
+  const deadlineAt = Date.now() + (deps.deadlineMs ?? CAPTURE_FLUSH_DEADLINE_MS);
   try {
-    client = await makeClient(agentId);
-  } catch (error) {
-    warn(`flush skipped (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`);
-    return { flushed: 0, remaining: records.length, reason: "write-failed" };
-  }
-
-  const written = new Set<string>();
-  for (const record of records) {
+    const makeClient = deps.makeClient ?? defaultClientFactory;
+    let client: CaptureClient;
     try {
-      const row = buildCaptureMemoryRow(
-        { kind: record.kind, content: record.content, dedupKey: record.dedupKey, provenance: record.provenance },
-        agentId,
-        now(),
-      );
-      await client.request("PUT", memoryPutPath(row.id), row);
-      written.add(record.dedupKey);
+      client = await withDeadline(Promise.resolve(makeClient(agentId)), deadlineAt - Date.now(), "capture flush client");
     } catch (error) {
-      warn(`capture write skipped (${error instanceof Error ? error.message : String(error)})`);
+      warn(`flush skipped (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`);
+      return { flushed: 0, remaining: records.length, reason: "write-failed" };
     }
-  }
-  let remaining = records.length;
-  if (written.size > 0) {
-    // Re-read under the lock and drop only what was written, so a record
-    // appended while the writes were in flight is kept.
-    try {
-      const kept = withCaptureLock(dir, agentId, () => {
-        const current = readSpool(dir, agentId).filter((r) => !written.has(r.dedupKey));
-        atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, current));
-        return current.length;
-      });
-      if (kept !== LOCK_BUSY) remaining = kept;
-    } catch {
+
+    const written = new Set<string>();
+    for (const record of records) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) break;
+      try {
+        const row = buildCaptureMemoryRow(
+          { kind: record.kind, content: record.content, dedupKey: record.dedupKey, provenance: record.provenance },
+          agentId,
+          now(),
+        );
+        await writeWithDeadline(client, memoryPutPath(row.id), row, remainingMs);
+        written.add(record.dedupKey);
+      } catch (error) {
+        warn(`capture write skipped (${error instanceof Error ? error.message : String(error)})`);
+      }
     }
+    let remaining = records.length;
+    if (written.size > 0) {
+      // Re-read under the lock and drop only what was written, so a record
+      // appended while the writes were in flight is kept.
+      try {
+        const kept = withCaptureLock(dir, agentId, () => {
+          const current = readSpool(dir, agentId).filter((r) => !written.has(r.dedupKey));
+          atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, current));
+          return current.length;
+        });
+        if (kept !== LOCK_BUSY) remaining = kept;
+      } catch {
+      }
+    }
+    return { flushed: written.size, remaining, reason: written.size > 0 ? "flushed" : "write-failed" };
+  } finally {
+    marker.release();
   }
-  return { flushed: written.size, remaining, reason: written.size > 0 ? "flushed" : "write-failed" };
 }
 
 // ── flush cooldown ──────────────────────────────────────────────────────────
