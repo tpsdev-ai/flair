@@ -77,7 +77,8 @@
  * The probe creates only `.migrations` non-recursively inside an existing
  * candidate. It refuses symlinks present at the probe at either path.
  * Node offers no openat-style handle; a swap after the check is not prevented.
- * The first usable candidate wins.
+ * A refusal names the configured path, the path it resolves to, why it is
+ * refused and the remedy (flair#2277). The first usable candidate wins.
  *
  * If NO candidate is usable, `resolveWritableMigrationDataDir` returns
  * `dataDir: null` WITH the per-candidate reasons, and the boot path turns
@@ -86,7 +87,7 @@
  * `flair quality`'s `instance.migrationsClean`. An instance that cannot run
  * migrations now says so; that silence was the actual defect.
  */
-import { accessSync, constants, existsSync, lstatSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, realpathSync, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -155,18 +156,54 @@ export interface DataDirProbe {
   reason?: string;
 }
 
+/**
+ * Operator-facing refusal for a data directory (or its `.migrations` child)
+ * that is a symbolic link (flair#2277). #2234 refuses a symlinked candidate —
+ * a link can be re-pointed between this check and the write, and Node offers
+ * no openat-style handle to pin it — but reported it only as "not a directory".
+ * This keeps the refusal and names the configured path, the real path it
+ * resolves to, why it is refused and the remedy, so the boot log and the
+ * migration failure reason (`/HealthDetail`, which `flair doctor` prints)
+ * carry one actionable sentence.
+ */
+export function describeSymlinkedDataDirRefusal(
+  configuredPath: string,
+  which: "data directory" | ".migrations directory",
+): string {
+  let target: string;
+  try {
+    target = realpathSync(configuredPath);
+  } catch (err) {
+    target = `a target that cannot be resolved (${(err as Error)?.message ?? String(err)})`;
+  }
+  let remedy =
+    `stop Flair, move the directory at ${target} to ${configuredPath} (remove the symbolic link at ${configuredPath} first), and start Flair`;
+  if (which === "data directory") {
+    remedy += `; or point the data directory at ${target} itself (set ${MIGRATION_DATA_DIR_ENV}=${target}) and restart`;
+  }
+  return (
+    `refusing ${configuredPath}: it is a symbolic link to ${target}, and Flair refuses a symlinked ${which} here — ` +
+    `the link can be re-pointed after this check. Remedy: ${remedy}.`
+  );
+}
+
 /** Requires an existing directory, then creates only its `.migrations` child. */
 export function probeMigrationDataDir(dir: string): DataDirProbe {
+  let candidate: Stats;
   try {
-    if (!lstatSync(resolve(dir)).isDirectory()) {
-      return { dir, ok: false, reason: "not a directory" };
-    }
+    candidate = lstatSync(resolve(dir));
   } catch (err) {
     return {
       dir,
       ok: false,
       reason: `${(err as Error)?.message ?? String(err)}: cannot confirm the candidate is an existing directory — refusing to create it`,
     };
+  }
+  if (candidate.isSymbolicLink()) {
+    return { dir, ok: false, reason: describeSymlinkedDataDirRefusal(dir, "data directory") };
+  }
+  if (!candidate.isDirectory()) {
+    return { dir, ok: false, reason: "not a directory" };
   }
   const owned = join(dir, MIGRATIONS_SUBDIR);
   try {
@@ -175,7 +212,11 @@ export function probeMigrationDataDir(dir: string): DataDirProbe {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
-    if (!lstatSync(owned).isDirectory()) {
+    const ownedStat = lstatSync(owned);
+    if (ownedStat.isSymbolicLink()) {
+      return { dir, ok: false, reason: describeSymlinkedDataDirRefusal(owned, ".migrations directory") };
+    }
+    if (!ownedStat.isDirectory()) {
       return { dir, ok: false, reason: ".migrations is not a directory" };
     }
     accessSync(owned, constants.W_OK | constants.X_OK);

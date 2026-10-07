@@ -111,6 +111,22 @@ flair upgrade --tree /opt/flair --flair-version 0.50.0
 without touching the tree. A git checkout or a path that *is* the npm-global
 install is refused rather than overwritten.
 
+### A symlinked data directory is refused at boot
+
+Flair's boot-time migration cycle probes the directory it uses for migration
+state before the cycle runs. A candidate that is a symbolic link — including a
+symlinked `.migrations` child — is refused, and resolution falls through to the
+next usable candidate; when none is usable, the migrations that would have run
+are reported `failed`. The refusal names the configured path, the path it
+resolves to, why the symlink is refused, and the remedy, and it appears in the
+instance log under `[flair-migrations]`, in `/HealthDetail` as the migration
+reason and `lastCycleError`, and in `flair doctor`'s Migrations section.
+
+> **Heads-up:** to use a data directory that currently lives behind a symlink,
+> stop Flair, move the directory to the configured path, remove the symbolic link
+> and start Flair — or point the data directory at the real path (set
+> `FLAIR_MIGRATION_DATA_DIR` to that path) and restart.
+
 ### After a Node bump: the CLI and the instance in different install trees
 
 A service unit bakes the node binary and install tree of the runtime it was
