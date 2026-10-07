@@ -10,9 +10,8 @@
  * the server's advertised capabilities from `GET /Health` before any write and
  * refuses with a named remedy when support cannot be confirmed.
  *
- * Harper-free and pure: no fetch, no I/O. The fetch adapter lives in
- * src/commands/reembed.ts, so the parse and the verdict are unit-testable
- * without a server, and the message builders are reusable.
+ * The parser and message builders are pure; the fetch adapter lives in
+ * src/commands/reembed.ts.
  */
 
 /**
