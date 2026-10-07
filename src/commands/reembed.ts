@@ -92,17 +92,20 @@ program
     // (flipped, re-baselined through the ratchet gate — see
     // embeddings-provider.ts's file header and PR #689 for the park history
     // this flip revisits). `currentModel` is getModelId()'s stamp
-    // (`gguf:<base>+searchprefix` by default; `node-llama-cpp@<version>:<id>+searchprefix`
-    // when FLAIR_EMBEDDINGS_ENGINE=flair). If
-    // EMBEDDING_PREFIXES_ENABLED or EMBEDDING_VARIANT ever changes in
-    // embeddings-provider.ts, update this block too — a drift here silently
-    // breaks `--stale-only`: it would compare every row's embeddingModel
-    // against the WRONG current-model string, so rows would read as already
-    // "current" (or as needing re-embed) out of sync with what getModelId()
-    // is actually stamping new writes with.
-    // Must match getModelId(). The formula lives in src/lib/embedding-model-stamp.ts
-    // because this build target cannot import resources/. The gguf path still
-    // treats the bare name as current; the flair path does not.
+    // (`gguf:<base>+searchprefix` by default; `flair:<digest>+searchprefix`
+    // when FLAIR_EMBEDDINGS_ENGINE=flair). The digest covers the registry
+    // id, file sha256, revision, dims, pooling, and both template strings.
+    // If EMBEDDING_PREFIXES_ENABLED or EMBEDDING_VARIANT ever changes in
+    // embeddings-provider.ts, update the CLI copy too — a drift here silently
+    // breaks `--stale-only` for the cases the stamp test compares.
+    // The CLI formula is duplicated in src/lib/embedding-model-stamp.ts
+    // because this build target cannot import resources/. The test compares
+    // the unset and flair flag cases it names; it does not lock every
+    // version-resolution path. The gguf path still treats the bare name as
+    // current; the flair path does not. S1 does not bulk re-embed an
+    // existing store when the flag is flair (the embedding-stamp migration
+    // no-ops until S2 ships the HNSW reindex trigger). `--stale-only` still
+    // selects rows whose stamp differs, when an operator runs it.
     const stamp = cliEmbeddingStamp();
     const currentModel = stamp.currentModel;
     const isCurrentSpace = (value: string | undefined | null): boolean =>

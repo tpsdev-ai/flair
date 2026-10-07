@@ -80,10 +80,10 @@ describe("detectUsableMetalBackend (flair#1437)", () => {
     delete process.env.FLAIR_EMBEDDINGS_ENGINE;
     expect(embedPrebuiltAnchor()).toBe("harper-fabric-embeddings");
     expect(embedPrebuiltAnchor({ FLAIR_EMBEDDINGS_ENGINE: "hfe" })).toBe("harper-fabric-embeddings");
-    expect(embedPrebuiltAnchor({ FLAIR_EMBEDDINGS_ENGINE: "flair" })).toBe("node-llama-cpp");
-    expect(embedPrebuiltAnchor({ FLAIR_EMBEDDINGS_ENGINE: "flair" }, () => {
-      throw new Error("not installed");
-    })).toBe("harper-fabric-embeddings");
+    expect(embedPrebuiltAnchor({ FLAIR_EMBEDDINGS_ENGINE: "flair" }, "linux", "x64")).toBe("@node-llama-cpp/linux-x64");
+    expect(embedPrebuiltAnchor({ FLAIR_EMBEDDINGS_ENGINE: "flair" }, "linux", "arm64")).toBe("@node-llama-cpp/linux-arm64");
+    expect(embedPrebuiltAnchor({ FLAIR_EMBEDDINGS_ENGINE: "flair" }, "darwin", "arm64")).toBe("@node-llama-cpp/mac-arm64-metal");
+    expect(() => embedPrebuiltAnchor({ FLAIR_EMBEDDINGS_ENGINE: "flair" }, "win32", "x64")).toThrow(/no supported prebuilt/);
     if (saved === undefined) delete process.env.FLAIR_EMBEDDINGS_ENGINE;
     else process.env.FLAIR_EMBEDDINGS_ENGINE = saved;
   });

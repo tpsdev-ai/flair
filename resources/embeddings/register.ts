@@ -10,6 +10,7 @@ import { EmbeddingModelError } from "./errors.js";
 import {
   ensureBuiltinModelFile,
   verifyExistingModelFile,
+  type ModelDownloader,
 } from "./fetch.js";
 import { BUILTIN_EMBEDDING_MODEL } from "./models.js";
 
@@ -52,6 +53,8 @@ export interface ActivateFlairOptions {
   gpuLayers: number;
   /** Bench hatch. Verified against the registry; never downloaded. */
   explicitModelPath?: string;
+  /** Test seam. Production follows redirects and writes the pinned file. */
+  download?: ModelDownloader;
   load?: (args: { modelPath: string; threads: number; gpuLayers: number }) => Promise<EmbedManyEngine>;
 }
 
@@ -99,8 +102,8 @@ export function bindFlairBackend(models: HarperModelsApi, engine: EmbedManyEngin
 
 export async function activateFlairBackend(opts: ActivateFlairOptions): Promise<EmbedManyEngine> {
   const modelPath = opts.explicitModelPath
-    ? await verifyExistingModelFile(BUILTIN_EMBEDDING_MODEL, opts.explicitModelPath)
-    : await ensureBuiltinModelFile(opts.modelsDir);
+    ? await verifyExistingModelFile(BUILTIN_EMBEDDING_MODEL, opts.explicitModelPath, { download: opts.download })
+    : await ensureBuiltinModelFile(opts.modelsDir, { download: opts.download });
   const load = opts.load ?? loadFlairEngine;
   const engine = await load({
     modelPath,

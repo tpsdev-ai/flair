@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { resolveEmbeddingsEngine } from "../../resources/embeddings/flag.ts";
 import { BUILTIN_EMBEDDING_MODEL } from "../../resources/embeddings/models.ts";
+import { prebuiltForPlatform } from "../../resources/embeddings/platforms.ts";
+import { readEmbeddingProvenance } from "../../resources/embeddings/provenance.ts";
+import { registryEntryDigest } from "../../resources/embeddings/stamp-key.ts";
 import { versionFromPackageJson } from "../../resources/embeddings/version.ts";
-import { cliEmbeddingStamp } from "../../src/lib/embedding-model-stamp.ts";
+import { cliEmbeddingProvenance, cliEmbeddingStamp, flairRegistryDigest } from "../../src/lib/embedding-model-stamp.ts";
 
 const SAVED = {
   engine: process.env.FLAIR_EMBEDDINGS_ENGINE,
@@ -33,16 +36,28 @@ describe("embedding stamp (S1 — default unchanged)", () => {
     expect(cliEmbeddingStamp().bareCurrentModel).toBe("nomic-embed-text-v1.5-Q4_K_M+searchprefix");
   });
 
-  it("adds the node-llama-cpp version and registry id only when the flag is flair", () => {
-    delete process.env.FLAIR_EMBEDDING_MODEL;
+  it("stamps flair:<digest>+searchprefix only when the flag is flair", () => {
     delete process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX;
+    process.env.FLAIR_EMBEDDING_MODEL = "some-other-id";
     process.env.FLAIR_EMBEDDINGS_ENGINE = "flair";
+    const digest = registryEntryDigest(BUILTIN_EMBEDDING_MODEL);
+    expect(digest).toBe(flairRegistryDigest());
     const id = getModelId();
-    expect(id.startsWith("node-llama-cpp@")).toBe(true);
-    expect(id.endsWith(`:${BUILTIN_EMBEDDING_MODEL.id}+searchprefix`)).toBe(true);
+    expect(id).toBe(`flair:${digest}+searchprefix`);
+    expect(id).not.toContain("some-other-id");
     expect(id).not.toContain("gguf:");
+    expect(id).not.toContain("node-llama-cpp@");
     expect(cliEmbeddingStamp().currentModel).toBe(id);
     expect(cliEmbeddingStamp().bareCurrentModel).toBeNull();
+    const server = readEmbeddingProvenance();
+    const cli = cliEmbeddingProvenance();
+    expect(cli).toEqual(server);
+    const host = prebuiltForPlatform(process.platform, process.arch);
+    if (!host) throw new Error(`unsupported host ${process.platform}/${process.arch}`);
+    expect(cli.prebuiltPackage).toBe(host.packageName);
+    expect(cli.prebuiltVersion).toBe("3.18.1");
+    expect(cli.llamaCppBuild.length).toBeGreaterThan(0);
+    expect(cli.pipelineVersion).toBe("1");
   });
 
   it("refuses an unknown engine instead of stamping gguf", () => {

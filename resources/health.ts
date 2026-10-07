@@ -18,6 +18,9 @@ import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
 import { embedGpuStatusNotice, withEmbedGpuHealth } from "./embed-gpu.js";
+import { degradeForPrebuiltFailure, getEmbeddingDegrade } from "./embeddings/degrade.js";
+import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
+import { readEmbeddingProvenance } from "./embeddings/provenance.js";
 import {
   classifyPeerLiveness,
   federationPeersAllDisconnectedWarning,
@@ -210,6 +213,29 @@ export class HealthDetail extends Resource {
     stats.bm25 = bm25;
     const embeddingBody = withEmbedGpuHealth({ ok: true });
     stats.embedding = embeddingBody.embedding;
+    // Provenance and degrade are flair-only. The default statement shape is
+    // the GPU snapshot alone.
+    try {
+      if (resolveEmbeddingsEngine() === "flair") {
+        const embedding: Record<string, unknown> = { ...embeddingBody.embedding };
+        const recorded = getEmbeddingDegrade();
+        try {
+          embedding.provenance = readEmbeddingProvenance();
+        } catch (err) {
+          const failure = recorded ?? degradeForPrebuiltFailure(err);
+          embedding.degrade = failure.message;
+          warnings.push({ level: "warn", message: failure.message });
+        }
+        if (recorded && embedding.degrade == null) {
+          embedding.degrade = recorded.message;
+          warnings.push({ level: "warn", message: recorded.message });
+        }
+        stats.embedding = embedding;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      warnings.push({ level: "warn", message });
+    }
     const embedNotice = embedGpuStatusNotice(embeddingBody.embedding);
     if (embedNotice) {
       warnings.push(embedNotice);

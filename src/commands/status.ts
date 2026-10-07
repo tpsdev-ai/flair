@@ -20,6 +20,7 @@ import {
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { formatEmbeddingProvenance, type CliEmbeddingProvenance } from "../lib/embedding-model-stamp.js";
 
 export type StatusCli = {
   fetchHealthDetail: (...args: any[]) => any;
@@ -36,6 +37,25 @@ export type StatusCli = {
 };
 
 let cli: StatusCli;
+
+/** Present only when the server stamped flair provenance onto HealthDetail. */
+function embeddingProvenanceLine(embedding: unknown): string | null {
+  if (typeof embedding !== "object" || embedding === null || !Object.hasOwn(embedding, "provenance")) return null;
+  const provenance = Reflect.get(embedding, "provenance");
+  if (typeof provenance !== "object" || provenance === null) return null;
+  const prebuiltPackage = Reflect.get(provenance, "prebuiltPackage");
+  const prebuiltVersion = Reflect.get(provenance, "prebuiltVersion");
+  const llamaCppBuild = Reflect.get(provenance, "llamaCppBuild");
+  const pipelineVersion = Reflect.get(provenance, "pipelineVersion");
+  if (
+    typeof prebuiltPackage !== "string"
+    || typeof prebuiltVersion !== "string"
+    || typeof llamaCppBuild !== "string"
+    || typeof pipelineVersion !== "string"
+  ) return null;
+  const value: CliEmbeddingProvenance = { prebuiltPackage, prebuiltVersion, llamaCppBuild, pipelineVersion };
+  return formatEmbeddingProvenance(value);
+}
 
 /** Bind the cli-locals this module depends on. */
 export function bindCli(fns: StatusCli): void {
@@ -540,6 +560,8 @@ const statusCmd = program
     const metaParts = [pidPart, uptimePart].filter(Boolean).join(render.wrap(render.c.dim, " · "));
     console.log(`${versionStr} ${render.wrap(render.c.dim, "—")} ${runStatus}${metaParts ? `  ${metaParts}` : ""}`);
     console.log(render.kv("URL", baseUrl));
+    const provenanceLine = embeddingProvenanceLine(healthData?.embedding);
+    if (provenanceLine) console.log(render.kv("Embeddings", provenanceLine));
     if (registryNotice.line) console.log(render.kv("Registry", registryNotice.line.replace(/^registry:\s*/, "")));
     if (registryNotice.error) console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, registryNotice.error)}`);
 

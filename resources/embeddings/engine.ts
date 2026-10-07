@@ -1,37 +1,29 @@
 /**
- * One in-process embedding engine per instance. Loads the registry GGUF
- * through the node-llama-cpp prebuilt (never a source build), checks
- * pooling and dims, applies registry templates, and returns L2-normalized
- * vectors. The addon is opened the same way the production HFE engine opens
- * it — init, then loadBackends — because getLlama()'s setup does not
- * reproduce those vectors. The decode path is HFE's batch (one sequence,
- * embeddings on, no extra generated token). embedMany is serialized; the
- * llama.cpp context is not concurrent.
+ * One embedding engine per worker thread, keyed by model path plus addon
+ * path. The registry lives on globalThis, so it is per isolate. Node-wide
+ * ownership across workers is #2052. Exactly one addon is dlopen'd in that
+ * isolate. The addon is the optional `@node-llama-cpp/<platform>` prebuilt
+ * for this host (linux-x64 CPU, linux-arm64 CPU, or darwin-arm64 Metal).
+ * There is no umbrella `node-llama-cpp` package and no fallback onto
+ * harper-fabric-embeddings. A missing or unsupported prebuilt throws; boot
+ * skips registration and keyword search remains.
+ *
+ * The addon is opened the same way the production HFE engine opens it —
+ * init, then loadBackends — because getLlama()'s setup does not reproduce
+ * those vectors. The bytes are re-verified immediately before AddonModel.
+ * The decode path is HFE's batch (one sequence, embeddings on, no extra
+ * generated token). embedMany is serialized; the llama.cpp context is not
+ * concurrent.
  */
 import { createRequire } from "node:module";
 import { existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { EmbeddingModelError } from "./errors.js";
+import { reverifyBeforeLoad } from "./fetch.js";
 import { assertDeclaredPooling } from "./gguf.js";
 import { BUILTIN_EMBEDDING_MODEL, type EmbeddingModelEntry } from "./models.js";
+import { hostLabel, prebuiltForPlatform } from "./platforms.js";
 import { applyEmbeddingTemplate } from "./template.js";
-
-/**
- * Same search order harper-fabric-embeddings uses, then the other CPU
- * prebuilts node-llama-cpp publishes. CUDA/Vulkan packages are omitted on
- * purpose: HFE does not select them, and a different binary is a different
- * vector. Resolved from Flair's own `node-llama-cpp` dependency, not from
- * whatever happens to sit in cwd/node_modules.
- */
-const ADDON_PACKAGES = [
-  "@node-llama-cpp/linux-x64",
-  "@node-llama-cpp/mac-arm64-metal",
-  "@node-llama-cpp/mac-x64",
-  "@node-llama-cpp/linux-arm64",
-  "@node-llama-cpp/linux-armv7l",
-  "@node-llama-cpp/win-x64",
-  "@node-llama-cpp/win-arm64",
-] as const;
 
 type GpuKind = "metal" | "cuda" | "vulkan" | false;
 
@@ -48,6 +40,14 @@ export interface FlairEngineOptions {
   modelPath: string;
   threads: number;
   gpuLayers: number;
+  /** Test seam. Production resolves the host platform package from this module. */
+  resolvePackage?: (name: string) => string;
+  platform?: string;
+  arch?: string;
+  /** Test seam. Production dlopens the resolved addon. */
+  loadBinding?: (addonPath: string) => Promise<NativeBinding>;
+  /** Test seam. Production re-verifies the registry file before AddonModel. */
+  verifyBeforeLoad?: (entry: EmbeddingModelEntry, modelPath: string) => Promise<void>;
 }
 
 interface AddonModelOptions {
@@ -92,23 +92,56 @@ interface NativeBinding {
   AddonContext: new (model: AddonModelHandle, opts: AddonContextOptions) => AddonContextHandle;
 }
 
-let active: FlairEmbeddingEngine | null = null;
-const bindings = new Map<string, Promise<NativeBinding>>();
+const REGISTRY = Symbol.for("flair.embeddings.engine.registry");
+
+interface EngineRegistry {
+  byKey: Map<string, FlairEmbeddingEngine>;
+  /** Addon path already selected in this worker thread. A second path is refused. */
+  addonPath: string | null;
+  /** Times loadBinding actually ran. A cached addon does not increment this. */
+  loads: number;
+  bindings: Map<string, Promise<NativeBinding>>;
+}
+
+function registry(): EngineRegistry {
+  const g = globalThis as Record<symbol, EngineRegistry | undefined>;
+  let reg = g[REGISTRY];
+  if (!reg) {
+    reg = { byKey: new Map(), addonPath: null, loads: 0, bindings: new Map() };
+    g[REGISTRY] = reg;
+  }
+  return reg;
+}
+
+/** How many times this worker thread has dlopen'd an embedding addon. */
+export function flairAddonLoadCount(): number {
+  return registry().loads;
+}
 
 export function createFlairEmbeddingEngine(opts: FlairEngineOptions): FlairEmbeddingEngine {
-  if (active && !active.disposed) {
+  const platform = opts.platform ?? process.platform;
+  const arch = opts.arch ?? process.arch;
+  const addonPath = resolveFlairAddonPath(opts.resolvePackage, platform, arch);
+  const key = `${opts.modelPath}\0${addonPath}`;
+  const reg = registry();
+  const existing = reg.byKey.get(key);
+  if (existing && !existing.disposed) return existing;
+  if (reg.addonPath != null && reg.addonPath !== addonPath) {
     throw new EmbeddingModelError(
       "engine",
-      "[embeddings] an embedding engine is already loaded in this process.",
-      "Reuse the existing engine. One engine per instance.",
+      `[embeddings] this worker thread already loaded ${reg.addonPath}.`,
+      "One addon dlopen per worker thread. A second native library is refused. Node-wide sharing across workers is #2052.",
     );
   }
-  active = new FlairEmbeddingEngine(opts);
-  return active;
+  const engine = new FlairEmbeddingEngine(opts, addonPath, key);
+  reg.byKey.set(key, engine);
+  reg.addonPath = addonPath;
+  return engine;
 }
 
 export function _resetFlairEmbeddingEngineForTests(): void {
-  active = null;
+  const g = globalThis as Record<symbol, EngineRegistry | undefined>;
+  delete g[REGISTRY];
 }
 
 export class FlairEmbeddingEngine {
@@ -116,6 +149,10 @@ export class FlairEmbeddingEngine {
   readonly modelPath: string;
   readonly threads: number;
   readonly requestedGpuLayers: number;
+  readonly #addonPath: string;
+  readonly #key: string;
+  readonly #loadBinding: ((addonPath: string) => Promise<NativeBinding>) | undefined;
+  readonly #verifyBeforeLoad: ((entry: EmbeddingModelEntry, modelPath: string) => Promise<void>) | undefined;
   #gpu: GpuKind | undefined;
   #model: AddonModelHandle | null = null;
   #context: AddonContextHandle | null = null;
@@ -123,11 +160,15 @@ export class FlairEmbeddingEngine {
   #ready: Promise<void> | null = null;
   #disposed = false;
 
-  constructor(opts: FlairEngineOptions) {
+  constructor(opts: FlairEngineOptions, addonPath: string, key: string) {
     this.entry = opts.entry ?? BUILTIN_EMBEDDING_MODEL;
     this.modelPath = opts.modelPath;
     this.threads = opts.threads;
     this.requestedGpuLayers = opts.gpuLayers;
+    this.#addonPath = addonPath;
+    this.#key = key;
+    this.#loadBinding = opts.loadBinding;
+    this.#verifyBeforeLoad = opts.verifyBeforeLoad;
   }
 
   get disposed(): boolean {
@@ -207,7 +248,8 @@ export class FlairEmbeddingEngine {
 
   async dispose(): Promise<void> {
     this.#disposed = true;
-    if (active === this) active = null;
+    const reg = registry();
+    if (reg.byKey.get(this.#key) === this) reg.byKey.delete(this.#key);
     await this.#queue.catch(() => undefined);
     const context = this.#context;
     const model = this.#model;
@@ -231,8 +273,10 @@ export class FlairEmbeddingEngine {
     }
     await assertDeclaredPooling(this.modelPath, this.entry.pooling);
     const gpuLayers = this.requestedGpuLayers > 0 ? this.requestedGpuLayers : 0;
-    const binding = await acquireBinding(resolveFlairAddonPath());
+    const binding = await acquireBinding(this.#addonPath, this.#loadBinding);
     const gpu = readGpuType(binding.getGpuType());
+    const verify = this.#verifyBeforeLoad ?? reverifyBeforeLoad;
+    await verify(this.entry, this.modelPath);
     let model: AddonModelHandle | null = null;
     let context: AddonContextHandle | null = null;
     try {
@@ -302,41 +346,40 @@ export class FlairEmbeddingEngine {
 }
 
 export function resolveFlairAddonPath(
-  resolvePackage: (name: string) => string = defaultResolveAddonPackage,
+  resolvePackage: (name: string) => string = (name) => createRequire(import.meta.url).resolve(name),
+  platform: string = process.platform,
+  arch: string = process.arch,
 ): string {
-  const tried: string[] = [];
-  for (const name of ADDON_PACKAGES) {
-    let entry: string;
-    try {
-      entry = resolvePackage(name);
-    } catch {
-      tried.push(name);
-      continue;
-    }
-    const addon = findAddonBinary(entry);
-    if (addon) return addon;
-    tried.push(name);
+  const match = prebuiltForPlatform(platform, arch);
+  const label = hostLabel(platform, arch);
+  if (!match) {
+    throw new EmbeddingModelError(
+      "engine",
+      `[embeddings] platform ${label} has no supported prebuilt ` +
+        `(supported: @node-llama-cpp/linux-x64, @node-llama-cpp/linux-arm64, @node-llama-cpp/mac-arm64-metal).`,
+      "Run on a supported platform. Refusing to build llama.cpp from source. Embeddings stay on keyword search.",
+    );
   }
-  throw new EmbeddingModelError(
-    "engine",
-    `[embeddings] no node-llama-cpp prebuilt resolved (tried ${tried.join(", ")}).`,
-    "Install the @node-llama-cpp prebuilt for this platform. Refusing to build llama.cpp from source.",
-  );
-}
-
-function defaultResolveAddonPackage(name: string): string {
-  const own = createRequire(import.meta.url);
-  // node-llama-cpp is an optional peer (#887: a hard dependency installs
-  // ~670MB of CUDA/Vulkan prebuilts on every Linux x64 machine). When the
-  // peer is present, resolve from its graph. When it is not, the same
-  // 3.18.1 platform addon is already installed by harper-fabric-embeddings.
-  let anchor: string;
+  let entry: string;
   try {
-    anchor = own.resolve("node-llama-cpp");
-  } catch {
-    anchor = own.resolve("harper-fabric-embeddings");
+    entry = resolvePackage(match.packageName);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new EmbeddingModelError(
+      "engine",
+      `[embeddings] prebuilt ${match.packageName} for platform ${label} is not installed (${detail}).`,
+      `Install the optional dependency ${match.packageName}. Refusing to build llama.cpp from source. Embeddings stay on keyword search.`,
+    );
   }
-  return createRequire(anchor).resolve(name);
+  const addon = findAddonBinary(entry);
+  if (!addon) {
+    throw new EmbeddingModelError(
+      "engine",
+      `[embeddings] ${match.packageName} for platform ${label} did not contain llama-addon.node.`,
+      `Reinstall ${match.packageName}. Refusing to build llama.cpp from source.`,
+    );
+  }
+  return addon;
 }
 
 function findAddonBinary(packageEntry: string): string | null {
@@ -355,13 +398,22 @@ function findAddonBinary(packageEntry: string): string | null {
   return null;
 }
 
-function acquireBinding(addonPath: string): Promise<NativeBinding> {
-  let pending = bindings.get(addonPath);
+function acquireBinding(
+  addonPath: string,
+  load: ((addonPath: string) => Promise<NativeBinding>) | undefined,
+): Promise<NativeBinding> {
+  const reg = registry();
+  let pending = reg.bindings.get(addonPath);
   if (!pending) {
-    pending = loadBinding(addonPath);
-    bindings.set(addonPath, pending);
+    reg.loads += 1;
+    const run = load ?? loadBinding;
+    pending = run(addonPath);
+    reg.bindings.set(addonPath, pending);
     pending.catch(() => {
-      if (bindings.get(addonPath) === pending) bindings.delete(addonPath);
+      if (reg.bindings.get(addonPath) === pending) {
+        reg.bindings.delete(addonPath);
+        reg.loads -= 1;
+      }
     });
   }
   return pending;
@@ -383,7 +435,7 @@ async function loadBinding(addonPath: string): Promise<NativeBinding> {
     throw new EmbeddingModelError(
       "engine",
       "[embeddings] node-llama-cpp prebuilt loaded without AddonModel/AddonContext.",
-      "Reinstall the pinned node-llama-cpp prebuilt. Refusing to embed through a different decode path.",
+      "Reinstall the pinned platform prebuilt. Refusing to embed through a different decode path.",
     );
   }
   const binding = holder.exports;

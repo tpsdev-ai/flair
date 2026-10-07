@@ -25,6 +25,7 @@
  */
 import { createRequire } from "node:module";
 import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
+import { hostLabel, prebuiltForPlatform } from "./embeddings/platforms.js";
 
 export const METAL_PREBUILT = "@node-llama-cpp/mac-arm64-metal";
 
@@ -111,30 +112,34 @@ export function detectUsableMetalBackend(input: MetalDetectInput = {}): boolean 
 }
 
 /**
- * Which package's dependency graph holds `@node-llama-cpp/*` prebuilts.
- * Unset / `hfe` stays on harper-fabric-embeddings. `flair` uses Flair's own
- * `node-llama-cpp` dependency.
+ * Which package holds the `@node-llama-cpp/*` prebuilt this process should
+ * resolve. Unset / `hfe` stays on harper-fabric-embeddings. `flair` names the
+ * host platform package (`@node-llama-cpp/linux-x64`, `linux-arm64`, or
+ * `mac-arm64-metal`). It does not fall back to harper-fabric-embeddings.
  */
 export function embedPrebuiltAnchor(
   env: NodeJS.ProcessEnv = process.env,
-  resolvePackage: (name: string) => string = (name) => createRequire(import.meta.url).resolve(name),
-): "node-llama-cpp" | "harper-fabric-embeddings" {
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string {
   if (resolveEmbeddingsEngine(env) !== "flair") return "harper-fabric-embeddings";
-  try {
-    resolvePackage("node-llama-cpp");
-    return "node-llama-cpp";
-  } catch {
-    // Optional peer is absent (#887). The platform addon is still the one
-    // harper-fabric-embeddings installed.
-    return "harper-fabric-embeddings";
+  const match = prebuiltForPlatform(platform, arch);
+  if (!match) {
+    throw new Error(
+      `[embeddings] platform ${hostLabel(platform, arch)} has no supported prebuilt ` +
+        `(supported: @node-llama-cpp/linux-x64, @node-llama-cpp/linux-arm64, @node-llama-cpp/mac-arm64-metal).`,
+    );
   }
+  return match.packageName;
 }
 
 function defaultResolveMetal(specifier: string): string {
   const fromHere = createRequire(import.meta.url);
   try {
     return fromHere.resolve(specifier);
-  } catch {
+  } catch (err) {
+    // The flair path installs the platform package directly. A miss stays a miss.
+    if (resolveEmbeddingsEngine() === "flair") throw err;
     const anchor = fromHere.resolve(embedPrebuiltAnchor());
     return createRequire(anchor).resolve(specifier);
   }

@@ -1,6 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -16,6 +15,36 @@ import {
   _resetEmbeddingsBackendRegistrationForTests,
   registerEmbeddingsBackend,
 } from "../../resources/embeddings-boot.ts";
+
+interface HarperModelsModule {
+  Models: new (
+    writer: { write: (record: unknown) => void },
+    emit: () => void,
+  ) => HarperModelsApi & { embed: (input: string | string[]) => Promise<Float32Array[]> };
+  ModelCallAnalyticsWriter: new (opts: {
+    flushIntervalMs: number;
+    cleanupIntervalMs: number;
+    getTable: () => { put: () => Promise<void> };
+  }) => { write: (record: unknown) => void };
+  clearRegistry: () => void;
+  clearRouting: () => void;
+}
+
+async function loadHarperModels(): Promise<HarperModelsModule> {
+  // A variable specifier so the test typecheck does not follow Harper's own
+  // sources. Runtime still loads the production Models facade.
+  const base = new URL("../../node_modules/harper/dist/resources/models/", import.meta.url);
+  const modelsMod: { Models: HarperModelsModule["Models"] } = await import(new URL("Models.js", base).href);
+  const registryMod: { clearRegistry: () => void } = await import(new URL("backendRegistry.js", base).href);
+  const analyticsMod: { ModelCallAnalyticsWriter: HarperModelsModule["ModelCallAnalyticsWriter"] } = await import(new URL("analyticsTable.js", base).href);
+  const routingMod: { clearRouting: () => void } = await import(new URL("routing.js", base).href);
+  return {
+    Models: modelsMod.Models,
+    ModelCallAnalyticsWriter: analyticsMod.ModelCallAnalyticsWriter,
+    clearRegistry: registryMod.clearRegistry,
+    clearRouting: routingMod.clearRouting,
+  };
+}
 
 function fakeModels(): HarperModelsApi & { calls: string[]; lastEmbed?: HarperModelsApi["defineBackend"] extends (s: infer S) => unknown ? S : never } {
   const calls: string[] = [];
@@ -89,9 +118,38 @@ describe("flair backend registration", () => {
     expect(result.usage.embeddingTokens).toBe(1);
   });
 
-  it("does not load or register when the model digest does not match", async () => {
+  it("quarantines a mismatched file and does not register when the refetch fails", async () => {
     const dir = tempDir("flair-embed-bad-");
     await writeFile(join(dir, BUILTIN_EMBEDDING_MODEL.file), Buffer.from("not-the-model"));
+    const models = fakeModels();
+    let loaded = false;
+    let fetched = false;
+    const err = await activateFlairBackend({
+      modelsDir: dir,
+      models,
+      threads: 1,
+      gpuLayers: 0,
+      download: async () => {
+        fetched = true;
+        return { ok: false, status: 500, statusText: "no", body: null };
+      },
+      load: async () => {
+        loaded = true;
+        return engine;
+      },
+    }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(EmbeddingModelError);
+    expect(fetched).toBe(true);
+    expect(loaded).toBe(false);
+    expect(models.calls).toEqual([]);
+    const names = await readdir(dir);
+    expect(names.some((name) => name.startsWith(`${BUILTIN_EMBEDDING_MODEL.file}.quarantine-`))).toBe(true);
+    expect(names).not.toContain(BUILTIN_EMBEDDING_MODEL.file);
+  }, 10_000);
+
+  it("does not register when the models directory is group-writable", async () => {
+    const dir = tempDir("flair-embed-open-");
+    await chmod(dir, 0o777);
     const models = fakeModels();
     let loaded = false;
     const err = await activateFlairBackend({
@@ -105,30 +163,42 @@ describe("flair backend registration", () => {
       },
     }).then(() => null, (e: unknown) => e);
     expect(err).toBeInstanceOf(EmbeddingModelError);
-    if (err instanceof EmbeddingModelError) expect(err.code).toBe("digest-mismatch");
+    if (err instanceof EmbeddingModelError) expect(err.message).toMatch(/group or other writable/);
     expect(loaded).toBe(false);
     expect(models.calls).toEqual([]);
   }, 10_000);
 
-  it("does not fetch or register when the models directory is missing", async () => {
-    const models = fakeModels();
-    let loaded = false;
-    const missing = join(tmpdir(), `flair-embed-missing-${process.pid}`);
-    const err = await activateFlairBackend({
-      modelsDir: missing,
-      models,
-      threads: 1,
-      gpuLayers: 0,
-      load: async () => {
-        loaded = true;
-        return engine;
-      },
-    }).then(() => null, (e: unknown) => e);
-    expect(err).toBeInstanceOf(EmbeddingModelError);
-    if (err instanceof EmbeddingModelError) expect(err.code).toBe("missing-dir");
-    expect(loaded).toBe(false);
-    expect(models.calls).toEqual([]);
-  }, 10_000);
+  it("registers the production callback on Harper models.embed and surfaces a failure", async () => {
+    const loaded = await loadHarperModels();
+    loaded.clearRegistry();
+    loaded.clearRouting();
+    try {
+      const writer = new loaded.ModelCallAnalyticsWriter({
+        flushIntervalMs: 3_600_000,
+        cleanupIntervalMs: 3_600_000,
+        getTable: () => ({ put: async () => undefined }),
+      });
+      const models = new loaded.Models(writer, () => undefined);
+      let calls = 0;
+      bindFlairBackend(models, {
+        async embedMany(texts) {
+          calls += 1;
+          const first = texts[0];
+          if (first === "fail") throw new Error("embed failed");
+          return { vectors: texts.map(() => Float32Array.from([1, 0, 0])), tokens: 1 };
+        },
+      });
+      const vectors = await models.embed("hello");
+      expect(vectors).toHaveLength(1);
+      expect(vectors[0]?.length).toBe(3);
+      expect(calls).toBe(1);
+      await expect(models.embed("fail")).rejects.toThrow(/embed failed/);
+      expect(calls).toBe(2);
+    } finally {
+      loaded.clearRegistry();
+      loaded.clearRouting();
+    }
+  }, 15_000);
 
   it("boot refuses an unknown engine and registers nothing", async () => {
     process.env.FLAIR_EMBEDDINGS_ENGINE = "nope";

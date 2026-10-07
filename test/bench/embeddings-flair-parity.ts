@@ -33,12 +33,12 @@ const SCRIPT = fileURLToPath(import.meta.url);
 interface Item {
   id: string;
   text: string;
-  kind: "document" | "query";
+  kind: "document" | "query" | "omit";
 }
 
 interface Embedded {
   id: string;
-  kind: "document" | "query";
+  kind: "document" | "query" | "omit";
   tokens: number;
   vector: number[];
 }
@@ -50,7 +50,7 @@ function positiveInt(raw: string | undefined): number | undefined {
   return n;
 }
 
-function inputs(): Item[] {
+function corpusInputs(): Item[] {
   // expectMarker repeats across query kinds. Index keeps each input distinct.
   const rows = [
     ...CORPUS.map((row, index) => ({ id: `d:${index}:${row.marker}`, text: row.text, kind: "document" as const })),
@@ -59,6 +59,36 @@ function inputs(): Item[] {
   const limit = Number(process.env.FLAIR_PARITY_LIMIT);
   if (Number.isInteger(limit) && limit > 0) return rows.slice(0, limit);
   return rows;
+}
+
+/** Short text, omitted inputType, and one long document/query pair. Always embedded. */
+function legInputs(): Item[] {
+  const shorts = ["cat", "a", "hi", "ok"];
+  const longDoc = [...CORPUS].sort((a, b) => b.text.length - a.text.length)[0];
+  const longQuery = QUERIES[0];
+  if (!longDoc || !longQuery) return [];
+  return [
+    ...shorts.map((text, index) => ({ id: `short:${index}`, text, kind: "document" as const })),
+    ...shorts.map((text, index) => ({ id: `shortq:${index}`, text, kind: "query" as const })),
+    { id: "omit:0", text: "plain text with no input type", kind: "omit" },
+    { id: "omit:1", text: longsEnough(longDoc.text), kind: "omit" },
+    { id: `legdoc:${longDoc.marker}`, text: longDoc.text, kind: "document" },
+    { id: `legq:${longQuery.expectMarker}`, text: longQuery.q, kind: "query" },
+  ];
+}
+
+function longsEnough(text: string): string {
+  return text.length > 80 ? text.slice(0, 80) : text;
+}
+
+function inputs(): Item[] {
+  if (process.env.FLAIR_PARITY_LEGS === "1") return legInputs();
+  return [...corpusInputs(), ...legInputs()];
+}
+
+function inputTypeOf(kind: Item["kind"]): "document" | "query" | undefined {
+  if (kind === "omit") return undefined;
+  return kind;
 }
 
 function cosine(a: readonly number[], b: readonly number[]): number {
@@ -88,7 +118,7 @@ async function embedHfe(modelPath: string, texts: readonly Item[]): Promise<Embe
   try {
     const out: Embedded[] = [];
     for (const item of texts) {
-      const { vectors, tokens } = await engine.embedMany([item.text], { inputType: item.kind });
+      const { vectors, tokens } = await engine.embedMany([item.text], { inputType: inputTypeOf(item.kind) });
       const vector = vectors[0];
       if (!vector) throw new Error(`HFE returned no vector for ${item.id}`);
       out.push({ id: item.id, kind: item.kind, tokens, vector: Array.from(vector) });
@@ -105,7 +135,7 @@ async function embedFlair(modelPath: string, texts: readonly Item[]): Promise<Em
   try {
     const out: Embedded[] = [];
     for (const item of texts) {
-      const { vectors, tokens } = await engine.embedMany([item.text], { inputType: item.kind });
+      const { vectors, tokens } = await engine.embedMany([item.text], { inputType: inputTypeOf(item.kind) });
       const vector = vectors[0];
       if (!vector) throw new Error(`flair returned no vector for ${item.id}`);
       out.push({ id: item.id, kind: item.kind, tokens, vector: Array.from(vector) });
@@ -165,7 +195,7 @@ async function compare(hfePath: string, flairPath: string): Promise<void> {
   const flair = readRows(flairPath);
   const byId = new Map(flair.map((row) => [row.id, row]));
   let minCosine = 1;
-  let minLong = 1;
+  let minLong: number | null = null;
   const tokenMismatches: string[] = [];
   const longFailures: { id: string; tokens: number; cosine: number }[] = [];
   const shortDiffs: { id: string; tokens: number; cosine: number }[] = [];
@@ -180,7 +210,7 @@ async function compare(hfePath: string, flairPath: string): Promise<void> {
     const score = cosine(row.vector, other.vector);
     if (score < minCosine) minCosine = score;
     if (row.tokens >= LONG_TOKENS) {
-      if (score < minLong) minLong = score;
+      if (minLong == null || score < minLong) minLong = score;
       if (score < MIN_COSINE) longFailures.push({ id: row.id, tokens: row.tokens, cosine: score });
     } else if (score < MIN_COSINE) {
       shortDiffs.push({ id: row.id, tokens: row.tokens, cosine: score });
@@ -198,6 +228,34 @@ async function compare(hfePath: string, flairPath: string): Promise<void> {
     if (a.join("|") !== b.join("|")) top3Diffs.push({ id: query.id, hfe: a, flair: b });
   }
 
+  const shortRows = hfe.filter((row) => row.id.startsWith("short"));
+  const shortCosines = shortRows.map((row) => {
+    const other = byId.get(row.id);
+    return { id: row.id, tokens: row.tokens, cosine: other ? cosine(row.vector, other.vector) : 0 };
+  });
+  const shortAtMost8 = shortCosines.filter((row) => row.tokens <= 8);
+  const omitRows = hfe.filter((row) => row.kind === "omit");
+  const omitCompared = omitRows.map((row) => {
+    const other = byId.get(row.id);
+    return {
+      id: row.id,
+      hfeTokens: row.tokens,
+      flairTokens: other?.tokens ?? null,
+      cosine: other ? cosine(row.vector, other.vector) : 0,
+    };
+  });
+  const cross: { id: string; hfeTop3: string[]; crossTop3: string[] }[] = [];
+  for (const query of hfe.filter((row) => row.kind === "query")) {
+    const flairQuery = byId.get(query.id);
+    if (!flairQuery) continue;
+    const hfeTop = top3(query, hfeDocs);
+    const crossTop = top3(flairQuery, hfeDocs);
+    if (hfeTop.join("|") !== crossTop.join("|")) {
+      cross.push({ id: query.id, hfeTop3: hfeTop, crossTop3: crossTop });
+    }
+  }
+  const liveStore = liveStoreSample();
+
   const report = {
     records: CORPUS.length,
     queries: QUERIES.length,
@@ -211,8 +269,13 @@ async function compare(hfePath: string, flairPath: string): Promise<void> {
     longFailureSample: longFailures.slice(0, 8),
     shortDifferences: shortDiffs.length,
     shortDifferenceSample: shortDiffs.slice(0, 12),
+    shortInputAtMost8: shortAtMost8,
+    omittedInputType: omitCompared,
+    crossPairTop3Diffs: cross.length,
+    crossPairTop3Sample: cross.slice(0, 8),
     top3Diffs: top3Diffs.length,
     top3DiffSample: top3Diffs.slice(0, 8),
+    liveStore,
   };
 
   const outPath = process.env.FLAIR_PARITY_REPORT ?? "/tmp/embeddings-flair-parity.json";
@@ -220,7 +283,21 @@ async function compare(hfePath: string, flairPath: string): Promise<void> {
   console.log(JSON.stringify(report, null, 2));
   console.log(`[parity] wrote ${outPath}`);
 
-  if (tokenMismatches.length || longFailures.length || top3Diffs.length) process.exit(1);
+  const legsOpen = shortAtMost8.length === 0
+    || omitCompared.length === 0
+    || liveStore.status !== "present"
+    || longFailures.length > 0
+    || top3Diffs.length > 0
+    || tokenMismatches.length > 0;
+  if (legsOpen) process.exit(1);
+}
+
+function liveStoreSample(): { status: "absent" | "present"; reason: string } {
+  const hinted = process.env.FLAIR_PARITY_LIVE_STORE;
+  if (hinted == null || hinted.trim() === "") {
+    return { status: "absent", reason: "FLAIR_PARITY_LIVE_STORE is unset; no live store was sampled" };
+  }
+  return { status: "absent", reason: `no readable memory sample at ${hinted}` };
 }
 
 const role = process.env.FLAIR_PARITY_ROLE;

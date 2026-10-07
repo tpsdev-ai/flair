@@ -110,7 +110,7 @@
 
 import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
 import { BUILTIN_EMBEDDING_MODEL } from "./embeddings/models.js";
-import { readNodeLlamaCppVersion } from "./embeddings/version.js";
+import { flairSpaceKey } from "./embeddings/stamp-key.js";
 
 /**
  * The nomic search-prefix `inputType` — closed union, not `string`. See the
@@ -450,16 +450,11 @@ export const EMBEDDING_ENGINE = "gguf";
 export function getModelId(): string {
   const suffix = prefixesEnabled() ? `+${EMBEDDING_VARIANT}` : "";
   // Opt-in engine only. Unset / hfe keeps the gguf stamp byte-for-byte.
+  // The flair space key is `flair:<digest>[+variant]`. Provenance (prebuilt
+  // version, llama.cpp build, pipeline version) is HealthDetail, not this key.
+  // S1 does not let this key drive a bulk re-embed; see embedding-stamp.ts.
   if (resolveEmbeddingsEngine() === "flair") {
-    const version = readNodeLlamaCppVersion();
-    const id = BUILTIN_EMBEDDING_MODEL.id;
-    if (id.includes(":") || version.includes(":")) {
-      throw new Error(
-        `[embeddings] flair stamp parts must not contain ':' — reserved for the <engine>:<model> split; ` +
-          `got engine node-llama-cpp@${JSON.stringify(version)} model ${JSON.stringify(id)}`,
-      );
-    }
-    return `node-llama-cpp@${version}:${id}${suffix}`;
+    return flairSpaceKey(BUILTIN_EMBEDDING_MODEL, suffix);
   }
   const base = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
   // The bare-name override must not collide with the `<engine>:<model>` stamp

@@ -3,9 +3,14 @@
  * on every boot (flair#694 fix; invariants at flair#695).
  *
  * Default (FLAIR_EMBEDDINGS_ENGINE unset or `hfe`): harper-fabric-embeddings.
- * `FLAIR_EMBEDDINGS_ENGINE=flair`: Flair's node-llama-cpp backend, registered
- * with the same `models.registerBackend('embedding', 'default', …)` slot.
- * Unset, the HFE path below is unchanged.
+ * `FLAIR_EMBEDDINGS_ENGINE=flair`: the in-tree backend, which dlopens the
+ * optional `@node-llama-cpp/<platform>` prebuilt for this host and registers
+ * it with the same `models.registerBackend('embedding', 'default', …)` slot.
+ * A missing or unsupported prebuilt skips that registration and degrades to
+ * keyword search (HealthDetail names the platform and package). The models
+ * directory is created mode 0700 when it is absent, and refused when it is
+ * group/other-writable or owned by someone else. Unset, the HFE path below
+ * is unchanged.
  *
  * ─── Why this file exists (flair#694) ──────────────────────────────────────
  * The previous mechanism (removed by this change) delivered the registration
@@ -90,6 +95,7 @@
  */
 import { availableParallelism } from "node:os";
 import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
+import { setEmbeddingDegrade, degradeForPrebuiltFailure } from "./embeddings/degrade.js";
 import { activateFlairBackend, requireHarperModels } from "./embeddings/register.js";
 import { resolveModelsDir } from "./embeddings-provider.js";
 import {
@@ -220,7 +226,13 @@ export async function registerEmbeddingsBackend(): Promise<void> {
   registered = true;
   try {
     if (resolveEmbeddingsEngine() === "flair") {
-      await registerFlairEmbeddings();
+      try {
+        await registerFlairEmbeddings();
+        setEmbeddingDegrade(null);
+      } catch (err) {
+        setEmbeddingDegrade(degradeForPrebuiltFailure(err));
+        throw err;
+      }
       return;
     }
     const { register } = await import("harper-fabric-embeddings");
@@ -282,8 +294,9 @@ export async function registerEmbeddingsBackend(): Promise<void> {
 
 /**
  * In-tree engine (FLAIR_EMBEDDINGS_ENGINE=flair). Verifies the registry file
- * and loads it before registerBackend. A mismatch or a missing models
- * directory throws here, which the caller logs and does not register.
+ * and loads the host platform prebuilt before registerBackend. A mismatch,
+ * an unsafe models directory, or a missing prebuilt throws here. The caller
+ * records an embeddings-only degrade and does not register.
  */
 async function registerFlairEmbeddings(): Promise<void> {
   const g = globalThis as { models?: unknown };
