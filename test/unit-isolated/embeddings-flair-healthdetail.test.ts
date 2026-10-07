@@ -2,8 +2,9 @@
  * HealthDetail warnings for the flair engine. Missing platform packages and
  * a fetch failure are different warnings (flair#2300).
  */
+import { mkdirSync, writeFileSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { tempDir } from "../helpers/temp-dir.ts";
 
@@ -20,8 +21,15 @@ mock.module("harper", () => {
   });
 });
 
-const { HealthDetail } = await import("../../resources/health.ts");
-const { resolveFlairAddonPath } = await import("../../resources/embeddings/engine.ts");
+const { HealthDetail, _setReadEmbeddingProvenanceForTests } = await import("../../resources/health.ts");
+const {
+  _resetFlairEmbeddingEngineForTests,
+  createFlairEmbeddingEngine,
+  resolveFlairAddonPath,
+} = await import("../../resources/embeddings/engine.ts");
+const { readEmbeddingProvenance } = await import("../../resources/embeddings/provenance.ts");
+const { getModelId } = await import("../../resources/embeddings-provider.ts");
+const { BUILTIN_EMBEDDING_MODEL } = await import("../../resources/embeddings/models.ts");
 const {
   _resetEmbeddingDegradeForTests,
   degradeForActivationFailure,
@@ -56,6 +64,8 @@ const savedGpu = process.env.FLAIR_EMBED_GPU_LAYERS;
 const savedGlobal = (globalThis as { models?: unknown }).models;
 
 afterEach(() => {
+  _setReadEmbeddingProvenanceForTests(null);
+  _resetFlairEmbeddingEngineForTests();
   _resetEmbeddingDegradeForTests();
   _resetEmbeddingsBackendRegistrationForTests();
   if (savedEngine === undefined) delete process.env.FLAIR_EMBEDDINGS_ENGINE;
@@ -172,4 +182,118 @@ describe("HealthDetail embedding degrade (flair#2300)", () => {
     expect(recorded?.message).not.toContain("embeddings did not start");
     expect(recorded?.message).not.toContain("did not load");
   }, 15_000);
+
+  test("a provenance miss after a successful embed does not claim keyword search", async () => {
+    process.env.FLAIR_EMBEDDINGS_ENGINE = "flair";
+    process.env.FLAIR_EMBED_GPU_LAYERS = "0";
+    _resetEmbeddingDegradeForTests();
+    setEmbeddingDegrade(null);
+    const root = tempDir("flair-provenance-after-write-");
+    const entry = join(root, "pkg", "dist", "index.js");
+    const addon = join(root, "pkg", "bins", "cpu", "llama-addon.node");
+    mkdirSync(dirname(entry), { recursive: true });
+    mkdirSync(dirname(addon), { recursive: true });
+    writeFileSync(entry, "");
+    writeFileSync(addon, "");
+    writeFileSync(join(root, "pkg", "package.json"), JSON.stringify({
+      name: "@node-llama-cpp/linux-x64",
+      version: "3.18.1",
+    }));
+    const modelPath = join(root, "model.gguf");
+    writeFileSync(modelPath, meanGguf());
+    const engine = createFlairEmbeddingEngine({
+      modelPath,
+      threads: 1,
+      gpuLayers: 0,
+      platform: "linux",
+      arch: "x64",
+      resolvePackage: () => entry,
+      verifyBeforeLoad: async () => {},
+      loadBinding: async () => fakeBinding(),
+    });
+    const { vectors } = await engine.embedMany(["a successfully embedded write"], { inputType: "document" });
+    const stamp = getModelId();
+    const row = {
+      content: "a successfully embedded write",
+      embedding: Array.from(vectors[0] ?? []),
+      embeddingModel: stamp,
+    };
+    expect(stamp.startsWith("flair:")).toBe(true);
+    expect(row.embedding.length).toBe(BUILTIN_EMBEDDING_MODEL.dims);
+    _setReadEmbeddingProvenanceForTests(() => readEmbeddingProvenance("linux", "x64", () => entry));
+    const stats = await detail().get();
+    const embedding = stats.embedding as {
+      degrade?: string;
+      provenance?: unknown;
+      provenanceUnavailable?: string;
+    };
+    expect(embedding.degrade).toBeUndefined();
+    expect(embedding.provenance).toBeUndefined();
+    expect(embedding.provenanceUnavailable).toContain("provenance is unavailable");
+    expect(embedding.provenanceUnavailable).toContain("registered embedding backend is unchanged");
+    expect(embedding.provenanceUnavailable).not.toContain("keyword search");
+    expect(embedding.provenanceUnavailable).not.toContain("did not load");
+    expect(embedding.provenanceUnavailable).not.toContain("embeddings did not start");
+    expect(warningsOf(stats).some((item) => item.message === embedding.provenanceUnavailable)).toBe(true);
+    expect(warningsOf(stats).every((item) => !item.message.includes("keyword search"))).toBe(true);
+    expect(row.embeddingModel).toBe(stamp);
+    expect(row.embedding.length).toBe(BUILTIN_EMBEDDING_MODEL.dims);
+  }, 15_000);
 });
+
+function u32(n: number): Buffer {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(n);
+  return b;
+}
+
+function u64(n: number): Buffer {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64LE(BigInt(n));
+  return b;
+}
+
+function ggufStr(s: string): Buffer {
+  return Buffer.concat([u64(Buffer.byteLength(s)), Buffer.from(s)]);
+}
+
+function meanGguf(): Buffer {
+  return Buffer.concat([
+    u32(0x46554747),
+    u32(3),
+    u64(0),
+    u64(2),
+    ggufStr("general.architecture"),
+    u32(8),
+    ggufStr("nomic-bert"),
+    ggufStr("nomic-bert.pooling_type"),
+    u32(4),
+    u32(1),
+  ]);
+}
+
+function fakeBinding() {
+  const dims = BUILTIN_EMBEDDING_MODEL.dims;
+  return {
+    async init() {},
+    loadBackends() {},
+    getGpuType: () => false as const,
+    AddonModel: class {
+      async init(): Promise<boolean> { return true; }
+      async dispose(): Promise<void> {}
+      tokenBos(): number { return 1; }
+      tokenEos(): number { return 2; }
+      tokenize(_text: string, _addBos: boolean): number[] { return [3]; }
+      getEmbeddingVectorSize(): number { return dims; }
+    },
+    AddonContext: class {
+      async init(): Promise<boolean> { return true; }
+      async dispose(): Promise<void> {}
+      disposeSequence(_seqId: number): void {}
+      initBatch(_size: number): void {}
+      addToBatch(): void {}
+      async decodeBatch(): Promise<void> {}
+      getEmbedding(): Float32Array { return new Float32Array(dims); }
+    },
+  };
+}

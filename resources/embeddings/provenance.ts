@@ -40,7 +40,7 @@ export function readEmbeddingProvenance(
     throw new Error(
       `[embeddings] prebuilt ${match.packageName} for platform ${hostLabel(platform, arch)} is not installed. ` +
         `Remedy: install the optional dependency ${match.packageName}@3.18.1. ` +
-        `Embeddings stay on keyword search. Refusing to record provenance. (${detail})`,
+        `Refusing to record provenance. (${detail})`,
     );
   }
   const pkgPath = findNamedPackageJson(entry, match.packageName);
@@ -95,6 +95,16 @@ export function versionFromPackageJson(text: string, pkgPath = "package.json"): 
     );
   }
   return version;
+}
+
+/**
+ * HealthDetail uses this when a provenance read fails and registration did
+ * not record a degrade. The backend stays registered. This is not keyword
+ * search and not an activation failure.
+ */
+export function provenanceUnavailableMessage(err: unknown): string {
+  const detail = err instanceof Error ? err.message : String(err);
+  return `[embeddings] embedding provenance is unavailable. The registered embedding backend is unchanged. ${detail}`;
 }
 
 function readLlamaCppBuild(packageDir: string): string {

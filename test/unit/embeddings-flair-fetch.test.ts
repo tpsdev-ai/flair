@@ -463,7 +463,9 @@ describe("embeddings fetch (S1 verified model file)", () => {
     expect(recorded.message).not.toContain("embeddings did not start");
   }, 10_000);
 
-  it("does not unlink a successor lock a child process installed during release", async () => {
+  // These three children replace the path before the final lstat. They do
+  // not cover a replacement between that lstat and unlinkSync.
+  it("leaves a child-process successor installed before the final release check", async () => {
     const dir = scratch();
     const bytes = Buffer.from("abcd");
     const entry = fixtureEntry(bytes);
@@ -477,7 +479,7 @@ describe("embeddings fetch (S1 verified model file)", () => {
     expect(await readFile(lock, "utf8")).toBe(successor);
   }, 10_000);
 
-  it("does not unlink a successor lock a child process installed during acquisition cleanup", async () => {
+  it("leaves a child-process successor installed before the final acquisition check", async () => {
     const dir = scratch();
     const bytes = Buffer.from("abcd");
     const entry = fixtureEntry(bytes);
@@ -500,7 +502,7 @@ describe("embeddings fetch (S1 verified model file)", () => {
     expect(await readFile(lock, "utf8")).toBe(successor);
   }, 10_000);
 
-  it("does not unlink a successor claim a child process installed during claim cleanup", async () => {
+  it("leaves a child-process successor installed before the final claim check", async () => {
     const dir = scratch();
     const bytes = Buffer.from("abcd");
     const entry = fixtureEntry(bytes);

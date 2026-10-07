@@ -18,9 +18,9 @@ import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
 import { embedGpuStatusNotice, withEmbedGpuHealth } from "./embed-gpu.js";
-import { degradeForActivationFailure, getEmbeddingDegrade } from "./embeddings/degrade.js";
+import { getEmbeddingDegrade } from "./embeddings/degrade.js";
 import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
-import { readEmbeddingProvenance } from "./embeddings/provenance.js";
+import { provenanceUnavailableMessage, readEmbeddingProvenance, type EmbeddingProvenance } from "./embeddings/provenance.js";
 import {
   classifyPeerLiveness,
   federationPeersAllDisconnectedWarning,
@@ -32,6 +32,14 @@ import { summarizeExpiredByAgent, expiredByAgentWarningLines, type NightlyDriver
 import { readAllInstanceRows } from "./Federation.js";
 
 const db = databases as any;
+
+type ReadProvenance = () => EmbeddingProvenance;
+let readProvenance: ReadProvenance = () => readEmbeddingProvenance();
+
+/** Test-only. Production reads the installed platform package. */
+export function _setReadEmbeddingProvenanceForTests(read: ReadProvenance | null): void {
+  readProvenance = read ?? (() => readEmbeddingProvenance());
+}
 
 const redactHome = (p: string): string => {
   const home = homedir();
@@ -220,11 +228,18 @@ export class HealthDetail extends Resource {
         const embedding: Record<string, unknown> = { ...embeddingBody.embedding };
         const recorded = getEmbeddingDegrade();
         try {
-          embedding.provenance = readEmbeddingProvenance();
+          embedding.provenance = readProvenance();
         } catch (err) {
-          const failure = recorded ?? degradeForActivationFailure(err);
-          embedding.degrade = failure.message;
-          warnings.push({ level: "warn", message: failure.message });
+          // Registration already succeeded when no degrade was recorded. A
+          // later unreadable provenance file must not say keyword search.
+          if (recorded) {
+            embedding.degrade = recorded.message;
+            warnings.push({ level: "warn", message: recorded.message });
+          } else {
+            const message = provenanceUnavailableMessage(err);
+            embedding.provenanceUnavailable = message;
+            warnings.push({ level: "warn", message });
+          }
         }
         if (recorded && embedding.degrade == null) {
           embedding.degrade = recorded.message;

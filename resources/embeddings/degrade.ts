@@ -61,11 +61,12 @@ function isProvenancePrebuiltMiss(err: unknown): boolean {
 }
 
 /**
- * Boot records this. A missing platform package is a prebuilt failure.
- * A fetch, digest, or models-directory failure is not — it must not say the
- * prebuilt did not load. Download rejections and models-directory mkdir,
- * chmod, and stat failures arrive as EmbeddingModelError (code unreadable),
- * so they take the model-file wording rather than "embeddings did not start".
+ * Boot records this when registration throws. A missing platform package is
+ * a prebuilt failure. A rejected download, or a models-directory mkdir,
+ * chmod, or stat failure, arrives as EmbeddingModelError (code unreadable)
+ * and takes the model-file wording. A provenance read that fails after a
+ * successful registration must not use this classifier: the backend is still
+ * active, and this wording says keyword search.
  */
 export function degradeForActivationFailure(err: unknown, platform = process.platform, arch = process.arch): EmbeddingDegrade {
   if (err instanceof EmbeddingModelError && err.code === "prebuilt") {

@@ -8,11 +8,12 @@
  *
  * One downloader holds `<file>.downloading` (exclusive create, owner token).
  * Others wait. Release, acquisition-error cleanup, and stale-claim cleanup
- * unlink a path only when a fresh lstat still shows the inode the caller
- * opened. A child that replaces that path during the await before the check
- * leaves the successor in place. That is the ownership the child-process
- * test proves: the inode check and the unlink are still two calls. A
- * heartbeat refreshes the owned inode while `reader.read()` is stalled. Bytes go to
+ * re-check the inode while the caller's fd is still open. A child that
+ * replaces the path during the await before that lstat leaves the successor
+ * in place. That is the limit the child-process test proves. lstatSync and
+ * unlinkSync are still two calls, so a replacement between them can remove
+ * the new file. A heartbeat refreshes the owned inode while `reader.read()`
+ * is stalled. Bytes go to
  * a unique temp in the models directory, are fsync'd, then renamed. The file
  * is verified by descriptor (O_NOFOLLOW, fstat regular file, size, SHA-256)
  * after rename. An existing mismatch is quarantined and fetched again, never
@@ -77,18 +78,23 @@ export interface EnsureModelOptions {
    */
   afterLockCreate?: (lockPath: string) => Promise<void>;
   /**
-   * Test seam: runs after the lock fd is closed and before acquisition-error
-   * cleanup unlinks. Cleanup then unlinks only the inode this process opened.
+   * Test seam: runs while the lock fd is still open, before the final
+   * lstat. A replacement during this await is left in place when its inode
+   * differs. A replacement between that lstat and unlinkSync can still
+   * remove the new file.
    */
   beforeAcquireCleanup?: (lockPath: string) => Promise<void>;
   /**
-   * Test seam: runs after release has confirmed ownership and before it
-   * unlinks. Release then unlinks only the inode this process opened.
+   * Test seam: runs while the lock fd is still open, after release has seen
+   * the owned inode and before the final lstat. Same limit as
+   * beforeAcquireCleanup.
    */
   beforeReleaseUnlink?: (lockPath: string) => Promise<void>;
   /**
-   * Test seam: runs after the claim fd is closed and before claim cleanup
-   * unlinks. Cleanup then unlinks only the inode this process opened.
+   * Test seam: runs while the claim fd is still open, before the final
+   * lstat. A replacement during this await is left in place when its inode
+   * differs. A replacement between that lstat and unlinkSync can still
+   * remove the new file.
    */
   beforeClaimCleanup?: (claimPath: string) => Promise<void>;
   statDir?: (path: string) => Promise<DirFacts>;
@@ -365,7 +371,11 @@ async function releaseLock(held: HeldLock, opts: EnsureModelOptions): Promise<vo
   }
 }
 
-/** Unlink `path` only when it still names `ino` on `dev`. A successor is left alone. */
+/**
+ * If lstat still shows `ino` on `dev`, unlink the path. A replacement that
+ * lands before this lstat is left in place. A replacement that lands after
+ * this lstat and before unlinkSync is removed with the path.
+ */
 function unlinkIfInode(path: string, ino: number, dev: number): void {
   let st: ReturnType<typeof lstatSync>;
   try {
@@ -481,8 +491,9 @@ async function reclaimStaleLock(
         owned = undefined;
       }
     }
-    // The claim fd stays open until after the inode check so a replacement
-    // cannot reuse the inode and be removed as if it were ours.
+    // The claim fd stays open through the lstat so a replacement during the
+    // await cannot reuse this inode. A replacement between lstatSync and
+    // unlinkSync can still remove the new file.
     try {
       if (opts.beforeClaimCleanup) await opts.beforeClaimCleanup(claimPath);
       if (owned) unlinkIfInode(claimPath, owned.ino, owned.dev);
