@@ -47,7 +47,7 @@ import { soulWriteSource } from "./soul-write-policy.js";
 import { recordMemoryDeletion, removeMemoryDeletionRecords } from "./memory-deletion-history.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
-import { loadPointerRows } from "./memory-host-source.js";
+import { storedPointerIds } from "./memory-host-source.js";
 
 function reply(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {
@@ -178,7 +178,7 @@ export class MemoryPurge extends Resource {
       }
     }
     const pointerLeft: string[] = [];
-    const pointers = await loadPointerRows(removedIds);
+    const pointers = await storedPointerIds(removedIds);
     if (pointers.size > 0) {
       await withOwnedTransaction(ctx, async (c) => {
         for (const id of removedIds) {
