@@ -354,7 +354,7 @@ export function resolveFlairAddonPath(
   const label = hostLabel(platform, arch);
   if (!match) {
     throw new EmbeddingModelError(
-      "engine",
+      "prebuilt",
       `[embeddings] platform ${label} has no supported prebuilt ` +
         `(supported: @node-llama-cpp/linux-x64, @node-llama-cpp/linux-arm64, @node-llama-cpp/mac-arm64-metal).`,
       "Run on a supported platform. Refusing to build llama.cpp from source. Embeddings stay on keyword search.",
@@ -366,7 +366,7 @@ export function resolveFlairAddonPath(
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new EmbeddingModelError(
-      "engine",
+      "prebuilt",
       `[embeddings] prebuilt ${match.packageName} for platform ${label} is not installed (${detail}).`,
       `Install the optional dependency ${match.packageName}. Refusing to build llama.cpp from source. Embeddings stay on keyword search.`,
     );
@@ -374,7 +374,7 @@ export function resolveFlairAddonPath(
   const addon = findAddonBinary(entry);
   if (!addon) {
     throw new EmbeddingModelError(
-      "engine",
+      "prebuilt",
       `[embeddings] ${match.packageName} for platform ${label} did not contain llama-addon.node.`,
       `Reinstall ${match.packageName}. Refusing to build llama.cpp from source.`,
     );
@@ -426,14 +426,14 @@ async function loadBinding(addonPath: string): Promise<NativeBinding> {
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new EmbeddingModelError(
-      "engine",
+      "prebuilt",
       `[embeddings] node-llama-cpp prebuilt did not load (${detail}).`,
       "Install the @node-llama-cpp prebuilt for this platform. Refusing to build llama.cpp from source.",
     );
   }
   if (!isNativeBinding(holder.exports)) {
     throw new EmbeddingModelError(
-      "engine",
+      "prebuilt",
       "[embeddings] node-llama-cpp prebuilt loaded without AddonModel/AddonContext.",
       "Reinstall the pinned platform prebuilt. Refusing to embed through a different decode path.",
     );

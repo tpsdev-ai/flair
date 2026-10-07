@@ -12,6 +12,7 @@ import {
   verifyExistingModelFile,
   type ModelDownloader,
 } from "./fetch.js";
+import { resolveFlairAddonPath } from "./engine.js";
 import { BUILTIN_EMBEDDING_MODEL } from "./models.js";
 
 export const FLAIR_BACKEND_LOGICAL_NAME = "default";
@@ -56,6 +57,10 @@ export interface ActivateFlairOptions {
   /** Test seam. Production follows redirects and writes the pinned file. */
   download?: ModelDownloader;
   load?: (args: { modelPath: string; threads: number; gpuLayers: number }) => Promise<EmbedManyEngine>;
+  /** Test seam. Production resolves the host platform package. */
+  platform?: string;
+  arch?: string;
+  resolvePackage?: (name: string) => string;
 }
 
 function isHarperModels(models: unknown): models is HarperModelsApi {
@@ -101,6 +106,10 @@ export function bindFlairBackend(models: HarperModelsApi, engine: EmbedManyEngin
 }
 
 export async function activateFlairBackend(opts: ActivateFlairOptions): Promise<EmbedManyEngine> {
+  // The platform package is resolved before any model fetch so a missing
+  // prebuilt is not reported as a download failure, and a download failure
+  // is not reported as a prebuilt that did not load.
+  resolveFlairAddonPath(opts.resolvePackage, opts.platform, opts.arch);
   const modelPath = opts.explicitModelPath
     ? await verifyExistingModelFile(BUILTIN_EMBEDDING_MODEL, opts.explicitModelPath, { download: opts.download })
     : await ensureBuiltinModelFile(opts.modelsDir, { download: opts.download });

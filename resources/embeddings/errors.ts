@@ -13,7 +13,8 @@ export type EmbeddingModelErrorCode =
   | "bad-registry-path"
   | "pooling"
   | "dims"
-  | "engine";
+  | "engine"
+  | "prebuilt";
 
 export class EmbeddingModelError extends Error {
   readonly code: EmbeddingModelErrorCode;

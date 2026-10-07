@@ -18,7 +18,7 @@ import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
 import { embedGpuStatusNotice, withEmbedGpuHealth } from "./embed-gpu.js";
-import { degradeForPrebuiltFailure, getEmbeddingDegrade } from "./embeddings/degrade.js";
+import { degradeForActivationFailure, getEmbeddingDegrade } from "./embeddings/degrade.js";
 import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
 import { readEmbeddingProvenance } from "./embeddings/provenance.js";
 import {
@@ -222,7 +222,7 @@ export class HealthDetail extends Resource {
         try {
           embedding.provenance = readEmbeddingProvenance();
         } catch (err) {
-          const failure = recorded ?? degradeForPrebuiltFailure(err);
+          const failure = recorded ?? degradeForActivationFailure(err);
           embedding.degrade = failure.message;
           warnings.push({ level: "warn", message: failure.message });
         }

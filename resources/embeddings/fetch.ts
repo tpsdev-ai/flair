@@ -6,8 +6,10 @@
  * URL-encoded segments). The production downloader follows redirects. No
  * Hugging Face token is attached.
  *
- * One downloader holds `<file>.downloading` (exclusive create). Others wait.
- * A lock whose mtime is older than the stale window is reclaimed. Bytes go to
+ * One downloader holds `<file>.downloading` (exclusive create, owner token).
+ * Others wait. Reclaim and release touch only the lock inode the caller
+ * still owns, so a stale reclaim cannot unlink a successor's lock. A
+ * heartbeat refreshes that inode while `reader.read()` is stalled. Bytes go to
  * a unique temp in the models directory, are fsync'd, then renamed. The file
  * is verified by descriptor (O_NOFOLLOW, fstat regular file, size, SHA-256)
  * after rename. An existing mismatch is quarantined and fetched again, never
@@ -15,8 +17,8 @@
  * a foreign owner, or group/other write bits refuse the directory.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, stat, unlink, utimes } from "node:fs/promises";
+import { constants, futimesSync, lstatSync, readSync, unlinkSync } from "node:fs";
+import { chmod, lstat, mkdir, open, rename, stat, unlink } from "node:fs/promises";
 import { EmbeddingModelError } from "./errors.js";
 import {
   assertResolvedModelPath,
@@ -61,6 +63,11 @@ export interface EnsureModelOptions {
   now?: () => number;
   /** Test seam: runs after rename and before the post-rename verify. */
   afterRename?: (dest: string) => Promise<void>;
+  /**
+   * Test seam: runs after a stale lock is claimed and before it is removed.
+   * The reclaim re-checks the inode and mtime after this returns.
+   */
+  beforeReclaimUnlink?: (lockPath: string) => Promise<void>;
   statDir?: (path: string) => Promise<DirFacts>;
   expectedUid?: number;
 }
@@ -141,7 +148,8 @@ export async function ensureModelFile(
     refuseProbe(dest, existing);
   }
 
-  await withDownloadLock(dest, modelsDir, entry.file, opts, async () => {
+  await withDownloadLock(dest, modelsDir, entry.file, opts, async (assertOwned) => {
+    await assertOwned();
     const again = await probe(dest);
     if (again.state === "file") {
       try {
@@ -158,10 +166,11 @@ export async function ensureModelFile(
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       handle = await open(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
-      await writeDownload(handle, url, entry, download, opts, dest + ".downloading");
+      await writeDownload(handle, url, entry, download, assertOwned);
       await handle.sync();
       await handle.close();
       handle = undefined;
+      await assertOwned();
       await rename(tmp, dest);
       if (opts.afterRename) await opts.afterRename(dest);
     } catch (err) {
@@ -221,12 +230,93 @@ export async function prepareModelsDir(modelsDir: string, opts: EnsureModelOptio
   }
 }
 
+interface HeldLock {
+  token: string;
+  fd: Awaited<ReturnType<typeof open>>;
+  ino: number;
+  path: string;
+}
+
+function stillOwns(held: HeldLock): boolean {
+  try {
+    const st = lstatSync(held.path);
+    if (!st.isFile() || st.ino !== held.ino) return false;
+    const buf = Buffer.alloc(held.token.length);
+    const n = readSync(held.fd.fd, buf, 0, buf.length, 0);
+    return n === held.token.length && buf.toString() === held.token;
+  } catch {
+    return false;
+  }
+}
+
+function assertStillOwns(held: HeldLock): void {
+  if (stillOwns(held)) return;
+  throw new EmbeddingModelError(
+    "unreadable",
+    `[embeddings] lost the download lock ${held.path} while fetching.`,
+    "Retry the download. Refusing to write the model without the lock.",
+  );
+}
+
+function heartbeatEvery(staleMs: number): number {
+  return Math.max(5, Math.min(1_000, Math.floor(staleMs / 3)));
+}
+
+function startHeartbeat(held: HeldLock, staleMs: number, now: () => number): () => void {
+  const beat = (): void => {
+    if (!stillOwns(held)) return;
+    const stamp = new Date(now());
+    try {
+      futimesSync(held.fd.fd, stamp, stamp);
+    } catch {
+      // The next ownership check fails the download.
+    }
+  };
+  beat();
+  const timer = setInterval(beat, heartbeatEvery(staleMs));
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
+async function tryAcquireLock(lockPath: string): Promise<HeldLock | null> {
+  let fd: Awaited<ReturnType<typeof open>>;
+  try {
+    fd = await open(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  } catch (err) {
+    if (errorCode(err) === "EEXIST") return null;
+    throw new EmbeddingModelError(
+      "unreadable",
+      `[embeddings] could not create download lock ${lockPath} (${errorCode(err) ?? "unknown"}).`,
+      "Fix permissions on the models directory. Refusing to write elsewhere.",
+    );
+  }
+  const token = randomBytes(16).toString("hex");
+  try {
+    await fd.writeFile(token);
+    await fd.sync();
+    const st = await fd.stat();
+    return { token, fd, ino: st.ino, path: lockPath };
+  } catch (err) {
+    await fd.close().catch(() => undefined);
+    await unlink(lockPath).catch(() => undefined);
+    throw err;
+  }
+}
+
+async function releaseLock(held: HeldLock): Promise<void> {
+  try {
+    if (stillOwns(held)) unlinkSync(held.path);
+  } finally {
+    await held.fd.close().catch(() => undefined);
+  }
+}
+
 async function withDownloadLock(
   dest: string,
   modelsDir: string,
   file: string,
   opts: EnsureModelOptions,
-  run: () => Promise<void>,
+  run: (assertOwned: () => Promise<void>) => Promise<void>,
 ): Promise<void> {
   const lockPath = assertResolvedModelPath(modelsDir, `${file}.downloading`);
   const staleMs = opts.staleMs ?? LOCK_STALE_MS;
@@ -234,33 +324,35 @@ async function withDownloadLock(
   const now = opts.now ?? Date.now;
   const deadline = now() + waitMs;
   while (true) {
-    await reclaimStaleLock(lockPath, staleMs, now);
-    let lock: Awaited<ReturnType<typeof open>> | undefined;
-    try {
-      lock = await open(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    } catch (err) {
-      if (errorCode(err) !== "EEXIST") {
-        throw new EmbeddingModelError(
-          "unreadable",
-          `[embeddings] could not create download lock ${lockPath} (${errorCode(err) ?? "unknown"}).`,
-          "Fix permissions on the models directory. Refusing to write elsewhere.",
-        );
-      }
+    await reclaimStaleLock(lockPath, staleMs, now, opts);
+    const held = await tryAcquireLock(lockPath);
+    if (!held) {
       const outcome = await waitForDownload(dest, lockPath, deadline, opts);
       if (outcome === "complete") return;
       continue;
     }
+    const stopHeartbeat = startHeartbeat(held, staleMs, now);
+    const assertOwned = async (): Promise<void> => {
+      assertStillOwns(held);
+    };
     try {
-      await lock.close();
-      await run();
+      await assertOwned();
+      await run(assertOwned);
       return;
     } finally {
-      await unlink(lockPath).catch(() => undefined);
+      stopHeartbeat();
+      await releaseLock(held);
     }
   }
 }
 
-async function reclaimStaleLock(lockPath: string, staleMs: number, now: () => number): Promise<void> {
+async function reclaimStaleLock(
+  lockPath: string,
+  staleMs: number,
+  now: () => number,
+  opts: EnsureModelOptions,
+): Promise<void> {
+  let observed: { ino: number } | undefined;
   try {
     const st = await lstat(lockPath);
     if (st.isSymbolicLink()) {
@@ -270,10 +362,61 @@ async function reclaimStaleLock(lockPath: string, staleMs: number, now: () => nu
         "Remove the symlink. Refusing to follow it.",
       );
     }
-    if (now() - st.mtimeMs > staleMs) await unlink(lockPath);
+    if (now() - st.mtimeMs <= staleMs) return;
+    observed = { ino: st.ino };
   } catch (err) {
     if (err instanceof EmbeddingModelError) throw err;
     if (errorCode(err) === "ENOENT") return;
+    return;
+  }
+  const claimPath = `${lockPath}.claim-${observed.ino}`;
+  let claim: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    claim = await open(claimPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  } catch (err) {
+    if (errorCode(err) === "EEXIST") {
+      await dropStaleClaim(claimPath, staleMs, now);
+      return;
+    }
+    if (errorCode(err) === "ENOENT") return;
+    return;
+  }
+  try {
+    const again = await lstat(lockPath);
+    if (again.isSymbolicLink() || again.ino !== observed.ino || now() - again.mtimeMs <= staleMs) return;
+    if (opts.beforeReclaimUnlink) await opts.beforeReclaimUnlink(lockPath);
+    let pathSt: { ino: number; mtimeMs: number; isSymbolicLink: () => boolean };
+    try {
+      pathSt = lstatSync(lockPath);
+    } catch (err) {
+      if (errorCode(err) === "ENOENT") return;
+      throw err;
+    }
+    if (pathSt.isSymbolicLink()) {
+      throw new EmbeddingModelError(
+        "symlink",
+        `[embeddings] download lock ${lockPath} is a symlink.`,
+        "Remove the symlink. Refusing to follow it.",
+      );
+    }
+    if (pathSt.ino !== observed.ino || now() - pathSt.mtimeMs <= staleMs) return;
+    unlinkSync(lockPath);
+  } catch (err) {
+    if (err instanceof EmbeddingModelError) throw err;
+    if (errorCode(err) === "ENOENT") return;
+  } finally {
+    await claim.close().catch(() => undefined);
+    await unlink(claimPath).catch(() => undefined);
+  }
+}
+
+async function dropStaleClaim(claimPath: string, staleMs: number, now: () => number): Promise<void> {
+  try {
+    const st = await lstat(claimPath);
+    if (st.isSymbolicLink() || now() - st.mtimeMs <= staleMs) return;
+    unlinkSync(claimPath);
+  } catch {
+    // The owner of a live claim keeps it. A missing claim is already gone.
   }
 }
 
@@ -317,10 +460,11 @@ async function writeDownload(
   url: string,
   entry: EmbeddingModelEntry,
   download: ModelDownloader,
-  opts: EnsureModelOptions,
-  lockPath: string,
+  assertOwned: () => Promise<void>,
 ): Promise<void> {
+  await assertOwned();
   const response = await download(url);
+  await assertOwned();
   if (!response.ok) {
     throw new EmbeddingModelError(
       "truncated",
@@ -338,23 +482,16 @@ async function writeDownload(
   const hash = createHash("sha256");
   const reader = response.body.getReader();
   let total = 0;
-  const now = opts.now ?? Date.now;
-  let lastTouch = 0;
   try {
     while (true) {
       const step = await reader.read();
+      await assertOwned();
       if (step.done) break;
       const value = step.value;
       if (value == null || value.byteLength === 0) continue;
       hash.update(value);
       await writeAll(handle, value);
       total += value.byteLength;
-      const t = now();
-      if (t - lastTouch > 1000) {
-        const stamp = new Date(t);
-        await utimes(lockPath, stamp, stamp).catch(() => undefined);
-        lastTouch = t;
-      }
     }
   } catch (err) {
     if (err instanceof EmbeddingModelError) throw err;

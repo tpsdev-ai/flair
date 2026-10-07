@@ -158,7 +158,7 @@ describe("flair addon resolution", () => {
     }
     expect(caught).toBeInstanceOf(EmbeddingModelError);
     if (!(caught instanceof EmbeddingModelError)) return;
-    expect(caught.code).toBe("engine");
+    expect(caught.code).toBe("prebuilt");
     expect(caught.message).toContain("darwin/arm64");
     expect(caught.message).toContain("@node-llama-cpp/mac-arm64-metal");
     expect(caught.remedy).toContain("Refusing to build llama.cpp from source");

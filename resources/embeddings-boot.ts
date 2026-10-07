@@ -95,7 +95,7 @@
  */
 import { availableParallelism } from "node:os";
 import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
-import { setEmbeddingDegrade, degradeForPrebuiltFailure } from "./embeddings/degrade.js";
+import { setEmbeddingDegrade, degradeForActivationFailure } from "./embeddings/degrade.js";
 import { activateFlairBackend, requireHarperModels } from "./embeddings/register.js";
 import { resolveModelsDir } from "./embeddings-provider.js";
 import {
@@ -230,7 +230,7 @@ export async function registerEmbeddingsBackend(): Promise<void> {
         await registerFlairEmbeddings();
         setEmbeddingDegrade(null);
       } catch (err) {
-        setEmbeddingDegrade(degradeForPrebuiltFailure(err));
+        setEmbeddingDegrade(degradeForActivationFailure(err));
         throw err;
       }
       return;

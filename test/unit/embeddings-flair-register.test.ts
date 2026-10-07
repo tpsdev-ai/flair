@@ -1,9 +1,11 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { chmod, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { EmbeddingModelError } from "../../resources/embeddings/errors.ts";
+import { degradeForActivationFailure, getEmbeddingDegrade, _resetEmbeddingDegradeForTests } from "../../resources/embeddings/degrade.ts";
+import { SUPPORTED_PREBUILTS } from "../../resources/embeddings/platforms.ts";
 import { BUILTIN_EMBEDDING_MODEL } from "../../resources/embeddings/models.ts";
 import {
   activateFlairBackend,
@@ -90,7 +92,71 @@ describe("flair backend registration", () => {
     else process.env.FLAIR_EMBED_GPU_LAYERS = savedGpu;
     (globalThis as { models?: unknown }).models = savedGlobal;
     _resetEmbeddingsBackendRegistrationForTests();
+    _resetEmbeddingDegradeForTests();
   });
+
+  it("resolves each supported platform package before fetching the model", async () => {
+    for (const prebuilt of SUPPORTED_PREBUILTS) {
+      const dir = tempDir("flair-embed-prebuilt-first-");
+      let fetched = false;
+      const err = await activateFlairBackend({
+        modelsDir: dir,
+        models: fakeModels(),
+        threads: 1,
+        gpuLayers: 0,
+        platform: prebuilt.platform,
+        arch: prebuilt.arch,
+        resolvePackage: () => {
+          throw new Error("cannot find module");
+        },
+        download: async () => {
+          fetched = true;
+          return { ok: false, status: 500, statusText: "no", body: null };
+        },
+        load: async () => engine,
+      }).then(() => null, (e: unknown) => e);
+      expect(fetched).toBe(false);
+      expect(err).toBeInstanceOf(EmbeddingModelError);
+      if (!(err instanceof EmbeddingModelError)) continue;
+      expect(err.code).toBe("prebuilt");
+      expect(err.message).toContain(prebuilt.packageName);
+      const recorded = degradeForActivationFailure(err, prebuilt.platform, prebuilt.arch);
+      expect(recorded.message).toContain("did not load");
+      expect(recorded.message).toContain(prebuilt.packageName);
+    }
+  }, 10_000);
+
+  it("reports a fetch failure without calling it a prebuilt that did not load", async () => {
+    const dir = tempDir("flair-embed-fetch-fail-");
+    const entry = join(dir, "linux-x64", "dist", "index.js");
+    const addon = join(dir, "linux-x64", "bins", "cpu", "llama-addon.node");
+    mkdirSync(dirname(entry), { recursive: true });
+    mkdirSync(dirname(addon), { recursive: true });
+    writeFileSync(entry, "");
+    writeFileSync(addon, "");
+    let loaded = false;
+    const err = await activateFlairBackend({
+      modelsDir: dir,
+      models: fakeModels(),
+      threads: 1,
+      gpuLayers: 0,
+      platform: "linux",
+      arch: "x64",
+      resolvePackage: () => entry,
+      download: async () => ({ ok: false, status: 503, statusText: "unavailable", body: null }),
+      load: async () => {
+        loaded = true;
+        return engine;
+      },
+    }).then(() => null, (e: unknown) => e);
+    expect(loaded).toBe(false);
+    expect(err).toBeInstanceOf(EmbeddingModelError);
+    if (!(err instanceof EmbeddingModelError)) return;
+    expect(err.code).not.toBe("prebuilt");
+    const recorded = degradeForActivationFailure(err, "linux", "x64");
+    expect(recorded.message).toContain("could not be verified or fetched");
+    expect(recorded.message).not.toContain("did not load");
+  }, 10_000);
 
   it("binds an in-tree backend via defineBackend then registerBackend", async () => {
     const models = fakeModels();
@@ -199,6 +265,24 @@ describe("flair backend registration", () => {
       loaded.clearRouting();
     }
   }, 15_000);
+
+  it("boot records a models-directory failure without labeling it a prebuilt load failure", async () => {
+    process.env.FLAIR_EMBEDDINGS_ENGINE = "flair";
+    process.env.FLAIR_EMBED_GPU_LAYERS = "0";
+    const dir = tempDir("flair-embed-boot-open-");
+    await chmod(dir, 0o777);
+    process.env.FLAIR_MODELS_DIR = dir;
+    const models = fakeModels();
+    (globalThis as { models?: unknown }).models = models;
+    _resetEmbeddingsBackendRegistrationForTests();
+    _resetEmbeddingDegradeForTests();
+    await registerEmbeddingsBackend();
+    const recorded = getEmbeddingDegrade();
+    expect(recorded).not.toBeNull();
+    expect(recorded?.message).toContain("could not be verified or fetched");
+    expect(recorded?.message).not.toContain("did not load");
+    expect(models.calls).toEqual([]);
+  }, 10_000);
 
   it("boot refuses an unknown engine and registers nothing", async () => {
     process.env.FLAIR_EMBEDDINGS_ENGINE = "nope";

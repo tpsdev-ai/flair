@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, readdir, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -234,6 +234,88 @@ describe("embeddings fetch (S1 verified model file)", () => {
       ensureModelFile(entry, dir, { download }),
       ensureModelFile(entry, dir, { download }),
     ]);
+    expect(a).toBe(b);
+    expect(calls).toBe(1);
+  }, 10_000);
+
+  it("does not let two stale-lock reclaimers both download", async () => {
+    const dir = scratch();
+    const bytes = Buffer.from("abcd");
+    const entry = fixtureEntry(bytes);
+    const lock = join(dir, `${entry.file}.downloading`);
+    await writeFile(lock, "stale-owner");
+    const old = new Date(Date.now() - 120_000);
+    await utimes(lock, old, old);
+    let calls = 0;
+    const download: ModelDownloader = async () => {
+      calls += 1;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+      return { ok: true, status: 200, statusText: "OK", body: bodyFrom(bytes) };
+    };
+    const [a, b] = await Promise.all([
+      ensureModelFile(entry, dir, { download, staleMs: 1_000 }),
+      ensureModelFile(entry, dir, { download, staleMs: 1_000 }),
+    ]);
+    expect(a).toBe(b);
+    expect(calls).toBe(1);
+  }, 10_000);
+
+  it("does not unlink a successor lock that replaced the stale one", async () => {
+    const dir = scratch();
+    const bytes = Buffer.from("abcd");
+    const entry = fixtureEntry(bytes);
+    const lock = join(dir, `${entry.file}.downloading`);
+    await writeFile(lock, "stale-owner");
+    const old = new Date(Date.now() - 120_000);
+    await utimes(lock, old, old);
+    const successor = "successor-token-0123456789abcdef";
+    let calls = 0;
+    const err = await ensureModelFile(entry, dir, {
+      staleMs: 1_000,
+      waitTimeoutMs: 400,
+      pollMs: 20,
+      beforeReclaimUnlink: async (lockPath) => {
+        await unlink(lockPath);
+        await writeFile(lockPath, successor);
+      },
+      download: async () => {
+        calls += 1;
+        return { ok: true, status: 200, statusText: "OK", body: bodyFrom(bytes) };
+      },
+    }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(EmbeddingModelError);
+    if (err instanceof EmbeddingModelError) expect(err.message).toMatch(/timed out/);
+    expect(calls).toBe(0);
+    expect(await readFile(lock, "utf8")).toBe(successor);
+  }, 10_000);
+
+  it("heartbeats a stalled read so a waiter does not start a second download", async () => {
+    const dir = scratch();
+    const bytes = Buffer.from("abcd");
+    const entry = fixtureEntry(bytes);
+    let calls = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    const download: ModelDownloader = async () => {
+      const mine = ++calls;
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (mine === 1) await gate;
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+      return { ok: true, status: 200, statusText: "OK", body };
+    };
+    const first = ensureModelFile(entry, dir, { download, staleMs: 300, pollMs: 20 });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+    const second = ensureModelFile(entry, dir, { download, staleMs: 300, pollMs: 20 });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+    expect(calls).toBe(1);
+    release();
+    const [a, b] = await Promise.all([first, second]);
     expect(a).toBe(b);
     expect(calls).toBe(1);
   }, 10_000);
