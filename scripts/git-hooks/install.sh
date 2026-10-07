@@ -14,5 +14,5 @@ chmod +x "$HOOKS_DIR/pre-commit"
 
 echo "✓ installed flair pre-commit hook → $HOOKS_DIR/pre-commit"
 echo
-echo "Runs: workspace-deps + dep-ages (bake-time) + impl-term-leaks"
+echo "Runs: workspace-deps + exact-overrides + dep-ages (bake-time) + impl-term-leaks"
 echo "Bypass with --no-verify (rarely warranted; CI will catch anyway)."
