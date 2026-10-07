@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { classifyKeysDir, applyKeyPrune, makeReadInstanceIds } from "../../src/commands/keys.ts";
 import { serializeSeedOwner, SEED_OWNER_SUFFIX, seedOwnerPath, readSeedOwner, readSeedOwnerAt, recordSeedOwner } from "../../src/keystore.ts";
@@ -195,8 +195,13 @@ describe("keystore seed-owner sidecar (flair#2200)", () => {
     recordSeedOwner(id, "/stores/xyz");
     const read = readSeedOwner(id);
     expect(read).toEqual({ state: "ok", instanceId: id, dataDir: "/stores/xyz" });
-    expect(statSync(seedOwnerPath(id)).mode & 0o777).toBe(0o600);
-    expect(readFileSync(seedOwnerPath(id), "utf-8")).toContain("/stores/xyz");
+    const fd = openSync(seedOwnerPath(id), "r");
+    try {
+      expect(fstatSync(fd).mode & 0o777).toBe(0o600);
+      expect(readFileSync(fd, "utf-8")).toContain("/stores/xyz");
+    } finally {
+      closeSync(fd);
+    }
   });
 
   test("readSeedOwnerAt reports absent, malformed and unreadable distinctly", () => {
@@ -321,9 +326,7 @@ describe("keys prune — sidecar move ordering", () => {
   });
 });
 
-// ─── a non-regular owner sidecar blocks the move (flair#2286) ────────────────
-
-describe("keys prune — the sidecar path must be a regular file (flair#2286)", () => {
+describe("keys prune — sidecar file type checks (flair#2286)", () => {
   const NAME = "agent-stale.key";
 
   /** A temp keys dir holding one stale key and a sidecar path of `kind`. */
@@ -366,6 +369,83 @@ describe("keys prune — the sidecar path must be a regular file (flair#2286)", 
       // The sidecar path still holds a non-regular file (read nothing — a FIFO
       // read would block).
       expect(lstatSync(sidecar).isFile()).toBe(false);
+    });
+  }
+
+  for (const replacement of ["directory", "symlink"] as const) {
+    test(`a ${replacement} moved from a changed sidecar path is restored before the key moves`, () => {
+      const { dir, sidecar } = sidecarFixture("regular");
+      let first = true;
+      const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+        if (first) {
+          first = false;
+          renameSync(sidecar, join(dir, "previous-owner.json"));
+          if (replacement === "directory") mkdirSync(sidecar);
+          else symlinkSync(join(dir, "missing.json"), sidecar);
+        }
+        renameSync(from, to);
+      });
+      expect(outcome.moved).toEqual([]);
+      expect(outcome.skipped).toHaveLength(1);
+      expect(outcome.skipped[0].reason).toContain(replacement === "directory" ? "directory" : "symbolic link");
+      expect(existsSync(join(dir, NAME))).toBe(true);
+      expect(lstatSync(sidecar).isFile()).toBe(false);
+      expect(existsSync(join(dir, ".pruned", "2026-10-03", NAME))).toBe(false);
+      expect(() => lstatSync(join(dir, ".pruned", "2026-10-03", `${NAME}${SEED_OWNER_SUFFIX}`))).toThrow();
+    });
+  }
+
+  for (const kind of ["directory", "regular"] as const) {
+    test(`a ${kind} sidecar appearing before its move is checked at the destination`, () => {
+      const dir = tempDir("flair-sidecar-appearing-");
+      const sidecar = join(dir, `${NAME}${SEED_OWNER_SUFFIX}`);
+      writeFileSync(join(dir, NAME), "fixture");
+      let first = true;
+      const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+        if (first) {
+          first = false;
+          if (kind === "directory") mkdirSync(sidecar);
+          else writeFileSync(sidecar, "metadata");
+        }
+        renameSync(from, to);
+      });
+      if (kind === "directory") {
+        expect(outcome.moved).toEqual([]);
+        expect(outcome.skipped).toHaveLength(1);
+        expect(existsSync(join(dir, NAME))).toBe(true);
+        expect(lstatSync(sidecar).isDirectory()).toBe(true);
+      } else {
+        expect(outcome.skipped).toEqual([]);
+        expect(outcome.moved).toHaveLength(1);
+        expect(readFileSync(join(dir, ".pruned", "2026-10-03", `${NAME}${SEED_OWNER_SUFFIX}`), "utf8")).toBe("metadata");
+        expect(existsSync(sidecar)).toBe(false);
+      }
+    });
+
+    test(`a ${kind} sidecar appearing after a missing-sidecar move leaves the key active`, () => {
+      const dir = tempDir("flair-sidecar-recheck-");
+      const sidecar = join(dir, `${NAME}${SEED_OWNER_SUFFIX}`);
+      writeFileSync(join(dir, NAME), "fixture");
+      const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+        if (String(from) === sidecar) {
+          try {
+            renameSync(from, to);
+          } catch (err) {
+            if (kind === "directory") mkdirSync(sidecar);
+            else writeFileSync(sidecar, "metadata");
+            throw err;
+          }
+        } else {
+          if (kind === "directory") mkdirSync(sidecar);
+          else writeFileSync(sidecar, "metadata");
+          renameSync(from, to);
+        }
+      });
+      expect(outcome.moved).toEqual([]);
+      expect(outcome.skipped).toHaveLength(1);
+      expect(existsSync(join(dir, NAME))).toBe(true);
+      expect(existsSync(sidecar)).toBe(true);
+      expect(existsSync(join(dir, ".pruned", "2026-10-03", NAME))).toBe(false);
     });
   }
 

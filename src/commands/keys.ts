@@ -189,9 +189,7 @@ export async function classifyKeysDir(
   return { aborted: false, entries, orphanRead };
 }
 
-/** What is at a key's ownership-sidecar path, classified WITHOUT following a
- *  symlink (lstat). flair#2286: prune moves a sidecar only when the path is a
- *  regular file; a directory, symlink, FIFO or socket there is refused. */
+/** Sidecar path type without following symlinks (lstat). */
 type SidecarPathKind =
   | { kind: "absent" }
   | { kind: "regular" }
@@ -239,8 +237,8 @@ export interface KeysPruneOutcome {
 }
 
 /** Archive prunable agent keys; node-shaped files without .pub stay in place.
- *  A key whose ownership-sidecar path holds a non-regular file stays in place
- *  with a reason (flair#2286). */
+ *  Source path changes after pre-move/absence checks and archive path changes
+ *  after verification can still occur before the key move. */
 export function applyKeyPrune(
   keysDir: string,
   entries: KeysPruneEntry[],
@@ -256,8 +254,7 @@ export function applyKeyPrune(
   if (prunable.length === 0) return { moved, skipped };
 
   const destDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
-  // Created on the first move, so a run where every candidate is skipped leaves
-  // no empty .pruned/<date>/ behind.
+  // Created before the first attempted move.
   let existing: Set<string> | undefined;
   const archiveNames = (): Set<string> => {
     if (!existing) {
@@ -287,17 +284,46 @@ export function applyKeyPrune(
     names.add(destName);
     const from = join(keysDir, e.name);
     const to = join(destDir, destName);
-    let toOwner: string | undefined;
-    if (ownerKind.kind === "regular") {
-      const destOwnerName = resolveCollisionSafeName(names, `${destName}${SEED_OWNER_SUFFIX}`);
-      names.add(destOwnerName);
-      toOwner = join(destDir, destOwnerName);
+    const destOwnerName = resolveCollisionSafeName(names, `${destName}${SEED_OWNER_SUFFIX}`);
+    const toOwner = join(destDir, destOwnerName);
+    let ownerMoved = false;
+    try {
       move(fromOwner, toOwner);
+      ownerMoved = true;
+      names.add(destOwnerName);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      if (sidecarPathKind(fromOwner).kind !== "absent") {
+        skipped.push({
+          name: e.name,
+          ownerPath: fromOwner,
+          reason: `${fromOwner} changed during the move attempt; the key is left in place`,
+        });
+        continue;
+      }
+    }
+    if (ownerMoved) {
+      const movedKind = sidecarPathKind(toOwner);
+      if (movedKind.kind !== "regular") {
+        move(toOwner, fromOwner);
+        names.delete(destOwnerName);
+        const why = movedKind.kind === "refused"
+          ? `is a ${movedKind.type}, not a regular file`
+          : movedKind.kind === "unreadable"
+            ? `could not be checked (${movedKind.error})`
+            : "was absent at its destination";
+        skipped.push({
+          name: e.name,
+          ownerPath: fromOwner,
+          reason: `${fromOwner} ${why}; the sidecar was restored and the key is left in place`,
+        });
+        continue;
+      }
     }
     try {
       move(from, to);
     } catch (err) {
-      if (toOwner) move(toOwner, fromOwner);
+      if (ownerMoved) move(toOwner, fromOwner);
       throw err;
     }
     moved.push({ name: e.name, movedTo: to });
