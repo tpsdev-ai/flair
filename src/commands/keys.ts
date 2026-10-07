@@ -237,8 +237,9 @@ export interface KeysPruneOutcome {
 }
 
 /** Archive prunable agent keys; node-shaped files without .pub stay in place.
- *  Source path changes after pre-move/absence checks and archive path changes
- *  after verification can still occur before the key move. */
+ *  The post-move check tests the archive path's type, not object identity.
+ *  The source path can change after pre-move/absence checks; the archive path
+ *  can change between move and check or after the check, before the key moves. */
 export function applyKeyPrune(
   keysDir: string,
   entries: KeysPruneEntry[],
@@ -488,7 +489,7 @@ export function register(program: Command): void {
           `  ${render.wrap(render.c.dim, `${prunable.length} prunable (${stale.length} stale, ${invalid.length} invalid, ${orphanSeeds.length} orphan instance seed(s)), ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored`)}`,
         );
         if (prunable.length > 0) {
-          console.log(`  ${render.wrap(render.c.dim, "Run with --apply to move prunable keys to")} ${join(keysDir, PRUNED_DIR_NAME, pruneDateStamp())}`);
+          console.log(`  ${render.wrap(render.c.dim, "Run with --apply to move prunable keys (keys with refused sidecars stay in place) to")} ${join(keysDir, PRUNED_DIR_NAME, pruneDateStamp())}`);
         }
         console.log("");
         return;

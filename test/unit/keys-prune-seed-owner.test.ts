@@ -449,6 +449,42 @@ describe("keys prune — sidecar file type checks (flair#2286)", () => {
     });
   }
 
+  for (const failure of ["type refusal", "key move failure"] as const) {
+    test(`rollback failure after ${failure} throws and leaves the key in place`, () => {
+      const { dir, sidecar } = sidecarFixture("regular");
+      const key = join(dir, NAME);
+      const archivedKey = join(dir, ".pruned", "2026-10-03", NAME);
+      const archivedSidecar = `${archivedKey}${SEED_OWNER_SUFFIX}`;
+      const rollbackError = Object.assign(new Error("sidecar rollback denied"), { code: "EACCES" });
+      const calls: Array<[string, string]> = [];
+      let thrown: unknown;
+      try {
+        applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+          calls.push([String(from), String(to)]);
+          if (String(from) === archivedSidecar) throw rollbackError;
+          if (String(from) === key) throw Object.assign(new Error("key move denied"), { code: "EACCES" });
+          if (failure === "type refusal") {
+            renameSync(sidecar, join(dir, "previous-owner.json"));
+            mkdirSync(sidecar);
+          }
+          renameSync(from, to);
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBe(rollbackError);
+      const expectedCalls: Array<[string, string]> = [[sidecar, archivedSidecar]];
+      if (failure === "key move failure") expectedCalls.push([key, archivedKey]);
+      expectedCalls.push([archivedSidecar, sidecar]);
+      expect(calls).toEqual(expectedCalls);
+      expect(readFileSync(key, "utf8")).toBe("fixture");
+      expect(existsSync(archivedKey)).toBe(false);
+      expect(existsSync(sidecar)).toBe(false);
+      if (failure === "type refusal") expect(lstatSync(archivedSidecar).isDirectory()).toBe(true);
+      else expect(readFileSync(archivedSidecar, "utf8")).toBe("metadata");
+    });
+  }
+
   test("a regular sidecar still moves with its key", () => {
     const { dir } = sidecarFixture("regular");
     const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03");
