@@ -55,8 +55,8 @@ afterEach(() => {
   else process.env.FLAIR_EPHEMERAL_TTL_HOURS = ORIGINAL_TTL;
 });
 
-describe("FeedMemories.post stamps the ephemeral tier expiry (flair#2274)", () => {
-  test("a fresh ephemeral feed write carries the shared rule's expiry", async () => {
+describe("FeedMemories.post ephemeral expiry (flair#2274)", () => {
+  test("a fresh ephemeral feed write without expiry gets the shared rule's default", async () => {
     const expected = sharedRuleExpiryMs();
     const result: any = await feed().post({ agentId: "alice", content: "feed journal entry, ephemeral" , durability: "ephemeral" });
     expect(result).not.toBeInstanceOf(Response);
@@ -75,16 +75,16 @@ describe("FeedMemories.post stamps the ephemeral tier expiry (flair#2274)", () =
     expect(stored.expiresAt).toBeUndefined();
   });
 
-  test("a caller-supplied expiresAt is preserved", async () => {
+  test("a canonical caller-supplied UTC expiry is preserved", async () => {
     const supplied = new Date(Date.now() + 1_234_567).toISOString();
     const result: any = await feed().post({ agentId: "alice", content: "explicitly dated feed row", durability: "ephemeral", expiresAt: supplied });
     expect(result).not.toBeInstanceOf(Response);
     expect(memoryStore.get(result.id).expiresAt).toBe(supplied);
   });
 
-  test("an update of an ephemeral row carries the stored expiry forward (no re-stamp)", async () => {
+  test("an update carries a canonical stored ephemeral expiry without re-stamping it", async () => {
     const stored = new Date(Date.now() + 9_000_000).toISOString();
-    memoryStore.set("eph-keep", { id: "eph-keep", agentId: "alice", content: "original", durability: "ephemeral", visibility: "private", expiresAt: stored });
+    memoryStore.set("eph-keep", { id: "eph-keep", agentId: "alice", content: "original", durability: "ephemeral", visibility: "private", createdAt: new Date().toISOString(), expiresAt: stored });
     const result: any = await feed().post({ id: "eph-keep", agentId: "alice", content: "edited journal entry", durability: "ephemeral" });
     expect(result).not.toBeInstanceOf(Response);
     expect(memoryStore.get("eph-keep").expiresAt).toBe(stored);
@@ -96,4 +96,33 @@ test("feed refuses malformed ephemeral expiry before storing the row", async () 
   expect(result).toBeInstanceOf(Response);
   expect((result as Response).status).toBe(400);
   expect(memoryStore.has("bad-expiry")).toBe(false);
+});
+
+for (const [expiresAt, canonical] of [
+  ["2026-10-08T00:00:00Z", "2026-10-08T00:00:00.000Z"],
+  ["2026-10-08T00:00:00.1Z", "2026-10-08T00:00:00.100Z"],
+]) {
+  test(`feed stores ${expiresAt} in canonical form`, async () => {
+    const result: any = await feed().post({ agentId: "alice", content: "UTC feed note", durability: "ephemeral", expiresAt });
+    expect(result).not.toBeInstanceOf(Response);
+    expect(memoryStore.get(result.id).expiresAt).toBe(canonical);
+  });
+}
+
+test("feed refuses an offset expiry with invalid_expiry", async () => {
+  const result = await feed().post({ id: "offset-expiry", agentId: "alice", content: "offset feed note", durability: "ephemeral", expiresAt: "2026-10-08T00:00:00+00:00" });
+  expect(result).toBeInstanceOf(Response);
+  expect((result as Response).status).toBe(400);
+  expect((await (result as Response).json()).error).toBe("invalid_expiry");
+  expect(memoryStore.has("offset-expiry")).toBe(false);
+});
+
+test("feed refuses malformed stored expiry without replacing the row", async () => {
+  const stored = { id: "bad-stored", agentId: "alice", content: "original", createdAt: new Date().toISOString(), durability: "ephemeral", expiresAt: "not-a-date" };
+  memoryStore.set(stored.id, stored);
+  const result = await feed().post({ id: stored.id, agentId: "alice", content: "changed", durability: "ephemeral" });
+  expect(result).toBeInstanceOf(Response);
+  expect((result as Response).status).toBe(400);
+  expect((await (result as Response).json()).error).toBe("invalid_expiry");
+  expect(memoryStore.get(stored.id)).toEqual(stored);
 });

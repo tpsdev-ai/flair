@@ -32,11 +32,59 @@ describe("stampEphemeralExpiry — the shared tier expiry rule", () => {
     expect(ttlMs).toBeLessThanOrEqual(3600_000 + 60_000);
   });
 
-  it("preserves a valid explicit expiry", () => {
+  it("preserves a canonical explicit UTC expiry", () => {
     const supplied = new Date(Date.now() + 123_456_789).toISOString();
     const row: Record<string, any> = { durability: "ephemeral", expiresAt: supplied };
     stampEphemeralExpiry(row);
     expect(row.expiresAt).toBe(supplied);
+  });
+
+  it("normalizes explicit UTC timestamps before storing", () => {
+    for (const [expiresAt, canonical] of [
+      ["2026-10-08T00:00:00Z", "2026-10-08T00:00:00.000Z"],
+      ["2026-10-08T00:00:00.1Z", "2026-10-08T00:00:00.100Z"],
+      ["2026-10-08T00:00:00.123456Z", "2026-10-08T00:00:00.123Z"],
+      ["2026-10-08T00:00Z", "2026-10-08T00:00:00.000Z"],
+      ["2026-10-08T24:00:00Z", "2026-10-09T00:00:00.000Z"],
+    ]) {
+      for (const incoming of [false, true]) {
+        const row: Record<string, any> = { durability: "ephemeral", expiresAt };
+        expect(stampEphemeralExpiry(row, null, { incoming })).toBeNull();
+        expect(row.expiresAt).toBe(canonical);
+      }
+    }
+  });
+
+  it("normalizes expanded UTC years", () => {
+    for (const [expiresAt, canonical] of [
+      ["+002026-10-08T00:00:00Z", "2026-10-08T00:00:00.000Z"],
+      ["-000001-10-08T00:00:00Z", "-000001-10-08T00:00:00.000Z"],
+    ]) {
+      const row: Record<string, any> = { durability: "ephemeral", expiresAt };
+      expect(stampEphemeralExpiry(row)).toBeNull();
+      expect(row.expiresAt).toBe(canonical);
+    }
+  });
+
+  it("refuses offsets, date-only values and malformed explicit expiry", () => {
+    for (const expiresAt of ["2026-10-08T00:00:00+00:00", "2026-10-08T01:00:00+01:00", "2026-10-08", "not-a-date", "2026-02-30T00:00:00Z", null]) {
+      const row: Record<string, any> = { durability: "ephemeral", expiresAt };
+      expect(stampEphemeralExpiry(row)).toBe("expiresAt must be a valid UTC ISO date");
+    }
+  });
+
+  it("normalizes a carried UTC expiry on a same-tier update", () => {
+    const row: Record<string, any> = { content: "updated" };
+    expect(stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: "2026-10-08T00:00:00Z" })).toBeNull();
+    expect(row.expiresAt).toBe("2026-10-08T00:00:00.000Z");
+  });
+
+  it("refuses malformed stored expiry without carrying it", () => {
+    for (const expiresAt of ["not-a-date", "2026-10-08T00:00:00+00:00", "2026-10-08", "2026-02-30T00:00:00Z", 123]) {
+      const row: Record<string, any> = { content: "updated" };
+      expect(stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt })).toBe("expiresAt must be a valid UTC ISO date");
+      expect(row.expiresAt).toBeUndefined();
+    }
   });
 
   it("leaves a non-ephemeral row with no expiry (no over-fire)", () => {
@@ -57,7 +105,7 @@ describe("stampEphemeralExpiry — the shared tier expiry rule", () => {
     expect(other.expiresAt).toBeUndefined();
   });
 
-  it("carries a pre-existing expiry forward instead of re-stamping it", () => {
+  it("carries a canonical stored expiry without re-stamping it", () => {
     const stored = new Date(Date.now() + 9_000_000).toISOString();
     const row: Record<string, any> = { durability: "ephemeral" };
     stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: stored });
@@ -66,7 +114,7 @@ describe("stampEphemeralExpiry — the shared tier expiry rule", () => {
 });
 
 describe("expiry updates", () => {
-  it("carries stored durability and expiry into a partial PUT", () => {
+  it("carries stored durability and canonical expiry into a partial PUT", () => {
     const expiresAt = new Date(Date.now() + 900000).toISOString();
     const row: Record<string, any> = { content: "updated" };
     stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt });
@@ -114,7 +162,7 @@ describe("expiry updates", () => {
     expect(stampEphemeralExpiry(past, null, { incoming: true })).toBeTruthy();
   });
 
-  it("keeps a valid incoming date within the receiver's bound", () => {
+  it("keeps a canonical incoming date within the receiver's bound", () => {
     const expiresAt = new Date(Date.now() + 86400000).toISOString();
     const row: Record<string, any> = { durability: "ephemeral", expiresAt };
     stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z" }, { incoming: true });

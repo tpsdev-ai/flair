@@ -139,12 +139,12 @@ describe("flair#1965 r3 — AgentSeed fails closed on a failed existing-Agent lo
 });
 
 describe("AgentSeed ephemeral expiry", () => {
-  test("stores the configured TTL through the seed writer", async () => {
+  test("ignores supplied expiry and stores the configured TTL through the seed writer", async () => {
     const prior = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
     process.env.FLAIR_EPHEMERAL_TTL_HOURS = "6";
     try {
       const before = Date.now();
-      const result: any = await seed().post({ agentId: "expiry-seed", starterMemories: [{ content: "starter note", durability: "ephemeral" }] });
+      const result: any = await seed().post({ agentId: "expiry-seed", starterMemories: [{ content: "starter note", durability: "ephemeral", expiresAt: "not-a-date" }] });
       expect(result.memories).toHaveLength(1);
       const stored = memStore.get(result.memories[0].id);
       expect(stored.durability).toBe("ephemeral");

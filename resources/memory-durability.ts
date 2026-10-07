@@ -58,11 +58,9 @@ const MS_PER_HOUR = 3600_000;
 
 /**
  * Tier expiry for Memory POST/PUT/PATCH, feed ingest, AgentSeed and federation.
- * Omitted durability carries the stored tier. Leaving ephemeral clears an
- * inherited expiry; entering it stamps a default. Local same-tier updates keep the
- * stored expiry unless explicitly changed. Valid explicit UTC dates are kept.
- * Feed ingest defaults omitted durability to standard before calling this rule.
- * AgentSeed accepts no explicit expiry. Raw re-writers do not call this rule.
+ * Ephemeral explicit and carried UTC timestamps are validated and normalized.
+ * AgentSeed ignores supplied expiry. Feed and federation call this rule before
+ * their raw table writes.
  */
 export function stampEphemeralExpiry(
   content: Record<string, any>,
@@ -78,19 +76,26 @@ export function stampEphemeralExpiry(
     return null;
   }
   const now = Date.now();
-  if (explicitExpiry && (options.incoming || content.expiresAt !== null)) {
-    const value = content.expiresAt;
-    const parsed = typeof value === "string" ? Date.parse(value) : NaN;
-    if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+  const carriedExpiry = !options.incoming && !explicitExpiry &&
+    preExisting?.durability === "ephemeral" && preExisting.expiresAt != null;
+  if (explicitExpiry || carriedExpiry) {
+    const value = explicitExpiry ? content.expiresAt : preExisting?.expiresAt;
+    const timestamp = typeof value === "string"
+      ? /^(\d{4}|[+-]\d{6})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z$/.exec(value)
+      : null;
+    const parsed = timestamp ? Date.parse(value) : NaN;
+    const datePart = timestamp ? value.slice(0, value.indexOf("T")) : "";
+    const calendar = Date.parse(`${datePart}T00:00:00Z`);
+    const date = new Date(calendar);
+    if (!Number.isFinite(parsed) || !Number.isFinite(calendar) ||
+        date.getUTCFullYear() !== Number(timestamp?.[1]) ||
+        date.getUTCMonth() + 1 !== Number(timestamp?.[2]) || date.getUTCDate() !== Number(timestamp?.[3])) {
       return "expiresAt must be a valid UTC ISO date";
     }
     if (options.incoming && (parsed < 0 || parsed > now + 365 * 24 * MS_PER_HOUR)) {
       return "incoming expiresAt must be between the Unix epoch and receiver time plus 365 days";
     }
-    return null;
-  }
-  if (!options.incoming && !explicitExpiry && preExisting?.durability === "ephemeral" && preExisting.expiresAt != null) {
-    content.expiresAt = preExisting.expiresAt;
+    content.expiresAt = new Date(parsed).toISOString();
     return null;
   }
   const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
