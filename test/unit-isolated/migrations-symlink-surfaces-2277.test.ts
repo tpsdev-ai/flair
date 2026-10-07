@@ -137,3 +137,39 @@ test("a usable fallback runs without a symlink refusal on the boot and health su
   expect(JSON.stringify(response.migrations)).not.toContain("symbolic link");
   expect(existsSync(join(target, ".migrations"))).toBe(true);
 });
+
+test("non-admin HealthDetail and doctor qualify a runner state-file short circuit without paths", async () => {
+  process.env.FLAIR_MIGRATION_DATA_DIR = target;
+  process.env.ROOTPATH = target;
+  const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
+  const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
+  const { defaultStatePath, writeMigrationStateEntry } = await import("../../resources/migrations/state.ts");
+  const statePath = defaultStatePath(target);
+  const id = "recorded-fixture";
+  const version = "fixture-version";
+  writeMigrationStateEntry(statePath, id, { completedAtVersion: version, lastOutcome: "success" });
+  const detect = mock(async () => true);
+  const registry = new MigrationRegistry().register({
+    id, riskClass: "derived-only", affectsTables: ["Memory"], detect,
+    countPending: async () => 1,
+    run: async () => ({ processed: 0, touchedIds: [] }),
+  });
+  await runMigrationCycle({ registry, dataDir: target, runningVersion: version, getTable: () => emptyTable });
+  expect(detect).not.toHaveBeenCalled();
+  const admin = await detail(true);
+  expect(admin.migrations.migrations.find((m: any) => m.id === id).reason).toContain(statePath);
+  const reader = await detail(false);
+  const migration = reader.migrations.migrations.find((m: any) => m.id === id);
+  expect(migration.state).toBe("completed");
+  expect(migration.reason).toBe("recorded complete; not re-verified this boot");
+  expect(JSON.stringify(reader)).not.toContain(target);
+  expect(JSON.stringify(reader)).not.toContain(statePath);
+  spyOn(globalThis, "fetch").mockResolvedValue(Response.json(reader));
+  const lines = spyOn(console, "log").mockImplementation(() => {});
+  expect(await fetchAndRenderMigrations("http://fixture/HealthDetail", { Authorization: "fixture" }, "  ")).toBe(0);
+  const rendered = lines.mock.calls.flat().map(String).join("\n");
+  expect(rendered).toContain(`${id}: completed`);
+  expect(rendered).toContain("recorded complete; not re-verified this boot");
+  expect(rendered).not.toContain(target);
+  expect(rendered).not.toContain(statePath);
+});

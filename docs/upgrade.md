@@ -114,9 +114,9 @@ install is refused rather than overwritten.
 ### A symlinked data directory is refused at boot
 
 The migration probe refuses a symlinked data directory or `.migrations` child.
-When no candidate is usable, the boot log, `/HealthDetail` and `flair doctor`
-report the failure; full paths are available only in the operator log and admin
-`/HealthDetail` responses.
+When no candidate is usable, the boot log and `/HealthDetail` report the failure;
+`flair doctor` does so with a verified agent and a reachable instance. Full paths
+appear in the operator log, admin `/HealthDetail` responses and admin `flair doctor` output.
 
 > **Heads-up:** for a link to a directory, stop Flair, remove the link, move its
 > target to the configured path and start Flair. For a linked **data directory**

@@ -71,10 +71,7 @@ export async function fetchAndRenderMigrations(healthDetailUrl: string | URL, he
     }
     for (const m of migBlock.migrations) {
       if (m.state === "completed") {
-        // flair#812: a `reason` on a COMPLETED migration means the
-        // runner short-circuited it from the (hand-editable) state file
-        // rather than verifying the corpus this boot. Print it, so an
-        // unverified claim is never rendered as a verified one.
+        // Print the state-file short-circuit qualification (flair#812).
         const note = m.reason ? ` ${render.wrap(render.c.dim, `(${m.reason})`)}` : "";
         console.log(`${indent}${render.icons.ok} ${m.id}: completed${note}`);
       } else if (m.state === "halted" || m.state === "failed") {

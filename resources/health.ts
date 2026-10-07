@@ -794,7 +794,12 @@ export class HealthDetail extends Resource {
       const snapshot = isAdmin ? rawSnapshot : {
         ...rawSnapshot,
         lastCycleError: redactReason(rawSnapshot.lastCycleError),
-        migrations: rawSnapshot.migrations.map((m) => ({ ...m, reason: redactReason(m.reason) })),
+        migrations: rawSnapshot.migrations.map((m) => ({
+          ...m,
+          reason: m.state === "completed" && m.reason
+            ? "recorded complete; not re-verified this boot"
+            : redactReason(m.reason),
+        })),
       };
       stats.migrations = {
         cyclePhase: snapshot.cyclePhase,
