@@ -580,10 +580,6 @@ program
     // ROOTPATH / HARPER_SET_CONFIG, messages) takes this resolved value.
     const dataDir: string = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
 
-    // flair#2270: stage the MCP OAuth redirect variable when this install was
-    // enabled by an older `flair mcp enable` that predates it. Idempotent — a
-    // fresh install (MCP off, or no issuer) is a no-op — and it never prints
-    // the value.
     try {
       const migration = planRedirectMigration({
         env: process.env as Record<string, string | undefined>,

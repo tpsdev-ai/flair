@@ -8,8 +8,8 @@
  */
 import { Command } from "commander";
 import { makeReadInstanceIds } from "./keys.js";
-import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, envKeyNames, readEnvValue } from "../component-env.js";
-import { describeMcpRedirectFinding, mcpOAuthEnabledIn } from "../lib/mcp-oauth-env.js";
+import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
+import { readTargetMcpRedirectFinding } from "../lib/mcp-oauth-env.js";
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
@@ -840,25 +840,16 @@ program
         if (finding.isIssue) issues++;
       }
 
-      // 3e. flair#2270 — the MCP OAuth redirect variable.
-      //
-      // The shipped config references `${OAUTH_GITHUB_REDIRECT_URI}`, and an
-      // install enabled by an older `flair mcp enable` never staged it. Report
-      // the missing variable by name with the one-step remedy; doctor reads it
-      // from the process environment and the component `.env` (names only —
-      // never a value).
-      const mcpRedirectFinding = describeMcpRedirectFinding({
-        mcpEnabled:
-          mcpOAuthEnabledIn(process.env as Record<string, string | undefined>) ||
-          mcpOAuthEnabledIn({ FLAIR_MCP_OAUTH: readEnvValue(componentEnvText, "FLAIR_MCP_OAUTH") ?? undefined }),
-        presentVarNames: [...envKeyNames(componentEnvText), ...Object.keys(process.env)],
-        advertisedIssuer,
-      });
+      const mcpRedirectFinding = await readTargetMcpRedirectFinding(() =>
+        api("GET", "/HealthDetail", undefined, { baseUrl, keysDir: defaultKeysDir(), agent: opts.agent }),
+      );
       if (mcpRedirectFinding) {
-        console.log(`  ${render.icons.error} ${mcpRedirectFinding.message}`);
+        console.log(`  ${mcpRedirectFinding.isIssue ? render.icons.error : render.icons.warn} ${mcpRedirectFinding.message}`);
         if (mcpRedirectFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${mcpRedirectFinding.fixHint}`);
-        issues++;
+        if (mcpRedirectFinding.isIssue) issues++;
       }
+    } else {
+      console.log(`  ${render.icons.warn} MCP OAuth redirect: cannot verify target configuration`);
     }
 
     // 4. Embeddings check — REAL semantic round-trip (only if Harper is responding).

@@ -1,206 +1,162 @@
-/**
- * flair#2270 — the IdP redirect-URI variable: derive, migrate, degrade.
- *
- * Unit coverage for src/lib/mcp-oauth-env.ts. The behavioural, real-Harper side
- * of the same change lives in
- * test/integration-heavy/mcp-oauth-redirect-upgrade-2270.test.ts.
- *
- * Nothing here asserts a VALUE of a secret-shaped variable — only names,
- * booleans and the redirect itself (a public origin).
- */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, chmodSync, statSync, readdirSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  idpEnvNames,
-  isUnresolvedEnvValue,
-  mcpOAuthEnabledIn,
-  redirectUriForIssuer,
-  guardMcpOAuthEnv,
-  planRedirectMigration,
-  describeMcpRedirectFinding,
-  renderRedirectMigration,
+  idpEnvNames, isUnresolvedEnvValue, redirectUriForIssuer, validateRedirectIssuer,
+  guardMcpOAuthEnv, planRedirectMigration, describeMcpRedirectFinding,
+  readMcpProviderReadiness, readTargetMcpRedirectFinding, renderRedirectMigration,
 } from "../../src/lib/mcp-oauth-env.ts";
 
-const REDIRECT = idpEnvNames().redirectUri; // OAUTH_GITHUB_REDIRECT_URI
-
+const REDIRECT = idpEnvNames().redirectUri;
+const configured = { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://flair.example.com", OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s" };
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "flair-2270-unit-"));
-  writeFileSync(join(dir, "config.yaml"), "name: flair\n", "utf-8");
+  writeFileSync(join(dir, "config.yaml"), "name: flair\n");
 });
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
-});
+afterEach(() => rmSync(dir, { recursive: true, force: true }));
+const envPath = () => join(dir, ".env");
+const migrate = (env: Record<string, string | undefined> = configured) => planRedirectMigration({ configPath: join(dir, "config.yaml"), env });
 
-function envPath(): string {
-  return join(dir, ".env");
-}
-function envText(): string {
-  return readFileSync(envPath(), "utf-8");
-}
-
-describe("redirectUriForIssuer / isUnresolvedEnvValue", () => {
-  test("derives origin + /oauth, dropping any path or trailing slash", () => {
-    expect(redirectUriForIssuer("https://flair.example.com")).toBe("https://flair.example.com/oauth");
-    expect(redirectUriForIssuer("https://flair.example.com/")).toBe("https://flair.example.com/oauth");
-    expect(redirectUriForIssuer("https://flair.example.com:8443/whatever")).toBe("https://flair.example.com:8443/oauth");
-    expect(redirectUriForIssuer("http://127.0.0.1:9926")).toBe("http://127.0.0.1:9926/oauth");
+describe("redirect issuer", () => {
+  test.each(["https://flair.example.com", "https://flair.example.com/", "https://flair.example.com:8443", "http://127.0.0.1:9926", "http://[::1]:9926", "http://localhost:9926"])("accepts origin %s", issuer => {
+    expect(redirectUriForIssuer(issuer)).toBe(`${new URL(issuer).origin}/oauth`);
   });
-
-  test("refuses a non-HTTP(S) or non-absolute issuer rather than inventing a value", () => {
-    expect(redirectUriForIssuer("ftp://x")).toBeNull();
-    expect(redirectUriForIssuer("not a url")).toBeNull();
-    expect(redirectUriForIssuer("")).toBeNull();
-    expect(redirectUriForIssuer(null)).toBeNull();
-    expect(redirectUriForIssuer(undefined)).toBeNull();
+  test.each([
+    ["https://x\\path", "origin-has-path"], ["https://x\\", "origin-has-path"],
+    ["https://x/path", "origin-has-path"], ["https://x/path/..", "origin-has-path"],
+    ["https://user:pass@x", "origin-has-userinfo"], ["http://public.example", "origin-requires-https"],
+    ["https://x?q=1", "origin-has-query"], ["https://x#fragment", "origin-has-fragment"],
+    ["ftp://x", "origin-requires-https"], ["not a url", "invalid-origin"],
+  ])("refuses %s", (issuer, reason) => {
+    expect(validateRedirectIssuer(issuer)).toEqual({ redirect: null, reason });
+    const result = migrate({ ...configured, FLAIR_MCP_ISSUER: issuer });
+    expect(result.action).toBe("refused");
+    expect(renderRedirectMigration(result)).toContain(reason);
+    expect(existsSync(envPath())).toBe(false);
   });
-
-  test("blank and whole-token placeholders read as missing; real values do not", () => {
-    expect(isUnresolvedEnvValue(undefined)).toBe(true);
-    expect(isUnresolvedEnvValue("")).toBe(true);
-    expect(isUnresolvedEnvValue("   ")).toBe(true);
-    expect(isUnresolvedEnvValue("${OAUTH_GITHUB_REDIRECT_URI}")).toBe(true);
-    expect(isUnresolvedEnvValue("https://flair.example.com/oauth")).toBe(false);
-  });
-
-  test("mcpOAuthEnabledIn mirrors flair's strict reader", () => {
-    expect(mcpOAuthEnabledIn({ FLAIR_MCP_OAUTH: "true" })).toBe(true);
-    expect(mcpOAuthEnabledIn({ FLAIR_MCP_OAUTH: "1" })).toBe(true);
-    expect(mcpOAuthEnabledIn({ FLAIR_MCP_OAUTH: "maybe" })).toBe(false);
-    expect(mcpOAuthEnabledIn({})).toBe(false);
+  test.each([undefined, "", "   ", "${OAUTH_GITHUB_REDIRECT_URI}"])("missing value %s", value => {
+    expect(isUnresolvedEnvValue(value)).toBe(true);
   });
 });
 
-describe("guardMcpOAuthEnv — the degraded-start decision", () => {
-  test("no-op when MCP is off", () => {
-    const env = { OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s" };
-    expect(guardMcpOAuthEnv(env).degraded).toBe(false);
-    expect(env.OAUTH_GITHUB_CLIENT_ID).toBe("c");
-  });
-
-  test("no-op when the redirect is set", () => {
-    const env = { FLAIR_MCP_OAUTH: "true", OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s", [REDIRECT]: "https://x/oauth" };
-    expect(guardMcpOAuthEnv(env).degraded).toBe(false);
-    expect(env.OAUTH_GITHUB_CLIENT_SECRET).toBe("s");
-  });
-
-  test("no-op when no credentials are staged (the provider is already unconfigured)", () => {
-    const env = { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://x" };
-    expect(guardMcpOAuthEnv(env).degraded).toBe(false);
-  });
-
-  test("degrades and neutralizes the provider when credentials are staged without a redirect", () => {
-    const env = { FLAIR_MCP_OAUTH: "true", OAUTH_GITHUB_CLIENT_ID: "CREDVAL", OAUTH_GITHUB_CLIENT_SECRET: "CREDVAL" };
+describe("provider guard", () => {
+  test.each(["true", "false", undefined])("missing redirect with MCP flag %s", flag => {
+    const env = { ...configured, FLAIR_MCP_OAUTH: flag };
     const decision = guardMcpOAuthEnv(env);
     expect(decision.degraded).toBe(true);
     expect(decision.reason).toContain(REDIRECT);
-    expect(decision.neutralizedVars).toEqual(["OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET"]);
-    // The credential variables are gone, so @harperfast/oauth skips the
-    // provider instead of throwing and taking the instance down.
     expect(env.OAUTH_GITHUB_CLIENT_ID).toBeUndefined();
     expect(env.OAUTH_GITHUB_CLIENT_SECRET).toBeUndefined();
-    // Never surfaces a value.
-    expect(JSON.stringify(decision)).not.toContain("CREDVAL");
   });
-
-  test("a placeholder-valued redirect is treated as missing", () => {
-    const env = { FLAIR_MCP_OAUTH: "true", OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s", [REDIRECT]: "${" + REDIRECT + "}" };
-    expect(guardMcpOAuthEnv(env).degraded).toBe(true);
+  test("preserves a configured redirect", () => {
+    const env = { ...configured, [REDIRECT]: "https://kept.example/oauth" };
+    expect(guardMcpOAuthEnv(env).degraded).toBe(false);
+    expect(env.OAUTH_GITHUB_CLIENT_SECRET).toBe("s");
   });
-});
-
-describe("planRedirectMigration — the upgrade path", () => {
-  test("not-enabled when MCP is off and nothing was advertised", () => {
-    const r = planRedirectMigration({ configPath: join(dir, "config.yaml"), env: { OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s" } });
-    expect(r.action).toBe("not-enabled");
-    expect(existsSync(envPath())).toBe(false);
-  });
-
-  test("already-set leaves an existing value verbatim", () => {
-    writeFileSync(envPath(), `${REDIRECT}=https://kept.example.com/oauth\n`, { mode: 0o600 });
-    const r = planRedirectMigration({
-      configPath: join(dir, "config.yaml"),
-      env: { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://derived.example.com", OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s" },
-    });
-    expect(r.action).toBe("already-set");
-    expect(envText()).toContain("https://kept.example.com/oauth");
-  });
-
-  test("stages the redirect derived from the issuer, and never returns the value", () => {
-    const r = planRedirectMigration({
-      configPath: join(dir, "config.yaml"),
-      env: { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://flair.example.com", OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s" },
-    });
-    expect(r.action).toBe("staged");
-    expect(r.wrote).toBe(true);
-    expect(envText()).toContain(`${REDIRECT}=https://flair.example.com/oauth`);
-    // The result object carries names/paths only.
-    expect(JSON.stringify(r)).not.toContain("flair.example.com");
-  });
-
-  test("no-issuer does not write (an unknown issuer is never guessed)", () => {
-    const r = planRedirectMigration({
-      configPath: join(dir, "config.yaml"),
-      env: { FLAIR_MCP_OAUTH: "true", OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s" },
-    });
-    expect(r.action).toBe("no-issuer");
-    expect(existsSync(envPath())).toBe(false);
-  });
-
-  test("no-credentials does not stage a redirect for a provider that is not configured", () => {
-    const r = planRedirectMigration({
-      configPath: join(dir, "config.yaml"),
-      env: { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://flair.example.com" },
-    });
-    expect(r.action).toBe("no-credentials");
-    expect(existsSync(envPath())).toBe(false);
-  });
-
-  test("an advertised issuer drives the migration even when the CLI env carries no MCP flag", () => {
-    const r = planRedirectMigration({
-      configPath: join(dir, "config.yaml"),
-      env: {},
-      advertisedIssuer: "https://flair.example.com",
-    });
-    expect(r.action).toBe("staged");
-    expect(envText()).toContain(`${REDIRECT}=https://flair.example.com/oauth`);
-  });
-
-  test("renderRedirectMigration names the variable, never the value", () => {
-    const r = planRedirectMigration({
-      configPath: join(dir, "config.yaml"),
-      env: { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://flair.example.com", OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s" },
-    });
-    const line = renderRedirectMigration(r);
-    expect(line).toContain(REDIRECT);
-    expect(line).not.toContain("flair.example.com");
+  test("an incomplete credential pair stays unconfigured", () => {
+    expect(guardMcpOAuthEnv({ OAUTH_GITHUB_CLIENT_ID: "c" }).degraded).toBe(false);
   });
 });
 
-describe("describeMcpRedirectFinding — flair doctor", () => {
-  test("no finding when MCP is off", () => {
-    expect(describeMcpRedirectFinding({ mcpEnabled: false, presentVarNames: ["OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET"], advertisedIssuer: "https://x" })).toBeNull();
+describe("redirect migration files", () => {
+  test("stages a redirect from local configuration", () => {
+    const result = migrate();
+    expect(result.action).toBe("staged");
+    expect(readFileSync(envPath(), "utf8")).toBe(`${REDIRECT}=https://flair.example.com/oauth\n`);
+    expect(statSync(envPath()).mode & 0o777).toBe(0o600);
+    expect(JSON.stringify(result)).not.toContain("flair.example.com");
   });
-
-  test("no finding when the redirect is present", () => {
-    expect(describeMcpRedirectFinding({ mcpEnabled: true, presentVarNames: [REDIRECT, "OAUTH_GITHUB_CLIENT_ID"], advertisedIssuer: "https://x" })).toBeNull();
+  test("reads local dotenv issuer and credentials", () => {
+    writeFileSync(envPath(), Object.entries(configured).map(([k, v]) => `${k}="${v}" # local\n`).join(""), { mode: 0o640 });
+    expect(migrate({}).action).toBe("staged");
+    expect(statSync(envPath()).mode & 0o777).toBe(0o640);
+    expect(readdirSync(dir).sort()).toEqual([".env", "config.yaml"]);
   });
-
-  test("no finding when no credentials are staged", () => {
-    expect(describeMcpRedirectFinding({ mcpEnabled: true, presentVarNames: ["FLAIR_MCP_OAUTH"], advertisedIssuer: "https://x" })).toBeNull();
+  test("process issuer wins over dotenv; public URL does not supply the issuer", () => {
+    writeFileSync(envPath(), "FLAIR_MCP_ISSUER=https://file.example\nFLAIR_PUBLIC_URL=https://public.example\n");
+    expect(migrate({ ...configured, FLAIR_PUBLIC_URL: "https://other.example" }).action).toBe("staged");
+    expect(readFileSync(envPath(), "utf8")).toContain(`${REDIRECT}=https://flair.example.com/oauth`);
+    rmSync(envPath());
+    expect(migrate({ ...configured, FLAIR_MCP_ISSUER: undefined, FLAIR_PUBLIC_URL: "https://public.example" }).action).toBe("no-issuer");
   });
+  test("requires enablement and both credentials", () => {
+    expect(migrate({}).action).toBe("not-enabled");
+    expect(migrate({ ...configured, FLAIR_MCP_OAUTH: "false" }).action).toBe("not-enabled");
+    expect(migrate({ ...configured, OAUTH_GITHUB_CLIENT_SECRET: undefined }).action).toBe("no-credentials");
+    expect(migrate({ ...configured, OAUTH_GITHUB_CLIENT_ID: "${CLIENT}" }).action).toBe("no-credentials");
+    expect(existsSync(envPath())).toBe(false);
+  });
+  test.each(["", "${OAUTH_GITHUB_REDIRECT_URI}"])("replaces missing dotenv redirect %s", value => {
+    writeFileSync(envPath(), `${REDIRECT}=${value}\n`);
+    expect(migrate().action).toBe("staged");
+  });
+  test("preserves the operator redirect and inode", () => {
+    const text = `${REDIRECT}='https://kept.example/oauth' # operator\n`;
+    writeFileSync(envPath(), text);
+    const inode = statSync(envPath()).ino;
+    expect(migrate().action).toBe("already-set");
+    expect(readFileSync(envPath(), "utf8")).toBe(text);
+    expect(statSync(envPath()).ino).toBe(inode);
+  });
+  test("replaces the inode when staging", () => {
+    writeFileSync(envPath(), "# retained\n", { mode: 0o640 });
+    const inode = statSync(envPath()).ino;
+    expect(migrate().action).toBe("staged");
+    expect(statSync(envPath()).ino).not.toBe(inode);
+    expect(statSync(envPath()).mode & 0o777).toBe(0o640);
+  });
+  test.each([`${REDIRECT}=\n${REDIRECT}=https://kept.example/oauth\n`, `${REDIRECT}=https://kept.example/oauth\nexport ${REDIRECT}='${REDIRECT}'\n`])("refuses repeated redirect assignments", text => {
+    writeFileSync(envPath(), text);
+    expect(migrate()).toMatchObject({ action: "refused", reason: `ambiguous-env:${REDIRECT}` });
+    expect(readFileSync(envPath(), "utf8")).toBe(text);
+  });
+  test("refuses unreadable files", () => {
+    writeFileSync(envPath(), "# keep\n");
+    chmodSync(envPath(), 0);
+    try { expect(migrate()).toMatchObject({ action: "refused", reason: "unreadable-env" }); }
+    finally { chmodSync(envPath(), 0o600); }
+    expect(readFileSync(envPath(), "utf8")).toBe("# keep\n");
+  });
+  test("refuses a process redirect that masks the file", () => {
+    expect(migrate({ ...configured, [REDIRECT]: "" })).toMatchObject({ action: "refused", reason: "redirect-env-masks-file" });
+    expect(existsSync(envPath())).toBe(false);
+  });
+  test.each(["=", ": "])("refuses multiline tracked assignments with %s", separator => {
+    const text = `${REDIRECT}${separator}"\n\${OAUTH_GITHUB_REDIRECT_URI}\n"\n`;
+    writeFileSync(envPath(), text);
+    expect(migrate()).toMatchObject({ action: "refused", reason: `multiline-env:${REDIRECT}` });
+    expect(readFileSync(envPath(), "utf8")).toBe(text);
+  });
+  test("refuses a directory at the env path", () => {
+    mkdirSync(envPath());
+    expect(migrate()).toMatchObject({ action: "refused", reason: "unreadable-env" });
+  });
+});
 
-  test("reports the missing variable by name with the one-step remedy", () => {
-    const f = describeMcpRedirectFinding({
-      mcpEnabled: true,
-      presentVarNames: ["FLAIR_MCP_OAUTH", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET"],
-      advertisedIssuer: "https://flair.example.com",
-    })!;
-    expect(f.isIssue).toBe(true);
-    expect(f.message).toContain(REDIRECT);
-    expect(f.fixHint).toContain(REDIRECT);
-    expect(f.fixHint).toContain("flair mcp enable");
+describe("doctor target readiness", () => {
+  test.each([undefined, "", "   ", "${OAUTH_GITHUB_REDIRECT_URI}"])("effective redirect %s is missing", async redirect => {
+    const readiness = readMcpProviderReadiness({ ...configured, FLAIR_MCP_OAUTH: "false", [REDIRECT]: redirect });
+    expect(readiness).toEqual({ credentialsPresent: true, redirectPresent: false });
+    const finding = await readTargetMcpRedirectFinding(async () => ({ mcpOAuthProvider: readiness }));
+    expect(finding?.isIssue).toBe(true);
+    expect(finding?.message).toContain(REDIRECT);
+  });
+  test("service-only credentials produce a finding", async () => {
+    const finding = await readTargetMcpRedirectFinding(async () => ({ mcpOAuthProvider: { credentialsPresent: true, redirectPresent: false } }));
+    expect(finding?.isIssue).toBe(true);
+    expect(finding?.fixHint).toContain("flair mcp enable");
+  });
+  test("unavailable or malformed target state cannot be verified", async () => {
+    for (const read of [async () => { throw new Error("offline"); }, async () => ({}), async () => ({ mcpOAuthProvider: { credentialsPresent: "true", redirectPresent: false } })]) {
+      const finding = await readTargetMcpRedirectFinding(read);
+      expect(finding?.isIssue).toBe(false);
+      expect(finding?.message).toContain("cannot verify");
+    }
+  });
+  test("a resolved redirect or absent credentials needs no remedy", () => {
+    expect(describeMcpRedirectFinding({ credentialsPresent: true, redirectPresent: true })).toBeNull();
+    expect(describeMcpRedirectFinding({ credentialsPresent: false, redirectPresent: false })).toBeNull();
   });
 });

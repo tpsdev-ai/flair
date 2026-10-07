@@ -17,7 +17,7 @@ import { classifyDaemonState, type DaemonEvidence } from "../lib/daemon-liveness
 import { renderVerifiedSummary } from "../lib/doctor-run.js";
 import { isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { FLAIR_MCP_PACKAGE, clearFlairCliVersionCache } from "../lib/mcp-spec.js";
-import { planRedirectMigration, probeAdvertisedIssuer, renderRedirectMigration } from "../lib/mcp-oauth-env.js";
+import { planRedirectMigration, renderRedirectMigration } from "../lib/mcp-oauth-env.js";
 import { createRegistryNoticePrinter, fetchLatestVersion, fetchVersionDeprecation, isStrictSemver } from "../lib/npm-registry.js";
 import { classifyUpgradePriorLiveness, type PriorLiveness } from "../lib/upgrade-prior-liveness.js";
 import { decideAfterRestartFailure, decideDeprecatedRollback, formatKnownBrokenRollbackRestart, type DeprecationLookup, type RollbackRecoveryLane } from "../lib/upgrade-rollback.js";
@@ -109,6 +109,15 @@ function doctorRunAfterUpgrade(...args: any[]): any {
 
 function flairPackageDir(...args: any[]): any {
   return cli.flairPackageDir(...args);
+}
+
+function stageMcpRedirect(packageRoot: string): void {
+  const migration = planRedirectMigration({
+    configPath: join(packageRoot, "config.yaml"),
+    env: process.env as Record<string, string | undefined>,
+  });
+  const line = renderRedirectMigration(migration);
+  if (line) console.log(`  ${line}`);
 }
 
 function fleetSweepCallerExitMessage(...args: any[]): any {
@@ -950,6 +959,7 @@ program
   .action(async (opts) => {
     // ── Fabric-upgrade branch ───────────────────────────────────────────────
     if (opts.target) {
+      if (!opts.check) console.log("OAuth redirect migration is local-only; --target requires target-side OAuth environment configuration.");
       await runFabricUpgrade(opts);
       return;
     }
@@ -1341,6 +1351,7 @@ program
     // run will do. `npm install -g` remains wrong for flair-mcp either way
     // (#1168/#1208).
     if (totalUpgrades === 0) {
+      if (!checkOnly) stageMcpRedirect(treeLane?.dir ?? flairPackageDir());
       if (missing.length > 0) {
         const npmMissing = missing.filter((f) => f.name !== FLAIR_MCP_PACKAGE);
         const mcpMissing = missing.some((f) => f.name === FLAIR_MCP_PACKAGE);
@@ -1430,13 +1441,6 @@ program
         process.exit(1);
       }
     }
-
-    // flair#2270: capture the issuer the running instance advertises BEFORE any
-    // package swap or restart. The MCP OAuth redirect migration derives the
-    // redirect the shipped config now requires from it. A failed probe returns
-    // null and never blocks the upgrade — the migration is skipped, not
-    // guessed at.
-    const advertisedIssuerForMigration = await probeAdvertisedIssuer(baseUrl);
 
     // ── Pre-upgrade data snapshot (flair#637, opt-in as of the 2026-07-08 rewire) ──
     // Only an @tpsdev-ai/flair package swap touches the code that reads/
@@ -1620,6 +1624,9 @@ program
     if (deprecatedRestartFlagUsed) {
       console.error("warning: --restart is deprecated and is now a no-op — flair upgrade restarts by default. Use --no-restart to skip it.");
     }
+
+    const swappedPackageRoot = treePlan?.treeDir ?? flairPackageDir();
+    stageMcpRedirect(swappedPackageRoot);
 
     if (!shouldRestart) {
       console.log("\nRun: flair restart to use the new version");
@@ -1843,7 +1850,6 @@ program
     // from disk AFTER the swap. `null` (flair itself wasn't swapped, or the new
     // tree can't be verified) falls back to an in-process restart, announced.
     const flairWasSwapped = flairIsUpgrading && !flairInstallFailed;
-    const swappedPackageRoot = treePlan?.treeDir ?? flairPackageDir();
     let newCli: { cliPath: string; version: string } | null = null;
     if (flairWasSwapped) {
       const resolved = resolveInstalledFlairCli(swappedPackageRoot, expectedFlairVersion);
@@ -1852,27 +1858,6 @@ program
       } else {
         newCli = { cliPath: resolved.cliPath, version: resolved.version };
       }
-    }
-
-    // ── flair#2270: migrate the MCP OAuth redirect variable ───────────────
-    // An install enabled by an older `flair mcp enable` carries the GitHub
-    // credentials but never had `OAUTH_GITHUB_REDIRECT_URI`, which the shipped
-    // config.yaml now references AND which @harperfast/oauth now requires for a
-    // configured provider — so upgrading it booted a 500. Derive the redirect
-    // from the issuer captured above and stage it for the new tree through the
-    // component `.env` the shipped config's `loadEnv` reads, BEFORE the
-    // restart. Runs for --no-restart too (stage now, bounce later). The value
-    // is never printed.
-    try {
-      const migration = planRedirectMigration({
-        configPath: join(swappedPackageRoot, "config.yaml"),
-        env: process.env as Record<string, string | undefined>,
-        advertisedIssuer: advertisedIssuerForMigration,
-      });
-      const migrationLine = renderRedirectMigration(migration);
-      if (migrationLine) console.log(`  ${migrationLine}`);
-    } catch (err: any) {
-      console.error(`warning: MCP OAuth redirect migration could not run (${err?.message ?? String(err)}).`);
     }
 
     let restartWasDelegated = false;
