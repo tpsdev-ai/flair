@@ -294,6 +294,21 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
   throw new Error(`no response from ${url} within ${timeoutMs}ms (${last})`);
 }
 
+// Returns the socket's stat once it exists, so a caller reads its mode from this one stat.
+async function waitForSocket(path: string, timeoutMs: number): Promise<ReturnType<typeof statSync>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const st = statSync(path);
+      if (st.isSocket()) return st;
+    } catch {
+      // not there yet
+    }
+    if (Date.now() >= deadline) throw new Error(`${path} did not appear as a socket within ${timeoutMs} ms`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 async function waitDead(pid: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -960,9 +975,10 @@ test.skipIf(skipFixtureCase)(
     // doctor classify treats 0700 and 0600 as default-clean. Group/world bits
     // (0755) are the canary-red finding — do not allow-list those.
     const socketPath = join(sb.dataDir, "operations-server");
-    expect(existsSync(socketPath), "ops socket must exist after adopt").toBe(true);
+    // HTTP up does not mean the operations socket is bound yet: wait for it, bounded.
+    const socketStat = await waitForSocket(socketPath, 10_000);
     expect(statSync(sb.dataDir).mode & 0o777, "data dir must be 0700 after first adopt start").toBe(0o700);
-    const socketMode = statSync(socketPath).mode & 0o777;
+    const socketMode = socketStat.mode & 0o777;
     expect(socketMode & 0o077, "ops socket must be owner-only after first adopt start").toBe(0);
     expect(
       socketMode === 0o600 || socketMode === 0o700,
