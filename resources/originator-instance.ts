@@ -218,7 +218,8 @@ function storedRowLookupFailure(tableName: string, err: unknown): Response {
  * force a "create" that re-stamped an existing row.
  *
  * Rules:
- *   - a body `id` that disagrees with the URL target id is REFUSED;
+ *   - with a URL target id, a non-null body `id` that is not a string or
+ *     number, or that disagrees with it, is REFUSED;
  *   - the stored row is read by the URL target id (via the raw table reader,
  *     falling back to the resource's own bound-record read when the table
  *     exposes no static reader — an in-process harness);
@@ -237,7 +238,8 @@ export async function resolveStoredRow(
   const targetId = urlTargetId(resource);
   const bodyId = isPlainObject(content) && content.id != null ? content.id : undefined;
 
-  if (targetId != null && bodyId !== undefined && String(bodyId) !== String(targetId)) {
+  if (targetId != null && bodyId !== undefined &&
+    ((typeof bodyId !== "string" && typeof bodyId !== "number") || String(bodyId) !== String(targetId))) {
     return { row: null, denial: idTargetMismatchDenial(bodyId, targetId) };
   }
 

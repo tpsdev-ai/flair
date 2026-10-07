@@ -1,5 +1,6 @@
-// flair#2263 — the URL-bound id is the skill write target; the feed refuses
-// reserved seed ids. Mocked transactions/locks, no Harper.
+// flair#2263 — the URL-bound id is the skill write target when the body ID is
+// absent or null; the feed refuses reserved seed ids. Mocked transactions/locks,
+// no Harper.
 import { beforeEach, expect, test } from "bun:test";
 import {
   databasesMock, harnessState, installMemoryHarperMock, resetHarnessState,

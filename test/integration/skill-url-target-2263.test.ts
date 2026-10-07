@@ -69,6 +69,18 @@ async function memoryRow(id: string): Promise<any | null> {
   return rows[0] ?? null;
 }
 
+async function writeFootprint(): Promise<{ memories: number; versions: number }> {
+  const memories = await ops({
+    operation: "search_by_value", database: "flair", table: "Memory",
+    search_attribute: "agentId", search_value: A.id, get_attributes: ["id"],
+  });
+  const versions = await ops({
+    operation: "search_by_value", database: "flair", table: "InstructionVersion",
+    search_attribute: "id", search_value: "*", get_attributes: ["id"],
+  });
+  return { memories: (memories as any[]).length, versions: (versions as any[]).length };
+}
+
 const memPath = (id: string) => `/Memory/${encodeURIComponent(id)}`;
 const nextId = (label: string) => `urlonly-${label}-${sfx}`;
 
@@ -90,7 +102,7 @@ afterAll(async () => {
   if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 });
 });
 
-describe("flair#2263 — the URL-bound id is the skill write target", () => {
+describe("flair#2263 — the URL-bound id is the skill write target when the body ID is absent or null", () => {
   test("PUT /Memory/<X> with a skill body that has only the URL id creates at X, and an identical retry writes a successor id with supersedes X and skillSubjectId X", async () => {
     const id = nextId("skill");
     const body = { agentId: A.id, content: "url-only skill", trigger: "when the url names the id", tags: ["skill"], durability: "persistent" };
@@ -138,6 +150,45 @@ describe("flair#2263 — the URL-bound id is the skill write target", () => {
     expect(await memoryRow(id)).toBeNull();
     expect(await memoryRow(bodyId)).toBeNull();
     expect(await versionsOf(bodyId)).toEqual([]);
+  }, 180_000);
+
+  test("PUT /Memory/<X> refuses a body id array that names X and writes no row or version", async () => {
+    const id = nextId("put-array");
+    const before = await writeFootprint();
+    const result = await call(A, "PUT", memPath(id), {
+      id: [id], agentId: A.id, content: "array-id skill", trigger: "t", tags: ["skill"], durability: "persistent",
+    });
+    expect(result.status, result.text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(result.text).error).toBe("id_target_mismatch");
+    expect(await memoryRow(id)).toBeNull();
+    expect(await versionsOf(id)).toEqual([]);
+    expect(await writeFootprint()).toEqual(before);
+  }, 180_000);
+
+  test("the feed refuses a body id array that names its URL-bound id and writes no row or version", async () => {
+    const id = nextId("feed-array");
+    const before = await writeFootprint();
+    const result = await call(A, "POST", `/FeedMemories/${encodeURIComponent(id)}`, {
+      id: [id], agentId: A.id, content: "array-id feed skill", trigger: "t", tags: ["skill"], durability: "persistent",
+    });
+    expect(result.status, result.text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(result.text).error).toBe("id_target_mismatch");
+    expect(await memoryRow(id)).toBeNull();
+    expect(await versionsOf(id)).toEqual([]);
+    expect(await writeFootprint()).toEqual(before);
+  }, 180_000);
+
+  test("PUT /Memory/<X> refuses an object body id that stringifies to X and writes no row or version", async () => {
+    const id = String({});
+    const before = await writeFootprint();
+    const result = await call(A, "PUT", memPath(id), {
+      id: { label: "object-id" }, agentId: A.id, content: "object-id skill", trigger: "t", tags: ["skill"], durability: "persistent",
+    });
+    expect(result.status, result.text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(result.text).error).toBe("id_target_mismatch");
+    expect(await memoryRow(id)).toBeNull();
+    expect(await versionsOf(id)).toEqual([]);
+    expect(await writeFootprint()).toEqual(before);
   }, 180_000);
 
   test("PUT /Memory/<X> with a null body id creates the skill at X", async () => {
