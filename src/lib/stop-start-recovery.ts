@@ -12,7 +12,7 @@
  *      respond" and refuses — with no remedy named.
  *
  * This module holds the decision behind the fix, kept out of the command
- * bodies so every branch is unit-testable without a daemon:
+ * bodies so its branches are unit-testable without a daemon:
  *
  *   - `decideStartOnUnknown` — how `flair start` resolves the classifier's
  *     UNKNOWN "no pid + health silent" verdict. The health probe is a bounded
@@ -20,7 +20,7 @@
  *     connect completes, so a port with NOTHING listening can read as
  *     "did not respond". Before refusing, `flair start` asks the narrower,
  *     decisive question directly (a TCP connect, `probePortListening`): a port
- *     that refuses every connection is free, and the start proceeds. A port
+ *     whose connection is refused is free, and the start proceeds. A port
  *     that accepts one — or a probe that cannot decide — still refuses, and
  *     the refusal names the remedy.
  *
