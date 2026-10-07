@@ -5133,21 +5133,9 @@ export function readSidecar(dataDir: string): SidecarRead {
   return { kind: "present", ...parsed };
 }
 
-/**
- * Timeout for one Darwin `ps -o stat=` state read (flair#2330). The read runs
- * only after signal 0 says the pid exists, and a failed or empty read is retried
- * once by `probePidLiveness`. On a loaded macOS runner this read intermittently
- * returned null, and the fail-safe reported a zombie `alive`; 5s leaves headroom
- * for a slow spawn.
- */
 const DARWIN_STATE_READ_TIMEOUT_MS = 5_000;
+const DARWIN_STATE_READ_MIN_MS = 1_000;
 
-/**
- * The Darwin process-state read: the first character of `/bin/ps -o stat=` (the
- * invocation the zombie test reads with), with LC_ALL=C and a raised budget
- * (flair#2330). A failure or empty output returns null — the caller treats that
- * as "not exited", never as exited (fail safe).
- */
 function readDarwinProcessState(pid: number, timeoutMs: number): string | null {
   try {
     const out = execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], {
@@ -5189,11 +5177,6 @@ function readProcessState(pid: number, timeoutMs: number): string | null {
  * state stays `alive` — a read failure must never report a live process as
  * exited.
  *
- * A read that fails or returns nothing is retried ONCE (flair#2330): under load
- * a single read can fail while the pid is still there, and one failed read made
- * a zombie read as `alive`. Only a read that keeps failing is unreadable, and
- * an unreadable state stays `alive` (fail safe).
- *
  * The state reader is injectable so the unreadable and retried branches are
  * unit-testable without a real unreadable process.
  */
@@ -5212,8 +5195,9 @@ export function probePidLiveness(
   }
   let state: string | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const timeoutMs = Math.min(DARWIN_STATE_READ_TIMEOUT_MS, deadlineMs - Date.now());
-    if (timeoutMs <= 0) break;
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) break;
+    const timeoutMs = Math.min(DARWIN_STATE_READ_TIMEOUT_MS, Math.max(DARWIN_STATE_READ_MIN_MS, remainingMs));
     state = readState(pid, timeoutMs);
     if (state !== null) break;
   }
@@ -5226,7 +5210,8 @@ export function probePidLiveness(
  * (flair#2330). This is `flair doctor`'s stop wait.
  *
  * If both state reads fail, that poll stays `alive`.
- * `gone` counts only when observed before the deadline.
+ * Check expiry before each read; an admitted read gets at least 1s to finish.
+ * Readers honoring their timeout allow deadline + 1s, plus scheduling and subprocess overhead.
  */
 export async function waitForPidGone(
   pid: number,
@@ -5237,8 +5222,8 @@ export async function waitForPidGone(
   let last: PidLiveness = { kind: "unknown", reason: "the stop deadline passed before a probe" };
   while (Date.now() < deadlineMs) {
     last = probePidLiveness(pid, readState, deadlineMs);
-    if (Date.now() >= deadlineMs) return { gone: false, last };
     if (last.kind === "gone") return { gone: true, last };
+    if (Date.now() >= deadlineMs) return { gone: false, last };
     const remaining = deadlineMs - Date.now();
     if (remaining <= 0) break;
     await new Promise((r) => setTimeout(r, Math.min(pollMs, remaining)));
@@ -7875,7 +7860,6 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
       if (result.kind === "failed") result.detail += ` ${signalResult}; not observed to exit before the deadline (liveness: ${liveness.kind}; identity: ${identityDetail}).`;
       return failure(result);
     }
-    // The signalled process exited before the shared deadline (flair#2284).
     observedExit = true;
   }
   const stateDecision = decideAdoptStop(state, { kind: "refused" });

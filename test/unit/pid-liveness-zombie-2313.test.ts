@@ -25,6 +25,9 @@ const IS_DARWIN = process.platform === "darwin";
 
 const CASE_TIMEOUT_MS = 10_000;
 const ZOMBIE_WAIT_MS = 3_000;
+const DARWIN_ZOMBIE_WAIT_MS = 10_000;
+const DARWIN_CASE_TIMEOUT_MS = 240_000;
+let darwinReadLatencyMs = 0;
 const WAIT_POLL_MS = 10;
 
 const children: ChildProcess[] = [];
@@ -45,7 +48,7 @@ function spawnZombieHelper(): Promise<{ zombiePid: number; helper: ChildProcess 
   return new Promise((resolve, reject) => {
     const helper = spawn("sh", ["-c", "sleep 0.1 & echo $!; exec sleep 300"], {
       stdio: ["ignore", "pipe", "ignore"],
-      timeout: CASE_TIMEOUT_MS,
+      timeout: IS_DARWIN ? DARWIN_CASE_TIMEOUT_MS : CASE_TIMEOUT_MS,
       killSignal: "SIGKILL",
     });
     children.push(helper);
@@ -89,6 +92,7 @@ function darwinState(pid: number, deadline = Infinity): string {
   for (let attempt = 0; attempt < 2; attempt++) {
     const timeout = Math.min(5_000, deadline - Date.now());
     if (timeout <= 0) break;
+    const started = Date.now();
     const result = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], {
       encoding: "utf-8",
       env: { ...process.env, LC_ALL: "C" },
@@ -96,6 +100,7 @@ function darwinState(pid: number, deadline = Infinity): string {
       killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    darwinReadLatencyMs = Math.max(darwinReadLatencyMs, Date.now() - started);
     const state = result.stdout?.trim();
     if (!result.error && result.status === 0 && state) return state;
   }
@@ -104,7 +109,7 @@ function darwinState(pid: number, deadline = Infinity): string {
 
 /** Prove the child is a zombie via the test's own `ps` read BEFORE asserting. */
 async function waitForDarwinZombie(pid: number): Promise<void> {
-  const deadline = Date.now() + ZOMBIE_WAIT_MS;
+  const deadline = Date.now() + DARWIN_ZOMBIE_WAIT_MS;
   let state = "";
   while (Date.now() < deadline) {
     state = darwinState(pid, deadline);
@@ -151,7 +156,9 @@ describe("flair#2313 — the shared probe reports an unreaped zombie as exited",
     const { zombiePid, helper } = await spawnZombieHelper();
     try {
       await waitForDarwinZombie(zombiePid);
-      expect((await waitForPidGone(zombiePid, Date.now() + ZOMBIE_WAIT_MS)).gone).toBe(true);
+      const waitMs = Math.max(DARWIN_ZOMBIE_WAIT_MS, 4 * darwinReadLatencyMs + 2_000);
+      console.info(`Darwin ps maximum observed latency: ${darwinReadLatencyMs}ms; stop wait: ${waitMs}ms`);
+      expect((await waitForPidGone(zombiePid, Date.now() + waitMs)).gone).toBe(true);
       // The Darwin state read is the path that failed under a loaded runner
       // (#2330), so read the same zombie through the default probe 20 times
       // (flair#2330).
@@ -162,7 +169,7 @@ describe("flair#2313 — the shared probe reports an unreaped zombie as exited",
     } finally {
       helper.kill("SIGKILL");
     }
-  }, CASE_TIMEOUT_MS);
+  }, DARWIN_CASE_TIMEOUT_MS);
 
   test("a live process stays alive", () => {
     expect(probePidLiveness(process.pid).kind).toBe("alive");

@@ -284,7 +284,7 @@ jobs:
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
       - name: Verify Darwin zombie regression rejects a missing state read
-        timeout-minutes: 1
+        timeout-minutes: 2
         run: |
           node --input-type=module <<'JS'
           import { readFileSync, writeFileSync } from "node:fs";
@@ -296,11 +296,11 @@ jobs:
           try {
             writeFileSync(path, source.replace(original, 'if (process.platform === "darwin") return null;'));
             const result = spawnSync("bun", ["test", "test/unit/pid-liveness-zombie-2313.test.ts", "--test-name-pattern", "a real Darwin zombie reads as gone through the default probe"], {
-              encoding: "utf8", timeout: 30000, killSignal: "SIGKILL",
+              encoding: "utf8", timeout: 60000, killSignal: "SIGKILL",
             });
             const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
             console.log(output);
-            if (result.error || result.status !== 1 || !output.includes('Expected: "gone"') || !output.includes('Received: "alive"') || !/1 fail/.test(output)) {
+            if (result.error || result.status !== 1 || !output.includes('Expected: true') || !output.includes('Received: false') || !/1 fail/.test(output)) {
               throw new Error("Mutation did not fail at the zombie liveness assertion");
             }
           } finally {

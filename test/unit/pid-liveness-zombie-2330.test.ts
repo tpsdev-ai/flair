@@ -67,6 +67,21 @@ describe("flair#2330 — the stop wait re-reads the state on its next poll", () 
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
+  test("a read near the remaining budget can finish in the minimum read allowance", async () => {
+    const started = Date.now();
+    const deadline = started + 120;
+    const budgets: number[] = [];
+    const outcome = await waitForPidGone(LIVE_PID, deadline, (_pid, budgetMs) => {
+      budgets.push(budgetMs);
+      const end = Date.now() + Math.min(150, budgetMs);
+      while (Date.now() < end) { /* spin */ }
+      return budgetMs >= 150 ? "Z" : null;
+    }, 10);
+    expect(outcome).toEqual({ gone: true, last: { kind: "gone" } });
+    expect(budgets).toEqual([1_000]);
+    expect(Date.now() - started).toBeLessThan(1_200);
+  });
+
   test("failed reads leave the stop wait alive", async () => {
     const deadline = Date.now() + 250;
     const outcome = await waitForPidGone(LIVE_PID, deadline, () => null, 10);
@@ -96,7 +111,7 @@ describe("flair#2330 — the stop wait re-reads the state on its next poll", () 
     expect(calls).toBe(0);
   });
 
-  test("slow failed reads share the stop deadline", async () => {
+  test("slow failed reads do not start a retry after expiry", async () => {
     const started = Date.now();
     const deadline = started + 100;
     const reads: number[] = [];
@@ -107,12 +122,13 @@ describe("flair#2330 — the stop wait re-reads the state on its next poll", () 
       return null;
     };
     const outcome = await waitForPidGone(LIVE_PID, deadline, slow, 10);
-    expect(Date.now() - started).toBeLessThanOrEqual(135);
+    expect(Date.now() - started).toBeLessThanOrEqual(1_135);
     expect(outcome).toEqual({ gone: false, last: { kind: "alive" } });
+    expect(reads).toHaveLength(1);
     expect(reads.every((at) => at < deadline)).toBe(true);
   });
 
-  test("the retry receives the remaining stop budget", async () => {
+  test("the retry receives the minimum budget before expiry", async () => {
     const started = Date.now();
     const deadline = started + 100;
     const budgets: number[] = [];
@@ -123,10 +139,10 @@ describe("flair#2330 — the stop wait re-reads the state on its next poll", () 
       return null;
     };
     const outcome = await waitForPidGone(LIVE_PID, deadline, slow, 10);
-    expect(Date.now() - started).toBeLessThanOrEqual(135);
+    expect(Date.now() - started).toBeLessThanOrEqual(1_135);
     expect(outcome).toEqual({ gone: false, last: { kind: "alive" } });
     expect(budgets).toHaveLength(2);
-    expect(budgets[0]).toBeLessThanOrEqual(100);
-    expect(budgets[1]).toBeLessThanOrEqual(70);
+    expect(budgets[0]).toBe(1_000);
+    expect(budgets[1]).toBe(1_000);
   });
 });
