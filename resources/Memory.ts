@@ -620,12 +620,13 @@ const SUPERSEDE_CLOSE_ATTEMPTS = 3;
  * throws so the caller can log it. Never called before the new record is
  * already written.
  *
- * flair#2307: the read, the owner comparison and the write run in ONE owned
+ * flair#2307: the read and write run in ONE owned
  * transaction (withOwnedTransaction, the MemoryMaintenance pattern: the
  * request's transaction is detached and a fresh one this call owns is created),
  * and the write is built from the row read inside it. `expectedOwner`, when
- * given, is the owner the authorization read saw; a row whose owner differs at
- * the read inside the transaction is not closed (throws instead).
+ * supplied by a non-admin agent's close plan, is the owner the authorization
+ * read saw; a differing owner at the transaction read throws instead of closing.
+ * Admin and internal close plans have no expected owner.
  *
  * Harper 5.2.8 has no compare-and-set on a table write: a transaction does not
  * fail when a row it read is changed by another write before it commits;
@@ -635,7 +636,7 @@ const SUPERSEDE_CLOSE_ATTEMPTS = 3;
  * committed state, not this transaction's snapshot or its staged write). If
  * that row is no longer the one read inside the transaction, the transaction
  * is aborted (the staged write is discarded) and the close starts over from
- * the committed row, owner comparison included, up to SUPERSEDE_CLOSE_ATTEMPTS
+ * the committed row, up to SUPERSEDE_CLOSE_ATTEMPTS
  * times. A change committed after that re-read and before the commit is not
  * seen by it; Harper orders the two writes by timestamp.
  */
@@ -740,7 +741,7 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  * missing target refuses (supersedesTargetMissing) — except a reference that is
  * unchanged from the stored row's own `supersedes` (a re-PUT of a successor
  * whose predecessor was since deleted), which is kept and closes nothing.
- * For ordinary Memory writes, the close carries the owner the read saw;
+ * For a non-admin agent's ordinary Memory write, the close carries the owner the read saw;
  * closeSupersededRecord aborts on a change visible at its committed re-read.
  * Later changes follow Harper's timestamp order (see the PR residual-gap note).
  * An admin or internal write has no authorization read or owner comparison.
@@ -800,7 +801,7 @@ async function validateAndAuthorizeSupersedes(
 /** The close a write is authorized to perform on its `supersedes` target. */
 interface SupersedeClose {
   id: string;
-  /** The owner the authorization read saw (agent callers only). */
+  /** The owner the authorization read saw (non-admin agent callers only). */
   ownerId?: string;
 }
 

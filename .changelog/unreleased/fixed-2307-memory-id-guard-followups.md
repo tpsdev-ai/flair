@@ -18,8 +18,10 @@
   for its `supersedes` target changes no row, including its `derivedFrom`
   sources: their `lastReflected` is stamped only after the new row is written.
   For ordinary Memory writes, a change visible at the close's committed re-read
-  aborts its transaction; the close retries with the owner comparison (at most
-  three attempts). A federated Memory row whose id ends in `.content` is skipped
+  aborts its transaction; the close retries (at most three attempts), comparing
+  the owner only when a non-admin agent's close carries the owner seen at
+  authorization; admin and internal close plans have none.
+  A federated Memory row whose id ends in `.content` is skipped
   (`content_suffix_id_not_federated`), so such a legacy row is not federated.
   The embedding-stamp migration re-embeds a stale row whose id ends in
   `.content` from the text Memory embeds for it (a skill row's `trigger`, else
