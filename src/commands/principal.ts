@@ -170,8 +170,17 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
     if (rows.length === 0) return { kind: "absent" };
     if (rows.length !== 1) return { kind: "unreadable" };
     const row = rows[0] as { id?: unknown; status?: unknown };
-    if (row?.id !== id || typeof row.status !== "string") return { kind: "unreadable" };
-    return { kind: "found", status: row.status };
+    if (row?.id !== id) return { kind: "unreadable" };
+    // A stored row with no `status` is ACTIVE — the same rule the auth path
+    // (resources/agent-auth.ts's isPrincipalDeactivated) and `principal list`
+    // apply, so a principal created without one can still be disabled and
+    // re-enabled. Any other present value is unreadable.
+    const rawStatus = row.status;
+    if (typeof rawStatus === "string") return { kind: "found", status: rawStatus };
+    // A missing `status` reads back as `undefined` in-process and as `null` over
+    // the operations API; both mean ACTIVE.
+    if (rawStatus === undefined || rawStatus === null) return { kind: "found", status: "active" };
+    return { kind: "unreadable" };
   };
 
   // Read the principal BEFORE the update. Harper answers an update for an id
@@ -460,10 +469,13 @@ export function register(program: Command): void {
       console.log(render.wrap(render.c.bold, String(result.id)));
       if (result.name) console.log(render.kv("name", String(result.name)));
       if (result.kind) console.log(render.kv("kind", render.wrap(result.kind === "human" ? render.c.cyan : render.c.magenta, String(result.kind))));
-      if (result.status) {
-        const statusColor = result.status === "active" ? render.c.green : result.status === "disabled" ? render.c.red : render.c.yellow;
-        console.log(render.kv("status", render.wrap(statusColor, String(result.status))));
-      }
+      // A principal with no `status` is active, so report the effective value
+      // rather than omitting the line — the same rule the auth path and
+      // `principal list` apply. A missing field is `undefined` on a record and
+      // `null` when the operations API materialises it.
+      const shownStatus = result.status == null ? "active" : String(result.status);
+      const statusColor = shownStatus === "active" ? render.c.green : shownStatus === "disabled" ? render.c.red : render.c.yellow;
+      console.log(render.kv("status", render.wrap(statusColor, shownStatus)));
       if (result.defaultTrustTier) console.log(render.kv("trust tier", String(result.defaultTrustTier)));
       // flair#941 — read the authority, not the mirror, and say so when the two
       // disagree (only reachable via a raw table write).
