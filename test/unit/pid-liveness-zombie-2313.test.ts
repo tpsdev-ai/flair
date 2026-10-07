@@ -148,8 +148,9 @@ describe("flair#2313 — the shared probe reports an unreaped zombie as exited",
     const { zombiePid, helper } = await spawnZombieHelper();
     try {
       await waitForDarwinZombie(zombiePid);
-      // The Darwin state read is what flaked under a loaded runner (#2330), so
-      // read the same zombie through the default probe 20 times (flair#2330).
+      // The Darwin state read is the path that failed under a loaded runner
+      // (#2330), so read the same zombie through the default probe 20 times
+      // (flair#2330).
       for (let i = 0; i < 20; i++) {
         expect(darwinState(zombiePid)).toMatch(/^Z/);
         expect(probePidLiveness(zombiePid).kind).toBe("gone");

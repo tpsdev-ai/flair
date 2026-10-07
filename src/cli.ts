@@ -5135,10 +5135,10 @@ export function readSidecar(dataDir: string): SidecarRead {
 
 /**
  * Timeout for one Darwin `ps -o stat=` state read (flair#2330). The read runs
- * only after signal 0 says the pid exists; a read that fails or returns nothing
- * is retried once by `probePidLiveness`. A loaded macOS runner intermittently
- * exceeded the former 2s budget, and the timed-out read returned null, so the
- * fail-safe reported a zombie `alive`. 5s leaves headroom for a slow spawn.
+ * only after signal 0 says the pid exists, and a failed or empty read is retried
+ * once by `probePidLiveness`. On a loaded macOS runner this read intermittently
+ * returned null, and the fail-safe reported a zombie `alive`; 5s leaves headroom
+ * for a slow spawn.
  */
 const DARWIN_STATE_READ_TIMEOUT_MS = 5_000;
 
