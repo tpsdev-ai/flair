@@ -22,6 +22,7 @@ import { findOrCreateInstance, storeInstanceSeed } from "./instance-create-lock.
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
 import { isReservedSeedId } from "./seed-reservation.js";
+import { endsWithContentSelectorSuffix } from "../src/lib/memory-id-policy.js";
 import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -867,6 +868,15 @@ export class FederationSync extends Resource {
         // (resources/seed-reservation.ts), whatever its tags.
         if (isReservedSeedId(record.table, record.id)) {
           recordSkip("seed_id_not_federated");
+          continue;
+        }
+
+        // flair#2199 follow-up: a Memory id that ends in the `.content`
+        // property suffix addresses no distinct record (Harper reads the suffix
+        // as a selector), so a federated row carrying one is skipped — the same
+        // discipline the seed reservation applies just above.
+        if (record.table === "Memory" && endsWithContentSelectorSuffix(mergedData.id)) {
+          recordSkip("content_suffix_id_not_federated");
           continue;
         }
 

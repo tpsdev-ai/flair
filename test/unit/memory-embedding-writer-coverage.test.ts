@@ -70,6 +70,8 @@ add("promotion-stamp", ["writer:table.put#1"], "ECHO",
   "Promotion status stamp: get-then-put re-writes the existing local row.");
 add("migrations/graph-heal", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
+add("migrations/embedding-stamp", ["writer:table.put#1"], "ECHO",
+  "The content-suffix fallback re-embeds a server-selected row into the CURRENT space (a locally-computed embedding + getCurrentModelId()); no foreign stamp.");
 add("migrations/visibility-backfill", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"], "ECHO",

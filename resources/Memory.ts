@@ -59,7 +59,7 @@ import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-track
 import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 import { refuseReservedSeedWrite, reservedSeedWriteDenial, reservedSeedSubjectDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
-import { refuseContentSuffixId } from "./memory-id-guard.js";
+import { refuseContentSuffixId, resolveMemoryReferenceId } from "./memory-id-guard.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -693,7 +693,12 @@ async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdi
   const seedDenial = reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth);
   if (seedDenial) return seedDenial;
   if (content.supersedes && auth.kind === "agent" && !auth.isAdmin) {
-    const target = await (databases as any).flair.Memory.get(content.supersedes).catch(() => null);
+    // flair#2199 follow-up: enforce authority against the record the reference
+    // RESOLVES to — decode it and drop a trailing declared-attribute selector —
+    // never against the literal string, so a suffix or encoding on the
+    // reference cannot name a record the caller is not allowed to supersede.
+    const targetId = resolveMemoryReferenceId(content.supersedes) ?? content.supersedes;
+    const target = await (databases as any).flair.Memory.get(targetId).catch(() => null);
     if (target && target.agentId !== auth.agentId) {
       if (!(await hasWriteGrant(auth.agentId, target.agentId))) {
         return FORBIDDEN("forbidden: cannot supersede a memory owned by another agent without a write grant");

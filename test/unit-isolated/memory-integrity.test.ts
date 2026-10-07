@@ -20,6 +20,8 @@
  * jaccardSimilarity() implementations — nothing about that math is mocked.
  */
 import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
+import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
+import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
 
 // Defensive: `bun test <dir>` runs every file in one process, and
 // resources/rate-limiter.ts reads process.env LAZILY (not cached at import
@@ -245,7 +247,12 @@ const databasesMock = {
         return gen();
       },
     },
-    Agent: { get: async () => null, search: async () => [] },
+    Agent: {
+      get: async (id: string) => agentStore.get(id) ?? null,
+      search: async function* () {
+        for (const a of agentStore.values()) yield a;
+      },
+    },
     // federation-edge-hardening slice 1: resources/instance-identity.ts's
     // localInstanceId() reads this table to find THIS instance's own row.
     Instance: {
@@ -257,10 +264,30 @@ const databasesMock = {
         return gen();
       },
     },
+    // A signed request records its nonce here (flair#2061). Present so a
+    // harper-mocking sibling in this process can import auth-middleware
+    // whichever mock is in effect (flair#2307 item 6).
+    ReplayNonce: createFakeReplayNonceTable(),
   },
 };
 
-mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({
+  databases: databasesMock,
+  // A SHARED identity for the `server`/`Resource`/`RequestTarget` surface:
+  // bun's mock.module is process-global, so a second file that mocks `harper`
+  // in the same process must present a compatible shape or the module cache
+  // serves whichever registration won. These exports let a harper-mocking
+  // sibling (test/unit/memory-selection-middleware-1940.test.ts) import
+  // auth-middleware whichever mock is in effect (flair#2307 item 6).
+  server: {
+    getUser: async (_user: string, _pass: string | null, _request: any) => null,
+    http: (fn: any, _opts?: any) => {
+      middlewareCapture.value = fn;
+    },
+  },
+  Resource: class {},
+  RequestTarget: class {},
+}));
 
 const { Memory } = await import("../../resources/Memory.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");

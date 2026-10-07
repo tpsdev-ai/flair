@@ -71,6 +71,9 @@ add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource po
 add("MemoryReindex", ["writer:Memory.put#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields.");
 add("promotion-stamp", ["writer:table.put#1"],
   "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id.");
+add("migrations/embedding-stamp", [
+  "writer:table.put#1",
+], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address.");
 add("migrations/graph-heal", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
 add("migrations/visibility-backfill", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
@@ -159,6 +162,33 @@ test("each GUARDED path runs the decision before it writes", () => {
   const federation = readFileSync("resources/Federation.ts", "utf8");
   const skip = federation.indexOf('recordSkip("seed_id_not_federated")');
   expect(skip).toBeGreaterThan(-1);
+  expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
+});
+
+test("each GUARDED path runs the .content-suffix id decision before it writes", () => {
+  const memory = readFileSync("resources/Memory.ts", "utf8");
+  for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {", "  async patch(content: any, query?: any) {"]) {
+    const body = methodBody(memory, signature);
+    const check = body.indexOf("refuseContentSuffixId(");
+    expect(check, `${signature} does not run the .content-suffix decision`).toBeGreaterThan(-1);
+    for (const write of ["super.put(", "super.patch(", "writeMemoryRowPost(", ".flair.Memory.put("]) {
+      const at = body.indexOf(write);
+      if (at !== -1) expect(at, `${signature}: ${write} before the decision`).toBeGreaterThan(check);
+    }
+  }
+  const del = methodBody(memory, "  async delete(id: any) {");
+  const delCheck = del.indexOf("refuseContentSuffixId(");
+  expect(delCheck, "delete() does not run the decision on its id").toBeGreaterThan(-1);
+  expect(del.indexOf(".flair.Memory.delete(")).toBeGreaterThan(delCheck);
+
+  const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
+  const feedCheck = feed.indexOf("refuseContentSuffixId(");
+  expect(feedCheck).toBeGreaterThan(-1);
+  expect(feed.indexOf(".flair.Memory.put(")).toBeGreaterThan(feedCheck);
+
+  const federation = readFileSync("resources/Federation.ts", "utf8");
+  const skip = federation.indexOf('recordSkip("content_suffix_id_not_federated")');
+  expect(skip, "the federation merge does not skip a .content-suffixed Memory id").toBeGreaterThan(-1);
   expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
 });
 

@@ -20,36 +20,46 @@ import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../he
 
 let memoryGetCalls = 0;
 
-mock.module("harper", () => ({
-  databases: {
-    flair: {
-      Agent: {
-        get: async (id: string) => agentStore.get(id) ?? null,
-        // isAdmin() reads the admin set from this search; yield the stored agents
-        // so an agent seeded with role "admin" resolves as an admin.
-        search: async function* () {
-          for (const a of agentStore.values()) yield a;
+// The factory is registered here and re-asserted in loadMiddleware() below:
+// bun's mock.module is process-global, so when another test file that mocks
+// `harper` (e.g. memory-integrity.test.ts) shares this process, its mock can be
+// the one in effect at the moment auth-middleware is imported. Re-registering
+// immediately before that import pins the mock this file needs (flair#2307
+// item 6).
+function harperMock() {
+  return {
+    databases: {
+      flair: {
+        Agent: {
+          get: async (id: string) => agentStore.get(id) ?? null,
+          // isAdmin() reads the admin set from this search; yield the stored agents
+          // so an agent seeded with role "admin" resolves as an admin.
+          search: async function* () {
+            for (const a of agentStore.values()) yield a;
+          },
         },
-      },
-      Memory: {
-        get: async (_id: string) => {
-          memoryGetCalls++;
-          return null;
+        Memory: {
+          get: async (_id: string) => {
+            memoryGetCalls++;
+            return null;
+          },
         },
+        // Every signed request records its nonce here (flair#2061).
+        ReplayNonce: createFakeReplayNonceTable(),
       },
-      // Every signed request records its nonce here (flair#2061).
-      ReplayNonce: createFakeReplayNonceTable(),
     },
-  },
-  server: {
-    getUser: async (_user: string, _pass: string | null, _request: any) => null,
-    http: (fn: any, _opts?: any) => {
-      middlewareCapture.value = fn;
+    server: {
+      getUser: async (_user: string, _pass: string | null, _request: any) => null,
+      http: (fn: any, _opts?: any) => {
+        middlewareCapture.value = fn;
+      },
     },
-  },
-  Resource: class {},
-  RequestTarget: class {},
-}));
+    Resource: class {},
+    RequestTarget: class {},
+  };
+}
+
+mock.module("harper", harperMock);
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const PUBLIC_B64 = Buffer.from((publicKey.export({ format: "jwk" }) as any).x, "base64url").toString("base64");
@@ -85,6 +95,10 @@ const nextLayer = () => new Response("ok", { status: 200 });
 let authMiddleware: any;
 async function loadMiddleware() {
   if (!authMiddleware) {
+    // Re-assert this file's harper mock right before auth-middleware is
+    // imported, so a competing mock from another file in this process does not
+    // win the race (flair#2307 item 6).
+    mock.module("harper", harperMock);
     await import("../../resources/auth-middleware.ts");
     authMiddleware = middlewareCapture.value;
   }
@@ -161,9 +175,17 @@ describe("flair#1940 round 17 — a non-admin Memory read drops the caller's sel
     expect(req.url).toBe("/Memory/x?select(id)"); // assertion: a write is not a read
   });
 
+  it("flair#2307: refuses a malformed percent-encoded `.content` id segment with the named 400", async () => {
+    const mw = await loadMiddleware();
+    const req = makeRequest("/Memory/a%ZZ.content", "PUT");
+    const res: Response = await mw(req, nextLayer);
+    expect(res.status).toBe(400); // assertion: not Harper's 500 from its own path decode
+    expect((await res.json()).error).toBe("memory_id_content_suffix");
+  });
+
   it("flair#2199: refuses an encoded-slash id segment before a declared suffix", async () => {
     const mw = await loadMiddleware();
-    for (const given of ["/Memory/a%2Fb.content", "/Memory/a%2fb.content", "/Memory/a%2Fb%2Econtent", "/Memory/a%2Fb.agentId"] as const) {
+    for (const given of ["/Memory/a%2Fb.content", "/Memory/a%2fb.content", "/Memory/a%2Fb%2Econtent", "/Memory/a%2Fb.agentId", "/Memory/a%252Fb.content"] as const) {
       const req = makeRequest(given);
       const res: Response = await mw(req, nextLayer);
       expect(res.status, given).toBe(400); // assertion: the ambiguous read is refused, not rewritten

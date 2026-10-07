@@ -90,6 +90,8 @@ add("promotion-stamp", ["writer:table.put#1"],
   "Promotion status stamp — non-skill.");
 add("migrations/graph-heal", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
+add("migrations/embedding-stamp", ["writer:table.put#1"],
+  "Migration re-embed of a server-selected row's own embedding — preserves content, non-skill.");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
 add("migrations/visibility-backfill", ["writer:table.put#1"],

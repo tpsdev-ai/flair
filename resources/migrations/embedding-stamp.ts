@@ -134,18 +134,21 @@
  * re-embed, ship a structural reindex trigger with it.
  */
 import { databases } from "harper";
-import { getModelId } from "../embeddings-provider.js";
+import { getEmbedding, getModelId } from "../embeddings-provider.js";
 import { harperPortValue } from "../../src/lib/harper-port-value.js";
 import { DEFAULT_HTTP_PORT } from "../a2a-url.js";
 import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
 import type { Migration, RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
+import { endsWithContentSelectorSuffix } from "../../src/lib/memory-id-policy.js";
 
 export { EMBEDDING_STAMP_ID };
 
 export interface MemoryTableLike {
   search(query: unknown): AsyncIterable<Record<string, unknown>>;
   get(id: string): Promise<Record<string, unknown> | null>;
+  /** The raw table write handle, used only for the content-suffix fallback below. */
+  put(row: Record<string, unknown>): Promise<unknown>;
 }
 
 function defaultMemoryTable(): MemoryTableLike {
@@ -215,6 +218,30 @@ async function regenViaHttpPut(
       signal: AbortSignal.timeout(REGEN_HTTP_TIMEOUT_MS),
     });
     return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Re-embed a legacy row whose id ends in the `.content` property suffix. Such
+ * an id cannot be addressed by the loopback `PUT /Memory/:id` the regen path
+ * uses — Harper reads the suffix as a selector, and the write path refuses the
+ * id — so the row would otherwise stay pending forever and /HealthDetail would
+ * name this migration indefinitely. Compute the embedding here and write the
+ * row through the raw table handle, which the by-id write guard does not cover.
+ * Returns true iff the row was written; a failure leaves it in its current
+ * (queryable, stale) state for the next cycle, never partially written.
+ */
+async function regenContentSuffixRow(
+  table: MemoryTableLike,
+  existing: Record<string, unknown>,
+  current: string,
+): Promise<boolean> {
+  try {
+    const embedding = await getEmbedding(String(existing.content ?? ""), "document");
+    await table.put({ ...existing, embedding, embeddingModel: current });
+    return true;
   } catch {
     return false;
   }
@@ -324,7 +351,9 @@ export function createEmbeddingStampMigration(
         if (!existing) continue; // deleted since the search above — nothing to fix
         if (isCurrentSpaceStamp(existing.embeddingModel as string | null | undefined, current)) continue; // already current-space (incl. bare equivalent) — idempotent skip
 
-        const ok = await regen(id, existing);
+        const ok = endsWithContentSelectorSuffix(id)
+          ? await regenContentSuffixRow(table, existing, current)
+          : await regen(id, existing);
         if (ok) touchedIds.push(id);
         // A failed regen leaves the row untouched (still matching
         // staleCondition — retried next batch/boot), never partially
