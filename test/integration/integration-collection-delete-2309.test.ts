@@ -1,22 +1,9 @@
-// An operator's collection DELETE on Integration must remove exactly the
-// matched rows (flair#2309), and a runtime principal's collection DELETE must
-// stay refused.
-//
-// Real-Harper integration test. Harper's bulk delete
-// (resources/Table.ts:3068, `delete()`'s search branch) consumes the resource's
-// own `search()` synchronously:
-//
-//   for await (const entry of this.search(scanTarget)) { ... }
-//
-// `Integration.search()` is async, so `this.search(...)` returns a Promise, not
-// an async iterable, and the operator's collection DELETE 500s and removes
-// nothing. This file pins the fixed behaviour against a real Harper.
-//
-// MODEL: test/integration/flair-agent-deelevation.test.ts (mkAgent /
-// ed25519Header / adminOp helpers, real Harper via startHarper()).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
+import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -39,41 +26,39 @@ const adminAgent = mkAgent("intdel-admin");
 const runtimeAgent = mkAgent("intdel-runtime");
 const ownerAgent = mkAgent("intdel-owner");
 
-async function adminOp(op: Record<string, any>): Promise<Response> {
-  return fetch(harper.opsURL, {
+async function adminOp(op: Record<string, any>, instance = harper): Promise<Response> {
+  return fetch(instance.opsURL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
+      Authorization: "Basic " + btoa(`${instance.admin.username}:${instance.admin.password}`),
     },
     body: JSON.stringify(op),
   });
 }
 
-function basicAdmin(): string {
-  return "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
+function basicAdmin(instance = harper): string {
+  return "Basic " + btoa(`${instance.admin.username}:${instance.admin.password}`);
 }
 
-/** Seed one Integration row owned by `ownerAgent` via the real ops API. */
-async function seedRow(id: string, platform: string): Promise<void> {
+async function seedRow(id: string, platform: string, agentId = ownerAgent.id, instance = harper): Promise<void> {
   const res = await adminOp({
     operation: "insert", database: "flair", table: "Integration",
     records: [{
-      id, agentId: ownerAgent.id, platform,
+      id, agentId, platform,
       createdAt: new Date().toISOString(),
     }],
-  });
+  }, instance);
   expect(res.status, `seed Integration/${id}`).toBe(200);
 }
 
-/** Read back one Integration row as the operator (Basic admin). */
-async function readRow(id: string): Promise<any | null> {
-  const res = await fetch(`${harper.httpURL}/Integration/${id}`, { headers: { Authorization: basicAdmin() } });
+async function readRow(id: string, instance = harper): Promise<any | null> {
+  const res = await fetch(`${instance.httpURL}/Integration/${id}`, { headers: { Authorization: basicAdmin(instance) } });
   if (res.status === 404) return null;
+  expect(res.status, `read Integration/${id}`).toBe(200);
   return await res.json();
 }
 
-/** Read the collection matched by `platform` as the operator (Basic admin). */
 async function readByPlatform(platform: string): Promise<any[]> {
   const res = await fetch(`${harper.httpURL}/Integration/?platform=${encodeURIComponent(platform)}`, {
     headers: { Authorization: basicAdmin() },
@@ -118,27 +103,109 @@ describe("Integration collection DELETE (flair#2309)", () => {
 
     const matched = await readByPlatform("slack-op");
     expect(matched.map((r) => r.id).sort()).toEqual([]);
+    for (const id of ["intdel-op-a", "intdel-op-b", "intdel-op-c"]) {
+      expect(await readRow(id)).toBeNull();
+    }
 
     const control = await readRow("intdel-op-control");
     expect(control).not.toBeNull();
     expect(control.id).toBe("intdel-op-control");
   }, 60_000);
 
+  for (const [label, projection] of [["object", "select(platform,agentId)"], ["scalar", "select(platform)"]]) {
+    test(`OPERATOR: collection DELETE with ${label} projection deletes matched ids`, async () => {
+      const platform = `slack-${label}`;
+      const ids = [`intdel-${label}-a`, `intdel-${label}-b`, `intdel-${label}-c`];
+      for (const id of ids) await seedRow(id, platform);
+      const controlId = `intdel-${label}-control`;
+      await seedRow(controlId, `discord-${label}`);
+
+      const path = `/Integration/?platform=${platform}&${projection}`;
+      const selected = await fetch(`${harper.httpURL}${path}`, { headers: { Authorization: basicAdmin() } });
+      expect(selected.status).toBe(200);
+      const rows = await selected.json();
+      expect(rows).toHaveLength(ids.length);
+      for (const row of rows) {
+        if (label === "scalar") expect(row).toBe(platform);
+        else expect(row).toEqual({ platform, agentId: ownerAgent.id });
+      }
+      const del = await fetch(`${harper.httpURL}${path}`, {
+        method: "DELETE",
+        headers: { Authorization: basicAdmin() },
+      });
+      expect([200, 204], await del.text()).toContain(del.status);
+      for (const id of ids) expect(await readRow(id)).toBeNull();
+      expect((await readRow(controlId))?.id).toBe(controlId);
+    }, 60_000);
+  }
+
   test("RUNTIME PRINCIPAL: collection DELETE is refused and deletes nothing", async () => {
     await seedRow("intdel-rt-a", "slack-rt");
     await seedRow("intdel-rt-b", "slack-rt");
+
+    await seedRow("intdel-rt-own", "own-rt", runtimeAgent.id);
+    const ownPath = "/Integration/intdel-rt-own";
+    const authenticated = await fetch(`${harper.httpURL}${ownPath}`, {
+      headers: { Authorization: ed25519Header(runtimeAgent, "GET", ownPath) },
+    });
+    expect(authenticated.status).toBe(200);
+    expect((await authenticated.json()).agentId).toBe(runtimeAgent.id);
 
     const path = "/Integration/?platform=slack-rt";
     const del = await fetch(`${harper.httpURL}${path}`, {
       method: "DELETE",
       headers: { Authorization: ed25519Header(runtimeAgent, "DELETE", path) },
     });
-    expect(
-      [401, 403],
-      `runtime collection DELETE returned ${del.status}: ${(await del.text()).slice(0, 300)}`,
-    ).toContain(del.status);
+    expect(del.status).toBe(403);
+    expect(await del.json()).toEqual({ error: "forbidden: cannot delete integration for another agent" });
 
     const still = await readByPlatform("slack-rt");
     expect(still.map((r) => r.id).sort()).toEqual(["intdel-rt-a", "intdel-rt-b"]);
+    for (const id of ["intdel-rt-a", "intdel-rt-b", "intdel-rt-own"]) {
+      expect((await readRow(id))?.id).toBe(id);
+    }
   }, 60_000);
+
+  test("OPERATOR: a throw after the second staged delete returns 500 and rolls back the rows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-integration-delete-failure-"));
+    let failingHarper: HarperInstance | undefined;
+    try {
+      for (const entry of ["config.yaml", "package.json", "dist", "schemas"]) {
+        cpSync(join(process.cwd(), entry), join(dir, entry), { recursive: true });
+      }
+      symlinkSync(join(process.cwd(), "node_modules"), join(dir, "node_modules"), "dir");
+      const resourcePath = join(dir, "dist", "resources", "Integration.js");
+      const resource = readFileSync(resourcePath, "utf8");
+      writeFileSync(resourcePath, resource + `
+const originalWriteDelete = Integration.prototype._writeDelete;
+Integration.prototype._writeDelete = function(id, options) {
+  const result = originalWriteDelete.call(this, id, options);
+  this.testDeleteCount = (this.testDeleteCount || 0) + 1;
+  if (this.testDeleteCount === 2) throw new Error("forced Integration failure after second staged delete");
+  return result;
+};
+`);
+      failingHarper = await startHarper({ cwd: dir });
+      const ids = ["intdel-failure-a", "intdel-failure-b", "intdel-failure-c"];
+      for (const id of ids) await seedRow(id, "slack-failure", ownerAgent.id, failingHarper);
+      await seedRow("intdel-failure-control", "discord-failure", ownerAgent.id, failingHarper);
+      const del = await fetch(`${failingHarper.httpURL}/Integration/?platform=slack-failure&sort(id)`, {
+        method: "DELETE",
+        headers: { Authorization: basicAdmin(failingHarper) },
+      });
+      expect(del.status).toBe(500);
+      const error = await del.json();
+      expect(error.type).toBe("error:Error");
+      expect(error.title).toBe("forced Integration failure after second staged delete");
+      for (const id of [...ids, "intdel-failure-control"]) {
+        expect((await readRow(id, failingHarper))?.id).toBe(id);
+      }
+    } finally {
+      try {
+        if (failingHarper) await stopHarper(failingHarper);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }, 240_000);
 });
