@@ -1,26 +1,6 @@
 #!/usr/bin/env node
 // Shared-unit-lane shards (flair#2311).
 //
-// PROBLEM. The `Unit Tests (node N)` job runs the whole shared unit lane as a
-// single step ("Shared unit lane (root, isolated and workspace tests)" ->
-// `bun run test:unit --keep-going`) under scripts/test-unit.ts's keep-going
-// budget of 780 s. On green runs that lane takes 533-741 s — 70-95% of the
-// budget — the same shape the root unit step had before flair#2258 sharded it.
-//
-// FIX. This module owns the lane's step plan AND partitions its file-bearing
-// steps across `LANE_SHARDS` shards, deterministically: each test-bearing step
-// — and therefore each test file — lands in exactly one shard. The CI matrix
-// runs one shard per leg (`bun run test:unit --keep-going --shard <i> --of N`),
-// and `--verify` is the coverage gate that fails when a test file or a
-// test-bearing step is in no shard or in two.
-//
-// The steps that carry no test files (the vendor step, the strict typechecks,
-// the dist emit and the flair-client build) are the lane's shared setup: every
-// shard runs them first, because every shard is an independent runner and some
-// of its tests need their output. They are not part of the shard partition, and
-// `--verify` reports them as the shared prologue rather than counting them
-// twice.
-//
 // USAGE
 //   node scripts/ci/lane-shards.mjs --list-all
 //                                          every test-bearing lane step's name
@@ -32,7 +12,7 @@
 //                                          test-bearing step and every file
 //   Every command refuses an argument it does not take, with exit status 2.
 
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { testFiles } from "./test-files.mjs";
 import { SHARDS, assignShards, listUnitFiles } from "./unit-shards.mjs";
@@ -71,10 +51,6 @@ export const WORKSPACE_PACKAGES = [
 ];
 
 /**
- * The lane's step plan, in execution order. Ported verbatim from
- * scripts/test-unit.ts (flair#2258) so the runner and the coverage gate share
- * one plan; unit-runner.test.ts pins the parts of the shape the lane relies on.
- *
  * @param {string} [root]
  */
 export function unitPlan(root = ROOT) {
@@ -106,6 +82,7 @@ export function unitPlan(root = ROOT) {
     steps.push({ name: `typecheck: ${label}`, cwd: root, args: ["x", "tsc", "--noEmit", "-p", config], files: [] });
   }
   steps.push({ name: "emit server for boundary guard", cwd: root, args: ["x", "tsc", "-p", "tsconfig.json", "--noCheck"], files: [] });
+  steps.push({ name: "build root CLI", cwd: root, args: ["run", "build:cli"], files: [] });
   assignShards(rootUnitFiles, SHARDS).forEach((files, index) => {
     steps.push({
       name: `root unit tests (shard ${index + 1}/${SHARDS})`,
@@ -120,6 +97,7 @@ export function unitPlan(root = ROOT) {
     steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
   }
   steps.push({ name: "build flair-client", cwd: join(root, "packages/flair-client"), args: ["run", "build"], files: [] });
+  steps.push({ name: "build flair-mcp", cwd: join(root, "packages/flair-mcp"), args: ["run", "build"], files: [] });
   // flair#1943: the langgraph-flair contract test asserts a TYPE-LEVEL
   // `const s: BaseStore = new FlairStore(...)` assignability that no `bun test`
   // step can see; type-check that one file against the peer package's types.
@@ -138,12 +116,12 @@ export function unitPlan(root = ROOT) {
     const cwd = join(root, "packages", pkg);
     steps.push({ name: `${pkg} unit tests`, cwd, args: ["test", `./${dir}/`], files: requiredFiles(`packages/${pkg}/${dir}`) });
   }
-  return steps;
+  return [...sharedSteps(steps), ...shardedSteps(steps)];
 }
 
 /** A lane step is shardable work when it runs test files (root shards included). */
 export function isShardedStep(step) {
-  return step.shard !== undefined || step.files.length > 0;
+  return step.shard !== undefined || step.files.length > 0 || step.args[0] === "test";
 }
 
 /** The file-bearing lane steps — the ones the shard partition is over. */
@@ -215,22 +193,38 @@ export function listLaneFiles(root = ROOT) {
   return found.sort();
 }
 
-/**
- * Coverage of the shard partition. Fails a test when a test-bearing lane step,
- * or a test file, is in no shard (`missing*`) or in two (`duplicated*`); also
- * reports a shard with no steps (`empty`). The file corpus is `allFiles`
- * (disk discovery), NOT the union of the shards — otherwise a dropped file
- * would shrink both sides of the comparison and read as covered.
- */
+export function laneShardPlans(steps, of = LANE_SHARDS) {
+  return assignLaneShards(steps, of).map(shard => [...sharedSteps(steps), ...shard]);
+}
+
+function isPureTestStep(step) {
+  if (step.shard !== undefined && !step.files.length && !step.args.length) return true;
+  return step.args[0] === "test" && step.args.length > 1 && step.args.slice(1).every(arg => {
+    const target = resolve(step.cwd, arg);
+    return !arg.startsWith("-") && step.files.some(file => file === target || file.startsWith(target + sep));
+  });
+}
+
 export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
   const corpusSteps = new Set(shardedSteps(steps).map(step => step.name));
+  const setup = new Set(sharedSteps(steps).map(step => step.name));
   const corpusFiles = new Set(allFiles);
   const seenSteps = new Set();
   const seenFiles = new Set();
   const duplicatedSteps = [];
   const duplicatedFiles = [];
+  const invalidTestSteps = new Set(shardedSteps(steps).filter(step => !isPureTestStep(step)).map(step => step.name));
+  const invalidSharedSteps = [];
+  for (const name of setup) {
+    if (shards.some(shard => shard.filter(step => step.name === name).length !== 1)) invalidSharedSteps.push(name);
+  }
   for (const shard of shards) {
     for (const step of shard) {
+      if (setup.has(step.name)) {
+        if (isShardedStep(step)) invalidSharedSteps.push(step.name);
+        continue;
+      }
+      if (!isShardedStep(step) || !isPureTestStep(step)) invalidTestSteps.add(step.name);
       if (seenSteps.has(step.name)) duplicatedSteps.push(step.name);
       seenSteps.add(step.name);
       for (const file of step.files) {
@@ -250,13 +244,14 @@ export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
     missingFiles: [...corpusFiles].filter(file => !seenFiles.has(file)),
     duplicatedFiles,
     unknownFiles: [...seenFiles].filter(file => !corpusFiles.has(file)),
-    empty: shards.flatMap((shard, index) => (shard.length ? [] : [index + 1])),
+    invalidSharedSteps,
+    invalidTestSteps: [...invalidTestSteps],
+    empty: shards.flatMap((shard, index) => (shard.some(isShardedStep) ? [] : [index + 1])),
   };
 }
 
-/** Coverage of the real partition at `of` shards, over the on-disk lane corpus. */
 export function verifyLaneShards(of = LANE_SHARDS, steps = unitPlan(), allFiles = listLaneFiles()) {
-  return laneCoverage(steps, assignLaneShards(steps, of), allFiles);
+  return laneCoverage(steps, laneShardPlans(steps, of), allFiles);
 }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -300,7 +295,7 @@ if (isEntryPoint) {
       }
       const res = verifyLaneShards(of);
       const bad = res.missingSteps.length || res.duplicatedSteps.length || res.unknownSteps.length ||
-        res.missingFiles.length || res.duplicatedFiles.length || res.unknownFiles.length || res.empty.length;
+        res.missingFiles.length || res.duplicatedFiles.length || res.unknownFiles.length || res.empty.length || res.invalidSharedSteps.length || res.invalidTestSteps.length;
       process.stdout.write(
         `lane shards of ${of}: ${res.coveredSteps}/${res.totalSteps} steps and ` +
           `${res.coveredFiles}/${res.totalFiles} files covered, ` +
@@ -308,6 +303,8 @@ if (isEntryPoint) {
           `${res.duplicatedSteps.length + res.duplicatedFiles.length} duplicated\n`,
       );
       if (bad) {
+        if (res.invalidSharedSteps.length) process.stderr.write(`setup not once in every shard: ${res.invalidSharedSteps.join(", ")}\n`);
+        if (res.invalidTestSteps.length) process.stderr.write(`partitioned steps must only run tests: ${res.invalidTestSteps.join(", ")}\n`);
         if (res.empty.length) process.stderr.write(`empty shards: ${res.empty.join(", ")}\n`);
         if (res.missingSteps.length) process.stderr.write(`missing steps: ${res.missingSteps.join(", ")}\n`);
         if (res.missingFiles.length) process.stderr.write(`missing files: ${res.missingFiles.join(", ")}\n`);

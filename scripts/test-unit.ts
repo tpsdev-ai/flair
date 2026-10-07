@@ -23,8 +23,7 @@ import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isola
 import {
   LANE_SHARDS,
   ROOT_STEP_TIMEOUT_MS,
-  assignLaneShards,
-  sharedSteps,
+  laneShardPlans,
   unitPlan,
 } from "./ci/lane-shards.mjs";
 import type { UnitStep } from "./ci/lane-shards.mjs";
@@ -594,7 +593,7 @@ if (import.meta.main) {
     // A sharded invocation runs the shared setup steps first, then this shard's
     // test-bearing steps (flair#2311). The whole lane is the unsharded default.
     const steps = invocation.shard
-      ? [...sharedSteps(allSteps), ...assignLaneShards(allSteps, invocation.shard.of)[invocation.shard.index - 1]]
+      ? laneShardPlans(allSteps, invocation.shard.of)[invocation.shard.index - 1]
       : allSteps;
     if (invocation.list) {
       console.log(JSON.stringify(steps.map(step => ({ ...step, cwd: relative(root, step.cwd) || ".", files: step.files.map(file => relative(root, file)) })), null, 2));

@@ -11,7 +11,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import {
@@ -20,6 +20,7 @@ import {
   assignLaneShards,
   isShardedStep,
   laneCoverage,
+  laneShardPlans,
   listLaneFiles,
   shardSteps,
   sharedSteps,
@@ -71,7 +72,9 @@ describe("lane-shards — the plan", () => {
       "typecheck: root CLI",
       "typecheck: test suite (strict)",
       "emit server for boundary guard",
+      "build root CLI",
       "build flair-client",
+      "build flair-mcp",
       "typecheck: langgraph-flair contract (BaseStore assignability)",
     ]);
   });
@@ -91,6 +94,8 @@ describe("lane-shards — the plan", () => {
     expect(res.duplicatedFiles).toEqual([]);
     expect(res.unknownFiles).toEqual([]);
     expect(res.empty).toEqual([]);
+    expect(res.invalidSharedSteps).toEqual([]);
+    expect(res.invalidTestSteps).toEqual([]);
     expect(res.coveredSteps).toBe(res.totalSteps);
     expect(res.coveredFiles).toBe(res.totalFiles);
   });
@@ -99,7 +104,7 @@ describe("lane-shards — the plan", () => {
     const planted = "test/unit/aaa-lane-shard-planted.test.ts";
     const root = fixtureRoot([planted]);
     const steps = unitPlan(root);
-    const shards = assignLaneShards(steps, LANE_SHARDS);
+    const shards = laneShardPlans(steps, LANE_SHARDS);
     const file = join(root, planted);
     const owners = shards.filter(shard => shard.some(step => step.files.includes(file)));
     expect(owners).toHaveLength(1);
@@ -119,6 +124,8 @@ describe("lane-shards — assignment", () => {
       expect(res.missingFiles).toEqual([]);
       expect(res.duplicatedFiles).toEqual([]);
       expect(res.empty).toEqual([]);
+      expect(res.invalidSharedSteps).toEqual([]);
+      expect(res.invalidTestSteps).toEqual([]);
       expect(res.coveredSteps).toBe(res.totalSteps);
       expect(res.coveredFiles).toBe(res.totalFiles);
     });
@@ -145,17 +152,18 @@ describe("lane-shards — assignment", () => {
 
   test("reports a dropped file, a dropped step, and a duplicated step", () => {
     const plan = unitPlan(ROOT);
-    const shards = assignLaneShards(plan, LANE_SHARDS);
+    const shards = laneShardPlans(plan, LANE_SHARDS);
     const droppedFile = shards.flatMap(s => s).find(s => s.files.length)!.files[0];
-    const droppedStep = shards[0][0].name;
+    const testAt = shards[0].findIndex(isShardedStep);
+    const droppedStep = shards[0][testAt].name;
     const withoutFile = laneCoverage(plan, shards.map((shard, i) => i === 0 ? [
-      { ...shard[0], files: shard[0].files.filter(f => f !== droppedFile) }, ...shard.slice(1),
+      ...shard.slice(0, testAt), { ...shard[testAt], files: shard[testAt].files.filter(f => f !== droppedFile) }, ...shard.slice(testAt + 1),
     ] : shard));
     expect(withoutFile.missingFiles).toEqual([droppedFile]);
-    const withoutStep = laneCoverage(plan, shards.map((shard, i) => i === 0 ? shard.slice(1) : shard));
+    const withoutStep = laneCoverage(plan, shards.map((shard, i) => i === 0 ? shard.filter((_, index) => index !== testAt) : shard));
     expect(withoutStep.missingSteps).toEqual([droppedStep]);
-    const doubled = laneCoverage(plan, [...shards, [shards[0][0]]]);
-    expect(doubled.duplicatedSteps).toEqual([shards[0][0].name]);
+    const doubled = laneCoverage(plan, shards.map((shard, i) => i === 0 ? [...shard, shard[testAt]] : shard));
+    expect(doubled.duplicatedSteps).toEqual([droppedStep]);
   });
 
   test("an unknown step in a shard is reported", () => {
@@ -173,6 +181,32 @@ describe("lane-shards — assignment", () => {
   });
 });
 
+test("coverage rejects setup assigned to one shard", () => {
+  const plan = unitPlan(ROOT);
+  const shards = laneShardPlans(plan, 2);
+  const res = laneCoverage(plan, shards.map((shard, i) => i === 1 ? shard.filter(step => step.name !== "build root CLI") : shard));
+  expect(res.invalidSharedSteps).toEqual(["build root CLI"]);
+});
+
+test("coverage rejects a test-bearing build command", () => {
+  const plan = unitPlan(ROOT).map(step => step.shard?.index === 1 ? { ...step, args: ["run", "build:cli"] } : step);
+  expect(verifyLaneShards(2, plan).invalidTestSteps).toEqual(["root unit tests (shard 1/4)"]);
+});
+
+test("coverage rejects a test command with no declared files", () => {
+  const plan = unitPlan(ROOT).map(step => step.name === "build root CLI" ? { ...step, args: ["test", "test/unit/lane-shards.test.ts"] } : step);
+  expect(verifyLaneShards(2, plan).invalidTestSteps).toEqual(["build root CLI"]);
+});
+
+test("setup precedes tests in each shard", () => {
+  const plan = unitPlan(ROOT);
+  for (const shard of laneShardPlans(plan, 2)) {
+    const firstTest = shard.findIndex(isShardedStep);
+    for (const step of sharedSteps(plan)) expect(shard.indexOf(step)).toBeLessThan(firstTest);
+    expect(shard.find(step => step.name === "build root CLI")?.args).toEqual(["run", "build:cli"]);
+  }
+});
+
 describe("lane-shards — CLI", () => {
   const run = (...args: string[]) => spawnSync("node", ["scripts/ci/lane-shards.mjs", ...args], {
     cwd: ROOT, encoding: "utf8", timeout: 20_000,
@@ -185,6 +219,29 @@ describe("lane-shards — CLI", () => {
     expect(r.stdout).toContain("steps and");
     expect(r.stdout).toContain("files covered");
   });
+
+  for (const mutation of ["setup", "build command"]) {
+    test(`--verify rejects ${mutation} mutation`, () => {
+      const root = fixtureRoot();
+      mkdirSync(join(root, "scripts/ci"), { recursive: true });
+      for (const file of ["lane-shards.mjs", "unit-shards.mjs", "test-files.mjs"]) {
+        cpSync(join(ROOT, "scripts/ci", file), join(root, "scripts/ci", file));
+      }
+      const modulePath = join(root, "scripts/ci/lane-shards.mjs");
+      const source = readFileSync(modulePath, "utf8");
+      const original = mutation === "setup"
+        ? ".map(shard => [...sharedSteps(steps), ...shard])"
+        : "return [...sharedSteps(steps), ...shardedSteps(steps)];";
+      const replacement = mutation === "setup"
+        ? ".map((shard, index) => [...sharedSteps(steps).filter(step => step.name !== 'build root CLI' || index !== 1), ...shard])"
+        : "steps.find(step => step.shard?.index === 1).args = ['run', 'build:cli']; return [...sharedSteps(steps), ...shardedSteps(steps)];";
+      expect(source).toContain(original);
+      writeFileSync(modulePath, source.replace(original, replacement));
+      const result = spawnSync("node", [modulePath, "--verify", "--of", "2"], { cwd: root, encoding: "utf8", timeout: 20_000 });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(mutation === "setup" ? "setup not once in every shard: build root CLI" : "partitioned steps must only run tests: root unit tests (shard 1/4)");
+    });
+  }
 
   test("--verify --of matches another shard count", () => {
     expect(run("--verify", "--of", "3").status).toBe(0);
