@@ -38,6 +38,15 @@ const REPO_ROOT = join(import.meta.dirname, "..", "..");
 const LAUNCHER = join(REPO_ROOT, "templates", "launchd", "start-flair-with-admin-pass.sh");
 const MARKER = "STUB-HARPER-RAN";
 
+// Bounds for a start-time read of a just-spawned pid (flair#2130). A fresh
+// fork's start time is not always answerable on the first read — macOS
+// `ps -o lstart=` (and Linux /proc) can briefly return nothing — so a single
+// null read is "not yet readable", not "unreadable". Retry an unsuccessful
+// read until the cutoff instead of failing on the first attempt; a read
+// already in flight at the cutoff may still finish after it.
+const START_TIME_READ_TIMEOUT_MS = 5_000;
+const START_TIME_READ_POLL_MS = 25;
+
 const dirs: string[] = [];
 const pids: number[] = [];
 
@@ -133,17 +142,53 @@ function psLstartSecond(pid: number): number {
   const conv = process.platform === "darwin"
     ? 'date -j -f "%a %b %e %T %Y" "$(ps -o lstart= -p "$1")" +%s'
     : 'date -d "$(ps -o lstart= -p "$1")" +%s';
-  const r = spawnSync("sh", ["-c", conv, "sh", String(pid)], { encoding: "utf-8", timeout: 5_000 });
-  const sec = Number((r.stdout ?? "").trim());
-  if (!Number.isInteger(sec) || sec <= 0) throw new Error(`could not read the start second of pid ${pid}: ${r.stderr}`);
-  return sec;
+  // Same bounded retry as tsStartSecondMs (flair#2130): a just-spawned pid's
+  // lstart can be briefly unreadable, and this reference conversion must not
+  // throw on a read the reader beside it would have retried.
+  const deadline = Date.now() + START_TIME_READ_TIMEOUT_MS;
+  let sec = NaN;
+  let stderr = "";
+  for (;;) {
+    const r = spawnSync("sh", ["-c", conv, "sh", String(pid)], { encoding: "utf-8", timeout: 5_000 });
+    sec = Number((r.stdout ?? "").trim());
+    stderr = r.stderr ?? "";
+    if (Number.isInteger(sec) && sec > 0) return sec;
+    if (Date.now() >= deadline) break;
+    sleepSync(START_TIME_READ_POLL_MS);
+  }
+  throw new Error(`could not read the start second of pid ${pid}: ${stderr}`);
 }
 
-/** The pid's start second from the same reader resolveInstanceServingPid uses. */
+/** A short synchronous pause, so a bounded retry needs no async plumbing. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * The pid's start second from the same reader resolveInstanceServingPid uses,
+ * read with a bounded retry (flair#2130). A process spawned a moment ago can
+ * have a start time the reader cannot answer for yet, so retry until it
+ * answers. The cutoff is checked only after an unsuccessful read, so a read in
+ * flight at the cutoff may still answer; only a null after the cutoff fails.
+ */
+function readStartSecondWithin(
+  pid: number,
+  read: (pid: number) => number | null,
+  timeoutMs: number = START_TIME_READ_TIMEOUT_MS,
+): number | null {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const ms = read(pid);
+    if (ms !== null) return ms;
+    if (Date.now() >= deadline) return null;
+    sleepSync(START_TIME_READ_POLL_MS);
+  }
+}
+
 function tsStartSecondMs(pid: number): number {
-  const ms = readProcessStartSecondMs(pid);
+  const ms = readStartSecondWithin(pid, readProcessStartSecondMs);
   expect(ms).not.toBeNull();
-  if (ms === null) throw new Error(`could not read the start second of pid ${pid}`);
+  if (ms === null) throw new Error(`could not read the start second of pid ${pid} within ${START_TIME_READ_TIMEOUT_MS}ms`);
   expect(ms % 1000).toBe(0);
   return ms;
 }
@@ -298,6 +343,22 @@ describe("isHarperProcessCommandLine", () => {
     expect(isHarperProcessCommandLine("sleep 60")).toBe(false);
     expect(isHarperProcessCommandLine("node")).toBe(false);
     expect(isHarperProcessCommandLine("")).toBe(false);
+  });
+});
+
+describe("readStartSecondWithin — a just-spawned pid's start second is retried, bounded (flair#2130)", () => {
+  test("a reader that answers only after a few reads is retried, not failed", () => {
+    let reads = 0;
+    const ms = readStartSecondWithin(4242, () => (reads++ < 3 ? null : 12_000), 1_000);
+    expect(ms).toBe(12_000);
+    expect(reads).toBe(4);
+  });
+
+  test("a reader that never answers returns null once the bound expires (and does not hang)", () => {
+    const started = Date.now();
+    const ms = readStartSecondWithin(4242, () => null, 60);
+    expect(ms).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 });
 
