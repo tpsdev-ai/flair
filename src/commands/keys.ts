@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { existsSync, mkdirSync, renameSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, renameSync, readdirSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import * as render from "../render.js";
 import { loadEd25519PrivateKeyFromFile } from "../mcp-client-assertion.js";
@@ -189,34 +189,108 @@ export async function classifyKeysDir(
   return { aborted: false, entries, orphanRead };
 }
 
-/** Archive prunable agent keys; node-shaped files without .pub stay in place. */
+/** What is at a key's ownership-sidecar path, classified WITHOUT following a
+ *  symlink (lstat). flair#2286: prune moves a sidecar only when the path is a
+ *  regular file; a directory, symlink, FIFO or socket there is refused. */
+type SidecarPathKind =
+  | { kind: "absent" }
+  | { kind: "regular" }
+  | { kind: "refused"; type: string }
+  | { kind: "unreadable"; error: string };
+
+/** Classify the path where `key`'s ownership sidecar would be (lstat — a symlink
+ *  is reported as itself, never followed). A failed lstat that is not ENOENT
+ *  is `unreadable`, not `absent`: prune must not move the key on unknown
+ *  evidence. */
+function sidecarPathKind(ownerPath: string): SidecarPathKind {
+  let st: Stats;
+  try {
+    st = lstatSync(ownerPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { kind: "absent" };
+    return { kind: "unreadable", error: code ?? String(err) };
+  }
+  if (st.isFile()) return { kind: "regular" };
+  if (st.isSymbolicLink()) return { kind: "refused", type: "symbolic link" };
+  if (st.isDirectory()) return { kind: "refused", type: "directory" };
+  if (st.isFIFO()) return { kind: "refused", type: "FIFO" };
+  if (st.isSocket()) return { kind: "refused", type: "socket" };
+  return { kind: "refused", type: "not a regular file" };
+}
+
+/** A key moved into the archive, with its destination path. */
+export interface KeysPruneMove {
+  name: string;
+  movedTo: string;
+}
+
+/** A prunable key left where it was, with why. */
+export interface KeysPruneSkip {
+  name: string;
+  ownerPath: string;
+  reason: string;
+}
+
+/** The outcome of an --apply run: what moved and what was left in place. */
+export interface KeysPruneOutcome {
+  moved: KeysPruneMove[];
+  skipped: KeysPruneSkip[];
+}
+
+/** Archive prunable agent keys; node-shaped files without .pub stay in place.
+ *  A key whose ownership-sidecar path holds a non-regular file stays in place
+ *  with a reason (flair#2286). */
 export function applyKeyPrune(
   keysDir: string,
   entries: KeysPruneEntry[],
   dateStamp: string,
   move: typeof renameSync = renameSync,
-): Array<{ name: string; movedTo: string }> {
+): KeysPruneOutcome {
   const prunable = entries.filter((e) => {
     const nodeShaped = isNodeKeyId(e.name.replace(/\.key$/, ""), keysDir);
     return !nodeShaped && (e.class === "stale" || e.class === "invalid");
   });
-  if (prunable.length === 0) return [];
+  const moved: KeysPruneMove[] = [];
+  const skipped: KeysPruneSkip[] = [];
+  if (prunable.length === 0) return { moved, skipped };
 
   const destDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
-  mkdirSync(destDir, { recursive: true });
-  const existing = new Set(readdirSync(destDir));
+  // Created on the first move, so a run where every candidate is skipped leaves
+  // no empty .pruned/<date>/ behind.
+  let existing: Set<string> | undefined;
+  const archiveNames = (): Set<string> => {
+    if (!existing) {
+      mkdirSync(destDir, { recursive: true });
+      existing = new Set(readdirSync(destDir));
+    }
+    return existing;
+  };
 
-  const moved: Array<{ name: string; movedTo: string }> = [];
   for (const e of prunable) {
-    const destName = resolveCollisionSafeName(existing, e.name);
-    existing.add(destName);
+    const fromOwner = join(keysDir, `${e.name}${SEED_OWNER_SUFFIX}`);
+    const ownerKind = sidecarPathKind(fromOwner);
+    if (ownerKind.kind === "refused" || ownerKind.kind === "unreadable") {
+      const why = ownerKind.kind === "refused"
+        ? `${fromOwner} is a ${ownerKind.type}, not a regular file`
+        : `${fromOwner} could not be checked (${ownerKind.error})`;
+      skipped.push({
+        name: e.name,
+        ownerPath: fromOwner,
+        reason: `${why}; the key and the sidecar path are left in place`,
+      });
+      continue;
+    }
+
+    const names = archiveNames();
+    const destName = resolveCollisionSafeName(names, e.name);
+    names.add(destName);
     const from = join(keysDir, e.name);
     const to = join(destDir, destName);
-    const fromOwner = join(keysDir, `${e.name}${SEED_OWNER_SUFFIX}`);
     let toOwner: string | undefined;
-    if (existsSync(fromOwner)) {
-      const destOwnerName = resolveCollisionSafeName(existing, `${destName}${SEED_OWNER_SUFFIX}`);
-      existing.add(destOwnerName);
+    if (ownerKind.kind === "regular") {
+      const destOwnerName = resolveCollisionSafeName(names, `${destName}${SEED_OWNER_SUFFIX}`);
+      names.add(destOwnerName);
       toOwner = join(destDir, destOwnerName);
       move(fromOwner, toOwner);
     }
@@ -228,7 +302,7 @@ export function applyKeyPrune(
     }
     moved.push({ name: e.name, movedTo: to });
   }
-  return moved;
+  return { moved, skipped };
 }
 
 /** Require the HTTP target's Instance id to match the sole ops Instance id. */
@@ -394,11 +468,14 @@ export function register(program: Command): void {
         return;
       }
 
-      const moved = applyKeyPrune(keysDir, result.entries, pruneDateStamp());
+      const { moved, skipped } = applyKeyPrune(keysDir, result.entries, pruneDateStamp());
       console.log("");
       for (const m of moved) {
         console.log(`  ${render.icons.ok} moved ${m.name} -> ${m.movedTo}`);
       }
-      console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored\n`);
+      for (const s of skipped) {
+        console.log(`  ${render.icons.warn} ${render.wrap(render.c.bold, s.name)} — not moved: ${s.reason}`);
+      }
+      console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${skipped.length} left in place, ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored\n`);
     });
 }

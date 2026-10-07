@@ -32,6 +32,7 @@ import nacl from "tweetnacl";
 
 import { classifyKeysDir, applyKeyPrune, program } from "../../src/cli.ts";
 import { PRUNED_DIR_NAME } from "../../src/doctor-client.ts";
+import { SEED_OWNER_SUFFIX } from "../../src/keystore.ts";
 import { makeReadInstanceIds } from "../../src/commands/keys.ts";
 
 const BASE_URL = "http://127.0.0.1:19926";
@@ -208,7 +209,7 @@ describe("classifyKeysDir — orphan instance seeds (flair#1925)", () => {
     expect(byName["flair_1111aaaa.key"]).toBe("unidentified");
     expect(byName["flair_2222bbbb.key"]).toBe("keep");
 
-    const moved = applyKeyPrune(keysDir, res.entries, "2026-10-02");
+    const { moved } = applyKeyPrune(keysDir, res.entries, "2026-10-02");
     expect(moved).toEqual([]);
     expect(existsSync(join(keysDir, "flair_1111aaaa.key"))).toBe(true);
     expect(existsSync(join(keysDir, "flair_2222bbbb.key"))).toBe(true);
@@ -224,7 +225,7 @@ describe("classifyKeysDir — orphan instance seeds (flair#1925)", () => {
     }));
     expect(res.entries.map((e) => e.class)).toEqual(["unidentified"]);
     expect(res.orphanRead).toEqual({ state: "unreadable", reason: "no local admin credential" });
-    expect(applyKeyPrune(keysDir, res.entries, "2026-10-02")).toEqual([]);
+    expect(applyKeyPrune(keysDir, res.entries, "2026-10-02")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(keysDir, "flair_1111aaaa.key"))).toBe(true);
   });
 
@@ -332,7 +333,7 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
     const classified = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
     expect(classified.aborted).toBe(false);
 
-    const moved = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
+    const { moved } = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
     expect(moved).toHaveLength(2);
     expect(moved.map((m) => m.name).sort()).toEqual(["agent-stale-1.key", "agent-stale-2.key"]);
 
@@ -358,7 +359,7 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
     const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
     writeFileSync(join(keysDir, "flair_deadbeef.key"), blob);
     const classified = await classifyKeysDir(keysDir, BASE_URL, instanceRows(["flair_deadbeef"]));
-    const moved = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
+    const { moved } = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
     expect(moved).toEqual([]);
     expect(existsSync(join(keysDir, "flair_deadbeef.key"))).toBe(true);
     expect(existsSync(join(keysDir, PRUNED_DIR_NAME))).toBe(false);
@@ -368,7 +369,7 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
     writeSeedKey(keysDir, "agent-registered");
     globalThis.fetch = mockRegistrationFetch(new Set(["agent-registered"]));
     const classified = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
-    const moved = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
+    const { moved } = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
     expect(moved).toEqual([]);
     expect(existsSync(join(keysDir, PRUNED_DIR_NAME))).toBe(false);
     expect(existsSync(join(keysDir, "agent-registered.key"))).toBe(true);
@@ -378,19 +379,49 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
     writeSeedKey(keysDir, "agent-stray");
     globalThis.fetch = mockRegistrationFetch(new Set());
     const first = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
-    const firstMoved = applyKeyPrune(keysDir, first.entries, "2026-07-18");
+    const { moved: firstMoved } = applyKeyPrune(keysDir, first.entries, "2026-07-18");
     expect(firstMoved).toHaveLength(1);
 
     // A fresh key happens to reuse the same agent id / filename (e.g. a
     // second run after `flair agent add agent-stray` was retried).
     writeSeedKey(keysDir, "agent-stray");
     const second = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
-    const secondMoved = applyKeyPrune(keysDir, second.entries, "2026-07-18");
+    const { moved: secondMoved } = applyKeyPrune(keysDir, second.entries, "2026-07-18");
     expect(secondMoved).toHaveLength(1);
     expect(secondMoved[0].movedTo).toContain("agent-stray.key.2");
 
     const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-18");
     expect(readdirSync(archiveDir).sort()).toEqual(["agent-stray.key", "agent-stray.key.2"]);
+  });
+});
+
+// ─── --apply refuses a non-regular sidecar (flair#2286) ─────────────────────
+
+describe("`flair keys prune --apply` reports a non-regular sidecar instead of moving it (flair#2286)", () => {
+  it("a directory at the sidecar path: the key stays and the operator is told the path and its type", async () => {
+    writeSeedKey(keysDir, "agent-stale");
+    const sidecar = join(keysDir, `agent-stale.key${SEED_OWNER_SUFFIX}`);
+    mkdirSync(sidecar);
+    globalThis.fetch = mockRegistrationFetch(new Set());
+
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try {
+      await program.parseAsync(
+        ["keys", "prune", "--apply", "--keys-dir", keysDir, "--instance", BASE_URL],
+        { from: "user" },
+      );
+    } finally {
+      console.log = realLog;
+    }
+
+    const out = lines.join("\n");
+    expect(out).toContain(sidecar);
+    expect(out).toContain("directory");
+    expect(out).toContain("not moved");
+    expect(existsSync(join(keysDir, "agent-stale.key"))).toBe(true);
+    expect(existsSync(join(keysDir, PRUNED_DIR_NAME))).toBe(false);
   });
 });
 
