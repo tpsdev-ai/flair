@@ -1,4 +1,4 @@
-- **A symlinked migration data directory is refused with the path it points to and the remedy.** The refusal names the configured path, the real path it resolves to, why the symlink is refused, and how to move the data (flair#2277).
+- **A refused symlinked migration data directory now says why it was refused and how to fix it, not just "not a directory".** The refusal names the configured path, the real path it resolves to, why the symlink is refused, and the remedy (flair#2277).
 
   The boot log, the per-migration failure reason and `lastCycleError` in `/HealthDetail`, and `flair doctor`'s Migrations section carry the same message. A symlinked `.migrations` child is refused the same way.
 
