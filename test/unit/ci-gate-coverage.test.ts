@@ -76,7 +76,11 @@ function ciTestTargets(): { dirs: string[]; rootGlob: boolean } {
  */
 function executesSharedLane(flags: string): boolean {
   try {
-    return !parseUnitLaneArgs(flags.trim().split(/\s+/).filter(Boolean), {}).list;
+    // A workflow flag value may be a GitHub expression (e.g.
+    // `--shard ${{ matrix.shard }}`); it stands for a number at run time, so
+    // substitute one before parsing (flair#2311).
+    const normalized = flags.replace(/\$\{\{[^}]*\}\}/g, "1");
+    return !parseUnitLaneArgs(normalized.trim().split(/\s+/).filter(Boolean), {}).list;
   } catch {
     return false;
   }
@@ -168,6 +172,13 @@ describe("every test file is reachable from a CI command", () => {
     // would read as an orphan and this gate would fail on a correct workflow.
     expect(sharedUnitFiles("      run: bun run test:unit --keep-going").size).toBeGreaterThan(100);
     expect(sharedUnitFiles("      run: bun run test:unit --fail-fast").size).toBeGreaterThan(100);
+  });
+
+  test("a sharded runner invocation keeps its coverage (flair#2311)", () => {
+    // The lane is run one shard per matrix leg; the GitHub expression in the
+    // flag stands for a number, so the detector must still see it as executing.
+    expect(sharedUnitFiles("      run: bun run test:unit --keep-going --shard 1 --of 2").size).toBeGreaterThan(100);
+    expect(sharedUnitFiles("      run: bun run test:unit --keep-going --shard ${{ matrix.shard }} --of 2").size).toBeGreaterThan(100);
   });
 
   test("an invocation that runs no tests covers nothing (flair#2030)", () => {
