@@ -1516,7 +1516,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
       fieldTypes: { entries: "array", hasMore: "boolean", limit: "number", generatedAt: "string" },
       invariants: {
         selfDescribingEmpty: [{ path: "entries", type: "array" }],
-        containerRules: [{ container: "entries", requiredFields: ["agentId", "name", "platform", "email", "publishedAt"] }],
+        containerRules: [{ container: "entries", requiredFields: ["agentId", "name", "platform", "email", "publishedAt", "homeInstanceId"] }],
         fullyResolved: true,
       },
       errorShape: { trigger: "a caller that is not a verified active agent", fields: ["error", "status"] },
