@@ -1,16 +1,3 @@
-/**
- * agent-remove-soul-cleanup-2351.test.ts — `flair agent remove` Soul cleanup
- * (flair#2351, mirroring the Memory cleanup of #2299).
- *
- * A Soul scan that fails or returns a malformed response stops the command
- * before any delete. A Soul delete that is not confirmed fails the command, and
- * its message names the Soul ids. The Agent record is deleted only after the
- * agent's Soul rows are confirmed gone.
- *
- * The real `agent remove` command tree runs against a scripted operations
- * endpoint (a fake fetch). The real-Harper case lives in
- * test/integration/local-delete-instance-2225.test.ts.
- */
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Command } from "commander";
 import { bindCli as bindAgent, register as registerAgent, type AgentCli } from "../../src/commands/agent";
@@ -30,7 +17,14 @@ let operations: string[];
 let soulScan: (() => Response) | null;
 let soulConfirm: (() => Response) | null;
 let soulDeleteSkips: Set<string>;
-let soulStore: Map<string, { id: string }>;
+type SoulRow = { id: string; agentId: string; key: string; value: string; createdAt: string };
+type MemoryRow = { id: string; agentId: string; content: string; createdAt: string };
+let soulStore: Map<string, SoulRow>;
+let memoryStore: Map<string, MemoryRow>;
+let memoryScan: (() => Response) | null;
+let soulDelete: (() => Response) | null;
+let purge: (() => void) | null;
+let requested: any[];
 let soulScans: number;
 let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
@@ -40,7 +34,12 @@ beforeEach(() => {
   soulScan = null;
   soulConfirm = null;
   soulDeleteSkips = new Set();
-  soulStore = new Map([["soul-a", { id: "soul-a" }], ["soul-b", { id: "soul-b" }]]);
+  soulStore = new Map(["soul-a", "soul-b"].map(id => [id, { id, agentId: "owner", key: id, value: "plain", createdAt: new Date().toISOString() }]));
+  memoryStore = new Map();
+  memoryScan = null;
+  soulDelete = null;
+  purge = null;
+  requested = [];
   soulScans = 0;
   delete process.env.FLAIR_OPS_PORT;
   process.env.FLAIR_ADMIN_PASS = "secret";
@@ -50,20 +49,28 @@ beforeEach(() => {
   globalThis.fetch = (async (url: any, init: any) => {
     expect(String(url)).toBe("http://127.0.0.1:19925/");
     const b = JSON.parse(init.body);
+    requested.push(b);
     operations.push(`${b.operation}:${b.table ?? ""}`);
     if (b.operation === "get_configuration") return Response.json(CONFIGURATION);
-    if (b.table === "Memory" && b.operation === "search_by_value") return Response.json([]);
+    const selected = <T extends { agentId: string }>(rows: T[]) => {
+      if (b.operation === "search_by_conditions") {
+        expect(b.conditions).toEqual([{ search_attribute: "agentId", search_type: "equals", search_value: b.conditions[0].search_value }]);
+        expect(b.get_attributes).toEqual(["id", "agentId"]);
+        return rows.filter(row => row.agentId === b.conditions[0].search_value);
+      }
+      return rows.filter(row => b.search_value.endsWith("*") ? row.agentId.startsWith(b.search_value.slice(0, -1)) : row.agentId === b.search_value);
+    };
+    if (b.table === "Memory" && b.operation.startsWith("search")) return memoryScan ? memoryScan() : Response.json(selected([...memoryStore.values()]));
     if (b.table === "Agent" && b.operation === "search_by_value") {
       return Response.json([{ id: "owner", name: "Owner" }]);
     }
-    if (b.table === "Soul" && b.operation === "search_by_value") {
+    if (b.table === "Soul" && b.operation.startsWith("search")) {
       soulScans++;
-      if (soulScans === 1) return soulScan ? soulScan() : Response.json([...soulStore.values()]);
-      return soulConfirm ? soulConfirm() : Response.json([...soulStore.values()]);
+      if (soulScans === 1) return soulScan ? soulScan() : Response.json(selected([...soulStore.values()]));
+      return soulConfirm ? soulConfirm() : Response.json(selected([...soulStore.values()]));
     }
     if (b.table === "Soul" && b.operation === "delete") {
-      // Harper queues a delete and can skip it at commit: an id in
-      // `soulDeleteSkips` is accepted (200) but left stored.
+      if (soulDelete) return soulDelete();
       for (const id of b.ids ?? []) if (!soulDeleteSkips.has(id)) soulStore.delete(id);
       return Response.json({ message: "1 of 1 records deleted" });
     }
@@ -77,8 +84,13 @@ beforeEach(() => {
     Number(opts.opsPort ?? process.env.FLAIR_OPS_PORT ?? 19925);
   const resolveHttpPort = () => 19926;
   bindAgent({
-    api: async () => {
-      throw new Error("agent remove must not call /MemoryPurge when the agent has no Memory rows");
+    api: async (method, path, body) => {
+      expect(method).toBe("POST");
+      expect(path).toBe("/MemoryPurge");
+      const ids = (body as { ids: string[] }).ids;
+      for (const id of ids) memoryStore.delete(id);
+      purge?.();
+      return { removed: ids.length, removedIds: ids };
     },
     resolveOpsPort,
     resolveHttpPort,
@@ -102,10 +114,10 @@ afterEach(() => {
   write.mockRestore();
 });
 
-async function invokeAgentRemove(): Promise<void> {
+async function invokeAgentRemove(id = "owner"): Promise<void> {
   const cmd = new Command();
   registerAgent(cmd);
-  await cmd.parseAsync(["agent", "remove", "owner", "--force", "--keep-keys"], { from: "user" });
+  await cmd.parseAsync(["agent", "remove", id, "--force", "--keep-keys"], { from: "user" });
 }
 
 test("agent remove deletes the agent's Soul rows, confirms them gone, then deletes the Agent", async () => {
@@ -113,11 +125,11 @@ test("agent remove deletes the agent's Soul rows, confirms them gone, then delet
   expect(operations).toEqual([
     "get_configuration:",
     "search_by_value:Agent",
-    "search_by_value:Memory",
-    "search_by_value:Soul",
+    "search_by_conditions:Memory",
+    "search_by_conditions:Soul",
     "delete:Soul",
     "delete:Soul",
-    "search_by_value:Soul",
+    "search_by_conditions:Soul",
     "delete:Agent",
   ]);
   expect(soulStore.size).toBe(0);
@@ -141,6 +153,7 @@ for (const [label, scan] of scanFailures) {
 
 const confirmFailures: [string, () => Response][] = [
   ["a failed confirmation scan", () => new Response("ops unavailable", { status: 500 })],
+  ["a rejected confirmation request", () => { throw new Error("connection closed"); }],
   ["a malformed confirmation scan", () => Response.json({ results: [] })],
 ];
 for (const [label, confirm] of confirmFailures) {
@@ -154,8 +167,6 @@ for (const [label, confirm] of confirmFailures) {
 }
 
 test("agent remove: an unconfirmed Soul delete fails before the Agent delete and names the Soul id that remains", async () => {
-  // soul-a's delete is accepted but skipped at commit; the confirmation read
-  // still finds it. soul-b's delete is confirmed.
   soulDeleteSkips = new Set(["soul-a"]);
   await expect(invokeAgentRemove()).rejects.toThrow(/soul-a/);
   expect(operations.filter((o) => o === "delete:Soul")).toHaveLength(2);
@@ -164,3 +175,63 @@ test("agent remove: an unconfirmed Soul delete fails before the Agent delete and
   expect(soulStore.has("soul-b")).toBe(false);
   expect(log.mock.calls.flat().join("\n")).not.toContain("removed successfully");
 });
+
+for (const table of ["Memory", "Soul"] as const) {
+  test(`agent remove checks every ${table} row owner before deletion`, async () => {
+    const rows = [{ id: "owned", agentId: "owner" }, { id: "different", agentId: "other" }];
+    if (table === "Memory") memoryScan = () => Response.json(rows);
+    else soulScan = () => Response.json(rows);
+    let failure: any;
+    try { await invokeAgentRemove(); } catch (error) { failure = error; }
+    expect(failure?.name).toBe("AgentRemoveOwnerMismatchError");
+    expect(failure?.message).toContain(`${table} row 'different'`);
+    expect(requested.some(b => b.operation === "delete")).toBe(false);
+    expect(soulStore.size).toBe(2);
+  });
+  test(`agent remove preserves other owners' ${table} rows with a literal agent ID`, async () => {
+    const owner = "owner*";
+    const other = "owner2";
+    soulStore.clear();
+    for (const agentId of [owner, other]) {
+      for (const suffix of ["a", "b"]) {
+        const id = `${agentId}-${suffix}`;
+        if (table === "Memory") memoryStore.set(id, { id, agentId, content: "plain", createdAt: new Date().toISOString() });
+        else soulStore.set(id, { id, agentId, key: suffix, value: "plain", createdAt: new Date().toISOString() });
+      }
+    }
+    await invokeAgentRemove(owner);
+    const rows = table === "Memory" ? [...memoryStore.values()] : [...soulStore.values()];
+    expect(rows.map(row => row.id).sort()).toEqual([`${other}-a`, `${other}-b`]);
+  });
+}
+
+test("agent remove performs Soul confirmation after an empty initial scan and Memory cleanup", async () => {
+  soulStore.clear();
+  memoryStore.set("memory-a", { id: "memory-a", agentId: "owner", content: "plain", createdAt: new Date().toISOString() });
+  purge = () => soulStore.set("soul-later", { id: "soul-later", agentId: "owner", key: "tone", value: "plain", createdAt: new Date().toISOString() });
+  await expect(invokeAgentRemove()).rejects.toThrow("soul-later");
+  expect(soulScans).toBe(2);
+  expect(memoryStore.size).toBe(0);
+  expect(soulStore.has("soul-later")).toBe(true);
+  expect(operations).not.toContain("delete:Agent");
+});
+
+test("agent remove checks row ownership on Soul confirmation", async () => {
+  soulConfirm = () => Response.json([{ id: "different", agentId: "other" }]);
+  await expect(invokeAgentRemove()).rejects.toMatchObject({ name: "AgentRemoveOwnerMismatchError" });
+  expect(operations).not.toContain("delete:Agent");
+  expect(requested.filter(b => b.operation === "delete").flatMap(b => b.ids)).not.toContain("different");
+});
+
+for (const [label, fail] of [
+  ["HTTP failure", () => new Response("unavailable", { status: 500 })],
+  ["request rejection", () => { throw new Error("connection closed"); }],
+] as const) {
+  test(`agent remove names the Soul ID on a per-row delete ${label}`, async () => {
+    soulDelete = fail;
+    await expect(invokeAgentRemove()).rejects.toThrow("Failed to delete Soul 'soul-a'");
+    expect(soulStore.size).toBe(2);
+    expect(operations).not.toContain("delete:Agent");
+    expect(log.mock.calls.flat().join("\n")).not.toContain("removed successfully");
+  });
+}

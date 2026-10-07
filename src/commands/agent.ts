@@ -653,28 +653,39 @@ export function register(program: Command): void {
       const agentData = agentRes.ok ? await agentRes.json().catch(() => null) : null;
       const agentName = agentData?.[0]?.name ?? id;
 
-      const memRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
-      const memories: unknown = memRes.ok ? await memRes.json().catch(() => undefined) : undefined;
-      if (!Array.isArray(memories) || !memories.every((mem: any) => typeof mem?.id === "string" && mem.id.length > 0)) {
-        throw new Error(
-          `The Memory scan for agent '${id}' ${memRes.ok ? "returned an unexpected response" : `failed (${memRes.status})`}; ` +
-          `nothing was removed. Check the operations API at ${instance.opsUrl} and retry.`,
-        );
+      async function scanOwnedIds(table: "Memory" | "Soul"): Promise<string[]> {
+        const res = await opsPost({
+          operation: "search_by_conditions", database: "flair", table, operator: "and",
+          conditions: [{ search_attribute: "agentId", search_type: "equals", search_value: id }],
+          get_attributes: ["id", "agentId"],
+        });
+        if (!res.ok) throw new Error(`operations API returned ${res.status}`);
+        const rows: unknown = await res.json();
+        if (!Array.isArray(rows) || !rows.every((row: any) => typeof row?.id === "string" && row.id.length > 0)) {
+          throw new Error("returned an unexpected response");
+        }
+        for (const row of rows) {
+          if (row.agentId !== id) {
+            const error = new Error(`${table} row '${row.id}' does not belong to agent '${id}'`);
+            error.name = "AgentRemoveOwnerMismatchError";
+            throw error;
+          }
+        }
+        return rows.map((row: { id: string }) => row.id);
       }
-      const memoryIds: string[] = memories.map((mem: { id: string }) => mem.id);
-      const memoryCount = memoryIds.length;
 
-      // The Soul scan runs before any delete, like the Memory scan above: a
-      // failed or malformed scan stops the command here.
-      const soulRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Soul", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
-      const souls: unknown = soulRes.ok ? await soulRes.json().catch(() => undefined) : undefined;
-      if (!Array.isArray(souls) || !souls.every((soul: any) => typeof soul?.id === "string" && soul.id.length > 0)) {
-        throw new Error(
-          `The Soul scan for agent '${id}' ${soulRes.ok ? "returned an unexpected response" : `failed (${soulRes.status})`}; ` +
-          `nothing was removed. Check the operations API at ${instance.opsUrl} and retry.`,
-        );
+      async function initialScan(table: "Memory" | "Soul"): Promise<string[]> {
+        try {
+          return await scanOwnedIds(table);
+        } catch (error) {
+          const failure = new Error(`The ${table} scan for agent '${id}' failed: ${error instanceof Error ? error.message : String(error)}; nothing was removed.`, { cause: error });
+          if (error instanceof Error) failure.name = error.name;
+          throw failure;
+        }
       }
-      const soulIds: string[] = souls.map((soul: { id: string }) => soul.id);
+      const memoryIds = await initialScan("Memory");
+      const memoryCount = memoryIds.length;
+      const soulIds = await initialScan("Soul");
 
       // Confirmation
       const isInteractive = process.stdin.isTTY;
@@ -718,33 +729,36 @@ export function register(program: Command): void {
         confirmedPurgeIds(purge, memoryIds);
       }
 
-      // Delete the agent's Soul rows, then confirm each is gone. Harper queues
-      // a delete and can skip it at commit, so the command reads the agent's
-      // Soul rows again and, if any remain, fails naming them before the Agent
-      // record is deleted.
       if (soulIds.length > 0) {
         console.log(`Deleting ${soulIds.length} soul entries...`);
         for (const soulId of soulIds) {
-          const soulDel = await opsPost({ operation: "delete", database: "flair", table: "Soul", ids: [soulId] });
-          if (!soulDel.ok) {
-            const text = await soulDel.text().catch(() => "");
-            throw new Error(`Failed to delete Soul '${soulId}' (${soulDel.status}): ${text}`);
+          try {
+            const soulDel = await opsPost({ operation: "delete", database: "flair", table: "Soul", ids: [soulId] });
+            if (!soulDel.ok) {
+              const text = await soulDel.text().catch(() => "");
+              throw new Error(`operations API returned ${soulDel.status}: ${text}`);
+            }
+          } catch (error) {
+            throw new Error(`Failed to delete Soul '${soulId}': ${error instanceof Error ? error.message : String(error)}`, { cause: error });
           }
         }
-        const confirmRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Soul", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
-        const remaining: unknown = confirmRes.ok ? await confirmRes.json().catch(() => undefined) : undefined;
-        if (!Array.isArray(remaining) || !remaining.every((soul: any) => typeof soul?.id === "string" && soul.id.length > 0)) {
-          throw new Error(
-            `The Soul deletion for agent '${id}' ${confirmRes.ok ? "returned an unexpected confirmation response" : `could not be confirmed (${confirmRes.status})`}; ` +
-            `these Soul rows may remain and the Agent record was not deleted: ${soulIds.join(", ")}.`,
-          );
-        }
-        const remainingIds: string[] = remaining.map((soul: { id: string }) => soul.id);
-        if (remainingIds.length > 0) {
-          throw new Error(
-            `The Soul deletion for agent '${id}' was not confirmed; these Soul rows remain and the Agent record was not deleted: ${remainingIds.join(", ")}.`,
-          );
-        }
+      }
+      let remainingIds: string[];
+      try {
+        remainingIds = await scanOwnedIds("Soul");
+      } catch (error) {
+        const failure = new Error(
+          `The Soul deletion for agent '${id}' could not be confirmed: ${error instanceof Error ? error.message : String(error)}; ` +
+          `these scanned Soul rows may remain and the Agent record was not deleted: ${soulIds.join(", ") || "(none scanned)"}.`,
+          { cause: error },
+        );
+        if (error instanceof Error) failure.name = error.name;
+        throw failure;
+      }
+      if (remainingIds.length > 0) {
+        throw new Error(
+          `The Soul deletion for agent '${id}' was not confirmed; these Soul rows remain and the Agent record was not deleted: ${remainingIds.join(", ")}.`,
+        );
       }
 
       // Delete agent record
