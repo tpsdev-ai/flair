@@ -555,3 +555,62 @@ describe("POST /MemoryPurge on a real Harper", () => {
     expect(await historyFor(present)).toEqual([]);
   }, 300_000);
 });
+
+// ─── flair#2351 — agent remove confirms the Soul cleanup ──────────────────────
+describe("flair#2351 — agent remove confirms the agent's Soul rows are gone", () => {
+  /** Insert a Soul row with every field the Soul schema requires (schemas/soul in memory.graphql). */
+  async function insertSoul(rec: { id: string; agentId: string; key: string; value: string }): Promise<void> {
+    const res = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Soul",
+        records: [{ ...rec, createdAt: new Date().toISOString() }],
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    expect(res.status, `Soul insert ${rec.id} → ${res.status}: ${(await res.text()).slice(0, 200)}`).toBe(200);
+  }
+
+  async function soulsFor(agentId: string): Promise<any[]> {
+    const rows = await ops({
+      operation: "search_by_value",
+      database: "flair",
+      table: "Soul",
+      search_attribute: "agentId",
+      search_value: agentId,
+      get_attributes: ["id", "agentId", "key"],
+    });
+    return Array.isArray(rows) ? rows.filter((r: any) => r?.agentId === agentId) : rows;
+  }
+
+  test("agent remove removes an agent with Soul rows and leaves no Soul or Agent row", async () => {
+    const home = scratchHome();
+    const agentId = "agent-soul-owner";
+    await insertAgent(agentId);
+    await insertSoul({ id: `${agentId}:mission`, agentId, key: "mission", value: "keep the fleet honest" });
+    await insertSoul({ id: `${agentId}:tone`, agentId, key: "tone", value: "plain" });
+    expect((await soulsFor(agentId)).length).toBe(2);
+
+    const run = await runCli(
+      ["agent", "remove", agentId, "--force", "--keep-keys", "--ops-port", String(opsPort())],
+      home,
+    );
+    expect(run.code, run.out).toBe(0);
+    expect(run.out).toContain(`Agent '${agentId}' removed successfully`);
+
+    const souls = await soulsFor(agentId);
+    expect(souls, `Soul rows left after agent remove: ${JSON.stringify(souls)}`).toEqual([]);
+    const agent = await ops({
+      operation: "search_by_value",
+      database: "flair",
+      table: "Agent",
+      search_attribute: "id",
+      search_value: agentId,
+      get_attributes: ["id"],
+    });
+    expect(agent, `Agent row left after agent remove: ${JSON.stringify(agent)}`).toEqual([]);
+  }, 300_000);
+});
