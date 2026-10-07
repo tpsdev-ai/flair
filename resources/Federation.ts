@@ -21,6 +21,7 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance, storeInstanceSeed } from "./instance-create-lock.js";
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
+import { stampEphemeralExpiry } from "./memory-durability.js";
 import { isReservedSeedId } from "./seed-reservation.js";
 import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
@@ -924,6 +925,10 @@ export class FederationSync extends Resource {
             local && typeof local.instanceToken === "string" && local.instanceToken.length > 0
               ? local.instanceToken
               : randomUUID();
+          // flair#2274: a federated receive is a Memory writer — an ephemeral
+          // merged row gets the tier expiry the shared rule stamps (carry the
+          // local row's expiry forward, else stamp the default).
+          stampEphemeralExpiry(mergedData, local);
         }
 
         await table.put(mergedData);

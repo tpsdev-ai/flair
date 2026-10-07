@@ -27,6 +27,7 @@ import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { rejectSkillWritePath } from "./skill-write.js";
+import { stampEphemeralExpiry } from "./memory-durability.js";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { SKILL_ASSIGNMENT_KEY } from "./skill-provenance.js";
 
@@ -194,6 +195,10 @@ export class AgentSeed extends Resource {
         record.instanceToken = randomUUID();
         // flair#1965 r2: raw Memory create — stamp the local instance id.
         await stampOriginatorOnCreate(record);
+        // flair#2274: the seed is a Memory writer — give an ephemeral starter
+        // memory the tier expiry the shared rule stamps (this raw put bypasses
+        // Memory.post()/put()).
+        stampEphemeralExpiry(record);
         await (databases as any).flair.Memory.put(record);
         noteMemoryUpsert(record);
         memories.push(record);

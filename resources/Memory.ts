@@ -24,7 +24,7 @@ import {
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
-import { assertValidDurability } from "./memory-durability.js";
+import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
@@ -1311,10 +1311,12 @@ export class Memory extends (databases as any).flair.Memory {
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
 
-    if (content.durability === "ephemeral" && !content.expiresAt) {
-      const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
-      content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
-    }
+    // flair#2274: the tier expiry (durability -> expiresAt) is ONE shared rule
+    // (resources/memory-durability.ts) — see stampEphemeralExpiry's doc for the
+    // effective-durability / carry-forward semantics. Every writer that can
+    // land an ephemeral row calls it, so a write through any of them expires
+    // identically.
+    stampEphemeralExpiry(content);
 
     // Content safety scan — covers content + summary (defense-in-depth for
     // agent-set summaries).
@@ -1635,6 +1637,12 @@ export class Memory extends (databases as any).flair.Memory {
     // The receiver-side federation bookkeeping keeps its stored value (a patch
     // merges); a client body value is dropped.
     dropClientFederationBookkeeping(content);
+    // flair#2274: patch() is a Memory writer too — a PATCH that lands an
+    // ephemeral row (or flips one to ephemeral) must carry the tier expiry,
+    // through the same shared rule the other writers use. existingForSkill is
+    // the carry-forward source, as put()'s preExisting is. (The re-embed branch
+    // above returns first; it changes no tier.)
+    stampEphemeralExpiry(content, existingForSkill);
     return super.patch(content, query);
   }
 
@@ -1892,15 +1900,10 @@ export class Memory extends (databases as any).flair.Memory {
     // carried forward, never re-stamped — an update must not extend the
     // exposure window; an explicit caller-provided expiresAt always wins.
     {
-      const effectiveDurability = content.durability ?? preExisting?.durability;
-      if (effectiveDurability === "ephemeral" && !content.expiresAt) {
-        if (preExisting?.expiresAt) {
-          content.expiresAt = preExisting.expiresAt;
-        } else {
-          const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
-          content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
-        }
-      }
+      // flair#2274: the same shared tier rule post() uses, with put()'s one
+      // extra input — the pre-existing row, so an update carries a stored
+      // expiry forward instead of re-stamping it. See stampEphemeralExpiry.
+      stampEphemeralExpiry(content, preExisting);
     }
 
     // supersedes: optional reference to the ID of the memory this one

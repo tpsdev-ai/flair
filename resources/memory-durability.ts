@@ -52,3 +52,47 @@ export function assertValidDurability(durability: unknown): string | null {
     `(got: ${JSON.stringify(durability)}). Omit it to use the default "standard".`
   );
 }
+
+/** Milliseconds in one hour — the unit FLAIR_EPHEMERAL_TTL_HOURS is expressed in. */
+const MS_PER_HOUR = 3600_000;
+
+/**
+ * ─── The one rule that stamps an ephemeral write's tier expiry ────────────
+ *
+ * MemoryMaintenance reaps a Memory row only when its durability is "ephemeral"
+ * AND its expiresAt is in the past (resources/MemoryMaintenance.ts). An
+ * ephemeral row stored without an expiresAt is therefore never reaped, so the
+ * 24-hour ephemeral tier silently stops expiring. Every writer that
+ * can land an ephemeral row gives it that expiry through this one rule:
+ * Memory.post()/put()/patch(), the feed ingest, the agent seed and the
+ * federation merge.
+ *
+ * Sets expiresAt on `content` IN PLACE when the EFFECTIVE durability is
+ * "ephemeral" and no expiry is present:
+ *
+ *   - effective durability is the write's own `durability`, else the stored
+ *     row's (`PUT`/`PATCH` may omit it; the tier is then the pre-existing row's);
+ *   - a caller-supplied expiresAt is never overwritten;
+ *   - a pre-existing row's expiresAt is carried forward, never re-stamped —
+ *     an update of an already-expiring row must not extend its window;
+ *   - otherwise the tier default applies: now + FLAIR_EPHEMERAL_TTL_HOURS
+ *     (default 24), read at write time.
+ *
+ * Deliberately has ZERO imports (same load-bearing reason as
+ * assertValidDurability above): any caller — a resource, a raw table writer, a
+ * migration — can import it without dragging in "harper".
+ */
+export function stampEphemeralExpiry(
+  content: Record<string, any>,
+  preExisting?: { durability?: unknown; expiresAt?: unknown } | null,
+): void {
+  const effectiveDurability = content.durability ?? preExisting?.durability;
+  if (effectiveDurability !== "ephemeral") return;
+  if (content.expiresAt) return;
+  if (preExisting?.expiresAt) {
+    content.expiresAt = preExisting.expiresAt;
+    return;
+  }
+  const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
+  content.expiresAt = new Date(Date.now() + ttlHours * MS_PER_HOUR).toISOString();
+}
