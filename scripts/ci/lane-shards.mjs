@@ -7,12 +7,12 @@
 //   node scripts/ci/lane-shards.mjs --shard <i> [--of <N>]
 //                                          shard i's step names (1-based)
 //   node scripts/ci/lane-shards.mjs --verify [--of <N>]
-//                                          coverage gate: exit non-zero unless
-//                                          the shards partition every
-//                                          test-bearing step and every file
+//                                          checks command/file agreement and
+//                                          the step and file partition
 //   Every command refuses an argument it does not take, with exit status 2.
 
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { readdirSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { testFiles } from "./test-files.mjs";
 import { SHARDS, assignShards, listUnitFiles } from "./unit-shards.mjs";
@@ -197,12 +197,44 @@ export function laneShardPlans(steps, of = LANE_SHARDS) {
   return assignLaneShards(steps, of).map(shard => [...sharedSteps(steps), ...shard]);
 }
 
-function isPureTestStep(step) {
-  if (step.shard !== undefined && !step.files.length && !step.args.length) return true;
-  return step.args[0] === "test" && step.args.length > 1 && step.args.slice(1).every(arg => {
-    const target = resolve(step.cwd, arg);
-    return !arg.startsWith("-") && step.files.some(file => file === target || file.startsWith(target + sep));
+function bunDirectoryFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+    const file = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      return entry.name.startsWith(".") || entry.name === "node_modules" ? [] : bunDirectoryFiles(file);
+    }
+    return /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/.test(entry.name) ? [file] : [];
   });
+}
+
+function expandCommand(step) {
+  if (step.shard !== undefined && !step.files.length && !step.args.length) return { files: [], errors: [] };
+  if (step.args[0] !== "test" || step.args.length < 2 || step.args.slice(1).some(arg => arg.startsWith("-"))) {
+    return { files: [], errors: ["not a targeted bun test command"] };
+  }
+  const files = new Set();
+  const errors = [];
+  for (const arg of step.args.slice(1)) {
+    try {
+      let matched;
+      if (isAbsolute(arg) || arg.startsWith("./") || arg.startsWith("../")) {
+        const target = resolve(step.cwd, arg);
+        const stat = statSync(target);
+        matched = stat.isDirectory() ? bunDirectoryFiles(target) : [target];
+      } else {
+        matched = bunDirectoryFiles(step.cwd).filter(file => relative(step.cwd, file).includes(arg));
+      }
+      if (!matched.length) throw new Error(`no test files match ${arg}`);
+      for (const file of matched) files.add(file);
+    } catch { errors.push(`unmatched target: ${arg}`); }
+  }
+  return { files: [...files].sort(), errors };
+}
+
+export function commandFiles(step) {
+  const { files, errors } = expandCommand(step);
+  if (errors.length) throw new Error(errors.join(", "));
+  return files;
 }
 
 export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
@@ -213,7 +245,31 @@ export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
   const seenFiles = new Set();
   const duplicatedSteps = [];
   const duplicatedFiles = [];
-  const invalidTestSteps = new Set(shardedSteps(steps).filter(step => !isPureTestStep(step)).map(step => step.name));
+  const invalidTestSteps = new Set();
+  const fileMismatches = new Map();
+  const invalidCommands = new Set();
+  const expanded = new Map();
+  const inspect = step => {
+    if (expanded.has(step)) return expanded.get(step);
+    const { files, errors } = expandCommand(step);
+    if (errors.length) {
+      invalidTestSteps.add(step.name);
+      invalidCommands.add(`${step.name}: ${errors.join(", ")}`);
+    }
+    const declared = new Set(step.files);
+    const actual = new Set(files);
+    const mismatch = {
+      step: step.name,
+      declaredOnly: [...declared].filter(file => !actual.has(file)).sort(),
+      commandOnly: files.filter(file => !declared.has(file)),
+    };
+    if (mismatch.declaredOnly.length || mismatch.commandOnly.length) {
+      fileMismatches.set(JSON.stringify(mismatch), mismatch);
+    }
+    expanded.set(step, files);
+    return files;
+  };
+  for (const step of shardedSteps(steps)) inspect(step);
   const invalidSharedSteps = [];
   for (const name of setup) {
     if (shards.some(shard => shard.filter(step => step.name === name).length !== 1)) invalidSharedSteps.push(name);
@@ -224,10 +280,10 @@ export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
         if (isShardedStep(step)) invalidSharedSteps.push(step.name);
         continue;
       }
-      if (!isShardedStep(step) || !isPureTestStep(step)) invalidTestSteps.add(step.name);
+      if (!isShardedStep(step)) invalidTestSteps.add(step.name);
       if (seenSteps.has(step.name)) duplicatedSteps.push(step.name);
       seenSteps.add(step.name);
-      for (const file of step.files) {
+      for (const file of inspect(step)) {
         if (seenFiles.has(file)) duplicatedFiles.push(file);
         seenFiles.add(file);
       }
@@ -246,6 +302,8 @@ export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
     unknownFiles: [...seenFiles].filter(file => !corpusFiles.has(file)),
     invalidSharedSteps,
     invalidTestSteps: [...invalidTestSteps],
+    fileMismatches: [...fileMismatches.values()],
+    invalidCommands: [...invalidCommands],
     empty: shards.flatMap((shard, index) => (shard.some(isShardedStep) ? [] : [index + 1])),
   };
 }
@@ -303,7 +361,7 @@ if (isEntryPoint) {
       }
       const res = verifyLaneShards(of);
       const bad = res.missingSteps.length || res.duplicatedSteps.length || res.unknownSteps.length ||
-        res.missingFiles.length || res.duplicatedFiles.length || res.unknownFiles.length || res.empty.length || res.invalidSharedSteps.length || res.invalidTestSteps.length;
+        res.missingFiles.length || res.duplicatedFiles.length || res.unknownFiles.length || res.empty.length || res.invalidSharedSteps.length || res.invalidTestSteps.length || res.fileMismatches.length;
       process.stdout.write(
         `lane shards of ${of}: ${res.coveredSteps}/${res.totalSteps} steps and ` +
           `${res.coveredFiles}/${res.totalFiles} files covered, ` +
@@ -311,6 +369,10 @@ if (isEntryPoint) {
           `${res.duplicatedSteps.length + res.duplicatedFiles.length} duplicated\n`,
       );
       if (bad) {
+        for (const command of res.invalidCommands) process.stderr.write(`invalid command: ${command}\n`);
+        for (const mismatch of res.fileMismatches) {
+          process.stderr.write(`command/files mismatch: ${mismatch.step}; declared only: ${mismatch.declaredOnly.join(", ") || "(none)"}; command only: ${mismatch.commandOnly.join(", ") || "(none)"}\n`);
+        }
         if (res.invalidSharedSteps.length) process.stderr.write(`setup not once in every shard: ${res.invalidSharedSteps.join(", ")}\n`);
         if (res.invalidTestSteps.length) process.stderr.write(`partitioned steps must only run tests: ${res.invalidTestSteps.join(", ")}\n`);
         if (res.empty.length) process.stderr.write(`empty shards: ${res.empty.join(", ")}\n`);

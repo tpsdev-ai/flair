@@ -23,6 +23,7 @@ export function assignLaneShards(steps: UnitStep[], of?: number): UnitStep[][];
 export function laneShardPlans(steps: UnitStep[], of?: number): UnitStep[][];
 export function shardSteps(index: number, of?: number, steps?: UnitStep[]): UnitStep[];
 export function listLaneFiles(root?: string): string[];
+export function commandFiles(step: UnitStep): string[];
 export function laneCoverage(
   steps: UnitStep[],
   shards: UnitStep[][],
@@ -40,6 +41,8 @@ export function laneCoverage(
   unknownFiles: string[];
   invalidSharedSteps: string[];
   invalidTestSteps: string[];
+  invalidCommands: string[];
+  fileMismatches: { step: string; declaredOnly: string[]; commandOnly: string[] }[];
   empty: number[];
 };
 export function verifyLaneShards(

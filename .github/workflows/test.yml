@@ -166,9 +166,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - name: Verify root unit shard coverage
         run: node scripts/ci/unit-shards.mjs --verify
-      # flair#2311: the coverage gate for the lane shard split — fails when a
-      # test file or a test-bearing lane step is in no shard or in two. Modelled
-      # on the root unit shard gate above; same plan (scripts/ci/lane-shards.mjs).
+      # flair#2311: verify command/file agreement and the lane partition.
       - name: Verify lane shard coverage
         run: node scripts/ci/lane-shards.mjs --verify --of 2
       - name: Shared unit lane (root, isolated and workspace tests)

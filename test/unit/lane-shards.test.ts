@@ -1,13 +1,6 @@
 // Shared-unit-lane shard map (flair#2311).
 //
-// The lane is split into `LANE_SHARDS` shards of *steps*, run one shard per CI
-// matrix leg. Two invariants matter and are pinned here:
-//
-//   - every test-bearing lane step — and therefore every test file it runs —
-//     lands in exactly one shard (no file or step run twice or not at all);
-//   - the shard count the workflow matrix uses is the one this module defines:
-//     lane-shards.test.ts reads the workflow matrix and fails if it is not
-//     exactly 1..LANE_SHARDS.
+// Tests command/file agreement, the lane partition and workflow shard count.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -18,6 +11,7 @@ import {
   LANE_SHARDS,
   ROOT,
   assignLaneShards,
+  commandFiles,
   isShardedStep,
   laneCoverage,
   laneShardPlans,
@@ -170,7 +164,8 @@ describe("lane-shards — assignment", () => {
     const withoutFile = laneCoverage(plan, shards.map((shard, i) => i === 0 ? [
       ...shard.slice(0, testAt), { ...shard[testAt], files: shard[testAt].files.filter(f => f !== droppedFile) }, ...shard.slice(testAt + 1),
     ] : shard));
-    expect(withoutFile.missingFiles).toEqual([droppedFile]);
+    expect(withoutFile.fileMismatches).toEqual([{ step: droppedStep, declaredOnly: [], commandOnly: [droppedFile] }]);
+    expect(withoutFile.missingFiles).toEqual([]);
     const withoutStep = laneCoverage(plan, shards.map((shard, i) => i === 0 ? shard.filter((_, index) => index !== testAt) : shard));
     expect(withoutStep.missingSteps).toEqual([droppedStep]);
     const doubled = laneCoverage(plan, shards.map((shard, i) => i === 0 ? [...shard, shard[testAt]] : shard));
@@ -206,7 +201,61 @@ test("coverage rejects a test-bearing build command", () => {
 
 test("coverage rejects a test command with no declared files", () => {
   const plan = unitPlan(ROOT).map(step => step.name === "build root CLI" ? { ...step, args: ["test", "test/unit/lane-shards.test.ts"] } : step);
-  expect(verifyLaneShards(2, plan).invalidTestSteps).toEqual(["build root CLI"]);
+  expect(verifyLaneShards(2, plan).fileMismatches).toEqual([{
+    step: "build root CLI", declaredOnly: [], commandOnly: [join(ROOT, "test/unit/lane-shards.test.ts")],
+  }]);
+});
+
+test("command coverage reports declared-only and command-only files", () => {
+  const root = fixtureRoot(["test/unit/extra.test.ts"]);
+  const steps = unitPlan(root);
+  const step = steps.find(step => step.shard !== undefined && step.files.length > 1)!;
+  const missing = step.files[1];
+  const added = join(root, "test/unit-isolated/placeholder.test.ts");
+  const changed = { ...step, args: ["test", step.files[0], added] };
+  const plan = steps.map(item => item === step ? changed : item);
+  const res = verifyLaneShards(2, plan, listLaneFiles(root));
+  expect(res.fileMismatches).toEqual([{ step: step.name, declaredOnly: step.files.slice(1).sort(), commandOnly: [added] }]);
+  expect(res.missingFiles).toContain(missing);
+  expect(res.duplicatedFiles).toContain(added);
+  expect(res.coveredFiles).toBe(res.totalFiles - step.files.length + 1);
+});
+
+test("directory and literal glob targets agree with Bun discovery", () => {
+  const root = fixtureRoot();
+  const names = ["a.test.ts", "b.spec.ts", "c_test.ts", "d_spec.ts", "nested/e.test.mjs", "nested/f.test.cts", ".hidden.test.ts"];
+  const excluded = [".hidden/g.test.ts", "node_modules/h.test.ts", "plain.ts"];
+  for (const name of [...names, ...excluded]) {
+    const file = join(root, "targets", name);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, `import { test } from "bun:test"; test(${JSON.stringify(name)}, () => console.log(${JSON.stringify("ran:" + name)}));`);
+  }
+  for (const targets of [["./targets/"], ["./targets/*.test.ts"], ["targets/*.test.ts"], names.map(name => `./targets/${name}`)]) {
+    const step = { name: "fixture", cwd: root, args: ["test", ...targets], files: names.map(name => join(root, "targets", name)) };
+    const result = spawnSync(process.execPath, step.args, { cwd: root, encoding: "utf8", timeout: 20_000 });
+    if (targets.length === 1 && targets[0].includes("*")) {
+      expect(result.status).toBe(1);
+      expect(() => commandFiles(step)).toThrow();
+    } else {
+      expect(result.status).toBe(0);
+      const ran = result.stdout.split("\n").filter(line => line.startsWith("ran:")).map(line => join(root, "targets", line.slice(4))).sort();
+      expect(commandFiles(step)).toEqual(ran);
+      expect(laneCoverage([step], [[step]], ran).fileMismatches).toEqual([]);
+    }
+  }
+  const step = { name: "fixture", cwd: root, args: ["test", "./targets/"], files: [join(root, "targets/a.test.ts")] };
+  expect(laneCoverage([step], [[step]], step.files).fileMismatches[0].commandOnly).toHaveLength(names.length - 1);
+});
+
+test("an unmatched target retains coverage of matched command files", () => {
+  const root = fixtureRoot();
+  const file = join(root, "test/unit/placeholder.test.ts");
+  const step = { name: "fixture", cwd: root, args: ["test", file, "./test/unit/*.test.ts"], files: [file] };
+  const result = spawnSync(process.execPath, step.args, { cwd: root, encoding: "utf8", timeout: 20_000 });
+  expect(result.status).toBe(0);
+  const res = laneCoverage([step], [[step]], [file]);
+  expect(res.coveredFiles).toBe(1);
+  expect(res.invalidCommands).toEqual(["fixture: unmatched target: ./test/unit/*.test.ts"]);
 });
 
 test("setup precedes tests in each shard", () => {
@@ -231,9 +280,9 @@ describe("lane-shards — CLI", () => {
     expect(r.stdout).toContain("files covered");
   });
 
-  for (const mutation of ["setup", "build command"]) {
+  for (const mutation of ["setup", "build command", "one command file"]) {
     test(`--verify rejects ${mutation} mutation`, () => {
-      const root = fixtureRoot();
+      const root = fixtureRoot(Array.from({ length: 24 }, (_, i) => `test/unit/extra-${i}.test.ts`));
       mkdirSync(join(root, "scripts/ci"), { recursive: true });
       for (const file of ["lane-shards.mjs", "unit-shards.mjs", "test-files.mjs"]) {
         cpSync(join(ROOT, "scripts/ci", file), join(root, "scripts/ci", file));
@@ -245,12 +294,20 @@ describe("lane-shards — CLI", () => {
         : "return [...sharedSteps(steps), ...shardedSteps(steps)];";
       const replacement = mutation === "setup"
         ? ".map((shard, index) => [...sharedSteps(steps).filter(step => step.name !== 'build root CLI' || index !== 1), ...shard])"
-        : "steps.find(step => step.shard?.index === 1).args = ['run', 'build:cli']; return [...sharedSteps(steps), ...shardedSteps(steps)];";
+        : mutation === "build command"
+          ? "steps.find(step => step.shard?.index === 1).args = ['run', 'build:cli']; return [...sharedSteps(steps), ...shardedSteps(steps)];"
+          : "const step = steps.find(step => step.shard?.index === 1); step.args = step.args.slice(0, 2); return [...sharedSteps(steps), ...shardedSteps(steps)];";
       expect(source).toContain(original);
       writeFileSync(modulePath, source.replace(original, replacement));
       const result = spawnSync("node", [modulePath, "--verify", "--of", "2"], { cwd: root, encoding: "utf8", timeout: 20_000 });
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain(mutation === "setup" ? "setup not once in every shard: build root CLI" : "partitioned steps must only run tests: root unit tests (shard 1/4)");
+      expect(result.stderr).toContain(mutation === "setup" ? "setup not once in every shard: build root CLI"
+        : mutation === "build command" ? "partitioned steps must only run tests: root unit tests (shard 1/4)"
+          : "command/files mismatch: root unit tests (shard 1/4); declared only:");
+      if (mutation === "one command file") {
+        expect(result.stderr).toContain("extra-");
+        expect(result.stdout).not.toContain("0 missing");
+      }
     });
   }
 
