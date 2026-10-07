@@ -1,16 +1,9 @@
 /**
  * Dynamic loader for Shape B code-plugin bridges.
- *
- * Given a discovered `npm-package` source, dynamic-import the package,
- * validate that it exports a `MemoryBridge`, and return the loaded module.
- * The import is done via `createRequire` relative to the package root so
- * scoped packages and deep nested deps resolve correctly.
- *
- * Validation is deliberately minimal: `name`, `version`, `kind`, and at
- * least one of `import` / `export` must be present and look right. The
- * spec §6 contract is "duck-type at runtime, strict error messages."
  */
 
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DiscoveredBridge, MemoryBridge } from "../types.js";
 import { BridgeRuntimeError } from "../types.js";
@@ -42,15 +35,14 @@ export async function loadCodePlugin(
   }
 
   const importer = opts.importer ?? DEFAULT_IMPORTER;
-  // Package root path — the entry point is resolved by Node's package.json
-  // "main"/"exports" fields. Use a file:// URL so Node resolves it as a
-  // filesystem path rather than a bare specifier.
-  const spec = pathToFileURL(discovered.path + "/").href;
+  let spec = pathToFileURL(discovered.path).href;
 
   let mod: unknown;
   try {
+    spec = pathToFileURL(await resolveEntry(discovered)).href;
     mod = await importer(spec);
   } catch (err: any) {
+    if (err instanceof BridgeRuntimeError) throw err;
     throw new BridgeRuntimeError({
       bridge: discovered.name,
       op: "import",
@@ -79,6 +71,44 @@ export async function loadCodePlugin(
   // to build a working MemoryBridge; we just need enough to route calls.
   validateBridge(discovered, candidate);
   return candidate;
+}
+
+function importTarget(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const conditions = value as Record<string, unknown>;
+  return importTarget(conditions.import) ?? importTarget(conditions.default);
+}
+
+async function resolveEntry(discovered: DiscoveredBridge): Promise<string> {
+  const root = await realpath(discovered.path);
+  const pkg = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+  const exported = importTarget(
+    pkg.exports && typeof pkg.exports === "object" && Object.hasOwn(pkg.exports, ".")
+      ? pkg.exports["."]
+      : pkg.exports,
+  );
+  const field = exported !== undefined ? "exports" : typeof pkg.main === "string" ? "main" : "index.js";
+  const target = exported ?? (typeof pkg.main === "string" ? pkg.main : "index.js");
+  const entry = resolve(root, target);
+  const assertInside = (path: string): void => {
+    const rel = relative(root, path);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new BridgeRuntimeError({
+        bridge: discovered.name,
+        op: "import",
+        path: discovered.path,
+        field,
+        expected: "entry inside package directory",
+        got: target,
+        hint: `package.json ${field} resolves outside the package directory`,
+      });
+    }
+  };
+  assertInside(entry);
+  const resolved = await realpath(entry);
+  assertInside(resolved);
+  return resolved;
 }
 
 function pickBridgeExport(mod: unknown): MemoryBridge | null {

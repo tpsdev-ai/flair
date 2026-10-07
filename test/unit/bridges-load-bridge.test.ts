@@ -20,6 +20,7 @@ function sandbox(): { dir: string; cleanup: () => void; makePackage: (name: stri
         join(pkgDir, "package.json"),
         JSON.stringify({ name: `flair-bridge-${name}`, version: "1.0.0" }, null, 2),
       );
+      writeFileSync(join(pkgDir, "index.js"), "");
       return pkgDir;
     },
     cleanup: () => rmSync(root, { recursive: true, force: true }),

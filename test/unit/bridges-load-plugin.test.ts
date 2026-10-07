@@ -1,13 +1,24 @@
-import { describe, test, expect } from "bun:test";
+import { beforeEach, describe, test, expect } from "bun:test";
+import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { tempDir } from "../helpers/temp-dir";
 import { loadCodePlugin } from "../../src/bridges/runtime/load-plugin";
 import type { DiscoveredBridge, MemoryBridge } from "../../src/bridges/types";
 import { BridgeRuntimeError } from "../../src/bridges/types";
+
+let packageDir: string;
+beforeEach(() => {
+  packageDir = tempDir("flair-bridge-loader-");
+  writeFileSync(join(packageDir, "package.json"), JSON.stringify({ type: "module" }));
+  writeFileSync(join(packageDir, "index.js"), "");
+});
 
 const discovered = (overrides: Partial<DiscoveredBridge> = {}): DiscoveredBridge => ({
   name: "example",
   kind: "api",
   source: "npm-package",
-  path: "/fake/path/flair-bridge-example",
+  path: packageDir,
   ...overrides,
 });
 
@@ -100,5 +111,87 @@ describe("loadCodePlugin: rejections", () => {
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.field).toBe("exports");
+  });
+});
+
+describe("loadCodePlugin: package entry files", () => {
+  test.each([
+    ["exports string", { exports: "./entry.mjs", main: "wrong.mjs" }],
+    ["exports dot string", { exports: { ".": "./entry.mjs" }, main: "wrong.mjs" }],
+    ["exports import before default", { exports: { ".": { default: "./wrong.mjs", import: "./entry.mjs" } } }],
+    ["exports nested import", { exports: { ".": { import: { default: "./entry.mjs" }, default: "./wrong.mjs" } } }],
+    ["exports nested default", { exports: { ".": { require: "./wrong.cjs", default: { import: "./entry.mjs" } } } }],
+    ["exports root conditions", { exports: { import: "./entry.mjs", default: "./wrong.mjs" } }],
+    ["main only", { main: "entry.mjs" }],
+  ])("loads %s", async (_name, metadata) => {
+    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ type: "module", ...metadata }));
+    writeFileSync(join(packageDir, "entry.mjs"), `export const bridge = {
+      name: "example", version: 1, kind: "api", async *import() {}
+    };`);
+    const bridge = await loadCodePlugin(discovered());
+    expect(bridge.name).toBe("example");
+  });
+
+  test("uses index.js when exports and main are absent", async () => {
+    let spec: string | undefined;
+    await loadCodePlugin(discovered(), { importer: async (value) => {
+      spec = value;
+      return { bridge: validBridge };
+    } });
+    expect(spec).toBe(pathToFileURL(realpathSync(join(packageDir, "index.js"))).href);
+  });
+
+  test.each(["exports", "main"])("refuses an escaping %s entry before import", async (field) => {
+    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ [field]: "../outside.mjs" }));
+    let imported = false;
+    try {
+      await loadCodePlugin(discovered(), { importer: async () => { imported = true; return { bridge: validBridge }; } });
+      throw new Error("accepted escaping entry");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BridgeRuntimeError);
+      expect((error as BridgeRuntimeError).detail.field).toBe(field);
+    }
+    expect(imported).toBe(false);
+  });
+
+  test("refuses an entry symlink outside the package", async () => {
+    const outside = tempDir("flair-bridge-outside-");
+    writeFileSync(join(outside, "entry.mjs"), "");
+    symlinkSync(join(outside, "entry.mjs"), join(packageDir, "linked.mjs"));
+    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ exports: "./linked.mjs" }));
+    try {
+      await loadCodePlugin(discovered());
+      throw new Error("accepted escaping symlink");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BridgeRuntimeError);
+      expect((error as BridgeRuntimeError).detail.field).toBe("exports");
+    }
+  });
+
+  test("loads a package discovered through a directory symlink", async () => {
+    const parent = tempDir("flair-bridge-link-");
+    mkdirSync(join(packageDir, "lib"));
+    writeFileSync(join(packageDir, "lib", "entry.mjs"), `export default {
+      name: "example", version: 1, kind: "api", async *import() {}
+    };`);
+    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ main: "lib/entry.mjs" }));
+    const link = join(parent, "plugin");
+    symlinkSync(packageDir, link, "dir");
+    expect((await loadCodePlugin(discovered({ path: link }))).name).toBe("example");
+  });
+
+  test("reports a missing entry with the import error shape", async () => {
+    writeFileSync(join(packageDir, "package.json"), JSON.stringify({ main: "missing.mjs" }));
+    try {
+      await loadCodePlugin(discovered());
+      throw new Error("accepted missing entry");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BridgeRuntimeError);
+      const detail = (error as BridgeRuntimeError).detail;
+      expect(detail.field).toBe("(import)");
+      expect(detail.expected).toBe("importable npm package");
+      expect(detail.got).toBe("ENOENT");
+      expect(detail.path).toBe(packageDir);
+    }
   });
 });

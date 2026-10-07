@@ -1,25 +1,6 @@
 /**
- * bridges-e2e-npm-plugin.test.ts — flair#2308.
- *
- * Bridge plugins are loaded from an npm package and driven end to end by the
- * real CLI. A fixture package with real entry-point files (its package.json
- * entry plus an index) is installed into a temp app's node_modules through a
- * local `file:` dependency — no registry — and then `flair bridge allow`,
- * `flair bridge import` and `flair bridge export` run through the built
- * dist/cli.js against it. The fixture's import/export handlers record the
- * `opts` object they receive, so the test pins the option record each path
- * builds:
- *
- *   - `flair bridge import` passes a null-prototype record (the plugin cannot
- *     reach `Object.prototype`), own option keys only;
- *   - `flair bridge export` passes a plain object (prototype present);
- *   - `Object.hasOwn` reports the passed option key on both.
- *
- * The loader is the production one: the test injects no `importer`, so a stub
- * that never imports the fixture produces no record and fails here.
- *
- * HOME is a scratch dir and every CLI spawn is HOME-isolated, so nothing
- * touches a real ~/.flair.
+ * Exercises npm bridge handlers through Node's published CLI shim and Bun.
+ * Import options: `opts` does not inherit from `Object.prototype`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
@@ -29,7 +10,7 @@ import { tmpdir } from "node:os";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 
-const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
+const DIST = join(import.meta.dirname ?? __dirname, "..", "..", "dist");
 const CHILD_DEADLINE_MS = 20_000;
 const INSTALL_DEADLINE_MS = 60_000;
 
@@ -78,12 +59,13 @@ interface CliResult {
   code: number | null;
 }
 
-function runCli(args: string[], env: Record<string, string>, cwd: string): Promise<CliResult> {
+function runCli(runtime: string, args: string[], env: Record<string, string>, cwd: string): Promise<CliResult> {
+  const CLI_PATH = join(DIST, runtime === "node" ? "cli-shim.cjs" : "cli.js");
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn("bun", [CLI_PATH, ...args], {
+    const child = spawn(runtime, [CLI_PATH, ...args], {
       cwd,
-      env: { ...process.env, FLAIR_AGENT_ID: "", ...env },
+      env: { ...process.env, FLAIR_AGENT_ID: "", ...env, USERPROFILE: env.HOME },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 20_000, // literal so the spawn-budget gate sees a deadline (flair#1807)
     });
@@ -113,7 +95,7 @@ function runCli(args: string[], env: Record<string, string>, cwd: string): Promi
 
 /** Install the fixture into the app's node_modules through a local `file:` dep. */
 function installFixture(appDir: string): void {
-  const res = spawnSync("bun", ["install", "--no-summary"], {
+  const res = spawnSync("npm", ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", join(appDir, "npm-cache")], {
     cwd: appDir,
     encoding: "utf8",
     timeout: 60_000,
@@ -132,109 +114,109 @@ function recordLines(path: string): any[] {
     .map((line) => JSON.parse(line));
 }
 
-describe("flair bridge: npm-loaded plugin option record (#2308)", () => {
-  let scratch: string;
-  let work: string;
-  let app: string;
+for (const runtime of ["node", "bun"]) {
+  describe(`flair bridge: npm plugin option records (${runtime})`, () => {
+    let scratch: string;
+    let work: string;
+    let app: string;
 
-  beforeAll(() => {
-    ensureCliBuild();
+    beforeAll(async () => {
+      ensureCliBuild();
 
-    scratch = mkdtempSync(join(tmpdir(), "flair-bridge-2308-home-"));
-    work = mkdtempSync(join(tmpdir(), "flair-bridge-2308-work-"));
-    app = join(work, "app");
-    const pkg = join(work, "pkg");
-    mkdirSync(app, { recursive: true });
-    mkdirSync(pkg, { recursive: true });
+      scratch = mkdtempSync(join(tmpdir(), "flair-bridge-2308-home-"));
+      work = mkdtempSync(join(tmpdir(), "flair-bridge-2308-work-"));
+      app = join(work, "app");
+      const pkg = join(work, "pkg");
+      mkdirSync(app, { recursive: true });
+      mkdirSync(pkg, { recursive: true });
 
-    // Real entry-point files: package.json names the flair-bridge package and
-    // points at the index the loader will import.
-    writeFileSync(
-      join(pkg, "package.json"),
-      JSON.stringify(
-        { name: FIXTURE_PKG, version: "1.0.0", main: "index.mjs", type: "module", flair: { kind: "api" } },
-        null,
-        2,
-      ) + "\n",
-    );
-    writeFileSync(join(pkg, "index.mjs"), FIXTURE_INDEX);
+      // Real entry-point files: package.json names the flair-bridge package and
+      // points at the index the loader will import.
+      writeFileSync(
+        join(pkg, "package.json"),
+        JSON.stringify(
+          { name: FIXTURE_PKG, version: "1.0.0", main: "index.mjs", type: "module", flair: { kind: "api" } },
+          null,
+          2,
+        ) + "\n",
+      );
+      writeFileSync(join(pkg, "index.mjs"), FIXTURE_INDEX);
 
-    // The app installs it as a local dependency — no registry involved.
-    writeFileSync(
-      join(app, "package.json"),
-      JSON.stringify(
-        { name: "fixture-app", version: "1.0.0", private: true, dependencies: { [FIXTURE_PKG]: "file:../pkg" } },
-        null,
-        2,
-      ) + "\n",
-    );
-    installFixture(app);
-  }, 120_000);
+      // The app installs it as a local dependency — no registry involved.
+      writeFileSync(
+        join(app, "package.json"),
+        JSON.stringify(
+          { name: "fixture-app", version: "1.0.0", private: true, dependencies: { [FIXTURE_PKG]: "file:../pkg" } },
+          null,
+          2,
+        ) + "\n",
+      );
+      installFixture(app);
+      const allowed = await runCli(runtime, ["bridge", "allow", FIXTURE_NAME], { HOME: scratch }, app);
+      expect(allowed.code, allowed.stderr).toBe(0);
+    }, 180_000);
 
-  afterAll(() => {
-    rmSync(scratch, { recursive: true, force: true });
-    rmSync(work, { recursive: true, force: true });
+    afterAll(() => {
+      rmSync(scratch, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    });
+
+    it("flair bridge import hands the plugin a null-prototype record of own option keys", async () => {
+      const recordPath = join(work, "import-record.jsonl");
+      const res = await runCli(
+        runtime,
+        [
+          "bridge", "import", FIXTURE_NAME,
+          "--user", "user-a",
+          "--agent", "agent-a",
+          "--url", FLAIR_URL,
+          "--dry-run",
+        ],
+        { HOME: scratch, FLAIR_BRIDGE_FIXTURE_RECORD: recordPath },
+        app,
+      );
+      expect(res.code, res.stderr).toBe(0);
+
+      const recs = recordLines(recordPath).filter((r) => r.op === "import");
+      expect(recs).toHaveLength(1);
+      const rec = recs[0];
+      expect(rec.protoIsNull).toBe(true);
+      expect(rec.protoIsObjectPrototype).toBe(false);
+      // No inherited members: the record carries own option keys only.
+      expect(rec.hasOwnPropertyType).toBe("undefined");
+      expect(rec.toStringIn).toBe(false);
+      expect(rec.ownKeys).toContain("user");
+      expect(rec.ownKeys).not.toContain("toString");
+      expect(rec.ownsUser).toBe(true);
+      expect(rec.ownsToString).toBe(false);
+      expect(rec.user).toBe("user-a");
+    }, 25_000);
+
+    it("flair bridge export hands the plugin a plain record where Object.hasOwn reports the option", async () => {
+      const recordPath = join(work, "export-record.jsonl");
+      const res = await runCli(
+        runtime,
+        [
+          "bridge", "export", FIXTURE_NAME, "unused-dst",
+          "--agent", "agent-a",
+          "--url", FLAIR_URL,
+        ],
+        { HOME: scratch, FLAIR_BRIDGE_FIXTURE_RECORD: recordPath },
+        app,
+      );
+      expect(res.code, res.stderr).toBe(0);
+
+      const recs = recordLines(recordPath).filter((r) => r.op === "export");
+      expect(recs).toHaveLength(1);
+      const rec = recs[0];
+      // The export option copy is a plain object: a prototype is present.
+      expect(rec.protoIsNull).toBe(false);
+      expect(rec.protoIsObjectPrototype).toBe(true);
+      expect(rec.hasOwnPropertyType).toBe("function");
+      // Object.hasOwn reports the option the CLI passed — own keys only.
+      expect(rec.ownsAgent).toBe(true);
+      expect(rec.ownsToString).toBe(false);
+      expect(rec.agent).toBe("agent-a");
+    }, 25_000);
   });
-
-  it("flair bridge import hands the plugin a null-prototype record of own option keys", async () => {
-    // Approve the installed package, then import through it.
-    const allowed = await runCli(["bridge", "allow", FIXTURE_NAME], { HOME: scratch }, app);
-    expect(allowed.code).toBe(0);
-
-    const recordPath = join(work, "import-record.jsonl");
-    const res = await runCli(
-      [
-        "bridge", "import", FIXTURE_NAME,
-        "--user", "user-a",
-        "--agent", "agent-a",
-        "--url", FLAIR_URL,
-        "--dry-run",
-      ],
-      { HOME: scratch, FLAIR_BRIDGE_FIXTURE_RECORD: recordPath },
-      app,
-    );
-    expect(res.code).toBe(0);
-
-    const recs = recordLines(recordPath).filter((r) => r.op === "import");
-    expect(recs).toHaveLength(1);
-    const rec = recs[0];
-    // The production option copy is a null-prototype record: no Object.prototype.
-    expect(rec.protoIsNull).toBe(true);
-    expect(rec.protoIsObjectPrototype).toBe(false);
-    // No inherited members: the record carries own option keys only.
-    expect(rec.hasOwnPropertyType).toBe("undefined");
-    expect(rec.toStringIn).toBe(false);
-    expect(rec.ownKeys).toContain("user");
-    expect(rec.ownKeys).not.toContain("toString");
-    // Object.hasOwn still reports the option the CLI passed — and owns only.
-    expect(rec.ownsUser).toBe(true);
-    expect(rec.ownsToString).toBe(false);
-    expect(rec.user).toBe("user-a");
-  }, 25_000);
-
-  it("flair bridge export hands the plugin a plain record where Object.hasOwn reports the option", async () => {
-    const recordPath = join(work, "export-record.jsonl");
-    const res = await runCli(
-      [
-        "bridge", "export", FIXTURE_NAME, "unused-dst",
-        "--agent", "agent-a",
-        "--url", FLAIR_URL,
-      ],
-      { HOME: scratch, FLAIR_BRIDGE_FIXTURE_RECORD: recordPath },
-      app,
-    );
-    expect(res.code).toBe(0);
-
-    const recs = recordLines(recordPath).filter((r) => r.op === "export");
-    expect(recs).toHaveLength(1);
-    const rec = recs[0];
-    // The export option copy is a plain object: a prototype is present.
-    expect(rec.protoIsNull).toBe(false);
-    expect(rec.protoIsObjectPrototype).toBe(true);
-    expect(rec.hasOwnPropertyType).toBe("function");
-    // Object.hasOwn reports the option the CLI passed — own keys only.
-    expect(rec.ownsAgent).toBe(true);
-    expect(rec.ownsToString).toBe(false);
-    expect(rec.agent).toBe("agent-a");
-  }, 25_000);
-});
+}
