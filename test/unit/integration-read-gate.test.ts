@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 
 let integrationStore: Map<string, any>;
+let lastSearchTarget: any;
 let agents: Map<string, any>;
 let failAgentStore = false;
 
@@ -53,15 +54,26 @@ class BaseIntegration {
     return { ...content };
   }
   async delete(id: any) {
-    integrationStore.delete(id);
+    integrationStore.delete(id ?? (this as any).getId?.());
     return { ok: true };
   }
   search(query?: any) {
+    lastSearchTarget = query;
     const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
     let records = Array.from(integrationStore.values());
     for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
+    for (let sort = query?.sort; sort && typeof sort === "object"; sort = sort.next) {
+      const { attribute, descending } = sort;
+      records.sort((a, b) => String(a[attribute]).localeCompare(String(b[attribute])) * (descending ? -1 : 1));
+    }
+    records = records.slice(query?.offset ?? 0, (query?.offset ?? 0) + (query?.limit ?? records.length));
     async function* gen() {
-      for (const r of records) yield r;
+      for (const r of records) {
+        if (typeof query?.select === "string") yield r[query.select];
+        else if (Array.isArray(query?.select)) {
+          yield Object.fromEntries(query.select.map((field: string) => [field, field === "$id" ? r.id : r[field]]));
+        } else yield r;
+      }
     }
     return gen();
   }
@@ -101,6 +113,7 @@ const anonCtx = () => ({ tpsAnonymous: true });
 
 beforeEach(() => {
   integrationStore = new Map();
+  lastSearchTarget = undefined;
   agents = new Map();
   agents.set("agent-a", { id: "agent-a", kind: "agent", status: "active" });
   agents.set("agent-b", { id: "agent-b", kind: "agent", status: "active" });
@@ -220,7 +233,7 @@ describe("Integration.get() — anonymous denied, owner-scoped for non-admin, un
   });
 });
 
-describe("Integration.delete() — ownership check uses the raw record (super.get), not the new scoped get()", () => {
+describe("Integration.delete() — ownership check uses the raw record", () => {
   it("owner can still delete its own integration", async () => {
     integrationStore.set("int-1", { id: "int-1", agentId: "agent-owner" });
     const i = makeIntegration(agentCtx("agent-owner"));
@@ -242,6 +255,56 @@ describe("Integration.delete() — ownership check uses the raw record (super.ge
     const res = await (i as any).delete("does-not-exist");
     expect(res instanceof Response).toBe(false);
   });
+
+  it("an omitted target deletes the bound row without a collection scan", async () => {
+    integrationStore.set("int-1", { id: "int-1", agentId: "agent-a" });
+    integrationStore.set("int-2", { id: "int-2", agentId: "agent-b" });
+    const i = makeIntegration(operatorCtx(), "int-1");
+    expect(await i.delete(undefined)).toEqual({ ok: true });
+    expect([...integrationStore.keys()]).toEqual(["int-2"]);
+    expect(lastSearchTarget).toBeUndefined();
+  });
+
+  it("operator (admin) collection DELETE removes the rows search() matched, leaving the rest", async () => {
+    integrationStore.set("int-a", { id: "int-a", agentId: "agent-x", platform: "slack", directoryPublishedAt: "2026-09-01T00:00:00.000Z" });
+    integrationStore.set("int-b", { id: "int-b", agentId: "agent-y", platform: "slack" });
+    integrationStore.set("int-c", { id: "int-c", agentId: "agent-z", platform: "discord" });
+    const i = makeIntegration(operatorCtx());
+    await (i as any).delete({
+      isCollection: true,
+      conditions: [{ attribute: "platform", comparator: "equals", value: "slack" }],
+    });
+    expect([...integrationStore.keys()].sort()).toEqual(["int-c"]);
+  });
+
+  for (const select of [["platform"], "platform"]) {
+    it(`collection DELETE copies the scan target and selects the primary key for ${JSON.stringify(select)}`, async () => {
+      for (const id of ["int-a", "int-b", "int-c"]) {
+        integrationStore.set(id, { id, agentId: "agent-x", platform: "slack" });
+      }
+      integrationStore.set("int-control", { id: "int-control", agentId: "agent-x", platform: "discord" });
+      const target = Object.assign(new URLSearchParams("platform=slack"), {
+        isCollection: true,
+        conditions: [{ attribute: "platform", comparator: "equals", value: "slack" }],
+        operator: "and",
+        sort: { attribute: "id", descending: false },
+        offset: 1,
+        limit: 1,
+        select,
+      });
+      const i = makeIntegration(operatorCtx());
+      expect(await i.delete(target)).toBe(true);
+      expect(lastSearchTarget).not.toBe(target);
+      expect(lastSearchTarget).toBeInstanceOf(URLSearchParams);
+      expect(lastSearchTarget.get("platform")).toBe("slack");
+      for (const field of ["conditions", "operator", "sort", "offset", "limit"]) {
+        expect(lastSearchTarget[field]).toEqual((target as any)[field]);
+      }
+      expect(lastSearchTarget.select).toEqual(["$id"]);
+      expect(target.select).toBe(select);
+      expect([...integrationStore.keys()].sort()).toEqual(["int-a", "int-c", "int-control"]);
+    });
+  }
 });
 
 // ─── flair#2141 S3a — the team-directory publication gate ────────────────────
@@ -335,6 +398,7 @@ describe("Integration directory publication — non-operator refusals", () => {
     expect(res instanceof Response).toBe(true);
     expect((res as Response).status).toBe(403);
     expect(integrationStore.has("int-1")).toBe(true);
+    expect(lastSearchTarget).toBeUndefined();
   });
 
   it("a runtime owner cannot delete a published entry (403)", async () => {
