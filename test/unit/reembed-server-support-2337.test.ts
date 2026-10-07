@@ -5,9 +5,9 @@
  *
  * The CLI is spawned against a stub HTTP server (ephemeral 127.0.0.1 port) that
  * stands in for the server, so the check is exercised through the real CLI
- * entry point. The real-server paths live in
- * test/integration/reembed-preserves-fields-2296.test.ts (a real ephemeral
- * Harper); here a stub is enough to prove the gate opens and closes.
+ * entry point. Real Harper coverage:
+ * test/integration/reembed-preserves-fields-2296.test.ts — current-server PATCH;
+ * test/compat/reembed-pre-2298.test.ts — older-server refusal in both CLI modes.
  *
  * Fixtures and outputs use neutral ids (agent-a), never a real host or agent.
  */
@@ -79,9 +79,9 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-/** The pre-#2298 /Health body: no capabilities advertised. */
+/** A /Health fixture without capabilities. */
 const OLD_HEALTH = { ok: true, version: "0.59.0", buildCommit: null, searchReady: true };
-/** The current /Health body: the re-embed PATCH is advertised. */
+/** A /Health fixture advertising the re-embed PATCH. */
 const CURRENT_HEALTH = {
   ok: true,
   version: "0.60.0",
@@ -129,7 +129,7 @@ function standInHealth(health: (req: IncomingMessage, res: ServerResponse) => vo
   };
 }
 
-test("an older server: the CLI refuses before any write, names what it found and the remedy", async () => {
+test("a missing capability: the CLI refuses before any write, names what it found and the remedy", async () => {
   ensureCliBuild();
   const stub = await startStub(standInHealth((_req, res) => json(res, 200, OLD_HEALTH)));
   try {
@@ -145,7 +145,7 @@ test("an older server: the CLI refuses before any write, names what it found and
   }
 }, 90_000);
 
-test("a current server: the CLI re-embeds as before", async () => {
+test("an advertised capability: the CLI sends a re-embed PATCH", async () => {
   ensureCliBuild();
   const stub = await startStub(standInHealth((_req, res) => json(res, 200, CURRENT_HEALTH)));
   try {

@@ -64,13 +64,11 @@ export async function reembedRow(baseUrl: string, agentId: string, keyPath: stri
 
 /**
  * flair#2337: refuse before the first write when the running server does not
- * advertise the re-embed PATCH (#2298). Returns null when support is confirmed,
+ * advertise the re-embed PATCH (#2298). Returns null when the token is present,
  * else the refusal message to print. Reads the public `GET /Health` — no auth,
  * so it works before any agent key is used and before the all-agents loop.
  *
- * A read that cannot confirm support (unreachable, non-2xx, non-JSON, or a
- * capabilities field this client cannot parse) is refused, never treated as
- * support — an unverified server must not be handed the PATCH.
+ * Unreachable, non-200, non-JSON, or unparseable capability responses are refused.
  */
 export async function reembedServerSupportError(baseUrl: string): Promise<string | null> {
   let res: Response;
@@ -148,11 +146,7 @@ program
       process.exit(1);
     }
 
-    // flair#2337: before any write (either the all-agents loop or the --agent
-    // loop), confirm the running server supports the re-embed PATCH. A server
-    // built before #2298 does not advertise it, so refuse rather than send a
-    // PATCH whose support could not be confirmed. The two loops below are the
-    // writers.
+    // flair#2337: require the advertised token before either PATCH loop.
     const supportError = await reembedServerSupportError(baseUrl);
     if (supportError) {
       console.error(supportError);

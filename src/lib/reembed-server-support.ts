@@ -8,17 +8,17 @@
  * CLI newer than its server is a supported state (`flair upgrade
  * --no-restart`, a bare npm install, an unrestarted service), so the CLI reads
  * the server's advertised capabilities from `GET /Health` before any write and
- * refuses with a named remedy when support cannot be confirmed.
+ * refuses when the token is absent or the response cannot be parsed.
  *
  * The parser and message builders are pure; the fetch adapter lives in
  * src/commands/reembed.ts.
  */
 
 /**
- * The /Health capability a server advertises when it supports the re-embed
- * PATCH. This module is the single source of truth; resources/search-readiness.ts
- * imports it so the server's advertisement and the CLI's expectation cannot
- * drift.
+ * This build advertises this /Health capability for the re-embed PATCH.
+ * The shared constant aligns this build's CLI and server literals.
+ * A missing token is intentionally refused even if an intermediate server
+ * supports the PATCH.
  */
 export const MEMORY_REEMBED_PATCH_CAPABILITY = "memory-reembed-patch";
 
@@ -59,7 +59,7 @@ export function reembedUnsupportedMessage(version: string | null): string {
   ].join("\n");
 }
 
-/** The refusal for a /Health read that could not confirm support. */
+/** The refusal for a failed or unparseable /Health read. */
 export function reembedUnverifiedMessage(detail: string): string {
   return [
     "❌ flair reembed stopped before its first write: could not confirm the server supports the re-embed PATCH.",

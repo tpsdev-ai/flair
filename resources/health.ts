@@ -105,10 +105,6 @@ export class Health extends Resource {
     // `version` (flair#695, the CLI↔server handshake — src/version-handshake.ts):
     // exposed on the PUBLIC endpoint deliberately, so the check works even
     // before an agent identity/key exists (fresh install, pre-`flair init`).
-    // Sherlock verdict: fine while locally bound; if /Health is ever fronted
-    // PUBLICLY over Fabric, the public surface must omit this field (the
-    // richer, auth-gated /HealthDetail already carried version pre-existing —
-    // this only adds it to the anonymous endpoint too).
     //
     // flair#1076: both values come from dist/build-info.json — the stamp the
     // build wrote next to the modules Harper actually loaded — so /Health
@@ -142,7 +138,7 @@ export class Health extends Resource {
 }
 
 /**
- * Same sources /Health and /HealthDetail consult so they cannot disagree.
+ * Sources /Health and /HealthDetail consult.
  *
  * `detail` includes the progress summary (doc counts) on the lag reason.
  * Public /Health leaves it off — corpus size stays on the authenticated

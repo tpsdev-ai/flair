@@ -187,14 +187,10 @@ export function buildPublicHealthBody(
     version: identity.version,
     buildCommit: identity.buildCommit,
     searchReady: readiness.searchReady,
-    // flair#2337: the capabilities this build advertises. `flair reembed` reads
-    // this before its first write and refuses against a server that does not
-    // list the re-embed PATCH (a build before #2298). The token is defined once
-    // in src/lib/reembed-server-support.ts and imported here so the server's
-    // advertisement and the CLI's expectation cannot drift.
+    // flair#2337: this build advertises the re-embed PATCH token.
+    // The shared constant aligns this build's CLI and server literals.
     capabilities: [MEMORY_REEMBED_PATCH_CAPABILITY],
   };
-  // Public shape is unchanged: searchReadyReason is still present iff !searchReady.
   // Ready-path verification constants stay on the decision object (flair#1411).
   if (!readiness.searchReady && readiness.searchReadyReason) {
     body.searchReadyReason = readiness.searchReadyReason;
