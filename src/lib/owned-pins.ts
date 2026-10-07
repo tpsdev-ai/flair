@@ -181,7 +181,9 @@ export function readOwnedPin(target: OwnedPinTarget, homeDir: string): OwnedPinR
     const held = duplicates
       ? `${hook.matches} Flair SessionStart hooks match in ${target.displayPath} — pin not read, not re-pinned; remove all but one`
       : span!.held
-        ? `${span!.invocations} \`npx -y -p\` spans in ${target.displayPath} — pin not read, not re-pinned; edit the hook to one`
+        ? span!.invocations === 1
+          ? `No \`npx -y -p\` span invokes Flair in ${target.displayPath} — pin not read, not re-pinned; use \`npx -y -p ${FLAIR_MCP_PACKAGE} flair-session-start\``
+          : `${span!.invocations} \`npx -y -p\` spans in ${target.displayPath} — pin not read, not re-pinned; edit the hook to one`
         : undefined;
     return {
       target,

@@ -280,6 +280,24 @@ describe("flair#2291 — ambiguous hook shapes are held and reported", () => {
   }
 });
 
+for (const harness of HARNESSES) {
+  it(`${harness}: one unrelated package span reports no Flair invocation and preserves settings through status and init`, async () => {
+    const command = `npx -y -p other@1 other; ${FLAIR_MCP_PACKAGE}@${STALE} flair-session-start`;
+    const path = writeHookGroups(harness, [[command]]);
+    const display = path.replace(home, "~");
+    const bytes = readFileSync(path);
+    const held = `No \`npx -y -p\` span invokes Flair in ${display} — pin not read, not re-pinned; use \`npx -y -p ${FLAIR_MCP_PACKAGE} flair-session-start\``;
+
+    const status = await runCli(statusArgs(harness));
+    expect(status.out).toContain(`${render.icons.warn} SessionStart hook: ${held}`);
+    expect(readFileSync(path)).toEqual(bytes);
+
+    const init = await runCli(initArgs(harness));
+    expect(init.out).toContain(held);
+    expect(readFileSync(path)).toEqual(bytes);
+  }, CASE_MS);
+}
+
 it("quoted command text names an older pin; init leaves the file byte-identical", async () => {
   const command = `echo 'npx -y -p ${FLAIR_MCP_PACKAGE}@${STALE} flair-session-start'`;
   const path = writeHookGroups("claude-code", [[command]]);
