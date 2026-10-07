@@ -91,8 +91,16 @@ function writeCache(root: string, entries: CacheEntry[], opts: { generationFileM
   chmodSync(dir, 0o700);
   chmodSync(instDir, 0o700);
   const p = payload(entries);
-  writeFileSync(generationPath(dir, INSTANCE, p.generation), encodeEnvelope(p), { mode: opts.generationFileMode ?? 0o600 });
-  writeFileSync(bindingPath(dir), encodeBinding({ v: CACHE_VERSION, url: URL, principal: AGENT, session: SESSION, instance: INSTANCE, generation: p.generation }), { mode: 0o600 });
+  const genPath = generationPath(dir, INSTANCE, p.generation);
+  const genMode = opts.generationFileMode ?? 0o600;
+  writeFileSync(genPath, encodeEnvelope(p), { mode: genMode });
+  // writeFileSync's mode is applied at creation and masked by the umask; chmod
+  // after the write sets the mode explicitly, so this fixture's modes hold
+  // despite the umask (flair#2292).
+  chmodSync(genPath, genMode);
+  const bindPath = bindingPath(dir);
+  writeFileSync(bindPath, encodeBinding({ v: CACHE_VERSION, url: URL, principal: AGENT, session: SESSION, instance: INSTANCE, generation: p.generation }), { mode: 0o600 });
+  chmodSync(bindPath, 0o600);
   return dir;
 }
 
