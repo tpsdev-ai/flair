@@ -74,14 +74,37 @@ function isExempt(value) {
   return typeof value === "string" && value.startsWith("workspace:");
 }
 
-const EXACT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[\dA-Za-z-]*[A-Za-z-][\dA-Za-z-]*)(?:\.(?:0|[1-9]\d*|[\dA-Za-z-]*[A-Za-z-][\dA-Za-z-]*))*)?(?:\+[\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*)?(?![\s\S])/;
+const CORE_PART = /^(?:0|[1-9]\d*)$/;
+const PRERELEASE_ID = /^(?:0|[1-9]\d*|\d*[A-Za-z-][\dA-Za-z-]*)$/;
+const BUILD_ID = /^[\dA-Za-z-]+$/;
+
+function matchesWhole(value, pattern) {
+  return value.match(pattern)?.[0] === value;
+}
+
+function isExactSemver(value) {
+  const plus = value.indexOf("+");
+  if (plus !== -1) {
+    const build = value.slice(plus + 1).split(".");
+    if (!build.every((id) => matchesWhole(id, BUILD_ID))) return false;
+    value = value.slice(0, plus);
+  }
+  const dash = value.indexOf("-");
+  if (dash !== -1) {
+    const prerelease = value.slice(dash + 1).split(".");
+    if (!prerelease.every((id) => matchesWhole(id, PRERELEASE_ID))) return false;
+    value = value.slice(0, dash);
+  }
+  const core = value.split(".");
+  return core.length === 3 && core.every((part) => matchesWhole(part, CORE_PART));
+}
 
 function isExactVersion(value) {
   if (typeof value !== "string") return false;
-  if (EXACT_SEMVER.test(value)) return true;
+  if (isExactSemver(value)) return true;
   if (value.startsWith("npm:")) {
     const at = value.lastIndexOf("@");
-    return at > "npm:".length && EXACT_SEMVER.test(value.slice(at + 1));
+    return at > "npm:".length && isExactSemver(value.slice(at + 1));
   }
   return false;
 }

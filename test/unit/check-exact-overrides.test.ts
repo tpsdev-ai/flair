@@ -223,7 +223,7 @@ describe("check-exact-overrides — the CLI", () => {
 
 const nonExact = ["1.x", "1", "^1.2.3", "~1.2.3", ">=1", "*", "latest", "npm:foo@1.x"];
 
-describe("complete version validation", () => {
+describe("version validation", () => {
   for (const value of nonExact) {
     test(`function rejects ${value}`, () => {
       const root = buildFixture({
@@ -262,6 +262,106 @@ describe("complete version validation", () => {
       expect(runCli(root).status).toBe(1);
     });
   }
+});
+
+const legacySemverSource = String.raw`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[\dA-Za-z-]*[A-Za-z-][\dA-Za-z-]*)(?:\.(?:0|[1-9]\d*|[\dA-Za-z-]*[A-Za-z-][\dA-Za-z-]*))*)?(?:\+[\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*)?(?![\s\S])`;
+const versionCases: [string, boolean][] = [
+  ["1.2.3", true],
+  ["0.0.0", true],
+  ["0.0.0-0", true],
+  ["1.2.3-alpha.1", true],
+  ["1.2.3-0a", true],
+  ["1.2.3--", true],
+  ["1.2.3+build.5", true],
+  ["1.2.3-rc.1+sha.abc", true],
+  ["1.2.3-00a", true],
+  ["1.2.3-123-456", true],
+  ["1.2.3+001", true],
+  ["1.2.3-a-b+--.0", true],
+  ["99999999999999999999.2.3", true],
+  ["npm:foo@1.2.3", true],
+  ["npm:@scope/foo@1.2.3-rc.1+abc", true],
+  ["01.2.3", false],
+  ["1.02.3", false],
+  ["1.2.03", false],
+  ["1.2", false],
+  ["1.2.3.4", false],
+  ["1.2.3-", false],
+  ["1.2.3-01", false],
+  ["1.2.3-a..b", false],
+  ["1.2.3+", false],
+  ["^1.2.3", false],
+  ["~1.2.3", false],
+  ["1.2.x", false],
+  [">=1.2.3", false],
+  ["1.2.3 || 2", false],
+  ["npm:foo@^1", false],
+  ["npm:@1.2.3", false],
+  ["1.2.3+abc+def", false],
+  ["1.2.3+abc..def", false],
+  ["1.2.3+abc-", true],
+  ["1.2.3-α", false],
+  ["1.2.3-0.01", false],
+  ["1.2.3\n", false],
+  ["1.2.3-a\n", false],
+  ["1.2.3+a\n", false],
+  ["1.2.3\r", false],
+  ["1.2.3\u2028", false],
+  ["1.2.3-a\u2029", false],
+  ["", false],
+  [" 1.2.3", false],
+];
+
+function legacyResults(values: string[], timeout: number) {
+  return spawnSync(process.execPath, ["-e", `
+    const pattern = new RegExp(process.env.LEGACY_SEMVER_SOURCE);
+    const results = JSON.parse(process.env.LEGACY_VALUES).map(value => {
+      if (pattern.test(value)) return true;
+      const at = value.lastIndexOf("@");
+      return value.startsWith("npm:") && at > 4 && pattern.test(value.slice(at + 1));
+    });
+    process.stdout.write(JSON.stringify(results));
+  `], {
+    encoding: "utf8", timeout,
+    env: { ...process.env, LEGACY_SEMVER_SOURCE: legacySemverSource, LEGACY_VALUES: JSON.stringify(values) },
+  });
+}
+
+describe("semver parser parity", () => {
+  test("matches legacy results for the version table", () => {
+    const old = legacyResults(versionCases.map(([value]) => value), 1000);
+    expect(old.error).toBeUndefined();
+    expect(old.status).toBe(0);
+    const results: boolean[] = JSON.parse(old.stdout);
+    for (const [index, [value, accepted]] of versionCases.entries()) {
+      const root = buildFixture({
+        overrides: { "@x/dep": value },
+        workspaces: [declares("dependencies", { "@x/dep": "1.2.3" })],
+      });
+      const actual = findExactOverrideViolations(root).length === 0;
+      expect(actual).toBe(accepted);
+      expect(actual).toBe(results[index]);
+    }
+  });
+
+  test("rejects the CodeQL witness within the latency budget", () => {
+    const witness = "0.0.0-0." + "--.".repeat(5000) + "!";
+    const root = buildFixture({
+      overrides: { "@x/dep": witness },
+      workspaces: [declares("dependencies", { "@x/dep": "1.2.3" })],
+    });
+    const start = performance.now();
+    const actual = findExactOverrideViolations(root).length === 0;
+    const elapsed = performance.now() - start;
+    expect(actual).toBe(false);
+    expect(elapsed).toBeLessThan(50);
+    const old = legacyResults([witness], 100);
+    if (old.error) expect((old.error as NodeJS.ErrnoException).code).toBe("ETIMEDOUT");
+    else {
+      expect(old.status).toBe(0);
+      expect(JSON.parse(old.stdout)).toEqual([actual]);
+    }
+  });
 });
 
 describe("workspace declarations", () => {
