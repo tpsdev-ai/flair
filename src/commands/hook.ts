@@ -231,8 +231,8 @@ export function register(program: Command): void {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
       // flair#2291: `hook status` reads the ONE shared stale-pin finding
-      // (sessionStartHookPinFindings) and hands it to hookStatus, so a present
-      // but stale hook is reported red here, the way `doctor` reports it.
+      // (sessionStartHookPinFindings) and hands it to hookStatus, so a hook whose
+      // pin is behind the installed CLI is reported red here, as `doctor` reports it.
       const pinFinding = sessionStartHookPinFindings(home).find(
         (f) => f.reading.target.id === harness,
       ) ?? null;
@@ -309,15 +309,20 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      // flair#2291: a wired hook is not necessarily the INSTALLED adapter. A
-      // stale pin is red here, the same finding `doctor` fails on.
+      // flair#2291: a wired hook is not necessarily the INSTALLED adapter. A pin
+      // behind the installed CLI is red here, the same finding `doctor` fails on.
       if (status.pinStale) {
-        console.log(`  ${render.icons.error} SessionStart hook: pinned to flair-mcp@${status.stalePin} (installed CLI is ${flairCliVersion()}) — the hook still launches the OLD adapter on every session`);
+        console.log(`  ${render.icons.error} SessionStart hook: pinned to flair-mcp@${status.stalePin} (installed CLI is ${flairCliVersion()}) — configured to invoke the older pin when it runs`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
         renderContinuity();
         renderActionRecall();
         console.log("");
         process.exit(1);
+      }
+
+      // flair#2291: a held hook shape (see readOwnedPin) is reported.
+      if (pinFinding?.reading.held) {
+        console.log(`  ${render.icons.warn} SessionStart hook: ${pinFinding.reading.held}`);
       }
 
       const headline = hookStatusHeadline(status);

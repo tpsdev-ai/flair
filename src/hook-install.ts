@@ -897,7 +897,7 @@ export interface HookStatusOptions {
    * The ONE shared stale-pin finding for this harness, computed by the command
    * from owned-pins' `sessionStartHookPinFindings` (flair#2291). `hook status`
    * renders the finding's `behind` direction red, matching `doctor`. Absent or
-   * null means no stale pin. */
+   * null means none was supplied. */
   stalePinFinding?: HookPinFinding | null;
 }
 

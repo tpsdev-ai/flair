@@ -362,7 +362,9 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
       //              blocking, NOT auto-re-pinned, and never worded as an old
       //              adapter — the guard holds an unreadable pin.
       const behind = findings.filter((f) => f.direction === "behind");
-      const unknownFindings = findings.filter((f) => f.direction === "unknown");
+      // flair#2291: a held hook shape (no pin read) is its own warn.
+      const heldFindings = findings.filter((f) => f.reading.held);
+      const unknownFindings = findings.filter((f) => f.direction === "unknown" && !f.reading.held);
       const aheadFindings = findings.filter((f) => f.direction === "ahead");
       if (behind.length > 0) {
         const readings = behind.map((f) => f.reading);
@@ -373,6 +375,11 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
         return result(id, label, "fail", {
           detail,
           remedy: staleHookRemedy(readings),
+        });
+      }
+      if (heldFindings.length > 0) {
+        return result(id, label, "warn", {
+          detail: heldFindings.map((f) => `SessionStart hook (${f.reading.target.id}): ${f.reading.held}`).join("; "),
         });
       }
       if (unknownFindings.length > 0) {

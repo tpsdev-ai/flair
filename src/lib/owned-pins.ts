@@ -75,6 +75,9 @@ export interface OwnedPinReading {
   entryExists: boolean;
   /** Concrete `@tpsdev-ai/flair-mcp@<ver>` pin, or null if unpinned / absent. */
   pin: string | null;
+  /** SessionStart hooks only (flair#2291): set for a held hook shape (see
+   *  readOwnedPin); `pin` is then null. The line a consumer prints for it. */
+  held?: string;
 }
 
 export interface OwnedPinRefreshResult {
@@ -149,15 +152,48 @@ function readFileText(path: string): string | null {
   }
 }
 
+const SESSION_START_HOOK_INVOCATIONS_RE = new RegExp(SESSION_START_HOOK_INVOCATION_RE.source, "g");
+
+/**
+ * The `@tpsdev-ai/flair-mcp[@<ver>]` span a SessionStart hook command runs
+ * (flair#2291), read by both the pin finding and the guarded re-pin: an
+ * installer form's captured span, else the command's one `npx -y -p`
+ * invocation. `held` when the command has two or more invocations, or a
+ * flair-mcp pin and no invocation.
+ */
+function hookInvocationSpec(command: string): { spec: string | null; invocations: number; held: boolean } {
+  const form = parseInstallerHookForm(command);
+  if (form) return { spec: form.pkgSpec, invocations: 1, held: false };
+  const invocations = command.match(SESSION_START_HOOK_INVOCATIONS_RE) ?? [];
+  if (invocations.length === 1) {
+    return { spec: invocations[0]!.slice("npx -y -p ".length, -" flair-session-start".length), invocations: 1, held: false };
+  }
+  const pinned = decodeWiringSpecs(command, FLAIR_MCP_PACKAGE).some((s) => wiringPinString(s) !== null);
+  return { spec: null, invocations: invocations.length, held: invocations.length > 1 || pinned };
+}
+
 export function readOwnedPin(target: OwnedPinTarget, homeDir: string): OwnedPinReading {
   if (target.kind === "session-start-hook") {
     const hook = checkSessionStartHook(homeDir, target.path);
-    const present = !!(hook.present && hook.command && isFlairHookCommand(hook.command));
+    // flair#2291: more than one marker match is held, the writer's own rule
+    // (repinSessionStartHook holds on it too).
+    const duplicates = hook.present && (hook.matches ?? 1) > 1;
+    const present = duplicates || !!(hook.present && hook.command && isFlairHookCommand(hook.command));
+    if (!present) return { target, present, entryExists: present, pin: null };
+    // flair#2291: the pin comes from the invocation span, never from the first
+    // package string in the command (an agent id or URL can contain one).
+    const span = duplicates ? null : hookInvocationSpec(hook.command!);
+    const held = duplicates
+      ? `${hook.matches} Flair SessionStart hooks match in ${target.displayPath} — pin not read, not re-pinned; remove all but one`
+      : span!.held
+        ? `${span!.invocations} \`npx -y -p\` flair-session-start invocations in ${target.displayPath} — pin not read, not re-pinned; edit the hook to one`
+        : undefined;
     return {
       target,
       present,
       entryExists: present,
-      pin: present ? wiringPinString(decodeWiringSpec(hook.command ?? "", FLAIR_MCP_PACKAGE)) : null,
+      pin: held || !span || span.spec === null ? null : wiringPinString(decodeWiringSpec(span.spec, FLAIR_MCP_PACKAGE)),
+      ...(held ? { held } : {}),
     };
   }
   const block = readClientMcpBlock(target.id as ClientId, homeDir);
@@ -344,23 +380,26 @@ export function sessionStartHookPinFindings(
   homeDir: string,
   expectedVersion: string = flairCliVersion(),
 ): SessionStartHookPinFinding[] {
-  return staleSessionStartHookPins(homeDir, expectedVersion).map((reading) => ({
+  const stale = staleSessionStartHookPins(homeDir, expectedVersion).map((reading) => ({
     reading,
     direction: pinDirection(reading.pin, expectedVersion),
   }));
+  // flair#2291: a HELD hook (no pin read) is a finding too, direction "unknown".
+  const held = listOwnedPinTargets(homeDir)
+    .filter((t) => t.kind === "session-start-hook")
+    .map((t) => readOwnedPin(t, homeDir))
+    .filter((r) => r.held)
+    .map((reading) => ({ reading, direction: "unknown" as const }));
+  return [...stale, ...held];
 }
 
 /**
- * Apply-or-re-pin for a wiring command's SessionStart-hook leg (flair#2291).
- *
- * The ONE composition of "add when absent, re-pin when present-but-stale,
- * report when already current" a wiring command can call. A present hook is
- * judged against `sessionStartHookPinFindings` (the one stale-pin finding) and
- * re-pinned through `repinSessionStartHookGuarded` (the one guarded writer); a
- * present hook whose pin is current (or unpinned) stays a byte-identical
- * "already wired". This is the composition `flair init` calls for each client's
- * hook leg — the fifth path (#1485, #1516, #1571, #1779, #2291) closed by shape
- * rather than by one more per-command check.
+ * `flair init`'s SessionStart-hook leg (flair#2291). An absent hook goes to
+ * `fixSessionStartHook`. A present hook is judged by
+ * `sessionStartHookPinFindings`: no finding is "already wired" and left as is;
+ * a held finding is reported and left as is; any other finding goes to
+ * `repinSessionStartHookGuarded`. `skip` (--skip-hook) is checked before
+ * either write.
  */
 export function applyOrRepinSessionStartHook(
   homeDir: string,
@@ -371,11 +410,17 @@ export function applyOrRepinSessionStartHook(
   const existing = checkSessionStartHook(homeDir, settingsPath);
   if (existing.present) {
     const harness = hookHarnessFromSettingsPath(existing.path);
-    const stale = sessionStartHookPinFindings(homeDir).some(
+    const finding = sessionStartHookPinFindings(homeDir).find(
       (f) => f.reading.target.id === harness,
     );
-    if (!stale) {
+    if (!finding) {
       return { applied: false, ok: true, message: `SessionStart hook already wired in ${existing.path}` };
+    }
+    if (finding.reading.held) {
+      return { applied: false, ok: false, message: finding.reading.held };
+    }
+    if (skip) {
+      return { applied: false, ok: false, message: `SessionStart hook in ${existing.path} not re-pinned (--skip-hook)` };
     }
     const repin = repinSessionStartHookGuarded(homeDir, harness);
     return { applied: repin.action === "update", ok: repin.ok, message: repin.message };
@@ -460,11 +505,10 @@ export function repinSessionStartHookGuarded(
   const command = checkSessionStartHook(homeDir, resolved.path).command;
   const form = command ? parseInstallerHookForm(command) : null;
   // A form supplies the exact span the writer replaces. For a rejected form,
-  // the status-only match may recover an unreadable pin for a HOLD; it cannot
+  // the one-invocation match may recover an unreadable pin for a HOLD; it cannot
   // authorize a write. The writer still validates the full command in-lock.
-  const invocation = form ? undefined : command?.match(SESSION_START_HOOK_INVOCATION_RE)?.[0];
-  const spec = form?.pkgSpec
-    ?? invocation?.slice("npx -y -p ".length, -" flair-session-start".length);
+  // flair#2291: the same span the pin finding reads (hookInvocationSpec).
+  const spec = command ? hookInvocationSpec(command).spec : null;
   const existing = spec ? wiringPinString(decodeWiringSpec(spec, FLAIR_MCP_PACKAGE)) : null;
   // A comparable pin in a non-installer command is a shape refusal, not an
   // unknown pin. Let the writer retain its "not one of the installer forms"

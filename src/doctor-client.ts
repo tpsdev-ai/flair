@@ -1204,6 +1204,9 @@ export interface SessionStartHookCheckResult {
    *  hook's PRESENCE was never the problem; whether the command it names can
    *  still execute is, and answering that needs the command itself. */
   command?: string;
+  /** How many hook commands carry the marker; `command` is the first
+   *  (flair#2291). Set when `present`. */
+  matches?: number;
 }
 
 /**
@@ -1221,16 +1224,19 @@ export function checkSessionStartHook(homeDir: string, settingsPath?: string): S
     const config = JSON.parse(raw);
     const groups = config?.hooks?.SessionStart;
     if (!Array.isArray(groups)) return { present: false, path };
+    let command: string | undefined;
+    let matches = 0;
     for (const group of groups) {
       const hooks = group?.hooks;
       if (!Array.isArray(hooks)) continue;
       for (const hook of hooks) {
         if (typeof hook?.command === "string" && hook.command.includes(SESSION_START_HOOK_MARKER)) {
-          return { present: true, path, command: hook.command };
+          matches++;
+          command ??= hook.command;
         }
       }
     }
-    return { present: false, path };
+    return command === undefined ? { present: false, path } : { present: true, path, command, matches };
   } catch {
     return { present: false, path };
   }
