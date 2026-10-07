@@ -6296,22 +6296,15 @@ function resolveAdminPassAvailability(path: string): AdminPassAvailability {
   };
 }
 
-/**
- * Prove an admin credential belongs to the running instance before adoption
- * materializes it into the 0600 pass file (flair#1685). The admin-gated
- * /HealthDetail read is the proof: a rejected Basic credential produces 401 and
- * is NOT retried through the agent-key floor (that floor only engages when no
- * credential was sent at all), so success here means THIS credential was
- * accepted by THIS instance. Never logs the secret.
- */
 export async function proveAdminPassAgainstInstance(
   port: number,
   adminPass: string,
 ): Promise<string | null> {
   try {
-    await api("GET", "/HealthDetail", undefined, {
+    await api("GET", "/FederationPeers", undefined, {
       baseUrl: `http://127.0.0.1:${port}`,
       explicitAdminPass: adminPass,
+      adminUser: DEFAULT_ADMIN_USER,
     });
     return null;
   } catch (err) {
@@ -6419,10 +6412,6 @@ export type WriteInitLaunchdPlistResult =
  *      file and the command named and write NO plist. Never a plist whose
  *      launcher argv cannot be satisfied.
  *
- * The proof uses the same authed `GET /HealthDetail` as the doctor arms (a
- * rejected Basic credential is a 401 and never falls through to the agent-key
- * floor), so a credential that does not belong to THIS instance is refused
- * rather than baked into a pass file the instance would reject.
  */
 export async function writeInitLaunchdPlist(
   opts: WriteInitLaunchdPlistOptions,

@@ -1,21 +1,3 @@
-/**
- * flair#2271 — a supplied admin credential is proven against the running
- * instance before it replaces `~/.flair/admin-pass`.
- *
- * `flair init` re-persisted any explicit credential from `--admin-pass`,
- * `--admin-pass-file`, `FLAIR_ADMIN_PASS` or `HDB_ADMIN_PASSWORD` without
- * checking it against the instance that was already serving. A wrong value
- * overwrote a working admin-pass. These run a real `flair init` against a real
- * Harper instance in a throwaway HOME and assert, for every way a credential
- * can be supplied:
- *   - a wrong credential is refused (non-zero exit, a remedy naming
- *     `--reset-admin-pass`) and the stored file is byte-identical;
- *   - a correct credential proceeds;
- *   - `--reset-admin-pass` still rotates and the new credential authenticates.
- *
- * No real ~/.flair is touched: HOME is a temp dir, the data dir is explicit,
- * and both ports are picked free at run time.
- */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -145,7 +127,7 @@ function credential(source: "inline" | "file" | "FLAIR_ADMIN_PASS" | "HDB_ADMIN_
 }
 
 async function adminStatus(password: string): Promise<number> {
-  const res = await fetch(`http://127.0.0.1:${httpPort}/HealthDetail`, {
+  const res = await fetch(`http://127.0.0.1:${httpPort}/FederationPeers`, {
     headers: { Authorization: "Basic " + Buffer.from(`${ADMIN_USER}:${password}`).toString("base64") },
     signal: AbortSignal.timeout(10_000),
   });
@@ -172,7 +154,7 @@ afterAll(() => {
   process.umask(savedUmask);
 });
 
-describe.skipIf(process.platform !== "linux")("flair#2271 — a supplied credential is verified before it replaces admin-pass", () => {
+describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentials on an existing install", () => {
   test("a real init establishes a running instance with a working admin-pass", async () => {
     mkdirSync(home, { recursive: true });
     mkdirSync(dataDir, { recursive: true });
@@ -205,6 +187,31 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — a supplied credent
     }, 150_000);
   }
 
+  test("FLAIR_ADMIN_USER cannot substitute another superuser's password", async () => {
+    const alternate = "fixture-alternate-superuser-2271";
+    const response = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: {
+        Authorization: "Basic " + Buffer.from(`admin:${installedPassword}`).toString("base64"),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ operation: "add_user", username: "alternate-2271", password: alternate, role: "super_user", active: true }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(response.status).toBe(200);
+    const accepted = await fetch(`http://127.0.0.1:${httpPort}/FederationPeers`, {
+      headers: { Authorization: "Basic " + Buffer.from(`alternate-2271:${alternate}`).toString("base64") },
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(accepted.status).toBe(200);
+    const before = readFileSync(adminPassPath);
+    const r = await runInit([...baseArgs(), "--admin-pass", alternate], { FLAIR_ADMIN_USER: "alternate-2271" });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain(ROTATE_REMEDY);
+    expect(readFileSync(adminPassPath).equals(before)).toBe(true);
+    expect(await adminStatus(installedPassword)).toBe(200);
+  }, 180_000);
+
   test("--reset-admin-pass still rotates and the new credential authenticates", async () => {
     const rotated = "fixture-rotated-admin-2271";
     const before = readFileSync(adminPassPath);
@@ -215,4 +222,31 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — a supplied credent
     expect(await adminStatus(rotated)).toBe(200);
     installedPassword = rotated;
   }, 150_000);
+
+  describe("stopped Harper install", () => {
+    beforeAll(() => stopHarper());
+    for (const skipStart of [false, true]) {
+      for (const source of ["inline", "file", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD"] as const) {
+        test(`${source}: refuses a supplied credential, skip-start=${skipStart}`, async () => {
+          const before = readFileSync(adminPassPath);
+          const { args, env } = credential(source, "fixture-stopped-wrong-2271");
+          const initArgs = skipStart ? baseArgs() : baseArgs().filter(arg => arg !== "--skip-start");
+          const r = await runInit([...initArgs, ...args], env);
+          expect(r.code).not.toBe(0);
+          expect(r.out).toContain("Start the instance and re-run");
+          expect(r.out).toContain(ROTATE_REMEDY);
+          expect(readFileSync(adminPassPath).equals(before)).toBe(true);
+        }, 150_000);
+      }
+    }
+    test("a persisted admin without a pass file refuses a supplied credential", async () => {
+      rmSync(adminPassPath);
+      const r = await runInit([...baseArgs(), "--admin-pass", installedPassword]);
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain("Start the instance and re-run");
+      expect(r.out).toContain(ROTATE_REMEDY);
+      expect(existsSync(adminPassPath)).toBe(false);
+    }, 150_000);
+  });
+
 });

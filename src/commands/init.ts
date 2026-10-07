@@ -813,14 +813,15 @@ program
       process.exit(1);
     };
 
-    // flair#2271: a supplied admin credential must not replace the stored
-    // `~/.flair/admin-pass` until it has been proven against the running
-    // instance. Reuse the same authenticated probe the CLI already uses to
-    // check an admin credential (an admin-gated `GET /HealthDetail`). A fresh
-    // install has no running instance to prove against, so the credential is
-    // written as before.
     const persistSuppliedAdminPass = async (): Promise<void> => {
       if (resolveInitAdminPasswordSource(false, passwordCtx) !== "re-persist") return;
+      if (!alreadyRunning && (existsSync(adminPassPath) || persistedAdminUser)) {
+        console.error(
+          `Refusing to replace ${adminPassPath}: an existing install is stopped. ` +
+            `Start the instance and re-run init with the supplied credential, or run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
+        );
+        process.exit(1);
+      }
       if (alreadyRunning) {
         const failure = await proveAdminPassAgainstInstance(httpPort, adminPass);
         if (failure) {

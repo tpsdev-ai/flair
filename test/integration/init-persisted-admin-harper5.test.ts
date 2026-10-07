@@ -233,7 +233,7 @@ describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
     expect(existsSync(adminPassPath)).toBe(false);
   }, 150_000);
 
-  test("an explicit credential re-persists the file on the Harper 5 install", async () => {
+  test("a stopped Harper 5 install refuses an explicit credential", async () => {
     const r = await runInit([
       "--data-dir", dataDir,
       "--port", String(httpPort),
@@ -242,8 +242,9 @@ describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
       "--admin-pass", installedPassword,
       ...SKIP_EXTRAS,
     ]);
-    expect(r.code, `flair init failed:\n${r.out.slice(-4000)}`).toBe(0);
-    expect(existsSync(adminPassPath)).toBe(true);
-    expect(readFileSync(adminPassPath, "utf-8")).toBe(installedPassword + "\n");
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("Start the instance and re-run");
+    expect(r.out).toContain("flair init --reset-admin-pass");
+    expect(existsSync(adminPassPath)).toBe(false);
   }, 150_000);
 });

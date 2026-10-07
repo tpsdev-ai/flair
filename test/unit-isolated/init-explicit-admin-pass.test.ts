@@ -36,6 +36,10 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
   const script = `
     Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
     globalThis.fetch = async () => { throw new Error("offline fixture"); };
+    const socketLimitPath = ${JSON.stringify(new URL("../../src/lib/socket-path-limit.ts", import.meta.url).href)};
+    const socketLimit = await import(socketLimitPath);
+    const { mock: mockSocketLimit } = await import("bun:test");
+    mockSocketLimit.module(socketLimitPath, () => ({ ...socketLimit, opsSocketPathRefusal: () => null }));
     ${options.umask === undefined ? "" : `process.umask(${options.umask});`}
     ${options.columns === undefined ? "" : `
       const { createRequire } = await import("node:module");
@@ -103,7 +107,7 @@ describe("fresh init persists explicit admin credentials", () => {
       symlinkSync(target, path);
       const result = runInit(home, dataDir, "inline", "linux");
       expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain("symbolic link");
+      expect(result.stderr).toContain(dangling ? "symbolic link" : "existing install is stopped");
       expect(lstatSync(path).isSymbolicLink()).toBe(true);
       if (!dangling) expect(readFileSync(target, "utf8")).toBe("unchanged");
       else expect(existsSync(target)).toBe(false);
@@ -118,7 +122,7 @@ describe("fresh init persists explicit admin credentials", () => {
     writeFileSync(path, "unchanged", { mode: 0o600 });
     const result = runInit(home, dataDir, "inline", "linux", true);
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("owned by another user");
+    expect(result.stderr).toContain("existing install is stopped");
     expect(readFileSync(path, "utf8")).toBe("unchanged");
   });
 });
@@ -233,4 +237,65 @@ describe("admin credential persistence refuses unassessed stores", () => {
     const issues = (text: string) => Number(/(\d+) issues? found/.exec(text)?.[1]);
     expect(issues(output)).toBe(issues(baseline) + 1);
   });
+});
+
+
+describe("supplied credentials on stopped installs", () => {
+  for (const persisted of [false, true]) {
+    for (const fileExists of [false, true]) {
+      if (!persisted && !fileExists) continue;
+      for (const source of sources) {
+        test(`${source}: stopped install, persisted=${persisted}, file=${fileExists}`, () => {
+          const home = tempDir("i-");
+          const dataDir = tempDir("d-");
+          const passPath = join(home, ".flair", "admin-pass");
+          mkdirSync(join(home, ".flair"));
+          markInstalled(dataDir);
+          if (persisted) {
+            mkdirSync(join(dataDir, "system"));
+            writeFileSync(join(dataDir, "system", "hdb_user.mdb"), "fixture-user");
+          }
+          const before = Buffer.from([0x73, 0x61, 0x76, 0x65, 0x64, 0x0d, 0x0a, 0xff]);
+          if (fileExists) writeFileSync(passPath, before, { mode: 0o600 });
+          const result = runInit(home, dataDir, source, "linux");
+          expect(result.error).toBeUndefined();
+          expect(result.status).not.toBe(0);
+          expect(result.stderr).toContain("Start the instance and re-run");
+          expect(result.stderr).toContain("flair init --reset-admin-pass");
+          if (fileExists) expect(readFileSync(passPath)).toEqual(before);
+          else expect(existsSync(passPath)).toBe(false);
+        }, 60_000);
+      }
+    }
+  }
+});
+
+test("the supplied-password probe pins admin despite FLAIR_ADMIN_USER", async () => {
+  const { proveAdminPassAgainstInstance } = await import("../../src/cli.ts");
+  const savedUser = process.env.FLAIR_ADMIN_USER;
+  const savedFetch = globalThis.fetch;
+  process.env.FLAIR_ADMIN_USER = "alternate-user";
+  const seen: Array<{ path: string; user: string }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const auth = new Headers(init?.headers).get("Authorization") ?? "";
+    const decoded = Buffer.from(auth.replace(/^Basic /, ""), "base64").toString();
+    const [user, pass] = decoded.split(":");
+    const path = new URL(String(input)).pathname;
+    seen.push({ path, user });
+    const accepted = user === "alternate-user" && pass === "fixture-alternate-password"
+      || user === "admin" && pass === "fixture-admin-password";
+    return Response.json({}, { status: accepted ? 200 : 401 });
+  }) as typeof fetch;
+  try {
+    expect(await proveAdminPassAgainstInstance(20991, "fixture-alternate-password")).not.toBeNull();
+    expect(await proveAdminPassAgainstInstance(20991, "fixture-admin-password")).toBeNull();
+    expect(seen).toEqual([
+      { path: "/FederationPeers", user: "admin" },
+      { path: "/FederationPeers", user: "admin" },
+    ]);
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedUser === undefined) delete process.env.FLAIR_ADMIN_USER;
+    else process.env.FLAIR_ADMIN_USER = savedUser;
+  }
 });
