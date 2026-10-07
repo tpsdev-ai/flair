@@ -246,6 +246,21 @@ server.http(async (request: any, nextLayer: any) => {
   const limited = checkHttpRateLimit(request, url.pathname);
   if (limited) return limited;
 
+  // ── Malformed `.content` Memory path: the named 400, for every caller ────────
+  // flair#2307 item 2: Harper's OWN path decode answers a 500 for invalid
+  // percent-encoding, before any resource by-id guard can run. A Memory path
+  // whose last segment is invalid percent-encoding AND ends in the `.content`
+  // property suffix is refused here with the guard's named 400 instead. Placed
+  // before every auth branch (the public-path passthrough, the Basic-admin and
+  // anonymous early returns, the signed-agent path), so the refusal does not
+  // depend on the request's credential, and no row is read or written for it.
+  if (isMemoryReadPath(url.pathname)) {
+    const seg = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+    if (seg.endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX) && !isValidPercentEncoding(seg)) {
+      return contentSuffixIdDenial(seg);
+    }
+  }
+
   // A2A discovery endpoints: GET returns public agent-card metadata (per
   // A2A spec, cards are intentionally public). POST invokes JSON-RPC
   // actions (message/send writes OrgEvents on behalf of agents,
@@ -793,21 +808,13 @@ server.http(async (request: any, nextLayer: any) => {
   // contract, applied in `Memory.get`/`Memory.search`). The by-id
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
-  // flair#2307 item 2: Harper's OWN path decode throws a 500 on invalid
-  // percent-encoding, before any resource by-id guard can run. A Memory path
-  // whose last segment is invalid percent-encoding AND ends in the `.content`
-  // property suffix is refused here with the guard's named 400 instead.
-  if (isMemoryReadPath(url.pathname)) {
-    const seg = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
-    if (seg.endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX) && !isValidPercentEncoding(seg)) {
-      return contentSuffixIdDenial(seg);
-    }
-  }
-
+  // (A malformed `.content` segment was refused before any auth branch, above.)
   if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(url.pathname)) {
     // flair#2199: an id segment carrying an encoded `/` before a declared
     // property suffix is ambiguous — the suffix could be part of the id or a
-    // selector on a slash-containing id.
+    // selector on a slash-containing id. This branch runs for a signed
+    // non-admin agent: Basic-admin and anonymous requests returned to the next
+    // layer before it.
     if (isAmbiguousEncodedSlashSelector(request.url)) {
       return new Response(method === "HEAD" ? null : JSON.stringify({
         error: "ambiguous_memory_id",

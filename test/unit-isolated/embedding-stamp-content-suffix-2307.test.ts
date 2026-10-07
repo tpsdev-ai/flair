@@ -6,14 +6,18 @@
  * `PUT /Memory/:id` cannot address it), from the text Memory's write paths
  * embed for it (a skill row's `trigger`, else `content`). The write must happen
  * only when the provider returned a usable vector, and only onto a row that
- * still exists and is unchanged since the migration read it; otherwise this
- * migration does not stamp the row, and a still-existing stale row stays
- * pending.
+ * still exists and is unchanged since the migration read it, including a
+ * change committed after the transaction read it and before it commits (the
+ * transaction stand-in below commits a staged write regardless, as Harper has
+ * no compare-and-set); otherwise this migration does not stamp the row, and a
+ * still-existing stale row stays pending.
  *
  * Runs in its own process (test/unit-isolated): it mocks
  * resources/embeddings-provider.ts, which other unit files import for real.
  * The success path against real Harper is
- * test/integration/embedding-stamp-content-suffix-2307.test.ts.
+ * test/integration/embedding-stamp-content-suffix-2307.test.ts; a change
+ * committed while the transaction is paused after its read, against real
+ * Harper, is test/integration/embedding-stamp-contention-2307.test.ts.
  */
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
@@ -31,9 +35,18 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
   EMBEDDING_ENGINE: "gguf",
   getMode: () => "local",
 }));
-// resources/request-transaction.ts reads Harper's `transaction` from the global;
-// this stand-in runs the callback with the context it is given.
-(globalThis as any).transaction = async (ctx: any, cb: (ctx: any) => any) => cb(ctx);
+// resources/request-transaction.ts reads Harper's `transaction` from the global.
+// This stand-in stages the writes made through the transaction's context and
+// applies them when the callback returns, whether or not a row it read changed
+// meanwhile (Harper has no compare-and-set); a callback that throws discards
+// them (an abort).
+(globalThis as any).transaction = async (ctx: any, cb: (ctx: any) => any) => {
+  const staged: Row[] = [];
+  ctx.transaction = { staged };
+  const result = await cb(ctx);
+  for (const row of staged) commitRow(row);
+  return result;
+};
 
 const { createEmbeddingStampMigration } = await import("../../resources/migrations/embedding-stamp.ts");
 
@@ -42,7 +55,15 @@ const LEGACY_ID = "legacy-row.content";
 const STALE = { embedding: [0.1, 0.1, 0.1], embeddingModel: "ancient-model" };
 
 let store: Map<string, Row>;
+/** Rows committed to the store by a put (a staged put counts once its transaction commits). */
 let puts: Row[];
+/** Runs after a put is staged in a transaction, before that transaction commits. */
+let afterStage: (() => void) | null = null;
+
+function commitRow(row: Row): void {
+  puts.push(structuredClone(row));
+  store.set(row.id, structuredClone(row));
+}
 
 function matches(row: Row, cond: any): boolean {
   if (cond.operator && Array.isArray(cond.conditions)) {
@@ -59,9 +80,11 @@ const table = {
     const row = store.get(id);
     return row ? structuredClone(row) : null;
   },
-  async put(row: Row) {
-    puts.push(structuredClone(row));
-    store.set(row.id, structuredClone(row));
+  async put(row: Row, ctx?: any) {
+    const staged = ctx?.transaction?.staged;
+    if (!Array.isArray(staged)) return commitRow(row);
+    staged.push(structuredClone(row));
+    afterStage?.();
   },
   search(query: any): AsyncIterable<Row> {
     const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
@@ -89,6 +112,7 @@ beforeEach(() => {
   puts = [];
   embedded = [];
   embedImpl = async () => [0.5, 0.25, 0.125];
+  afterStage = null;
 });
 
 describe("flair#2307 — the content-suffix re-embed writes only a usable vector onto an unchanged row", () => {
@@ -135,6 +159,27 @@ describe("flair#2307 — the content-suffix re-embed writes only a usable vector
     expect(puts).toEqual([]);
     expect(store.get(LEGACY_ID)).toMatchObject({ content: "edited meanwhile", ...STALE });
   });
+
+  for (const [name, change] of [
+    ["edited", () => store.set(LEGACY_ID, { ...store.get(LEGACY_ID)!, content: "edited after the read" })],
+    ["deleted", () => store.delete(LEGACY_ID)],
+  ] as const) {
+    it(`a row ${name} after the transaction read it, before it commits, is not stamped`, async () => {
+      afterStage = () => {
+        afterStage = null;
+        change(); // a competing write commits while this transaction's write is staged
+      };
+      const result = await migration().run(10);
+      expect(result.processed).toBe(0);
+      expect(puts).toEqual([]); // assertion: the staged write was discarded, not committed
+      if (name === "edited") {
+        expect(store.get(LEGACY_ID)).toMatchObject({ content: "edited after the read", ...STALE });
+        expect(await migration().countPending()).toBe(1);
+      } else {
+        expect(store.has(LEGACY_ID)).toBe(false);
+      }
+    });
+  }
 
   it("a row deleted while its embedding was computed is not recreated", async () => {
     embedImpl = async () => {

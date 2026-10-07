@@ -31,8 +31,11 @@ export function idSegmentHasEncodedSlash(segment: string): boolean {
 /**
  * Decode one path segment the way Harper decodes a request path before its
  * property parse (`RequestTarget` decodes the path). Returns the raw segment
- * when it is not valid percent-encoding — a malformed request is rejected by
- * Harper's own path handling, and a caller here must not throw on it.
+ * when it is not valid percent-encoding, so a caller here never throws on it.
+ * Such a Memory request whose last segment ends in `.content` is refused by
+ * the auth middleware with the named 400 (`memory_id_content_suffix`) before
+ * any auth branch; another malformed segment is left to Harper's own path
+ * handling.
  *
  * Shared so the resource-layer guard and the auth middleware decode a URL-bound
  * id the SAME way (flair#2199 follow-up).

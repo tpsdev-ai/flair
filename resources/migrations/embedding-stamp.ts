@@ -152,7 +152,8 @@ export { EMBEDDING_STAMP_ID };
 
 export interface MemoryTableLike {
   search(query: unknown): AsyncIterable<Record<string, unknown>>;
-  /** `context` carries the owned transaction of the content-suffix fallback below. */
+  /** `context` carries the owned transaction of the content-suffix fallback below, or an
+   *  empty context for its re-read of the committed row. */
   get(id: string, context?: unknown): Promise<Record<string, unknown> | null>;
   /** The raw table write handle, used only for the content-suffix fallback below. */
   put(row: Record<string, unknown>, context?: unknown): Promise<unknown>;
@@ -246,6 +247,9 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
   inTransaction: (fn) => withOwnedTransaction(undefined, fn),
 };
 
+/** Aborts the re-embed's owned transaction: the row changed after the transaction read it. */
+class RowChangedBeforeCommit extends Error {}
+
 /**
  * Re-embed a legacy row whose id ends in the `.content` property suffix. The
  * loopback `PUT /Memory/:id` the regen path uses cannot address such an id
@@ -261,8 +265,20 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * that still exists and is unchanged since `existing` was read: the re-read,
  * comparison and write share one owned transaction (the MemoryMaintenance
  * pattern), and the write changes only `embedding` and `embeddingModel`.
+ *
+ * Harper 5.2.8 has no compare-and-set on a table write: a transaction does not
+ * fail when a row it read is changed by another write before it commits;
+ * Harper applies both writes, ordered by transaction timestamp. So once the
+ * write is staged, and before the transaction commits, the row is re-read
+ * outside the transaction (an empty context: Harper's latest committed state,
+ * not this transaction's snapshot or its staged write); if it is no longer the
+ * row read inside the transaction, the transaction is aborted and the staged
+ * write discarded. A change committed after that re-read and before the commit
+ * is not seen by it; Harper orders the two writes by timestamp.
+ *
  * Returns true iff it wrote. Otherwise this migration does not stamp the row;
- * a row that still exists with a stale stamp stays pending for the next cycle.
+ * a row that still exists with a stale stamp stays pending for the next batch
+ * or cycle.
  */
 async function regenContentSuffixRow(
   table: MemoryTableLike,
@@ -283,9 +299,12 @@ async function regenContentSuffixRow(
       const pause = txnPausePoint("embedding-stamp-content-suffix");
       if (pause) await pause;
       await table.put({ ...fresh, embedding, embeddingModel: current }, txn);
+      const committed = await table.get(id, {});
+      if (!isDeepStrictEqual(committed, fresh)) throw new RowChangedBeforeCommit();
       return true;
     });
   } catch {
+    // Includes RowChangedBeforeCommit: the transaction was aborted, nothing written.
     return false;
   }
 }

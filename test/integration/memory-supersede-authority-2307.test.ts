@@ -1,10 +1,13 @@
 /**
  * memory-supersede-authority-2307.test.ts — flair#2307 item 4, real Harper.
  *
- * A Memory write that carries `supersedes` resolves the reference once, the way
- * Harper resolves a by-id path (decode, then drop a trailing declared-attribute
- * selector), and uses that id for the cross-agent write-grant check, the stored
- * reference and the close. A failed or missing target read refuses the write.
+ * A write through `Memory.post` or `Memory.put` that carries `supersedes`
+ * resolves the reference once, the way Harper resolves a by-id path (decode,
+ * then drop a trailing declared-attribute selector), and uses that id for the
+ * cross-agent write-grant check, the stored reference and the close. On those
+ * two paths a failed target read refuses the write, and so, for a non-admin
+ * agent, does a missing target. These cases write through `PUT /Memory/:id`
+ * (Memory.put) as a non-admin agent.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";

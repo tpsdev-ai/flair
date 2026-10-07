@@ -183,6 +183,54 @@ describe("flair#1940 round 17 — a non-admin Memory read drops the caller's sel
     expect((await res.json()).error).toBe("memory_id_content_suffix");
   });
 
+  it("flair#2307: the malformed `.content` refusal does not depend on the request's credential", async () => {
+    const mw = await loadMiddleware();
+    const savedPass = process.env.HDB_ADMIN_PASSWORD;
+    process.env.HDB_ADMIN_PASSWORD = "unit-admin-pass";
+    try {
+      const callers: Array<[string, () => any]> = [
+        ["a Basic admin", () => {
+          const req = makeRequest("/Memory/a%ZZ.content", "GET");
+          req.headers.set("authorization", "Basic " + Buffer.from("admin:unit-admin-pass").toString("base64"));
+          return req;
+        }],
+        ["a super_user Harper already authorized", () => {
+          const req = makeRequest("/Memory/a%ZZ.content", "GET");
+          req.headers.set("authorization", "Basic " + Buffer.from("root:other-pass").toString("base64"));
+          req.user = { username: "root", role: { permission: { super_user: true } } };
+          return req;
+        }],
+        ["an anonymous", () => {
+          const req = makeRequest("/Memory/a%ZZ.content", "GET");
+          req.headers.set("authorization", "");
+          return req;
+        }],
+      ];
+      for (const [who, build] of callers) {
+        for (const method of ["GET", "PUT", "DELETE"]) {
+          const req = build();
+          req.method = method;
+          const next = mock(nextLayer);
+          const res: Response = await mw(req, next);
+          expect(res.status, `${who} ${method}`).toBe(400);
+          expect((await res.json()).error, `${who} ${method}`).toBe("memory_id_content_suffix");
+          expect(next, `${who} ${method} reached the next layer`).not.toHaveBeenCalled();
+        }
+      }
+      // CONTROL: the same callers on a well-formed path reach the next layer.
+      for (const [who, build] of callers) {
+        const req = build();
+        req.url = "/Memory/a.content";
+        const next = mock(nextLayer);
+        await mw(req, next);
+        expect(next, `${who} on a well-formed path`).toHaveBeenCalled();
+      }
+    } finally {
+      if (savedPass === undefined) delete process.env.HDB_ADMIN_PASSWORD;
+      else process.env.HDB_ADMIN_PASSWORD = savedPass;
+    }
+  });
+
   it("flair#2199: refuses an encoded-slash id segment before a declared suffix", async () => {
     const mw = await loadMiddleware();
     for (const given of ["/Memory/a%2Fb.content", "/Memory/a%2fb.content", "/Memory/a%2Fb%2Econtent", "/Memory/a%2Fb.agentId", "/Memory/a%252Fb.content"] as const) {

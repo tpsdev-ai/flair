@@ -201,10 +201,15 @@ class BaseMemory {
   static async get(id: any) {
     return memoryStore.get(id) ?? null;
   }
-  static async put(content: any) {
+  static async put(content: any, ctx?: any) {
     callOrder.push(`static-put:${content.id}`);
     const rec = { ...content };
-    memoryStore.set(content.id, rec);
+    // A put made through a transaction's context is staged and applied when
+    // that transaction commits (see the `transaction` stand-in below), so a
+    // read outside the transaction does not see it before then.
+    const staged = ctx?.transaction?.open === 1 ? ctx.transaction.staged : undefined;
+    if (Array.isArray(staged)) staged.push(rec);
+    else memoryStore.set(content.id, rec);
     return rec;
   }
   static search(query: any) {
@@ -336,7 +341,17 @@ const FINDING_A_REWORDED =
 // to run a write unwrapped. Provide it in this isolated mock.
 (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
   if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
-  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  // Static puts made through this context are staged, applied at commit and
+  // discarded on abort.
+  const txn: any = {
+    open: 1, saveCommits: false, staged: [] as any[],
+    abort() { this.open = 0; this.staged = []; },
+    commit() {
+      this.open = 0;
+      for (const rec of this.staged) memoryStore.set(rec.id, rec);
+      this.staged = [];
+    },
+  };
   const c = ctx && typeof ctx === "object" ? ctx : {};
   c.transaction = txn;
   let r: any;
@@ -818,6 +833,9 @@ describe("supersede transaction (write-new-before-close-old fix)", () => {
     const closeWriteIdx = callOrder.findIndex((c) => c.startsWith("static-put:"));
     expect(newWriteIdx).toBeGreaterThanOrEqual(0);
     expect(closeWriteIdx).toBeGreaterThan(newWriteIdx);
+    // An unchanged target is closed in one attempt (no re-run of the close).
+    expect(callOrder.filter((c) => c === `static-put:${owned.id}`)).toHaveLength(1);
+    expect(memoryStore.get(owned.id).validTo).toBeDefined();
   });
 
   it("a close-old failure is logged (observable), never silent — and the new record is still safely written", async () => {
@@ -951,83 +969,65 @@ describe("flair#2307: a supersede authorizes, stores and closes one target", () 
     expect(memoryStore.get("sup-swap").validTo).toBeUndefined();
   });
 
-  it("an owner change between the close's read and its write is not overwritten", async () => {
-    memoryStore.set("sup-race", { id: "sup-race", agentId: "agent-1", content: "Own row, long enough for the gate." });
-    // A stand-in for Harper's optimistic transactions: every write bumps the
-    // row's version; a transaction records the version of each row read through
-    // it and stages the writes made through it, and at commit applies them only
-    // if none of the rows it read has changed (otherwise it aborts). A write
-    // made outside a transaction applies at once.
-    const versions = new Map<string, number>();
-    const bump = (id: string) => versions.set(id, (versions.get(id) ?? 0) + 1);
-    const savedTransaction = (globalThis as any).transaction;
-    (globalThis as any).transaction = async (ctx: any, cb: (txn: any) => any) => {
-      if (ctx?.transaction?.open === 1) return cb(ctx.transaction);
-      const txn: any = { open: 1, saveCommits: false, reads: new Map<string, number>(), writes: [] as any[] };
-      ctx.transaction = txn;
-      try {
-        const result = await cb(txn);
-        for (const [id, seen] of txn.reads) {
-          if ((versions.get(id) ?? 0) !== seen) throw new Error(`transaction conflict on ${id}`);
-        }
-        for (const row of txn.writes) {
-          memoryStore.set(row.id, { ...row });
-          bump(row.id);
-        }
-        return result;
-      } finally {
-        txn.open = 0;
-      }
-    };
-    const txnOf = (c: any) => (c?.transaction?.open === 1 && c.transaction.reads ? c.transaction : null);
+  // The transaction stand-in above commits a staged write whether or not a row
+  // the transaction read has changed since (Harper has no compare-and-set), so
+  // these cases fail if the close writes from a row that changed after its read.
+  // The same interleavings against real Harper:
+  // test/integration/supersede-close-contention-2307.test.ts.
+  function changeTargetAfterCloseRead(id: string, change: (row: any) => any) {
     const realGet = BaseMemory.get;
-    const realPut = BaseMemory.put;
     const realPost = BaseMemory.post;
     let successorWritten = false;
-    let injected = false;
-    const getSpy = spyOn(BaseMemory, "get").mockImplementation(async (id: any, c?: any) => {
-      txnOf(c)?.reads.set(id, versions.get(id) ?? 0);
-      const row = await realGet(id);
-      if (id === "sup-race" && successorWritten && !injected) {
-        // The close has read the row; a competing writer changes its owner
-        // before the close writes.
-        injected = true;
-        memoryStore.set("sup-race", { ...row, agentId: "agent-other" });
-        bump("sup-race");
+    const state = { injected: false };
+    const getSpy = spyOn(BaseMemory, "get").mockImplementation(async (gotId: any, c?: any) => {
+      const row = await realGet(gotId);
+      if (gotId === id && successorWritten && !state.injected) {
+        // The close has read the row; a competing write commits a change
+        // before the close's transaction commits.
+        state.injected = true;
+        memoryStore.set(id, change(row));
       }
       return row;
-    });
-    const putSpy = spyOn(BaseMemory, "put").mockImplementation(async (content: any, c?: any) => {
-      const txn = txnOf(c);
-      if (txn) {
-        txn.writes.push({ ...content });
-        return { ...content };
-      }
-      const r = await realPut(content);
-      bump(content.id);
-      return r;
     });
     const postSpy = spyOn(BaseMemory, "post").mockImplementation(async (content: any, ctx?: any) => {
       const written = await realPost(content, ctx);
       successorWritten = true;
       return written;
     });
+    return { state, restore: () => { getSpy.mockRestore(); postSpy.mockRestore(); } };
+  }
+
+  it("an owner change between the close's read and its commit is kept, and the row is not closed", async () => {
+    memoryStore.set("sup-race", { id: "sup-race", agentId: "agent-1", content: "Own row, long enough for the gate." });
+    const race = changeTargetAfterCloseRead("sup-race", (row) => ({ ...row, agentId: "agent-other" }));
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     let res: any;
     try {
       res = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-race" });
     } finally {
-      getSpy.mockRestore();
-      putSpy.mockRestore();
-      postSpy.mockRestore();
+      race.restore();
       errorSpy.mockRestore();
-      (globalThis as any).transaction = savedTransaction;
     }
-    expect(injected).toBe(true);
+    expect(race.state.injected).toBe(true);
     expect(res instanceof Response).toBe(false);
     expect(memoryStore.has(res.id)).toBe(true);
-    expect(memoryStore.get("sup-race").agentId).toBe("agent-other"); // assertion: the competing owner change is not overwritten
+    expect(memoryStore.get("sup-race").agentId).toBe("agent-other"); // assertion: the competing owner change is kept
     expect(memoryStore.get("sup-race").validTo).toBeUndefined();
+  });
+
+  it("a content edit between the close's read and its commit is kept, and the close lands on the edited row", async () => {
+    memoryStore.set("sup-edit", { id: "sup-edit", agentId: "agent-1", content: "Own row before the edit, long enough for the gate." });
+    const race = changeTargetAfterCloseRead("sup-edit", (row) => ({ ...row, content: "Own row AFTER the edit, long enough for the gate." }));
+    let res: any;
+    try {
+      res = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-edit" });
+    } finally {
+      race.restore();
+    }
+    expect(race.state.injected).toBe(true);
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.get("sup-edit").content).toBe("Own row AFTER the edit, long enough for the gate."); // assertion: the edit is kept
+    expect(memoryStore.get("sup-edit").validTo).toBeDefined();
   });
 
   for (const [name, setup, status, error] of [

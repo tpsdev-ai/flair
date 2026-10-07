@@ -1,5 +1,6 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { guardAuthorityFields } from "./authority-field-guard.js";
@@ -608,6 +609,12 @@ function reindexDrift(content: any, existing: Record<string, any>): string | nul
   return null;
 }
 
+/** Aborts the close's owned transaction: the row changed after the transaction read it. */
+class CloseTargetChanged extends Error {}
+
+/** Attempts of the close before it gives up on a row that keeps changing. */
+const SUPERSEDE_CLOSE_ATTEMPTS = 3;
+
 /**
  * Read-modify-write close of a superseded record. Does NOT swallow failures —
  * throws so the caller can log it. Never called before the new record is
@@ -619,27 +626,51 @@ function reindexDrift(content: any, existing: Record<string, any>): string | nul
  * and the write is built from the row read inside it. `expectedOwner`, when
  * given, is the owner the authorization read saw; a row whose owner differs at
  * the read inside the transaction is not closed (throws instead).
+ *
+ * Harper 5.2.8 has no compare-and-set on a table write: a transaction does not
+ * fail when a row it read is changed by another write before it commits;
+ * Harper applies both writes, ordered by transaction timestamp. So once the
+ * write is staged, and before the transaction commits, the close re-reads the
+ * committed row outside the transaction (an empty context: Harper's latest
+ * committed state, not this transaction's snapshot or its staged write). If
+ * that row is no longer the one read inside the transaction, the transaction
+ * is aborted (the staged write is discarded) and the close starts over from
+ * the committed row, owner comparison included, up to SUPERSEDE_CLOSE_ATTEMPTS
+ * times. A change committed after that re-read and before the commit is not
+ * seen by it; Harper orders the two writes by timestamp.
  */
 async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>, expectedOwner?: string): Promise<void> {
-  const closedRow = await withOwnedTransaction(ctx, async (c) => {
-    const existing = await (databases as any).flair.Memory.get(oldId, c);
-    if (!existing) {
-      throw new Error(`supersede-close: record ${oldId} not found`);
+  for (let attempt = 1; ; attempt++) {
+    let closedRow: any;
+    try {
+      closedRow = await withOwnedTransaction(ctx, async (c) => {
+        const existing = await (databases as any).flair.Memory.get(oldId, c);
+        if (!existing) {
+          throw new Error(`supersede-close: record ${oldId} not found`);
+        }
+        if (expectedOwner !== undefined && existing.agentId !== expectedOwner) {
+          throw new Error(`supersede-close: record ${oldId} is no longer owned by the authorized owner`);
+        }
+        // Test-only: inert unless the fault-injection env opt-in is set and armed.
+        const pause = txnPausePoint("supersede-close");
+        if (pause) await pause;
+        const closed = { ...existing, ...patch };
+        stripUndeclaredMemoryAttributes(closed);
+        await (databases as any).flair.Memory.put(closed, c);
+        const committed = await (databases as any).flair.Memory.get(oldId, {});
+        if (!isDeepStrictEqual(committed, existing)) throw new CloseTargetChanged();
+        return closed;
+      });
+    } catch (err) {
+      if (!(err instanceof CloseTargetChanged)) throw err;
+      if (attempt < SUPERSEDE_CLOSE_ATTEMPTS) continue;
+      throw new Error(`supersede-close: record ${oldId} changed during each of ${SUPERSEDE_CLOSE_ATTEMPTS} attempts; not closed`);
     }
-    if (expectedOwner !== undefined && existing.agentId !== expectedOwner) {
-      throw new Error(`supersede-close: record ${oldId} is no longer owned by the authorized owner`);
-    }
-    // Test-only: inert unless the fault-injection env opt-in is set and armed.
-    const pause = txnPausePoint("supersede-close");
-    if (pause) await pause;
-    const closed = { ...existing, ...patch };
-    stripUndeclaredMemoryAttributes(closed);
-    await (databases as any).flair.Memory.put(closed, c);
-    return closed;
-  });
-  // flair#1357 — a supersede-close sets `validTo`, which the retrieval filters
-  // read, so the lexical index has to see it as eagerly as a content write.
-  noteMemoryUpsert(closedRow);
+    // flair#1357 — a supersede-close sets `validTo`, which the retrieval filters
+    // read, so the lexical index has to see it as eagerly as a content write.
+    noteMemoryUpsert(closedRow);
+    return;
+  }
 }
 
 /**
