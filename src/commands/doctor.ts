@@ -8,7 +8,8 @@
  */
 import { Command } from "commander";
 import { makeReadInstanceIds } from "./keys.js";
-import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
+import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, envKeyNames, readEnvValue } from "../component-env.js";
+import { describeMcpRedirectFinding, mcpOAuthEnabledIn } from "../lib/mcp-oauth-env.js";
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
@@ -817,12 +818,11 @@ program
       // READs it for drift detection, but describePublicUrlFinding never names
       // it as the fix (flair#1313 — wiped on every upgrade).
       const componentEnvPath = join(flairPackageDir(), COMPONENT_ENV_FILENAME);
-      let componentEnvValue: string | null = null;
+      let componentEnvText: string | null = null;
       try {
-        if (existsSync(componentEnvPath)) {
-          componentEnvValue = readEnvValue(readFileSync(componentEnvPath, "utf-8"), PUBLIC_URL_KEY);
-        }
+        if (existsSync(componentEnvPath)) componentEnvText = readFileSync(componentEnvPath, "utf-8");
       } catch { /* unreadable → treat as absent */ }
+      const componentEnvValue = readEnvValue(componentEnvText, PUBLIC_URL_KEY);
 
       const finding = describePublicUrlFinding({
         advertisedIssuer,
@@ -838,6 +838,26 @@ program
         console.log(`  ${icon} ${finding.message}`);
         if (finding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
         if (finding.isIssue) issues++;
+      }
+
+      // 3e. flair#2270 — the MCP OAuth redirect variable.
+      //
+      // The shipped config references `${OAUTH_GITHUB_REDIRECT_URI}`, and an
+      // install enabled by an older `flair mcp enable` never staged it. Report
+      // the missing variable by name with the one-step remedy; doctor reads it
+      // from the process environment and the component `.env` (names only —
+      // never a value).
+      const mcpRedirectFinding = describeMcpRedirectFinding({
+        mcpEnabled:
+          mcpOAuthEnabledIn(process.env as Record<string, string | undefined>) ||
+          mcpOAuthEnabledIn({ FLAIR_MCP_OAUTH: readEnvValue(componentEnvText, "FLAIR_MCP_OAUTH") ?? undefined }),
+        presentVarNames: [...envKeyNames(componentEnvText), ...Object.keys(process.env)],
+        advertisedIssuer,
+      });
+      if (mcpRedirectFinding) {
+        console.log(`  ${render.icons.error} ${mcpRedirectFinding.message}`);
+        if (mcpRedirectFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${mcpRedirectFinding.fixHint}`);
+        issues++;
       }
     }
 

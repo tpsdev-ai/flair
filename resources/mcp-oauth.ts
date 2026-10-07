@@ -20,6 +20,11 @@
 
 import * as harper from "harper";
 import { mcpOAuthEnabled, mcpAuthConfig } from "./mcp-oauth-flag.js";
+// flair#2270: run the degraded-start guard BEFORE the @harperfast/oauth
+// component resolves its config. Imported for its module-load side effect (this
+// module is itself loaded during jsResource boot, ahead of the component);
+// `mcpOAuthDegraded()` is read below to report the state by variable name.
+import { mcpOAuthDegraded } from "./mcp-oauth-env-guard.js";
 import { checkMcpRateLimit } from "./rate-limit.js";
 import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
 
@@ -207,6 +212,19 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
       // "1" the /mcp route registers and every request 401s against a
       // component that never mounted its AS.
       reason: "Set FLAIR_MCP_OAUTH=true (and an issuer) to serve MCP over HTTP.",
+    });
+  }
+
+  // flair#2270: the install is enabled but a required OAuth variable is
+  // missing, so the auth server cannot serve this surface. Do NOT mount a
+  // guarded /mcp that could only fail closed against a provider that is not
+  // there — report MCP auth unavailable, by variable name.
+  const degraded = mcpOAuthDegraded();
+  if (degraded.degraded) {
+    return decide({
+      mounted: false,
+      status: "MCP auth unavailable",
+      reason: `${degraded.reason}. Set it (or re-run: flair mcp enable), then restart.`,
     });
   }
 

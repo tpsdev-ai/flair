@@ -1,0 +1,3 @@
+- **An MCP-enabled install upgraded from an older release no longer boots unhealthy over the redirect variable the OAuth config added.** The upgrade path derives `OAUTH_GITHUB_REDIRECT_URI` from the public origin the instance advertises and stages it, so the upgraded instance is healthy; when the variable is still missing the instance starts degraded — MCP auth reported unavailable by name — instead of answering 500.
+
+  > **Action required only if MCP auth still reports unavailable after upgrading:** set `OAUTH_GITHUB_REDIRECT_URI` to the instance's public origin plus `/oauth` (or re-run `flair mcp enable`) and restart.

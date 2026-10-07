@@ -17,6 +17,7 @@ import { classifyDaemonState, type DaemonEvidence } from "../lib/daemon-liveness
 import { renderVerifiedSummary } from "../lib/doctor-run.js";
 import { isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { FLAIR_MCP_PACKAGE, clearFlairCliVersionCache } from "../lib/mcp-spec.js";
+import { planRedirectMigration, probeAdvertisedIssuer, renderRedirectMigration } from "../lib/mcp-oauth-env.js";
 import { createRegistryNoticePrinter, fetchLatestVersion, fetchVersionDeprecation, isStrictSemver } from "../lib/npm-registry.js";
 import { classifyUpgradePriorLiveness, type PriorLiveness } from "../lib/upgrade-prior-liveness.js";
 import { decideAfterRestartFailure, decideDeprecatedRollback, formatKnownBrokenRollbackRestart, type DeprecationLookup, type RollbackRecoveryLane } from "../lib/upgrade-rollback.js";
@@ -1430,6 +1431,13 @@ program
       }
     }
 
+    // flair#2270: capture the issuer the running instance advertises BEFORE any
+    // package swap or restart. The MCP OAuth redirect migration derives the
+    // redirect the shipped config now requires from it. A failed probe returns
+    // null and never blocks the upgrade — the migration is skipped, not
+    // guessed at.
+    const advertisedIssuerForMigration = await probeAdvertisedIssuer(baseUrl);
+
     // ── Pre-upgrade data snapshot (flair#637, opt-in as of the 2026-07-08 rewire) ──
     // Only an @tpsdev-ai/flair package swap touches the code that reads/
     // writes ~/.flair/data — an flair-mcp-only or openclaw-plugin-only
@@ -1844,6 +1852,27 @@ program
       } else {
         newCli = { cliPath: resolved.cliPath, version: resolved.version };
       }
+    }
+
+    // ── flair#2270: migrate the MCP OAuth redirect variable ───────────────
+    // An install enabled by an older `flair mcp enable` carries the GitHub
+    // credentials but never had `OAUTH_GITHUB_REDIRECT_URI`, which the shipped
+    // config.yaml now references AND which @harperfast/oauth now requires for a
+    // configured provider — so upgrading it booted a 500. Derive the redirect
+    // from the issuer captured above and stage it for the new tree through the
+    // component `.env` the shipped config's `loadEnv` reads, BEFORE the
+    // restart. Runs for --no-restart too (stage now, bounce later). The value
+    // is never printed.
+    try {
+      const migration = planRedirectMigration({
+        configPath: join(swappedPackageRoot, "config.yaml"),
+        env: process.env as Record<string, string | undefined>,
+        advertisedIssuer: advertisedIssuerForMigration,
+      });
+      const migrationLine = renderRedirectMigration(migration);
+      if (migrationLine) console.log(`  ${migrationLine}`);
+    } catch (err: any) {
+      console.error(`warning: MCP OAuth redirect migration could not run (${err?.message ?? String(err)}).`);
     }
 
     let restartWasDelegated = false;

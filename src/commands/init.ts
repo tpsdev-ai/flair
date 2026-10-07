@@ -21,6 +21,7 @@ import {
 import { canonicalLexicalPath } from "../lib/daemon-liveness.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { planRedirectMigration, renderRedirectMigration } from "../lib/mcp-oauth-env.js";
 import { seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { clearSkillSeedPending, markSkillSeedPending } from "../lib/skill-seed-pending.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
@@ -578,6 +579,21 @@ program
     // preflight measured. Every downstream use (preflight, config/plist,
     // ROOTPATH / HARPER_SET_CONFIG, messages) takes this resolved value.
     const dataDir: string = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
+
+    // flair#2270: stage the MCP OAuth redirect variable when this install was
+    // enabled by an older `flair mcp enable` that predates it. Idempotent — a
+    // fresh install (MCP off, or no issuer) is a no-op — and it never prints
+    // the value.
+    try {
+      const migration = planRedirectMigration({
+        env: process.env as Record<string, string | undefined>,
+        configPath: join(flairPackageDir(), "config.yaml"),
+      });
+      const migrationLine = renderRedirectMigration(migration);
+      if (migrationLine) console.log(`  ${migrationLine}`);
+    } catch (err: any) {
+      console.error(`warning: MCP OAuth redirect migration could not run (${err?.message ?? String(err)}).`);
+    }
 
     // flair#916: the Harper operations API is a Unix domain socket at
     // `<data-dir>/operations-server`, and Unix socket paths are capped by
