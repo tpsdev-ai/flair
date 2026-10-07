@@ -509,22 +509,35 @@ function installerCommandRecognizer(
     flairUrl: "MATCH_FLAIR_URL",
     flushSpec: "@MATCH_FLUSH_PACKAGE@MATCH_FLUSH_VERSION",
   };
-  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const patterns: RegExp[] = [];
+  const forms: Array<Array<{ literal: string } | { name: keyof CaptureCommandParts; prefix: string; suffix: string }>> = [];
   for (const url of [undefined, tokens.flairUrl]) {
     for (const spec of withFlushSpec ? [undefined, tokens.flushSpec] : [undefined]) {
-      let pattern = escape(builder(tokens.bunPath, tokens.artifactPath, tokens.agentId, url, spec));
-      for (const [name, token] of Object.entries(tokens)) {
-        pattern = pattern.replace(escape(token), `(?<${name}>\\S+)`);
-      }
-      patterns.push(new RegExp(`^${pattern}$`));
+      forms.push(builder(tokens.bunPath, tokens.artifactPath, tokens.agentId, url, spec).split(" ").map((part) => {
+        for (const name of Object.keys(tokens) as Array<keyof typeof tokens>) {
+          const token = tokens[name];
+          const offset = part.indexOf(token);
+          if (offset !== -1) return { name, prefix: part.slice(0, offset), suffix: part.slice(offset + token.length) };
+        }
+        return { literal: part };
+      }));
     }
   }
   return (command) => {
     if (typeof command !== "string") return null;
-    for (const pattern of patterns) {
-      const parts = pattern.exec(command)?.groups;
-      if (!parts || parts.artifactPath?.split("/").at(-1) !== marker) continue;
+    const commandTokens = command.split(" ");
+    for (const form of forms) {
+      if (commandTokens.length !== form.length) continue;
+      const parts: Partial<CaptureCommandParts> = {};
+      const matches = form.every((part, index) => {
+        const value = commandTokens[index]!;
+        if ("literal" in part) return value === part.literal;
+        if (!value.startsWith(part.prefix) || !value.endsWith(part.suffix)) return false;
+        const captured = value.slice(part.prefix.length, value.length - part.suffix.length);
+        if (!captured) return false;
+        parts[part.name] = captured;
+        return true;
+      });
+      if (!matches || parts.artifactPath?.split("/").at(-1) !== marker) continue;
       const { bunPath, artifactPath, agentId, flairUrl, flushSpec } = parts;
       if (!bunPath || !artifactPath || !agentId) continue;
       try {
