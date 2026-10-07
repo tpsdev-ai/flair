@@ -16,8 +16,19 @@ import {
   type ServiceManagerTripwire,
 } from "../test/helpers/fake-launchctl.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
-import { SHARDS, assignShards, listUnitFiles } from "./ci/unit-shards.mjs";
-import { testFiles } from "./ci/test-files.mjs";
+// The lane plan and its root-step limit live in scripts/ci/lane-shards.mjs so
+// this runner and the `node scripts/ci/lane-shards.mjs --verify` coverage gate
+// share one plan (flair#2311); re-exported below because the unit tests import
+// `unitPlan` and `ROOT_STEP_TIMEOUT_MS` from this module.
+import {
+  LANE_SHARDS,
+  ROOT_STEP_TIMEOUT_MS,
+  laneShardPlans,
+  unitPlan,
+} from "./ci/lane-shards.mjs";
+import type { UnitStep } from "./ci/lane-shards.mjs";
+export { ROOT_STEP_TIMEOUT_MS, unitPlan };
+export type { UnitStep };
 
 /** The short, canonical temp base darwin unit steps run under (flair#2137). */
 export const DARWIN_TEMP_BASE = "/private/tmp";
@@ -28,16 +39,6 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
   return platform === "darwin" ? DARWIN_TEMP_BASE : undefined;
 }
 
-export interface UnitStep {
-  name: string;
-  cwd: string;
-  args: string[];
-  files: string[];
-  /** This step's own time limit when the lane runs with limits; unset means the lane's default. */
-  timeoutMs?: number;
-  /** Set on the shard steps that replace the single root unit step (flair#2258). */
-  shard?: { index: number; of: number };
-}
 
 // ── Time bounds (flair#2030, resized flair#2224) ───────────────────────────
 //
@@ -84,12 +85,10 @@ export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
  * inside the budget (510 + 100 = 610 s ≤ 780 s).
  */
 export const STEP_TIMEOUT_MS = 100_000;
-/**
- * `root unit tests`' own limit: 450 s, 1.37× its slowest measured run (327 s).
- * If it hangs, the other ~183 s of the lane still fits (183 + 450 = 633 s ≤
- * 780 s).
- */
-export const ROOT_STEP_TIMEOUT_MS = 450_000;
+// `root unit tests`' own limit is 450 s, 1.37× its slowest measured run (327 s).
+// If it hangs, the other ~183 s of the lane still fits (183 + 450 = 633 s ≤
+// 780 s). It is defined in scripts/ci/lane-shards.mjs, which builds the plan,
+// and re-exported above for this module's tests.
 
 /** The time limits a lane runs under (flair#2030). */
 export interface UnitLaneLimits {
@@ -168,79 +167,6 @@ export function stepEnvironment(
   return env;
 }
 
-export function unitPlan(root: string): UnitStep[] {
-  const requiredFiles = (dir: string, recursive = true) => {
-    const files = testFiles(join(root, dir), recursive);
-    if (!files.length) throw new Error(`No unit test files found in ${dir}`);
-    return files;
-  };
-  const rootUnitFiles = listUnitFiles(root);
-  const isolatedFiles = requiredFiles("test/unit-isolated");
-  const steps: UnitStep[] = [{
-    // flair#1683: the private descriptor package is a build-time source, not a
-    // dependency. Vendor its copy into both consumers before anything reads it
-    // (there is no workspace symlink to fall back on).
-    name: "vendor tool descriptors",
-    cwd: root,
-    args: ["scripts/vendor-tool-descriptors.mjs"],
-    files: [],
-  }];
-  // Strict typechecks. bun's transpiler STRIPS types rather than checking them,
-  // so no `bun test` step can see a type error: a tree that does not compile can
-  // report a green lane. (Found 2026-09-19 — an excess property in a bindCli
-  // object literal shipped while this lane read "matches baseline".) These mirror
-  // the "Type Check (strict)" CI job exactly, in the same order, so the lane and
-  // CI cannot disagree about whether the tree compiles. The first four require
-  // the vendored descriptors above; none require the flair-client build.
-  const typecheckConfigs: Array<[string, string]> = [
-    ["resources (strict)", "tsconfig.check.json"],
-    ["src (strict, excl. cli.ts)", "tsconfig.check.src.json"],
-    ["root CLI", "tsconfig.cli.json"],
-    ["test suite (strict)", "tsconfig.test.check.json"],
-  ];
-  for (const [label, config] of typecheckConfigs) {
-    steps.push({ name: `typecheck: ${label}`, cwd: root, args: ["x", "tsc", "--noEmit", "-p", config], files: [] });
-  }
-  steps.push({ name: "emit server for boundary guard", cwd: root, args: ["x", "tsc", "-p", "tsconfig.json", "--noCheck"], files: [] });
-  assignShards(rootUnitFiles, SHARDS).forEach((files, index) => {
-    steps.push({
-      name: `root unit tests (shard ${index + 1}/${SHARDS})`,
-      cwd: root,
-      args: files.length ? ["test", ...files.map(file => join(root, file))] : [],
-      files: files.map(file => join(root, file)),
-      timeoutMs: ROOT_STEP_TIMEOUT_MS,
-      shard: { index: index + 1, of: SHARDS },
-    });
-  });
-  for (const file of isolatedFiles) {
-    steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
-  }
-  steps.push({ name: "build flair-client", cwd: join(root, "packages/flair-client"), args: ["run", "build"], files: [] });
-  // flair#1943: the langgraph-flair contract test asserts
-  // `const s: BaseStore = new FlairStore(...)` — a TYPE-LEVEL check no other step
-  // covers. The package tsconfig includes `src/**` only, and `bun test` strips
-  // types without checking them, so a broken structural contract could still
-  // report a green lane. Type-check that one file here, against the peer
-  // package's types. It runs after the flair-client build because the file
-  // imports this package's `src`, which imports flair-client's emitted types.
-  steps.push({
-    name: "typecheck: langgraph-flair contract (BaseStore assignability)",
-    cwd: join(root, "packages/langgraph-flair"),
-    args: [
-      "x", "tsc", "--noEmit", "--strict", "--target", "ES2022", "--module", "ESNext",
-      "--moduleResolution", "Bundler", "--types", "node,bun-types", "--esModuleInterop",
-      "--skipLibCheck", "test/contract.test.ts",
-    ],
-    files: [],
-  });
-  for (const pkg of ["flair-tool-descriptors", "flair-mcp", "flair-client", "langgraph-flair", "n8n-nodes-flair", "openclaw-flair", "pi-flair", "flair-bench", "adk-flair-js", "cursor-wake-runner"]) {
-    const dir = pkg === "adk-flair-js" ? "test/unit" : "test";
-    const cwd = join(root, "packages", pkg);
-    steps.push({ name: `${pkg} unit tests`, cwd, args: ["test", `./${dir}/`], files: requiredFiles(`packages/${pkg}/${dir}`) });
-  }
-  return steps;
-}
-
 /**
  * One failure the keep-going summary reports: a step that ran and failed, a
  * step the lane's time budget left unrun, or an end-of-lane guard.
@@ -263,13 +189,16 @@ export function ciRequestsKeepGoing(env: NodeJS.ProcessEnv): boolean {
   return !!value && value !== "0" && value !== "false";
 }
 
-export const UNIT_LANE_USAGE = "Usage: bun run test:unit [--list] [--keep-going | --fail-fast]";
+export const UNIT_LANE_USAGE =
+  "Usage: bun run test:unit [--list] [--keep-going | --fail-fast] [--shard <i> [--of <N>]]";
 
 /** What one invocation of the runner asks for. */
 export interface UnitLaneInvocation {
   /** `--list`: print the plan and run nothing. */
   list: boolean;
   keepGoing: boolean;
+  /** The lane shard to run (`--shard i --of N`); unset means the whole lane. */
+  shard?: { index: number; of: number };
   /** The time limits. Set in keep-going mode only. */
   limits?: Readonly<UnitLaneLimits>;
 }
@@ -285,16 +214,53 @@ export interface UnitLaneInvocation {
  * ci-gate-coverage.test.ts asks this same parser whether a workflow line
  * actually runs the lane, so the coverage gate cannot count an invocation the
  * runner would only list or refuse.
+ *
+ * `--shard <i> --of <N>` (flair#2311) runs one shard of the lane: the shared
+ * setup steps plus shard `i`'s test-bearing steps. `--of` defaults to
+ * LANE_SHARDS and requires `--shard`.
  */
 export function parseUnitLaneArgs(args: readonly string[], env: NodeJS.ProcessEnv): UnitLaneInvocation {
   const known = new Set(["--list", "--keep-going", "--fail-fast"]);
-  const unknown = args.filter(arg => !known.has(arg));
+  const valueFlags = new Set(["--shard", "--of"]);
+  const unknown: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (valueFlags.has(args[i])) {
+      i++;
+      continue;
+    }
+    if (!known.has(args[i])) unknown.push(args[i]);
+  }
   if (unknown.length) throw new Error(`Unknown argument ${unknown.map(arg => JSON.stringify(arg)).join(", ")}. ${UNIT_LANE_USAGE}`);
   const keepGoingFlag = args.includes("--keep-going");
   const failFastFlag = args.includes("--fail-fast");
   if (keepGoingFlag && failFastFlag) throw new Error(`--keep-going and --fail-fast contradict each other; pass one. ${UNIT_LANE_USAGE}`);
   const keepGoing = keepGoingFlag || (!failFastFlag && ciRequestsKeepGoing(env));
-  return { list: args.includes("--list"), keepGoing, ...(keepGoing ? { limits: KEEP_GOING_LIMITS } : {}) };
+  const shard = parseShardArgs(args);
+  return {
+    list: args.includes("--list"),
+    keepGoing,
+    ...(shard ? { shard } : {}),
+    ...(keepGoing ? { limits: KEEP_GOING_LIMITS } : {}),
+  };
+}
+
+/** Parse `--shard <i> [--of <N>]`, or undefined when neither is given. */
+function parseShardArgs(args: readonly string[]): { index: number; of: number } | undefined {
+  const shardAt = args.indexOf("--shard");
+  const ofAt = args.indexOf("--of");
+  if (shardAt === -1) {
+    if (ofAt !== -1) throw new Error(`--of requires --shard. ${UNIT_LANE_USAGE}`);
+    return undefined;
+  }
+  const index = Number(args[shardAt + 1]);
+  if (!Number.isInteger(index)) throw new Error(`--shard needs a positive integer. ${UNIT_LANE_USAGE}`);
+  let of = LANE_SHARDS;
+  if (ofAt !== -1) {
+    of = Number(args[ofAt + 1]);
+    if (!Number.isInteger(of) || of < 1) throw new Error(`--of needs a positive integer. ${UNIT_LANE_USAGE}`);
+  }
+  if (index < 1 || index > of) throw new Error(`--shard must be 1..${of}, got ${index}. ${UNIT_LANE_USAGE}`);
+  return { index, of };
 }
 
 /**
@@ -623,7 +589,12 @@ if (import.meta.main) {
   try {
     const invocation = parseUnitLaneArgs(process.argv.slice(2), process.env);
     const root = dirname(dirname(fileURLToPath(import.meta.url)));
-    const steps = unitPlan(root);
+    const allSteps = unitPlan(root);
+    // A sharded invocation runs the shared setup steps first, then this shard's
+    // test-bearing steps (flair#2311). The whole lane is the unsharded default.
+    const steps = invocation.shard
+      ? laneShardPlans(allSteps, invocation.shard.of)[invocation.shard.index - 1]
+      : allSteps;
     if (invocation.list) {
       console.log(JSON.stringify(steps.map(step => ({ ...step, cwd: relative(root, step.cwd) || ".", files: step.files.map(file => relative(root, file)) })), null, 2));
     } else {
@@ -635,7 +606,10 @@ if (import.meta.main) {
       const mode = invocation.keepGoing
         ? `keep-going: every step runs and failures are summed at the end; a step is killed after ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}) and the lane after ${seconds(KEEP_GOING_LANE_BUDGET_MS)}`
         : "fail-fast: stops at the first failing step; steps are not time-limited";
-      console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps; ${mode}. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME and behind a launchctl/systemctl tripwire (a unit test that reaches a host service manager without its own fake fails the lane). A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
+      const shardNote = invocation.shard
+        ? `; shard ${invocation.shard.index}/${invocation.shard.of} of the shared unit lane (the shared setup steps run in every shard; the rest are this shard's test-bearing steps, flair#2311)`
+        : "";
+      console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps${shardNote}; ${mode}. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME and behind a launchctl/systemctl tripwire (a unit test that reaches a host service manager without its own fake fails the lane). A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
       process.exitCode = runUnitSteps(steps, process.execPath, realHomeDir(), {
         keepGoing: invocation.keepGoing,
         limits: invocation.limits,
