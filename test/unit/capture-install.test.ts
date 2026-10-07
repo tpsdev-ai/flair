@@ -15,6 +15,8 @@ import {
   CAPTURE_HOOK_MARKER,
   CAPTURE_POST_TOOL_USE_FAILURE_MATCHER,
   CAPTURE_POST_TOOL_USE_MATCHER,
+  buildCaptureHookCommand,
+  captureFlushSpec,
   parseCaptureCommand,
 } from "../../src/doctor-client.ts";
 import { captureInstallRoot } from "../../src/lib/capture-runtime.ts";
@@ -120,7 +122,7 @@ describe("flair hook install --capture", () => {
     expect(config.hooks.PostToolUse.length).toBe(1);
   });
 
-  it("status re-probes the provisioned artifact and reports a broken one", () => {
+  it("status probes the artifact named in settings and reports a broken one", () => {
     install();
     const durable = installedArtifact();
     const original = readFileSync(durable, "utf8");
@@ -132,6 +134,18 @@ describe("flair hook install --capture", () => {
     // restore for the teardown sanity check
     writeFileSync(durable, original);
     expect(captureHookStatus(home, "claude-code").installed).toBe(true);
+  });
+
+  it("status accepts a probed artifact outside the provisioned directory", () => {
+    expect(install().ok).toBe(true);
+    expect(RUNTIME.artifactPath.startsWith(`${captureInstallRoot(home)}/`)).toBe(false);
+    const config = settings();
+    const command = buildCaptureHookCommand(RUNTIME.bunPath, RUNTIME.artifactPath, "me", "http://localhost:19926", captureFlushSpec());
+    for (const event of ["PostToolUseFailure", "PostToolUse", "Stop"]) {
+      config.hooks[event][0].hooks[0].command = command;
+    }
+    writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+    expect(captureHookStatus(home, "claude-code").state).toBe("installed");
   });
 
   it("install upgrades a stale versioned hook and uninstall removes every version", () => {

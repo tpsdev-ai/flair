@@ -80,6 +80,21 @@ for (const variant of ["group", "nested", "drifted", "drifted first"] as const) 
   }, 30_000);
 }
 
+for (const event of events) {
+  it(`capture status rejects a non-command ${event} entry in settings`, () => {
+    expect(install().ok).toBe(true);
+    const config = settings();
+    config.hooks[event][0].hooks[0].type = "prompt";
+    save(config);
+    const observed = captureHookStatus(home, "claude-code");
+    expect(observed.state).toBe("stale");
+    expect(observed.problems).toContain(`${event} carries an unexpected type`);
+    const result = status();
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(`capture: stale (${event} carries an unexpected type)`);
+  }, 30_000);
+}
+
 for (const state of ["stale", "partial", "absent", "runtime failure"] as const) {
   it(`capture CLI exit code for ${state} settings`, () => {
     if (state !== "absent") {

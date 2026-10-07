@@ -440,8 +440,6 @@ export function captureFlushSpec(): string {
 
 /**
  * Build the exact `command` string registered for every capture hook event.
- * Same strict value allow-list as the other builders — throws rather than
- * emitting a quoted approximation.
  */
 export function buildCaptureHookCommand(
   bunPath: string,

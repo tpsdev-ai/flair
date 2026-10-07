@@ -7,7 +7,7 @@
  *   <dir>/<agentId>.spool.json    staged candidates (bounded)
  *   <dir>/<agentId>.pending.json  failed commands awaiting a matching follow-up (bounded)
  *   <dir>/<agentId>.flush.stamp   last background-flush time (cooldown)
- *   <dir>/<agentId>.lock          held across each spool/pending read-modify-write
+ *   <dir>/<agentId>.lock
  */
 
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -197,8 +197,7 @@ function trimRecords(records: CaptureSpoolRecord[]): CaptureSpoolRecord[] {
 
 /**
  * Append one candidate, deduplicating by `dedupKey` against what is already
- * staged. Returns "appended", "deduplicated" (already staged) or "refused"
- * (nothing writable). The spool stays within its record and byte bounds.
+ * staged. Returns "appended", "deduplicated" or "refused".
  */
 export function appendRecord(dir: string, agentId: string, candidate: CaptureCandidate): "appended" | "deduplicated" | "refused" {
   return underLock(dir, agentId, () => appendRecordLocked(dir, agentId, candidate));

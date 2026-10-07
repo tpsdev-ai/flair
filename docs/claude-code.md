@@ -172,7 +172,7 @@ The hot path reads a per-session cache of the agent's own lessons under `~/.flai
 
 The hook may stage a possible matching follow-up to a failed `Bash` call, or a cue-matching sentence from the turn's final text, in a bounded local spool under `~/.flair/capture/`. Network writes run in a detached flush. The foreground stdin deadline is 2 seconds; the lock wait is 200 ms.
 
-Install probes the copied command; status probes a detected entry and reports `partial` when only some of the three events are wired. Absence is informational: installing the hooks is the opt-in. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --capture`.
+Install probes the copied command; status probes artifact paths named in settings, without a directory restriction, and reports `partial` when only some of the three events are wired. Absence is informational: installing the hooks is the opt-in. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --capture`.
 
 ## Multiple Projects
 

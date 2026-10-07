@@ -20,7 +20,7 @@ import {
   stripInterpolationLiteralsFromEnv,
 } from "./capture-spool.js";
 
-/** Read stdin up to `maxBytes`; resolves to "" on oversize, error or deadline. */
+/** Resolves to "" on oversize, error or deadline. */
 function readStdin(maxBytes: number = CAPTURE_STDIN_MAX_BYTES, deadlineMs = 2000): Promise<string> {
   return new Promise((resolve) => {
     let data = "";

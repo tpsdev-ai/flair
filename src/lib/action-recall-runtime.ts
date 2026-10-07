@@ -234,8 +234,7 @@ export interface ResolveOptions {
 }
 
 /**
- * Resolve paths and require the installed command to pass its certification
- * probe. Generic over the artifact descriptor; the probe is per-hook.
+ * Resolve paths and probe the artifact.
  */
 export function resolveHookRuntime(
   opts: ResolveOptions,

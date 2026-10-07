@@ -1669,8 +1669,7 @@ function findCaptureEntries(config: any, event: CaptureHookEvent): Array<{ group
   return entries;
 }
 
-/** The command the wired capture events agree on (the most common one; ties go
- *  to the earliest event). Empty when none is present. */
+/** Most common command among each event's first match; ties go to the earliest event. */
 function expectedCaptureCommand(commands: ReadonlyArray<string | null>): string {
   const counts = new Map<string, number>();
   for (const command of commands) {
@@ -1919,8 +1918,7 @@ export function uninstallCaptureHooks(opts: UninstallHookOptions): CaptureMutati
   return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
 }
 
-/** Read-only capture status — installed only when all three events carry the
- *  expected capture command; names any event that is missing or different. */
+/** Read-only capture status; names missing events in partial installations. */
 export function captureHookStatus(homeDir: string, harness: Harness): CaptureStatus {
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
@@ -1936,8 +1934,6 @@ export function captureHookStatus(homeDir: string, harness: Harness): CaptureSta
   const problems: string[] = [];
   const presentCount = commands.filter((command) => command !== null).length;
   if (presentCount === 0) return { path, harness, installed: false, state: "absent", problems };
-  // The expected command is the one the wired events agree on; an event whose
-  // command differs from it is named below (flair#2068 round 2).
   const expected = expectedCaptureCommand(commands);
   let runtimeFailure: string | null = null;
   const checked = new Map<string, string | null>();
@@ -1946,7 +1942,9 @@ export function captureHookStatus(homeDir: string, harness: Harness): CaptureSta
     if (matches.length === 0) problems.push(`${event} missing`);
     if (matches.length > 1) problems.push(`${event} has duplicate capture entries`);
     for (const entry of matches) {
-      const command = entry.group.hooks[entry.hookIndex].command as string;
+      const hook = entry.group.hooks[entry.hookIndex];
+      if (hook.type !== "command") problems.push(`${event} carries an unexpected type`);
+      const command = hook.command as string;
       if (command !== expected) problems.push(`${event} carries a different command`);
       const want = CAPTURE_HOOK_MATCHERS[event];
       const matcher = entry.group.matcher;
