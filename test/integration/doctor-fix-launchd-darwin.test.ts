@@ -73,6 +73,10 @@ import { cleanupLaunchdSandbox, unloadJob, type TrackedLaunchdJob } from "../hel
 
 const isDarwin = process.platform === "darwin";
 const externalHarper = process.env.HARPER_HTTP_URL !== undefined;
+// Every fixture case gates on this one predicate. The "inherited external Harper
+// URL" case re-runs this file with HARPER_HTTP_URL set and requires 0 pass, so a
+// case gated on isDarwin alone fails it.
+const skipFixtureCase = !isDarwin || externalHarper;
 if (externalHarper) console.log("doctor-fix-launchd-darwin: skipped; HARPER_HTTP_URL is set; requires locally spawned Harper");
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI_JS = join(REPO_ROOT, "dist", "cli.js");
@@ -524,7 +528,7 @@ function unloadTracked(): void {
   }
 }
 
-if (isDarwin && !externalHarper) {
+if (!skipFixtureCase) {
   process.on("exit", unloadTracked);
 }
 
@@ -841,7 +845,7 @@ function assertDirectSidecar(sb: Sandbox, spawnedPid: number): void {
   });
 }
 
-test.skipIf(!isDarwin || externalHarper)(
+test.skipIf(skipFixtureCase)(
   "cleanup refusal retains the fixture label and root",
   diagnosed(async () => {
     requireCliBuild();
@@ -860,7 +864,7 @@ test.skipIf(!isDarwin || externalHarper)(
   900_000,
 );
 
-test.skipIf(!isDarwin || externalHarper)(
+test.skipIf(skipFixtureCase)(
   "inherited external Harper URL skips fixture cases",
   async () => {
     let requests = 0;
@@ -896,7 +900,7 @@ test.skipIf(!isDarwin || externalHarper)(
   30_000,
 );
 
-test.skipIf(!isDarwin || externalHarper)(
+test.skipIf(skipFixtureCase)(
   "corrupt or missing launchd plist: doctor --fix regenerates and comes up managed",
   diagnosed(async () => {
     requireCliBuild();
@@ -921,7 +925,7 @@ test.skipIf(!isDarwin || externalHarper)(
   CORRUPT_PLIST_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin || externalHarper)(
+test.skipIf(skipFixtureCase)(
   "detached direct-spawned instance: doctor --fix adopts into launchd, bouncing once",
   diagnosed(async () => {
     requireCliBuild();
@@ -972,7 +976,7 @@ test.skipIf(!isDarwin || externalHarper)(
   ADOPT_DETACHED_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin || externalHarper)(
+test.skipIf(skipFixtureCase)(
   "adopt with NO pass file and a proven env credential: doctor writes the 0600 file and adopts (flair#1685)",
   diagnosed(async () => {
     requireCliBuild();
@@ -1005,7 +1009,7 @@ test.skipIf(!isDarwin || externalHarper)(
   ADOPT_NO_PASS_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin || externalHarper)(
+test.skipIf(skipFixtureCase)(
   "regenerate with NO pass file, no live process, and no env credential: refuse and write no plist (flair#1685)",
   diagnosed(async () => {
     requireCliBuild();
@@ -1035,7 +1039,7 @@ test.skipIf(!isDarwin || externalHarper)(
   REFUSE_NO_PASS_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin || externalHarper)(
+test.skipIf(skipFixtureCase)(
   "flair init on an already-adopted instance leaves the plist byte-identical (flair#1693)",
   diagnosed(async () => {
     requireCliBuild();
@@ -1059,7 +1063,7 @@ test.skipIf(!isDarwin || externalHarper)(
   INIT_UNCHANGED_CASE_BUDGET_MS,
 );
 
-test.skipIf(!isDarwin)(
+test.skipIf(skipFixtureCase)(
   "built flair stop verifies the managed Harper exited and removes its sidecar",
   diagnosed(async () => {
     requireCliBuild();
