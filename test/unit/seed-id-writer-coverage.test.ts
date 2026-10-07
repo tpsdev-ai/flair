@@ -9,9 +9,10 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  *
  * The guarded Resource paths require the operator source: an authenticated
  * Basic administrator or a deliberate internal call. No storage hook sees
- * every Memory write, so those paths call one decision
- * (`reservedSeedWriteDenial`) before writing. This test inventories raw Memory
- * write sites in its supported source patterns and classifies each as:
+ * every Memory write, so those paths call a reserved-id decision before
+ * writing (`reservedSeedWriteDenial`, or `reservedSeedFeedWriteDenial` for the
+ * feed, which refuses a reserved seed id outright). This test inventories raw
+ * Memory write sites in its supported source patterns and classifies each as:
  *
  *   GUARDED     — the decision runs on the ids this write can land on;
  *   OPERATOR    — the route already requires the operator source;
@@ -190,8 +191,8 @@ test("each GUARDED path runs the decision, and its denial stops the path before 
   }
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
-  expect(feed).toContain('reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth)');
-  expectWritesAfter(feed, denialReturnEnd(feed, "reservedSeedWriteDenial"), "FeedMemories.post");
+  expect(feed).toContain('reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes])');
+  expectWritesAfter(feed, denialReturnEnd(feed, "reservedSeedFeedWriteDenial"), "FeedMemories.post");
 
   const federation = readFileSync("resources/Federation.ts", "utf8");
   const skip = skipContinueEnd(federation, "seed_id_not_federated");

@@ -1200,6 +1200,11 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
+    const postUrlTargetId = (this as any).getId?.();
+    if (content && typeof content === "object" && content.id == null &&
+      (typeof postUrlTargetId === "string" || typeof postUrlTargetId === "number")) {
+      content.id = postUrlTargetId;
+    }
     const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
     canonicalizeSupersedes(content);
     const preparedSkill = await prepareSkillBody(content, postStored);
@@ -1785,6 +1790,11 @@ export class Memory extends (databases as any).flair.Memory {
     const preExisting = resolvedExisting.row;
     canonicalizeSupersedes(content);
     const requestedPayload = { ...content };
+    const urlTargetId = (this as any).getId?.();
+    if (content && typeof content === "object" && content.id == null &&
+      (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
+      content.id = urlTargetId;
+    }
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;

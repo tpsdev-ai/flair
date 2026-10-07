@@ -118,3 +118,12 @@ export function reservedSeedSubjectDenial(
       "(an authenticated Basic administrator or deliberate internal call)",
   );
 }
+
+export function reservedSeedFeedWriteDenial(table: string, ids: unknown[]): Response | null {
+  const reserved = ids.find((id) => id != null && isReservedSeedId(table, String(id)));
+  if (reserved === undefined) return null;
+  return FORBIDDEN(
+    `seed_id_reserved: ${table} ${JSON.stringify(String(reserved))} is written by the flair init seed; ` +
+      "the feed ingest does not write it",
+  );
+}
