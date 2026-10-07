@@ -1,19 +1,3 @@
-/**
- * memory-durability-expiry-rule.test.ts — flair#2274.
- *
- * `stampEphemeralExpiry` is the ONE shared rule used to give an ephemeral row
- * its tier expiry (durability -> expiresAt). It lives in
- * resources/memory-durability.ts, which has zero imports, so this is a pure
- * unit test of the rule itself: the write paths' behavior rides on it, and the
- * real-Harper control lives in
- * test/integration/feed-ephemeral-expiry-e2e.test.ts.
- *
- * The rule (see its doc comment): effective durability is the write's own
- * `durability`, else the stored row's; a caller-supplied expiresAt is never
- * overwritten; a pre-existing row's expiresAt is carried forward, never
- * re-stamped; otherwise the tier default is now + FLAIR_EPHEMERAL_TTL_HOURS
- * (default 24).
- */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
 
@@ -48,7 +32,7 @@ describe("stampEphemeralExpiry — the shared tier expiry rule", () => {
     expect(ttlMs).toBeLessThanOrEqual(3600_000 + 60_000);
   });
 
-  it("never overwrites a caller-supplied expiresAt", () => {
+  it("preserves a valid explicit expiry", () => {
     const supplied = new Date(Date.now() + 123_456_789).toISOString();
     const row: Record<string, any> = { durability: "ephemeral", expiresAt: supplied };
     stampEphemeralExpiry(row);
@@ -78,5 +62,69 @@ describe("stampEphemeralExpiry — the shared tier expiry rule", () => {
     const row: Record<string, any> = { durability: "ephemeral" };
     stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: stored });
     expect(row.expiresAt).toBe(stored);
+  });
+});
+
+describe("expiry updates", () => {
+  it("carries stored durability and expiry into a partial PUT", () => {
+    const expiresAt = new Date(Date.now() + 900000).toISOString();
+    const row: Record<string, any> = { content: "updated" };
+    stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt });
+    expect(row).toEqual({ content: "updated", durability: "ephemeral", expiresAt });
+  });
+
+  it("clears an inherited expiry when leaving ephemeral", () => {
+    const row: Record<string, any> = { durability: "persistent" };
+    stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z" });
+    expect(row.expiresAt).toBeNull();
+  });
+
+  it("stamps a fresh expiry when entering ephemeral", () => {
+    const before = Date.now();
+    const row: Record<string, any> = { durability: "ephemeral" };
+    stampEphemeralExpiry(row, { durability: "standard", expiresAt: "2020-01-01T00:00:00.000Z" });
+    expect(Date.parse(row.expiresAt)).toBeGreaterThanOrEqual(before + 6 * 3600000);
+  });
+
+  it("preserves an explicit expiry when leaving ephemeral", () => {
+    const expiresAt = new Date(Date.now() + 900000).toISOString();
+    const row: Record<string, any> = { durability: "persistent", expiresAt };
+    stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z" });
+    expect(row.expiresAt).toBe(expiresAt);
+  });
+
+  it("lets an explicit same-tier expiry replace the stored expiry", () => {
+    const expiresAt = new Date(Date.now() + 900000).toISOString();
+    const row: Record<string, any> = { expiresAt };
+    stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z" });
+    expect(row.expiresAt).toBe(expiresAt);
+  });
+
+  it("refuses malformed incoming ephemeral dates", () => {
+    for (const expiresAt of ["invalid", "", 123, null, "2026-02-30T00:00:00.000Z"]) {
+      const row: Record<string, any> = { durability: "ephemeral", expiresAt };
+      expect(stampEphemeralExpiry(row, null, { incoming: true })).toBeTruthy();
+    }
+  });
+
+  it("refuses incoming dates beyond the receiver's one-year horizon", () => {
+    const row: Record<string, any> = { durability: "ephemeral", expiresAt: new Date(Date.now() + 366 * 86400000).toISOString() };
+    expect(stampEphemeralExpiry(row, null, { incoming: true })).toBeTruthy();
+    const past: Record<string, any> = { durability: "ephemeral", expiresAt: "1969-12-31T23:59:59.999Z" };
+    expect(stampEphemeralExpiry(past, null, { incoming: true })).toBeTruthy();
+  });
+
+  it("keeps a valid incoming date within the receiver's bound", () => {
+    const expiresAt = new Date(Date.now() + 86400000).toISOString();
+    const row: Record<string, any> = { durability: "ephemeral", expiresAt };
+    stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z" }, { incoming: true });
+    expect(row.expiresAt).toBe(expiresAt);
+  });
+
+  it("uses the receiver's clock for a missing incoming expiry", () => {
+    const before = Date.now();
+    const row: Record<string, any> = { durability: "ephemeral" };
+    stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z" }, { incoming: true });
+    expect(Date.parse(row.expiresAt)).toBeGreaterThanOrEqual(before + 6 * 3600000);
   });
 });

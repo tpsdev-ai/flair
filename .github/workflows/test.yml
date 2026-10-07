@@ -613,6 +613,9 @@ jobs:
             bun test $files
             echo "::endgroup::"
           done
+      - name: Verify seed and federation expiry mutations
+        if: matrix.shard == 1
+        run: bash scripts/ci/ephemeral-expiry-mutations.sh
       # adk-flair-js integration tests exercise the Flair application through
       # the ADK MemoryService. They live here (not in the Unit Tests matrix)
       # because they need a built Flair app — the unit lane has no build

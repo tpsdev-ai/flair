@@ -57,42 +57,43 @@ export function assertValidDurability(durability: unknown): string | null {
 const MS_PER_HOUR = 3600_000;
 
 /**
- * ─── The one rule that stamps an ephemeral write's tier expiry ────────────
- *
- * MemoryMaintenance reaps a Memory row only when its durability is "ephemeral"
- * AND its expiresAt is in the past (resources/MemoryMaintenance.ts). An
- * ephemeral row stored without an expiresAt is therefore never reaped, so the
- * 24-hour ephemeral tier silently stops expiring. Every writer that
- * can land an ephemeral row gives it that expiry through this one rule:
- * Memory.post()/put()/patch(), the feed ingest, the agent seed and the
- * federation merge.
- *
- * Sets expiresAt on `content` IN PLACE when the EFFECTIVE durability is
- * "ephemeral" and no expiry is present:
- *
- *   - effective durability is the write's own `durability`, else the stored
- *     row's (`PUT`/`PATCH` may omit it; the tier is then the pre-existing row's);
- *   - a caller-supplied expiresAt is never overwritten;
- *   - a pre-existing row's expiresAt is carried forward, never re-stamped —
- *     an update of an already-expiring row must not extend its window;
- *   - otherwise the tier default applies: now + FLAIR_EPHEMERAL_TTL_HOURS
- *     (default 24), read at write time.
- *
- * Deliberately has ZERO imports (same load-bearing reason as
- * assertValidDurability above): any caller — a resource, a raw table writer, a
- * migration — can import it without dragging in "harper".
+ * Tier expiry for Memory POST/PUT/PATCH, feed ingest, AgentSeed and federation.
+ * Omitted durability carries the stored tier. Leaving ephemeral clears an
+ * inherited expiry; entering it stamps a default. Local same-tier updates keep the
+ * stored expiry unless explicitly changed. Valid explicit UTC dates are kept.
+ * Feed ingest defaults omitted durability to standard before calling this rule.
+ * AgentSeed accepts no explicit expiry. Raw re-writers do not call this rule.
  */
 export function stampEphemeralExpiry(
   content: Record<string, any>,
   preExisting?: { durability?: unknown; expiresAt?: unknown } | null,
-): void {
-  const effectiveDurability = content.durability ?? preExisting?.durability;
-  if (effectiveDurability !== "ephemeral") return;
-  if (content.expiresAt) return;
-  if (preExisting?.expiresAt) {
+  options: { incoming?: boolean } = {},
+): string | null {
+  if (content.durability == null && preExisting?.durability != null) {
+    content.durability = preExisting.durability;
+  }
+  const explicitExpiry = content.expiresAt !== undefined;
+  if (content.durability !== "ephemeral") {
+    if (preExisting?.durability === "ephemeral" && !explicitExpiry) content.expiresAt = null;
+    return null;
+  }
+  const now = Date.now();
+  if (explicitExpiry && (options.incoming || content.expiresAt !== null)) {
+    const value = content.expiresAt;
+    const parsed = typeof value === "string" ? Date.parse(value) : NaN;
+    if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+      return "expiresAt must be a valid UTC ISO date";
+    }
+    if (options.incoming && (parsed < 0 || parsed > now + 365 * 24 * MS_PER_HOUR)) {
+      return "incoming expiresAt must be between the Unix epoch and receiver time plus 365 days";
+    }
+    return null;
+  }
+  if (!options.incoming && !explicitExpiry && preExisting?.durability === "ephemeral" && preExisting.expiresAt != null) {
     content.expiresAt = preExisting.expiresAt;
-    return;
+    return null;
   }
   const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
-  content.expiresAt = new Date(Date.now() + ttlHours * MS_PER_HOUR).toISOString();
+  content.expiresAt = new Date(now + ttlHours * MS_PER_HOUR).toISOString();
+  return null;
 }

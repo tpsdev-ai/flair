@@ -1,17 +1,3 @@
-/**
- * memory-feed-ephemeral-expiry.test.ts — flair#2274.
- *
- * FeedMemories.post() writes via the RAW Memory table, bypassing
- * Memory.post()/put(). Before the fix it never stamped the ephemeral tier's
- * expiresAt, so an ephemeral row written through the feed was never reaped by
- * MemoryMaintenance — contradicting the documented 24h ephemeral tier. This is
- * the isolated-lane control for that path: it asserts the stored expiry against
- * the SAME shared rule (resources/memory-durability.ts's stampEphemeralExpiry),
- * not a hand-computed constant. The real-Harper control lives in
- * test/integration/feed-ephemeral-expiry-e2e.test.ts.
- *
- * Isolated: owns the harper mock for MemoryFeed.ts.
- */
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
 
@@ -103,4 +89,11 @@ describe("FeedMemories.post stamps the ephemeral tier expiry (flair#2274)", () =
     expect(result).not.toBeInstanceOf(Response);
     expect(memoryStore.get("eph-keep").expiresAt).toBe(stored);
   });
+});
+
+test("feed refuses malformed ephemeral expiry before storing the row", async () => {
+  const result = await feed().post({ id: "bad-expiry", agentId: "alice", content: "dated note", durability: "ephemeral", expiresAt: "invalid" });
+  expect(result).toBeInstanceOf(Response);
+  expect((result as Response).status).toBe(400);
+  expect(memoryStore.has("bad-expiry")).toBe(false);
 });

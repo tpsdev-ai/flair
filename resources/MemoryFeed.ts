@@ -298,13 +298,8 @@ export class FeedMemories extends Resource {
     // resources/originator-instance.ts.
     await applyOriginatorInstanceId(record, priorById);
     applyFederationBookkeeping(record, priorById);
-    // ── flair#2274: the feed is a Memory writer ──────────────────────────────
-    // The raw table put below bypasses Memory.post()/put(), so an ephemeral
-    // feed write never got the tier's expiresAt and was never reaped by
-    // MemoryMaintenance (the same rule those two call). Apply that one shared
-    // rule here, with the stored row as the carry-forward source exactly as
-    // put() does. A caller-supplied expiresAt is preserved by the rule itself.
-    stampEphemeralExpiry(record, priorById);
+    const expiryError = stampEphemeralExpiry(record, priorById);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

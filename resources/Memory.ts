@@ -1311,12 +1311,8 @@ export class Memory extends (databases as any).flair.Memory {
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
 
-    // flair#2274: the tier expiry (durability -> expiresAt) is ONE shared rule
-    // (resources/memory-durability.ts) — see stampEphemeralExpiry's doc for the
-    // effective-durability / carry-forward semantics. Every writer that can
-    // land an ephemeral row calls it, so a write through any of them expires
-    // identically.
-    stampEphemeralExpiry(content);
+    const expiryError = stampEphemeralExpiry(content);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
 
     // Content safety scan — covers content + summary (defense-in-depth for
     // agent-set summaries).
@@ -1637,12 +1633,8 @@ export class Memory extends (databases as any).flair.Memory {
     // The receiver-side federation bookkeeping keeps its stored value (a patch
     // merges); a client body value is dropped.
     dropClientFederationBookkeeping(content);
-    // flair#2274: patch() is a Memory writer too — a PATCH that lands an
-    // ephemeral row (or flips one to ephemeral) must carry the tier expiry,
-    // through the same shared rule the other writers use. existingForSkill is
-    // the carry-forward source, as put()'s preExisting is. (The re-embed branch
-    // above returns first; it changes no tier.)
-    stampEphemeralExpiry(content, existingForSkill);
+    const expiryError = stampEphemeralExpiry(content, existingForSkill);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
     return super.patch(content, query);
   }
 
@@ -1798,8 +1790,7 @@ export class Memory extends (databases as any).flair.Memory {
     // ── flair#1238: refuse an unrecognised durability (mirrors post()) ──
     // put() is the other HTTP-reachable write path (fresh create via CLI, and
     // the update/patch path). Same guard as post(): a present-but-unknown
-    // durability is refused with 400; absent is accepted (no default stamped
-    // here — put() leaves durability untouched for updates).
+    // durability is refused with 400; absent is accepted.
     {
       const durabilityError = assertValidDurability(content.durability);
       if (durabilityError) {
@@ -1887,24 +1878,8 @@ export class Memory extends (databases as any).flair.Memory {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
 
-    // ── flair#1257 slice 3: stamp the ephemeral TTL on the PUT path too ──────
-    // post() has stamped expiresAt for ephemeral rows since the tier shipped,
-    // but put() — the verb the continuity capture hook actually writes with
-    // (`PUT /Memory/<id>`, packages/flair-mcp/src/continuity-capture-hook.ts)
-    // — never did. MemoryMaintenance's reap keys on expiresAt (expired =
-    // expiresAt < now), so hook-written journal rows carried NO expiry and
-    // the tier's load-bearing 24h containment bound (the exposure window the
-    // #1257 rulings cite) silently never engaged on the real write path.
-    // Effective durability = the write's, else the pre-existing row's (same
-    // resolution the visibility guard above uses). A pre-existing expiry is
-    // carried forward, never re-stamped — an update must not extend the
-    // exposure window; an explicit caller-provided expiresAt always wins.
-    {
-      // flair#2274: the same shared tier rule post() uses, with put()'s one
-      // extra input — the pre-existing row, so an update carries a stored
-      // expiry forward instead of re-stamping it. See stampEphemeralExpiry.
-      stampEphemeralExpiry(content, preExisting);
-    }
+    const expiryError = stampEphemeralExpiry(content, preExisting);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
 
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared

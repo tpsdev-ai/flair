@@ -1,29 +1,8 @@
-// flair#2274 — feed-written ephemeral memories get the tier expiry.
-//
-// FeedMemories.post() writes through the RAW Memory table, bypassing
-// Memory.post()/put(). Before the fix it never stamped the ephemeral tier's
-// expiresAt, so an ephemeral row written through the feed was never reaped by
-// MemoryMaintenance — contradicting the documented 24-hour ephemeral tier.
-//
-// This is the REAL-Harper control: it boots the repo's ephemeral Harper
-// (test/helpers/harper-lifecycle) and drives POST /FeedMemories over the real
-// REST surface, then reads the STORED row back through the admin ops API and
-// runs POST /MemoryMaintenance. The expiry is asserted against the SAME shared
-// rule the writes use (resources/memory-durability.ts's stampEphemeralExpiry),
-// not a hand-computed constant.
-//
-// FLAIR_EPHEMERAL_TTL_HOURS is set to a small value for this instance so a
-// tier-stamped row passes its expiry within the test window — the "it has
-// passed" reap below. The shared rule reads the same env, so the assertion is
-// still against the rule, not the constant.
-//
-// Mutation: bypass the shared rule in MemoryFeed.post() (drop the
-// stampEphemeralExpiry call) and the first test goes red (no expiresAt), the
-// reap test goes red (the row survives maintenance). Both go green restored.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
 
 // A small, non-default TTL so a tier-stamped row can be reaped inside the test.
@@ -168,8 +147,6 @@ describe("feed-written ephemeral memories get the tier expiry (flair#2274)", () 
   }, 30_000);
 
   test("a PATCH that flips a row to the ephemeral tier carries the tier expiry", async () => {
-    // patch() is the other Memory writer that can assign the ephemeral tier;
-    // it must apply the same shared rule (asserted against it, not a constant).
     const id = `memory-patch-eph-${randomUUID()}`;
     const put = await authFetch(harper, agent, "PUT", `/Memory/${id}`, {
       id, agentId: agent.id,
@@ -190,4 +167,122 @@ describe("feed-written ephemeral memories get the tier expiry (flair#2274)", () 
     stampEphemeralExpiry(expected);
     expect(Math.abs(Date.parse(stored!.expiresAt!) - Date.parse(expected.expiresAt))).toBeLessThan(2000);
   }, 30_000);
+});
+
+describe("stored expiry updates", () => {
+  test("partial PUT keeps the ephemeral tier and expiry until maintenance reaps it", async () => {
+    const id = `partial-put-${randomUUID()}`;
+    const expiresAt = new Date(Date.now() + 1500).toISOString();
+    expect((await authFetch(harper, agent, "PUT", `/Memory/${id}`, {
+      id, agentId: agent.id, content: `original ${id}`, durability: "ephemeral", expiresAt,
+    })).ok).toBe(true);
+    expect((await authFetch(harper, agent, "PUT", `/Memory/${id}`, {
+      id, agentId: agent.id, content: `updated ${id}`,
+    })).ok).toBe(true);
+    const stored = await readStored(harper, id);
+    expect(stored?.durability).toBe("ephemeral");
+    expect(stored?.expiresAt).toBe(expiresAt);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await runMaintenance(harper, agent.id);
+    expect(await readStored(harper, id)).toBeNull();
+  }, 30000);
+
+  for (const method of ["PUT", "PATCH"]) {
+    test(`${method} clears the inherited tier expiry and stamps a fresh expiry on re-entry`, async () => {
+      const id = `transition-${method}-${randomUUID()}`;
+      const expired = "2020-01-01T00:00:00.000Z";
+      expect((await authFetch(harper, agent, "PUT", `/Memory/${id}`, {
+        id, agentId: agent.id, content: `transition ${id}`, durability: "ephemeral", expiresAt: expired,
+      })).ok).toBe(true);
+      const update = (durability: string, expiresAt?: string) => authFetch(harper, agent, method, `/Memory/${id}`, {
+        id, agentId: agent.id, content: `transition ${id}`, durability,
+        ...(expiresAt === undefined ? {} : { expiresAt }),
+      });
+      expect((await update("persistent")).ok).toBe(true);
+      expect((await readStored(harper, id))?.expiresAt ?? null).toBeNull();
+      await runMaintenance(harper, agent.id);
+      expect((await readStored(harper, id))?.durability).toBe("persistent");
+      const before = Date.now();
+      expect((await update("ephemeral")).ok).toBe(true);
+      const fresh = (await readStored(harper, id))?.expiresAt;
+      expect(Date.parse(fresh!)).toBeGreaterThanOrEqual(before + Number(TTL_HOURS) * 3600000);
+      expect((await update("ephemeral")).ok).toBe(true);
+      expect((await readStored(harper, id))?.expiresAt).toBe(fresh);
+      const explicit = new Date(Date.now() + 3600000).toISOString();
+      expect((await update("ephemeral", explicit)).ok).toBe(true);
+      expect((await readStored(harper, id))?.expiresAt).toBe(explicit);
+    }, 30000);
+  }
+
+  test("AgentSeed stores a default expiry for an ephemeral starter memory", async () => {
+    const agentId = `seed-expiry-${randomUUID()}`;
+    const before = Date.now();
+    const res = await fetch(`${harper.httpURL}/AgentSeed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+      body: JSON.stringify({ agentId, starterMemories: [{ content: "starter note", durability: "ephemeral" }] }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.memories).toHaveLength(1);
+    const stored = await readStored(harper, body.memories[0].id);
+    expect(stored?.durability).toBe("ephemeral");
+    expect(Date.parse(stored!.expiresAt!)).toBeGreaterThanOrEqual(before + Number(TTL_HOURS) * 3600000);
+    expect(Date.parse(stored!.expiresAt!)).toBeLessThanOrEqual(Date.now() + Number(TTL_HOURS) * 3600000);
+  }, 30000);
+});
+
+describe("signed federation expiry", () => {
+  const kp = nacl.sign.keyPair();
+  const instanceId = "expiry-spoke";
+  beforeAll(async () => {
+    const res = await adminOp(harper, {
+      operation: "insert", database: "flair", table: "Peer",
+      records: [{ id: instanceId, publicKey: Buffer.from(kp.publicKey).toString("base64url"), role: "spoke", status: "paired", createdAt: new Date().toISOString() }],
+    });
+    expect(res.status).toBe(200);
+  });
+  async function receive(id: string, fields: Record<string, unknown>) {
+    const now = new Date().toISOString();
+    const signed = signBodyFresh({ instanceId, records: [{
+      table: "Memory", id,
+      data: { id, agentId: agent.id, content: `received ${id}`, durability: "ephemeral", visibility: "private", createdAt: now, updatedAt: now, ...fields },
+      updatedAt: now,
+    }], lamportClock: Date.now() }, kp.secretKey);
+    const res = await fetch(`${harper.httpURL}/FederationSync`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(signed) });
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  test("signed receive stores receiver-clock expiry when the incoming expiry is missing", async () => {
+    const id = `federated-missing-${randomUUID()}`;
+    const insert = await adminOp(harper, {
+      operation: "insert", database: "flair", table: "Memory",
+      records: [{ id, agentId: agent.id, content: "earlier received note", durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z", updatedAt: "2020-01-01T00:00:00.000Z" }],
+    });
+    expect(insert.status).toBe(200);
+    const before = Date.now();
+    expect((await receive(id, {})).merged).toBe(1);
+    const stored = await readStored(harper, id);
+    expect(stored?.durability).toBe("ephemeral");
+    expect(Date.parse(stored!.expiresAt!)).toBeGreaterThanOrEqual(before + Number(TTL_HOURS) * 3600000);
+    expect(Date.parse(stored!.expiresAt!)).toBeLessThanOrEqual(Date.now() + Number(TTL_HOURS) * 3600000);
+  }, 30000);
+
+  test("signed receive keeps a valid peer expiry within the accepted bound", async () => {
+    const id = `federated-valid-${randomUUID()}`;
+    const expiresAt = new Date(Date.now() + 3600000).toISOString();
+    expect((await receive(id, { expiresAt })).merged).toBe(1);
+    expect((await readStored(harper, id))?.expiresAt).toBe(expiresAt);
+  }, 30000);
+
+  test("signed receive refuses malformed and out-of-bound ephemeral expiry", async () => {
+    for (const expiresAt of ["invalid", null, new Date(Date.now() + 366 * 86400000).toISOString()]) {
+      const id = `federated-refused-${randomUUID()}`;
+      const result = await receive(id, { expiresAt });
+      expect(result.merged).toBe(0);
+      expect(result.skippedReasons?.invalid_expiry).toBe(1);
+      expect(await readStored(harper, id)).toBeNull();
+    }
+  }, 30000);
 });

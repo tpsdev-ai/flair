@@ -842,7 +842,19 @@ export class FederationSync extends Resource {
           continue;
         }
 
-        const mergedData = mergeRecord(local, record);
+        const incoming = { ...record.data };
+        if (record.table === "Memory") {
+          // Ephemeral peer expiry must be a valid UTC ISO date from the Unix
+          // epoch through receiver time + 365 days. Missing expiry uses the receiver's clock
+          // and configured TTL, even when a local expiry exists; malformed or
+          // out-of-bound ephemeral expiry skips the record before merging.
+          const expiryError = stampEphemeralExpiry(incoming, local, { incoming: true });
+          if (expiryError) {
+            recordSkip("invalid_expiry");
+            continue;
+          }
+        }
+        const mergedData = mergeRecord(local, { ...record, data: incoming });
 
         // ── flair#1940 A1'' item 8: the SAME declared-attribute whitelist the
         // writers apply. A dirty pushed row (a legacy direct-insert, or a raw
@@ -925,10 +937,6 @@ export class FederationSync extends Resource {
             local && typeof local.instanceToken === "string" && local.instanceToken.length > 0
               ? local.instanceToken
               : randomUUID();
-          // flair#2274: a federated receive is a Memory writer — an ephemeral
-          // merged row gets the tier expiry the shared rule stamps (carry the
-          // local row's expiry forward, else stamp the default).
-          stampEphemeralExpiry(mergedData, local);
         }
 
         await table.put(mergedData);
