@@ -21,6 +21,7 @@
  */
 import { createHash } from "node:crypto";
 import type { SourceTable } from "./types.js";
+import { protoSafeRecord } from "../../src/lib/proto-safe-record.js";
 
 export const MEMORY_SOURCE_FIELDS = [
   "content",
@@ -67,11 +68,10 @@ export function sourceFieldsFor(table: SourceTable): readonly string[] {
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
-      out[k] = canonicalize((value as Record<string, unknown>)[k]);
-    }
-    return out;
+    const src = value as Record<string, unknown>;
+    // A null-prototype copy: an own `__proto__` key in a source field is kept
+    // and hashed rather than silently dropped from the envelope (flair#2235).
+    return protoSafeRecord(src, { keys: Object.keys(src).sort(), map: canonicalize });
   }
   return value === undefined ? null : value;
 }

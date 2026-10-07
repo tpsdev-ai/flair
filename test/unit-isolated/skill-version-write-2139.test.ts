@@ -81,7 +81,7 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   return result;
 }
 
-const { runSkillVersionWrite, resolveSkillHead } = await import("../../resources/skill-version-write.ts");
+const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable } = await import("../../resources/skill-version-write.ts");
 const { recordDigest, valueDigest } = await import("../../resources/instruction-version-record.ts");
 const { deriveSkillSubjectId } = await import("../../resources/skill-subject.ts");
 
@@ -297,4 +297,31 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     expect(v2.previousVersionHash).toBe(v1.recordHash);
     for (const v of [v1, v2]) expect(v.recordHash).toBe(recordDigest(v));
   });
+});
+
+
+test("a closed root payload is denied once its successor expires", async () => {
+  const root = { ...liveSkill("root", "root", "old"), validTo: "2020-01-01T00:00:00.000Z" };
+  const successor = { ...liveSkill("s1", "root", "new"), expiresAt: "2999-01-01T00:00:00.000Z" };
+  memoryStore.set("root", root);
+  memoryStore.set("s1", successor);
+  store.set("v2", { id: "v2", subjectType: "skill", subjectId: "root", agentId: "agent-a", visibility: "shared", kind: "update", memoryId: "s1", version: 2 });
+  expect(await closedSkillPayloadReadable(root, "reader")).toBe(true);
+  successor.expiresAt = "2020-01-01T00:00:00.000Z";
+  expect(await closedSkillPayloadReadable(root, "reader")).toBe(false);
+  expect(await resolveSkillHead("root", "root", undefined)).toBeNull();
+  expect(await closedSkillPayloadReadable(root, "agent-a")).toBe(false);
+});
+
+
+test("a live successor does not bypass a missing or inconsistent version authority", async () => {
+  const root = { ...liveSkill("root", "root", "old"), validTo: "2020-01-01T00:00:00.000Z" };
+  memoryStore.set("root", root);
+  memoryStore.set("s1", liveSkill("s1", "root", "new"));
+  expect(await closedSkillPayloadReadable(root, "reader")).toBe(false);
+  const authority = { id: "v2", subjectType: "skill", subjectId: "root", agentId: "other-owner", visibility: "shared", kind: "update", memoryId: "s1", version: 2 };
+  store.set("v2", authority);
+  expect(await closedSkillPayloadReadable(root, "reader")).toBe(false);
+  authority.agentId = "agent-a";
+  expect(await closedSkillPayloadReadable(root, "reader")).toBe(true);
 });

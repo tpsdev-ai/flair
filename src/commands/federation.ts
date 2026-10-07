@@ -13,6 +13,7 @@
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { PEER_STATUS, isPeerMemberStatus } from "../lib/peer-status.js";
+import { protoSafeRecord } from "../lib/proto-safe-record.js";
 import { Command } from "commander";
 import nacl from "tweetnacl";
 import { existsSync, readFileSync } from "node:fs";
@@ -145,11 +146,10 @@ function shouldShowInlineSecretWarning(
 function sortKeys(val: unknown): unknown {
   if (val === null || val === undefined || typeof val !== "object") return val;
   if (Array.isArray(val)) return val.map(sortKeys);
-  const sorted: Record<string, unknown> = {};
-  for (const key of Object.keys(val as Record<string, unknown>).sort()) {
-    sorted[key] = sortKeys((val as Record<string, unknown>)[key]);
-  }
-  return sorted;
+  const src = val as Record<string, unknown>;
+  // Shared null-prototype copy: an own `__proto__` key is kept in the signing
+  // input rather than silently dropped (flair#2235).
+  return protoSafeRecord(src, { keys: Object.keys(src).sort(), map: sortKeys });
 }
 function canonicalize(obj: unknown): string {
   return JSON.stringify(sortKeys(obj));

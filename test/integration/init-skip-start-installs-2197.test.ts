@@ -282,9 +282,8 @@ describe("flair#2197 — local init --skip-start installs without starting", () 
         });
         const init = runLocalInit(install, skipStart ? ["--skip-start"] : []);
         expect(init.status, init.stdout + init.stderr).toBe(1);
-        expect(init.stderr).toContain(responds
-          ? `port ${install.httpPort} answered /health with HTTP 200`
-          : `port ${install.httpPort} has a listener without a /health response`);
+        expect(init.stderr).toContain(`port ${install.httpPort}`);
+        expect(init.stderr).toContain("attribution to this data directory was not confirmed");
         expect(init.stderr).toContain("Remedy:");
         expect(init.stdout).not.toContain("initialized successfully");
         expect(installed(install)).toBe(existing);

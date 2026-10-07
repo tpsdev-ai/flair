@@ -4,6 +4,7 @@
  */
 
 import nacl from "tweetnacl";
+import { protoSafeRecord } from "../src/lib/proto-safe-record.js";
 
 // ─── Canonical JSON ─────────────────────────────────────────────────────────
 
@@ -18,11 +19,10 @@ export function canonicalize(obj: unknown): string {
 function sortKeys(val: unknown): unknown {
   if (val === null || val === undefined || typeof val !== "object") return val;
   if (Array.isArray(val)) return val.map(sortKeys);
-  const sorted: Record<string, unknown> = {};
-  for (const key of Object.keys(val as Record<string, unknown>).sort()) {
-    sorted[key] = sortKeys((val as Record<string, unknown>)[key]);
-  }
-  return sorted;
+  const src = val as Record<string, unknown>;
+  // A null-prototype copy: an own `__proto__` key is kept in the signing input
+  // rather than silently dropped (flair#2235).
+  return protoSafeRecord(src, { keys: Object.keys(src).sort(), map: sortKeys });
 }
 
 // ─── Nonce generation ───────────────────────────────────────────────────────

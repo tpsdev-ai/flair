@@ -10,7 +10,7 @@
 
 import type { KeyObject } from "node:crypto";
 import { createHash, createPrivateKey } from "node:crypto";
-import { inspectKeyLookup, loadPrivateKey, signRequest, type KeyLookupState } from "./auth.js";
+import { inspectKeyLookup, loadPrivateKeyBounded, signRequest, type KeyLookupState } from "./auth.js";
 import { readEnvOrUnset } from "./env-guard.js";
 import { FLAIR_CLIENT_VERSION_HEADER, flairClientVersionToken } from "./version.js";
 import type {
@@ -197,7 +197,7 @@ export class FlairClient {
     this.teamDirectory = new TeamDirectoryApi(this);
   }
 
-  private resolveKey(): KeyObject | null {
+  private async resolveKey(): Promise<KeyObject | null> {
     if (this.authMode === "basic") return null;
     // Cache a FOUND key only. A miss must be retried on the next request —
     // flair#1271: `flair agent add` can write ~/.flair/keys/<id>.key after
@@ -226,8 +226,10 @@ export class FlairClient {
     const lookup = inspectKeyLookup(this.agentId, this.keyPath);
     if (lookup.resolvedPath) {
       // Key file exists — failure to parse is a hard error.
-      // Silent fallback to unauthenticated would be a security risk.
-      this.privateKey = loadPrivateKey(lookup.resolvedPath);
+      // Silent fallback to unauthenticated would be a security risk. The cap
+      // bounds the bytes read, and the read is asynchronous so a caller's own
+      // deadline can fire while it is pending (flair#2086).
+      this.privateKey = await loadPrivateKeyBounded(lookup.resolvedPath);
     }
     this.lastKeyLookup = {
       ...lookup,
@@ -301,7 +303,7 @@ export class FlairClient {
       // enforced without fingerprinting. Pre-0.18.0 clients never sent this.
       [FLAIR_CLIENT_VERSION_HEADER]: flairClientVersionToken(),
     };
-    const key = this.resolveKey();
+    const key = await this.resolveKey();
     if (key) {
       headers["Authorization"] = signRequest(this.agentId, key, method, signedPath);
     } else if (this.basicAuth) {
