@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=138 options=616
+# commands=138 options=619
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -282,6 +282,9 @@ flair hook install
     --action-recall
       description: Wire the Claude Code PreToolUse action-recall hook instead (flair#2067)
       attr: actionRecall
+    --capture
+      description: Wire the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks instead (flair#2068)
+      attr: capture
 
 flair hook uninstall
   description: Remove the Flair SessionStart hook entry — only ours, everything else in the file is left untouched
@@ -300,6 +303,9 @@ flair hook uninstall
     --action-recall
       description: Remove the Claude Code PreToolUse action-recall hook instead (flair#2067)
       attr: actionRecall
+    --capture
+      description: Remove the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks instead (flair#2068)
+      attr: capture
 
 flair hook status
   description: Show whether the SessionStart hook is wired, its shape, and which Flair instance it targets
@@ -312,6 +318,9 @@ flair hook status
     --action-recall
       description: Also report the Claude Code PreToolUse action-recall hook (flair#2067)
       attr: actionRecall
+    --capture
+      description: Also report the Claude Code PostToolUseFailure + PostToolUse + Stop learning-capture hooks (flair#2068)
+      attr: capture
 
 flair mcp
   description: MCP client-credentials agent-auth (RFC 7523 private_key_jwt)
@@ -3047,6 +3056,8 @@ Options:
                     Stop — flair#1257; installing them IS the opt-in)
   --action-recall   Wire the Claude Code PreToolUse action-recall hook instead
                     (flair#2067)
+  --capture         Wire the Claude Code PostToolUseFailure + PostToolUse + Stop
+                    learning-capture hooks instead (flair#2068)
   -h, --help        display help for command
 
 Global Options:
@@ -3065,6 +3076,8 @@ Options:
                     Stop — flair#1257)
   --action-recall   Remove the Claude Code PreToolUse action-recall hook instead
                     (flair#2067)
+  --capture         Remove the Claude Code PostToolUseFailure + PostToolUse +
+                    Stop learning-capture hooks instead (flair#2068)
   -h, --help        display help for command
 
 Global Options:
@@ -3080,6 +3093,8 @@ Options:
   --harness <name>  Target harness (claude-code, codex) (default: "claude-code")
   --action-recall   Also report the Claude Code PreToolUse action-recall hook
                     (flair#2067)
+  --capture         Also report the Claude Code PostToolUseFailure + PostToolUse
+                    + Stop learning-capture hooks (flair#2068)
   -h, --help        display help for command
 
 Global Options:

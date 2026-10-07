@@ -14,9 +14,10 @@ import { extractPointerInputs } from "./memory-host-source.js";
 import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
-import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
+import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
-import { reservedSeedSubjectDenial, reservedSeedWriteDenial } from "./seed-reservation.js";
+import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
+import { refuseContentSuffixId } from "./memory-id-guard.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -34,10 +35,10 @@ export class FeedMemories extends Resource {
       return UNAUTH();
     }
 
-    // flair#2141 S2: check a body id against the operator-source seed
-    // reservation (resources/seed-reservation.ts).
-    const seedDenial = reservedSeedWriteDenial("Memory", [content?.id, content?.supersedes], ctx, auth);
+    const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
     if (seedDenial) return seedDenial;
+    if (contentSuffixDenial) return contentSuffixDenial;
 
     // No-forge attribution: use the kit's stampAttribution to stamp agentId
     // from the authenticated principal, never from the body.
@@ -63,7 +64,14 @@ export class FeedMemories extends Resource {
     if (attr.denied) return attr.denied;
 
     // Guard against body-supplied id targeting another agent's record.
-    const existingRecord = content?.id ? await (databases as any).flair.Memory.get(content.id) : null;
+    const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => null);
+    if (resolvedExisting.denial) return resolvedExisting.denial;
+    const existingRecord = resolvedExisting.row;
+    const urlTargetId = (this as any).getId?.();
+    if (content && typeof content === "object" && content.id == null &&
+      (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
+      content.id = urlTargetId;
+    }
     if (content?.id) {
       if (existingRecord && existingRecord.agentId !== content.agentId) {
         return FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");

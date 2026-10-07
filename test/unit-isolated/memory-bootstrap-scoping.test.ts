@@ -102,7 +102,7 @@ function memorySearchGen(query: any) {
   return gen();
 }
 
-function emptyGen() {
+function emptyGen(): AsyncGenerator<any, void, unknown> {
   async function* gen() {}
   return gen();
 }
@@ -1391,6 +1391,33 @@ describe("MemoryBootstrap.post() — org-scope skills (flair#2141 S1)", () => {
   });
 });
 
+describe("MemoryBootstrap.post() directory hint", () => {
+  for (const roster of [true, false]) {
+    for (const includeContext of [true, false]) {
+      for (const includeSoul of [true, false]) {
+        it(`ships the hint with roster=${roster}, context=${includeContext}, soul=${includeSoul}`, async () => {
+          reset();
+          soulStore.set("role", { agentId: "reader", key: "role", value: "reviewer" });
+          const previousSearch = databasesMock.flair.Agent.search;
+          databasesMock.flair.Agent.search = () => (async function* () {
+            yield { id: "reader", kind: "agent", status: "active" };
+            if (roster) yield { id: "teammate", kind: "agent", status: "active" };
+          })();
+          try {
+            const body: any = await makeBootstrap(agentCtx("reader")).post({ includeContext, includeSoul });
+            expect(body.directoryHint).toBe("Need a teammate? Call the `team_directory` tool (MCP) or `GET /TeamDirectory` for this office's active agents with published tps-mail addresses.");
+            expect(body.sections.team).toBe(roster ? 1 : 0);
+            expect(body.context.includes("## Team")).toBe(roster && includeContext);
+            if (roster && includeContext) expect(body.context).toContain(body.directoryHint);
+            expect(body.soul.role).toBe(includeSoul ? "reviewer" : undefined);
+          } finally {
+            databasesMock.flair.Agent.search = previousSearch;
+          }
+        });
+      }
+    }
+  }
+});
 
 describe("org skillRef to a later physical version", () => {
   it("follows root -> s1 -> s2 and still checks the current head's read scope", async () => {

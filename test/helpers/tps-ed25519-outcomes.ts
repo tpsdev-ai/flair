@@ -74,6 +74,7 @@ export const TPS_GET_ROUTE_STATUS: Record<string, number | readonly number[]> = 
   SemanticSearch: 404,
   SkillScan: 404,
   Soul: 200,
+  TeamDirectory: 200,
   WorkspaceLatest: 400,
   WorkspaceState: 200,
   a2a: 200,
@@ -148,6 +149,15 @@ export function assertTpsRouteOutcome(method: string, path: string, status: numb
     return;
   }
   switch (name) {
+    case "TeamDirectory":
+      expect(json()).toMatchObject({
+        entries: expect.any(Array),
+        nextCursor: null,
+        hasMore: false,
+        limit: 50,
+        generatedAt: expect.any(String),
+      });
+      return;
     case "Health":
       expect(json()).toMatchObject({ ok: status === 200 });
       return;

@@ -75,6 +75,7 @@ const getOutcomes: Array<[string, number | readonly number[], string]> = [
   ["SemanticSearch", 404, "resources/SemanticSearch.ts:32: no get/search/allowRead override"],
   ["SkillScan", 404, "resources/SkillScan.ts:37: no get/search/allowRead override"],
   ["Soul", 200, "resources/Soul.ts:69: verified read gate; inherited table get/search serve collection"],
+  ["TeamDirectory", 200, "resources/TeamDirectory.ts:17: verified read gate; get:21 calls resolver; resources/team-directory.ts:141: verified active reader; :99: absent kind/status retain agent/active; :276: returns page"],
   ["WorkspaceLatest", 400, "resources/WorkspaceLatest.ts:15: allowRead allowVerified; get:19 requires path agentId; no search"],
   ["WorkspaceState", 200, "resources/WorkspaceState.ts:59: verified read gate; get:70 delegates collection to scoped search:90"],
   ["a2a", 200, "resources/A2AAdapter.ts:581: inherits A2AAdapter get:313/allowRead:310; no search"],
@@ -89,6 +90,7 @@ const harperDispatch = {
 };
 
 function getBody(name: string, status: number): string {
+  if (name === "TeamDirectory" && status === 200) return JSON.stringify({ entries: [], nextCursor: null, hasMore: false, limit: 50, generatedAt: new Date().toISOString() });
   if (status === 404) return name === "health" ? "Not found\n" : "";
   if (status === 403) return JSON.stringify({ code: "AccessViolation", title: "Unauthorized access to resource", status });
   if (status === 503 || name === "Health" || name === "HealthDetail") return JSON.stringify({ ok: status === 200 });
