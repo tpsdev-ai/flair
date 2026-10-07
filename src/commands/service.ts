@@ -18,10 +18,11 @@ import {
   renderDirectRunNotice,
   renderStartLaunchdUnavailable,
 } from "../lib/launchd-domain-preflight.js";
+import { mapRepairThrow } from "../lib/launchd-repair.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import { formatServingTreeLine, formatTreeAssessmentLines, type TreeAssessment } from "../lib/tree-divergence.js";
 import { execSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export type ServiceCli = {
@@ -252,13 +253,26 @@ program
       // the new instance-scoped one, or a pre-flair#693 legacy install.
       const { plistPath } = resolveLaunchdLabel(defaultDataDir());
       if (existsSync(plistPath)) {
+        const dataDir = defaultDataDir();
+        let pid: number | null = null;
         try {
+          const n = Number(readFileSync(join(dataDir, "hdb.pid"), "utf-8").trim());
+          if (!Number.isSafeInteger(n) || n <= 0) throw new Error("recorded pid is invalid");
+          pid = n;
           const { execSync } = await import("node:child_process");
           execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
+          // Verify the captured pid exited before attempting confirmed-dead cleanup.
+          await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
+          removeStaleSidecarIfConfirmedDead(dataDir);
           console.log("✅ Flair stopped (launchd service unloaded)");
           return;
-        } catch {
-          // launchd unload failed, try PID fallback
+        } catch (err) {
+          const failure = mapRepairThrow(err);
+          console.error(`❌ flair stop: launchd stop failed for ${dataDir} (pid ${pid ?? "unknown"}): ${failure.detail}`);
+          if (failure.kind === "failed") {
+            for (const remedy of failure.remedy ?? []) console.error(`   Fix: ${remedy}`);
+          }
+          process.exit(1);
         }
       }
     }

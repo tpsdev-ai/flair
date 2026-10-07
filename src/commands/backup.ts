@@ -6,6 +6,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
+import { readExactTableCount } from "../lib/ops-table-count.js";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { flairBackupOutputPath } from "../lib/flair-paths.js";
 import * as render from "../render.js";
@@ -170,17 +171,7 @@ addSharedCredentialOptions(
     type Table = keyof typeof ids;
     type Inventory = Map<string, unknown>;
 
-    async function rowCount(table: Table): Promise<number> {
-      const parsed: any = await opsPost(
-        { operation: "describe_table", database: "flair", table, exact_count: true },
-        `${table} row count`,
-      );
-      const n = parsed?.record_count;
-      if (!Number.isSafeInteger(n) || n < 0) {
-        throw new Error(`${table} row count via the operations API: response carried no record_count`);
-      }
-      return n;
-    }
+    const rowCount = (table: Table): Promise<number> => readExactTableCount(opsPost, table);
 
     async function inventory(table: Table): Promise<Inventory> {
       const expected = await rowCount(table);

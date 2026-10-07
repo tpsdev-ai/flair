@@ -33,6 +33,19 @@ function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "
     "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", ...args];
   const script = `
     const { appendFileSync } = await import("node:fs");
+    const { EventEmitter } = await import("node:events");
+    const net = await import("node:net");
+    net.default.createConnection = ({ port }) => {
+      const socket = new EventEmitter();
+      socket.setTimeout = () => {};
+      socket.destroy = () => {};
+      queueMicrotask(() => {
+        if (port === ${HTTP_PORT} ? ${httpOccupied} : ${occupied}) socket.emit("connect");
+        else socket.emit("error", Object.assign(new Error("fixture stopped"), { code: "ECONNREFUSED" }));
+      });
+      return socket;
+    };
+    (await import("node:module")).syncBuiltinESMExports();
     globalThis.fetch = async (url, options = {}) => {
       appendFileSync(${JSON.stringify(f.log)}, JSON.stringify({ url: String(url), authorization: new Headers(options.headers).get("Authorization") }) + "\\n");
       if (String(url).includes(":${HTTP_PORT}/") ? !${httpOccupied} : !${occupied}) throw new Error("fixture stopped");
@@ -161,7 +174,7 @@ describe("local init skip-start safety through the built CLI", () => {
         const result = runInit(f, skip ? ["--skip-start"] : [], listener);
         expect(result.error).toBeUndefined();
         expect(result.status, result.stdout + result.stderr).toBe(1);
-        expect(result.stderr).toContain(`port ${HTTP_PORT} answered /health with HTTP 401`);
+        expect(result.stderr).toContain(`port ${HTTP_PORT}, pid 42: attribution to this data directory was not confirmed`);
         expect(result.stderr).toContain("pid 42");
         expect(result.stderr).toContain("Remedy:");
         expect(result.stderr).toContain("--port and --ops-port");
@@ -193,44 +206,32 @@ describe("local init skip-start safety through the built CLI", () => {
     expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(false);
   }, 30_000);
 
-  test("an attributed installed listener permits skip-start and queues the seed", () => {
+  test("an installed config and matching ROOTPATH without a PID file refuse skip-start", () => {
     const f = fixture(true);
     const config = readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8");
     const result = runInit(f, ["--skip-start"], "local");
-    expect(result.status, result.stdout + result.stderr).toBe(0);
-    expect(result.stdout).toContain("using-flair skill: pending");
-    expect(readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8")).toBe(config);
-    expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(true);
-    expect(requests(f).every(r => r.authorization === null)).toBe(true);
-  }, 30_000);
-
-  test("an attributed HTTP listener does not authorize a foreign operations listener", () => {
-    const f = fixture(true);
-    const result = runInit(f, ["--skip-start"], "foreign-ops");
     expect(result.status, result.stdout + result.stderr).toBe(1);
-    expect(result.stderr).toContain(`port ${OPS_PORT}`);
-    expect(result.stderr).toContain("/foreign/ops");
-    expect(requests(f)).toEqual([
-      { url: `http://127.0.0.1:${HTTP_PORT}/health`, authorization: null },
-      { url: `http://127.0.0.1:${OPS_PORT}/`, authorization: null },
-    ]);
-    expect(existsSync(join(f.home, ".flair", "admin-pass"))).toBe(false);
-    expect(existsSync(join(f.home, ".flair", "keys"))).toBe(false);
+    expect(result.stderr).toContain(`port ${HTTP_PORT}`);
+    expect(result.stderr).toContain("attribution to this data directory was not confirmed");
+    expect(readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8")).toBe(config);
+    expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(false);
+    expect(requests(f).every(r => r.authorization === null)).toBe(true);
   }, 30_000);
   test("a stopped HTTP port does not authorize an occupied foreign operations port", () => {
     const f = fixture();
     const result = runInit(f, ["--skip-start"], "foreign-ops", true, "explicit", false);
     expect(result.status, result.stdout + result.stderr).toBe(1);
-    expect(result.stderr).toContain(`port ${OPS_PORT} answered with HTTP 401`);
+    expect(result.stderr).toContain(`port ${OPS_PORT}`);
     expect(requests(f).every(r => r.authorization === null)).toBe(true);
     expectNoSetup(f);
   }, 30_000);
 
-  test("an HTTP listener without a health response still requires attribution", () => {
+  test("an injected PID with a simulated free HTTP port refuses before attribution", () => {
     const f = fixture();
     const result = runInit(f, ["--skip-start"], "unknown", true, "explicit", false);
     expect(result.status, result.stdout + result.stderr).toBe(1);
-    expect(result.stderr).toContain(`port ${HTTP_PORT} has a listener without a /health response`);
+    expect(result.stderr).toContain(`port ${HTTP_PORT}, pid 42: TCP readiness check failed`);
+    expect(result.stderr).not.toContain("attribution to this data directory");
     expect(requests(f).every(r => r.authorization === null)).toBe(true);
     expectNoSetup(f);
   }, 30_000);

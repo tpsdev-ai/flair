@@ -57,10 +57,12 @@ import {
   type PresenceActivity,
 } from "./presence.js";
 import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
+import { isDirectRun } from "./is-direct-run.js";
 import { serverInfo } from "./version.js";
 import { registerStdioTools } from "./adapter-tools.js";
 
 export { classifyError } from "./errors.js";
+export { isDirectRun };
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 //
@@ -224,17 +226,12 @@ export async function runMcp(): Promise<void> {
 
 // ─── Entry point dispatch ──────────────────────────────────────────────────────
 //
-// Run directly when this module is the entry point — covers `bun src/index.ts`
-// and `node dist/index.js`. The packaged bin goes through mcp-shim.cjs → runMcp()
-// after its Node-version check, so import.meta.main is false there; without this
-// the server would never start when invoked through the shim. (Matches the
-// session-start-hook + CLI shim entry-point pattern.)
+// Run when this file is the process entry point (`bun src/index.ts`,
+// `node dist/index.js`). The published bin is mcp-shim.cjs, which imports this
+// module and calls runMcp(), so that path does not use this check.
 const importMeta = import.meta as ImportMeta & { main?: boolean };
 const isMain =
-  importMeta.main === true ||
-  (typeof process !== "undefined" &&
-    process.argv[1] != null &&
-    import.meta.url === `file://${process.argv[1]}`);
+  typeof process !== "undefined" && isDirectRun(import.meta.url, process.argv[1], importMeta.main);
 
 if (isMain) {
   void runMcp().catch((err) => {

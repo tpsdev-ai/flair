@@ -38,6 +38,8 @@
  * arrays compare in order.
  */
 
+import { protoSafeRecord } from "./proto-safe-record.js";
+
 /** The columns restore compares per table. */
 export const RESTORE_PRESERVED_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   Memory: Object.freeze([
@@ -60,9 +62,9 @@ function normalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalize);
   if (typeof value === "object") {
     const src = value as Record<string, unknown>;
-    const out: Record<string, unknown> = Object.create(null);
-    for (const key of Object.keys(src).sort()) out[key] = normalize(src[key]);
-    return out;
+    // A null-prototype copy built entry by entry: an own `__proto__` key
+    // survives and stays visible to the comparison below (flair#2233, #2235).
+    return protoSafeRecord(src, { keys: Object.keys(src).sort(), map: normalize });
   }
   return value;
 }

@@ -7,7 +7,7 @@ Thanks for your interest. Flair is open-source under Apache 2.0; contributions a
 | You want to... | Start here |
 |----------------|------------|
 | Report a bug | [Open an issue](https://github.com/tpsdev-ai/flair/issues/new) — include `flair --version`, OS, and the steps to reproduce |
-| Propose a feature | Open a discussion or issue first; large PRs without prior alignment are hard to land |
+| Propose a feature or a fix beyond a typo | Open an issue first. A maintainer answers there — an `accepted` label, or a written no with the reason — so the fit decision arrives before the work. Link the tracking issue using `Closes #N` or `Refs #N`. If no issue applies, explain with `No issue: <reason>`. Outside contributions must link an issue labelled `accepted` or opened by a maintainer. |
 | Fix a typo or a doc rough edge | Just open a PR — no issue needed |
 | Write a new bridge | See [docs/bridges.md](docs/bridges.md) — scaffold with `flair bridge scaffold <name>` and publish as `flair-bridge-<name>` on npm |
 | Report a security issue | See [SECURITY.md](SECURITY.md) — **do not** open a public issue |
@@ -85,9 +85,9 @@ Run the CLI against a local Flair instance:
 
 Flair's main branch is protected. Landing a change means:
 
-1. **CI green.** Unit tests, integration tests, type-check, Semgrep SAST, and install-from-tarball smoke all pass.
-2. **Reviewed.** Each PR gets one architecture review and one security review. Both must approve.
-3. **Squash-merged.** Clean history; the PR body becomes the commit message.
+1. **CI green.** All applicable required checks must pass; examples include unit and integration lanes, type-checks, Semgrep SAST and CodeQL, the CLI spawn-budget gate, the changelog-fragment gate, install-from-tarball smoke and the upgrade drills. CodeRabbit's review threads resolved (reply with why when you disagree). Every sentence in the fragment and the PR body must be true of the head being merged.
+2. **Reviewed.** Each PR gets one architecture review and one security review. Both must approve. For PRs from outside the team the reviewers read the diff and do not execute it, so your tests must speak for the change; the bar is the same as for internal PRs, not lighter and not heavier.
+3. **Squash-merged.** Clean history.
 
 Before opening a PR:
 
@@ -103,7 +103,21 @@ Before opening a PR:
   lede, not the body). Put operator-critical detail in a `> **Heads-up:**` line so
   it survives summarising. Don't edit `## [Unreleased]` in `CHANGELOG.md` by hand;
   the release step overwrites it.
-- Reference a bead or issue in the PR body when one exists.
+- Link the tracking issue using `Closes #N` or `Refs #N`. If no issue applies, explain with `No issue: <reason>`. Outside contributions must link an issue labelled `accepted` or opened by a maintainer.
+
+## Attribution is yours, exactly
+
+Commits must be authored under your own GitHub identity: use the exact `noreply` address shown in your GitHub email settings or an email verified on your account. Do not guess a noreply address. Squash merges keep you as the author. Add a `Co-authored-by:` trailer only for a real co-author.
+
+<!-- DCO: maintainers are deciding whether to require a Signed-off-by trailer. If adopted, this section will say so and the gate will check it. -->
+
+## What a maintainer does with your PR
+
+1. Confirms the linked issue has the `accepted` label or was opened by a maintainer.
+2. Waits for the required checks and both reviews, and resolves review-bot findings.
+3. Records the go on the PR and squash-merges.
+
+If a check fails for a reason that is not your change (a flaky lane, an unrelated red on main), say so on the PR; a maintainer confirms and re-runs rather than asking you to work around it.
 
 ## What to avoid
 

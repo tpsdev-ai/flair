@@ -1390,3 +1390,26 @@ describe("MemoryBootstrap.post() — org-scope skills (flair#2141 S1)", () => {
     await expect(makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a" })).rejects.toThrow("org assignment read failed");
   });
 });
+
+
+describe("org skillRef to a later physical version", () => {
+  it("follows root -> s1 -> s2 and still checks the current head's read scope", async () => {
+    reset();
+    agentStore.set("agent-a", { id: "agent-a" });
+    seedSkillRow({ id: "root", agentId: "agent-ops", name: "using-flair" });
+    seedSkillRow({ id: "s1", agentId: "agent-ops", name: "using-flair" });
+    Object.assign(memoryStore.get("root"), { skillSubjectId: "root", validTo: "2020-01-01T00:00:00.000Z" });
+    Object.assign(memoryStore.get("s1"), { skillSubjectId: "root" });
+    orgSkillStore.push({ skillName: "using-flair", skillRef: "s1", priority: "standard" });
+    const bootstrap = () => makeBootstrap(agentCtx("agent-a")).post({ agentId: "agent-a", includeSoul: false });
+    expect((await bootstrap() as any).skills.map((s: any) => s.skillId)).toEqual(["s1"]);
+    memoryStore.get("s1").validTo = "2020-01-01T00:00:00.000Z";
+    seedSkillRow({ id: "s2", agentId: "agent-ops", name: "using-flair" });
+    Object.assign(memoryStore.get("s2"), { skillSubjectId: "root", supersedes: "s1" });
+    expect((await bootstrap() as any).skills.map((s: any) => s.skillId)).toEqual(["s2"]);
+    memoryStore.get("s2").visibility = "private";
+    const denied: any = await bootstrap();
+    expect(denied.skills).toEqual([]);
+    expect(denied.skillDiagnostics.map((d: any) => d.decision)).toEqual(["unresolved"]);
+  });
+});

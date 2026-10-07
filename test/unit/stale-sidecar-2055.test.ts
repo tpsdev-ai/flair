@@ -20,9 +20,11 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gatherDaemonEvidence, readSidecar } from "../../src/cli.ts";
+import { socketPathLimit } from "../../src/lib/socket-path-limit.ts";
+
+const SHORT_ROOT = process.env.FLAIR_UNIT_TEMP_ROOT ?? "/tmp";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 const repoRoot = join(import.meta.dirname, "..", "..");
@@ -42,17 +44,20 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
   const spawned: Array<{ kill: (sig?: NodeJS.Signals | number) => void }> = [];
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), "flair2055-"));
+    tmpHome = mkdtempSync(join(SHORT_ROOT, "f2055-"));
     // `flair restart` has no --data-dir and acts on defaultDataDir(); the other
     // cases use --data-dir. Both name this same directory.
     dataDir = join(tmpHome, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
+    // The fixture must FIT the socket limit, or a case measures a refusal
+    // instead of the cleanup (flair#2075 item 1).
+    expect(Buffer.byteLength(join(dataDir, "operations-server"), "utf8")).toBeLessThanOrEqual(socketPathLimit(process.platform));
     // A service-manager STAND-IN first on the CLI's PATH: `flair restart`'s
     // Linux leg reads the serving process's cgroup unit and asks `systemctl`
     // about it. This keeps that probe off the host's real systemctl — the
     // stand-in reports a MainPID that is not the decoy, so the restart takes
     // the direct path (which is the code under test). Nothing real is touched.
-    shimBin = mkdtempSync(join(tmpdir(), "flair2055-shim-"));
+    shimBin = mkdtempSync(join(SHORT_ROOT, "f2055-shim-"));
     writeFileSync(
       join(shimBin, "systemctl"),
       "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = \"show\" ]; then printf 'MainPID=1\\n'; exit 0; fi; done\nexit 0\n",
@@ -92,6 +97,15 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
       await new Promise((r) => setTimeout(r, 20));
     }
     throw new Error(`pid ${pid} never reported ESRCH after exit`);
+  }
+
+  /** An OS-assigned port with nothing listening: bind, read the port, close. */
+  async function closedPort(): Promise<number> {
+    const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("x") });
+    const port = srv.port;
+    await srv.stop(true);
+    if (typeof port !== "number" || port <= 0) throw new Error("closedPort: Bun.serve reported no port");
+    return port;
   }
 
   /**
@@ -306,6 +320,54 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
       expect(stdout + stderr).toMatch(/Flair stopped/i);
       expect(stdout + stderr).not.toMatch(/could not be verified/i);
       expect(pidAlive(pid)).toBe(false);
+    },
+    30_000,
+  );
+
+  test(
+    "flair#2075: a repeat `flair stop` drops a leftover sidecar on the NOT_RUNNING leg",
+    async () => {
+      // 1. A live instance; its stop removes the sidecar.
+      const { pid, port } = await spawnHarperDecoy();
+      writeFileSync(join(dataDir, "hdb.pid"), `${pid}\n`);
+      writeFileSync(sidecarPath(), JSON.stringify({ pid, startTimeMs: Date.now(), port, flairVersion: "0.57.0" }));
+      const first = await runFlair(["stop", "--port", String(port)]);
+      expect(first.exitCode).toBe(0);
+      expect(pidAlive(pid)).toBe(false);
+      expect(existsSync(sidecarPath())).toBe(false);
+
+      // 2. The leftover the published stop did not remove: a sidecar naming a
+      //    pid that is now CONFIRMED gone, with hdb.pid gone too, so the next
+      //    stop is NOT_RUNNING — the leg under test.
+      writeFileSync(sidecarPath(), JSON.stringify({ pid, startTimeMs: Date.now() - 3_600_000, port, flairVersion: "0.57.0" }));
+      rmSync(join(dataDir, "hdb.pid"), { force: true });
+
+      const second = await runFlair(["stop", "--port", String(port)]);
+      expect(second.exitCode).toBe(0);
+      expect(second.stdout + second.stderr).toMatch(/not running/i);
+      // THE ASSERTION (the defect): the NOT_RUNNING leg drops the leftover.
+      expect(existsSync(sidecarPath())).toBe(false);
+    },
+    30_000,
+  );
+
+  test(
+    "flair#2075: a `flair restart` on a stopped instance drops a leftover sidecar on the cli.ts NOT_RUNNING leg",
+    async () => {
+      const deadPid = await confirmedDeadPid();
+      // No live process and no hdb.pid: `flair restart`'s STOP leg is
+      // NOT_RUNNING (the cli.ts leg this pins). The leftover names a pid that
+      // is CONFIRMED gone.
+      writeFileSync(sidecarPath(), JSON.stringify({ pid: deadPid, startTimeMs: Date.now() - 3_600_000, port: await closedPort(), flairVersion: "0.57.0" }));
+      rmSync(join(dataDir, "hdb.pid"), { force: true });
+      // The START leg refuses on a newer engine stamp, so no real Harper spawns.
+      writeFileSync(join(dataDir, "engine-version.txt"), "99.0.0\n");
+
+      const { stdout, stderr, exitCode } = await runFlair(["restart", "--port", String(await closedPort())]);
+      expect(exitCode).not.toBe(0);
+      // THE ASSERTION: the cli.ts NOT_RUNNING leg dropped the leftover.
+      expect(existsSync(sidecarPath())).toBe(false);
+      expect(stdout + stderr).toMatch(/was last written by Harper 99\.0\.0/i);
     },
     30_000,
   );

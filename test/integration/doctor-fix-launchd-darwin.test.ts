@@ -1058,3 +1058,28 @@ test.skipIf(!isDarwin || externalHarper)(
   }),
   INIT_UNCHANGED_CASE_BUDGET_MS,
 );
+
+test.skipIf(!isDarwin)(
+  "built flair stop verifies the managed Harper exited and removes its sidecar",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    const pid = instancePid(sb.dataDir, sb.httpPort);
+    expect(pid).not.toBeNull();
+    if (pid === null) throw new Error("managed Harper PID is unreadable");
+    expect(isAlive(pid)).toBe(true);
+    writeDirectSidecar(sb, pid);
+    const result = spawnSync(nodeBin(), [CLI_JS, "stop", "--port", String(sb.httpPort)], {
+      cwd: REPO_ROOT,
+      env: doctorEnv(sb.tmpHome),
+      encoding: "utf8",
+      timeout: 90_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("Flair stopped (launchd service unloaded)");
+    expect(isAlive(pid)).toBe(false);
+    expect(existsSync(join(sb.dataDir, "flair-daemon.json"))).toBe(false);
+  }),
+  750_000,
+);

@@ -482,6 +482,10 @@ import {
   bindCli as bindGrantCli,
   register as registerGrant,
 } from "./commands/grant.js";
+import {
+  bindIntegrityCli,
+  register as registerIntegrity,
+} from "./commands/integrity.js";
 import { resolveHome } from "./lib/home.js";
 import { FLAIR_AGENT_PERMISSION } from "./lib/flair-agent-role.js";
 
@@ -2675,12 +2679,13 @@ export function isCredentialOnlyFailure(result: ProbeResult): boolean {
   return result.healthy === true && result.authFailureKind === "credentials";
 }
 
-async function waitForHealth(httpPort: number, adminUser: string, adminPass: string, timeoutMs: number): Promise<void> {
+async function waitForHealth(httpPort: number, adminUser: string, adminPass: string, timeoutMs: number, beforeRequest?: () => Promise<void>): Promise<void> {
   const url = `http://127.0.0.1:${httpPort}/Health`;
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   while (Date.now() < deadline) {
     attempt++;
+    await beforeRequest?.();
     try {
       const res = await fetch(url, {
         headers: { Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}` },
@@ -3539,7 +3544,7 @@ export async function seedAgentViaOpsApi(
       try {
         after = occupiedListener.reread();
       } catch {
-        after = { port: occupiedListener.before.port, pids: [], dataDirs: [] };
+        after = { port: occupiedListener.before.port, pids: [], dataDirs: [], pidsKnown: false };
       }
       return occupiedListenerAuthFailure({
         lead: "Operations API insert failed (401): ",
@@ -4751,6 +4756,15 @@ bindGrantCli({
   resolveAdminUser,
 });
 registerGrant(program);
+
+// ─── flair integrity ──────────────────────────────────────────────────────────
+// Command group lives in src/commands/integrity.ts (flair#2213). Bind shared
+// helpers first so the extracted module never imports this file.
+bindIntegrityCli({
+  resolveOpsPort,
+  resolveAdminUser,
+});
+registerIntegrity(program);
 
 // ─── flair federation ────────────────────────────────────────────────────────
 // Command group lives in src/commands/federation.ts (flair#1620). Bind shared
@@ -8443,6 +8457,7 @@ bindMemoryCli({
   addSharedCredentialOptions,
   addSharedIdentityOption,
   resolveOpsPort,
+  resolveHttpPort,
   parseEntitiesOptionOrExit,
   ENTITIES_OPTION_DESCRIPTION,
 });

@@ -376,11 +376,24 @@ describe("runActionRecall", () => {
 // ── redaction ──────────────────────────────────────────────────────────────────
 
 describe("redaction", () => {
+  for (const [label, secret] of [
+    ["Stripe", `sk_live_${"A".repeat(16)}`],
+    ["Hugging Face", `hf_${"A".repeat(20)}`],
+    ["Groq", `gsk_${"A".repeat(20)}`],
+    ["PyPI", `pypi-${"A".repeat(16)}`],
+    ["PGP", "-----BEGIN PGP PRIVATE KEY BLOCK-----\nsecret\n-----END PGP PRIVATE KEY BLOCK-----"],
+  ]) {
+    test(`buildExcerpt redacts ${label} credentials`, () => {
+      const out = buildExcerpt(`before ${secret} after`);
+      expect(out.includes(secret)).toBe(false);
+      expect(out === "before [redacted] after").toBe(true);
+    });
+  }
   test("buildExcerpt redacts a secret-shaped string before caching", () => {
     const token = `ghp_${"A".repeat(36)}`;
     const out = buildExcerpt(`rotate ${token} now`);
-    expect(out).not.toContain(token);
-    expect(out).toContain("[redacted]");
+    expect(out.includes(token)).toBe(false);
+    expect(out.includes("[redacted]")).toBe(true);
   });
 });
 

@@ -23,10 +23,17 @@ let failingReads: Set<string>;
 let reads: string[];
 let events: any[];
 let lastRequest: any;
+let skillVersionHead: any;
 
 const databasesMock = {
   flair: {
+    InstructionVersion: { create() {}, async *search() { if (skillVersionHead) yield skillVersionHead; } },
     Memory: {
+      async *search(query: any) {
+        for (const row of stored.values()) {
+          if (query.conditions.every((c: any) => row[c.attribute] === c.value)) yield row;
+        }
+      },
       get: async (id: string) => {
         reads.push(id);
         if (failingReads.has(id)) throw new Error("storage unavailable");
@@ -82,6 +89,7 @@ beforeEach(() => {
   reads = [];
   events = [];
   lastRequest = undefined;
+  skillVersionHead = undefined;
 });
 
 describe("FeedMemories.connect: partial events are decided from the stored row", () => {
@@ -215,4 +223,17 @@ describe("FeedMemories.connect: the caller's subscription options", () => {
     expect(await delivered({ previousCount: 5 })).toEqual(["still-shared"]);
     expect(reads).toEqual(["now-private", "deleted", "read-fails", "still-shared"]);
   });
+});
+
+
+test("Feed replay withholds a closed payload once the successor expires", async () => {
+  const root = { id: "root", agentId: WRITER, visibility: "shared", tags: ["skill"], skillSubjectId: "root", validTo: "2020-01-01T00:00:00.000Z" };
+  const head = { id: "s1", agentId: WRITER, visibility: "shared", tags: ["skill"], skillSubjectId: "root", expiresAt: "2999-01-01T00:00:00.000Z" };
+  stored.set("root", root);
+  stored.set("s1", head);
+  skillVersionHead = { subjectType: "skill", subjectId: "root", agentId: WRITER, visibility: "shared", kind: "update", memoryId: "s1" };
+  events = [put("root", root)];
+  expect(await delivered({ previousCount: 1 })).toEqual(["root"]);
+  head.expiresAt = "2020-01-01T00:00:00.000Z";
+  expect(await delivered({ previousCount: 1 })).toEqual([]);
 });
