@@ -151,7 +151,7 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
   };
 
   type RowRead =
-    | { kind: "found"; status: string }
+    | { kind: "found"; status: "active" | "deactivated" | null }
     | { kind: "absent" }
     | { kind: "unreadable" };
 
@@ -171,15 +171,11 @@ async function setPrincipalStatus(id: string, status: "active" | "deactivated", 
     if (rows.length !== 1) return { kind: "unreadable" };
     const row = rows[0] as { id?: unknown; status?: unknown };
     if (row?.id !== id) return { kind: "unreadable" };
-    // A stored row with no `status` is ACTIVE — the same rule the auth path
-    // (resources/agent-auth.ts's isPrincipalDeactivated) and `principal list`
-    // apply, so a principal created without one can still be disabled and
-    // re-enabled. Any other present value is unreadable.
     const rawStatus = row.status;
-    if (typeof rawStatus === "string") return { kind: "found", status: rawStatus };
-    // A missing `status` reads back as `undefined` in-process and as `null` over
-    // the operations API; both mean ACTIVE.
-    if (rawStatus === undefined || rawStatus === null) return { kind: "found", status: "active" };
+    if (rawStatus === "active" || rawStatus === "deactivated") {
+      return { kind: "found", status: rawStatus };
+    }
+    if (rawStatus === undefined || rawStatus === null) return { kind: "found", status: null };
     return { kind: "unreadable" };
   };
 

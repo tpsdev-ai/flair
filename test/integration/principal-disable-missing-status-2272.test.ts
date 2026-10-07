@@ -1,18 +1,5 @@
 // principal-disable-missing-status-2272.test.ts — flair#2272.
-//
-// A principal created without a `status` field (POST /AgentSeed, the shape
-// `tps agent create` writes, and the shape seeds written before the field
-// existed) is still a principal. `flair principal disable` used to refuse it
-// while it could still authenticate. A missing status now reads as ACTIVE on
-// the disable/enable precondition and transition, on the auth path that refuses
-// a deactivated principal, and in `principal show`/`list` — so such a principal
-// can be disabled (and its signed requests refused), and re-enabled.
-//
-// Harness: a real ephemeral Harper. A principal is created through the real
-// POST /AgentSeed path and left with no `status`; a second is written with an
-// explicit `status: "active"`. Both are driven through the built CLI against
-// this test's own ops port, and their signed Ed25519 requests are checked
-// against this test's own HTTP port.
+
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
@@ -39,6 +26,8 @@ function mkPrincipal(id: string): Principal {
 const seed = mkPrincipal(`p2272-seed-${sfx}`);
 // Explicit: written with `status: "active"`.
 const explicit = mkPrincipal(`p2272-explicit-${sfx}`);
+const basicUser = `p2272-basic-${sfx}`;
+const basicPass = "p2272-basic-test-password";
 
 let harper: HarperInstance;
 let scratch: string;
@@ -80,6 +69,13 @@ function signedGet(principal: Principal, path: string): Promise<Response> {
   const sig = nacl.sign.detached(new TextEncoder().encode(payload), principal.secretKey);
   return fetch(`${harper.httpURL}${path}`, {
     headers: { Authorization: `TPS-Ed25519 ${principal.id}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+}
+
+function protectedGet(): Promise<Response> {
+  return fetch(`${harper.httpURL}/Memory/?agentId=${basicUser}`, {
+    headers: { Authorization: `Basic ${Buffer.from(`${basicUser}:${basicPass}`).toString("base64")}` },
     signal: AbortSignal.timeout(10_000),
   });
 }
@@ -167,7 +163,7 @@ describe("flair#2272 — a principal with no status is active, so disable/enable
     expect("status" in (await rawRow(seed.id)), "the seed path must not have written a status for this case to be meaningful").toBe(false);
   }, 30_000);
 
-  test("principal show and list report the missing status as active", async () => {
+  test("human-readable principal show and list report the missing status as active", async () => {
     const show = await runCli(["principal", "show", seed.id], { HOME: scratch, FLAIR_URL: harper.httpURL, FLAIR_ADMIN_PASS: adminPass(), FLAIR_OUTPUT: "human" });
     expect(show.code, show.stderr).toBe(0);
     const showStatus = lineFor(show.stdout, "status");
@@ -180,7 +176,7 @@ describe("flair#2272 — a principal with no status is active, so disable/enable
     expect(listRow).toContain("active");
   }, 60_000);
 
-  test("a principal created through AgentSeed (no status) can be disabled, and its signed request is then refused; re-enable restores it", async () => {
+  test("AgentSeed principal: disable refuses protected Ed25519 access; enable restores it", async () => {
     // Active while it has no status: the auth path treats missing as active.
     const before = await signedGet(seed, `/Agent/${seed.id}`);
     await before.arrayBuffer();
@@ -204,6 +200,36 @@ describe("flair#2272 — a principal with no status is active, so disable/enable
     const restored = await signedGet(seed, `/Agent/${seed.id}`);
     await restored.arrayBuffer();
     expect(restored.status, "re-enable restores authentication").toBe(200);
+  }, 90_000);
+
+  test("no-status Basic principal: disable refuses protected access; enable restores it", async () => {
+    await expectOk(await adminOp({
+      operation: "add_user", username: basicUser, password: basicPass,
+      role: "super_user", active: true,
+    }), "add Basic user");
+    await expectOk(await adminOp({
+      operation: "insert", database: "flair", table: "Agent",
+      records: [{ id: basicUser, name: basicUser, kind: "human", role: "admin", createdAt: new Date().toISOString() }],
+    }), "insert no-status Basic principal");
+    expect("status" in (await rawRow(basicUser))).toBe(false);
+
+    const before = await protectedGet();
+    await before.arrayBuffer();
+    expect(before.status).toBe(200);
+
+    const disabled = await runCli(["principal", "disable", basicUser, "--ops-port", String(opsPort()), "--admin-pass", adminPass()], { HOME: scratch });
+    expect(disabled.code, `${disabled.stdout}\n${disabled.stderr}`).toBe(0);
+    expect((await rawRow(basicUser)).status).toBe("deactivated");
+    const refused = await protectedGet();
+    await refused.arrayBuffer();
+    expect(refused.status).toBe(403);
+
+    const enabled = await runCli(["principal", "enable", basicUser, "--ops-port", String(opsPort()), "--admin-pass", adminPass()], { HOME: scratch });
+    expect(enabled.code, `${enabled.stdout}\n${enabled.stderr}`).toBe(0);
+    expect((await rawRow(basicUser)).status).toBe("active");
+    const restored = await protectedGet();
+    await restored.arrayBuffer();
+    expect(restored.status).toBe(200);
   }, 90_000);
 
   test("a principal with an explicit active status behaves the same", async () => {
