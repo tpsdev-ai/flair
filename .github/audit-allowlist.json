@@ -416,6 +416,32 @@
       "removeWhen": "harper ships a build resolving stream-json > 3.4.0 (the patched line), or flair stops depending on harper."
     },
     {
+      "ghsa": "GHSA-mjw6-4jj6-33hc",
+      "package": "stream-json",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> stream-json",
+      "reason": "Prototype pollution in stream-json's Assembler (fixed in 3.6.0). Harper 5.2.8 pins stream-json 1.9.1 in its npm-shrinkwrap, which blocks a root override for npm installs (flair#1498/#1510). A Bun root override to stream-json 3.x is deferred pending compatibility testing. flair does not import stream-json. Harper 5.2.8 imports StreamArray and Batch in dist/dataLayer/bulkLoad.js; its import_from_s3 operation selects JSON from the S3 object's extension. StreamArray builds each element through the Assembler, so that path is in scope; Harper checks target-table insert permission for an insert import, update permission for update, and both for upsert (dist/utility/operation_authorization.js).",
+      "sources": ["bun", "npm-install"],
+      "approvedBy": "tps-flint",
+      "added": "2026-10-06",
+      "expires": "2026-12-03",
+      "removeWhen": "harper ships a build resolving stream-json >= 3.6.0, or flair stops depending on harper."
+    },
+    {
+      "ghsa": "GHSA-hqr4-qq8f-hg3x",
+      "package": "stream-json",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> stream-json",
+      "reason": "Quadratic re-scan in stream-json's JSONC parser and verifier (fixed after 3.5.0). The installed stream-json 1.9.1 package ships no JSONC parser. Harper 5.2.8 pins stream-json 1.9.1 in its npm-shrinkwrap, which blocks a root override for npm installs (flair#1498/#1510). A Bun root override to stream-json 3.x is deferred pending compatibility testing. flair does not import stream-json. Harper 5.2.8 imports StreamArray and Batch in dist/dataLayer/bulkLoad.js; its import_from_s3 operation selects JSON from the S3 object's extension.",
+      "sources": ["bun", "npm-install"],
+      "approvedBy": "tps-flint",
+      "added": "2026-10-06",
+      "expires": "2026-12-03",
+      "removeWhen": "harper ships a build resolving stream-json > 3.5.0, or flair stops depending on harper; re-check this entry if harper moves to a stream-json major that includes the JSONC parser."
+    },
+    {
       "ghsa": "GHSA-86w9-cpqp-85rv",
       "package": "node-forge",
       "severity": "high",
@@ -430,6 +456,81 @@
       "added": "2026-10-02",
       "expires": "2026-10-16",
       "removeWhen": "npm's latest node-forge release is outside the affected range (the gate then blocks this entry): reassess; a maintainer removes the entry once harper resolves a fixed release or drops node-forge"
+    },
+    {
+      "ghsa": "GHSA-x6jw-m9v5-85vh",
+      "package": "simple-git",
+      "severity": "critical",
+      "class": "remediation-available",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "reason": "Gap in simple-git's unsafe-operation guard (affected >=3.15.0 <4.0.1). simple-git@3.36.0 arrives through @tpsdev-ai/flair-bench -> node-llama-cpp@3.18.1, which declares simple-git ^3.33.0 (packages/flair-bench/package.json; node-llama-cpp/package.json). node-llama-cpp calls simple-git through its source-build clone (dist/bindings/getLlama.js -> utils/compileLLamaCpp.js -> utils/cloneLlamaCppRepo.js) and its source download CLI clone with CLI-supplied repo and release values (dist/cli/commands/source/commands/DownloadCommand.js). That CLI also calls dist/utils/gitReleaseBundles.js under its CI bundle flag. Flair and flair-bench do not invoke that CLI path. flair-bench calls getLlama() with default options (packages/flair-bench/src/engine.ts); the source-build clone uses built-in defaults or NODE_LLAMA_CPP_REPO and NODE_LLAMA_CPP_REPO_RELEASE (dist/config.js). Remediation-available, deferred: the simple-git 4.0.2 root override crosses node-llama-cpp's declared range and belongs in a separate, test-gated dependency PR that exercises the source-build clone.",
+      "added": "2026-10-06",
+      "expires": "2026-10-20",
+      "removeWhen": "a separate, test-gated PR overrides simple-git to >=4.0.2 after exercising node-llama-cpp's source-build clone, or node-llama-cpp ships a release declaring simple-git >=4.0.1 and flair-bench moves to it, or flair-bench drops node-llama-cpp."
+    },
+    {
+      "ghsa": "GHSA-858h-whjf-mvg5",
+      "package": "simple-git",
+      "severity": "high",
+      "class": "remediation-available",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "reason": "Gap in simple-git's unsafe-operations plugin (affected <=3.36.0, fixed in 4.0.0). simple-git@3.36.0 arrives through @tpsdev-ai/flair-bench -> node-llama-cpp@3.18.1, which declares simple-git ^3.33.0 (packages/flair-bench/package.json; node-llama-cpp/package.json). node-llama-cpp calls simple-git through its source-build clone (dist/bindings/getLlama.js -> utils/compileLLamaCpp.js -> utils/cloneLlamaCppRepo.js) and its source download CLI clone with CLI-supplied repo and release values (dist/cli/commands/source/commands/DownloadCommand.js). That CLI also calls dist/utils/gitReleaseBundles.js under its CI bundle flag. Flair and flair-bench do not invoke that CLI path. flair-bench calls getLlama() with default options (packages/flair-bench/src/engine.ts); the source-build clone uses built-in defaults or NODE_LLAMA_CPP_REPO and NODE_LLAMA_CPP_REPO_RELEASE (dist/config.js). Remediation-available, deferred: the simple-git 4.0.2 root override crosses node-llama-cpp's declared range and belongs in a separate, test-gated dependency PR that exercises the source-build clone.",
+      "added": "2026-10-06",
+      "expires": "2026-10-20",
+      "removeWhen": "a separate, test-gated PR overrides simple-git to >=4.0.2 after exercising node-llama-cpp's source-build clone, or node-llama-cpp ships a release declaring simple-git >=4.0.0 and flair-bench moves to it, or flair-bench drops node-llama-cpp."
+    },
+    {
+      "ghsa": "GHSA-g4wm-2vf7-vfgr",
+      "package": "simple-git",
+      "severity": "high",
+      "class": "remediation-available",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git",
+      "reason": "Gap in simple-git's handling of git configuration includes (affected <=3.36.0, fixed in 4.0.0). simple-git@3.36.0 arrives through @tpsdev-ai/flair-bench -> node-llama-cpp@3.18.1, which declares simple-git ^3.33.0 (packages/flair-bench/package.json; node-llama-cpp/package.json). node-llama-cpp calls simple-git through its source-build clone (dist/bindings/getLlama.js -> utils/compileLLamaCpp.js -> utils/cloneLlamaCppRepo.js) and its source download CLI clone with CLI-supplied repo and release values (dist/cli/commands/source/commands/DownloadCommand.js). That CLI also calls dist/utils/gitReleaseBundles.js under its CI bundle flag. Flair and flair-bench do not invoke that CLI path. flair-bench calls getLlama() with default options (packages/flair-bench/src/engine.ts); the source-build clone uses built-in defaults or NODE_LLAMA_CPP_REPO and NODE_LLAMA_CPP_REPO_RELEASE (dist/config.js). Remediation-available, deferred: the simple-git 4.0.2 root override crosses node-llama-cpp's declared range and belongs in a separate, test-gated dependency PR that exercises the source-build clone.",
+      "added": "2026-10-06",
+      "expires": "2026-10-20",
+      "removeWhen": "a separate, test-gated PR overrides simple-git to >=4.0.2 after exercising node-llama-cpp's source-build clone, or node-llama-cpp ships a release declaring simple-git >=4.0.0 and flair-bench moves to it, or flair-bench drops node-llama-cpp."
+    },
+    {
+      "ghsa": "GHSA-v5rq-49vh-5v5c",
+      "package": "@simple-git/argv-parser",
+      "severity": "critical",
+      "class": "remediation-available",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/flair-bench -> node-llama-cpp -> simple-git -> @simple-git/argv-parser",
+      "reason": "Gap in the unsafe-editor detection simple-git relies on (affected <2.0.1, fixed in @simple-git/argv-parser 2.0.1). @simple-git/argv-parser@1.1.1 is pulled by simple-git@3.36.0 (^1.1.0), through @tpsdev-ai/flair-bench -> node-llama-cpp@3.18.1 (simple-git/package.json; packages/flair-bench/package.json). node-llama-cpp calls simple-git through its source-build clone (dist/bindings/getLlama.js -> utils/compileLLamaCpp.js -> utils/cloneLlamaCppRepo.js) and its source download CLI clone with CLI-supplied repo and release values (dist/cli/commands/source/commands/DownloadCommand.js). That CLI also calls dist/utils/gitReleaseBundles.js under its CI bundle flag. Flair and flair-bench do not invoke that CLI path. flair-bench calls getLlama() with default options (packages/flair-bench/src/engine.ts); the source-build clone uses built-in defaults or NODE_LLAMA_CPP_REPO and NODE_LLAMA_CPP_REPO_RELEASE (dist/config.js). Remediation-available, deferred with simple-git: overriding argv-parser alone to 2.x would cross simple-git 3.36.0's declared ^1.1.0 range, and the simple-git 4.0.2 override belongs in a separate, test-gated dependency PR.",
+      "added": "2026-10-06",
+      "expires": "2026-10-20",
+      "removeWhen": "the simple-git entries retire (simple-git >=4.0.2, which pins @simple-git/argv-parser 2.0.1, reaches bun.lock through a test-gated override or a node-llama-cpp release), or flair-bench drops node-llama-cpp."
+    },
+    {
+      "ghsa": "GHSA-hp3w-g68c-fv3c",
+      "package": "sprintf-js",
+      "severity": "moderate",
+      "class": "no-patch-published",
+      "sources": [
+        "bun"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "@tpsdev-ai/adk-flair -> @google/adk -> @mikro-orm/mssql (peer) -> tedious -> sprintf-js",
+      "reason": "Denial of service in sprintf-js's handling of precision specifiers. sprintf-js@1.1.3 reaches the workspace lockfile through @tpsdev-ai/adk-flair -> @google/adk@1.6.0, which declares the mikro-orm SQL drivers, including @mikro-orm/mssql, as non-optional peers; @mikro-orm/mssql@6.6.16 depends on tedious@19.2.1, which depends on sprintf-js. tedious's calls pass a literal format string (node_modules/tedious/lib/packet.js:131,144,155; lib/metadata-parser.js:104,355; lib/value-parser.js:409,485; lib/prelogin-payload.js:223; lib/login7-payload.js:419). As a no-patch-published entry, the gate blocks it once npm's latest sprintf-js is outside the affected range (when the audit can reach the registry).",
+      "added": "2026-10-06",
+      "expires": "2026-12-03",
+      "removeWhen": "npm's latest sprintf-js release is outside the affected range (the gate then blocks this entry): move to it with a root override, or remove the entry once tedious, @mikro-orm/mssql or @google/adk stop pulling sprintf-js into bun.lock."
     }
   ]
 }

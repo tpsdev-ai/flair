@@ -19,6 +19,8 @@
  * a tool never forwards a null where its schema declares a type.
  */
 
+import { protoSafeRecord } from "../src/lib/proto-safe-record.js";
+
 type JsonType = "string" | "number" | "integer" | "boolean" | "array" | "object" | "null";
 
 function matches(value: unknown, type: JsonType): boolean {
@@ -75,9 +77,7 @@ export function checkToolArguments(schema: any, args: unknown): string | null {
  *  checked to be present). Returns {} for absent arguments. */
 export function withoutNullArguments(args: unknown): Record<string, unknown> {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return {};
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
-    if (v !== null && v !== undefined) out[k] = v;
-  }
-  return out;
+  const src = args as Record<string, unknown>;
+  const keys = Object.keys(src).filter((k) => src[k] !== null && src[k] !== undefined);
+  return protoSafeRecord(src, { keys });
 }

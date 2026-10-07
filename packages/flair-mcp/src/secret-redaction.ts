@@ -49,7 +49,7 @@ export const AUTHORIZATION_PATTERNS: readonly RegExp[] = [
  */
 export const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // PEM private key blocks, whole, or to the end of the text when unterminated.
-  [/-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)/g, REDACTED],
+  [/-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----([\s\S]*?)(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g, REDACTED],
   // Credentials in a URL's userinfo: scheme://user:password@host.
   [/\b([a-z][a-z0-9+.-]{0,20}:\/\/)[^\s/:@]{1,256}:[^\s/@]{1,256}@/gi, `$1${REDACTED}@`],
   // name=value / name: value where the name says it is a credential.
@@ -66,6 +66,10 @@ export const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, REDACTED], // AWS access key ids
   [/\bAIza[A-Za-z0-9_-]{30,}/g, REDACTED], // Google API keys
   [/\bnpm_[A-Za-z0-9]{36}\b/g, REDACTED], // npm tokens
+  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED], // Stripe secret/restricted keys
+  [/\bhf_[A-Za-z0-9]{20,}/g, REDACTED], // Hugging Face tokens
+  [/\bgsk_[A-Za-z0-9]{20,}/g, REDACTED], // Groq keys
+  [/\bpypi-[A-Za-z0-9_-]{16,}/g, REDACTED], // PyPI tokens
   [/\bpat_[A-Za-z0-9_.-]{16,}/g, REDACTED], // generic PATs (pi-flair's pattern)
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED], // JWTs
 ];

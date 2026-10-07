@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { seedAgentViaOpsApi } from "../../src/cli.js";
 import { detectPersistedAdminUser } from "../../src/lib/init-admin-pass.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
@@ -189,6 +190,28 @@ describe("flair#2210 — a real Harper 5 install is not read as fresh", () => {
     // The real data dir has Harper's persisted admin user (RocksDB hdb_user/).
     expect(detectPersistedAdminUser(dataDir)).toBe(true);
   }, 150_000);
+
+  test("real Harper operations 401 gives a credential remedy", async () => {
+    const readListener = () => ({
+      port: opsPort,
+      pids: [Number(readFileSync(join(dataDir, "hdb.pid"), "utf8").trim())],
+      dataDirs: [dataDir],
+    });
+    let message = "";
+    try {
+      await seedAgentViaOpsApi(opsPort, "wrong-password-fixture", "pubkey", "admin", "fixture-wrong-password", {
+        before: readListener(),
+        reread: readListener,
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("Operations API insert failed (401)");
+    expect(message).toContain("check the admin password for this data directory");
+    expect(message).not.toContain("free the port");
+    expect(message).not.toContain("choose --port");
+    expect(message).not.toMatch(/\bkill \d+/);
+  });
 
   test("admin-pass removed: `flair init` refuses with the persisted-missing-file message and writes nothing", async () => {
     stopHarper();
