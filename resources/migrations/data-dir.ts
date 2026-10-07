@@ -170,19 +170,24 @@ export function describeSymlinkedDataDirRefusal(
   configuredPath: string,
   which: "data directory" | ".migrations directory",
 ): string {
-  let target: string;
+  let target: string | null;
   try {
     target = realpathSync(configuredPath);
-  } catch (err) {
-    target = `a target that cannot be resolved (${(err as Error)?.message ?? String(err)})`;
+  } catch {
+    target = null;
   }
-  let remedy =
-    `stop Flair, move the directory at ${target} to ${configuredPath} (remove the symbolic link at ${configuredPath} first), and start Flair`;
-  if (which === "data directory") {
-    remedy += `; or point the data directory at ${target} itself (set ${MIGRATION_DATA_DIR_ENV}=${target}) and restart`;
+  let remedy: string;
+  if (target === null) {
+    remedy = `stop Flair, remove the symbolic link at ${configuredPath} and point ${MIGRATION_DATA_DIR_ENV} at a writable directory, then start Flair`;
+  } else {
+    remedy = `stop Flair, move the directory at ${target} to ${configuredPath} (remove the symbolic link at ${configuredPath} first), and start Flair`;
+    if (which === "data directory") {
+      remedy += `; or point the data directory at ${target} itself (set ${MIGRATION_DATA_DIR_ENV}=${target}) and restart`;
+    }
   }
+  const link = target === null ? "a target that cannot be resolved" : target;
   return (
-    `refusing ${configuredPath}: it is a symbolic link to ${target}, and Flair refuses a symlinked ${which} here — ` +
+    `refusing ${configuredPath}: it is a symbolic link to ${link}, and Flair refuses a symlinked ${which} here — ` +
     `the link can be re-pointed after this check. Remedy: ${remedy}.`
   );
 }

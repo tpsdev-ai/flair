@@ -114,6 +114,20 @@ describe("probeMigrationDataDir — a symlinked candidate (flair#2277)", () => {
     expect(probe.reason).toContain("stop Flair");
   });
 
+  it("refuses a dangling symlink without a directory to move, naming the link and a remedy", () => {
+    const dangling = join(root, "dangling");
+    symlinkSync(join(root, "does-not-exist"), dangling);
+
+    const probe = probeMigrationDataDir(dangling);
+
+    expect(probe.ok).toBe(false);
+    expect(probe.reason).toContain(dangling);
+    expect(probe.reason).toContain("cannot be resolved");
+    expect(probe.reason).toContain("stop Flair");
+    // Its target does not exist, so the remedy never names a directory to move.
+    expect(probe.reason).not.toContain("move the directory at");
+  });
+
   it("still reports a plain file and an absent candidate with their own (non-symlink) reasons", () => {
     const file = join(root, "a-file");
     writeFileSync(file, "x");
