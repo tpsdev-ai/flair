@@ -207,7 +207,7 @@ export const bridge: MemoryBridge = {
 };
 ```
 
-**`opts`** holds the resolved options as own properties. For `import` it is a null-prototype record, so inherited methods such as `opts.hasOwnProperty` are not available: test for a key with `Object.hasOwn(opts, key)`, which works for `export` too.
+**`opts`** contains the option values passed to the plugin as own properties. For `import` it is a null-prototype record, so inherited methods such as `opts.hasOwnProperty` are not available: test for a key with `Object.hasOwn(opts, key)`, which works for `export` too.
 
 **`BridgeContext`** gives you:
 
