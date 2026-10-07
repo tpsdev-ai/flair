@@ -32,7 +32,7 @@ export const ROOT_STEP_TIMEOUT_MS = 450_000;
  * the lane budget: the 780 s lane takes 533-741 s on green runs, so two shards
  * put the slowest shard near half the budget with the same headroom the root
  * step keeps after flair#2258. The workflow matrix and this constant are pinned
- * together by unit-runner.test.ts.
+ * together by lane-shards.test.ts.
  */
 export const LANE_SHARDS = 2;
 
@@ -284,6 +284,14 @@ const isEntryPoint =
 if (isEntryPoint) {
   const args = process.argv.slice(2);
   try {
+    const seen = new Set();
+    for (const arg of args.filter(arg => arg.startsWith("--"))) {
+      if (seen.has(arg)) usageError(`repeated argument: ${arg}`);
+      seen.add(arg);
+      if (!["--list-all", "--verify", "--shard", "--of"].includes(arg)) {
+        usageError(`unknown argument: ${arg}`);
+      }
+    }
     if (args.includes("--list-all")) {
       if (args.length !== 1) usageError(`--list-all takes no other arguments`);
       process.stdout.write(`${shardedSteps(unitPlan()).map(step => step.name).sort().join("\n")}\n`);

@@ -138,16 +138,27 @@ describe("lane-shards — assignment", () => {
     expect(once).toEqual(twice);
   });
 
-  test("the heavy root-unit shards are spread across shards", () => {
-    // Every root unit shard step must appear in exactly one lane shard (the
-    // coverage gate).
+  test("root steps have distinct owners with one lane shard per root step", () => {
     const plan = unitPlan(ROOT);
     const roots = plan.filter(step => step.shard !== undefined).map(step => step.name);
+    const shards = assignLaneShards(plan, roots.length);
+    const owners = roots.map(name => {
+      const matches = shards.flatMap((shard, index) => shard.some(step => step.name === name) ? [index] : []);
+      expect(matches).toHaveLength(1);
+      return matches[0];
+    });
+    expect(new Set(owners).size).toBe(roots.length);
+  });
+
+  test("lane shards share root steps equally and file counts differ by at most one", () => {
+    const plan = unitPlan(ROOT);
     const shards = assignLaneShards(plan, LANE_SHARDS);
-    for (const name of roots) {
-      expect(shards.filter(shard => shard.some(step => step.name === name))).toHaveLength(1);
+    const rootCount = plan.filter(step => step.shard !== undefined).length;
+    for (const shard of shards) {
+      expect(shard.filter(step => step.shard !== undefined)).toHaveLength(rootCount / LANE_SHARDS);
     }
-    expect(shards.length).toBe(LANE_SHARDS);
+    const loads = shards.map(shard => shard.reduce((sum, step) => sum + step.files.length, 0));
+    expect(Math.max(...loads) - Math.min(...loads)).toBeLessThanOrEqual(1);
   });
 
   test("reports a dropped file, a dropped step, and a duplicated step", () => {
@@ -266,10 +277,18 @@ describe("lane-shards — CLI", () => {
     { args: ["--verify", "--of", "0"], status: 2 },
     { args: ["--list-all", "--of", "2"], status: 2 },
     { args: ["--verify", "--other"], status: 2 },
+    { args: ["--verify", "--verify", "--of", "2"], status: 2 },
+    { args: ["--shard", "1", "--shard", "2"], status: 2 },
+    { args: ["--verify", "--of", "2", "--of", "2"], status: 2 },
     { args: [], status: 2 },
   ]) {
     test(`invalid arguments fail: ${args.join(" ")}`, () => {
-      expect(run(...args).status).toBe(status);
+      const result = run(...args);
+      expect(result.status).toBe(status);
+      expect(result.stderr).toContain("lane-shards:");
+      if (new Set(args).size < args.length && args.some(arg => arg.startsWith("--"))) {
+        expect(result.stderr).toContain("repeated argument:");
+      }
       expect(run("--nope").status).toBe(2);
     });
   }
@@ -300,13 +319,16 @@ describe("lane-shards — the workflow runs it", () => {
 
   test("the runner selects the shared setup plus one shard's steps", () => {
     const plan = unitPlan(ROOT);
-    const selected = [...sharedSteps(plan), ...assignLaneShards(plan, LANE_SHARDS)[0]];
-    const names = selected.map(step => step.name);
-    for (const step of sharedSteps(plan)) expect(names).toContain(step.name);
-    expect(names.filter(n => n.startsWith("root unit tests")).length).toBeLessThan(plan.filter(s => s.shard !== undefined).length);
-    // Every file in the selection belongs to exactly one test-bearing step.
-    const files = selected.filter(isShardedStep).flatMap(step => step.files);
-    expect(new Set(files).size).toBe(files.length);
-    expect(relative(ROOT, ROOT)).toBe("");
+    for (const [index, shard] of laneShardPlans(plan, LANE_SHARDS).entries()) {
+      const result = spawnSync(process.execPath, ["scripts/test-unit.ts", "--list", "--shard", String(index + 1), "--of", "2"], {
+        cwd: ROOT, encoding: "utf8", timeout: 20_000,
+      });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual(shard.map(step => ({
+        ...step,
+        cwd: relative(ROOT, step.cwd) || ".",
+        files: step.files.map(file => relative(ROOT, file)),
+      })));
+    }
   });
 });
