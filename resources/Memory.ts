@@ -1583,7 +1583,7 @@ export class Memory extends (databases as any).flair.Memory {
         return Response.json({ error: "reembed_no_text", message: "the stored row has no text to embed" }, { status: 422 });
       }
       const embedding = await getEmbedding(embedText, "document");
-      if (!embedding) {
+      if (!embedding || embedding.length === 0 || !embedding.every((value) => typeof value === "number" && Number.isFinite(value))) {
         return Response.json({ error: "embedding_unavailable", message: "the embedding engine returned no vector; the stored row is unchanged, retry" }, { status: 503 });
       }
       const fields = { id: existingForSkill.id, embedding, embeddingModel: getModelId(), updatedAt: new Date().toISOString() };
@@ -1958,10 +1958,6 @@ export class Memory extends (databases as any).flair.Memory {
 
     // Re-generate embedding if content changed (no-op if the dedup gate above
     // already computed one for this content). flair#504 Phase 2: 'document'
-    // — this is also the regen branch the embedding-stamp migration triggers (clears
-    // embedding/embeddingModel then hits this put()), so it's what actually
-    // re-embeds a stale row WITH the prefix once stage 2 runs. flair#1542:
-    // skill-tagged rows embed from `trigger` (skillEmbedText), not `content`.
     const embedText = skillEmbedText(content);
     if (embedText && !content.embedding) {
       const vec = await getEmbedding(embedText, "document");

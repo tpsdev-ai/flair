@@ -6,7 +6,7 @@
  * resource's refusals and its write against the shared table mock, with the
  * embedding engine stubbed.
  */
-import { beforeEach, expect, mock, test } from "bun:test";
+import { beforeEach, expect, mock, spyOn, test } from "bun:test";
 import {
   databasesMock, harnessState, mockTransaction, MockRequestTarget, resetHarnessState,
 } from "../helpers/memory-search-harness";
@@ -112,13 +112,22 @@ test("a request for a row that does not exist is 404 and creates nothing", async
 test.each([
   ["throws", async () => { throw new Error("engine down"); }],
   ["returns no vector", async () => []],
+  ["returns an empty vector", async () => [[]]],
+  ["returns a non-numeric vector", async () => [["bad"]]],
+  ["returns a non-finite vector", async () => [[NaN]]],
 ])("when the embedding engine %s, the request is 503 and the row is unchanged", async (_label, impl) => {
   const before = row("m1");
   harnessState.memoryStore.set("m1", { ...before });
   embedImpl = impl as typeof embedImpl;
-  const res = await resource("m1", agent("agent-a")).patch({ ...REEMBED });
-  expect(res.status).toBe(503);
-  expect(harnessState.memoryStore.get("m1")).toEqual(before);
+  const patch = spyOn(databasesMock.flair.Memory.prototype, "patch");
+  try {
+    const res = await resource("m1", agent("agent-a")).patch({ ...REEMBED });
+    expect(res.status).toBe(503);
+    expect(harnessState.memoryStore.get("m1")).toEqual(before);
+    expect(patch).not.toHaveBeenCalled();
+  } finally {
+    patch.mockRestore();
+  }
 }, 10_000);
 
 test("a failed stored-row read writes nothing", async () => {

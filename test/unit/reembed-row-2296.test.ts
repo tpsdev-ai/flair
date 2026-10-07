@@ -32,7 +32,7 @@ function stubFetch(response: () => Response): Array<{ url: string; init: any }> 
 
 test("sends a signed PATCH that names only the two embedding fields", async () => {
   const calls = stubFetch(() => Response.json({ id: "a/b", embeddingModel: "gguf:model" }));
-  expect(await reembedRow("http://127.0.0.1:1", "agent-a", keyFile(), "a/b")).toBe(true);
+  expect(await reembedRow("http://127.0.0.1:1", "agent-a", keyFile(), "a/b", "gguf:model")).toBe(true);
   expect(calls).toHaveLength(1);
   expect(calls[0].url).toBe("http://127.0.0.1:1/Memory/a%2Fb");
   expect(calls[0].init.method).toBe("PATCH");
@@ -43,10 +43,12 @@ test("sends a signed PATCH that names only the two embedding fields", async () =
 test.each([
   ["a 204 with no body", () => new Response(null, { status: 204 })],
   ["a 200 without embeddingModel", () => Response.json({ id: "x" })],
+  ["a 200 with a stale embeddingModel", () => Response.json({ id: "x", embeddingModel: "gguf:old-model" })],
+  ["a 200 with a different embeddingModel", () => Response.json({ id: "x", embeddingModel: "onnx:model" })],
   ["a 200 that is not JSON", () => new Response("ok", { status: 200 })],
   ["a 403", () => Response.json({ error: "forbidden" }, { status: 403 })],
   ["a 503", () => Response.json({ error: "embedding_unavailable" }, { status: 503 })],
 ])("%s is not counted as re-embedded", async (_label, response) => {
   stubFetch(response);
-  expect(await reembedRow("http://127.0.0.1:1", "agent-a", keyFile(), "x")).toBe(false);
+  expect(await reembedRow("http://127.0.0.1:1", "agent-a", keyFile(), "x", "gguf:model")).toBe(false);
 }, 10_000);

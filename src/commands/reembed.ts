@@ -1,7 +1,6 @@
 /**
  * reembed.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair reembed`.
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
@@ -39,10 +38,9 @@ function resolveOpsPort(...args: any[]): any {
 /**
  * flair#2296: re-embed one stored row. The PATCH body names only the two
  * embedding fields; the server embeds the stored row and writes embedding,
- * embeddingModel and updatedAt. Done only when the response carries the new
- * embeddingModel: a server without this path answers a PATCH without it.
+ * embeddingModel and updatedAt.
  */
-export async function reembedRow(baseUrl: string, agentId: string, keyPath: string, id: string): Promise<boolean> {
+export async function reembedRow(baseUrl: string, agentId: string, keyPath: string, id: string, intendedModel: string): Promise<boolean> {
   const res = await authFetch(baseUrl, agentId, keyPath, "PATCH", `/Memory/${encodeRecordId(id)}`, {
     embedding: null, embeddingModel: null,
   });
@@ -54,7 +52,7 @@ export async function reembedRow(baseUrl: string, agentId: string, keyPath: stri
     return false;
   }
   const model = (body as { embeddingModel?: unknown } | null)?.embeddingModel;
-  return typeof model === "string" && model.length > 0;
+  return model === intendedModel;
 }
 
 export function register(program: Command): void {
@@ -227,7 +225,7 @@ program
           const batch = memories.slice(i, i + batchSize);
           for (const memory of batch) {
             try {
-              if (await reembedRow(baseUrl, agent, privPath, memory.id)) processed++;
+              if (await reembedRow(baseUrl, agent, privPath, memory.id, currentModel)) processed++;
               else errors++;
             } catch { errors++; }
           }
@@ -318,7 +316,7 @@ program
       const batch = candidates.slice(i, i + batchSize);
       for (const memory of batch) {
         try {
-          if (await reembedRow(baseUrl, agentId, privPath, memory.id)) processed++;
+          if (await reembedRow(baseUrl, agentId, privPath, memory.id, currentModel)) processed++;
           else errors++;
         } catch { errors++; }
       }

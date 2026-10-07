@@ -248,7 +248,7 @@ afterAll(async () => {
   if (home) rmSync(home, { recursive: true, force: true });
 });
 
-describe("flair#2296: flair reembed changes only the embedding fields", () => {
+describe("flair#2296: flair reembed", () => {
   test("the fixture covers every Memory attribute", () => {
     expect(Object.keys(fixtureRow("x", "y")).sort()).toEqual([...MEMORY_ATTRIBUTES].sort());
   });
