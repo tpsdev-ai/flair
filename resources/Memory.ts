@@ -24,6 +24,7 @@ import {
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
@@ -628,6 +629,9 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
     if (expectedOwner !== undefined && existing.agentId !== expectedOwner) {
       throw new Error(`supersede-close: record ${oldId} is no longer owned by the authorized owner`);
     }
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    const pause = txnPausePoint("supersede-close");
+    if (pause) await pause;
     const closed = { ...existing, ...patch };
     stripUndeclaredMemoryAttributes(closed);
     await (databases as any).flair.Memory.put(closed, c);

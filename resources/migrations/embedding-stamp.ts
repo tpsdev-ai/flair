@@ -139,6 +139,7 @@ import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
 import { getEmbedding, getModelId } from "../embeddings-provider.js";
 import { withOwnedTransaction } from "../request-transaction.js";
+import { txnPausePoint } from "../txn-pause-point.js";
 import { harperPortValue } from "../../src/lib/harper-port-value.js";
 import { DEFAULT_HTTP_PORT } from "../a2a-url.js";
 import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
@@ -278,6 +279,9 @@ async function regenContentSuffixRow(
     return await deps.inTransaction(async (txn) => {
       const fresh = await table.get(id, txn);
       if (!fresh || !isDeepStrictEqual(fresh, existing)) return false;
+      // Test-only: inert unless the fault-injection env opt-in is set and armed.
+      const pause = txnPausePoint("embedding-stamp-content-suffix");
+      if (pause) await pause;
       await table.put({ ...fresh, embedding, embeddingModel: current }, txn);
       return true;
     });

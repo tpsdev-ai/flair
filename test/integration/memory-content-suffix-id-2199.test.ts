@@ -280,3 +280,48 @@ describe("flair#2307 — a malformed `.content` segment and a twice-encoded slas
     expect(await res.text()).toBe("");
   }, 30_000);
 });
+
+describe("flair#2307 — the malformed `.content` segment refusal applies whatever the request's credential", () => {
+  const readRows = async (ids: string[]) => {
+    const res = await adminOp(harper, {
+      operation: "search_by_hash", database: "flair", table: "Memory", hash_values: ids, get_attributes: ["*"],
+    });
+    const text = await res.text();
+    expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+    return JSON.parse(text);
+  };
+  const ids = [BASE, "mcs-bad", MALFORMED, `${MALFORMED}.content`];
+  const credentials: Array<[string, () => Record<string, string>]> = [
+    ["a Basic admin", () => ({ Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) })],
+    ["an anonymous", () => ({})],
+  ];
+  /** The body as JSON, or the raw text when it is not JSON (Harper's own error page). */
+  const bodyOf = async (res: Response) => {
+    const text = await res.text();
+    try { return JSON.parse(text); } catch { return { raw: text.slice(0, 200) }; }
+  };
+
+  for (const [who, headers] of credentials) {
+    it(`${who} GET of a malformed segment ending in \`.content\` → 400 memory_id_content_suffix, no row served`, async () => {
+      const res = await fetch(`${harper.httpURL}/Memory/${MALFORMED}.content`, { headers: headers() });
+      const body = await bodyOf(res);
+      expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(400);
+      expect(body.error).toBe("memory_id_content_suffix");
+      expect(body.id).toBeUndefined(); // assertion: no record was served
+      expect(body.content).toBeUndefined();
+    }, 30_000);
+
+    it(`${who} PUT to a malformed segment ending in \`.content\` → 400 memory_id_content_suffix, no row changed`, async () => {
+      const before = await readRows(ids);
+      const res = await fetch(`${harper.httpURL}/Memory/${MALFORMED}.content`, {
+        method: "PUT",
+        headers: { ...headers(), "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: author.id, content: "CHANGED BODY" }),
+      });
+      const body = await bodyOf(res);
+      expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(400);
+      expect(body.error).toBe("memory_id_content_suffix");
+      expect(await readRows(ids)).toEqual(before);
+    }, 30_000);
+  }
+});

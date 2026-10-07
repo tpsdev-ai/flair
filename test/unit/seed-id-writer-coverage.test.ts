@@ -200,22 +200,37 @@ test("each GUARDED path runs the decision, and its denial stops the path before 
   expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
 });
 
-test("each GUARDED path runs the .content-suffix id decision, and its denial stops the path before it writes", () => {
+test("each GUARDED path runs the .content-suffix id decision on the ids it writes, and its denial stops the path before it writes", () => {
+  // The decision's inputs: the bound id and body ids (writeTargetIds), and for
+  // the by-id methods the request target too, so a suffix only in the URL counts.
   const memory = readFileSync("resources/Memory.ts", "utf8");
-  for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {", "  async patch(content: any, query?: any) {"]) {
+  for (const [signature, call] of [
+    ["  async post(content: any, context?: any) {", "refuseContentSuffixId(writeTargetIds(this, content));"],
+    ["  async put(content: any, query?: any) {", "refuseContentSuffixId(writeTargetIds(this, content), query);"],
+    ["  async patch(content: any, query?: any) {", "refuseContentSuffixId(writeTargetIds(this, content), query);"],
+  ] as const) {
     const body = methodBody(memory, signature);
+    expect(body, `${signature} does not run the decision on its write ids`).toContain(`const contentSuffixDenial = ${call}`);
     expectWritesAfter(body, denialReturnEnd(body, "refuseContentSuffixId"), signature);
   }
   const del = methodBody(memory, "  async delete(id: any) {");
+  expect(del, "delete() does not run the decision on its id").toContain(
+    "refuseContentSuffixId(\n      [id, ...writeTargetIds(this, id && typeof id === \"object\" ? id : undefined)], id,\n    );",
+  );
   expectWritesAfter(del, denialReturnEnd(del, "refuseContentSuffixId"), "delete()");
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
+  expect(feed, "FeedMemories.post does not run the decision on its write ids").toContain("const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));");
   expectWritesAfter(feed, denialReturnEnd(feed, "refuseContentSuffixId"), "FeedMemories.post");
 
+  // The federation merge: the predicate runs on the id of the row it writes
+  // (`mergedData`), the skip stops the record, and the put of that row follows.
   const federation = readFileSync("resources/Federation.ts", "utf8");
+  const guard = /if \(record\.table === "Memory" && endsWithContentSelectorSuffix\(mergedData\.id\)\) \{\s*recordSkip\("content_suffix_id_not_federated"\);\s*continue;/.exec(federation);
+  expect(guard, "the federation merge does not test endsWithContentSelectorSuffix(mergedData.id) before skipping, or the skip does not stop the record").not.toBeNull();
   const skip = skipContinueEnd(federation, "content_suffix_id_not_federated");
-  expect(skip, "the federation merge does not skip a .content-suffixed Memory id, or the skip does not stop the record").toBeGreaterThan(-1);
-  expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
+  expect(skip).toBe(guard!.index + guard![0].length);
+  expect(federation.indexOf("await table.put(mergedData);", skip), "the merge does not write the row the predicate checked after the skip").toBeGreaterThan(skip);
 });
 
 test("a new direct, aliased or computed Memory writer fails classification", () => {
