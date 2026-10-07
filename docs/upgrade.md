@@ -113,19 +113,16 @@ install is refused rather than overwritten.
 
 ### A symlinked data directory is refused at boot
 
-Flair's boot-time migration cycle probes the directory it uses for migration
-state before the cycle runs. A candidate that is a symbolic link — including a
-symlinked `.migrations` child — is refused, and resolution falls through to the
-next usable candidate; when none is usable, the migrations that would have run
-are reported `failed`. The refusal names the configured path, the path it
-resolves to, why the symlink is refused, and the remedy, and it appears in the
-instance log under `[flair-migrations]`, in `/HealthDetail` as the migration
-reason and `lastCycleError`, and in `flair doctor`'s Migrations section.
+The migration probe refuses a symlinked data directory or `.migrations` child.
+When no candidate is usable, the boot log, `/HealthDetail` and `flair doctor`
+report the failure; full paths are available only in the operator log and admin
+`/HealthDetail` responses.
 
-> **Heads-up:** to use a data directory that currently lives behind a symlink,
-> stop Flair, move the directory to the configured path, remove the symbolic link
-> and start Flair — or point the data directory at the real path (set
-> `FLAIR_MIGRATION_DATA_DIR` to that path) and restart.
+> **Heads-up:** for a link to a directory, stop Flair, remove the link, move its
+> target to the configured path and start Flair. For a linked **data directory**
+> with a directory target, you can instead set `FLAIR_MIGRATION_DATA_DIR` to the target and restart; this
+> alternative does not apply to a `.migrations` child. For a dangling link or a
+> link to a file, replace the link with a writable directory.
 
 ### After a Node bump: the CLI and the instance in different install trees
 

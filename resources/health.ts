@@ -32,7 +32,7 @@ const db = databases as any;
 
 const redactHome = (p: string): string => {
   const home = homedir();
-  return p.startsWith(home) ? "~" + p.slice(home.length) : p;
+  return p === home ? "~" : p.startsWith(home + "/") ? "~" + p.slice(home.length) : "[redacted]";
 };
 
 const exists = async (path: string): Promise<boolean> => {
@@ -788,7 +788,14 @@ export class HealthDetail extends Resource {
     // didn't run, not merely that it didn't.
     try {
       const migrationsDataDir = resolveMigrationDataDirForRead();
-      const snapshot = getMigrationStatusSnapshot(migrationsDataDir);
+      const rawSnapshot = getMigrationStatusSnapshot(migrationsDataDir);
+      const redactReason = (reason: string | undefined): string | undefined =>
+        reason ? "details redacted; consult the operator log or an administrator" : reason;
+      const snapshot = isAdmin ? rawSnapshot : {
+        ...rawSnapshot,
+        lastCycleError: redactReason(rawSnapshot.lastCycleError),
+        migrations: rawSnapshot.migrations.map((m) => ({ ...m, reason: redactReason(m.reason) })),
+      };
       stats.migrations = {
         cyclePhase: snapshot.cyclePhase,
         lastCycleAt: snapshot.lastCycleAt ?? null,
