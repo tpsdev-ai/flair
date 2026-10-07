@@ -64,6 +64,8 @@ import {
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
+  ACTION_RECALL_HOOK_MARKER,
+  CAPTURE_HOOK_MARKER,
   ACTION_RECALL_PRE_TOOL_USE_MATCHER,
   buildSessionStartHookCommand,
   buildActionRecallHookCommand,
@@ -1273,6 +1275,7 @@ export interface ActionRecallStatus {
   harness: Harness;
   installed: boolean;
   refreshEnabled: boolean;
+  problems: string[];
   runtimeFailure?: string;
 }
 
@@ -1282,8 +1285,11 @@ export function actionRecallHookStatus(homeDir: string, harness: Harness): Actio
   const config = read.parsed ?? {};
   const entry = findActionRecallEntry(config);
   const hook = entry ? entry.group.hooks[entry.hookIndex] : null;
+  const candidates = findCaptureEntries(config, "PreToolUse", command => isHookStatusCandidate(command, ACTION_RECALL_HOOK_MARKER));
+  const noncanonical = candidates.filter(candidate => !isFlairActionRecallCommand(candidate.group.hooks[candidate.hookIndex]?.command));
+  const problems = noncanonical.map(candidate => `PreToolUse[${candidate.groupIndex}].hooks[${candidate.hookIndex}]: noncanonical action-recall command`);
   const runtimeFailure = hook ? actionRecallCommandFailure(hook.command) : null;
-  const installed = harness === "claude-code" && hook?.type === "command" && entry?.group.matcher === ACTION_RECALL_PRE_TOOL_USE_MATCHER && runtimeFailure === null;
+  const installed = harness === "claude-code" && hook?.type === "command" && entry?.group.matcher === ACTION_RECALL_PRE_TOOL_USE_MATCHER && runtimeFailure === null && problems.length === 0;
   let refreshEnabled = false;
   const ss = findHookEntry(config);
   if (ss) {
@@ -1291,7 +1297,7 @@ export function actionRecallHookStatus(homeDir: string, harness: Harness): Actio
     const form = parseInstallerHookForm(hook.command);
     refreshEnabled = hook.type === "command" && form?.harness === "claude-code" && sessionStartEnablesActionRecall(hook.command);
   }
-  return { path, harness, installed, refreshEnabled, ...(runtimeFailure ? { runtimeFailure } : {}) };
+  return { path, harness, installed, refreshEnabled, problems, ...(runtimeFailure ? { runtimeFailure } : {}) };
 }
 
 /** Install (or repair) the action-recall PreToolUse hook + SessionStart refresh. */
@@ -1671,7 +1677,11 @@ function describeCaptureActions(actions: Record<CaptureHookEvent, HookDeltaActio
   return CAPTURE_HOOK_EVENTS.map((event) => `${event}: ${actions[event]}`).join(", ");
 }
 
-function findCaptureEntries(config: any, event: CaptureHookEvent): Array<{ group: any; hookIndex: number; groupIndex: number }> {
+function isHookStatusCandidate(command: unknown, marker: string): boolean {
+  return typeof command === "string" && command.includes("FLAIR_AGENT_ID=") && command.includes(marker);
+}
+
+function findCaptureEntries(config: any, event: CaptureHookEvent | "PreToolUse", isMatch: (command: any) => boolean = isFlairCaptureCommand): Array<{ group: any; hookIndex: number; groupIndex: number }> {
   const entries: Array<{ group: any; hookIndex: number; groupIndex: number }> = [];
   const groups = config?.hooks?.[event];
   if (!Array.isArray(groups)) return entries;
@@ -1679,7 +1689,7 @@ function findCaptureEntries(config: any, event: CaptureHookEvent): Array<{ group
     const hooks = groups[gi]?.hooks;
     if (!Array.isArray(hooks)) continue;
     for (let hi = 0; hi < hooks.length; hi++) {
-      if (isFlairCaptureCommand(hooks[hi]?.command)) entries.push({ group: groups[gi], hookIndex: hi, groupIndex: gi });
+      if (isMatch(hooks[hi]?.command)) entries.push({ group: groups[gi], hookIndex: hi, groupIndex: gi });
     }
   }
   return entries;
@@ -1948,7 +1958,7 @@ export function captureHookStatus(homeDir: string, harness: Harness): CaptureSta
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   const config = read.parsed ?? {};
-  const matching = CAPTURE_HOOK_EVENTS.map((event) => findCaptureEntries(config, event));
+  const matching = CAPTURE_HOOK_EVENTS.map((event) => findCaptureEntries(config, event, command => isHookStatusCandidate(command, CAPTURE_HOOK_MARKER)));
   const entries = matching.map((entries) => entries[0] ?? null);
   const commands = CAPTURE_HOOK_EVENTS.map((event, i) => {
     const entry = entries[i];
@@ -1970,6 +1980,10 @@ export function captureHookStatus(homeDir: string, harness: Harness): CaptureSta
       const hook = entry.group.hooks[entry.hookIndex];
       if (hook.type !== "command") problems.push(`${event} carries an unexpected type`);
       const command = hook.command as string;
+      if (!isFlairCaptureCommand(command)) {
+        problems.push(`${event}[${entry.groupIndex}].hooks[${entry.hookIndex}]: noncanonical capture command`);
+        continue;
+      }
       if (command !== expected) problems.push(`${event} carries a different command`);
       const want = CAPTURE_HOOK_MATCHERS[event];
       const matcher = entry.group.matcher;
