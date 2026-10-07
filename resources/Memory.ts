@@ -23,7 +23,7 @@ import {
 } from "./memory-host-source.js";
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
-import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
+import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
@@ -608,30 +608,57 @@ function reindexDrift(content: any, existing: Record<string, any>): string | nul
 }
 
 /**
- * Read-modify-write close of a superseded record, with the SAME transaction
- * detachment discipline as findConservativeDedupMatch (each discrete Harper
- * call individually wrapped — see withDetachedTxn's doc for why a single
- * wrap around a multi-await async function would not protect the later
- * call). Does NOT swallow failures — throws so the caller can
- * log it. Never called before the new record is already written.
+ * Read-modify-write close of a superseded record. Does NOT swallow failures —
+ * throws so the caller can log it. Never called before the new record is
+ * already written.
  *
- * flair#2307: `expectedOwner`, when given, is the owner the authorization read
- * saw; a row whose owner differs now is not closed (throws instead).
+ * flair#2307: the read, the owner comparison and the write run in ONE owned
+ * transaction (withOwnedTransaction, the MemoryMaintenance pattern: the
+ * request's transaction is detached and a fresh one this call owns is created),
+ * and the write is built from the row read inside it. `expectedOwner`, when
+ * given, is the owner the authorization read saw; a row whose owner differs at
+ * the read inside the transaction is not closed (throws instead).
  */
 async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>, expectedOwner?: string): Promise<void> {
-  const existing = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(oldId));
-  if (!existing) {
-    throw new Error(`supersede-close: record ${oldId} not found`);
-  }
-  if (expectedOwner !== undefined && existing.agentId !== expectedOwner) {
-    throw new Error(`supersede-close: record ${oldId} is no longer owned by the authorized owner`);
-  }
-  const closed = { ...existing, ...patch };
-  stripUndeclaredMemoryAttributes(closed);
-  await withDetachedTxn(ctx, () => (databases as any).flair.Memory.put(closed));
+  const closedRow = await withOwnedTransaction(ctx, async (c) => {
+    const existing = await (databases as any).flair.Memory.get(oldId, c);
+    if (!existing) {
+      throw new Error(`supersede-close: record ${oldId} not found`);
+    }
+    if (expectedOwner !== undefined && existing.agentId !== expectedOwner) {
+      throw new Error(`supersede-close: record ${oldId} is no longer owned by the authorized owner`);
+    }
+    const closed = { ...existing, ...patch };
+    stripUndeclaredMemoryAttributes(closed);
+    await (databases as any).flair.Memory.put(closed, c);
+    return closed;
+  });
   // flair#1357 — a supersede-close sets `validTo`, which the retrieval filters
   // read, so the lexical index has to see it as eagerly as a content write.
-  noteMemoryUpsert(closed);
+  noteMemoryUpsert(closedRow);
+}
+
+/**
+ * Stamp `lastReflected` on each existing `derivedFrom` source of a new row
+ * (best-effort bookkeeping; a failure is swallowed). Called only after the new
+ * row was written (flair#2307): a refused write changes no source row.
+ * lastReflected keys off updatedAt (the write moment), NOT createdAt — since
+ * #1336 a create may carry a backdated caller createdAt, and the reflection
+ * bookkeeping must record when the derivation actually ran.
+ */
+async function markDerivedSourcesReflected(content: any): Promise<void> {
+  if (!Array.isArray(content.derivedFrom) || content.derivedFrom.length === 0) return;
+  const now = content.updatedAt;
+  for (const sourceId of content.derivedFrom) {
+    try {
+      const src = await (databases as any).flair.Memory.get(sourceId);
+      if (src) {
+        const reflectPatch = { lastReflected: now };
+        stripUndeclaredMemoryAttributes(reflectPatch);
+        await patchRecord((databases as any).flair.Memory, sourceId, reflectPatch).catch(() => {});
+      }
+    } catch {}
+  }
 }
 
 /** Does an agent hold a "write" grant from `ownerId`? Same MemoryGrant lookup
@@ -678,8 +705,10 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  * missing target refuses (supersedesTargetMissing) — except a reference that is
  * unchanged from the stored row's own `supersedes` (a re-PUT of a successor
  * whose predecessor was since deleted), which is kept and closes nothing. The
- * close carries the owner the read saw, and closeSupersededRecord refuses a
- * row whose owner differs by then.
+ * close carries the owner the read saw; closeSupersededRecord re-reads the row,
+ * compares that owner and writes in one owned transaction, and does not close a
+ * row whose owner differs. An admin or internal write closes its target without
+ * the authorization read (no owner comparison).
  *
  * flair#704: an explicit `supersedes: null` — the shape most JSON writers
  * produce for an unset optional field (`JSON.stringify({supersedes: undefined})`
@@ -1318,25 +1347,6 @@ export class Memory extends (databases as any).flair.Memory {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
 
-    // Validate derivedFrom source IDs exist (best-effort, non-blocking).
-    // lastReflected keys off updatedAt (the write moment), NOT createdAt —
-    // since #1336 a create may carry a backdated caller createdAt, and the
-    // reflection bookkeeping must record when the derivation actually ran.
-    // (Pre-#1336 the two were always identical here.)
-    if (Array.isArray(content.derivedFrom) && content.derivedFrom.length > 0) {
-      const now = content.updatedAt;
-      for (const sourceId of content.derivedFrom) {
-        try {
-          const src = await (databases as any).flair.Memory.get(sourceId);
-          if (src) {
-            const reflectPatch = { lastReflected: now };
-            stripUndeclaredMemoryAttributes(reflectPatch);
-            patchRecord((databases as any).flair.Memory, sourceId, reflectPatch).catch(() => {});
-          }
-        } catch {}
-      }
-    }
-
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with put() — see validateAndAuthorizeSupersedes doc).
@@ -1463,10 +1473,12 @@ export class Memory extends (databases as any).flair.Memory {
     stripUndeclaredMemoryAttributes(content);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
-      return await writeSkillCreateOrUpdate({
+      const skillResult = await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
         inPlaceId: reservedId != null ? String(reservedId) : null,
       });
+      if (!(skillResult instanceof Response)) await markDerivedSourcesReflected(content);
+      return skillResult;
     }
     // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
     // transaction. With a request context they join its open transaction; with
@@ -1504,6 +1516,7 @@ export class Memory extends (databases as any).flair.Memory {
     // Now the safe failure state is two active records (recoverable), never
     // a lost write — and the failure is logged, never silently swallowed.
     await closeSupersededIfNeeded(ctx, content, supersede.close, "post");
+    await markDerivedSourcesReflected(content);
 
     // flair#744 slice A: citation-on-write — POST-COMMIT, fully
     // failure-isolated. The write above already succeeded and `result` is

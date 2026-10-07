@@ -3,9 +3,12 @@
  * migration's re-embed of a stale row whose id ends in `.content`.
  *
  * That row is re-embedded through the raw table handle (the loopback
- * `PUT /Memory/:id` cannot address it). The write must happen only when the
- * provider returned a usable vector, and only onto a row that still exists and
- * is unchanged since the migration read it; otherwise the row stays pending.
+ * `PUT /Memory/:id` cannot address it), from the text Memory's write paths
+ * embed for it (a skill row's `trigger`, else `content`). The write must happen
+ * only when the provider returned a usable vector, and only onto a row that
+ * still exists and is unchanged since the migration read it; otherwise this
+ * migration does not stamp the row, and a still-existing stale row stays
+ * pending.
  *
  * Runs in its own process (test/unit-isolated): it mocks
  * resources/embeddings-provider.ts, which other unit files import for real.
@@ -16,10 +19,14 @@ import { beforeEach, describe, expect, it, mock } from "bun:test";
 
 const CURRENT = "current-model";
 let embedImpl: (text: string) => Promise<unknown> = async () => [0.5, 0.25, 0.125];
+let embedded: string[] = [];
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 mock.module("../../resources/embeddings-provider.ts", () => ({
-  getEmbedding: (text: string) => embedImpl(text),
+  getEmbedding: (text: string) => {
+    embedded.push(text);
+    return embedImpl(text);
+  },
   getModelId: () => CURRENT,
   EMBEDDING_ENGINE: "gguf",
   getMode: () => "local",
@@ -80,6 +87,7 @@ function migration() {
 beforeEach(() => {
   store = new Map([[LEGACY_ID, { id: LEGACY_ID, agentId: "a", content: "legacy body", ...STALE }]]);
   puts = [];
+  embedded = [];
   embedImpl = async () => [0.5, 0.25, 0.125];
 });
 
@@ -138,4 +146,42 @@ describe("flair#2307 — the content-suffix re-embed writes only a usable vector
     expect(puts).toEqual([]);
     expect(store.has(LEGACY_ID)).toBe(false);
   });
+});
+
+describe("flair#2307 — the content-suffix re-embed uses the text Memory embeds for the row", () => {
+  const SKILL_ID = "legacy-skill.content";
+  const TRIGGER = "when the greenhouse humidity climbs overnight";
+  const PROCEDURE = "open the roof vents, then log the reading";
+
+  it("a skill row is embedded from its trigger, not its content, and only then stamped current", async () => {
+    store = new Map([[SKILL_ID, { id: SKILL_ID, agentId: "a", tags: ["skill"], trigger: TRIGGER, content: PROCEDURE, ...STALE }]]);
+    embedImpl = async (text) => (text === TRIGGER ? [0.75, 0.5, 0.25] : [0.01, 0.02, 0.03]);
+    const result = await migration().run(10);
+    expect(embedded).toEqual([TRIGGER]); // assertion: the provider is asked for the trigger's vector
+    expect(result).toEqual({ processed: 1, touchedIds: [SKILL_ID] });
+    expect(store.get(SKILL_ID)).toMatchObject({ trigger: TRIGGER, content: PROCEDURE, embedding: [0.75, 0.5, 0.25], embeddingModel: CURRENT });
+  });
+
+  it("a skill row without a trigger is embedded from its content", async () => {
+    store = new Map([[SKILL_ID, { id: SKILL_ID, agentId: "a", tags: ["skill"], content: PROCEDURE, ...STALE }]]);
+    const result = await migration().run(10);
+    expect(embedded).toEqual([PROCEDURE]);
+    expect(result.processed).toBe(1);
+    expect(store.get(SKILL_ID)).toMatchObject({ embeddingModel: CURRENT });
+  });
+
+  for (const [name, row] of [
+    ["no content", { id: LEGACY_ID, agentId: "a", ...STALE }],
+    ["empty content", { id: LEGACY_ID, agentId: "a", content: "", ...STALE }],
+    ["a skill with no trigger and no content", { id: LEGACY_ID, agentId: "a", tags: ["skill"], ...STALE }],
+  ] as const) {
+    it(`a row with ${name} is not embedded and stays pending`, async () => {
+      store = new Map([[LEGACY_ID, { ...row }]]);
+      const result = await migration().run(10);
+      expect(embedded).toEqual([]);
+      expect(result.processed).toBe(0);
+      expect(puts).toEqual([]);
+      expect(await migration().countPending()).toBe(1);
+    });
+  }
 });

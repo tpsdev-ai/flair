@@ -950,6 +950,127 @@ describe("flair#2307: a supersede authorizes, stores and closes one target", () 
     expect(memoryStore.get("sup-swap").agentId).toBe("agent-other");
     expect(memoryStore.get("sup-swap").validTo).toBeUndefined();
   });
+
+  it("an owner change between the close's read and its write is not overwritten", async () => {
+    memoryStore.set("sup-race", { id: "sup-race", agentId: "agent-1", content: "Own row, long enough for the gate." });
+    // A stand-in for Harper's optimistic transactions: every write bumps the
+    // row's version; a transaction records the version of each row read through
+    // it and stages the writes made through it, and at commit applies them only
+    // if none of the rows it read has changed (otherwise it aborts). A write
+    // made outside a transaction applies at once.
+    const versions = new Map<string, number>();
+    const bump = (id: string) => versions.set(id, (versions.get(id) ?? 0) + 1);
+    const savedTransaction = (globalThis as any).transaction;
+    (globalThis as any).transaction = async (ctx: any, cb: (txn: any) => any) => {
+      if (ctx?.transaction?.open === 1) return cb(ctx.transaction);
+      const txn: any = { open: 1, saveCommits: false, reads: new Map<string, number>(), writes: [] as any[] };
+      ctx.transaction = txn;
+      try {
+        const result = await cb(txn);
+        for (const [id, seen] of txn.reads) {
+          if ((versions.get(id) ?? 0) !== seen) throw new Error(`transaction conflict on ${id}`);
+        }
+        for (const row of txn.writes) {
+          memoryStore.set(row.id, { ...row });
+          bump(row.id);
+        }
+        return result;
+      } finally {
+        txn.open = 0;
+      }
+    };
+    const txnOf = (c: any) => (c?.transaction?.open === 1 && c.transaction.reads ? c.transaction : null);
+    const realGet = BaseMemory.get;
+    const realPut = BaseMemory.put;
+    const realPost = BaseMemory.post;
+    let successorWritten = false;
+    let injected = false;
+    const getSpy = spyOn(BaseMemory, "get").mockImplementation(async (id: any, c?: any) => {
+      txnOf(c)?.reads.set(id, versions.get(id) ?? 0);
+      const row = await realGet(id);
+      if (id === "sup-race" && successorWritten && !injected) {
+        // The close has read the row; a competing writer changes its owner
+        // before the close writes.
+        injected = true;
+        memoryStore.set("sup-race", { ...row, agentId: "agent-other" });
+        bump("sup-race");
+      }
+      return row;
+    });
+    const putSpy = spyOn(BaseMemory, "put").mockImplementation(async (content: any, c?: any) => {
+      const txn = txnOf(c);
+      if (txn) {
+        txn.writes.push({ ...content });
+        return { ...content };
+      }
+      const r = await realPut(content);
+      bump(content.id);
+      return r;
+    });
+    const postSpy = spyOn(BaseMemory, "post").mockImplementation(async (content: any, ctx?: any) => {
+      const written = await realPost(content, ctx);
+      successorWritten = true;
+      return written;
+    });
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let res: any;
+    try {
+      res = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-race" });
+    } finally {
+      getSpy.mockRestore();
+      putSpy.mockRestore();
+      postSpy.mockRestore();
+      errorSpy.mockRestore();
+      (globalThis as any).transaction = savedTransaction;
+    }
+    expect(injected).toBe(true);
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.has(res.id)).toBe(true);
+    expect(memoryStore.get("sup-race").agentId).toBe("agent-other"); // assertion: the competing owner change is not overwritten
+    expect(memoryStore.get("sup-race").validTo).toBeUndefined();
+  });
+
+  for (const [name, setup, status, error] of [
+    ["a missing target", () => {}, 409, "supersedes_target_missing"],
+    ["an unreadable target", () => memoryStore.set("sup-target", { id: "sup-target", agentId: "agent-1", content: "Target row, long enough for the gate." }), 503, "supersedes_target_unreadable"],
+  ] as const) {
+    it(`a write refused for ${name} leaves its derivedFrom source rows unchanged`, async () => {
+      const source = { id: "src-1", agentId: "agent-1", content: "Source row the new one derives from, long enough." };
+      memoryStore.set("src-1", { ...source });
+      setup();
+      // The first read of the target (the skill-body predecessor read) succeeds;
+      // the authorization read after it fails.
+      const realGet = BaseMemory.get;
+      let targetReads = 0;
+      const getSpy = spyOn(BaseMemory, "get").mockImplementation(async (id: any) => {
+        if (id === "sup-target" && ++targetReads >= 2) throw new Error("simulated read failure");
+        return realGet(id);
+      });
+      let res: any;
+      try {
+        res = await makeMemory(agentCtx("agent-1")).post({
+          agentId: "agent-1", content: SUCCESSOR, derivedFrom: ["src-1"],
+          supersedes: name === "a missing target" ? "sup-nowhere" : "sup-target",
+        });
+        await new Promise((r) => setTimeout(r, 10)); // let any unawaited bookkeeping land
+      } finally {
+        getSpy.mockRestore();
+      }
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(status);
+      expect((await (res as Response).json()).error).toBe(error);
+      expect(memoryStore.get("src-1")).toEqual(source); // assertion: the source row is unchanged (no lastReflected)
+    });
+  }
+
+  it("an accepted write with derivedFrom stamps lastReflected on its source rows", async () => {
+    memoryStore.set("src-1", { id: "src-1", agentId: "agent-1", content: "Source row the new one derives from, long enough." });
+    memoryStore.set("sup-ok", { id: "sup-ok", agentId: "agent-1", content: "Own row, long enough for the gate." });
+    const res: any = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, derivedFrom: ["src-1"], supersedes: "sup-ok" });
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.get("src-1").lastReflected).toBe(memoryStore.get(res.id).updatedAt);
+    expect(memoryStore.get("sup-ok").validTo).toBeDefined();
+  });
 });
 
 // ─── memory-soul-read-gate fix: Memory.allowRead + Memory.get() ownership scoping ──

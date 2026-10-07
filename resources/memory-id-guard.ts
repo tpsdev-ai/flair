@@ -42,7 +42,8 @@ export function refuseContentSuffixId(ids: unknown[], target?: { pathname?: unkn
  * selector resolves to its decoded form; a non-string resolves to undefined.
  * Memory.ts resolves a `supersedes` reference with this once, before anything
  * reads it, and uses the result for the reserved-id check, the authorization
- * read, the stored reference and the close (flair#2307).
+ * read (non-admin agents only), the stored reference and the close
+ * (flair#2307).
  */
 export function resolveMemoryReferenceId(ref: unknown): string | undefined {
   if (typeof ref !== "string") return undefined;
@@ -58,9 +59,12 @@ export const SUPERSEDES_TARGET_UNREADABLE_ERROR = "supersedes_target_unreadable"
 export const SUPERSEDES_TARGET_MISSING_ERROR = "supersedes_target_missing";
 
 /**
- * Refuse a write whose `supersedes` target could not be read. A client error
- * from the read (an id Harper cannot look up) answers 400; anything else 503,
- * since a retry can succeed. Nothing has been written when this is returned.
+ * Refuse a write whose `supersedes` target could not be read: the predecessor
+ * read every write with a `supersedes` makes (prepareSkillBody in
+ * resources/skill-version-write.ts), or, for a non-admin agent, the
+ * authorization read. A client error from the read (an id Harper cannot look
+ * up) answers 400; anything else 503, since a retry can succeed. Nothing has
+ * been written when this is returned.
  */
 export function supersedesTargetUnreadable(err: unknown): Response {
   const code = (err as { statusCode?: unknown } | null | undefined)?.statusCode;

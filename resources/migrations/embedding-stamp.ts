@@ -145,6 +145,7 @@ import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-gu
 import type { Migration, RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
 import { endsWithContentSelectorSuffix } from "../../src/lib/memory-id-policy.js";
+import { skillEmbedText } from "../skill-write.js";
 
 export { EMBEDDING_STAMP_ID };
 
@@ -251,12 +252,16 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * refuses the id), so this computes the embedding itself and writes through the
  * raw table handle.
  *
+ * The text embedded is the one Memory's own write paths embed for the row
+ * (`skillEmbedText`: a skill row's `trigger` when present, else `content`); a
+ * row with no such text is not embedded.
+ *
  * Writes only when the provider returned a usable vector, and only onto a row
  * that still exists and is unchanged since `existing` was read: the re-read,
  * comparison and write share one owned transaction (the MemoryMaintenance
  * pattern), and the write changes only `embedding` and `embeddingModel`.
- * Returns true iff it wrote; otherwise the row is left as it is (still pending
- * if it was) for the next cycle.
+ * Returns true iff it wrote. Otherwise this migration does not stamp the row;
+ * a row that still exists with a stale stamp stays pending for the next cycle.
  */
 async function regenContentSuffixRow(
   table: MemoryTableLike,
@@ -266,7 +271,9 @@ async function regenContentSuffixRow(
   deps: ContentSuffixRegenDeps,
 ): Promise<boolean> {
   try {
-    const embedding = await deps.embed(String(existing.content ?? ""));
+    const text = skillEmbedText(existing);
+    if (typeof text !== "string" || text.length === 0) return false;
+    const embedding = await deps.embed(text);
     if (!isUsableEmbedding(embedding)) return false;
     return await deps.inTransaction(async (txn) => {
       const fresh = await table.get(id, txn);
