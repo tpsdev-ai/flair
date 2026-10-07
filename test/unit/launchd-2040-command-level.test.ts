@@ -40,6 +40,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { buildLaunchdPlist, launchdLabel, launchdPlistPath, LEGACY_LAUNCHD_LABEL } from "../../src/cli.ts";
+import { STUB_HARPER, stubLifetimeEnv } from "../helpers/stub-harper-2040.ts";
 
 const isDarwin = process.platform === "darwin";
 const repoRoot = join(import.meta.dirname, "..", "..");
@@ -48,47 +49,6 @@ const GUI = `gui/${UID}`;
 const ADMIN_PASS = "PLACEHOLDER-not-a-secret";
 /** launchctl verbs that change launchd state. A refusal must issue none of them. */
 const MUTATING_VERBS = ["bootout", "bootstrap", "kickstart", "load", "unload", "start", "stop", "enable", "disable", "remove", "submit"];
-
-const STUB_HARPER = `
-import { createServer } from "node:http";
-import { createServer as createNetServer } from "node:net";
-import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-const root = process.env.ROOTPATH;
-const port = Number(((process.env.HTTP_PORT ?? "0").match(/(\\d+)$/) ?? [])[1] ?? 0);
-if (process.env.STUB_START_LOG) appendFileSync(process.env.STUB_START_LOG, process.pid + "\\n");
-const http = createServer((_q, r) => {
-  r.writeHead(200, { "content-type": "application/json" });
-  r.end('{"ok":true,"version":"0.57.0","buildCommit":null,"searchReady":true}');
-});
-// A real Harper takes seconds to boot: STUB_START_DELAY_MS holds the bind and
-// the hdb.pid write back while the process itself is already running.
-// STUB_PIDFILE_FIRST writes hdb.pid AND opens the operations socket at once,
-// BEFORE the (delayed) HTTP bind: a process whose pid file names it, and whose
-// ops socket is up, while its HTTP port still refuses.
-const openOpsSocket = () => {
-  try { rmSync(join(root, "operations-server"), { force: true }); } catch {}
-  createNetServer((s) => s.end()).listen(join(root, "operations-server"));
-};
-if (process.env.STUB_PIDFILE_FIRST) {
-  writeFileSync(join(root, "hdb.pid"), String(process.pid));
-  openOpsSocket();
-  appendFileSync(join(root, "stub-events.log"), "pidfile\\n");
-}
-const serve = () => http.listen(port, "127.0.0.1", () => {
-  if (process.env.STUB_PIDFILE_FIRST) appendFileSync(join(root, "stub-events.log"), "bound\\n");
-  if (!process.env.STUB_NO_PIDFILE) writeFileSync(join(root, "hdb.pid"), String(process.pid));
-  writeFileSync(join(root, "stub-port"), String(http.address().port));
-  if (!process.env.STUB_PIDFILE_FIRST) openOpsSocket();
-});
-const startDelayMs = Number(process.env.STUB_START_DELAY_MS ?? 0);
-if (startDelayMs > 0) setTimeout(serve, startDelayMs); else serve();
-process.on("SIGTERM", () => {
-  appendFileSync(join(root, "signals.log"), "SIGTERM " + process.pid + "\\n");
-  try { if (readFileSync(join(root, "hdb.pid"), "utf-8").trim() === String(process.pid)) rmSync(join(root, "hdb.pid")); } catch {}
-  if (!process.env.STUB_HOLD_ON_SIGTERM) process.exit(0);
-});
-`;
 
 // The launchctl stand-in. State lives under $SHIM_STATE:
 //   domain-code           exit code for `print gui/<uid>` (default 0)
@@ -330,6 +290,9 @@ function childEnv(): Record<string, string> {
     STUB_RUNTIME: process.execPath,
     STUB_HARPER: fx.stubHarper,
     STUB_START_LOG: fx.startLog,
+    // The stub ends on its own when THIS process (the test runner) is gone,
+    // whatever signal killed it, and after a hard lifetime backstop (flair#2281).
+    ...stubLifetimeEnv(process.pid),
   };
 }
 
