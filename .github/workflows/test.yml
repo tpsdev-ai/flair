@@ -2008,6 +2008,8 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      - name: Check unit lane matrix coverage
+        run: node scripts/ci/check-lane-matrix.mjs
       # Build the publishable packages so check-impl-term-leaks.sh scans the
       # SAME packages/*/dist/ surface that ships to npm — and that the release
       # build scans. Without this, a bead-ref/internal label in a package's

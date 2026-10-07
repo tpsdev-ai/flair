@@ -50,12 +50,7 @@ export const WORKSPACE_PACKAGES = [
   "cursor-wake-runner",
 ];
 
-/**
- * `packages/*` directories that hold test files the Bun lane cannot run (their
- * tests are written in another language), so they are left out of the plan by
- * name. This is an explicit decision, not a default: any other directory that
- * holds test files and is absent from the plan makes the verifier fail.
- */
+/** Packages with recognized Python test filenames omitted from the Bun plan. */
 export const NON_JS_TEST_PACKAGES = ["adk-flair", "hermes-flair"];
 
 /**
@@ -181,14 +176,7 @@ export function shardSteps(index, of = LANE_SHARDS, steps = unitPlan()) {
   return assignLaneShards(steps, of)[index - 1];
 }
 
-/**
- * Every test file the lane's steps run, found on disk. It walks the same
- * `packages/*` names as the plan, so it reports a file dropped from the
- * assignment (or added to a step the assignment does not run) as missing, but
- * it cannot see a whole package the plan omits — `discoveredTestPackages`
- * covers that. On a clean tree it equals the union of `unitPlan()`'s step
- * files; lane-shards.test.ts pins that.
- */
+/** Files matching `.test.[jt]s` or `.test.[jt]sx` in the planned directories. */
 export function listLaneFiles(root = ROOT) {
   const found = [
     ...testFiles(join(root, "test"), false),
@@ -202,11 +190,11 @@ export function listLaneFiles(root = ROOT) {
   return found.sort();
 }
 
-/** Name patterns that mark a package as holding tests: JS/TS test files, and Python ones the Bun lane cannot run. */
+/** Recognized JS/TS and Python test filenames. */
 const JS_TEST_FILE = /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/;
 const NON_JS_TEST_FILE = /^(?:test_.*|.*_test)\.py$/;
 
-/** Every file under `dir` whose name matches `pattern`; skips node_modules and dot directories. */
+/** Matching regular files; skips node_modules, dot entries and symlinks. */
 function matchingFiles(dir, pattern, found = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
@@ -218,10 +206,8 @@ function matchingFiles(dir, pattern, found = []) {
 }
 
 /**
- * Every `packages/*` directory that holds test files, found on disk rather than
- * read off the plan. `jsTestPackages` hold JS/TS test files and must all be in
- * the plan; `nonJsTestPackages` hold only tests in another language, which the
- * plan may omit only when the package is named in NON_JS_TEST_PACKAGES.
+ * Package names with recognized JS/TS or Python test filenames.
+ * Other languages and omitted files inside planned packages are deferred.
  */
 export function discoveredTestPackages(root = ROOT) {
   const base = join(root, "packages");

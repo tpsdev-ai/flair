@@ -4,7 +4,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { load as loadYaml } from "js-yaml";
@@ -26,6 +26,7 @@ import {
   unitPlan,
   verifyLaneShards,
 } from "../../scripts/ci/lane-shards.mjs";
+import { effectiveMatrix, shardValues, verifyWorkflowMatrix } from "../../scripts/ci/check-lane-matrix.mjs";
 import { parseUnitLaneArgs } from "../../scripts/test-unit.ts";
 
 const fixtures: string[] = [];
@@ -33,7 +34,7 @@ afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive:
 
 /** A root with the minimal directories `unitPlan` requires, plus any planted files. */
 function fixtureRoot(planted: string[] = []): string {
-  const root = mkdtempSync(join(tmpdir(), "flair-lane-shard-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "flair-lane-shard-")));
   fixtures.push(root);
   const requiredDirs = [
     "test", "test/unit", "test/unit-isolated",
@@ -84,7 +85,7 @@ describe("lane-shards — the plan", () => {
     expect(listLaneFiles(ROOT).length).toBeGreaterThan(100);
   });
 
-  test("every package that holds tests on disk is in the plan or allowlisted", () => {
+  test("packages with recognized test filenames are planned or allowlisted", () => {
     const { jsTestPackages, nonJsTestPackages } = discoveredTestPackages(ROOT);
     const res = verifyLaneShards(LANE_SHARDS);
     expect(res.missingTestPackages).toEqual([]);
@@ -94,17 +95,24 @@ describe("lane-shards — the plan", () => {
     expect(plannedTestPackages(unitPlan(ROOT), ROOT)).toEqual([...WORKSPACE_PACKAGES].sort());
   });
 
-  test("a package whose tests are on disk but not in the plan fails the verifier", () => {
+  test("a wholly omitted package with a .test.ts file fails the verifier", () => {
     const root = fixtureRoot(["packages/x/test/a.test.ts"]);
     const res = verifyLaneShards(LANE_SHARDS, unitPlan(root), listLaneFiles(root), root);
     expect(res.missingTestPackages).toEqual(["x"]);
   });
 
-  test("a package whose only tests are non-JS must be named in the allowlist", () => {
+  test("a package with only recognized Python test filenames requires allowlisting", () => {
     const root = fixtureRoot(["packages/py-pkg/tests/test_thing.py"]);
     const res = verifyLaneShards(LANE_SHARDS, unitPlan(root), listLaneFiles(root), root);
     expect(res.missingTestPackages).toEqual([]);
     expect(res.unlistedTestPackages).toEqual(["py-pkg"]);
+  });
+
+  test("other languages and omitted files inside planned packages are deferred", () => {
+    const root = fixtureRoot(["packages/rust-pkg/tests/example.rs", "packages/adk-flair-js/test/integration/extra.test.ts"]);
+    const res = verifyLaneShards(LANE_SHARDS, unitPlan(root), listLaneFiles(root), root);
+    expect(res.missingTestPackages).toEqual([]);
+    expect(res.unlistedTestPackages).toEqual([]);
   });
 
   test("a step's files are covered exactly once across shards", () => {
@@ -381,43 +389,6 @@ describe("lane-shards — CLI", () => {
 
 type Matrix = Record<string, unknown>;
 
-/**
- * The matrix combinations GitHub Actions actually runs: the cartesian product of
- * the axes, minus every `exclude` entry that matches a combination in full, plus
- * every `include` entry (merged into each combination it does not overwrite,
- * otherwise added on its own). Resolving the effective matrix — rather than
- * reading the `shard:` list — is what catches an `exclude` that drops a leg.
- */
-function effectiveMatrix(matrix: Matrix): Matrix[] {
-  const axes = Object.entries(matrix).filter(([key, value]) => key !== "include" && key !== "exclude" && Array.isArray(value));
-  let combos: Matrix[] = axes.reduce<Matrix[]>(
-    (acc, [key, values]) => acc.flatMap(combo => (values as unknown[]).map(value => ({ ...combo, [key]: value }))),
-    [{}],
-  );
-  const asEntries = (value: unknown): Matrix[] => Array.isArray(value) ? value as Matrix[] : [];
-  const matches = (combo: Matrix, entry: Matrix) => Object.entries(entry).every(([key, value]) => combo[key] === value);
-  combos = combos.filter(combo => !asEntries(matrix.exclude).some(entry => matches(combo, entry)));
-  for (const entry of asEntries(matrix.include)) {
-    let merged = false;
-    combos = combos.map(combo => {
-      if (Object.keys(entry).some(key => key in combo && combo[key] !== entry[key])) return combo;
-      merged = true;
-      return { ...combo, ...entry };
-    });
-    if (!merged) combos.push({ ...entry });
-  }
-  return combos;
-}
-
-/** The shard indices the effective matrix runs, sorted. */
-function shardValues(matrix: Matrix): number[] {
-  const values = new Set<number>();
-  for (const combo of effectiveMatrix(matrix)) {
-    if (combo.shard !== undefined) values.add(Number(combo.shard));
-  }
-  return [...values].sort((a, b) => a - b);
-}
-
 function workflowMatrix(text: string): Matrix {
   const doc = loadYaml(text) as { jobs: Record<string, { strategy: { matrix: Matrix } }> };
   return doc.jobs["test-unit"].strategy.matrix;
@@ -430,23 +401,65 @@ describe("lane-shards — the workflow runs it", () => {
     expect(workflow).toContain("node scripts/ci/lane-shards.mjs --verify");
   });
 
-  test("CI runs every lane shard (effective matrix, exclude and include resolved)", () => {
+  test("the workflow matrix contains every required shard index", () => {
     expect(workflow).toMatch(/run: bun run test:unit --keep-going --shard \$\{\{ matrix\.shard \}\} --of 2/);
     expect(shardValues(workflowMatrix(workflow))).toEqual(Array.from({ length: LANE_SHARDS }, (_, i) => i + 1));
   });
 
-  test("an exclude that drops a shard fails the effective-matrix check", () => {
+  test("the matrix resolver removes excluded shard indices", () => {
     const base = { "node-version": ["22", "24"], shard: [1, 2] };
     expect(shardValues(base)).toEqual([1, 2]);
     expect(shardValues({ ...base, exclude: [{ shard: 2 }] })).toEqual([1]);
     // An exclude narrowed by another axis leaves that shard running elsewhere.
     expect(shardValues({ ...base, exclude: [{ "node-version": "24", shard: 2 }] })).toEqual([1, 2]);
     expect(shardValues({ ...base, include: [{ shard: 3 }] })).toEqual([1, 2, 3]);
-    // And through the workflow text: the check the CI actually runs.
     const mutated = workflow.replace(/^( {8}shard: \[[^\]]*\]\n)/m, "$1        exclude:\n          - shard: 2\n");
     expect(mutated).not.toBe(workflow);
     expect(shardValues(workflowMatrix(mutated))).not.toEqual(Array.from({ length: LANE_SHARDS }, (_, i) => i + 1));
     expect(shardValues(workflowMatrix(mutated))).toEqual([1]);
+  });
+
+  test("the matrix checker runs in unsharded doclint", () => {
+    const doc = loadYaml(workflow) as { jobs: Record<string, { strategy?: unknown; if?: unknown; steps: { run?: string; if?: unknown; "continue-on-error"?: boolean }[] }> };
+    const job = doc.jobs.doclint;
+    expect(job.strategy).toBeUndefined();
+    expect(job.if).toBeUndefined();
+    const step = job.steps.find(step => step.run === "node scripts/ci/check-lane-matrix.mjs");
+    expect(step).toBeDefined();
+    expect(step?.if).toBeUndefined();
+    expect(step?.["continue-on-error"]).toBeUndefined();
+  });
+
+  test("excluding the test file's lane shard fails the standalone checker", () => {
+    const checkerFile = join(ROOT, "test/unit/lane-shards.test.ts");
+    const owner = laneShardPlans(unitPlan(ROOT)).findIndex(shard => shard.some(step => step.files.includes(checkerFile))) + 1;
+    expect(owner).toBeGreaterThan(0);
+    const mutated = workflow.replace(/^( {8}shard: \[[^\]]*\]\n)/m, `$1        exclude:\n          - shard: ${owner}\n`);
+    expect(mutated).not.toBe(workflow);
+    const dir = mkdtempSync(join(tmpdir(), "flair-matrix-"));
+    fixtures.push(dir);
+    const path = join(dir, "test.yml");
+    writeFileSync(path, mutated);
+    const result = spawnSync("node", ["scripts/ci/check-lane-matrix.mjs", path], { cwd: ROOT, encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`missing lane shards: ${owner}`);
+    expect(() => verifyWorkflowMatrix(workflow)).not.toThrow();
+  });
+
+  test("later includes overwrite added values on original combinations", () => {
+    const matrix = { "node-version": ["22"], include: [{ shard: 2 }, { shard: 1 }] };
+    expect(effectiveMatrix(matrix)).toEqual([{ "node-version": "22", shard: 1 }]);
+    expect(shardValues(matrix)).toEqual([1]);
+    expect(() => verifyWorkflowMatrix(`jobs:\n  test-unit:\n    strategy:\n      matrix: ${JSON.stringify(matrix)}`)).toThrow("missing lane shards: 2");
+  });
+
+  test("includes that conflict with originals add separate combinations", () => {
+    expect(effectiveMatrix({ fruit: ["apple", "pear"], include: [{ color: "green" }, { color: "pink", fruit: "apple" }, { fruit: "banana" }, { fruit: "banana", color: "yellow" }] })).toEqual([
+      { fruit: "apple", color: "pink" }, { fruit: "pear", color: "green" },
+      { fruit: "banana" }, { fruit: "banana", color: "yellow" },
+    ]);
+    expect(effectiveMatrix({ include: [{ shard: 2 }, { shard: 1 }] })).toEqual([{ shard: 2 }, { shard: 1 }]);
+    expect(effectiveMatrix({ shard: [1, 2], exclude: [{ shard: 2 }], include: [{ shard: 2 }] })).toEqual([{ shard: 1 }, { shard: 2 }]);
   });
 
   test("--shard/--of are accepted by the runner's own argument parser", () => {
