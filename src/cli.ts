@@ -5148,12 +5148,12 @@ const DARWIN_STATE_READ_TIMEOUT_MS = 5_000;
  * (flair#2330). A failure or empty output returns null — the caller treats that
  * as "not exited", never as exited (fail safe).
  */
-function readDarwinProcessState(pid: number): string | null {
+function readDarwinProcessState(pid: number, timeoutMs: number): string | null {
   try {
     const out = execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], {
       encoding: "utf-8",
       env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
-      timeout: DARWIN_STATE_READ_TIMEOUT_MS,
+      timeout: timeoutMs,
       killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
@@ -5169,16 +5169,16 @@ function readDarwinProcessState(pid: number): string | null {
  * first character of `/bin/ps -o stat=` (flair#2330). A read failure returns
  * null — the caller treats that as "not exited", never as exited (fail safe).
  */
-function readProcessState(pid: number): string | null {
+function readProcessState(pid: number, timeoutMs: number): string | null {
   if (process.platform === "linux") {
     try { return parseProcStatState(readFileSync(`/proc/${pid}/stat`, "utf-8")); } catch { return null; }
   }
-  if (process.platform === "darwin") return readDarwinProcessState(pid);
+  if (process.platform === "darwin") return readDarwinProcessState(pid, timeoutMs);
   return null;
 }
 
 /**
- * `kill(pid, 0)` as a four-way: alive / gone (ESRCH) / eperm (another user's) /
+ * Process liveness: alive / gone (ESRCH or zombie) / eperm (another user's) /
  * unknown.
  *
  * Signal 0 says the pid EXISTS, which is not the same as running: an exited
@@ -5199,7 +5199,8 @@ function readProcessState(pid: number): string | null {
  */
 export function probePidLiveness(
   pid: number,
-  readState: (pid: number) => string | null = readProcessState,
+  readState: (pid: number, timeoutMs: number) => string | null = readProcessState,
+  deadlineMs: number = Infinity,
 ): PidLiveness {
   try {
     process.kill(pid, 0);
@@ -5209,8 +5210,13 @@ export function probePidLiveness(
     // classifier's unknown state (flair#2055).
     return livenessFromKillError(err?.code);
   }
-  let state = readState(pid);
-  if (state === null) state = readState(pid);
+  let state: string | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const timeoutMs = Math.min(DARWIN_STATE_READ_TIMEOUT_MS, deadlineMs - Date.now());
+    if (timeoutMs <= 0) break;
+    state = readState(pid, timeoutMs);
+    if (state !== null) break;
+  }
   return isExitedState(state) ? { kind: "gone" } : { kind: "alive" };
 }
 
@@ -5219,29 +5225,25 @@ export function probePidLiveness(
  * `deadlineMs` passes; return whether `gone` was read and the last read
  * (flair#2330). This is `flair doctor`'s stop wait.
  *
- * The probe is re-read on EVERY poll, so a single failed or empty state read —
- * which `probePidLiveness` reports as `alive` (fail safe) — does not end the
- * wait: the next poll reads the pid's state again, and a zombie is reported
- * `gone` on a later poll within the wait. `gone` counts only when it is read
- * BEFORE the deadline; a read that succeeds only at the deadline is a timeout
- * the caller reports (flair#2205). `readState` is injectable so a failing or
- * slow read is unit-testable.
+ * If both state reads fail, that poll stays `alive`.
+ * `gone` counts only when observed before the deadline.
  */
 export async function waitForPidGone(
   pid: number,
   deadlineMs: number,
-  readState: (pid: number) => string | null = readProcessState,
+  readState: (pid: number, timeoutMs: number) => string | null = readProcessState,
   pollMs: number = HEALTH_POLL_INTERVAL_MS,
 ): Promise<{ gone: boolean; last: PidLiveness }> {
+  let last: PidLiveness = { kind: "unknown", reason: "the stop deadline passed before a probe" };
   while (Date.now() < deadlineMs) {
-    const last = probePidLiveness(pid, readState);
+    last = probePidLiveness(pid, readState, deadlineMs);
     if (Date.now() >= deadlineMs) return { gone: false, last };
     if (last.kind === "gone") return { gone: true, last };
     const remaining = deadlineMs - Date.now();
     if (remaining <= 0) break;
     await new Promise((r) => setTimeout(r, Math.min(pollMs, remaining)));
   }
-  return { gone: false, last: probePidLiveness(pid, readState) };
+  return { gone: false, last };
 }
 
 /**

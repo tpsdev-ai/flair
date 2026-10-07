@@ -67,11 +67,66 @@ describe("flair#2330 — the stop wait re-reads the state on its next poll", () 
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
-  test("a read that never stops failing ends the wait alive at the deadline (fail safe)", async () => {
+  test("failed reads leave the stop wait alive", async () => {
     const deadline = Date.now() + 250;
     const outcome = await waitForPidGone(LIVE_PID, deadline, () => null, 10);
     expect(outcome.gone).toBe(false);
     expect(outcome.last.kind).toBe("alive");
     expect(Date.now()).toBeGreaterThanOrEqual(deadline - 50);
+  });
+
+  test("the stop wait returns its last poll without a probe after expiry", async () => {
+    let calls = 0;
+    const outcome = await waitForPidGone(LIVE_PID, Date.now() + 30, () => {
+      calls++;
+      return "R";
+    }, 100);
+    expect(outcome).toEqual({ gone: false, last: { kind: "alive" } });
+    expect(calls).toBe(1);
+  });
+
+  test("an expired stop wait does not probe", async () => {
+    let calls = 0;
+    const outcome = await waitForPidGone(LIVE_PID, Date.now() - 1, () => {
+      calls++;
+      return "Z";
+    });
+    expect(outcome.gone).toBe(false);
+    expect(outcome.last.kind).toBe("unknown");
+    expect(calls).toBe(0);
+  });
+
+  test("slow failed reads share the stop deadline", async () => {
+    const started = Date.now();
+    const deadline = started + 100;
+    const reads: number[] = [];
+    const slow = (_pid: number, budgetMs = 5_000) => {
+      reads.push(Date.now());
+      const end = Date.now() + Math.min(200, budgetMs);
+      while (Date.now() < end) { /* spin */ }
+      return null;
+    };
+    const outcome = await waitForPidGone(LIVE_PID, deadline, slow, 10);
+    expect(Date.now() - started).toBeLessThanOrEqual(135);
+    expect(outcome).toEqual({ gone: false, last: { kind: "alive" } });
+    expect(reads.every((at) => at < deadline)).toBe(true);
+  });
+
+  test("the retry receives the remaining stop budget", async () => {
+    const started = Date.now();
+    const deadline = started + 100;
+    const budgets: number[] = [];
+    const slow = (_pid: number, budgetMs = 5_000) => {
+      budgets.push(budgetMs);
+      const end = Date.now() + Math.min(budgets.length === 1 ? 30 : 200, budgetMs);
+      while (Date.now() < end) { /* spin */ }
+      return null;
+    };
+    const outcome = await waitForPidGone(LIVE_PID, deadline, slow, 10);
+    expect(Date.now() - started).toBeLessThanOrEqual(135);
+    expect(outcome).toEqual({ gone: false, last: { kind: "alive" } });
+    expect(budgets).toHaveLength(2);
+    expect(budgets[0]).toBeLessThanOrEqual(100);
+    expect(budgets[1]).toBeLessThanOrEqual(70);
   });
 });

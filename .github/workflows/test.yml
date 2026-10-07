@@ -291,7 +291,7 @@ jobs:
           import { spawnSync } from "node:child_process";
           const path = "src/cli.ts";
           const source = readFileSync(path, "utf8");
-          const original = 'if (process.platform === "darwin") return readDarwinProcessState(pid);';
+          const original = 'if (process.platform === "darwin") return readDarwinProcessState(pid, timeoutMs);';
           if (source.split(original).length !== 2) throw new Error("Darwin state reader not uniquely found");
           try {
             writeFileSync(path, source.replace(original, 'if (process.platform === "darwin") return null;'));
