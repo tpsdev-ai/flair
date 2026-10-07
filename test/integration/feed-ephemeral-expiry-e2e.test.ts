@@ -48,10 +48,10 @@ async function seedAgent(harper: HarperInstance, agent: TestAgent): Promise<void
 }
 
 /** The stored row's durability + expiresAt, read back through the admin surface. */
-async function readStored(harper: HarperInstance, id: string): Promise<{ durability?: string; expiresAt?: string | null } | null> {
+async function readStored(harper: HarperInstance, id: string): Promise<{ durability?: string; expiresAt?: string | null; createdAt?: string } | null> {
   const read = await adminOp(harper, {
     operation: "search_by_value", database: "flair", table: "Memory",
-    search_attribute: "id", search_value: id, get_attributes: ["id", "durability", "expiresAt"],
+    search_attribute: "id", search_value: id, get_attributes: ["id", "durability", "expiresAt", "createdAt"],
   });
   expect(read.status).toBe(200);
   const rows = await read.json();
@@ -262,9 +262,10 @@ describe("signed federation expiry", () => {
     });
     expect(insert.status).toBe(200);
     const before = Date.now();
-    expect((await receive(id, {})).merged).toBe(1);
+    expect((await receive(id, { createdAt: "2020-01-01T00:00:00.000Z" })).merged).toBe(1);
     const stored = await readStored(harper, id);
     expect(stored?.durability).toBe("ephemeral");
+    expect(stored?.createdAt).toBe("2020-01-01T00:00:00.000Z");
     expect(Date.parse(stored!.expiresAt!)).toBeGreaterThanOrEqual(before + Number(TTL_HOURS) * 3600000);
     expect(Date.parse(stored!.expiresAt!)).toBeLessThanOrEqual(Date.now() + Number(TTL_HOURS) * 3600000);
   }, 30000);

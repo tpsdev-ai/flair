@@ -46,7 +46,11 @@ mock.module("harper", () => ({
       },
       Memory: {
         search: () => gen(() => memStore.values()),
-        put: async (r: any) => { memStore.set(r.id, { ...r }); return r; },
+        put: async (r: any) => {
+          for (const field of ["agentId", "content", "createdAt"]) expect(typeof r[field]).toBe("string");
+          memStore.set(r.id, JSON.parse(JSON.stringify(r)));
+          return r;
+        },
       },
       Instance: {
         search: () => gen(() => (instanceRow ? [instanceRow] : [])),
@@ -131,5 +135,24 @@ describe("flair#1965 r3 — AgentSeed fails closed on a failed existing-Agent lo
     // No Soul/Memory rows were created either (the seed refused before them).
     expect(soulStore.size).toBe(0);
     expect(memStore.size).toBe(0);
+  });
+});
+
+describe("AgentSeed ephemeral expiry", () => {
+  test("stores the configured TTL through the seed writer", async () => {
+    const prior = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
+    process.env.FLAIR_EPHEMERAL_TTL_HOURS = "6";
+    try {
+      const before = Date.now();
+      const result: any = await seed().post({ agentId: "expiry-seed", starterMemories: [{ content: "starter note", durability: "ephemeral" }] });
+      expect(result.memories).toHaveLength(1);
+      const stored = memStore.get(result.memories[0].id);
+      expect(stored.durability).toBe("ephemeral");
+      expect(Date.parse(stored.expiresAt)).toBeGreaterThanOrEqual(before + 6 * 3600000);
+      expect(Date.parse(stored.expiresAt)).toBeLessThanOrEqual(Date.now() + 6 * 3600000);
+    } finally {
+      if (prior === undefined) delete process.env.FLAIR_EPHEMERAL_TTL_HOURS;
+      else process.env.FLAIR_EPHEMERAL_TTL_HOURS = prior;
+    }
   });
 });
