@@ -285,7 +285,9 @@ type MemoryHitStat @table(database: "flair") {
 # undeclared attributes except the named bookkeeping fields (f1-out/f1-in).
 #
 # Cascade (A1' item 6 / A1'' item 2): `Memory.delete` and maintenance expiry or
-# age-based archival delete the pointer with their Memory operation. `MemoryArchive`
+# age-based archival delete the pointer with their Memory operation. POST
+# /MemoryPurge deletes a pointer only after a read after its row delete's commit
+# finds the row gone, so a row still stored keeps its pointer. `MemoryArchive`
 # basement/restore retains the pointer row; the join suppresses it while the Memory
 # is archived. `Memory.delete` joins a request transaction when present; maintenance
 # uses an owned transaction per item (c3). An orphan sweep re-checks inside the
@@ -403,10 +405,12 @@ type OrgSkillAssignment @table(database: "flair") {
   sourceClass: String!             # operator | internal
 }
 
-# Deletion history for confirmed physical deletions of permanent/persistent
-# Memory rows through Memory.delete (including CLI hygiene and agent remove),
-# appended in the delete transaction. Non-durable deletes, including
-# maintenance expiry, append no history.
+# Deletion history for physical deletions of permanent/persistent Memory rows,
+# appended in the delete's transaction by Memory.delete and by POST /MemoryPurge
+# (the path CLI hygiene and agent remove use). For a row still stored after the
+# commit, MemoryPurge attempts history cleanup and checks for absence after its
+# commit; unconfirmed cleanup returns 500 memory_purge_history_cleanup_unconfirmed.
+# Non-durable deletes, including maintenance expiry, append no history.
 # No @export and no resource class: there is no direct route.
 type MemoryDeletionHistory @table(database: "flair") {
   id: ID @primaryKey               # unique per deletion record (a memory id can be deleted and re-created)

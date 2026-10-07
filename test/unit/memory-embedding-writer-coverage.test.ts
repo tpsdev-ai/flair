@@ -96,6 +96,8 @@ add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "wr
 // write site remains.
 add("MemoryMaintenance", ["writer:table.delete#1"], "OTHER_TABLE",
   "MemoryHostSource pointer cascade (A1') — not the Memory table, never an embeddingModel.");
+add("MemoryPurge", ["writer:memory.delete#1"], "NON_EMBED",
+  "Physical removal — a delete; never writes embeddingModel.");
 add("Memory", ["writer:patchRecord#1", "writer:super.patch#2", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "derivedFrom/lastReflected patch, patch(), and delete() — never write embeddingModel.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");

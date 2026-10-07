@@ -71,6 +71,12 @@ add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "wr
   "Maintenance (archive/expiry) — non-skill.");
 add("MemoryMaintenance", ["writer:table.delete#1"],
   "A1': MemoryHostSource pointer cascade — a different table, never skill content.");
+
+// ── Physical removal (MemoryPurge) ──
+add("MemoryPurge", ["writer:memory.delete#1"],
+  "Physical-removal path: removes the named rows (and a skill row's lineage) through the raw table handle — a removal, not a skill write, so the post/put SkillScan gate does not apply.");
+add("MemoryPurge", ["alias-source:(databases as any).flair?.Memory#1"],
+  "Read handle (MemoryPurge reads each row and searches a skill lineage); its delete is the site classified above.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:Memory.put#1"],

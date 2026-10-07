@@ -55,6 +55,8 @@ add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
 // ── OPERATOR ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
   "OPERATOR: POST /AgentSeed requires the operator source (authorizeSoulWrite), the authority the reservation asks for.");
+add("MemoryPurge", ["writer:memory.delete#1"],
+  "OPERATOR: POST /MemoryPurge requires the operator source (soulWriteSource in allowCreate), the authority the reservation asks for.");
 
 // ── BOOKKEEPING (deliberately open; see the distinctions above) ──
 add("Memory", ["writer:patchRecord#1"],
@@ -112,6 +114,7 @@ for (const [file, alias] of [
   ["health", "alias-source:db.flair?.Memory#1"],
   ["migration-boot", "alias-source:flair?.Memory#1"],
   ["bm25-index-service", "alias-source:(databases as any).flair?.Memory#1"],
+  ["MemoryPurge", "alias-source:(databases as any).flair?.Memory#1"],
   ["embedding-space-guard", "alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
   ["migrations/embedding-stamp", "alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
   ["migrations/graph-heal", "alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
