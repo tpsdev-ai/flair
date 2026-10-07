@@ -83,20 +83,27 @@ async function validatePublication(content: any): Promise<Response | null> {
   return null;
 }
 
-const ADDRESS_FROZEN = () =>
+/** True when a delete target is one row id: a string or number, or a non-collection request target carrying one. */
+function namesOneRow(target: any): boolean {
+  if (typeof target === "string" || typeof target === "number") return true;
+  if (target == null || typeof target !== "object" || target.isCollection === true) return false;
+  return typeof target.id === "string" || typeof target.id === "number";
+}
+
+const BINDING_FROZEN = () =>
   CONFLICT(
-    "integration_directory_withdraw_before_address_change",
-    "withdraw the published contact (set directoryPublishedAt to null) before changing its address",
+    "integration_directory_withdraw_before_binding_change",
+    "withdraw the published contact (set directoryPublishedAt to null) before changing its agentId, platform or email",
   );
 
 /**
  * True when `stored` is published and this write would change its effective
- * email or platform. `replaces` is true for a full-row `put`, where an omitted
- * field is removed; otherwise an omitted field keeps its stored value.
+ * agentId, platform or email. `replaces` is true for a full-row `put`, where an
+ * omitted field is removed; otherwise an omitted field keeps its stored value.
  */
-function changesPublishedAddress(content: any, stored: any, replaces: boolean): boolean {
+function changesPublishedBinding(content: any, stored: any, replaces: boolean): boolean {
   if (!stored || !isValidPublicationStamp(stored[DIRECTORY_STAMP_FIELD])) return false;
-  return ["email", "platform"].some((field) => {
+  return ["agentId", "platform", "email"].some((field) => {
     const next = hasField(content, field) ? content[field] : replaces ? undefined : stored[field];
     return next !== stored[field];
   });
@@ -118,13 +125,13 @@ async function resolvePublicationStamp(
     const denial = await requireOperator(self, "publication and withdrawal are operator-only");
     if (denial) return { denial };
     if (content[DIRECTORY_STAMP_FIELD] === null) return { stamp: null };
-    if (changesPublishedAddress(content, stored, replaces)) return { denial: ADDRESS_FROZEN() };
+    if (changesPublishedBinding(content, stored, replaces)) return { denial: BINDING_FROZEN() };
     const invalid = await validatePublication(content);
     if (invalid) return { denial: invalid };
     return { stamp: new Date().toISOString() };
   }
 
-  if (changesPublishedAddress(content, stored, replaces)) return { denial: ADDRESS_FROZEN() };
+  if (changesPublishedBinding(content, stored, replaces)) return { denial: BINDING_FROZEN() };
   return {};
 }
 
@@ -135,7 +142,7 @@ async function resolvePublicationStamp(
  * agentId. Mirrors the WorkspaceState pattern.
  *
  * Integration resource publication writes require an operator source and stamp
- * the time. Resource writes freeze a published address until withdrawal.
+ * the time. Resource writes freeze a published binding until withdrawal.
  */
 export class Integration extends (databases as any).flair.Integration {
   private _auth() {
@@ -251,12 +258,16 @@ export class Integration extends (databases as any).flair.Integration {
   }
 
   async delete(id: any) {
-    // Use super.get(id), NOT this.get(id): the new get() override above 404s
-    // (a truthy Response) for a non-owner id, which would otherwise defeat
-    // the `if (!record)` check below and mis-route a genuinely-missing
-    // record into the FORBIDDEN branch instead of a clean super.delete(id)
-    // no-op. Mirrors Memory.ts's delete() — same rationale, same fix.
-    const record = await super.get(id);
+    // A collection or query target can match many rows: require the operator
+    // before any row is read.
+    if (!namesOneRow(id)) {
+      const denial = await requireOperator(this, "deleting by a collection or query target is operator-only");
+      if (denial) return denial;
+      return super.delete(id);
+    }
+
+    // Authorize from the full stored row, read by id from the table.
+    const record = await (databases as any).flair.Integration.get(typeof id === "object" ? id.id : id, (this as any).getContext?.());
 
     // Removing a published directory entry is operator-only — a withdrawal
     // (directoryPublishedAt: null) is the routine way to hide it.

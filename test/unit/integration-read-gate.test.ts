@@ -314,6 +314,29 @@ describe("Integration directory publication — non-operator refusals", () => {
     }
   });
 
+  it("an admin agent cannot reassign a published row's agentId by patch or put (409), unchanged", async () => {
+    for (const verb of ["patch", "put"] as const) {
+      seedPublished();
+      const i = makeIntegration(agentCtx("agent-admin", true), "int-1");
+      const body = verb === "patch"
+        ? { id: "int-1", agentId: "agent-b" }
+        : { id: "int-1", agentId: "agent-b", platform: "tps-mail", email: "a@example.test" };
+      const res = await (i as any)[verb](body);
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(409);
+      expect(integrationStore.get("int-1").agentId).toBe("agent-a");
+    }
+  });
+
+  it("an admin agent cannot delete by a collection target (403), nothing deleted", async () => {
+    seedPublished();
+    const i = makeIntegration(agentCtx("agent-admin", true));
+    const res = await (i as any).delete({ isCollection: true, conditions: [] });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(integrationStore.has("int-1")).toBe(true);
+  });
+
   it("a runtime owner cannot delete a published entry (403)", async () => {
     seedPublished();
     const i = makeIntegration(agentCtx("agent-a"), "int-1");
