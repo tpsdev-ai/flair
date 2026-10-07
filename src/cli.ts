@@ -7529,10 +7529,6 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
           stop.failure.detail += " Previously loaded launchd jobs were unloaded.";
         }
         if (stop.observedExit && stop.failure.kind === "failed") {
-          // flair#2284: the stop already observed the old process exit; the
-          // listener probe's failure does not undo that. Carry the observed
-          // exit into the restore path (restoreAfterFailedRepair) so the
-          // instance is brought back rather than left stopped.
           done.stopped = true;
           throw new Error(stop.failure.detail);
         }
@@ -7727,12 +7723,6 @@ async function restoreAfterFailedRepair(
   };
 }
 
-/**
- * The adopt path's clean-stop outcome. `failure` is the result the caller would
- * otherwise return; `observedExit` (flair#2284) marks a failure the caller can
- * restore around — this step signalled the running process and observed it
- * exit, so the instance can be brought back rather than left stopped.
- */
 interface AdoptStopOutcome {
   failure: LaunchdRepairResult;
   observedExit: boolean;
@@ -7740,7 +7730,7 @@ interface AdoptStopOutcome {
 
 /**
  * Clean-stop the direct (non-launchd) process serving `dataDir`+`port` for the
- * adopt path (flair#1573 slice b2). Returns a `failed` result when the process
+ * adopt path (flair#1573 slice b2). Returns a failure outcome when the process
  * cannot be attributed (never stop a foreign process) or the port is still
  * occupied after the stop; returns null when the port is free and the caller
  * should proceed to regenerate + load.
@@ -7749,21 +7739,13 @@ interface AdoptStopOutcome {
  * (pidfile + sidecar + start time) before any signal, so a DISAGREEMENT/UNKNOWN
  * verdict refuses rather than gambling on a recycled pid. The stop is SIGTERM +
  * wait for exit — never kill -9.
- *
- * A listener-probe failure that could not determine the port's state reports
- * `observedExit` (flair#2284) when the signalled process was observed to exit
- * and the shared stop deadline still has budget, so the caller can route it
- * through the restore path.
  */
 async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise<AdoptStopOutcome | null> {
   const evidence = await gatherDaemonEvidence(port, dataDir);
   const state = classifyDaemonState(evidence, { port, dataDir });
   const stopDeadline = Date.now() + ADOPT_STOP_TIMEOUT_MS;
-  // Set once the signalled process is observed to exit (flair#2284). The
-  // listener-probe failures below report it by default, unless the shared stop
-  // deadline is already spent — then there is no budget left to restore.
   let observedExit = false;
-  const failure = (result: LaunchdRepairResult, observed = observedExit && Date.now() < stopDeadline): AdoptStopOutcome => ({ failure: result, observedExit: observed });
+  const failure = (result: LaunchdRepairResult): AdoptStopOutcome => ({ failure: result, observedExit });
   const timeoutResult = (stage: string): LaunchdRepairResult => ({
     kind: "failed",
     detail: `Timed out after ${ADOPT_STOP_TIMEOUT_MS}ms ${stage} for ${dataDir}. No replacement launchd job was loaded.`,
@@ -7793,9 +7775,7 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
         ? `${identity.kind}, observed at ${new Date(identityObservedAt).toISOString()}`
         : "not observed before the deadline";
       if (result.kind === "failed") result.detail += ` ${signalResult}; not observed to exit before the deadline (liveness: ${liveness.kind}; identity: ${identityDetail}).`;
-      // The process survived SIGTERM: nothing was stopped, so a later failure
-      // must not restart anything (flair#2284).
-      return failure(result, false);
+      return failure(result);
     }
     // The signalled process exited before the shared deadline (flair#2284).
     observedExit = true;
@@ -7811,11 +7791,11 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
     if (remaining <= 0) break;
     await new Promise((r) => setTimeout(r, Math.min(250, remaining)));
   }
-  if (Date.now() >= stopDeadline) return failure(timeoutResult(`waiting for port ${port} to free (last health probe: ${health.kind})`), false);
+  if (Date.now() >= stopDeadline) return failure(timeoutResult(`waiting for port ${port} to free (last health probe: ${health.kind})`));
   const decision = decideAdoptStop(state, health);
   if (decision !== "proceed") return failure(decision);
   const listenerTimeout = Math.min(2_000, stopDeadline - Date.now());
-  if (listenerTimeout <= 0) return failure(timeoutResult(`checking the final listener on port ${port}`), false);
+  if (listenerTimeout <= 0) return failure(timeoutResult(`checking the final listener on port ${port}`));
   let output: string;
   let noMatch = false;
   try {
@@ -7829,9 +7809,6 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
       output = "";
       noMatch = true;
     } else {
-      // The listener probe could not determine the port's state (flair#2207).
-      // This failure is restore-eligible when the process was observed to exit
-      // and the shared stop deadline still has budget (flair#2284).
       return failure({
         kind: "failed",
         detail: `Final listener probe failed for port ${port} (${err?.code ?? err?.signal ?? err?.status ?? "unknown error"}). No replacement launchd job was loaded.`,
@@ -7839,7 +7816,7 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
       });
     }
   }
-  if (Date.now() >= stopDeadline) return failure(timeoutResult(`checking the final listener on port ${port}`), false);
+  if (Date.now() >= stopDeadline) return failure(timeoutResult(`checking the final listener on port ${port}`));
   if (noMatch) return null;
   if (typeof output !== "string" || output.trim() === "") {
     return failure({ kind: "failed", detail: `Final listener probe failed for port ${port} (unusable lsof output).`, remedy: ["Check lsof", "flair doctor --fix"] });
@@ -7850,13 +7827,11 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
   }
   const listeners = lines.map(Number);
   if (listeners.length > 0) {
-    // A listener that IS there is not a probe that failed: nothing to restore
-    // around, and starting a second instance on the held port would collide.
     return failure({
       kind: "failed",
       detail: `port still occupied after stopping the direct process (listener pid ${listeners.join(", ")})`,
       remedy: ["flair stop", "flair doctor --fix"],
-    }, false);
+    });
   }
   return null;
 }

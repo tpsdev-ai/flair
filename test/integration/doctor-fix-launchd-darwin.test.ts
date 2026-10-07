@@ -847,6 +847,62 @@ function assertDirectSidecar(sb: Sandbox, spawnedPid: number): void {
 }
 
 test.skipIf(!isDarwin)(
+  "adopt listener-probe failure attempts restoration of a real Harper instance",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    await stopManagedHarper(sb);
+    const directPid = await directSpawnDetached(sb);
+    assertDirectSidecar(sb, directPid);
+    const shimDir = join(sb.tmpHome, "probe-bin");
+    const failedProbe = join(sb.tmpHome, "failed-probe");
+    mkdirSync(shimDir);
+    writeFileSync(join(shimDir, "lsof"), `#!/bin/sh
+if ! /bin/kill -0 "$ADOPT_TEST_PID" 2>/dev/null && [ ! -e "$ADOPT_TEST_PROBE" ]; then
+  touch "$ADOPT_TEST_PROBE"
+  exit 2
+fi
+exec /usr/sbin/lsof "$@"
+`, { mode: 0o700 });
+    const script = `import { repairLaunchdManagement } from ${JSON.stringify(CLI_JS)};
+const result = await repairLaunchdManagement(${JSON.stringify(sb.dataDir)}, ${sb.httpPort});
+console.log("REPAIR_RESULT:" + JSON.stringify(result));`;
+    const result = spawnSync(nodeBin(), ["--input-type=module", "-e", script], {
+      cwd: REPO_ROOT,
+      env: {
+        ...doctorEnv(sb.tmpHome),
+        PATH: `${shimDir}:${process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin"}`,
+        ADOPT_TEST_PID: String(directPid),
+        ADOPT_TEST_PROBE: failedProbe,
+      },
+      encoding: "utf8",
+      timeout: 180_000,
+      killSignal: "SIGKILL",
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(existsSync(failedProbe)).toBe(true);
+    const line = result.stdout.split("\n").find((value) => value.startsWith("REPAIR_RESULT:"));
+    expect(line).toBeDefined();
+    const repair = JSON.parse(line!.slice("REPAIR_RESULT:".length));
+    expect(repair.kind).toBe("failed");
+    expect(repair.detail).toContain("Final listener probe failed");
+    expect(repair.detail).toContain("Flair was restarted directly");
+    expect(repair.remedy).toEqual(["flair doctor --fix"]);
+    expect(isAlive(directPid)).toBe(false);
+    const restoredPid = instancePid(sb.dataDir, sb.httpPort);
+    expect(restoredPid).not.toBeNull();
+    expect(restoredPid).not.toBe(directPid);
+    expect(launchctlList(sb.label).code).not.toBe(0);
+    expect(isAlive(restoredPid!)).toBe(true);
+    const health = await fetch(`${sb.httpURL}/Health`, { signal: AbortSignal.timeout(2_000) });
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ ok: true });
+  }),
+  850_000,
+);
+
+test.skipIf(!isDarwin)(
   "corrupt or missing launchd plist: doctor --fix regenerates and comes up managed",
   diagnosed(async () => {
     requireCliBuild();
