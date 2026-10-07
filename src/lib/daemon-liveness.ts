@@ -334,6 +334,37 @@ export function parseProcStatStartTime(stat: string): number | null {
 }
 
 /**
+ * Parse the state character (field 3) of `/proc/<pid>/stat`.
+ *
+ * Field 2 (comm) is parenthesised and may itself contain spaces and `)`
+ * characters, so the split is on the LAST `)` — the same rule
+ * `parseProcStatStartTime` uses. Returns null when no state follows the comm.
+ */
+export function parseProcStatState(stat: string): string | null {
+  const closeParen = stat.lastIndexOf(")");
+  if (closeParen < 0) return null;
+  const rest = stat.slice(closeParen + 1).trim();
+  return rest.length > 0 ? rest[0] : null;
+}
+
+/**
+ * Whether a process-state character names an EXITED process (flair#2313).
+ *
+ * After signal 0 succeeds the pid exists — but an exited child its parent has
+ * not yet reaped is a zombie: it exists, it answers signal 0, and it is not a
+ * running process. The kernel reports it as state `Z` (Linux field 3 of
+ * `/proc/<pid>/stat`; Darwin the first character of `ps -o stat=`), so `Z` is
+ * exited.
+ *
+ * Every other value — including `null`, a state that could not be read — is
+ * NOT evidence of exit: a read failure must never report a live process as
+ * exited (fail safe).
+ */
+export function isExitedState(state: string | null): boolean {
+  return state === "Z";
+}
+
+/**
  * Convert a `/proc/<pid>/stat` starttime (clock ticks since boot) to epoch ms,
  * given the system uptime in seconds and the current wall clock. Pure so the
  * arithmetic is testable without a live process.

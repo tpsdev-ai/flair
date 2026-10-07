@@ -217,6 +217,9 @@ export class Integration extends (databases as any).flair.Integration {
       if (ownerDenial) return ownerDenial;
       const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
       if (stored.denial) return stored.denial;
+      // An absent addressed row answers NOT_FOUND instead of reaching
+      // super.patch() (flair#2322): deliberate and fail-closed for the
+      // directory publication read, and a narrowing beyond that surface.
       if (!stored.row) return NOT_FOUND();
       const pub = await resolvePublicationStamp(this, content, stored.row, false);
       if (pub.denial) return pub.denial;
@@ -263,6 +266,18 @@ export class Integration extends (databases as any).flair.Integration {
     if (!namesOneRow(id)) {
       const denial = await requireOperator(this, "deleting by a collection or query target is operator-only");
       if (denial) return denial;
+      if (id && typeof id === "object" && id.isCollection) {
+        const scanTarget = Object.assign(
+          new URLSearchParams(id instanceof URLSearchParams ? id : undefined),
+          { sort: null },
+          id,
+          { select: ["$id"] },
+        );
+        for await (const row of await this.search(scanTarget)) {
+          await super.delete((row as any).$id);
+        }
+        return true;
+      }
       return super.delete(id);
     }
 
