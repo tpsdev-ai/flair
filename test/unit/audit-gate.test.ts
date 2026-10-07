@@ -344,8 +344,7 @@ describe("the committed allowlist", () => {
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
     // sources ["npm-install"] so the gate knows they are fixed for bun only.
     const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fast-uri");
-    // Name the fast-uri entries: a non-empty check alone could be satisfied by
-    // another package's entries while fast-uri's had gone missing.
+    // Exact IDs catch missing or substituted fast-uri advisories.
     expect(npmOnly.map((e) => e.ghsa).sort()).toEqual([
       "GHSA-4c8g-83qw-93j6",
       "GHSA-7p8r-x3mc-p8w7",
