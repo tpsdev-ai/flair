@@ -725,7 +725,7 @@ the flair#1050 invariant (it boots Harper via `startHarper`, so the CLI stamp
 phrasing is not on that path).
 
 **Engine-version break: Harper 5.2 → 5.3.** This release attempts to write an `engine-version.txt` stamp into
-`~/.flair/data` at boot; the write is best effort. With a readable stamp and a known installed Harper version, an older guarded Flair refuses before Harper opens the store if the stamp is newer or the versions cannot be compared. A failed write can leave a stale stamp.
+`ROOTPATH` (or `~/.flair/data` when unset) at boot; the write is best effort. With a readable stamp and a known installed Harper version, an older guarded Flair refuses before Harper opens the store if the stamp is newer or the versions cannot be compared. A failed write can leave a stale stamp.
 The remedy is the same as the breaks above: restore
 the pre-upgrade snapshot (`flair snapshot restore <path>`) or a `flair backup` export
 taken on the older version.

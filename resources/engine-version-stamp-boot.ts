@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,8 +10,8 @@ function packageRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
-/** Attempt to stamp the default HOME data directory with the running engine version. */
-export function stampEngineVersionOnBoot(dataDir: string = join(
+/** Attempt to stamp the data directory. */
+export function stampEngineVersionOnBoot(dataDir: string = process.env.ROOTPATH || join(
   (process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME) || homedir(), ".flair", "data",
 )): void {
   try {
@@ -22,7 +23,20 @@ export function stampEngineVersionOnBoot(dataDir: string = join(
         version = JSON.parse(readFileSync(pkgPath, "utf8")).version;
       } catch { continue; }
       if (version) {
-        writeFileSync(join(dataDir, ENGINE_VERSION_STAMP), `${version}\n`, "utf8");
+        const stampPath = join(dataDir, ENGINE_VERSION_STAMP);
+        const temporary = `${stampPath}.${process.pid}.${randomUUID()}.tmp`;
+        let fd: number | undefined;
+        try {
+          fd = openSync(temporary, "wx", 0o600);
+          writeFileSync(fd, `${version}\n`, "utf8");
+          fsyncSync(fd);
+          closeSync(fd);
+          fd = undefined;
+          renameSync(temporary, stampPath);
+        } finally {
+          if (fd !== undefined) closeSync(fd);
+          try { unlinkSync(temporary); } catch {}
+        }
         return;
       }
     }

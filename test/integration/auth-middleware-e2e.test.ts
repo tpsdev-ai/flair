@@ -9,6 +9,7 @@
 // MODEL: test/integration/ed25519-auth-hnsw.test.ts — boots Harper via
 // startHarper(), seeds data via the ops API, sends real HTTP requests with
 // TPS-Ed25519 / Basic headers, asserts HTTP status codes.
+import { assertTpsRouteOutcome, tpsRoutePath } from "../helpers/tps-ed25519-outcomes.ts";
 import { TPS_ED25519_ROUTES } from "../helpers/tps-ed25519-routes.ts";
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
@@ -403,19 +404,22 @@ describe("auth-middleware e2e (real Harper)", () => {
 
   for (const { method, path } of TPS_ED25519_ROUTES) {
     test(`${method} ${path}: TPS scheme is verified before Harper authentication`, async () => {
-      const send = (tamper: boolean) => fetch(`${harper.httpURL}${path}`, {
+      const requestPath = tpsRoutePath(method, path);
+      const send = (tamper: boolean) => fetch(`${harper.httpURL}${requestPath}`, {
         method,
         headers: {
-          Authorization: ed25519Header(agent, method, path, { tamper }),
+          Authorization: ed25519Header(agent, method, requestPath, { tamper }),
           "Content-Type": "application/json",
         },
         ...(method === "POST" ? { body: "{}" } : {}),
+        redirect: "manual",
       });
       const invalid = await send(true);
       expect(invalid.status).toBe(401);
       expect(await invalid.json()).toMatchObject({ error: "invalid_signature" });
       const valid = await send(false);
       const text = await valid.text();
+      assertTpsRouteOutcome(method, path, valid.status, text, agent.id);
       expect(text, `${method} ${path}: ${valid.status} ${text}`).not.toContain("Login failed");
       expect(text).not.toContain("invalid_signature");
       expect(text).not.toContain("signature_verification_failed");

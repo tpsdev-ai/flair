@@ -231,7 +231,7 @@ server.http(async (request: any, nextLayer: any) => {
   // closes the P0 where any caller could forge OrgEvents as any agent
   // and read all internal Beads issues unauthenticated.
   const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
-  const isTpsEd25519 = /^TPS-Ed25519(?:\s|$)/.test(header);
+  const isTpsEd25519 = /^TPS-Ed25519(?:\s|$)/i.test(header);
   const isA2APath = url.pathname === "/a2a" || url.pathname === "/A2AAdapter" || url.pathname.startsWith("/A2AAdapter/");
   if (!isTpsEd25519 && (
     url.pathname === "/health" ||

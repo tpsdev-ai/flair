@@ -68,7 +68,7 @@ export const MAX_AUTH_HEADER_LEN = 4096;
  * behavior-preserving for well-formed headers.
  */
 export const TPS_ED25519_HEADER_RE =
-  /^TPS-Ed25519\s+([^:\s]+):(\d+):([^:\s]+):(.+)$/;
+  /^TPS-Ed25519\s+([^:\s]+):(\d+):([^:\s]+):(.+)$/i;
 
 export interface ParsedAuthHeader {
   agentId: string;

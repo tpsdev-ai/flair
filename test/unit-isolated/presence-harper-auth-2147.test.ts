@@ -155,3 +155,24 @@ test("a preexisting Harper super-user does not bypass TPS verification", async (
   expect(res.status).toBe(401);
   expect(reached).toBe(false);
 });
+
+
+for (const scheme of ["tps-ed25519", "TpS-eD25519"]) {
+  test(`${scheme} authenticates through middleware and the resource parser`, async () => {
+    const req = request("/OAuthAuthorize", "/OAuthAuthorize", "POST");
+    req.headers.asObject.authorization = req.headers.asObject.authorization.replace("TPS-Ed25519", scheme);
+    const res = await middleware(req, () => new Response());
+    expect(res.status).toBe(200);
+    expect(await resolveAgentAuth(req)).toEqual({ kind: "agent", agentId: agent.id, isAdmin: false });
+    const fallback = request();
+    fallback.headers.asObject.authorization = fallback.headers.asObject.authorization.replace("TPS-Ed25519", scheme);
+    expect(await resolveAgentAuth(fallback)).toEqual({ kind: "agent", agentId: agent.id, isAdmin: false });
+    const malformed = request("/Health", "/Health");
+    malformed.headers.asObject.authorization = `${scheme} broken`;
+    let reached = false;
+    const refused = await middleware(malformed, () => { reached = true; return new Response(); });
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toEqual({ error: "invalid_authorization_header" });
+    expect(reached).toBe(false);
+  });
+}
