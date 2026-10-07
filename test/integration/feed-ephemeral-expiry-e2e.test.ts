@@ -258,7 +258,7 @@ describe("signed federation expiry", () => {
     const id = `federated-missing-${randomUUID()}`;
     const insert = await adminOp(harper, {
       operation: "insert", database: "flair", table: "Memory",
-      records: [{ id, agentId: agent.id, content: "earlier received note", durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z", updatedAt: "2020-01-01T00:00:00.000Z" }],
+      records: [{ id, agentId: agent.id, content: "earlier received note", durability: "ephemeral", expiresAt: "2020-01-01T00:00:00.000Z", createdAt: "2020-01-01T00:00:00.000Z", updatedAt: "2020-01-01T00:00:00.000Z" }],
     });
     expect(insert.status).toBe(200);
     const before = Date.now();
