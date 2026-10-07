@@ -156,10 +156,76 @@ export function isVulnerable(version, range) {
  * Inputs                                                             *
  * ------------------------------------------------------------------ */
 
+/** A short description of a parsed JSON value, for audit-report refusal messages. */
+function jsonShapeOf(value) {
+  if (value === undefined) return "nothing";
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  if (typeof value !== "object") return `a ${typeof value}`;
+  const keys = Object.keys(value);
+  return keys.length === 0 ? "an empty object" : `an object with keys ${keys.slice(0, 6).join(", ")}`;
+}
+
+/** The remedy every refused audit stage names, so an operator knows what to do. */
+const AUDIT_REMEDY = "Re-run the stage; if it keeps failing, check registry access.";
+
+/**
+ * Why `parsed` is not a JSON report object at all, or null when it is one. Both
+ * `npm audit` and `bun audit` answer a failure they cannot express as a report
+ * with the envelope `{ "error": { code, summary, detail } }`. Reading that as a
+ * zero-advisory report is how the gate passed on an audit that never ran.
+ */
+function errorEnvelopeRefusal(parsed) {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return `did not produce a JSON report object (got ${jsonShapeOf(parsed)})`;
+  }
+  const e = parsed.error;
+  if (
+    Object.hasOwn(parsed, "error") &&
+    (typeof e === "string" || (e !== null && typeof e === "object" && !Array.isArray(e)))
+  ) {
+    const code = e !== null && typeof e === "object" ? e.code : e;
+    return `returned an error object instead of a report${code === undefined ? "" : ` (${String(code)})`}`;
+  }
+  return null;
+}
+
+/**
+ * Why `parsed` is not an npm audit report, or null when it is one. An npm v2
+ * report is an object carrying a `vulnerabilities` object; `{"vulnerabilities":{}}`
+ * is a real zero-advisory report. A response that survives the envelope check
+ * but has no `vulnerabilities` object — the empty object `{}` included — is not
+ * a report and must not be read as one with zero advisories.
+ */
+export function npmAuditReportRefusal(parsed) {
+  const envelope = errorEnvelopeRefusal(parsed);
+  if (envelope) return envelope;
+  const v = parsed.vulnerabilities;
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    return `report has no "vulnerabilities" object (got ${jsonShapeOf(v)})`;
+  }
+  return null;
+}
+
+/**
+ * Why `parsed` is not a bun audit report, or null when it is one. bun's shape is
+ * a map of package name to advisory array, so `{}` is a real zero-advisory
+ * report and only the envelope check applies.
+ */
+export function bunAuditReportRefusal(parsed) {
+  return errorEnvelopeRefusal(parsed);
+}
+
+/** Refuse an audit report: the reason, then the stage and remedy an operator acts on. */
+function refuseAuditReport(stage, reason) {
+  return new Error(`${stage} ${reason}. ${AUDIT_REMEDY}`);
+}
+
 /**
  * `bun audit --json` writes clean JSON to stdout and its banner to stderr.
  * It exits non-zero when advisories exist, so a non-zero exit is expected and
- * is NOT itself the failure signal — unparseable stdout is.
+ * is NOT itself the failure signal — unparseable stdout, or stdout that is not
+ * a report, is.
  */
 export function runBunAudit() {
   const res = spawnSync("bun", ["audit", "--json"], {
@@ -180,14 +246,18 @@ export function runBunAudit() {
     );
   }
 
+  let parsed;
   try {
-    return JSON.parse(stdout);
+    parsed = JSON.parse(stdout);
   } catch (e) {
     throw new Error(
       `\`bun audit\` stdout was not valid JSON (exit ${res.status}): ${e.message}. ` +
         `First 300 chars: ${stdout.slice(0, 300)}`,
     );
   }
+  const refusal = bunAuditReportRefusal(parsed);
+  if (refusal) throw refuseAuditReport("`bun audit`", refusal);
+  return parsed;
 }
 
 /** Flatten bun's {package: [advisory,...]} shape into a flat advisory list. */
@@ -220,24 +290,30 @@ export function flattenAdvisories(auditJson) {
  * npm-shrinkwrap pins versions the root overrides never reach under npm.
  *
  * Like `runBunAudit`, a non-zero exit is expected when advisories exist and is
- * NOT itself the failure signal — unparseable stdout is.
+ * NOT itself the failure signal — unparseable stdout, or stdout that is not a
+ * report, is.
  */
 export function parseNpmAuditOutput(stdout, prefix, status, stderr = "") {
+  const stage = `\`npm audit --omit=dev --json\` in ${prefix}`;
   const trimmed = (stdout || "").trim();
   if (!trimmed) {
     throw new Error(
-      `\`npm audit --omit=dev --json\` in ${prefix} produced no output on stdout (exit ${status}). ` +
+      `${stage} produced no output on stdout (exit ${status}). ` +
         `stderr: ${(stderr || "").trim().slice(0, 500) || "<empty>"}`,
     );
   }
+  let parsed;
   try {
-    return JSON.parse(trimmed);
+    parsed = JSON.parse(trimmed);
   } catch (e) {
     throw new Error(
-      `\`npm audit --omit=dev --json\` in ${prefix} stdout was not valid JSON (exit ${status}): ${e.message}. ` +
+      `${stage} stdout was not valid JSON (exit ${status}): ${e.message}. ` +
         `First 300 chars: ${trimmed.slice(0, 300)}`,
     );
   }
+  const refusal = npmAuditReportRefusal(parsed);
+  if (refusal) throw refuseAuditReport(stage, refusal);
+  return parsed;
 }
 
 export function runNpmAudit(prefix) {

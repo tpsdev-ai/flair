@@ -10,6 +10,8 @@ import {
   flattenAdvisories,
   flattenNpmAdvisories,
   parseNpmAuditOutput,
+  npmAuditReportRefusal,
+  bunAuditReportRefusal,
   registryUrlFor,
   vendorPinnedNodeProblems,
 } from "../../scripts/audit-gate.mjs";
@@ -467,8 +469,155 @@ describe("parseNpmAuditOutput", () => {
   });
 
   it("parses a valid JSON report", () => {
-    expect(parseNpmAuditOutput('{"vulnerabilities":{}}', "/tmp", 0)).toEqual({ vulnerabilities: {} });
+    const report = { auditReportVersion: 2, vulnerabilities: {}, metadata: {} };
+    expect(parseNpmAuditOutput(JSON.stringify(report), "/tmp", 0)).toEqual(report);
   });
+
+  // flair#2278 — a response without a vulnerabilities field is not a report. On
+  // origin/main the parser returned it unchanged and flattenNpmAdvisories read
+  // the absent field as an empty report, so the gate passed on an audit that
+  // never ran. Each case below must fail the gate instead.
+  const NON_REPORTS = {
+    "an error object": { error: { code: "EAI_AGAIN", summary: "offline", detail: "registry" } },
+    "a missing vulnerabilities field": { auditReportVersion: 2, metadata: { vulnerabilities: {} } },
+    "an empty object": {},
+  };
+
+  for (const [name, value] of Object.entries(NON_REPORTS)) {
+    it(`throws on ${name}`, () => {
+      expect(() => parseNpmAuditOutput(JSON.stringify(value), "/tmp/prefix", 1)).toThrow(
+        /error object instead of a report|not a JSON report object|no "vulnerabilities" object/,
+      );
+    });
+  }
+
+  it("names the stage and the remedy in every refusal", () => {
+    for (const value of Object.values(NON_REPORTS)) {
+      let err: Error | undefined;
+      try {
+        parseNpmAuditOutput(JSON.stringify(value), "/tmp/prefix", 1);
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err).toBeDefined();
+      expect(err?.message).toContain("npm audit --omit=dev --json");
+      expect(err?.message).toContain("/tmp/prefix");
+      expect(err?.message).toContain("Re-run the stage; if it keeps failing, check registry access.");
+    }
+  });
+
+  it("still passes a real zero-advisory report", () => {
+    const report = { auditReportVersion: 2, vulnerabilities: {}, metadata: {} };
+    expect(parseNpmAuditOutput(JSON.stringify(report), "/tmp/prefix", 0)).toEqual(report);
+  });
+});
+
+// ─── Non-report audit responses (flair#2278) ─────────────────────────────────
+
+describe("audit report refusal", () => {
+  it("accepts an npm report with an empty vulnerabilities object", () => {
+    expect(npmAuditReportRefusal({ vulnerabilities: {} })).toBeNull();
+  });
+
+  it("accepts an empty bun report but refuses a bun error envelope", () => {
+    expect(bunAuditReportRefusal({})).toBeNull();
+    expect(bunAuditReportRefusal({ error: { code: "EAI_AGAIN" } })).toMatch(/error object/);
+  });
+
+  it("refuses a non-object in either stage", () => {
+    for (const value of [null, [], "ok", 3]) {
+      expect(npmAuditReportRefusal(value)).toMatch(/did not produce a JSON report object/);
+      expect(bunAuditReportRefusal(value)).toMatch(/did not produce a JSON report object/);
+    }
+  });
+
+  it("does not mistake an advisory array on a package named error for an envelope", () => {
+    // bun's shape maps a package name to its advisory array; a package literally
+    // named "error" is a report, not the error envelope.
+    expect(bunAuditReportRefusal({ error: [{ id: 1, url: "" }] })).toBeNull();
+  });
+});
+
+// ─── The gate itself refuses a non-report response (flair#2278) ──────────────
+
+describe("the gate fails a stage that returned no report (flair#2278)", () => {
+  // A minimal fixture: the real gate script, the real allowlist policy with no
+  // entries, and stubbed `bun`/`npm` on PATH. With no entries and no advisories
+  // the gate has nothing to allowlist, so it PASSES on any report — and only the
+  // audit response decides the outcome. On origin/main each non-report below was
+  // read as an empty report and the gate exited 0; here every one must fail it.
+  function runGate(bunOut: string, npmOut: string) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-nonreport-"));
+    try {
+      mkdirSync(join(root, "scripts"));
+      mkdirSync(join(root, ".github"));
+      mkdirSync(join(root, "bin"));
+      mkdirSync(join(root, "home"));
+      mkdirSync(join(root, "tmp"));
+      writeFileSync(
+        join(root, "scripts/audit-gate.mjs"),
+        readFileSync(join(REPO_ROOT, "scripts", "audit-gate.mjs")),
+      );
+      writeFileSync(
+        join(root, ".github/audit-allowlist.json"),
+        JSON.stringify({ policy: ALLOWLIST.policy, entries: [] }),
+      );
+      writeFileSync(join(root, "bin/bun"), `#!/bin/sh\nprintf '%s\\n' '${bunOut}'\n`);
+      writeFileSync(join(root, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' '${npmOut}'\n`);
+      chmodSync(join(root, "bin/bun"), 0o755);
+      chmodSync(join(root, "bin/npm"), 0o755);
+      return spawnSync(
+        process.execPath,
+        [join(root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", root],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          env: {
+            ...process.env,
+            PATH: `${join(root, "bin")}:${process.env.PATH}`,
+            HOME: join(root, "home"),
+            TMPDIR: join(root, "tmp"),
+            AUDIT_GATE_TODAY: "2026-10-01",
+          },
+        },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  const CLEAN_BUN = "{}";
+  const CLEAN_NPM = JSON.stringify({ auditReportVersion: 2, vulnerabilities: {}, metadata: {} });
+
+  it("passes on a real zero-advisory report from both stages", () => {
+    const res = runGate(CLEAN_BUN, CLEAN_NPM);
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+  }, 12_000);
+
+  const NPM_NON_REPORTS: Record<string, string> = {
+    "an error object": JSON.stringify({ error: { code: "EAI_AGAIN", summary: "offline" } }),
+    "a missing vulnerabilities field": JSON.stringify({ auditReportVersion: 2, metadata: {} }),
+    "an empty object": "{}",
+  };
+  for (const [name, out] of Object.entries(NPM_NON_REPORTS)) {
+    it(`fails the gate on ${name} from the npm stage`, () => {
+      const res = runGate(CLEAN_BUN, out);
+      expect(res.error).toBeUndefined();
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain("FAILED TO RUN");
+      expect(res.stdout).not.toContain("PASS —");
+    }, 12_000);
+  }
+
+  it("fails the gate on an error object from the bun stage", () => {
+    const res = runGate(JSON.stringify({ error: { code: "EAI_AGAIN" } }), CLEAN_NPM);
+    expect(res.error).toBeUndefined();
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("FAILED TO RUN");
+    expect(res.stdout).not.toContain("PASS —");
+  }, 12_000);
 });
 
 // ─── Registry URL construction ───────────────────────────────────────────────

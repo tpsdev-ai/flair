@@ -1,0 +1,1 @@
+- **The dependency audit gate now refuses an npm or bun audit stage that returned no report (flair#2278).** An `error` object fails both stages; on npm, a missing `vulnerabilities` field or an empty object fails too. Each refusal names the stage and the remedy; a real zero-advisory report still passes.
