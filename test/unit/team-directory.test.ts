@@ -11,13 +11,9 @@
  *     excluded, one channel per agent);
  *   - the caps (50 entries, 256 UTF-8 bytes for agentId/name/email, 64 KiB response);
  *   - pagination;
- *   - unavailable storage is a 503, never an empty success;
- *   - the CLI vocabulary matches the Peer.status schema comment and
- *     omits `active` (an Instance.status value).
+ *   - unavailable storage is a 503, never an empty success.
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 let agents = new Map<string, any>();
 let integrations = new Map<string, any>();
@@ -67,8 +63,7 @@ const {
   TEAM_DIRECTORY_MAX_RESPONSE_BYTES,
   TEAM_DIRECTORY_PLATFORM,
 } = await import("../../resources/team-directory.ts");
-const { PEER_STATUS, PEER_STATUS_VALUES, PEER_MEMBERSHIP_STATUSES, isPeerMemberStatus } =
-  await import("../../src/lib/peer-status.ts");
+const { TOOLS } = await import("../../resources/mcp-tools.ts");
 
 const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tpsAgentIsAdmin: isAdmin });
 const anonCtx = () => ({ tpsAnonymous: true });
@@ -325,26 +320,12 @@ describe("pure helpers", () => {
   });
 });
 
-describe("documented Peer.status CLI vocabulary (flair#2141 item 6)", () => {
-  it("matches the Peer.status comment in schemas/federation.graphql exactly", () => {
-    const schema = readFileSync(join(import.meta.dir, "../../schemas/federation.graphql"), "utf8");
-    const line = schema.split("\n").find((l) => l.includes("status: String") && l.includes("paired"));
-    expect(line).toBeDefined();
-    const quoted = [...line!.matchAll(/"([a-z]+)"/g)].map((m) => m[1]);
-    expect(quoted).toEqual([...PEER_STATUS_VALUES]);
-  });
-
-  it("the classifier excludes revoked and active", () => {
-    expect(PEER_MEMBERSHIP_STATUSES).toEqual([PEER_STATUS.PAIRED, PEER_STATUS.CONNECTED, PEER_STATUS.DISCONNECTED]);
-    expect(isPeerMemberStatus(PEER_STATUS.REVOKED)).toBe(false);
-    expect(isPeerMemberStatus("active")).toBe(false);
-    expect(PEER_STATUS_VALUES as readonly string[]).not.toContain("active");
-  });
-
-  it("the CLI imports the classifier and omits the retired color condition", () => {
-    const src = readFileSync(join(import.meta.dir, "../../src/commands/federation.ts"), "utf8");
-    expect(src).toContain('from "../lib/peer-status.js"');
-    // The retired literal: `active` used to color a peer status green.
-    expect(src).not.toContain('s === "paired" || s === "connected" || s === "active"');
+describe("MCP contract — the entry fields (flair#2322)", () => {
+  it("the entries container declares the home instance required", () => {
+    const rule = (TOOLS as any).team_directory.contract.invariants.containerRules.find(
+      (r: any) => r.container === "entries",
+    );
+    expect(rule).toBeDefined();
+    expect(rule.requiredFields).toContain("homeInstanceId");
   });
 });

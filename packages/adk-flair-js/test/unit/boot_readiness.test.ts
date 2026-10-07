@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import { bootEphemeralHarper } from "../helpers/live-flair";
 import { waitForAppLoaded } from "../../../adk-flair/tests/helpers/app-readiness.mjs";
+import { parseProcStatState, isExitedState } from "../../../../src/lib/daemon-liveness.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEST_TIMEOUT_MS = 5_000;
@@ -334,8 +335,10 @@ function processRunning(
 ): boolean {
   if (platform === "linux") {
     try {
-      const stat = readStat(pid);
-      return stat[stat.lastIndexOf(")") + 2] !== "Z";
+      // The kernel's state character (field 3, parsed past the last `)` because
+      // comm may hold spaces and parens) is `Z` for an exited-but-unreaped
+      // process (flair#2313).
+      return !isExitedState(parseProcStatState(readStat(pid)));
     } catch (error: any) {
       if (error.code === "ENOENT" || error.code === "ESRCH") return false;
       throw error;

@@ -410,11 +410,17 @@ describe("Soul resource version snapshots", () => {
       expect(version.createdAt).not.toBe(NOW);
       expect(Date.parse(version.createdAt)).toBeGreaterThanOrEqual(before);
       expect(Date.parse(version.createdAt)).toBeLessThanOrEqual(Date.now());
-      await new Promise((resolve) => setTimeout(resolve, 2));
+      // The resource stamps each version from the wall clock and accepts no injected
+      // clock, so two writes can share a millisecond. Advance the clock past this
+      // version's time before the next write.
+      const writtenMs = Date.parse(version.createdAt);
+      for (let i = 0; i < 100 && Date.now() <= writtenMs; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
     }
     const versions = [...store.values()];
     expect(Date.parse(versions[1].createdAt)).toBeGreaterThan(Date.parse(versions[0].createdAt));
-  });
+  }, 3000);
 
   test("PATCH strips client server fields before snapshotting the stored row", async () => {
     const id = "agent-a:role";
