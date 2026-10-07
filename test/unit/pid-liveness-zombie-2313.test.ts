@@ -12,7 +12,7 @@
  * unreadable state stays alive, never a false "exited".
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -21,6 +21,7 @@ import { gatherDaemonEvidence, probePidLiveness } from "../../src/cli.ts";
 import { classifyDaemonState, isExitedState, parseProcStatState } from "../../src/lib/daemon-liveness.ts";
 
 const IS_LINUX = process.platform === "linux";
+const IS_DARWIN = process.platform === "darwin";
 
 // A per-case budget; every spawned process is bounded by this too.
 const CASE_TIMEOUT_MS = 10_000;
@@ -39,8 +40,7 @@ afterAll(() => {
  * Spawn a REAL unreaped zombie: the helper shell backgrounds an immediately
  * exiting `sleep`, prints its pid, then `exec`s a long `sleep` that never
  * waits — so the backgrounded child stays a zombie (state `Z`) under it. The
- * helper is registered for cleanup; the zombie is reaped by the kernel when
- * the helper dies.
+ * helper is registered for cleanup.
  */
 function spawnZombieHelper(): Promise<{ zombiePid: number; helper: ChildProcess }> {
   return new Promise((resolve, reject) => {
@@ -105,7 +105,7 @@ describe("flair#2313 — the shared probe reports an unreaped zombie as exited",
       expect(await waitForZombie(zombiePid)).toBe("Z");
       expect(probePidLiveness(zombiePid).kind).toBe("gone");
 
-      // …and through the real caller, so the verdict reaches doctor's stop wait.
+      // …and through gatherDaemonEvidence and the classifier.
       const dataDir = mkdtempSync(join(tmpdir(), "flair2313-"));
       dirs.push(dataDir);
       writeFileSync(join(dataDir, "hdb.pid"), `${zombiePid}\n`);
@@ -113,6 +113,33 @@ describe("flair#2313 — the shared probe reports an unreaped zombie as exited",
       const evidence = await gatherDaemonEvidence(port, dataDir);
       expect(evidence.pidLiveness?.kind).toBe("gone");
       expect(classifyDaemonState(evidence, { port, dataDir }).state).toBe("NOT_RUNNING");
+    } finally {
+      helper.kill("SIGKILL");
+    }
+  }, CASE_TIMEOUT_MS);
+
+  test.skipIf(!IS_DARWIN)("a real Darwin zombie reads as gone through the default probe", async () => {
+    const { zombiePid, helper } = await spawnZombieHelper();
+    try {
+      const deadline = Date.now() + ZOMBIE_WAIT_MS;
+      let state = "";
+      while (Date.now() < deadline) {
+        const result = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(zombiePid)], {
+          encoding: "utf-8",
+          env: { ...process.env, LC_ALL: "C" },
+          timeout: 1000,
+          killSignal: "SIGKILL",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        state = result.stdout.trim();
+        if (state.startsWith("Z")) break;
+        await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
+      }
+      expect(state.startsWith("Z")).toBe(true);
+      expect(() => process.kill(zombiePid, 0)).not.toThrow();
+      expect(probePidLiveness(zombiePid).kind).toBe("gone");
     } finally {
       helper.kill("SIGKILL");
     }
