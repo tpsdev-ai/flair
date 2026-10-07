@@ -185,4 +185,20 @@ describe("Integration.delete() — ownership check uses the raw record (super.ge
     const res = await (i as any).delete("does-not-exist");
     expect(res instanceof Response).toBe(false);
   });
+
+  // flair#2309: an operator's collection DELETE arrives as a search RequestTarget
+  // (isCollection). Harper's own bulk-delete branch iterates search() as a
+  // synchronous async-iterable, which this resource's async search() cannot
+  // satisfy; delete() scans through its own search() and deletes each match.
+  it("operator (admin) collection DELETE removes the rows search() matched, leaving the rest", async () => {
+    integrationStore.set("int-a", { id: "int-a", agentId: "agent-x", platform: "slack" });
+    integrationStore.set("int-b", { id: "int-b", agentId: "agent-y", platform: "slack" });
+    integrationStore.set("int-c", { id: "int-c", agentId: "agent-z", platform: "discord" });
+    const i = makeIntegration(agentCtx("agent-admin", true));
+    await (i as any).delete({
+      isCollection: true,
+      conditions: [{ attribute: "platform", comparator: "equals", value: "slack" }],
+    });
+    expect([...integrationStore.keys()].sort()).toEqual(["int-c"]);
+  });
 });

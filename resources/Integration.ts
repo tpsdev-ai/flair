@@ -104,6 +104,20 @@ export class Integration extends (databases as any).flair.Integration {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
     if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
+      // A collection DELETE (`DELETE /Integration/?<query>`) arrives as a search
+      // RequestTarget. Harper's own bulk-delete branch (resources/Table.ts,
+      // delete(): `for await (const entry of this.search(scanTarget))`) consumes
+      // search() as a synchronous async-iterable, but this resource's search() is
+      // async (it awaits auth), so handing the target to super.delete() throws
+      // "...is not async iterable" (500) and removes nothing. Do the scan through
+      // this resource's OWN search() — the same scoped search the collection GET
+      // uses — and delete each matched row by id.
+      if (id && typeof id === "object" && (id as any).isCollection) {
+        for await (const row of await this.search(id)) {
+          await super.delete((row as any).id);
+        }
+        return true;
+      }
       return super.delete(id);
     }
     // Use super.get(id), NOT this.get(id): the new get() override above 404s
