@@ -1,32 +1,12 @@
-/**
- * flair#2280 — no test source binds a port a real local Flair uses.
- *
- * 9925 and 9926 are the ops and HTTP ports a default Flair holds. A test that
- * BINDS either can collide with a live instance that has the port, and — before
- * this check — its stub's failed start hung the suite instead of failing it. A
- * test source may still mention 9925/9926 as DATA (a config value, an expected
- * ops URL, a decoy to assert against); this check flags only a BIND:
- *
- *   - a listener call — `listen` or `serve` — whose line spells the literal
- *     port 9925 or 9926; or
- *   - such a call whose line names a file-local identifier that some line in
- *     the same file assigned one of those two values.
- *
- * The port match is word-bounded, so the near-miss TEST ports 19925/19926 are
- * not flagged. Scope: the test/ tree (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs),
- * helpers included. The scan reads text, so a comment or string that itself
- * spells a bind reads as one.
- */
+/** flair#2280 — scan listener port arguments for 9925/9926/19925/19926. */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import ts from "typescript";
 
 const TEST_ROOT = join(import.meta.dirname, "..");
 const EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]);
-/** A call that starts a listener. */
-const BIND_CALL = /(?:\.|\b)(?:listen|serve)\s*\(|\bstartStub\s*\(/;
-/** A literal production port, word-bounded so 19925 is not a match. */
-const PORT_LITERAL = /\b(?:9925|9926)\b/;
+const PROTECTED_PORTS = new Set([9925, 9926, 19925, 19926]);
 
 function testFiles(dir: string): string[] {
   const out: string[] = [];
@@ -38,29 +18,146 @@ function testFiles(dir: string): string[] {
   return out;
 }
 
-/** Binds of 9925/9926 in one file's text, as `lineNo: text`. */
-export function portBinds(text: string): string[] {
-  const assigned = new Set<string>();
-  for (const m of text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:9925|9926)\b/g)) {
-    assigned.add(m[1]);
-  }
-  const found: string[] = [];
-  text.split("\n").forEach((line, i) => {
-    if (!BIND_CALL.test(line)) return;
-    const referencesPort = PORT_LITERAL.test(line) || [...assigned].some((id) => new RegExp(`\\b${id}\\b`).test(line));
-    if (referencesPort) found.push(`${i + 1}: ${line.trim()}`);
-  });
-  return found;
-}
+export function portBinds(text: string, fileName = "fixture.ts"): string[] {
+  const kind = fileName.endsWith(".tsx") || fileName.endsWith(".jsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind);
+  const options: ts.CompilerOptions = { noLib: true, noResolve: true, allowJs: true };
+  const host = ts.createCompilerHost(options);
+  host.getSourceFile = (name) => name === source.fileName ? source : undefined;
+  const checker = ts.createProgram([source.fileName], options, host).getTypeChecker();
+  const writes = new Map<ts.Symbol, { at: number; value: ts.Expression }[]>();
+  const record = (name: ts.Identifier, value: ts.Expression, at: number) => {
+    const symbol = checker.getSymbolAtLocation(name);
+    if (!symbol) return;
+    const values = writes.get(symbol) ?? [];
+    values.push({ at, value });
+    writes.set(symbol, values);
+  };
+  const collect = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      record(node.name, node.initializer, node.getStart(source));
+    } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(node.left)) {
+      record(node.left, node.right, node.getStart(source));
+    }
+    ts.forEachChild(node, collect);
+  };
+  collect(source);
 
-describe("no test source binds a real Flair port (flair#2280)", () => {
-  test("test/ binds neither 9925 nor 9926", () => {
-    const offenders: string[] = [];
-    for (const file of testFiles(TEST_ROOT)) {
-      for (const bind of portBinds(readFileSync(file, "utf-8"))) {
-        offenders.push(`${relative(TEST_ROOT, file)}:${bind}`);
+  const valueOf = (expr: ts.Expression, at: number, seen = new Set<ts.Symbol>()): ts.Expression => {
+    if (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isSatisfiesExpression(expr) || ts.isNonNullExpression(expr)) {
+      return valueOf(expr.expression, at, seen);
+    }
+    if (!ts.isIdentifier(expr)) return expr;
+    const symbol = checker.getSymbolAtLocation(expr);
+    if (!symbol || seen.has(symbol)) return expr;
+    seen.add(symbol);
+    const latest = writes.get(symbol)?.filter((write) => write.at < at).sort((a, b) => b.at - a.at)[0];
+    return latest ? valueOf(latest.value, latest.at, seen) : expr;
+  };
+  const portOf = (arg: ts.Expression, at: number): ts.Expression | undefined => {
+    const value = valueOf(arg, at);
+    if (!ts.isObjectLiteralExpression(value)) return value;
+    const property = value.properties.find((item) => item.name &&
+      (ts.isIdentifier(item.name) || ts.isStringLiteral(item.name)) && item.name.text === "port");
+    if (property && ts.isPropertyAssignment(property)) return valueOf(property.initializer, value.getStart(source));
+    if (property && ts.isShorthandPropertyAssignment(property)) {
+      const symbol = checker.getShorthandAssignmentValueSymbol(property);
+      const latest = symbol && writes.get(symbol)?.filter((write) => write.at < value.getStart(source)).sort((a, b) => b.at - a.at)[0];
+      return latest ? valueOf(latest.value, latest.at) : undefined;
+    }
+    return undefined;
+  };
+  const found: string[] = [];
+  const add = (node: ts.Node, bind: string) => {
+    const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+    found.push(`${line}: ${bind}`);
+  };
+  const embedded = (node: ts.Node, code: string) => {
+    if (!code.includes("listen") && !code.includes("serve")) return;
+    for (const bind of portBinds(code)) add(node, bind);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const name = ts.isPropertyAccessExpression(callee) ? callee.name.text : ts.isIdentifier(callee) ? callee.text : "";
+      if (["listen", "serve", "startStub"].includes(name) && node.arguments[0]) {
+        const port = portOf(node.arguments[0], node.getStart(source));
+        if (port && ts.isNumericLiteral(port) && PROTECTED_PORTS.has(Number(port.text))) add(node, node.getText(source));
+      }
+      if (ts.isPropertyAccessExpression(callee) && callee.name.text === "join" && ts.isArrayLiteralExpression(callee.expression) &&
+          callee.expression.elements.every(ts.isStringLiteralLike)) {
+        const separator = node.arguments[0];
+        if (separator && ts.isStringLiteralLike(separator)) {
+          embedded(node, callee.expression.elements.map((item) => (item as ts.StringLiteralLike).text).join(separator.text));
+          return;
+        }
       }
     }
-    expect(offenders, `a test source binds a port a live Flair uses:\n${offenders.join("\n")}`).toEqual([]);
-  });
+    if (ts.isStringLiteralLike(node)) embedded(node, node.text);
+    else if (ts.isTemplateExpression(node)) {
+      const code = node.head.text + node.templateSpans.map((span) => {
+        const value = valueOf(span.expression, node.getStart(source));
+        return (ts.isNumericLiteral(value) || ts.isStringLiteralLike(value) ? value.text : value.getText(source)) + span.literal.text;
+      }).join("");
+      embedded(node, code);
+      for (const span of node.templateSpans) ts.forEachChild(span.expression, visit);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return [...new Set(found)];
+}
+
+describe("listener arguments for 9925/9926/19925/19926 (flair#2280)", () => {
+  for (const port of PROTECTED_PORTS) {
+    test(`${port}: literal, identifier, typed declaration, and later assignment binds`, () => {
+      for (const code of [
+        `server.listen(${port})`,
+        `serve(${port})`,
+        `createServer(() => {}).listen(${port})`,
+        `const $port = ${port}; server.listen($port)`,
+        `const port: number = ${port}; server.listen(port)`,
+        `const $port: number = ${port}; server.listen($port)`,
+        `let port: number; port = ${port}; server.listen(port)`,
+        `let $port: number; $port = ${port}; server.listen($port)`,
+        `const port = ${port}; const alias = port; server.listen(alias)`,
+        `server.listen({ port: ${port} })`,
+        `Bun.serve({\n port: ${port},\n fetch() {}\n})`,
+        `const port = ${port}; Bun.serve({ port })`,
+        `const config = { port: ${port} }; Bun.serve(config)`,
+        `let port = ${port}; const config = { port }; port = 0; Bun.serve(config)`,
+        `let port = ${port}; const config = { port: port }; port = 0; Bun.serve(config)`,
+        `const script = 'server.listen(${port})'`,
+        `const script = ['const port = ${port};', 'server.listen(port)'].join('\\n')`,
+      ]) expect(portBinds(code), code).toHaveLength(1);
+    });
+    test(`${port}: non-bind literals and distinct identifier boundaries`, () => {
+      for (const code of [
+        `server.listen(0); const expected = ${port}`,
+        `server.listen(0, () => log(${port}))`,
+        `const config = { port: ${port} }; fetch('http://localhost:' + config.port)`,
+        `const $port = ${port}; server.listen(port)`,
+        `const port = ${port}; server.listen($port)`,
+        `const port: number = ${port}; server.listen(portSuffix)`,
+        `let port; port = ${port}; server.listen(otherport)`,
+        `let $port: number; $port = ${port}; server.listen($portSuffix)`,
+        `let port = ${port}; port = 0; server.listen(port)`,
+        `const port = ${port}; function start() { const port = 0; server.listen(port) }`,
+        `server.listen({ port: 0, expected: ${port} })`,
+        `Bun.serve({ port: 0, expected: ${port} })`,
+        `let port = 0; const config = { port }; port = ${port}; Bun.serve(config)`,
+        `let port = 0; const config = { port: port }; port = ${port}; Bun.serve(config)`,
+        `// server.listen(${port})`,
+        `server.listen(${port}0)`,
+      ]) expect(portBinds(code), code).toEqual([]);
+    });
+  }
+  test("test/ has no detected 9925/9926/19925/19926 listener arguments", () => {
+    const offenders: string[] = [];
+    for (const file of testFiles(TEST_ROOT)) {
+      for (const bind of portBinds(readFileSync(file, "utf-8"), file)) offenders.push(`${relative(TEST_ROOT, file)}:${bind}`);
+    }
+    expect(offenders, offenders.join("\n")).toEqual([]);
+  }, 60_000);
 });

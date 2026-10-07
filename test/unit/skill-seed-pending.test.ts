@@ -15,13 +15,11 @@ const seeded: SkillSeedOutcome = {
 const refused: SkillSeedOutcome = { kind: "refused", error: "test", message: "refused" };
 
 describe("local --skip-start seed handoff", () => {
-  // Build dist/cli.js AT MOST ONCE per lane (flair#1807) — see
-  // test/helpers/build-cli-once.ts. Its own hook, budgeted above the helper's
-  // 90 s build limit, so a genuine build hang is named here instead of a bare
-  // 5 s per-case kill (the cases below must not carry the build's cost).
+  // CLI build memo is per test process (flair#1807).
+  // The helper allows 90 s per build step; this hook allows 210 s.
   beforeAll(() => {
     ensureCliBuild();
-  }, 120_000);
+  }, 210_000);
 
   it("runs on the next start, clears only after success, and does not run again", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-skill-pending-"));

@@ -60,10 +60,7 @@ const TSCONFIG_CLI = join(ROOT, "tsconfig.cli.json");
 const TSC_JS = join(ROOT, "node_modules", "typescript", "bin", "tsc");
 const WRITE_BUILD_INFO = join(ROOT, "scripts", "write-build-info.mjs");
 
-/**
- * The build budget. Must leave room, under the smallest caller hook budget
- * (120 s in every caller's `beforeAll`), for the freshness scan and the kill.
- */
+/** Timeout per build step. */
 export const BUILD_TIMEOUT_MS = 90_000;
 
 let builtThisProcess = false;
