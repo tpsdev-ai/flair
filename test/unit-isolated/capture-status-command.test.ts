@@ -9,7 +9,7 @@ import {
   installCaptureHooks,
   installHook,
 } from "../../src/hook-install.ts";
-import { isFlairCaptureCommand } from "../../src/doctor-client.ts";
+import { isFlairCaptureCommand, parseCaptureCommand } from "../../src/doctor-client.ts";
 import { createCaptureRuntime } from "../helpers/capture-runtime.ts";
 
 const root = resolve(import.meta.dir, "../..");
@@ -103,7 +103,8 @@ for (const state of ["stale", "partial", "absent", "runtime failure"] as const) 
       if (state === "stale") config.hooks.PostToolUseFailure[0].matcher = "Write";
       if (state === "partial") delete config.hooks.Stop;
       if (state === "runtime failure") {
-        for (const event of events) config.hooks[event][0].hooks[0].command = "echo capture-hook.js";
+        const artifact = parseCaptureCommand(config.hooks.PostToolUse[0].hooks[0].command)!.artifactPath;
+        writeFileSync(artifact, "process.exit(0);\n");
       }
       save(config);
     }

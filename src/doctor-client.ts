@@ -251,9 +251,14 @@ export function buildActionRecallHookCommand(
   return String.raw`sh -c 'out=$(${invocation} 2>/dev/null) && [ -n "$out" ] && [ "${"$"}{#out}" -le 4096 ] && printf %s "$out" || true'`;
 }
 
-/** Match the artifact marker in commands without npx. */
+const recognizeActionRecallCommand = installerCommandRecognizer(buildActionRecallHookCommand, ACTION_RECALL_HOOK_MARKER);
+
 export function isFlairActionRecallCommand(command: string): boolean {
-  return typeof command === "string" && command.includes(ACTION_RECALL_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
+  return recognizeActionRecallCommand(command) !== null;
+}
+
+export function parseActionRecallCommand(command: string): CaptureCommandParts | null {
+  return recognizeActionRecallCommand(command);
 }
 
 /**
@@ -473,8 +478,10 @@ export function buildCaptureHookCommand(
   return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null 2>/dev/null || true'`;
 }
 
+const recognizeCaptureCommand = installerCommandRecognizer(buildCaptureHookCommand, CAPTURE_HOOK_MARKER, true);
+
 export function isFlairCaptureCommand(command: string): boolean {
-  return typeof command === "string" && command.includes(CAPTURE_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
+  return recognizeCaptureCommand(command) !== null;
 }
 
 /** The bun/artifact/agent/url/spec a wired capture command carries, or null. */
@@ -487,12 +494,49 @@ export interface CaptureCommandParts {
 }
 
 export function parseCaptureCommand(command: string): CaptureCommandParts | null {
-  if (typeof command !== "string") return null;
-  const match = /^sh -c 'FLAIR_AGENT_ID=(\S+)(?: FLAIR_URL=(\S+))?(?: FLAIR_CAPTURE_FLUSH_SPEC=(\S+))? (\S+) (\S+) >\/dev\/null 2>\/dev\/null \|\| true'$/.exec(command);
-  if (!match) return null;
-  const [, agentId, flairUrl, flushSpec, bunPath, artifactPath] = match;
-  if (!agentId || !bunPath || !artifactPath) return null;
-  return { bunPath, artifactPath, agentId, ...(flairUrl ? { flairUrl } : {}), ...(flushSpec ? { flushSpec } : {}) };
+  return recognizeCaptureCommand(command);
+}
+
+function installerCommandRecognizer(
+  builder: (bunPath: string, artifactPath: string, agentId: string, flairUrl?: string, flushSpec?: string) => string,
+  marker: string,
+  withFlushSpec = false,
+): (command: unknown) => CaptureCommandParts | null {
+  const tokens = {
+    bunPath: "MATCH_BUN_PATH",
+    artifactPath: "MATCH_ARTIFACT_PATH",
+    agentId: "MATCH_AGENT_ID",
+    flairUrl: "MATCH_FLAIR_URL",
+    flushSpec: "@MATCH_FLUSH_PACKAGE@MATCH_FLUSH_VERSION",
+  };
+  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const patterns: RegExp[] = [];
+  for (const url of [undefined, tokens.flairUrl]) {
+    for (const spec of withFlushSpec ? [undefined, tokens.flushSpec] : [undefined]) {
+      let pattern = escape(builder(tokens.bunPath, tokens.artifactPath, tokens.agentId, url, spec));
+      for (const [name, token] of Object.entries(tokens)) {
+        pattern = pattern.replace(escape(token), `(?<${name}>\\S+)`);
+      }
+      patterns.push(new RegExp(`^${pattern}$`));
+    }
+  }
+  return (command) => {
+    if (typeof command !== "string") return null;
+    for (const pattern of patterns) {
+      const parts = pattern.exec(command)?.groups;
+      if (!parts || parts.artifactPath?.split("/").at(-1) !== marker) continue;
+      const { bunPath, artifactPath, agentId, flairUrl, flushSpec } = parts;
+      if (!bunPath || !artifactPath || !agentId) continue;
+      try {
+        if (command === builder(bunPath, artifactPath, agentId, flairUrl, flushSpec)) {
+          return { bunPath, artifactPath, agentId, ...(flairUrl ? { flairUrl } : {}), ...(flushSpec ? { flushSpec } : {}) };
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  };
 }
 
 /** The two hook events continuity registers under. */

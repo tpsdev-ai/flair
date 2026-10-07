@@ -67,6 +67,7 @@ import {
   ACTION_RECALL_PRE_TOOL_USE_MATCHER,
   buildSessionStartHookCommand,
   buildActionRecallHookCommand,
+  parseActionRecallCommand,
   buildContinuityCaptureHookCommand,
   buildCaptureHookCommand,
   captureFlushSpec,
@@ -1143,10 +1144,6 @@ export interface ActionRecallMutationResult {
   actions: { preToolUse: HookDeltaAction; sessionStart: HookDeltaAction | "skipped" } | null;
 }
 
-/** True when EVERY hook in the group was written by Flair for this feature, so
- *  Flair owns the group exclusively and may repair its matcher in place. A
- *  group holding even one hook Flair did not write is SHARED: its matcher is
- *  the user's and must not be touched (flair#2264). */
 function hookGroupIsFlairOnly(group: any, isOurs: (command: any) => boolean): boolean {
   const hooks = group?.hooks;
   return Array.isArray(hooks) && hooks.length > 0 && hooks.every((h: any) => isOurs(h?.command));
@@ -1202,8 +1199,6 @@ function computeActionRecallInstall(
         preToolUse = "update";
       }
     } else {
-      // The group also holds the user's hooks (flair#2264): its matcher is
-      // theirs, so leave it alone and move our entry into a dedicated group.
       group.hooks.splice(existing.hookIndex, 1);
       newConfig.hooks.PreToolUse.push({
         matcher: ACTION_RECALL_PRE_TOOL_USE_MATCHER,
@@ -1261,9 +1256,9 @@ function actionRecallInstallRefusal(delta: ActionRecallDelta, path: string): str
 
 function actionRecallCommandFailure(command: unknown): string | null {
   if (typeof command !== "string") return "action-recall command is not an installer command";
-  const match = /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^ ]+) (?:FLAIR_URL=([^ ]+) )?([^ ]+) ([^ ]+) 2>\/dev\/null\) /.exec(command);
-  if (!match) return "action-recall command is not an installer command";
-  const [, agent, url, bun, artifact] = match;
+  const parts = parseActionRecallCommand(command);
+  if (!parts) return "action-recall command is not an installer command";
+  const { bunPath: bun, artifactPath: artifact, agentId: agent, flairUrl: url } = parts;
   try {
     if (command !== buildActionRecallHookCommand(bun, artifact, agent, url)) return "action-recall command is not an installer command";
     return probeActionRecallRuntime({ bunPath: bun, artifactPath: artifact }, agent, url, command);
@@ -1748,8 +1743,6 @@ export function computeCaptureHookInstall(config: any, runtime: ActionRecallRunt
           changed = true;
         }
       } else {
-        // The group also holds the user's hooks (flair#2264): its matcher is
-        // theirs, so leave it alone and move our entry into a dedicated group.
         group.hooks.splice(existing.hookIndex, 1);
         const dedicated: any = { hooks: [{ type: "command", command }] };
         if (wantMatcher !== null) dedicated.matcher = wantMatcher;
@@ -1769,7 +1762,6 @@ export function computeCaptureHookInstall(config: any, runtime: ActionRecallRunt
   return { changed, newConfig, actions };
 }
 
-/** Removes marker matches unless npx is bounded by whitespace or string edges; matching does not prove ownership. */
 export function computeCaptureHookRemoval(config: any): CaptureDelta {
   const newConfig = deepClone(config ?? {});
   const actions = noCaptureActions();

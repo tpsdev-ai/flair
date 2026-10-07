@@ -1,18 +1,3 @@
-/**
- * flair#2264 — install and uninstall never change the matcher of a hook group
- * Flair does not exclusively own. A group that also holds the user's hook is
- * SHARED: its matcher is theirs, so Flair leaves it alone and moves its own
- * entry into a dedicated group. A Flair-only group may still have its matcher
- * repaired.
- *
- * The matcher assertions here are red on origin/main, where the action-recall
- * and capture installers set the found group's matcher unconditionally; the
- * "Flair-only group still repairs" case passes on both (it guards this change
- * against a regression).
- *
- * A fresh temp dir stands in for HOME on every test. Never touches the real
- * ~/.claude or ~/.flair.
- */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,8 +68,8 @@ function captureCommand(): string {
   return buildCaptureHookCommand(CAP_RUNTIME.bunPath, CAP_RUNTIME.artifactPath, AGENT, URL, captureFlushSpec());
 }
 
-describe("flair#2264 — a shared hook group's matcher is never changed", () => {
-  it("action-recall install leaves the shared group's matcher and other hook byte-identical and moves its entry to a dedicated group", () => {
+describe("flair#2264 — shared hook groups", () => {
+  it("action-recall install leaves the shared group's matcher and other hook serialized JSON unchanged and moves its entry to a dedicated group", () => {
     writeSettings({
       hooks: { PreToolUse: [{ matcher: "*", hooks: [USER_HOOK, { type: "command", command: actionRecallCommand() }] }] },
     });
@@ -93,8 +78,6 @@ describe("flair#2264 — a shared hook group's matcher is never changed", () => 
     expect(result.ok).toBe(true);
 
     const config = settings();
-    // The user's group keeps its matcher and its other hook, byte for byte —
-    // serialized comparison, not a parsed equality (flair#2264).
     expect(JSON.stringify(config.hooks.PreToolUse[0])).toBe(JSON.stringify(USER_GROUP_ONLY));
     const dedicated = config.hooks.PreToolUse.filter(
       (group: any) => group.hooks.some((hook: any) => typeof hook.command === "string" && hook.command.includes("action-recall-hook.js")),
@@ -103,7 +86,7 @@ describe("flair#2264 — a shared hook group's matcher is never changed", () => 
     expect(dedicated[0].matcher).toBe(ACTION_RECALL_PRE_TOOL_USE_MATCHER);
   });
 
-  it("action-recall uninstall, after a shared-group install, leaves the user group byte-identical", () => {
+  it("action-recall uninstall, after a shared-group install, leaves the user group serialized JSON unchanged", () => {
     writeSettings({
       hooks: { PreToolUse: [{ matcher: "*", hooks: [USER_HOOK, { type: "command", command: actionRecallCommand() }] }] },
     });
@@ -142,7 +125,7 @@ describe("flair#2264 — a shared hook group's matcher is never changed", () => 
     expect(config.hooks.PreToolUse[0].matcher).toBe(ACTION_RECALL_PRE_TOOL_USE_MATCHER);
   });
 
-  it("capture install leaves a shared PostToolUse group's matcher and other hook byte-identical and moves its entry", () => {
+  it("capture install leaves a shared PostToolUse group's matcher and other hook serialized JSON unchanged and moves its entry", () => {
     writeSettings({
       hooks: { PostToolUse: [{ matcher: "*", hooks: [USER_HOOK, { type: "command", command: captureCommand() }] }] },
     });
@@ -157,7 +140,7 @@ describe("flair#2264 — a shared hook group's matcher is never changed", () => 
     expect(dedicated[0].hooks[0].command).toContain("capture-hook.js");
   });
 
-  it("capture uninstall, after a shared-group install, leaves the user group byte-identical", () => {
+  it("capture uninstall, after a shared-group install, leaves the user group serialized JSON unchanged", () => {
     writeSettings({
       hooks: { PostToolUse: [{ matcher: "*", hooks: [USER_HOOK, { type: "command", command: captureCommand() }] }] },
     });
@@ -184,3 +167,37 @@ describe("flair#2264 — a shared hook group's matcher is never changed", () => 
     expect(config.hooks.PostToolUse.filter((group: any) => group.matcher === CAPTURE_POST_TOOL_USE_MATCHER).length).toBe(1);
   });
 });
+
+
+for (const event of ["PreToolUse", "PostToolUseFailure", "PostToolUse", "Stop"] as const) {
+  for (const fixture of ["marker-only", "appended-marker", "genuine-with-decoy", "edited-command"] as const) {
+    it(`${event} ${fixture}: install, reinstall and uninstall preserve the user group's serialized JSON`, () => {
+      const recall = event === "PreToolUse";
+      const genuine = recall ? actionRecallCommand() : captureCommand();
+      const marker = recall ? "action-recall-hook.js" : "capture-hook.js";
+      const command = fixture === "marker-only" || fixture === "genuine-with-decoy"
+        ? `echo ${marker}`
+        : fixture === "appended-marker" ? `${USER_HOOK.command} # ${marker}` : `${genuine} `;
+      const decoy = { type: "command", command, timeout: 17 };
+      const userGroup = { matcher: "Read", hooks: [decoy] };
+      writeSettings({ hooks: { [event]: [{
+        ...userGroup,
+        hooks: fixture === "genuine-with-decoy" ? [{ type: "command", command: genuine }, decoy] : [decoy],
+      }] } });
+      const runtime = recall ? AR_RUNTIME : CAP_RUNTIME;
+      const options = { homeDir: home, harness: "claude-code" as const, agentId: AGENT, flairUrl: URL, runtime };
+      const install = () => recall ? installActionRecall(options) : installCaptureHooks(options);
+      const snapshots: string[] = [];
+      const outcomes: Array<{ ok: boolean; message: string }> = [];
+      for (let step = 0; step < 2; step++) {
+        outcomes.push(install());
+        snapshots.push(JSON.stringify(settings().hooks[event][0]));
+      }
+      outcomes.push(recall ? uninstallActionRecall(options) : uninstallCaptureHooks(options));
+      snapshots.push(JSON.stringify(settings().hooks?.[event]?.[0]));
+      expect(outcomes.map((result) => result.ok), outcomes.map((result) => result.message).join("\n")).toEqual([true, true, true]);
+      expect(snapshots).toEqual(Array(3).fill(JSON.stringify(userGroup)));
+      expect(settings().hooks[event]).toHaveLength(1);
+    });
+  }
+}
