@@ -245,6 +245,8 @@ import {
   classifySidecarStaleness,
   shouldRemoveSidecarAfterStop,
   livenessFromKillError,
+  parseProcStatState,
+  isExitedState,
   parseNullSeparatedEnviron,
   extractRootPath,
   type DaemonEvidence,
@@ -5132,17 +5134,61 @@ export function readSidecar(dataDir: string): SidecarRead {
   return { kind: "present", ...parsed };
 }
 
-/** `kill(pid, 0)` as a four-way: alive / gone (ESRCH) / eperm (another user's) / unknown. */
-function probePidLiveness(pid: number): PidLiveness {
+/**
+ * The kernel's state character for an existing pid, or null when it cannot be
+ * read (flair#2313). Linux reads field 3 of `/proc/<pid>/stat`; Darwin reads the
+ * first character of `ps -o stat=`. A read failure returns null — the caller
+ * treats that as "not exited", never as exited (fail safe).
+ */
+function readProcessState(pid: number): string | null {
+  try {
+    if (process.platform === "linux") {
+      return parseProcStatState(readFileSync(`/proc/${pid}/stat`, "utf-8"));
+    }
+    if (process.platform === "darwin") {
+      const out = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+        encoding: "utf-8",
+        env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
+        timeout: 2000,
+        killSignal: "SIGKILL",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      return out.length > 0 ? out[0] : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * `kill(pid, 0)` as a four-way: alive / gone (ESRCH) / eperm (another user's) /
+ * unknown.
+ *
+ * Signal 0 says the pid EXISTS, which is not the same as running: an exited
+ * child whose parent has not reaped it is a zombie (state `Z`, `<defunct>`) that
+ * still answers signal 0. After the signal-0 probe succeeds, read the process
+ * state and report a zombie as `gone`, so `flair doctor`'s stop wait stops
+ * waiting on a process that has already exited (flair#2313). An unreadable
+ * state stays `alive` — a read failure must never report a live process as
+ * exited.
+ *
+ * The state reader is injectable so the unreadable branch is unit-testable
+ * without a real unreadable process.
+ */
+export function probePidLiveness(
+  pid: number,
+  readState: (pid: number) => string | null = readProcessState,
+): PidLiveness {
   try {
     process.kill(pid, 0);
-    return { kind: "alive" };
   } catch (err: any) {
     // `gone` ONLY for ESRCH. Any other errno (EINVAL, EACCES, ...) is `unknown`,
     // which must never be read as "gone" — that is the whole point of the
     // classifier's unknown state (flair#2055).
     return livenessFromKillError(err?.code);
   }
+  return isExitedState(readState(pid)) ? { kind: "gone" } : { kind: "alive" };
 }
 
 /**
