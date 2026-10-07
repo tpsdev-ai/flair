@@ -230,9 +230,6 @@ export function register(program: Command): void {
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
-      // flair#2291: `hook status` reads the ONE shared stale-pin finding
-      // (sessionStartHookPinFindings) and hands it to hookStatus, so a hook whose
-      // pin is behind the installed CLI is reported red here, as `doctor` reports it.
       const pinFinding = sessionStartHookPinFindings(home).find(
         (f) => f.reading.target.id === harness,
       ) ?? null;
@@ -309,10 +306,8 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      // flair#2291: a wired hook is not necessarily the INSTALLED adapter. A pin
-      // behind the installed CLI is red here, the same finding `doctor` fails on.
       if (status.pinStale) {
-        console.log(`  ${render.icons.error} SessionStart hook: pinned to flair-mcp@${status.stalePin} (installed CLI is ${flairCliVersion()}) — configured to invoke the older pin when it runs`);
+        console.log(`  ${render.icons.error} SessionStart hook: command names older pin flair-mcp@${status.stalePin} (installed CLI is ${flairCliVersion()})`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
         renderContinuity();
         renderActionRecall();

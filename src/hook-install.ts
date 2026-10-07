@@ -875,8 +875,6 @@ export interface HookStatusResult {
   /** What status verified, not what it configured (flair#1734). */
   delivery: HookDeliveryState;
   deliveryReasons: string[];
-  /** True when the shared stale-pin finding (see HookStatusOptions.stalePinFinding)
-   *  names this harness's hook as BEHIND the installed CLI (flair#2291). */
   pinStale: boolean;
   /** The stale pin that finding named, else null. */
   stalePin: string | null;
@@ -893,17 +891,9 @@ export type HookDeliveryProbe = (command: string) => {
 
 export interface HookStatusOptions {
   deliveryProbe?: HookDeliveryProbe;
-  /**
-   * The ONE shared stale-pin finding for this harness, computed by the command
-   * from owned-pins' `sessionStartHookPinFindings` (flair#2291). `hook status`
-   * renders the finding's `behind` direction red, matching `doctor`. Absent or
-   * null means none was supplied. */
   stalePinFinding?: HookPinFinding | null;
 }
 
-/** The subset of owned-pins' SessionStart-hook pin finding `hook status` needs.
- *  Structurally compatible with `sessionStartHookPinFindings`'s result, kept as
- *  a local shape so this module does not depend on owned-pins (flair#2291). */
 export interface HookPinFinding {
   pin: string | null;
   direction: "ahead" | "behind" | "unknown";

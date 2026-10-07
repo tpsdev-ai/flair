@@ -1,18 +1,3 @@
-/**
- * hook-pin-one-path-2291.test.ts — flair#2291.
- *
- * Runs the registered `flair init` and `flair hook status` actions in-process
- * (`program.parseAsync` on the program src/cli.ts builds) against real config
- * files in a temp HOME: ~/.claude/settings.json, ~/.codex/hooks.json and the
- * MCP files init writes. `npx` and `npm` on PATH are stubs that exit 1, so the
- * delivery probe `hook status` runs fetches nothing.
- *
- * `init` runs with `--skip-start` against a data dir that already holds a
- * harper-config.yaml, so it starts no Harper and registers no agent; its
- * client-wiring step (the step that owns the SessionStart hook leg) still runs.
- *
- * The doctor-catalog cases read the same files through `runDoctorChecks`.
- */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -43,8 +28,6 @@ function oneVersionBehind(version: string): string {
 
 const STALE = oneVersionBehind(INSTALLED);
 
-/** The installer form for `harness`, pinned to `version`, with any agent id
- *  (the builder refuses an id containing `@`, the installer form does not). */
 function installerCommand(harness: Harness, agent: string, version: string): string {
   const env = harness === "codex" ? `FLAIR_HOOK_HARNESS=codex FLAIR_AGENT_ID=${agent}` : `FLAIR_AGENT_ID=${agent}`;
   const invocation = `${env} npx -y -p ${FLAIR_MCP_PACKAGE}@${version} flair-session-start`;
@@ -65,9 +48,11 @@ let savedEnv: Record<string, string | undefined>;
 
 beforeEach(() => {
   savedEnv = { ...process.env };
-  root = tempDir("flair-2291-");
+  root = tempDir("flair-");
   home = join(root, "home");
-  dataDir = join(root, "data");
+  dataDir = process.platform === "darwin" && root.startsWith("/private/var/")
+    ? root.slice("/private".length)
+    : root;
   keysDir = join(root, "keys");
   const bin = join(root, "bin");
   for (const dir of [home, dataDir, keysDir, bin]) mkdirSync(dir, { recursive: true });
@@ -168,8 +153,7 @@ describe("flair#2291 — the registered init and hook status actions on a stale 
 
       const before = await runCli(statusArgs(harness));
       expect(before.code).toBe(1);
-      expect(before.out).toContain(`${render.icons.error} SessionStart hook: pinned to flair-mcp@${STALE} (installed CLI is ${INSTALLED})`);
-      expect(before.out).toContain("configured to invoke the older pin when it runs");
+      expect(before.out).toContain(`${render.icons.error} SessionStart hook: command names older pin flair-mcp@${STALE} (installed CLI is ${INSTALLED})`);
 
       const init = await runCli(initArgs(harness));
       expect(init.code).toBe(0);
@@ -178,7 +162,7 @@ describe("flair#2291 — the registered init and hook status actions on a stale 
 
       const after = await runCli(statusArgs(harness));
       expect(after.code).toBe(0);
-      expect(after.out).not.toContain("configured to invoke the older pin");
+      expect(after.out).not.toContain("command names older pin");
 
       const bytes = readFileSync(path, "utf-8");
       const again = await runCli(initArgs(harness));
@@ -202,27 +186,25 @@ describe("flair#2291 — init --skip-hook writes no hook", () => {
   }
 });
 
-describe("flair#2291 — the finding reads the invocation span, not the first package string", () => {
-  // The agent id carries the INSTALLED package spec; the invocation runs STALE.
+describe("flair#2291 — the finding reads the named pin span", () => {
   const DECOY_AGENT = `${AGENT}:${FLAIR_MCP_PACKAGE}@${INSTALLED}`;
 
-  it("hook status reports the invocation's stale pin; init re-pins the invocation and keeps the agent id", async () => {
+  it("hook status reports the named stale pin; init re-pins and keeps the agent id", async () => {
     const command = installerCommand("claude-code", DECOY_AGENT, STALE);
-    // The INSTALLED spec appears in the text BEFORE the invocation's STALE one.
     expect(command.indexOf(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`)).toBeGreaterThan(-1);
     expect(command.indexOf(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`)).toBeLessThan(command.indexOf(`${FLAIR_MCP_PACKAGE}@${STALE}`));
     const path = writeHookGroups("claude-code", [[command]]);
 
     const status = await runCli(statusArgs("claude-code"));
     expect(status.code).toBe(1);
-    expect(status.out).toContain(`pinned to flair-mcp@${STALE}`);
+    expect(status.out).toContain(`command names older pin flair-mcp@${STALE}`);
 
     const init = await runCli(initArgs("claude-code"));
     expect(init.out).toContain(`re-pinned the SessionStart hook in ${path}`);
     expect(hookCommands("claude-code")).toEqual([installerCommand("claude-code", DECOY_AGENT, INSTALLED)]);
   }, CASE_MS);
 
-  it("the doctor catalog fails on the invocation's stale pin", () => {
+  it("the doctor catalog fails on the named stale pin", () => {
     writeClaudeMcp();
     writeHookGroups("claude-code", [[installerCommand("claude-code", DECOY_AGENT, STALE)]]);
     const hook = doctorHookCheck();
@@ -237,18 +219,22 @@ describe("flair#2291 — ambiguous hook shapes are held and reported", () => {
     `FLAIR_AGENT_ID=${AGENT} npx -y -p ${FLAIR_MCP_PACKAGE}@${INSTALLED} flair-session-start`,
     `FLAIR_AGENT_ID=${AGENT} npx -y -p ${FLAIR_MCP_PACKAGE}@${STALE} flair-session-start`,
   ].join("; ")} 2>/dev/null) && printf %s "$out" || true'`;
-  // A pinned package with no `npx -y -p` invocation (the form without `-p`).
   const pinNoInvocation = `sh -c 'out=$(FLAIR_AGENT_ID=${AGENT} npx -y ${FLAIR_MCP_PACKAGE}@${STALE} flair-session-start 2>/dev/null) && printf %s "$out" || true'`;
   const shapes: ReadonlyArray<{ label: string; groups: () => string[][]; held: (path: string) => string }> = [
     {
-      label: "two invocations in one command",
+      label: "two package spans in one command",
       groups: () => [[twoInvocations]],
-      held: (path) => `2 \`npx -y -p\` flair-session-start invocations in ${path} — pin not read, not re-pinned`,
+      held: (path) => `2 \`npx -y -p\` spans in ${path} — pin not read, not re-pinned`,
     },
     {
-      label: "a pin and no invocation",
+      label: "an unrelated package and the current Flair pin in one command",
+      groups: () => [[`npx -y -p other@1 other; ${installerCommand("claude-code", AGENT, INSTALLED)}`]],
+      held: (path) => `2 \`npx -y -p\` spans in ${path} — pin not read, not re-pinned`,
+    },
+    {
+      label: "a pin and no matching span",
       groups: () => [[pinNoInvocation]],
-      held: (path) => `0 \`npx -y -p\` flair-session-start invocations in ${path} — pin not read, not re-pinned`,
+      held: (path) => `0 \`npx -y -p\` spans in ${path} — pin not read, not re-pinned`,
     },
     {
       label: "two matching hooks",
@@ -276,7 +262,7 @@ describe("flair#2291 — ambiguous hook shapes are held and reported", () => {
 
       const status = await runCli(statusArgs("claude-code"));
       expect(status.out).toContain(`${render.icons.warn} SessionStart hook: ${shape.held(display)}`);
-      expect(status.out).not.toContain("configured to invoke the older pin");
+      expect(status.out).not.toContain("command names older pin");
 
       const init = await runCli(initArgs("claude-code"));
       expect(init.out).toContain(shape.held(display));
@@ -293,6 +279,18 @@ describe("flair#2291 — ambiguous hook shapes are held and reported", () => {
     });
   }
 });
+
+it("quoted command text names an older pin; init leaves the file byte-identical", async () => {
+  const command = `echo 'npx -y -p ${FLAIR_MCP_PACKAGE}@${STALE} flair-session-start'`;
+  const path = writeHookGroups("claude-code", [[command]]);
+  const bytes = readFileSync(path, "utf-8");
+  const status = await runCli(statusArgs("claude-code"));
+  expect(status.code).toBe(1);
+  expect(status.out).toContain(`command names older pin flair-mcp@${STALE}`);
+  const init = await runCli(initArgs("claude-code"));
+  expect(init.out).toContain("not one of the installer forms Flair writes");
+  expect(readFileSync(path, "utf-8")).toBe(bytes);
+}, CASE_MS);
 
 // ── doctor catalog helpers ──────────────────────────────────────────────────
 
