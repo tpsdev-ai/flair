@@ -2,7 +2,7 @@ export interface OverrideViolation {
   name: string;
   /** The declared non-exact specifier. */
   declared: string;
-  /** Lockfile version suggestion, or null. */
+  /** Exact semver from the lockfile, or null. */
   exact: string | null;
 }
 

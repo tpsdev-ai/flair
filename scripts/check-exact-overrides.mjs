@@ -8,7 +8,6 @@
  * Usage: node scripts/check-exact-overrides.mjs [--root <dir>] [--staged]
  * Exit 0: checked values are exact semvers, exact npm: alias targets or exempt.
  * Exit 1: a checked value is a non-exact specifier.
- * Exit 2: input/checker error, including unsupported shapes or no manifests.
  */
 
 import { execFileSync } from "node:child_process";
@@ -67,7 +66,25 @@ function readJson(root, rel, staged) {
       `${path} is not a package object. Maintainer: repair package.json, then rerun the override check.`,
     );
   }
+  for (const kind of DEP_KINDS) objectField(pkg, kind, path);
   return pkg;
+}
+
+function isPlainObject(value) {
+  return (
+    value !== null && typeof value === "object" && !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+
+function objectField(object, field, path) {
+  if (!Object.hasOwn(object, field)) return {};
+  if (!isPlainObject(object[field])) {
+    throw new Error(
+      `${path} ${field} must be a plain object. Maintainer: repair ${field}, then rerun the override check.`,
+    );
+  }
+  return object[field];
 }
 
 function isExempt(value) {
@@ -99,12 +116,28 @@ function isExactSemver(value) {
   return core.length === 3 && core.every((part) => matchesWhole(part, CORE_PART));
 }
 
+function isPackageName(name) {
+  if (name.length === 0 || name.length > 214) return false;
+  if (name.startsWith("@")) {
+    const parts = name.slice(1).split("/");
+    return (
+      parts.length === 2 && matchesWhole(parts[0], /^[a-z0-9._~!'()*-]+$/) &&
+      matchesWhole(parts[1], /^[a-z0-9_-][a-z0-9._-]*$/)
+    );
+  }
+  return (
+    name !== "node_modules" && name !== "favicon.ico" &&
+    matchesWhole(name, /^[a-z0-9][a-z0-9._-]*$/)
+  );
+}
+
 function isExactVersion(value) {
   if (typeof value !== "string") return false;
   if (isExactSemver(value)) return true;
   if (value.startsWith("npm:")) {
     const at = value.lastIndexOf("@");
-    return at > "npm:".length && isExactSemver(value.slice(at + 1));
+    const name = value.slice("npm:".length, at);
+    return isPackageName(name) && isExactSemver(value.slice(at + 1));
   }
   return false;
 }
@@ -178,20 +211,27 @@ function workspaceManifests(root, rootPkg, staged) {
 }
 
 function makeResolver(root, staged) {
-  let packages;
+  let lock;
   try {
     const raw = readText(root, "bun.lock", staged);
-    packages = JSON.parse(raw.replace(/,(\s*[}\]])/g, "$1")).packages ?? {};
+    lock = JSON.parse(raw.replace(/,(\s*[}\]])/g, "$1"));
   } catch {
     return () => null;
   }
+  const path = join(root, "bun.lock");
+  if (!isPlainObject(lock)) {
+    throw new Error(`${path} must be a plain object. Maintainer: regenerate bun.lock.`);
+  }
+  const packages = objectField(lock, "packages", path);
   const map = new Map();
   for (const [name, entry] of Object.entries(packages)) {
     if (map.has(name)) continue;
     const spec = Array.isArray(entry) ? entry[0] : entry;
     if (typeof spec !== "string") continue;
     const at = spec.lastIndexOf("@");
-    if (at > 0) map.set(name, spec.slice(at + 1));
+    if (at > 0 && isPackageName(spec.slice(0, at)) && isExactSemver(spec.slice(at + 1))) {
+      map.set(name, spec.slice(at + 1));
+    }
   }
   return (name) => map.get(name) ?? null;
 }
@@ -199,6 +239,7 @@ function makeResolver(root, staged) {
 export function findExactOverrideViolations(repoRoot, { staged = false } = {}) {
   const rootPkg = readJson(repoRoot, "package.json", staged);
 
+  const overrides = objectField(rootPkg, "overrides", join(repoRoot, "package.json"));
   const reachable = new Set();
   for (const pkg of workspaceManifests(repoRoot, rootPkg, staged)) {
     for (const kind of DEP_KINDS) {
@@ -208,7 +249,7 @@ export function findExactOverrideViolations(repoRoot, { staged = false } = {}) {
 
   const resolve = makeResolver(repoRoot, staged);
   const violations = [];
-  for (const [name, declared] of Object.entries(rootPkg.overrides ?? {})) {
+  for (const [name, declared] of Object.entries(overrides)) {
     if (!reachable.has(name)) continue;
     if (typeof declared !== "string") {
       throw new Error(
@@ -246,8 +287,8 @@ function main() {
   );
   console.error("");
   for (const v of violations) {
-    const pin = v.exact ? `"${v.exact}"` : "the exact version the registry resolves";
-    console.error(`  overrides["${v.name}"] = "${v.declared}" — pin ${pin}.`);
+    const advice = v.exact ? `pin "${v.exact}"` : "choose an exact version or a workspace: specifier";
+    console.error(`  overrides["${v.name}"] = "${v.declared}" — ${advice}.`);
   }
   console.error("");
   process.exit(1);

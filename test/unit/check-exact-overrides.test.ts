@@ -151,7 +151,39 @@ describe("check-exact-overrides — the narrowed scope", () => {
     ]);
     const r = runCli(root);
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain("the exact version the registry resolves");
+    expect(r.stderr).toContain("choose an exact version or a workspace: specifier");
+    expect(r.stderr).not.toContain("registry");
+  });
+});
+
+describe("lockfile advice", () => {
+  for (const version of [
+    "workspace:packages/dep", "file:../dep", "link:../dep", "git+https://example.test/dep.git",
+    "https://example.test/dep.tgz", "git+https://example.test/dep.git@1.2.3", "file:dep@1.2.3", "^1.2.3", "npm:foo@1.2.3", "01.2.3", "1.2.3-01",
+  ]) {
+    test(`no pin for ${version}`, () => {
+      const root = buildFixture({
+        overrides: { "@x/dep": "^1.2.3" },
+        workspaces: [declares("dependencies", { "@x/dep": "file:../dep" })],
+        packages: { "@x/dep": res("@x/dep", version) },
+      });
+      expect(findExactOverrideViolations(root)).toEqual([
+        { name: "@x/dep", declared: "^1.2.3", exact: null },
+      ]);
+      const result = runCli(root);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("choose an exact version or a workspace: specifier");
+      expect(result.stderr).not.toContain("registry");
+    });
+  }
+  test("missing lockfile gives no pin", () => {
+    const root = buildFixture({
+      overrides: { "@x/dep": "^1.2.3" },
+      workspaces: [declares("dependencies", { "@x/dep": "file:../dep" })],
+    });
+    rmSync(join(root, "bun.lock"));
+    expect(findExactOverrideViolations(root)[0]?.exact).toBeNull();
+    expect(runCli(root).stderr).toContain("choose an exact version or a workspace: specifier");
   });
 });
 
@@ -164,6 +196,38 @@ describe("check-exact-overrides — required inputs fail closed", () => {
     expect(r.stderr).toContain(state);
     expect(r.stderr).toContain("Maintainer:");
     expect(r.stdout).not.toContain("✓");
+  }
+
+  for (const value of [null, "dep", 1, true, []]) {
+    for (const rel of ["package.json", "packages/adapter/package.json"]) {
+      for (const field of ["dependencies", "devDependencies", "optionalDependencies", ...(rel === "package.json" ? ["overrides"] : [])]) {
+        test(`refuses ${rel} ${field}=${JSON.stringify(value)}`, () => {
+          const root = buildFixture({
+            overrides: { dep: "1.x" },
+            workspaces: [declares("dependencies", { dep: "1.2.3" })],
+          });
+          const path = join(root, rel);
+          const pkg = JSON.parse(readFileSync(path, "utf8"));
+          pkg[field] = value;
+          writeFileSync(path, JSON.stringify(pkg));
+          expectInputFailure(root, path, `${field} must be a plain object`);
+        });
+      }
+    }
+    for (const rel of ["package.json", "packages/adapter/package.json", "bun.lock"]) {
+      test(`refuses ${rel}=${JSON.stringify(value)}`, () => {
+        const root = buildFixture({ workspaces: [{ dir: "adapter" }] });
+        const path = join(root, rel);
+        writeFileSync(path, JSON.stringify(value));
+        expectInputFailure(root, path, "object");
+      });
+    }
+    test(`refuses bun.lock packages=${JSON.stringify(value)}`, () => {
+      const root = buildFixture({ workspaces: [{ dir: "adapter" }] });
+      const path = join(root, "bun.lock");
+      writeFileSync(path, JSON.stringify({ packages: value }));
+      expectInputFailure(root, path, "packages must be a plain object");
+    });
   }
 
   test("a missing root package.json fails", () => {
@@ -221,7 +285,13 @@ describe("check-exact-overrides — the CLI", () => {
   });
 });
 
-const nonExact = ["1.x", "1", "^1.2.3", "~1.2.3", ">=1", "*", "latest", "npm:foo@1.x"];
+const nonExact = [
+  "1.x", "1", "^1.2.3", "~1.2.3", ">=1", "*", "latest", "npm:foo@1.x",
+  "npm:foo@^1@2.0.0", "npm:@scope/foo@^1@2.0.0", "npm:foo@@2.0.0",
+  "npm:@scope/@2.0.0", "npm:foo/bar@2.0.0", "npm:Foo@2.0.0", "npm:.foo@2.0.0",
+  "npm:_foo@2.0.0", "npm:-foo@2.0.0", "npm:~foo@2.0.0", "npm:node_modules@2.0.0", "npm:favicon.ico@2.0.0", "npm:foo bar@2.0.0", "npm:foo%20bar@2.0.0", "npm:@/foo@2.0.0",
+  "npm:@scope/foo/bar@2.0.0", "npm:foo\n@2.0.0", `npm:${"a".repeat(215)}@2.0.0`,
+];
 
 describe("version validation", () => {
   for (const value of nonExact) {
@@ -242,7 +312,7 @@ describe("version validation", () => {
       expect(runCli(root).status).toBe(1);
     });
   }
-  for (const value of ["1.2.3", "1.2.3-rc.1+build.2", "npm:foo@1.2.3", "npm:@x/foo@1.2.3-rc.1"]) {
+  for (const value of ["1.2.3", "1.2.3-rc.1+build.2", "npm:foo@1.2.3", "npm:@x/foo@1.2.3-rc.1", "npm:foo-bar.baz_2@1.2.3", "npm:@scope/_foo@1.2.3"]) {
     test(`accepts ${value}`, () => {
       const root = buildFixture({
         overrides: { "@x/dep": value },
@@ -477,19 +547,34 @@ describe("Bun local override seam", () => {
       writeFileSync(join(root, "old/package.json"), JSON.stringify({ name: "seam-dep", version: "1.0.0" }));
       const path = join(root, "package.json");
       const pkg = JSON.parse(readFileSync(path, "utf8"));
-      pkg.dependencies = { "seam-adapter": "workspace:*" };
+      pkg.dependencies = { "seam-adapter": "file:packages/adapter" };
       writeFileSync(path, JSON.stringify(pkg));
+      const home = join(root, "home");
+      mkdirSync(home);
       const installed = spawnSync(process.execPath, [
-        "install", "--no-save", "--ignore-scripts", "--linker", "hoisted",
+        "install", "--ignore-scripts", "--linker", "hoisted",
         "--cache-dir", join(root, "cache"), "--registry", "http://127.0.0.1:1",
-      ], { cwd: root, encoding: "utf8", timeout: 10000 });
+      ], {
+        cwd: root, encoding: "utf8", timeout: 10000,
+        env: { ...process.env, HOME: home, USERPROFILE: home, BUN_INSTALL_CACHE_DIR: join(root, "cache") },
+      });
       expect(installed.error).toBeUndefined();
       expect(installed.status).toBe(0);
       const require = createRequire(join(root, "packages/adapter/package.json"));
       const resolved = JSON.parse(readFileSync(require.resolve("seam-dep/package.json"), "utf8"));
       expect(resolved.version).toBe(override ? "2.0.0" : "1.0.0");
-      expect(findExactOverrideViolations(root)).toHaveLength(override === "^2.0.0" ? 1 : 0);
-      expect(runCli(root).status).toBe(override === "^2.0.0" ? 1 : 0);
+      const lock = JSON.parse(readFileSync(join(root, "bun.lock"), "utf8").replace(/,(\s*[}\]])/g, "$1"));
+      expect(lock.packages["seam-dep"][0]).toBe("seam-dep@workspace:packages/dep");
+      if (!override) expect(lock.packages["seam-adapter/seam-dep"][0]).toBe("seam-dep@file:old");
+      expect(findExactOverrideViolations(root)).toEqual(override === "^2.0.0"
+        ? [{ name: "seam-dep", declared: override, exact: null }]
+        : []);
+      const result = runCli(root);
+      expect(result.status).toBe(override === "^2.0.0" ? 1 : 0);
+      if (override === "^2.0.0") {
+        expect(result.stderr).toContain("choose an exact version or a workspace: specifier");
+        expect(result.stderr).not.toContain("registry");
+      }
     }
   }, 45000);
 });
