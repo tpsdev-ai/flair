@@ -867,7 +867,13 @@ exec /usr/sbin/lsof "$@"
     const script = `import { repairLaunchdManagement } from ${JSON.stringify(CLI_JS)};
 const result = await repairLaunchdManagement(${JSON.stringify(sb.dataDir)}, ${sb.httpPort});
 console.log("REPAIR_RESULT:" + JSON.stringify(result));`;
-    const result = spawnSync(nodeBin(), ["--input-type=module", "-e", script], {
+    // Async, never spawnSync: the direct Harper is THIS runner's child
+    // (directSpawnDetached), and only a running event loop reaps it. Blocked in
+    // spawnSync, the stopped Harper stayed a zombie, which kill(pid, 0) reports
+    // alive — both doctor's liveness probe and the shim's guard — so the stop
+    // ran out its deadline and the fault was never injected (CI, 605498d6). In
+    // production the direct process is reparented to launchd, which reaps it.
+    const child = spawn(nodeBin(), ["--input-type=module", "-e", script], {
       cwd: REPO_ROOT,
       env: {
         ...doctorEnv(sb.tmpHome),
@@ -875,13 +881,33 @@ console.log("REPAIR_RESULT:" + JSON.stringify(result));`;
         ADOPT_TEST_PID: String(directPid),
         ADOPT_TEST_PROBE: failedProbe,
       },
-      encoding: "utf8",
-      timeout: 180_000,
-      killSignal: "SIGKILL",
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    expect(result.error).toBeUndefined();
-    expect(result.status, result.stdout + result.stderr).toBe(0);
-    expect(existsSync(failedProbe)).toBe(true);
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    const startedAt = Date.now();
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+      const timer = setTimeout(() => child.kill("SIGKILL"), 180_000);
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on("close", (code, signal) => {
+        clearTimeout(timer);
+        resolveExit({ code, signal });
+      });
+    });
+    lastCliRun = { what: "repairLaunchdManagement (lsof fault)", exitCode: exit.code, signal: exit.signal, elapsedMs: Date.now() - startedAt, stdout, stderr };
+    const result = { stdout, stderr };
+    expect(exit.signal, stdout + stderr).toBeNull();
+    expect(exit.code, stdout + stderr).toBe(0);
+    expect(existsSync(failedProbe), `the lsof shim never failed a probe after the direct process exited:\n${stdout}${stderr}`).toBe(true);
     const line = result.stdout.split("\n").find((value) => value.startsWith("REPAIR_RESULT:"));
     expect(line).toBeDefined();
     const repair = JSON.parse(line!.slice("REPAIR_RESULT:".length));
