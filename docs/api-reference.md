@@ -170,7 +170,7 @@ the same identity plane.
 | POST | `/MemoryConsolidate` | Ed25519 | Dedup / consolidate. |
 | POST | `/MemoryReflect` | Ed25519 | REM distill → MemoryCandidate. |
 | POST | `/MemoryDedupStats` | Admin Basic | Dedup diagnostics. Fleet-wide sweep; `allowCreate` is `allowAdmin`. |
-| POST | `/MemoryPurge` | Admin Basic | Physical removal of Memory rows by id; a skill-tagged row expands to its whole skill lineage, and each durable deletion is recorded in the same transaction. Counts only rows whose delete is confirmed. Does not change `DELETE /Memory/<id>` (a skill-tagged row is versioned there, its head closed). |
+| POST | `/MemoryPurge` | **Operator / internal** | Not Ed25519, admin-agent keys included. Physical removal of Memory rows by id; a skill-tagged row expands to its whole skill lineage. `removedIds` lists the rows a read after the commit finds gone; a target not stored before the delete fails the call (404), and so does a target still stored after the commit (409). Does not change `DELETE /Memory/<id>` (a skill-tagged row is versioned there, its head closed). |
 | POST | `/SkillScan` | Ed25519 | Skill-tag scan on Memory writes. |
 | GET | `/OrgSkillAssignment`, `/OrgSkillAssignment/<id>` | Ed25519 | Any verified agent. Org-scope skill assignments; see the `skills` paragraph in [docs/mcp-clients.md](mcp-clients.md). Not federated. |
 | POST / PUT / PATCH / DELETE | `/OrgSkillAssignment/` (POST), `/OrgSkillAssignment/<id>` (PUT / PATCH / DELETE) | **Operator / internal** | Not Ed25519, admin-agent keys included. Each accepted write appends an `OrgSkillAssignmentHistory` row. |

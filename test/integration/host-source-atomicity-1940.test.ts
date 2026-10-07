@@ -11,6 +11,7 @@
  *   t1  a POST whose pointer write throws leaves NO Memory row;
  *   t2  a PUT whose pointer write throws leaves the pre-existing row byte-identical;
  *   c3  a failing pointer delete fails the Memory delete and the row is still there;
+ *   c5  a failing pointer delete fails POST /MemoryPurge; the row and its deletion history are unchanged;
  *   r4-http  POST/PUT/PATCH/DELETE to MemoryHostSource are refused (non-admin AND admin), nothing written.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
@@ -107,6 +108,19 @@ describe("flair#1940 A1-iv item 7 — real-Harper atomicity + REST refusal", () 
     const res = await authFetch(agent, "DELETE", `/Memory/${id}`);
     expect(res.status).toBe(500); // assertion: the delete failed
     expect((await readRows("Memory", "id", id)).length).toBe(1); // assertion: the Memory row remains
+  }, 60_000);
+
+  it("c5: a failing pointer delete fails POST /MemoryPurge; the Memory row and its deletion history are unchanged", async () => {
+    const id = `it-c5-${Date.now()}`;
+    const seedMem = await adminOp({ operation: "insert", database: "flair", table: "Memory", records: [{ id, agentId: agent.id, content: "c5", contentHash: "h", visibility: "shared", durability: "permanent", createdAt: new Date().toISOString(), archived: false, instanceToken: randomUUID() }] });
+    expect(seedMem.status).toBe(200); // assertion: seeded the Memory row
+    const before = JSON.stringify(await readRows("Memory", "id", id));
+    const historyBefore = await readRows("MemoryDeletionHistory", "memoryId", id);
+    expect(historyBefore).toEqual([]); // assertion: no history yet
+    const res = await adminFetch("POST", "/MemoryPurge", { ids: [id] });
+    expect(res.status).toBe(500); // assertion: the purge failed
+    expect(JSON.stringify(await readRows("Memory", "id", id))).toBe(before); // assertion: the row is unchanged
+    expect(await readRows("MemoryDeletionHistory", "memoryId", id)).toEqual(historyBefore); // assertion: no history row
   }, 60_000);
 
   it("r4-http: every MemoryHostSource REST write verb is refused (non-admin and admin), nothing written", async () => {

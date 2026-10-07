@@ -53,6 +53,8 @@ add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
 // ── OPERATOR ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
   "OPERATOR: POST /AgentSeed requires the operator source (authorizeSoulWrite), the authority the reservation asks for.");
+add("MemoryPurge", ["writer:memory.delete#1"],
+  "OPERATOR: POST /MemoryPurge requires the operator source (soulWriteSource in allowCreate), the authority the reservation asks for.");
 
 // ── BOOKKEEPING (deliberately open; see the distinctions above) ──
 add("Memory", ["writer:patchRecord#1"],
@@ -68,9 +70,6 @@ add("MemoryReflect", ["writer:patchRecordSilent#1"],
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "SERVER: the sweep selects rows by state (expired ephemeral, closed, old session notes). The seed row is persistent and closing it by supersede requires the operator-source decision.");
 add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource pointer rows, another table.");
-add("MemoryPurge", ["writer:memory.delete#1"],
-  "SERVER: the operator names the rows (POST /MemoryPurge, admin source) and the endpoint removes them.");
-add("MemoryPurge", ["writer:table.delete#1"], "SERVER: MemoryHostSource pointer rows, another table.");
 add("MemoryReindex", ["writer:Memory.put#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields.");
 add("promotion-stamp", ["writer:table.put#1"],
   "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id.");

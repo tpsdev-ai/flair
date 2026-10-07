@@ -73,10 +73,8 @@ add("MemoryMaintenance", ["writer:table.delete#1"],
 // ── Physical removal (MemoryPurge) ──
 add("MemoryPurge", ["writer:memory.delete#1"],
   "Physical-removal path: removes the named rows (and a skill row's lineage) through the raw table handle — a removal, not a skill write, so the post/put SkillScan gate does not apply.");
-add("MemoryPurge", ["writer:table.delete#1"],
-  "MemoryHostSource pointer cascade — a different table, never skill content.");
 add("MemoryPurge", ["alias-source:(databases as any).flair?.Memory#1"],
-  "Read-only alias: MemoryPurge reads each row (and searches a skill lineage) before removing it; no write through this handle.");
+  "Read handle (MemoryPurge reads each row and searches a skill lineage); its delete is the site classified above.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:Memory.put#1"],

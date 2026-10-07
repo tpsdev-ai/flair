@@ -17,6 +17,9 @@ let requests: string[];
 let otherInstance: Map<string, typeof row>;
 let expectedBaseUrl: string;
 let deletes: string[];
+let operations: string[];
+let memoryScan: (() => Response) | null;
+let purgeResponse: ((ids: string[]) => unknown) | null;
 let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
 const row = { id: "owner-compact-/m", agentId: "owner", durability: "permanent", content: "junk" };
@@ -28,6 +31,7 @@ const api = async (method: string, path: string, body: any, options: any) => {
   requests.push(`${method}:${options.baseUrl}`);
   const ids: string[] = Array.isArray(body?.ids) ? body.ids : [];
   deletes.push(...ids);
+  if (purgeResponse) return purgeResponse(ids);
   if (options.baseUrl === "http://127.0.0.1:29926") {
     for (const id of ids) otherInstance.delete(id);
     return { removed: ids.length };
@@ -41,6 +45,9 @@ beforeEach(() => {
   resetHarnessState();
   harnessState.memoryStore.set(row.id, { ...row });
   deletes = [];
+  operations = [];
+  memoryScan = null;
+  purgeResponse = null;
   expectedBaseUrl = "http://127.0.0.1:19926";
   configuration = { http: { port: "127.0.0.1:19926" }, operationsApi: { network: { port: "127.0.0.1:19925" } } };
   opsResolutions = 0;
@@ -55,7 +62,9 @@ beforeEach(() => {
     requests.push(`POST:${url}`);
     expect(String(url)).toBe("http://127.0.0.1:19925/");
     const b = JSON.parse(init.body);
+    operations.push(`${b.operation}:${b.table ?? ""}`);
     if (b.operation === "get_configuration") return Response.json(configuration);
+    if (memoryScan && b.table === "Memory" && b.operation.startsWith("search")) return memoryScan();
     if (b.operation === "delete" && b.table === "Memory") {
       for (const id of b.ids ?? b.hash_values ?? []) harnessState.memoryStore.delete(id);
       return Response.json({ message: "1 of 1 records deleted" });
@@ -93,6 +102,9 @@ async function assertRecorded(kind: "hygiene" | "remove") {
   await invoke(kind);
   expect(deletes).toEqual([row.id]);
   expect(harnessState.memoryStore.has(row.id)).toBe(false);
+  // Positive controls for the refusal tests below: a success logs these and sends the Agent delete.
+  expect(log.mock.calls.flat().join("\n")).toContain(kind === "hygiene" ? "Deleted 1 rows" : "removed successfully");
+  if (kind === "remove") expect(operations).toContain("delete:Agent");
   expect([...harnessState.deletionStore.values()].map(d => d.memoryId)).toEqual([row.id]);
   harnessState.memoryStore.set(row.id, { ...row });
   const failure = spyOn(databasesMock.flair.MemoryDeletionHistory, "put").mockRejectedValue(new Error("history down"));
@@ -150,5 +162,43 @@ for (const kind of ["hygiene", "remove"] as const) {
     expect(requests).toEqual(["POST:http://127.0.0.1:19925/"]);
     expect(deletes).toEqual([]);
     expect(otherInstance.has(row.id)).toBe(true);
+  });
+}
+
+const scanFailures: [string, () => Response][] = [
+  ["a failed scan", () => new Response("ops unavailable", { status: 500 })],
+  ["a non-array scan", () => Response.json({ results: [] })],
+  ["a scan row without an id", () => Response.json([{ agentId: "owner" }])],
+];
+for (const [label, scan] of scanFailures) {
+  test(`agent remove: ${label} stops before any delete and keeps the Agent record`, async () => {
+    memoryScan = scan;
+    await expect(invoke("remove")).rejects.toThrow("The Memory scan for agent 'owner'");
+    expect(deletes).toEqual([]);
+    expect(operations).not.toContain("delete:Agent");
+    expect(operations).not.toContain("delete:Soul");
+    expect(harnessState.memoryStore.has(row.id)).toBe(true);
+  });
+}
+
+const purgeFailures: [string, (ids: string[]) => unknown][] = [
+  ["an empty-body success", () => ({ ok: true })],
+  ["a count without the removed ids", (ids) => ({ removed: ids.length })],
+  ["a list that leaves out a requested id", () => ({ removed: 0, removedIds: [] })],
+  ["a count that disagrees with the list", (ids) => ({ removed: ids.length + 1, removedIds: ids })],
+];
+for (const [label, respond] of purgeFailures) {
+  test(`memory hygiene: ${label} from /MemoryPurge fails the command`, async () => {
+    purgeResponse = respond;
+    await expect(invoke("hygiene")).rejects.toThrow();
+    expect(deletes).toEqual([row.id]);
+    expect(log.mock.calls.flat().join("\n")).not.toContain("Deleted");
+  });
+  test(`agent remove: ${label} from /MemoryPurge fails before the Agent record is deleted`, async () => {
+    purgeResponse = respond;
+    await expect(invoke("remove")).rejects.toThrow();
+    expect(deletes).toEqual([row.id]);
+    expect(operations).not.toContain("delete:Agent");
+    expect(log.mock.calls.flat().join("\n")).not.toContain("removed successfully");
   });
 }

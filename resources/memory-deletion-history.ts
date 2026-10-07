@@ -20,15 +20,17 @@ export interface MemoryDeletionInput {
   at?: string;
 }
 
-export async function recordMemoryDeletion(input: MemoryDeletionInput, ctx?: unknown): Promise<void> {
-  if (input.durability !== "permanent" && input.durability !== "persistent") return;
+/** Returns the record's id, or null when the durability needs no record. */
+export async function recordMemoryDeletion(input: MemoryDeletionInput, ctx?: unknown): Promise<string | null> {
+  if (input.durability !== "permanent" && input.durability !== "persistent") return null;
   const table = (databases as any).flair?.[MEMORY_DELETION_HISTORY_TABLE];
   if (!table?.put) {
     throw new Error(`${MEMORY_DELETION_HISTORY_TABLE} table unavailable`);
   }
+  const id = randomUUID();
   await table.put(
     {
-      id: randomUUID(),
+      id,
       memoryId: input.memoryId,
       memoryInstanceToken: input.memoryInstanceToken ?? null,
       durability: input.durability ?? null,
@@ -38,4 +40,14 @@ export async function recordMemoryDeletion(input: MemoryDeletionInput, ctx?: unk
     },
     ctx as any,
   );
+  return id;
+}
+
+/** Delete one deletion-history record by its id. */
+export async function removeMemoryDeletionRecord(id: string, ctx?: unknown): Promise<void> {
+  const table = (databases as any).flair?.[MEMORY_DELETION_HISTORY_TABLE];
+  if (!table?.delete) {
+    throw new Error(`${MEMORY_DELETION_HISTORY_TABLE} table unavailable`);
+  }
+  await table.delete(id, ctx as any);
 }

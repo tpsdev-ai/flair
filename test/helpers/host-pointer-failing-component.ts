@@ -32,11 +32,30 @@ export async function deletePointerRowViaTable() { throw new Error("test adapter
  *  can assert the composed file IS the failing adapter (a positive control). */
 export const FAILING_ADAPTER_SRC = FAILING_ADAPTER_JS;
 
+/** A second test-only adapter (pass it as `adapterSrc`): before deleting a
+ *  pointer row, it commits a newer write of the same Memory row in a separate
+ *  transaction, so the caller's queued Memory delete loses to that write at
+ *  commit. Pointer puts and deletes otherwise go to the real table. */
+export const CONCURRENT_WRITE_ADAPTER_SRC = `// Test-only build replacement: a pointer delete first commits a newer write
+// of the same Memory row in a separate transaction.
+import { databases } from "harper";
+export async function putPointerRow(row, ctx) { await databases.flair.MemoryHostSource.put(row, ctx); }
+export async function deletePointerRowViaTable(memoryId, ctx) {
+  const memory = databases.flair.Memory;
+  const separate = {};
+  await globalThis.transaction(separate, async () => {
+    const row = await memory.get(memoryId, separate);
+    if (row) await memory.put({ ...row, content: "rewritten by a separate transaction" }, separate);
+  });
+  await databases.flair.MemoryHostSource.delete(memoryId, ctx);
+}
+`;
+
 function repoRoot(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
-export function componentWithFailingHostPointer(opts: { sourceRoot?: string } = {}): FailingComponent {
+export function componentWithFailingHostPointer(opts: { sourceRoot?: string; adapterSrc?: string } = {}): FailingComponent {
   const sourceRoot = opts.sourceRoot ?? repoRoot();
   const sourceAdapter = join(sourceRoot, ADAPTER_REL);
   if (!existsSync(sourceAdapter)) {
@@ -50,7 +69,7 @@ export function componentWithFailingHostPointer(opts: { sourceRoot?: string } = 
   }
   const nmSrc = join(sourceRoot, "node_modules");
   if (existsSync(nmSrc)) symlinkSync(nmSrc, join(dir, "node_modules"), "dir");
-  writeFileSync(join(dir, ADAPTER_REL), FAILING_ADAPTER_JS);
+  writeFileSync(join(dir, ADAPTER_REL), opts.adapterSrc ?? FAILING_ADAPTER_JS);
   return {
     dir,
     cleanup: () => {
