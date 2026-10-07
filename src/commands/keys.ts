@@ -316,7 +316,7 @@ export function applyKeyPrune(
         skipped.push({
           name: e.name,
           ownerPath: fromOwner,
-          reason: `${fromOwner} ${why}; the sidecar was restored and the key is left in place`,
+          reason: `${toOwner} ${why}; the archive-path entry was moved back and the key stayed active`,
         });
         continue;
       }

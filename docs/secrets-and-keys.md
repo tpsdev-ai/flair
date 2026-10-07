@@ -148,7 +148,9 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 
 `flair keys prune` classifies every `.key` file in the key directory and, with
 `--apply`, moves prunable keys into `<keysDir>/.pruned/<date>/`; keys with
-refused sidecars stay in place. It never deletes.
+refused sidecars stay in place.
+It never deletes unless a concurrent writer creates the selected archive name
+before the move, which can replace that entry.
 
 - Agent signing keys whose seed parses are prunable when the agent is not
   registered on the targeted instance, except node-shaped files without `.pub`.
