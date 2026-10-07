@@ -352,24 +352,23 @@ describe("capture spool", () => {
     expect(readSpool(dir, "agent-a").length).toBe(1);
   });
 
-  test("a record appended while the flush awaits Flair is kept, not overwritten", async () => {
+  test("a capture during the flush's write is refused, not interleaved", async () => {
     runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
-    let appendedMidFlush = false;
+    let attempted = false;
     const client: CaptureClient = {
       request: async () => {
-        if (!appendedMidFlush) {
-          appendedMidFlush = true;
-          expect(runCapture(stop("Decision: we will use host-b for search."), { env: env(), dir }).reason).toBe("appended");
+        if (!attempted) {
+          attempted = true;
+          // The flush holds the per-agent lock for its whole run.
+          expect(runCapture(stop("Decision: we will use host-b for search."), { env: env(), dir }).reason).toBe("refused");
         }
         return {};
       },
     };
     const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
     expect(result.flushed).toBe(1);
-    expect(result.remaining).toBe(1);
-    const left = readSpool(dir, "agent-a");
-    expect(left.length).toBe(1);
-    expect(left[0]!.content).toContain("host-b");
+    expect(result.remaining).toBe(0);
+    expect(readSpool(dir, "agent-a")).toHaveLength(0);
   });
 
   test("Stop and failure writes refuse a held per-agent lock", () => {
@@ -386,18 +385,18 @@ describe("capture spool", () => {
     expect(existsSync(lockPath(dir, "agent-a"))).toBe(false);
   });
 
-  test("the flush's rewrite waits for the lock and leaves the spool intact without it", async () => {
+  test("the flush holds the per-agent lock for its whole run and releases it", async () => {
     runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
+    let heldDuringWrite = false;
     const client: CaptureClient = {
-      request: async () => {
-        writeFileSync(lockPath(dir, "agent-a"), "held");
-        return {};
-      },
+      request: async () => { heldDuringWrite = existsSync(lockPath(dir, "agent-a")); return {}; },
     };
     const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
+    expect(heldDuringWrite).toBe(true);
     expect(result.flushed).toBe(1);
-    expect(result.remaining).toBe(1);
-    expect(readSpool(dir, "agent-a").length).toBe(1);
+    expect(result.remaining).toBe(0);
+    expect(readSpool(dir, "agent-a")).toHaveLength(0);
+    expect(existsSync(lockPath(dir, "agent-a"))).toBe(false);
   });
 
   test("a malformed payload and a missing agent id capture nothing", () => {

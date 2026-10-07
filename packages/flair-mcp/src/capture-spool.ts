@@ -7,11 +7,10 @@
  *   <dir>/<agentId>.spool.json    staged candidates (bounded)
  *   <dir>/<agentId>.pending.json  failed commands awaiting a matching follow-up (bounded)
  *   <dir>/<agentId>.flush.stamp   last background-flush time (cooldown)
- *   <dir>/<agentId>.flush.lock    flush-in-progress marker (owner pid + start)
  *   <dir>/<agentId>.lock
  */
 
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -50,15 +49,19 @@ export const CAPTURE_LOCK_WAIT_MS = 200;
 
 export const CAPTURE_LOCK_STALE_MS = 5000;
 
-/** One background flush runs for at most this long; client setup and every write
- *  count against it. A flush stops at the deadline and leaves whatever it did not
- *  write in the spool; the next flush tries again. */
+/** One background flush bounds its asynchronous setup and every write by this
+ *  deadline: the client factory and each write get only the time left. A flush
+ *  that reaches the deadline stops writing and leaves whatever it did not write
+ *  in the spool, including a record that belongs to another agent; the next
+ *  flush tries again. The final spool rewrite is a synchronous local write that
+ *  follows the last write. */
 export const CAPTURE_FLUSH_DEADLINE_MS = 5000;
 
-/** A flush-in-progress marker older than this is treated as stranded even while
- *  its owner pid is alive (a reused pid), so a stranded marker does not block a
- *  later flush. */
-export const CAPTURE_FLUSH_MARKER_STALE_MS = 60000;
+/** While a flush holds the per-agent lock it refreshes the lock's mtime this
+ *  often, keeping the lock fresh for the stale rule; a flush whose process dies
+ *  stops refreshing, and its lock is reclaimed by the same CAPTURE_LOCK_STALE_MS
+ *  rule the hot path uses. */
+export const CAPTURE_LOCK_REFRESH_MS = 1000;
 
 // ── paths ───────────────────────────────────────────────────────────────────
 
@@ -84,10 +87,6 @@ export function pendingPath(dir: string, agentId: string): string {
 
 export function flushStampPath(dir: string, agentId: string): string {
   return join(dir, `${agentId}.flush.stamp`);
-}
-
-export function flushLockPath(dir: string, agentId: string): string {
-  return join(dir, `${agentId}.flush.lock`);
 }
 
 export function lockPath(dir: string, agentId: string): string {
@@ -184,6 +183,20 @@ function isSpoolRecord(value: unknown, agentId: string): value is CaptureSpoolRe
     typeof record.dedupKey === "string" && /^[a-f0-9]{64}$/.test(record.dedupKey) &&
     isProvenance(record.provenance)
   );
+}
+
+/** Read every record in the file, without the agent filter, so the flush's
+ *  rewrite can keep a record that belongs to another agent. Null when the file
+ *  cannot be read as a records file; the caller then leaves the file untouched. */
+function readSpoolFile(dir: string, agentId: string): unknown[] | null {
+  try {
+    const raw = readFileSync(spoolPath(dir, agentId), "utf-8");
+    const parsed = JSON.parse(raw) as { records?: unknown };
+    if (!parsed || !Array.isArray(parsed.records)) return null;
+    return parsed.records;
+  } catch {
+    return null;
+  }
 }
 
 /** Read the staged records, tolerating a missing/malformed file as empty. */
@@ -367,57 +380,36 @@ async function defaultClientFactory(agentId: string): Promise<CaptureClient> {
   });
 }
 
-/** True when a process with `pid` exists right now. `EPERM` means it exists but
- *  is owned by another user — still alive. Anything else (ESRCH) is gone. */
-function processAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-/**
- * Take the per-agent flush marker, or null when another live flush holds it.
- * The marker file carries the owner's pid and start time and is taken over only
- * when that owner has exited, or when the start time is older than
- * CAPTURE_FLUSH_MARKER_STALE_MS (a reused pid). It is separate from the spool's
- * data lock, which a flush takes only for its final rewrite, so candidates are
- * still staged during the flush's writes.
- */
-function acquireFlushMarker(dir: string, agentId: string, startedAt: number): { release: () => void } | null {
+/** Take the per-agent lock without waiting: `{ release }` on success, null when
+ *  another holder has it. A lock whose mtime is older than CAPTURE_LOCK_STALE_MS
+ *  is taken over by the same stale rule the hot path uses, so a flush whose
+ *  process died while holding it does not block later flushes beyond that
+ *  interval. */
+function acquireSpoolLock(dir: string, agentId: string): { release: () => void } | null {
   ensureCaptureDir(dir);
-  const path = flushLockPath(dir, agentId);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let fd: number;
+  const path = lockPath(dir, agentId);
+  const create = (): number | null => {
     try {
-      fd = openSync(path, "wx", 0o600);
+      return openSync(path, "wx", 0o600);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let owner: { pid?: unknown; startedAt?: unknown } = {};
-      try {
-        owner = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; startedAt?: unknown };
-      } catch {
-        owner = {};
-      }
-      const ownerPid = typeof owner.pid === "number" ? owner.pid : Number.NaN;
-      const ownerStarted = typeof owner.startedAt === "number" ? owner.startedAt : Number.NaN;
-      const stranded = !Number.isFinite(ownerStarted) || startedAt - ownerStarted > CAPTURE_FLUSH_MARKER_STALE_MS;
-      if (processAlive(ownerPid) && !stranded) return null;
-      // Owner exited, or the marker is ancient: take it over.
-      try { unlinkSync(path); } catch {}
-      continue;
+      return null;
     }
+  };
+  let fd = create();
+  if (fd === null) {
     try {
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt }));
-      return { release: () => { try { unlinkSync(path); } catch {} } };
-    } finally {
-      closeSync(fd);
+      if (Date.now() - statSync(path).mtimeMs > CAPTURE_LOCK_STALE_MS) {
+        unlinkSync(path);
+        fd = create();
+      }
+    } catch {
+      // Released meanwhile.
     }
   }
-  return null;
+  if (fd === null) return null;
+  closeSync(fd);
+  return { release: () => { try { unlinkSync(path); } catch {} } };
 }
 
 /** Await `task`, or reject once `timeoutMs` elapses. `onTimeout` runs at the
@@ -459,14 +451,21 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
 
   const now = deps.now ?? (() => new Date());
-  const marker = acquireFlushMarker(dir, agentId, Date.now());
-  if (!marker) return { flushed: 0, remaining: records.length, reason: "busy" };
+  // Hold the per-agent lock for the whole flush — the same lock the hot path and
+  // the final rewrite take — so a second flush cannot start and a capture cannot
+  // interleave. A second flush that cannot take it returns "busy" without waiting.
+  const held = acquireSpoolLock(dir, agentId);
+  if (!held) return { flushed: 0, remaining: records.length, reason: "busy" };
+  const heldPath = lockPath(dir, agentId);
+  const beat = setInterval(() => { try { const t = new Date(); utimesSync(heldPath, t, t); } catch {} }, CAPTURE_LOCK_REFRESH_MS);
+  beat.unref?.();
   const deadlineAt = Date.now() + (deps.deadlineMs ?? CAPTURE_FLUSH_DEADLINE_MS);
   try {
     const makeClient = deps.makeClient ?? defaultClientFactory;
     let client: CaptureClient;
     try {
-      client = await withDeadline(Promise.resolve(makeClient(agentId)), deadlineAt - Date.now(), "capture flush client");
+      // Race the client setup against the deadline as well.
+      client = await withDeadline(Promise.resolve().then(() => makeClient(agentId)), deadlineAt - Date.now(), "capture flush client");
     } catch (error) {
       warn(`flush skipped (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`);
       return { flushed: 0, remaining: records.length, reason: "write-failed" };
@@ -490,21 +489,23 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
     }
     let remaining = records.length;
     if (written.size > 0) {
-      // Re-read under the lock and drop only what was written, so a record
-      // appended while the writes were in flight is kept.
-      try {
-        const kept = withCaptureLock(dir, agentId, () => {
-          const current = readSpool(dir, agentId).filter((r) => !written.has(r.dedupKey));
-          atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, current));
-          return current.length;
+      // Drop only the records that were written, starting from the whole file so
+      // a record that belongs to another agent is kept. The flush holds the lock,
+      // so no append can interleave this rewrite.
+      const staged = readSpoolFile(dir, agentId);
+      if (staged !== null) {
+        const kept = staged.filter((r) => {
+          const key = (r as { dedupKey?: unknown } | null)?.dedupKey;
+          return !(typeof key === "string" && written.has(key));
         });
-        if (kept !== LOCK_BUSY) remaining = kept;
-      } catch {
+        atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, kept as CaptureSpoolRecord[]));
+        remaining = readSpool(dir, agentId).length;
       }
     }
     return { flushed: written.size, remaining, reason: written.size > 0 ? "flushed" : "write-failed" };
   } finally {
-    marker.release();
+    clearInterval(beat);
+    held.release();
   }
 }
 
