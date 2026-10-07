@@ -1,4 +1,5 @@
 import { beforeAll, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { ensureCliBuild } from "../helpers/build-cli-once.ts";
 import { HTTP_PORT, OPS_PORT, runPlain } from "../helpers/init-plain-attribution-fixture.ts";
 
@@ -162,3 +163,14 @@ for (const scenario of ["own-stopped", "own-stopped-real-free"] as const) {
     expect(events.slice(stopped).some(e => e.kind === "attribution")).toBe(false);
   }, 30_000);
 }
+
+test("a rejected injected credential preserves admin-pass bytes", () => {
+  const { result, adminPassPath, originalAdminPass, events, actions } = runPlain("own", HTTP_PORT, false);
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  expect(result.stderr).toContain("does not authenticate");
+  expect(result.stderr).toContain("injected credential rejection");
+  expect(readFileSync(adminPassPath)).toEqual(originalAdminPass);
+  expect(actions).toEqual([]);
+  expect(events.some(e => e.kind === "auth")).toBe(false);
+}, 30_000);

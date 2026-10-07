@@ -22,8 +22,14 @@ interface Event {
   url?: string;
 }
 
-export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
+export function runPlain(scenario: Scenario, probePort = HTTP_PORT, authenticates = true) {
   const home = tempDir("ipa-");
+  const adminPassPath = join(home, ".flair", "admin-pass");
+  const originalAdminPass = Buffer.from([0x73, 0x61, 0x76, 0x65, 0x64, 0x0d, 0x0a, 0xff]);
+  if (!authenticates) {
+    mkdirSync(join(home, ".flair"));
+    writeFileSync(adminPassPath, originalAdminPass, { mode: 0o600 });
+  }
   const events = join(home, "events.jsonl");
   const actions = join(home, "actions.json");
   writeFileSync(events, "");
@@ -142,6 +148,7 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
       harperBin: () => "fixture-harper.js",
       registerInitLaunchdService: async () => ({ kind: "managed", lines: [] }),
       repointMainServiceUnit: () => ({ kind: "unchanged" }),
+      proveAdminPassAgainstInstance: async () => ${authenticates ? "null" : JSON.stringify("injected credential rejection")},
       resolveInstanceServingPid: ${["own", "own-stopped", "own-stopped-real-free", "own-launchd", "foreign-launchd"].includes(scenario) ? `() => { log({ kind: "attribution" }); return ${OWN_PID}; }` : "fns.resolveInstanceServingPid"},
     }) }));
     const stored = new Map();
@@ -181,5 +188,5 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT) {
   `;
   const result = spawnSync("bun", ["--eval", script], { cwd: home, env, encoding: "utf8", timeout: 25_000 });
   const eventList: Event[] = readFileSync(events, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
-  return { result, home, events: eventList, actions: JSON.parse(readFileSync(actions, "utf8")) as string[] };
+  return { result, home, adminPassPath, originalAdminPass, events: eventList, actions: JSON.parse(readFileSync(actions, "utf8")) as string[] };
 }
