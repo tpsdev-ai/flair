@@ -101,7 +101,7 @@ async function rowReadable(row: Record<string, any> | null | undefined, auth: an
 /**
  * The portion of the read scope Harper can evaluate in the scan: a row of either
  * readable subject type (Soul, or a skill reference). Pushed as the OUTERMOST
- * `and` condition, so an unknown subject type is never scanned or returned and a
+ * `and` condition, so an unknown subject type is never returned and a
  * caller-supplied `operator: "or"` cannot widen past it. A skill reference's own
  * rule depends on its subject's head and Memory row — not a condition on this
  * table — so it stays the per-row decision below.

@@ -91,7 +91,11 @@ async function upsertMemory(id: string, agentId: string, visibility: string, ski
 function idsOf(text: string): string[] {
   const parsed = JSON.parse(text);
   if (!Array.isArray(parsed)) throw new Error(`expected a collection, got: ${text.slice(0, 200)}`);
-  return parsed.map((row: any) => (typeof row === "object" && row ? row.id : row));
+  for (const row of parsed) {
+    expect(row).toHaveProperty("id");
+    expect(row).toHaveProperty("subjectType");
+  }
+  return parsed.map((row: any) => row.id);
 }
 
 beforeAll(async () => {
@@ -133,10 +137,10 @@ describe("flair#2273 — read scope applies before paging and projection", () =>
         : { id, subjectType: "skill", subjectId: `subj-${id}`, agentId: OTHER.id, version: i, rowId: `row-${id}`, visibility: "private" });
     }
 
-    const page = async (paging: string) => {
-      const res = await call(OWNER, "GET", `/InstructionVersion/?sort(id)${paging}`);
+    const page = async (paging: string, sort = "id") => {
+      const res = await call(OWNER, "GET", `/InstructionVersion/?sort(${sort})${paging}`);
       expect(res.status, res.text.slice(0, 200)).toBe(200);
-      return idsOf(res.text).filter((id) => id.startsWith("pg"));
+      return idsOf(res.text);
     };
 
     // The full collection is the readable set, and nothing unreadable.
@@ -146,6 +150,7 @@ describe("flair#2273 — read scope applies before paging and projection", () =>
     // rows were scanned first.
     expect(await page("&limit(3)")).toEqual(READABLE.slice(0, 3));
     expect(await page("&limit(1)")).toEqual(["pg01-soul"]);
+    expect(await page("&limit(1,4)", "-id")).toEqual(["pg07-soul", "pg05-soul", "pg03-soul"]);
 
     // Offset pages through exactly the readable set: concatenated pages equal the
     // readable set, no duplicates, nothing unreadable.
@@ -166,32 +171,39 @@ describe("flair#2273 — read scope applies before paging and projection", () =>
     await upsertMemory(memId, OWNER.id, "private", subject);
     await insertVersion({ id, subjectType: "skill", subjectId: subject, agentId: OWNER.id, version: 1, rowId: memId, memoryId: memId, visibility: "private" });
 
-    const byId = (who: TestAgent | "anonymous") => `/InstructionVersion/${encodeURIComponent(id)}`;
+    const byId = `/InstructionVersion/${encodeURIComponent(id)}`;
 
     // The owner may read it: a selection narrows the row, it does not hide it.
     // (`select(id)` renders to the id — the property value for a one-attribute select.)
-    const ownerSelect = await call(OWNER, "GET", `${byId(OWNER)}?select(id)`);
+    const ownerSelect = await call(OWNER, "GET", `${byId}?select(id)`);
     expect(ownerSelect.status, ownerSelect.text.slice(0, 200)).toBe(200);
-    const ownerSelected = JSON.parse(ownerSelect.text);
-    expect(ownerSelected?.id ?? ownerSelected).toBe(id);
+    expect(JSON.parse(ownerSelect.text)).toBe(id);
 
-    const ownerProp = await call(OWNER, "GET", `${byId(OWNER)}.subjectType`);
+    const ownerProp = await call(OWNER, "GET", `${byId}.subjectType`);
     expect(ownerProp.status, ownerProp.text.slice(0, 200)).toBe(200);
     expect(ownerProp.text.trim()).toBe("\"skill\"");
 
     // An admin may read it too (the same unfiltered skill exception get() keeps).
-    expect((await call(ADMIN, "GET", `${byId(ADMIN)}?select(id)`)).status).toBe(200);
-    expect((await call(ADMIN, "GET", `${byId(ADMIN)}.subjectType`)).status).toBe(200);
+    const adminSelect = await call(ADMIN, "GET", `${byId}?select(id)`);
+    expect(adminSelect.status).toBe(200);
+    expect(JSON.parse(adminSelect.text)).toBe(id);
+    const adminProp = await call(ADMIN, "GET", `${byId}.subjectType`);
+    expect(adminProp.status).toBe(200);
+    expect(JSON.parse(adminProp.text)).toBe("skill");
 
     // A non-owner may not, with or without a selection.
-    expect((await call(OTHER, "GET", `${byId(OTHER)}?select(id)`)).status).toBe(404);
-    expect((await call(OTHER, "GET", `${byId(OTHER)}.subjectType`)).status).toBe(404);
+    expect((await call(OTHER, "GET", `${byId}?select(id)`)).status).toBe(404);
+    expect((await call(OTHER, "GET", `${byId}.subjectType`)).status).toBe(404);
 
     // A Soul row is readable by any verified agent, and its selection is honored.
     const soulId = `rs-soul-${sfx}`;
     await insertVersion({ id: soulId, subjectType: "soul", subjectId: `subj-${soulId}`, agentId: OWNER.id, version: 1, rowId: `row-${soulId}` });
-    expect((await call(OTHER, "GET", `/InstructionVersion/${encodeURIComponent(soulId)}?select(id)`)).status).toBe(200);
-    expect((await call(OTHER, "GET", `/InstructionVersion/${encodeURIComponent(soulId)}.subjectType`)).status).toBe(200);
+    const soulSelect = await call(OTHER, "GET", `/InstructionVersion/${encodeURIComponent(soulId)}?select(id)`);
+    expect(soulSelect.status).toBe(200);
+    expect(JSON.parse(soulSelect.text)).toBe(soulId);
+    const soulProp = await call(OTHER, "GET", `/InstructionVersion/${encodeURIComponent(soulId)}.subjectType`);
+    expect(soulProp.status).toBe(200);
+    expect(JSON.parse(soulProp.text)).toBe("soul");
   }, 120_000);
 
   test("a collection select returns the readable rows, never an unreadable one", async () => {
@@ -207,6 +219,9 @@ describe("flair#2273 — read scope applies before paging and projection", () =>
     const res = await call(OWNER, "GET", "/InstructionVersion/?sort(id)&select(id)");
     expect(res.status, res.text.slice(0, 200)).toBe(200);
     const listed = idsOf(res.text);
+    expect(JSON.parse(res.text).find((row: any) => row.id === id)).toMatchObject({
+      id, subjectType: "skill", subjectId: subject, agentId: OWNER.id, memoryId: memId, visibility: "private",
+    });
     expect(listed, "a readable skill version must be listed").toContain(id);
     expect(listed, "a readable Soul version must be listed").toContain("pg01-soul");
     for (const unreadable of [...UNREADABLE, "pg10-opaque"]) {
