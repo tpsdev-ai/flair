@@ -6,8 +6,9 @@
  * failed (`ps` timed out or returned nothing), returned null, and the fail-safe
  * reported the zombie `alive` — the earlier fix, undone by one unreadable read.
  *
- * #2330 retries a failed or empty state read once, and `flair doctor`'s stop
- * wait re-reads the state on every poll. These tests inject a failing and a slow
+ * #2330 retries a failed or empty state read once if time remains, and
+ * `flair doctor`'s stop wait rechecks liveness on every poll, reading the state
+ * when signal 0 succeeds. These tests inject a failing and a slow
  * state read and show the probe and the stop wait still reach `gone` within a
  * bounded time; a read that keeps failing stays `alive` (fail safe).
  */
@@ -24,7 +25,7 @@ function readFailingThen(failures: number, then: string): (pid: number) => strin
   return () => (calls++ < failures ? null : then);
 }
 
-describe("flair#2330 — the probe retries a failed or empty state read", () => {
+describe("flair#2330 — the probe retries a failed or empty state read if time remains", () => {
   test("a read that fails once then reports Z is gone (one retry)", () => {
     expect(probePidLiveness(LIVE_PID, readFailingThen(1, "Z")).kind).toBe("gone");
   });
