@@ -107,7 +107,7 @@ Before opening a PR:
 
 ## Attribution is yours, exactly
 
-Commits must be authored under your own GitHub identity: the address GitHub assigns you (`<id>+<login>@users.noreply.github.com`) or an email verified on your account. Do not guess a noreply address. Squash merges keep you as the author. Add a `Co-authored-by:` trailer only for a real co-author.
+Commits must be authored under your own GitHub identity: use the exact `noreply` address shown in your GitHub email settings or an email verified on your account. Do not guess a noreply address. Squash merges keep you as the author. Add a `Co-authored-by:` trailer only for a real co-author.
 
 <!-- DCO: maintainers are deciding whether to require a Signed-off-by trailer. If adopted, this section will say so and the gate will check it. -->
 
