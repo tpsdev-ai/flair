@@ -133,6 +133,7 @@
  * re-embed, ship a structural reindex trigger with it.
  */
 import { databases } from "harper";
+import { resolveEmbeddingsEngine } from "../embeddings/flag.js";
 import { getModelId } from "../embeddings-provider.js";
 import { harperPortValue } from "../../src/lib/harper-port-value.js";
 import { DEFAULT_HTTP_PORT } from "../a2a-url.js";
@@ -234,6 +235,16 @@ export function createEmbeddingStampMigration(
   regen: (id: string, existing: Record<string, unknown>) => Promise<boolean> = (id, existing) =>
     regenViaHttpPut(id, existing, fetch),
 ): Migration {
+  // S1: flag-on changes the space key for new writes and must not bulk
+  // re-embed. The HNSW schema-descriptor bump that makes that safe is S2.
+  function flairStampMigrationSuppressed(): boolean {
+    try {
+      return resolveEmbeddingsEngine() === "flair";
+    } catch {
+      return false;
+    }
+  }
+
   function staleCondition() {
     // OR-combined: `not_equals <current>` catches a stale non-null model
     // string; `equals null` catches the explicit-null state this
@@ -292,6 +303,7 @@ export function createEmbeddingStampMigration(
     alwaysDetect: true,
 
     async detect(): Promise<boolean> {
+      if (flairStampMigrationSuppressed()) return false;
       const table = getTable();
       for await (const _row of table.search({ conditions: staleCondition(), limit: 1 })) {
         return true;
@@ -300,6 +312,7 @@ export function createEmbeddingStampMigration(
     },
 
     async countPending(): Promise<number> {
+      if (flairStampMigrationSuppressed()) return 0;
       const table = getTable();
       let n = 0;
       for await (const _row of table.search({ conditions: staleCondition() })) n++;
@@ -307,6 +320,7 @@ export function createEmbeddingStampMigration(
     },
 
     async run(batchSize: number): Promise<RunBatchResult> {
+      if (flairStampMigrationSuppressed()) return { processed: 0, touchedIds: [] };
       const table = getTable();
       const current = getCurrentModelId();
 
@@ -346,6 +360,7 @@ export function createEmbeddingStampMigration(
      * loud, actionable WARN without ever needing to know which rows.
      */
     async recheckPending(limit: number): Promise<{ sampled: number; falsePositives: number }> {
+      if (flairStampMigrationSuppressed()) return { sampled: 0, falsePositives: 0 };
       const table = getTable();
       const current = getCurrentModelId();
 

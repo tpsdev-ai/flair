@@ -504,6 +504,11 @@ describe("shared unit lane", () => {
     // The whole-lane budget carries at least 1.5× headroom over the slowest
     // measured lane (flair#2224); each step's own limit still applies.
     expect(KEEP_GOING_LANE_BUDGET_MS).toBeGreaterThanOrEqual(1.5 * lane);
+    // 2026-10-07 run 37613442339: node 22 finished the lane in 712 s, node 26
+    // in 756 s, and node 24 was killed at 780 s during flair-mcp (shards
+    // 136/179/86/106 s). That leg would have finished near 790 s. The budget
+    // keeps a minute past that projection.
+    expect(KEEP_GOING_LANE_BUDGET_MS).toBeGreaterThanOrEqual(790_000 + 60_000);
     expect(lane + STEP_TIMEOUT_MS).toBeLessThanOrEqual(KEEP_GOING_LANE_BUDGET_MS);
     expect(ROOT_STEP_TIMEOUT_MS + CI_OUTSIDE_LANE_MS).toBeLessThanOrEqual(CI_JOB_LIMIT_MS);
     const limited = unitPlan(root).filter(step => step.timeoutMs !== undefined);

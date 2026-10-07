@@ -108,6 +108,10 @@
  * description for that distinction.
  */
 
+import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
+import { BUILTIN_EMBEDDING_MODEL } from "./embeddings/models.js";
+import { flairSpaceKey } from "./embeddings/stamp-key.js";
+
 /**
  * The nomic search-prefix `inputType` — closed union, not `string`. See the
  * file header: the VALUES `'document'`/`'query'` are what HFE 0.3.0's engine
@@ -444,6 +448,14 @@ export const EMBEDDING_ENGINE = "gguf";
  * see its own comment) — the two must never drift.
  */
 export function getModelId(): string {
+  const suffix = prefixesEnabled() ? `+${EMBEDDING_VARIANT}` : "";
+  // Opt-in engine only. Unset / hfe keeps the gguf stamp byte-for-byte.
+  // The flair space key is `flair:<digest>[+variant]`. Provenance (prebuilt
+  // version, llama.cpp build, pipeline version) is HealthDetail, not this key.
+  // S1 does not let this key drive a bulk re-embed; see embedding-stamp.ts.
+  if (resolveEmbeddingsEngine() === "flair") {
+    return flairSpaceKey(BUILTIN_EMBEDDING_MODEL, suffix);
+  }
   const base = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
   // The bare-name override must not collide with the `<engine>:<model>` stamp
   // format — a ':' in the base makes the qualified stamp ambiguous
@@ -456,7 +468,6 @@ export function getModelId(): string {
         `<engine>:<model> embedding stamp (embedding-space-guard slice 1); got ${JSON.stringify(base)}`,
     );
   }
-  const suffix = prefixesEnabled() ? `+${EMBEDDING_VARIANT}` : "";
   return `${EMBEDDING_ENGINE}:${base}${suffix}`;
 }
 

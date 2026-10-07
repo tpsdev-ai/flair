@@ -24,6 +24,8 @@
  * It is not the product engagement decision.
  */
 import { createRequire } from "node:module";
+import { resolveEmbeddingsEngine } from "./embeddings/flag.js";
+import { hostLabel, prebuiltForPlatform } from "./embeddings/platforms.js";
 
 export const METAL_PREBUILT = "@node-llama-cpp/mac-arm64-metal";
 
@@ -109,14 +111,37 @@ export function detectUsableMetalBackend(input: MetalDetectInput = {}): boolean 
   }
 }
 
+/**
+ * Which package holds the `@node-llama-cpp/*` prebuilt this process should
+ * resolve. Unset / `hfe` stays on harper-fabric-embeddings. `flair` names the
+ * host platform package (`@node-llama-cpp/linux-x64`, `linux-arm64`, or
+ * `mac-arm64-metal`). It does not fall back to harper-fabric-embeddings.
+ */
+export function embedPrebuiltAnchor(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string {
+  if (resolveEmbeddingsEngine(env) !== "flair") return "harper-fabric-embeddings";
+  const match = prebuiltForPlatform(platform, arch);
+  if (!match) {
+    throw new Error(
+      `[embeddings] platform ${hostLabel(platform, arch)} has no supported prebuilt ` +
+        `(supported: @node-llama-cpp/linux-x64, @node-llama-cpp/linux-arm64, @node-llama-cpp/mac-arm64-metal).`,
+    );
+  }
+  return match.packageName;
+}
+
 function defaultResolveMetal(specifier: string): string {
   const fromHere = createRequire(import.meta.url);
   try {
     return fromHere.resolve(specifier);
-  } catch {
-    // Optional dep lives on harper-fabric-embeddings; try from its graph.
-    const hfe = fromHere.resolve("harper-fabric-embeddings");
-    return createRequire(hfe).resolve(specifier);
+  } catch (err) {
+    // The flair path installs the platform package directly. A miss stays a miss.
+    if (resolveEmbeddingsEngine() === "flair") throw err;
+    const anchor = fromHere.resolve(embedPrebuiltAnchor());
+    return createRequire(anchor).resolve(specifier);
   }
 }
 

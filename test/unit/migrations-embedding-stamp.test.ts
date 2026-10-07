@@ -367,3 +367,33 @@ describe("embedding-stamp migration — flair#807: recheckPending() safety-net h
     expect(recheck.falsePositives).toBe(0);
   });
 });
+
+describe("embedding-stamp migration — flair flag does not bulk re-embed", () => {
+  it("detect, count, run, and recheck are no-ops while FLAIR_EMBEDDINGS_ENGINE=flair", async () => {
+    const saved = process.env.FLAIR_EMBEDDINGS_ENGINE;
+    process.env.FLAIR_EMBEDDINGS_ENGINE = "flair";
+    try {
+      const { table, store } = makeFakeMemoryTable([
+        { id: "m1", content: "a", embeddingModel: "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix" },
+        { id: "m2", content: "b", embeddingModel: null },
+      ]);
+      let regens = 0;
+      const m = createEmbeddingStampMigration(() => table, () => "flair:digest+searchprefix", async () => {
+        regens += 1;
+        return true;
+      });
+      expect(await m.detect()).toBe(false);
+      expect(await m.countPending()).toBe(0);
+      const run = await m.run(50);
+      expect(run.processed).toBe(0);
+      expect(run.touchedIds).toEqual([]);
+      const recheck = await m.recheckPending!(10);
+      expect(recheck).toEqual({ sampled: 0, falsePositives: 0 });
+      expect(regens).toBe(0);
+      expect(store.get("m1")!.embeddingModel).toBe("gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix");
+    } finally {
+      if (saved === undefined) delete process.env.FLAIR_EMBEDDINGS_ENGINE;
+      else process.env.FLAIR_EMBEDDINGS_ENGINE = saved;
+    }
+  });
+});
