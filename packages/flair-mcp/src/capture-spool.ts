@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -360,7 +360,7 @@ async function defaultClientFactory(agentId: string): Promise<CaptureClient> {
   });
 }
 
-function acquireSpoolLock(dir: string, agentId: string): { release: () => void; isOwned: () => boolean; refresh: () => void } | null {
+function acquireSpoolLock(dir: string, agentId: string, warn: (message: string) => void = console.warn): { release: () => void; isOwned: () => boolean; refresh: () => void } | null {
   ensureCaptureDir(dir);
   const path = lockPath(dir, agentId);
   const identity = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
@@ -390,10 +390,17 @@ function acquireSpoolLock(dir: string, agentId: string): { release: () => void; 
     return true;
   };
   if (!create()) {
-    const previous = readIdentity();
-    if (previous === null) return null;
+    const readLock = (file: string) => {
+      const fd = openSync(file, "r");
+      try {
+        return { content: readFileSync(fd, "utf8"), stat: fstatSync(fd, { bigint: true }) };
+      } finally {
+        closeSync(fd);
+      }
+    };
     try {
-      const owner = JSON.parse(previous) as { pid?: unknown; nonce?: unknown };
+      const previous = readLock(path);
+      const owner = JSON.parse(previous.content) as { pid?: unknown; nonce?: unknown };
       if (!owner || typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 ||
           typeof owner.nonce !== "string" || owner.nonce.length === 0) return null;
       try {
@@ -402,8 +409,35 @@ function acquireSpoolLock(dir: string, agentId: string): { release: () => void; 
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") return null;
       }
-      if (readIdentity() !== previous) return null;
-      unlinkSync(path);
+      const parkedPath = `${path}.takeover-${randomUUID()}`;
+      renameSync(path, parkedPath);
+      let parked: ReturnType<typeof readLock>;
+      try {
+        parked = readLock(parkedPath);
+      } catch {
+        warn(`capture lock unreadable; left parked at ${parkedPath}`);
+        return null;
+      }
+      if (parked.content !== previous.content || parked.stat.dev !== previous.stat.dev || parked.stat.ino !== previous.stat.ino) {
+        let fd: number;
+        try {
+          fd = openSync(path, "wx", 0o600);
+        } catch {
+          warn(`capture lock changed; left parked at ${parkedPath}`);
+          return null;
+        }
+        try {
+          writeFileSync(fd, parked.content);
+        } catch {
+          warn(`capture lock restore failed; left parked at ${parkedPath}`);
+          return null;
+        } finally {
+          closeSync(fd);
+        }
+        unlinkSync(parkedPath);
+        return null;
+      }
+      unlinkSync(parkedPath);
     } catch {
       return null;
     }
@@ -459,7 +493,7 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
 
   const now = deps.now ?? (() => new Date());
-  const held = acquireSpoolLock(dir, agentId);
+  const held = acquireSpoolLock(dir, agentId, deps.warn ?? console.warn);
   if (!held) return { flushed: 0, remaining: records.length, reason: "busy" };
   const controller = new AbortController();
   let lost = false;

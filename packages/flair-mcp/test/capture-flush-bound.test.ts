@@ -164,7 +164,7 @@ describe("capture flush bounds (flair#2321)", () => {
     }
   }, 20_000);
 
-  test("exactly one of two concurrent flushes runs; the other returns busy", async () => {
+  test("a second flush returns busy while the first holds a live lock", async () => {
     const stub = await startNeverAnswering();
     try {
       const agent = agentId();
