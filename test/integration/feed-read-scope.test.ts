@@ -221,9 +221,17 @@ function memoryFeedCases(phase: string) {
 
   test("replay withholds a closed skill after its successor expires", async () => {
     const root = `${p}-expired-skill-root`;
+    // The successor carries its expiry in the same skill write that creates it,
+    // so the row's expiry is part of its creation rather than a later
+    // operations-API edit of it. The read-time expiry check
+    // (closedSkillPayloadReadable, resources/skill-version-write.ts:65-67)
+    // compares that stored value and lets the closed root's read flip to 404
+    // once the clock passes it; a separate ops edit commits on a different
+    // Harper thread, and a worker can lag it (the reopened flake).
+    const expiresAt = new Date(Date.now() + 6_000).toISOString();
     const body = { id: root, content: "skill v1", trigger: "when assigned", tags: ["skill"], durability: "persistent", visibility: "shared" };
     await feedWrite(A, body);
-    await feedWrite(A, { ...body, content: "skill v2" });
+    await feedWrite(A, { ...body, content: "skill v2", expiresAt });
     const query = await adminOp(harper, { operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "skillSubjectId", search_value: root, get_attributes: ["*"] });
     expect(query.status).toBe(200);
     const heads = (await query.json() as any[]).filter((row) => !row.validTo && row.archived !== true);
@@ -238,10 +246,12 @@ function memoryFeedCases(phase: string) {
     } finally {
       await before.stop();
     }
-    const expired = await adminOp(harper, { operation: "upsert", database: "flair", table: "Memory", records: [{ ...heads[0], expiresAt: "2020-01-01T00:00:00.000Z" }] });
-    expect(expired.status).toBe(200);
-    await expired.arrayBuffer();
-    // The observed post-upsert 200 may reflect cross-thread read visibility; the mechanism and duration have not been measured.
+    // Wait on the mechanism's own input: the read-time expiry check tests the
+    // live head's expiresAt against the clock (closedSkillPayloadReadable,
+    // resources/skill-version-write.ts:65-67). The poll below absorbs the
+    // read's own commit lag.
+    const deadline = Date.parse(expiresAt);
+    while (Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
     expect(await readStatusUntil((signal) => readStatus(B, `/Memory/${root}`, signal), 404, 200)).toBe(404);
     const after = await openAs(B, "/FeedMemories");
     try {
