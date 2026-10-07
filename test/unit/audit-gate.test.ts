@@ -339,6 +339,7 @@ describe("the committed allowlist", () => {
       "GHSA-6h2x-m376-mqjq",
       "GHSA-6w3j-5fw6-r9vr",
       "GHSA-gg4h-3hg2-grpc",
+      "GHSA-wr44-6hxh-3jwq",
     ]);
     for (const e of npmOnly) {
       expect(e.sources).toEqual(["npm-install"]);
