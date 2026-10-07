@@ -9,6 +9,8 @@
 // MODEL: test/integration/ed25519-auth-hnsw.test.ts — boots Harper via
 // startHarper(), seeds data via the ops API, sends real HTTP requests with
 // TPS-Ed25519 / Basic headers, asserts HTTP status codes.
+import { assertTpsRouteOutcome, tpsRouteBody, tpsRoutePath } from "../helpers/tps-ed25519-outcomes.ts";
+import { TPS_ED25519_ROUTES } from "../helpers/tps-ed25519-routes.ts";
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID, randomBytes } from "node:crypto";
@@ -399,6 +401,72 @@ describe("auth-middleware e2e (real Harper)", () => {
   // couldn't catch this. These cases send real TPS-Ed25519 headers to real
   // Harper and assert on HTTP status codes.
   // ═══════════════════════════════════════════════════════════════════════════
+
+  for (const { method, path } of TPS_ED25519_ROUTES) {
+    test(`${method} ${path}: TPS scheme is verified before Harper authentication`, async () => {
+      const requestPath = tpsRoutePath(method, path);
+      const send = (tamper: boolean) => fetch(`${harper.httpURL}${requestPath}`, {
+        method,
+        headers: {
+          Authorization: ed25519Header(agent, method, requestPath, { tamper }),
+          "Content-Type": "application/json",
+        },
+        ...(method === "POST" ? { body: tpsRouteBody(path) } : {}),
+        redirect: "manual",
+      });
+      const invalid = await send(true);
+      expect(invalid.status).toBe(401);
+      expect(await invalid.json()).toMatchObject({ error: "invalid_signature" });
+      const valid = await send(false);
+      const text = await valid.text();
+      assertTpsRouteOutcome(method, path, valid.status, text, agent.id);
+      expect(text, `${method} ${path}: ${valid.status} ${text}`).not.toContain("Login failed");
+      expect(text).not.toContain("invalid_signature");
+      expect(text).not.toContain("signature_verification_failed");
+      expect(text).not.toContain("unknown_agent");
+      expect(text).not.toContain("nonce_replay_detected");
+    }, 30_000);
+  }
+
+  test("mixed-case TPS scheme reads an owned WorkspaceState row", async () => {
+    const fixture = FAMILY_READ_GATE_RESOURCES.find(r => r.table === "WorkspaceState")!;
+    const path = `/WorkspaceState/${fixture.id}`;
+    const anonymous = await fetch(`${harper.httpURL}${path}`);
+    expect(anonymous.status).toBe(403);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      headers: {
+        Authorization: ed25519Header(agent, "GET", path).replace("TPS-Ed25519", "tPs-eD25519"),
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: fixture.id, agentId: agent.id, ref: "main" });
+  }, 30_000);
+
+  for (const header of ["tPs-eD25519", "tPs-eD25519 missing-fields"]) {
+    test(`malformed mixed-case header ${header} on /FederationSync returns 401`, async () => {
+      const res = await fetch(`${harper.httpURL}/FederationSync`, {
+        method: "POST",
+        headers: { Authorization: header, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "invalid_authorization_header" });
+    }, 30_000);
+  }
+
+  test("invalid mixed-case signature on /FederationSync returns 401", async () => {
+    const path = "/FederationSync";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: ed25519Header(agent, "POST", path, { tamper: true }).replace("TPS-Ed25519", "tPs-eD25519"),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "invalid_signature" });
+  }, 30_000);
 
   test("Bug 2 guard: valid TPS-Ed25519 on /FederationSync → NOT auth-rejected (downstream status, not 401 Login-failed)", async () => {
     const path = "/FederationSync";

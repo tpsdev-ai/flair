@@ -47,13 +47,13 @@ function makeTmpDir(): string {
  * `system` database whose `hdb_user/` primary column family holds one row per
  * user — using the same engine, resolved through the `harper` dependency.
  */
-function makeHarper5SystemDb(root: string, users: string[]): void {
+function makeHarper5SystemDb(root: string, users: string[], cf = "hdb_user/"): void {
   const requireHere = createRequire(import.meta.url);
   const rocksPath = createRequire(requireHere.resolve("harper")).resolve("@harperfast/rocksdb-js");
   const RocksDatabase = (requireHere(rocksPath) as { RocksDatabase: any }).RocksDatabase;
   const systemDir = join(root, "database", "system");
   mkdirSync(systemDir, { recursive: true });
-  const db = RocksDatabase.open(systemDir, { name: "hdb_user/" });
+  const db = RocksDatabase.open(systemDir, { name: cf });
   try {
     for (const user of users) db.put(user, "persisted-hash");
   } finally {
@@ -191,6 +191,21 @@ describe("detectPersistedAdminUser — Harper's own user-record paths", () => {
     const dir = makeTmpDir();
     dirs.push(dir);
     makeHarper5SystemDb(dir, []);
+    expect(detectPersistedAdminUser(dir)).toBe(false);
+  });
+
+  test("Harper 5.3: a generation-suffixed hdb_user/@<uuid> primary store is a persisted user", () => {
+    const dir = makeTmpDir();
+    dirs.push(dir);
+    makeHarper5SystemDb(dir, ["admin"], "hdb_user/@11111111-2222-3333-4444-555555555555");
+    expect(detectPersistedAdminUser(dir)).toBe(true);
+    expect(countRocksAdminUsers(join(dir, "database", "system"))).toBe(1);
+  });
+
+  test("Harper 5.3: an empty generation-suffixed store is NOT a persisted user", () => {
+    const dir = makeTmpDir();
+    dirs.push(dir);
+    makeHarper5SystemDb(dir, [], "hdb_user/@11111111-2222-3333-4444-555555555555");
     expect(detectPersistedAdminUser(dir)).toBe(false);
   });
 

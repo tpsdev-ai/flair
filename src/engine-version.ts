@@ -17,14 +17,16 @@
 // data directory being moved and must not require a Harper query to read — if
 // the engine cannot boot, we still need to read it.
 
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { fetchDeclaredDependencies } from "./lib/npm-registry.js";
 import { resolveHome } from "./lib/home.js";
+import { ENGINE_VERSION_STAMP } from "./engine-version-contract.js";
 
 /** Filename of the engine-version stamp inside the data directory. */
-export const ENGINE_VERSION_STAMP = "engine-version.txt";
+export { ENGINE_VERSION_STAMP };
 
 /** Root directory for pre-upgrade snapshots (~/.flair/upgrade-snapshots). */
 export const UPGRADE_SNAPSHOT_ROOT = resolve(resolveHome(), ".flair", "upgrade-snapshots");
@@ -71,7 +73,20 @@ export async function fetchDeclaredHarperVersion(flairVersion: string): Promise<
 
 /** Write the engine version stamp into the data directory. */
 export function writeEngineVersionStamp(dataDir: string, version: string): void {
-  writeFileSync(join(dataDir, ENGINE_VERSION_STAMP), `${version}\n`, "utf-8");
+  const stampPath = join(dataDir, ENGINE_VERSION_STAMP);
+  const temporary = `${stampPath}.${process.pid}.${randomUUID()}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+    writeFileSync(fd, `${version}\n`, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temporary, stampPath);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    try { unlinkSync(temporary); } catch {}
+  }
 }
 
 /** Read the engine version stamp from the data directory, or null if absent. */
