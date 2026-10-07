@@ -76,7 +76,9 @@ test("the package build stamps a hook that Bun can execute", () => {
   expect(hook.status).toBe(0);
   expect(hook.stdout).toBe("");
   expect(hook.stderr).toBe("");
-});
+  // The package build above allows 15 s; this budget must outlast it so a slow
+  // build is named here, not killed as a bare 5 s default.
+}, 30_000);
 
 for (const decoy of ["version-only runtime", "exit-only artifact", "hung runtime"]) {
   test(`install and status reject ${decoy} by name`, () => {
