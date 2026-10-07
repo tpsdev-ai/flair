@@ -64,7 +64,7 @@ export async function reembedRow(baseUrl: string, agentId: string, keyPath: stri
 
 /**
  * flair#2337: refuse before the first write when the running server does not
- * support the re-embed PATCH (#2298). Returns null when support is confirmed,
+ * advertise the re-embed PATCH (#2298). Returns null when support is confirmed,
  * else the refusal message to print. Reads the public `GET /Health` — no auth,
  * so it works before any agent key is used and before the all-agents loop.
  *
