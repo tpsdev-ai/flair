@@ -826,7 +826,7 @@ program
       }
       if (!alreadyRunning && (existsSync(adminPassPath) || persistedAdminUser)) {
         console.error(
-          `Refusing to replace ${adminPassPath}: an existing install is stopped. ` +
+          `Refusing to replace ${adminPassPath}: no running instance; a saved admin-pass file or persisted admin user exists. ` +
             `Start the instance and re-run init with the supplied credential, or run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
         );
         process.exit(1);
@@ -835,8 +835,7 @@ program
         const failure = await proveAdminPassAgainstInstance(httpPort, adminPass);
         if (failure) {
           console.error(
-            `Refusing to replace ${adminPassPath}: the supplied admin credential does not authenticate ` +
-              `against the running instance on port ${httpPort} (${failure}). The stored file is unchanged. ` +
+            `Refusing to replace ${adminPassPath}: ${failure} on port ${httpPort}. The stored file is unchanged. ` +
               `To rotate the instance's admin password instead, run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
           );
           process.exit(1);

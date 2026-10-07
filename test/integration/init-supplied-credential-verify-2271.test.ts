@@ -174,6 +174,7 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentia
       const { args, env } = credential(source, "fixture-wrong-credential-2271");
       const r = await runInit([...baseArgs(), ...args], env);
       expect(r.code, r.out).not.toBe(0);
+      expect(r.out).toContain("the supplied admin credential was rejected (HTTP ");
       expect(r.out).toContain(ROTATE_REMEDY);
       expect(readFileSync(adminPassPath).equals(before)).toBe(true);
       expect(await adminStatus(installedPassword)).toBe(200);
@@ -233,6 +234,7 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentia
           const initArgs = skipStart ? baseArgs() : baseArgs().filter(arg => arg !== "--skip-start");
           const r = await runInit([...initArgs, ...args], env);
           expect(r.code).not.toBe(0);
+          expect(r.out).toContain("no running instance; a saved admin-pass file or persisted admin user exists");
           expect(r.out).toContain("Start the instance and re-run");
           expect(r.out).toContain(ROTATE_REMEDY);
           expect(readFileSync(adminPassPath).equals(before)).toBe(true);

@@ -111,7 +111,6 @@ test("a rejected injected credential preserves admin-pass bytes", () => {
   const result = runInit("own", true, false);
   expect(result.error).toBeUndefined();
   expect(result.status, result.stdout + result.stderr).toBe(1);
-  expect(result.stderr).toContain("does not authenticate");
   expect(result.stderr).toContain("injected credential rejection");
   expect(readFileSync(result.adminPassPath)).toEqual(result.originalAdminPass);
 }, 30_000);

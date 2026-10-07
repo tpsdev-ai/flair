@@ -123,7 +123,7 @@ describe("local init skip-start safety through the built CLI", () => {
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
     const result = runInit(f, ["--data-dir", dataDir, "--skip-start", "--agent", "canary"]);
     expect(result.status, result.stdout + result.stderr).toBe(1);
-    expect(result.stderr).toContain("existing install is stopped");
+    expect(result.stderr).toContain("no running instance; a saved admin-pass file or persisted admin user exists");
     expect(readFileSync(passPath)).toEqual(before);
     expect(requests(f)).toEqual([]);
     expect(existsSync(join(f.home, ".flair", "keys"))).toBe(false);

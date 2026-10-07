@@ -20,7 +20,7 @@ function markInstalled(dataDir: string): void {
   writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
 }
 
-function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false, options: { umask?: number; columns?: string; agent?: string } = {}) {
+function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false, options: { umask?: number; columns?: string; agent?: string; probeFailure?: number | "connection" | "timeout" } = {}) {
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|TPS_TEST_ROOT$|ROOTPATH$)/.test(key),
   ));
@@ -36,9 +36,17 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
   } else env[source] = password;
   const script = `
     Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
-    globalThis.fetch = async () => {
+    globalThis.fetch = async input => {
       const { appendFileSync } = await import("node:fs");
       appendFileSync(${JSON.stringify(join(home, "requests.jsonl"))}, "request\\n");
+      ${options.probeFailure === undefined ? '' : `
+      if (new URL(String(input)).pathname === "/health") return Response.json({}, { status: 200 });
+      if (new URL(String(input)).pathname === "/FederationPeers") {
+        ${typeof options.probeFailure === "number"
+          ? `return new Response("fetch failed", { status: ${options.probeFailure} });`
+          : `throw new ${options.probeFailure === "timeout" ? 'DOMException("fixture timeout", "TimeoutError")' : 'TypeError("fetch failed")'};`}
+      }
+      `}
       throw new Error("offline fixture");
     };
     const socketLimitPath = ${JSON.stringify(new URL("../../src/lib/socket-path-limit.ts", import.meta.url).href)};
@@ -54,7 +62,22 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
         RocksDatabase: { open: () => ({ columns: ${options.columns}, close() {} }) },
       }));
     `}
-    const { program } = await import(${JSON.stringify(CLI)});
+    ${options.probeFailure === undefined ? '' : `
+    const dataDir = ${JSON.stringify(dataDir)};
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(dataDir + "/hdb.pid", String(process.pid));
+    const tcpPath = ${JSON.stringify(new URL("../../src/lib/init-tcp-probe.ts", import.meta.url).href)};
+    const tcp = await import(tcpPath);
+    mockSocketLimit.module(tcpPath, () => ({ ...tcp, localPortState: async port => port === 9 ? "listening" : "free" }));
+    const initPath = ${JSON.stringify(new URL("../../src/commands/init.ts", import.meta.url).href)};
+    const init = await import(initPath);
+    const bindCli = init.bindCli;
+    mockSocketLimit.module(initPath, () => ({ ...init, bindCli: fns => bindCli({ ...fns, resolveInstanceServingPid: () => process.pid }) }));
+    `}
+    const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
+    ${options.probeFailure === undefined ? '' : `
+    setOccupiedListenerLookupForTests({ pids: port => port === 9 ? [process.pid] : [], rootPath: () => ({ rootPath: ${JSON.stringify(dataDir)}, environReadable: true }) });
+    `}
     ${foreignOwner ? "const uid = process.getuid(); process.getuid = () => uid + 1;" : ""}
     await program.parseAsync(${JSON.stringify(args)}, { from: "user" });
   `;
@@ -140,7 +163,7 @@ describe("fresh init persists explicit admin credentials", () => {
       if (posture === "symlink") symlinkSync(target, passPath);
       const result = runInit(home, dataDir, "inline", "linux", posture === "foreign-owner");
       expect(result.status, result.stdout + result.stderr).toBe(1);
-      expect(result.stderr).toContain(posture === "open-mode" ? "too open" : "existing install is stopped");
+      expect(result.stderr).toContain(posture === "open-mode" ? "too open" : "no running instance; a saved admin-pass file or persisted admin user exists");
       expect(readFileSync(target, "utf8")).toBe(password + "\n");
     });
   }
@@ -156,7 +179,7 @@ describe("fresh init persists explicit admin credentials", () => {
       symlinkSync(target, path);
       const result = runInit(home, dataDir, "inline", "linux");
       expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain(dangling ? "symbolic link" : "existing install is stopped");
+      expect(result.stderr).toContain(dangling ? "symbolic link" : "no running instance; a saved admin-pass file or persisted admin user exists");
       expect(lstatSync(path).isSymbolicLink()).toBe(true);
       if (!dangling) expect(readFileSync(target, "utf8")).toBe("unchanged");
       else expect(existsSync(target)).toBe(false);
@@ -171,7 +194,7 @@ describe("fresh init persists explicit admin credentials", () => {
     writeFileSync(path, "unchanged", { mode: 0o600 });
     const result = runInit(home, dataDir, "inline", "linux", true);
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("existing install is stopped");
+    expect(result.stderr).toContain("no running instance; a saved admin-pass file or persisted admin user exists");
     expect(readFileSync(path, "utf8")).toBe("unchanged");
   });
 });
@@ -289,12 +312,12 @@ describe("admin credential persistence refuses unassessed stores", () => {
 });
 
 
-describe("supplied credentials on stopped installs", () => {
+describe("supplied credentials without a running instance", () => {
   for (const persisted of [false, true]) {
     for (const fileExists of [false, true]) {
       if (!persisted && !fileExists) continue;
       for (const source of sources) {
-        test(`${source}: stopped install, persisted=${persisted}, file=${fileExists}`, () => {
+        test(`${source}: no running instance, persisted=${persisted}, file=${fileExists}`, () => {
           const home = tempDir("i-");
           const dataDir = tempDir("d-");
           const passPath = join(home, ".flair", "admin-pass");
@@ -309,6 +332,8 @@ describe("supplied credentials on stopped installs", () => {
           const result = runInit(home, dataDir, source, "linux");
           expect(result.error).toBeUndefined();
           expect(result.status).not.toBe(0);
+          expect(result.stderr).toContain("no running instance; a saved admin-pass file or persisted admin user exists");
+          expect(result.stderr).not.toContain("install is stopped");
           expect(result.stderr).toContain("Start the instance and re-run");
           expect(result.stderr).toContain("flair init --reset-admin-pass");
           if (fileExists) expect(readFileSync(passPath)).toEqual(before);
@@ -348,3 +373,29 @@ test("the supplied-password probe pins admin despite FLAIR_ADMIN_USER", async ()
     else process.env.FLAIR_ADMIN_USER = savedUser;
   }
 });
+
+for (const failure of [401, 403, 500, 503, "connection", "timeout"] as const) {
+  test(`supplied-password refusal wording for ${failure}`, () => {
+    const home = tempDir("i-");
+    const dataDir = tempDir("d-");
+    const passPath = join(home, ".flair", "admin-pass");
+    mkdirSync(join(home, ".flair"));
+    markInstalled(dataDir);
+    const before = Buffer.from("saved-password\n");
+    writeFileSync(passPath, before, { mode: 0o600 });
+    const result = runInit(home, dataDir, "inline", "linux", false, { probeFailure: failure });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    const rejected = failure === 401 || failure === 403;
+    expect(result.stderr).toContain(rejected
+      ? `the supplied admin credential was rejected (HTTP ${failure})`
+      : "admin credential verification could not be completed");
+    if (typeof failure === "number") expect(result.stderr).toContain(`HTTP ${failure}`);
+    if (!rejected) {
+      expect(result.stderr).not.toContain("does not authenticate");
+      expect(result.stderr).not.toContain("credential was rejected");
+    }
+    expect(result.stderr).toContain("flair init --reset-admin-pass");
+    expect(readFileSync(passPath)).toEqual(before);
+  });
+}
