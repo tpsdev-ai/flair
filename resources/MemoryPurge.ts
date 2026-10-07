@@ -1,10 +1,9 @@
 /**
  * MemoryPurge.ts — operator-triggered PHYSICAL removal of Memory rows.
  *
- * POST /MemoryPurge { ids: string[] } removes the named Memory rows from the
- * store. A skill-tagged row (or any row carrying a `skillSubjectId`) expands to
- * every row in its skill lineage, so a superseded version row is removed
- * together with its live head.
+ * POST /MemoryPurge { ids: string[] } targets named Memory rows for physical
+ * deletion. A skill-tagged row (or any row carrying a `skillSubjectId`) expands
+ * to every row in its skill lineage, including superseded versions.
  *
  * Authority: the operator source (`soulWriteSource`): verified Basic
  * administrator credentials, or a deliberate internal call. Agent keys, admin
@@ -20,21 +19,20 @@
  *     (404 memory_purge_target_missing).
  *  2. A read after the commit sorts the targets: `removedIds` lists the ones it
  *     finds gone; the others are still stored.
- *  3. For a target still stored, the call deletes the deletion-history record
- *     step 1 wrote for it and reads again after that commit.
+ *  3. For a target still stored, the call attempts deletion of the history
+ *     record step 1 wrote for it and checks for absence after that commit.
  *  4. Host-pointer rows are deleted only for targets step 2 found gone, so a
  *     row that is still stored keeps its pointer row. One owned transaction
  *     re-reads each such row and deletes its pointer row through the
  *     pointer-table adapter while the row is still absent; a read after that
  *     commit looks for pointer rows left for rows that are still absent.
  *
- * Reply, checked in this order: a failed history delete, or a deletion-history
- * record still stored after step 3, fails the call (500
- * memory_purge_history_cleanup_unconfirmed, with the record ids); a failed
+ * Reply, checked in this order: unconfirmed history cleanup fails the call
+ * (500 memory_purge_history_cleanup_unconfirmed, with the record ids); a failed
  * pointer delete, or a pointer row left after step 4, fails it (500
- * memory_purge_pointer_cleanup_failed): those rows are removed, and the
- * maintenance orphan sweep deletes such pointer rows; a target still stored
- * fails it (409 memory_purge_unconfirmed). Otherwise the reply is
+ * memory_purge_pointer_cleanup_failed). A later successful maintenance sweep
+ * can remove leftover pointers while their Memory rows remain absent. A target
+ * still stored fails it (409 memory_purge_unconfirmed). Otherwise the reply is
  * `{ removed, removedIds }`.
  *
  * This is a separate path from the user-facing `DELETE /Memory/<id>` route.
@@ -147,9 +145,8 @@ export class MemoryPurge extends Resource {
       }
     });
 
-    // 3. A row still stored keeps no deletion-history record from this call;
-    // the removal is checked by a read after its commit. A failed cleanup
-    // leaves every one of these records unconfirmed.
+    // 3. Attempt cleanup of history for rows still stored; confirm absence
+    // after the cleanup commit. Failed cleanup is reported below.
     const staleHistory = stillStored.flatMap((id) => {
       const historyId = historyIds.get(id);
       return historyId ? [{ memoryId: id, historyId }] : [];
@@ -191,9 +188,9 @@ export class MemoryPurge extends Resource {
       const left = staleHistory.filter((h) => historyLeft.has(h.historyId));
       return reply(500, {
         error: "memory_purge_history_cleanup_unconfirmed",
-        message: `these rows are still stored after the commit, and the deletion-history records written for them ${historyError !== null
-          ? `could not be deleted (${errorText(historyError)})`
-          : "are still stored after their delete"}`,
+        message: `these rows are still stored after the commit; ${historyError !== null
+          ? `could not confirm deletion of their deletion-history records (${errorText(historyError)})`
+          : "their deletion-history records were not deleted and are still stored"}`,
         ids: left.map((h) => h.memoryId),
         historyIds: left.map((h) => h.historyId),
         stillStoredIds: stillStored,
@@ -204,8 +201,8 @@ export class MemoryPurge extends Resource {
       return reply(500, {
         error: "memory_purge_pointer_cleanup_failed",
         message: `${pointerError !== null
-          ? `the pointer-row delete for the removed rows failed (${errorText(pointerError)})`
-          : "these removed rows still have a pointer row after its delete"}; the rows are removed, and the maintenance orphan sweep deletes a pointer row whose Memory row is gone`,
+          ? `the pointer-row delete for rows in removedIds failed (${errorText(pointerError)})`
+          : "rows in removedIds still have a pointer row after its delete"}`,
         ids: pointerLeft,
         stillStoredIds: stillStored,
         removedIds,

@@ -131,6 +131,7 @@ describe("POST /MemoryPurge confirms every delete against the committed store", 
     const history = await rows("MemoryDeletionHistory", "memoryId", id);
     expect(history.length).toBe(1); // the record the cleanup could not remove
     expect(body.historyIds).toEqual([history[0].id]); // the reply names it
+    expect(body.message).toBe("these rows are still stored after the commit; their deletion-history records were not deleted and are still stored");
   }, 60_000);
 
   it("a pointer-row delete that loses to a newer write fails the call by name after the row is removed", async () => {
@@ -140,9 +141,31 @@ describe("POST /MemoryPurge confirms every delete against the committed store", 
     const { status, body } = await purge([id]);
     expect(status, JSON.stringify(body).slice(0, 300)).toBe(500);
     expect(body).toMatchObject({ error: "memory_purge_pointer_cleanup_failed", ids: [id], removedIds: [id] });
+    expect(body.message).toBe("rows in removedIds still have a pointer row after its delete");
 
     expect(await rows("Memory", "id", id)).toEqual([]); // the row is removed
     expect((await rows("MemoryHostSource", "memoryId", id)).length).toBe(1); // its pointer row is left, and reported
     expect((await rows("MemoryDeletionHistory", "memoryId", id)).length).toBe(1); // the removal is recorded
+  }, 60_000);
+
+  it("a mixed batch with a skipped pointer delete reports removedIds and stillStoredIds", async () => {
+    const storedId = `purge-skip-memory-delete-${Date.now()}`;
+    const removedId = `purge-skip-pointer-delete-${Date.now()}`;
+    await seed(storedId, true);
+    await seed(removedId, true);
+
+    const { status, body } = await purge([storedId, removedId]);
+    expect(status, JSON.stringify(body).slice(0, 300)).toBe(500);
+    expect(body).toMatchObject({
+      error: "memory_purge_pointer_cleanup_failed", ids: [removedId],
+      stillStoredIds: [storedId], removedIds: [removedId],
+      message: "rows in removedIds still have a pointer row after its delete",
+    });
+    expect((await rows("Memory", "id", storedId)).length).toBe(1);
+    expect(await rows("Memory", "id", removedId)).toEqual([]);
+    expect((await rows("MemoryHostSource", "memoryId", storedId)).length).toBe(1);
+    expect((await rows("MemoryHostSource", "memoryId", removedId)).length).toBe(1);
+    expect(await rows("MemoryDeletionHistory", "memoryId", storedId)).toEqual([]);
+    expect((await rows("MemoryDeletionHistory", "memoryId", removedId)).length).toBe(1);
   }, 60_000);
 });

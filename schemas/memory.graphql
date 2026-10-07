@@ -408,8 +408,8 @@ type OrgSkillAssignment @table(database: "flair") {
 # Deletion history for physical deletions of permanent/persistent Memory rows,
 # appended in the delete's transaction by Memory.delete and by POST /MemoryPurge
 # (the path CLI hygiene and agent remove use). For a row still stored after the
-# commit, MemoryPurge deletes the record it wrote and checks that delete with a
-# read after its commit; a record that read still finds fails the call.
+# commit, MemoryPurge attempts history cleanup and checks for absence after its
+# commit; unconfirmed cleanup returns 500 memory_purge_history_cleanup_unconfirmed.
 # Non-durable deletes, including maintenance expiry, append no history.
 # No @export and no resource class: there is no direct route.
 type MemoryDeletionHistory @table(database: "flair") {
