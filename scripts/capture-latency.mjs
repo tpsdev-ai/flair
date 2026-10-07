@@ -121,7 +121,6 @@ function measureInProcess(runs, home, stubBin) {
   return JSON.parse(out);
 }
 
-/** The full installed command, timed with the shell's own resolution. */
 function measureCommand(runs, home) {
   const dir = join(home, ".flair", "capture");
   const command = `sh -c 'FLAIR_AGENT_ID=${AGENT} ${BUN} ${ARTIFACT} >/dev/null 2>/dev/null || true'`;

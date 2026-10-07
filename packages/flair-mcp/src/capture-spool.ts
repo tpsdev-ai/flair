@@ -36,9 +36,7 @@ export const CAPTURE_SPOOL_MAX_RECORDS = 100;
  *  end until it fits. */
 export const CAPTURE_SPOOL_MAX_BYTES = 64 * 1024;
 
-/** At most this many failed commands awaiting a matching follow-up. Beyond it the OLDEST
- *  pending error is evicted, so an error that is never fixed cannot pin
- *  unbounded local state. */
+/** At most this many pending errors. */
 export const CAPTURE_PENDING_MAX = 8;
 
 export const CAPTURE_FLUSH_COOLDOWN_MS = 1000;
@@ -81,8 +79,6 @@ export function lockPath(dir: string, agentId: string): string {
   return join(dir, `${agentId}.lock`);
 }
 
-/** 0700 for the directory, 0600 for the file (re-asserted on an existing
- *  file — writeFileSync's mode only applies on create). */
 function writePrivate(path: string, data: string): void {
   writeFileSync(path, data, { mode: 0o600 });
   chmodSync(path, 0o600);
@@ -245,7 +241,6 @@ function writePendingLocked(dir: string, agentId: string, pending: PendingError[
   atomicWritePrivate(pendingPath(dir, agentId), `${JSON.stringify({ v: CAPTURE_VERSION, pending: pending.slice(-CAPTURE_PENDING_MAX) })}\n`);
 }
 
-// ── the hot path (append only, never a network call) ────────────────────────
 
 export interface CaptureDeps {
   env?: Record<string, string | undefined>;
@@ -261,11 +256,7 @@ export interface CaptureOutcome {
   reason: "appended" | "deduplicated" | "error-recorded" | "not-capturable" | "no-agent-id" | "malformed-input" | "refused";
 }
 
-/**
- * The whole capture flow for one hook fire. Parses the payload, plans a
- * candidate (or a pending error), appends it to the spool, and kicks a
- * background flush. Makes no network call.
- */
+/** Appends new candidates and invokes a supplied flush callback; pending errors, deduplicated candidates and uncapturable input do neither. */
 export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOutcome {
   const env = deps.env ?? process.env;
   const now = (deps.now ?? (() => new Date()))();
@@ -411,8 +402,6 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
 
 // ── flush cooldown ──────────────────────────────────────────────────────────
 
-/** True when a background flush may be spawned now (cooldown elapsed), and
- *  records the spawn time. Best-effort: an unreadable stamp flushes. */
 export function claimFlushSlot(dir: string, agentId: string, now: number, cooldownMs: number = CAPTURE_FLUSH_COOLDOWN_MS): boolean {
   try {
     const stamp = flushStampPath(dir, agentId);

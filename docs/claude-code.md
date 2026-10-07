@@ -96,7 +96,7 @@ This is a prompt-driven CLI setup: Claude must choose to run these commands. For
 | `flair-continuity-capture` | `PostToolUse` and `Stop` | Journals the agent's working state into the ephemeral memory tier, so the next session start can point at it with a one-line resume hint. | `flair hook install --continuity` |
 | `flair-prompt-recall` | `UserPromptSubmit` | Searches memory with each prompt and adds the relevant memories as context before the model answers. | By hand, below |
 | `flair-action-recall` | `PreToolUse` | Matches the pending Bash command against the agent's own triggered lessons and adds the matching ones as context on the next model request. | `flair hook install --action-recall` |
-| `flair-capture` | `PostToolUseFailure`, `PostToolUse` and `Stop` | Captures possible matching follow-ups to failed commands and cue-matching sentences as candidate memories staged locally and flushed in the background. | `flair hook install --capture` |
+| `flair-capture` | `PostToolUseFailure`, `PostToolUse` and `Stop` | Stages candidates locally; a background flush attempts writes. | `flair hook install --capture` |
 | `flair-precompact` | `PreCompact` | Saves a bounded continuity record just before a compaction, for `flair-session-start` to show first afterwards. | By hand, [below](#continuity-across-compaction-flair-precompact-optional) |
 
 ### Per-prompt recall (`flair-prompt-recall`)
@@ -150,7 +150,7 @@ The environment wins over the config file, where the keys are top-level entries;
 
 ### Action recall (`flair-action-recall`)
 
-`flair hook install --action-recall` copies the version-matched hook and its runtime modules to `~/.flair/hooks/action-recall/<version>-<content hash>/` and probes that installed command. This Flair-owned directory survives npm cache eviction; uninstall removes it. Status probes a detected entry; absence is informational. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --capture`. An incompatible SessionStart entry or held pin refuses installation.
+`flair hook install --action-recall` copies the version-matched hook and its runtime modules to `~/.flair/hooks/action-recall/<version>-<content hash>/` and probes that installed command. This Flair-owned directory survives npm cache eviction; uninstall removes it. Status probes a detected entry; absence is informational. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --action-recall`. An incompatible SessionStart entry or held pin refuses installation.
 
 **How it decides.** A lesson opts in through its JSON `metadata` field:
 
@@ -172,9 +172,7 @@ The hot path reads a per-session cache of the agent's own lessons under `~/.flai
 
 The hook may stage a possible matching follow-up to a failed `Bash` call, or a cue-matching sentence from the turn's final text, in a bounded local spool under `~/.flair/capture/`. Network writes run in a detached flush. The foreground stdin deadline is 2 seconds; the lock wait is 200 ms.
 
-
-
-Install probes the copied command; status probes a detected entry and reports `partial` when only some of the three events are wired. Uninstall removes matching capture entries and the provisioned directory. Absence is informational: installing the hooks is the opt-in. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --capture`.
+Install probes the copied command; status probes a detected entry and reports `partial` when only some of the three events are wired. Absence is informational: installing the hooks is the opt-in. If absent, run `npx -y -p @tpsdev-ai/flair-mcp@<CLI version> node --version` first, then `flair hook install --capture`.
 
 ## Multiple Projects
 

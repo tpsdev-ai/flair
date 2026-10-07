@@ -412,14 +412,12 @@ export function isFlairContinuityCommand(command: string): boolean {
 // action-recall hooks it emits NOTHING to the harness, so the wrapper discards
 // both streams and absorbs failure (`>/dev/null 2>/dev/null || true`).
 
-/** The exact substring identifying a Flair capture hook command. */
+/** Matches this substring unless npx is bounded by whitespace or string edges; a match does not prove ownership. */
 export const CAPTURE_HOOK_MARKER = "capture-hook.js";
 
-/** The Claude-only PostToolUse matcher written alongside our capture entry —
- *  the tools whose failure/fix or file edit the capture core pairs. */
+/** Tools considered for a possible matching follow-up. */
 export const CAPTURE_POST_TOOL_USE_MATCHER = "Write|Edit|NotebookEdit|Bash";
 
-/** The PostToolUseFailure matcher: only a failed Bash call is captured. */
 export const CAPTURE_POST_TOOL_USE_FAILURE_MATCHER = "Bash";
 
 /** The hook events the capture hook registers under. */
@@ -477,7 +475,6 @@ export function buildCaptureHookCommand(
   return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null 2>/dev/null || true'`;
 }
 
-/** Match the capture artifact marker in commands without npx. */
 export function isFlairCaptureCommand(command: string): boolean {
   return typeof command === "string" && command.includes(CAPTURE_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
 }

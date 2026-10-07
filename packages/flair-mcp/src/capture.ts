@@ -77,14 +77,11 @@ export function cleanCaptureText(text: string, max: number = CAPTURE_BOUND_CHARS
   return hardBoundCapture(redactSecrets(text).replace(/\s+/g, " ").trim(), max);
 }
 
-/** As cleanCaptureText, but keeps the TAIL: the cause of a failure is usually
- *  at the end of its output. */
 export function cleanCaptureTail(text: string, max: number = CAPTURE_BOUND_CHARS): string {
   const cleaned = cleanCaptureText(text, Number.POSITIVE_INFINITY);
   return cleaned.length <= max ? cleaned : `…${cleaned.slice(-max)}`;
 }
 
-/** A stable short hash of arbitrary text — the dedup identity primitive. */
 export function captureHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -233,19 +230,9 @@ export function planPostToolUse(input: CaptureHookInput, pending: PendingError[]
 
 // ── decision extraction (Stop) ──────────────────────────────────────────────
 
-/**
- * Cues that mark a sentence as an explicit decision or correction. A heuristic,
- * deliberately conservative: a sentence with no cue is not captured, and a turn
- * with no cue sentence produces nothing.
- */
 const DECISION_CUES =
   /\b(?:decision|decided|we(?:'ll| will| should) use|instead of|correction|correcting|i was wrong|chose|choose to|prefer(?:red)?|the right approach|note to self|going forward|from now on|to be clear|we agreed)\b/i;
 
-/**
- * Split assistant prose into sentences and return the first cue-matching
- * sentence, redacted + bounded, or null. One sentence at
- * most: a turn states one decision for the purpose of this capture.
- */
 export function extractDecision(text: string): string | null {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (!normalized) return null;

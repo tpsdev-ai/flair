@@ -337,7 +337,7 @@ export function register(program: Command): void {
         } else if (capture.state === "absent") {
           console.log(`  ${render.icons.info} capture: not enabled ${render.wrap(render.c.dim, `(opt-in: ${hookInstallHint(harness, "--capture")})`)}`);
         } else {
-          if (capture.runtimeFailure) process.exitCode = 1;
+          process.exitCode = 1;
           const what = capture.problems.length > 0 ? ` (${capture.problems.join("; ")})` : "";
           console.log(`  ${render.icons.warn} capture: ${capture.state}${what} ${render.wrap(render.c.dim, `(re-run: ${hookInstallHint(harness, "--capture")})`)}`);
         }

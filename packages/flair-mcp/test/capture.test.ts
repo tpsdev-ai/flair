@@ -141,7 +141,7 @@ describe("capture planning", () => {
     expect(other.action).toBe("none");
   });
 
-  test("the error excerpt keeps the bounded tail, where the cause usually is", () => {
+  test("the error excerpt keeps the bounded tail", () => {
     const t = new Date().toISOString();
     const long = `${"progress line\n".repeat(200)}fatal: the real cause`;
     const failed = planPostToolUseFailure(JSON.parse(failedBash("bun test foo", long)) as never, t);
@@ -160,7 +160,7 @@ describe("capture planning", () => {
   });
 });
 
-describe("capture redaction, end to end (pending file, spool file, flushed row)", () => {
+describe("capture redaction", () => {
   async function flushRows(): Promise<string> {
     const rows: unknown[] = [];
     const result = await runCaptureFlush({ env: env(), dir, makeClient: () => recordingClient(rows) });
@@ -172,7 +172,7 @@ describe("capture redaction, end to end (pending file, spool file, flushed row)"
     ["a ghp_ token", `Exit code 1\nremote: invalid credentials for ${SECRET}`],
     ["an Authorization: Bearer line", `Exit code 22\n> GET /api\n> ${BEARER}\n< HTTP/1.1 401`],
   ] as const) {
-    test(`${label} in the failure error never reaches disk or Flair`, async () => {
+    test(`redacts ${label} in the failure error`, async () => {
       const secret = label === "a ghp_ token" ? SECRET : "abcdefghijklmnopqrstuvwx123";
       expect(runCapture(failedBash("curl api", error), { env: env(), dir }).reason).toBe("error-recorded");
       const pending = readFileSync(pendingPath(dir, "agent-a"), "utf-8");
@@ -188,7 +188,7 @@ describe("capture redaction, end to end (pending file, spool file, flushed row)"
     });
   }
 
-  test("a secret in an Edit/Write file_path used as a follow-up never reaches disk or Flair", async () => {
+  test("redacts the follow-up file_path", async () => {
     const path = `/repo/${SECRET}/config.json`;
     expect(runCapture(failedBash(`cat ${path}`, `cat: ${path}: No such file or directory`), { env: env(), dir }).reason).toBe("error-recorded");
     const pending = readFileSync(pendingPath(dir, "agent-a"), "utf-8");

@@ -2,9 +2,8 @@
 
   The hook may redact a candidate and append it to a bounded, private spool under
   `~/.flair/capture/`. Network writes run in a detached flush; a candidate may
-  wait or be evicted before a write. Install and status probe the provisioned copy;
-  uninstall removes every matching entry for all three events and the provisioned
-  directory.
+  wait or be evicted before a write. Install and status probe the provisioned copy.
+  Partial or stale capture status exits nonzero with `--capture`.
 
   > **Heads-up:** the hook is copied to `~/.flair/hooks/capture/<version>-<hash>/`
   > at install time. Re-run the installation after upgrading `@tpsdev-ai/flair`

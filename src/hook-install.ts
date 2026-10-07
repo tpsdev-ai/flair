@@ -1621,14 +1621,7 @@ export function continuityHookStatus(homeDir: string, harness: Harness): Continu
 
 // ── capture hooks (flair#2068) ───────────────────────────────────────────────
 //
-// The PostToolUseFailure + PostToolUse + Stop hooks that capture at the point
-// of learning: a failed command paired with a possible matching follow-up, and cue-matching
-// sentences in a turn's final text, staged in a bounded local spool and flushed in the
-// background through Flair's normal write path. Claude Code only (the matchers
-// are Claude tool names). INSTALLING THE HOOKS IS THE OPT-IN, so absence renders as "not
-// enabled", never a failure. The command and provisioning reuse the
-// action-recall runtime machinery (flair#2067) — a second descriptor, not a
-// second mechanism.
+// Candidates are staged locally; the background flush attempts writes.
 
 export interface CaptureInstallOptions extends InstallHookOptions {
   runtime: ActionRecallRuntime;
@@ -1676,10 +1669,6 @@ function findCaptureEntries(config: any, event: CaptureHookEvent): Array<{ group
   return entries;
 }
 
-function findCaptureEntry(config: any, event: CaptureHookEvent) {
-  return findCaptureEntries(config, event)[0] ?? null;
-}
-
 /** The command the wired capture events agree on (the most common one; ties go
  *  to the earliest event). Empty when none is present. */
 function expectedCaptureCommand(commands: ReadonlyArray<string | null>): string {
@@ -1712,15 +1701,27 @@ export function computeCaptureHookInstall(config: any, runtime: ActionRecallRunt
   const actions = noCaptureActions();
   let changed = false;
   for (const event of CAPTURE_HOOK_EVENTS) {
-    const existing = findCaptureEntry(newConfig, event);
+    const entries = findCaptureEntries(newConfig, event);
+    const existing = entries[0];
     const wantMatcher = CAPTURE_HOOK_MATCHERS[event];
     if (existing) {
+      if (entries.length > 1) {
+        for (const duplicate of entries.slice(1).reverse()) {
+          duplicate.group.hooks.splice(duplicate.hookIndex, 1);
+        }
+        newConfig.hooks[event] = newConfig.hooks[event].filter((group: any) => !Array.isArray(group?.hooks) || group.hooks.length > 0);
+        actions[event] = "update";
+        changed = true;
+      }
       const hook = existing.group.hooks[existing.hookIndex];
-      const matcherCurrent = wantMatcher === null || existing.group.matcher === wantMatcher;
+      const matcherCurrent = wantMatcher === null
+        ? existing.group.matcher == null || existing.group.matcher === ""
+        : existing.group.matcher === wantMatcher;
       if (hook.type !== "command" || hook.command !== command || !matcherCurrent) {
         hook.command = command;
         hook.type = "command";
-        if (wantMatcher !== null) existing.group.matcher = wantMatcher;
+        if (wantMatcher === null) delete existing.group.matcher;
+        else existing.group.matcher = wantMatcher;
         actions[event] = "update";
         changed = true;
       }
@@ -1736,9 +1737,7 @@ export function computeCaptureHookInstall(config: any, runtime: ActionRecallRunt
   return { changed, newConfig, actions };
 }
 
-/** Pure removal of the capture hooks. Removes EVERY matching entry for each
- *  event (a duplicate — a second install, or a hand-copied entry — is ours too),
- *  then prunes any group / event array / `hooks` key left empty. */
+/** Removes marker matches unless npx is bounded by whitespace or string edges; matching does not prove ownership. */
 export function computeCaptureHookRemoval(config: any): CaptureDelta {
   const newConfig = deepClone(config ?? {});
   const actions = noCaptureActions();
