@@ -139,32 +139,34 @@ describe("Integration collection DELETE (flair#2309)", () => {
     }, 60_000);
   }
 
-  test("RUNTIME PRINCIPAL: collection DELETE is refused and deletes nothing", async () => {
-    await seedRow("intdel-rt-a", "slack-rt");
-    await seedRow("intdel-rt-b", "slack-rt");
+  for (const principal of [runtimeAgent, adminAgent]) {
+    test(`${principal.id}: collection DELETE is refused and deletes nothing`, async () => {
+      await seedRow(`${principal.id}-intdel-rt-a`, `${principal.id}-slack-rt`);
+      await seedRow(`${principal.id}-intdel-rt-b`, `${principal.id}-slack-rt`);
 
-    await seedRow("intdel-rt-own", "own-rt", runtimeAgent.id);
-    const ownPath = "/Integration/intdel-rt-own";
-    const authenticated = await fetch(`${harper.httpURL}${ownPath}`, {
-      headers: { Authorization: ed25519Header(runtimeAgent, "GET", ownPath) },
-    });
-    expect(authenticated.status).toBe(200);
-    expect((await authenticated.json()).agentId).toBe(runtimeAgent.id);
+      await seedRow(`${principal.id}-intdel-rt-own`, `${principal.id}-own-rt`, principal.id);
+      const ownPath = `/Integration/${principal.id}-intdel-rt-own`;
+      const authenticated = await fetch(`${harper.httpURL}${ownPath}`, {
+        headers: { Authorization: ed25519Header(principal, "GET", ownPath) },
+      });
+      expect(authenticated.status).toBe(200);
+      expect((await authenticated.json()).agentId).toBe(principal.id);
 
-    const path = "/Integration/?platform=slack-rt";
-    const del = await fetch(`${harper.httpURL}${path}`, {
-      method: "DELETE",
-      headers: { Authorization: ed25519Header(runtimeAgent, "DELETE", path) },
-    });
-    expect(del.status).toBe(403);
-    expect(await del.json()).toEqual({ error: "forbidden: cannot delete integration for another agent" });
+      const path = `/Integration/?platform=${principal.id}-slack-rt`;
+      const del = await fetch(`${harper.httpURL}${path}`, {
+        method: "DELETE",
+        headers: { Authorization: ed25519Header(principal, "DELETE", path) },
+      });
+      expect(del.status).toBe(403);
+      expect(await del.json()).toEqual({ error: "integration_directory_requires_operator: deleting by a collection or query target is operator-only" });
 
-    const still = await readByPlatform("slack-rt");
-    expect(still.map((r) => r.id).sort()).toEqual(["intdel-rt-a", "intdel-rt-b"]);
-    for (const id of ["intdel-rt-a", "intdel-rt-b", "intdel-rt-own"]) {
-      expect((await readRow(id))?.id).toBe(id);
-    }
-  }, 60_000);
+      const still = await readByPlatform(`${principal.id}-slack-rt`);
+      expect(still.map((r) => r.id).sort()).toEqual([`${principal.id}-intdel-rt-a`, `${principal.id}-intdel-rt-b`]);
+      for (const id of [`${principal.id}-intdel-rt-a`, `${principal.id}-intdel-rt-b`, `${principal.id}-intdel-rt-own`]) {
+        expect((await readRow(id))?.id).toBe(id);
+      }
+    }, 60_000);
+  }
 
   test("OPERATOR: a throw after the second staged delete returns 500 and rolls back the rows", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-integration-delete-failure-"));

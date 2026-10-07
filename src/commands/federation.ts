@@ -12,6 +12,7 @@
  * non-strict entry into the strict check.
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { PEER_STATUS, isPeerMemberStatus } from "../lib/peer-status.js";
 import { protoSafeRecord } from "../lib/proto-safe-record.js";
 import { Command } from "commander";
 import nacl from "tweetnacl";
@@ -1200,7 +1201,7 @@ export function register(program: Command): void {
           key: "status",
           format: (v) => {
             const s = String(v ?? "—");
-            const color = s === "paired" || s === "connected" || s === "active" ? render.c.green : s === "revoked" ? render.c.red : render.c.yellow;
+            const color = isPeerMemberStatus(s) ? render.c.green : s === PEER_STATUS.REVOKED ? render.c.red : render.c.yellow;
             return render.wrap(color, s);
           },
         },

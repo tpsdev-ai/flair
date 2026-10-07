@@ -698,6 +698,35 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     "stdio": false
   },
   {
+    "name": "team_directory",
+    "description": "List active agent-kind principals with published tps-mail contacts. Filter by id or name; page with cursor and limit.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Filter by stable Agent ID."
+        },
+        "name": {
+          "type": "string",
+          "description": "Filter by a case-insensitive substring of the display label."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque cursor from a prior page's nextCursor."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max entries per page (default 50, max 50)."
+        }
+      }
+    },
+    "outputShape": "{ entries: TeamDirectoryEntry[], nextCursor, hasMore, limit, generatedAt } — active agent-kind principals with a published tps-mail contact.",
+    "annotations": {
+      "readOnlyHint": true
+    }
+  },
+  {
     "name": "record_usage",
     "description": "Report that one or more memories were actually USED — cited or relied on to ground an answer or decision. Distinct from search (surfacing a memory is not usage). Drives the recall-quality usage signal; dedup'd (you can only count once per memory) and rate-limited. When both memoryId and memoryIds are supplied they are merged (union, then deduped) — a caller who passes both means both.",
     "inputSchema": {
