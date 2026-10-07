@@ -34,7 +34,7 @@
 // "darwin"`. Linux CI reports these as skipped (flair#1012); the darwin
 // unit lane executes them.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -365,6 +365,15 @@ function passFilePlist(label: string): string {
       path: process.env.PATH ?? "/usr/bin:/bin",
     },
   });
+}
+
+/**
+ * The environment a plist launch here runs under: the plist's
+ * EnvironmentVariables, this file's start log, and the stub's lifetime env
+ * against `ownerPid` (flair#2281).
+ */
+function plistLaunchEnv(plist: { EnvironmentVariables: Record<string, string> }, ownerPid = process.pid): Record<string, string> {
+  return { ...plist.EnvironmentVariables, STUB_START_LOG: fx.startLog, ...stubLifetimeEnv(ownerPid) };
 }
 
 async function drive(
@@ -854,7 +863,7 @@ describe("flair#2040 — a launchd start of the job while a DIRECT process serve
     const [program, ...args] = plist.ProgramArguments as string[];
     const r = spawnSync(program, args, {
       cwd: plist.WorkingDirectory,
-      env: { ...plist.EnvironmentVariables, STUB_START_LOG: fx.startLog },
+      env: plistLaunchEnv(plist),
       encoding: "utf-8",
       timeout: 10_000,
     });
@@ -888,7 +897,7 @@ describe("flair#2040 — a launchd start of the job while a DIRECT process serve
       const [program, ...args] = plist.ProgramArguments as string[];
       const proc = Bun.spawn([program, ...args], {
         cwd: plist.WorkingDirectory,
-        env: { ...plist.EnvironmentVariables, STUB_START_LOG: fx.startLog },
+        env: plistLaunchEnv(plist),
         stdout: "ignore",
         stderr: "ignore",
       });
@@ -896,6 +905,49 @@ describe("flair#2040 — a launchd start of the job while a DIRECT process serve
       expect(await healthy()).toBe(true);
       expect(hdbPid()).toBe(proc.pid);
       expect(stubStarts().length).toBe(startsBefore + 1);
+    },
+    60_000,
+  );
+});
+
+// ─── flair#2281: a stub the plist's launcher starts ends with its owner ─────
+
+describe("flair#2281 — a stub started through the plist's launcher exits when its owner is gone", () => {
+  test.skipIf(!isDarwin)(
+    "the launcher execs a serving stub; end its owner and the stub exits",
+    async () => {
+      writeFileSync(fx.plistPath, passFilePlist(fx.label));
+      const json = spawnSync("plutil", ["-convert", "json", "-o", "-", fx.plistPath], { encoding: "utf-8", timeout: 10_000 });
+      const plist = JSON.parse(json.stdout);
+      const [program, ...args] = plist.ProgramArguments as string[];
+      // The owner stands in for the test runner: a shell blocked reading a pipe
+      // this process holds. It exits when that pipe closes, so also when this
+      // process does.
+      const owner = Bun.spawn(["sh", "-c", "read -r line"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+      const stderrPath = join(fx.home, "plist-stub.stderr");
+      const stderrFd = openSync(stderrPath, "w");
+      try {
+        const stub = Bun.spawn([program, ...args], {
+          cwd: plist.WorkingDirectory,
+          env: plistLaunchEnv(plist, owner.pid),
+          stdout: "ignore",
+          stderr: stderrFd,
+        });
+        const stubStderr = () => readFileSync(stderrPath, "utf-8");
+        for (let i = 0; i < 100 && !(await healthy()); i++) await Bun.sleep(50);
+        expect(await healthy(), `the launched stub did not serve; its stderr:\n${stubStderr()}`).toBe(true);
+        expect(hdbPid(), `hdb.pid does not name the launched process; its stderr:\n${stubStderr()}`).toBe(stub.pid);
+
+        // End the owner by closing its pipe, and reap it: a zombie still answers kill(pid, 0).
+        owner.stdin.end();
+        await owner.exited;
+
+        const exited = await Promise.race([stub.exited.then(() => true), Bun.sleep(10_000).then(() => false)]);
+        expect(exited, `the stub (pid ${stub.pid}) outlived its owner by 10 s; its stderr:\n${stubStderr()}`).toBe(true);
+      } finally {
+        closeSync(stderrFd);
+        try { owner.stdin.end(); } catch { /* already closed */ }
+      }
     },
     60_000,
   );

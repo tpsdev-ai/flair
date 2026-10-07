@@ -8,15 +8,16 @@
  * keeps running after its tree is deleted. Two independent exits, either
  * sufficient:
  *
- *   1. `STUB_OWNER_PID` names the test process; a poll of it is the shutdown
- *      heartbeat. The stub exits the first time that pid is gone. This also
- *      covers a stub the launchctl shim started: the shim exits at once, so such
- *      a stub is re-parented to PID 1 long before the test is, and watching
- *      `process.ppid` would fire immediately.
+ *   1. `STUB_OWNER_PID` names the test process (or, in an owner-death test, a
+ *      stand-in for it); a poll of it is the shutdown heartbeat. The stub exits
+ *      the first time that pid is gone. This also covers a stub the launchctl
+ *      shim started: the shim's parent relationship does not reliably identify
+ *      the owning test runner.
  *   2. `STUB_MAX_LIFETIME_MS` is a hard backstop, set well above the test's
  *      budget.
  *
  * `stubLifetimeEnv()` arms both; callers merge it into the stub's environment.
+ * A stub missing either variable exits with `STUB_LIFETIME_UNSET` before it serves.
  */
 
 /** Hard backstop for a stub whose owner poll would not otherwise fire. */
@@ -35,6 +36,13 @@ import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+// Fail closed: a stub missing either exit from this file's header stops here, before it serves.
+const ownerPid = Number(process.env.STUB_OWNER_PID);
+const maxLifetimeMs = Number(process.env.STUB_MAX_LIFETIME_MS);
+if (!Number.isInteger(ownerPid) || ownerPid <= 1 || !Number.isInteger(maxLifetimeMs) || maxLifetimeMs <= 0) {
+  process.stderr.write("STUB_LIFETIME_UNSET: this stub needs STUB_OWNER_PID and STUB_MAX_LIFETIME_MS; merge stubLifetimeEnv() into its environment\\n");
+  process.exit(1);
+}
 const root = process.env.ROOTPATH;
 const port = Number(((process.env.HTTP_PORT ?? "0").match(/(\\d+)$/) ?? [])[1] ?? 0);
 if (process.env.STUB_START_LOG) appendFileSync(process.env.STUB_START_LOG, process.pid + "\\n");
@@ -66,14 +74,10 @@ const startDelayMs = Number(process.env.STUB_START_DELAY_MS ?? 0);
 if (startDelayMs > 0) setTimeout(serve, startDelayMs); else serve();
 // The two exits from this file's header. Independent of the SIGTERM handler
 // below, which a stub with STUB_HOLD_ON_SIGTERM deliberately ignores.
-const ownerPid = Number(process.env.STUB_OWNER_PID ?? "0");
-if (ownerPid > 1) {
-  setInterval(() => {
-    try { process.kill(ownerPid, 0); } catch { process.exit(0); }
-  }, 250);
-}
-const maxLifetimeMs = Number(process.env.STUB_MAX_LIFETIME_MS ?? "0");
-if (maxLifetimeMs > 0) setTimeout(() => process.exit(0), maxLifetimeMs);
+setInterval(() => {
+  try { process.kill(ownerPid, 0); } catch { process.exit(0); }
+}, 250);
+setTimeout(() => process.exit(0), maxLifetimeMs);
 process.on("SIGTERM", () => {
   appendFileSync(join(root, "signals.log"), "SIGTERM " + process.pid + "\\n");
   try { if (readFileSync(join(root, "hdb.pid"), "utf-8").trim() === String(process.pid)) rmSync(join(root, "hdb.pid")); } catch {}
