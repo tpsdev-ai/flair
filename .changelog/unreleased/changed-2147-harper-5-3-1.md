@@ -6,5 +6,7 @@
   - `fast-uri`: `GHSA-5jgf-p345-68v8`, `GHSA-fph4-wmhf-6fwf`.
 
   > **Heads-up:** A data directory upgraded to Harper 5.3 must not be served
-  > by an older flair. The remedy is restoring the pre-upgrade snapshot, or a
-  > `flair backup` export taken on the older version.
+  > by an older flair. The only full rollback is restoring the pre-upgrade physical
+  > data-directory snapshot (`flair snapshot restore <path>`). `flair backup`/`restore`
+  > logically exports/imports only Agent, Memory and Soul rows through a running
+  > server; it can transfer those rows into a fresh compatible instance.

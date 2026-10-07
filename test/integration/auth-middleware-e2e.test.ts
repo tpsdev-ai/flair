@@ -428,6 +428,46 @@ describe("auth-middleware e2e (real Harper)", () => {
     }, 30_000);
   }
 
+  test("mixed-case TPS scheme reads an owned WorkspaceState row", async () => {
+    const fixture = FAMILY_READ_GATE_RESOURCES.find(r => r.table === "WorkspaceState")!;
+    const path = `/WorkspaceState/${fixture.id}`;
+    const anonymous = await fetch(`${harper.httpURL}${path}`);
+    expect(anonymous.status).toBe(403);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      headers: {
+        Authorization: ed25519Header(agent, "GET", path).replace("TPS-Ed25519", "tPs-eD25519"),
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: fixture.id, agentId: agent.id, ref: "main" });
+  }, 30_000);
+
+  for (const header of ["tPs-eD25519", "tPs-eD25519 missing-fields"]) {
+    test(`malformed mixed-case header ${header} on /FederationSync returns 401`, async () => {
+      const res = await fetch(`${harper.httpURL}/FederationSync`, {
+        method: "POST",
+        headers: { Authorization: header, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "invalid_authorization_header" });
+    }, 30_000);
+  }
+
+  test("invalid mixed-case signature on /FederationSync returns 401", async () => {
+    const path = "/FederationSync";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: ed25519Header(agent, "POST", path, { tamper: true }).replace("TPS-Ed25519", "tPs-eD25519"),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "invalid_signature" });
+  }, 30_000);
+
   test("Bug 2 guard: valid TPS-Ed25519 on /FederationSync → NOT auth-rejected (downstream status, not 401 Login-failed)", async () => {
     const path = "/FederationSync";
     const res = await fetch(`${harper.httpURL}${path}`, {

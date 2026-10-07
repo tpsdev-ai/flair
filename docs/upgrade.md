@@ -685,10 +685,10 @@ the destructive replace unless you pass `--yes`); the equivalent by hand is `fla
 stop && rm -rf ~/.flair/data && mkdir -p ~/.flair/data && tar -xzf
 <snapshot> -C ~/.flair/data && flair start`, in case you'd rather not use the command.
 
-If you don't have a snapshot (upgraded without `--snapshot`, or on a version from
-before flair#637 shipped it), there is no tested way back short of restoring from a
-`flair backup` JSON export on the older version — do not assume an untested downgrade
-boot will work.
+The only full rollback is restoring the pre-upgrade physical data-directory snapshot.
+`flair backup`/`restore` logically exports/imports only Agent, Memory and Soul rows
+through a running server into a fresh compatible instance; it does not restore the
+physical store or other tables.
 
 ### Does the previous version actually boot against newer data? (tested, not assumed)
 
@@ -725,10 +725,11 @@ the flair#1050 invariant (it boots Harper via `startHarper`, so the CLI stamp
 phrasing is not on that path).
 
 **Engine-version break: Harper 5.2 → 5.3.** This release attempts to write an `engine-version.txt` stamp into
-`ROOTPATH` (or `~/.flair/data` when unset) at boot; the write is best effort. With a readable stamp and a known installed Harper version, an older guarded Flair refuses before Harper opens the store if the stamp is newer or the versions cannot be compared. A failed write can leave a stale stamp.
-The remedy is the same as the breaks above: restore
-the pre-upgrade snapshot (`flair snapshot restore <path>`) or a `flair backup` export
-taken on the older version.
+`ROOTPATH` (or `~/.flair/data` when unset) at boot; the write is best effort. With a readable, nonempty stamp and a known installed Harper version, an older guarded Flair refuses before Harper opens the store if the stamp is newer or the versions cannot be compared. A failed write can leave a stale stamp.
+The only full rollback is restoring the pre-upgrade physical data-directory snapshot
+(`flair snapshot restore <path>`). `flair backup`/`restore` logically exports/imports
+only Agent, Memory and Soul rows through a running server into a fresh compatible
+instance; it does not restore the physical store or other tables.
 
 **As observed when this suite was added (2026-07-08):** the npm-published baseline
 (0.21.0) boots cleanly against data written by a HEAD build roughly 14 commits ahead of
