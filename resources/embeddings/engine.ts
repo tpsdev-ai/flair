@@ -2,7 +2,8 @@
  * One embedding engine per worker thread, keyed by model path plus addon
  * path. The registry lives on globalThis, so it is per isolate. Node-wide
  * ownership across workers is #2052. Exactly one addon is dlopen'd in that
- * isolate. The addon is the optional `@node-llama-cpp/<platform>` prebuilt
+ * isolate. A failed load stays in the registry, so a later ensureReady does
+ * not dlopen again. The addon is the optional `@node-llama-cpp/<platform>` prebuilt
  * for this host (linux-x64 CPU, linux-arm64 CPU, or darwin-arm64 Metal).
  * There is no umbrella `node-llama-cpp` package and no fallback onto
  * harper-fabric-embeddings. A missing or unsupported prebuilt throws; boot
@@ -16,13 +17,14 @@
  * concurrent.
  */
 import { createRequire } from "node:module";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { EmbeddingModelError } from "./errors.js";
 import { reverifyBeforeLoad } from "./fetch.js";
 import { assertDeclaredPooling } from "./gguf.js";
 import { BUILTIN_EMBEDDING_MODEL, type EmbeddingModelEntry } from "./models.js";
-import { hostLabel, prebuiltForPlatform } from "./platforms.js";
+import { hostLabel, PINNED_PREBUILT_VERSION, prebuiltForPlatform } from "./platforms.js";
+import { versionFromPackageJson } from "./provenance.js";
 import { applyEmbeddingTemplate } from "./template.js";
 
 type GpuKind = "metal" | "cuda" | "vulkan" | false;
@@ -379,7 +381,34 @@ export function resolveFlairAddonPath(
       `Reinstall ${match.packageName}. Refusing to build llama.cpp from source.`,
     );
   }
+  assertPinnedAddon(addon, match.packageName);
   return addon;
+}
+
+/** Refuse any prebuilt other than the tested pin before process.dlopen. */
+function assertPinnedAddon(addonPath: string, packageName: string): void {
+  const pkgPath = join(dirname(addonPath), "..", "..", "package.json");
+  let text: string;
+  try {
+    text = readFileSync(pkgPath, "utf8");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new EmbeddingModelError(
+      "prebuilt",
+      `[embeddings] ${packageName} package.json at ${pkgPath} is unreadable (${detail}).`,
+      `Reinstall ${packageName}@${PINNED_PREBUILT_VERSION}. Refusing to dlopen an untested prebuilt.`,
+    );
+  }
+  try {
+    versionFromPackageJson(text, pkgPath);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new EmbeddingModelError(
+      "prebuilt",
+      `[embeddings] ${packageName} is not the tested prebuilt ${PINNED_PREBUILT_VERSION}. ${detail}`,
+      `Install ${packageName}@${PINNED_PREBUILT_VERSION}. Refusing to dlopen a version that was not tested.`,
+    );
+  }
 }
 
 function findAddonBinary(packageEntry: string): string | null {
@@ -409,17 +438,14 @@ function acquireBinding(
     const run = load ?? loadBinding;
     pending = run(addonPath);
     reg.bindings.set(addonPath, pending);
-    pending.catch(() => {
-      if (reg.bindings.get(addonPath) === pending) {
-        reg.bindings.delete(addonPath);
-        reg.loads -= 1;
-      }
-    });
+    // A rejection stays. Deleting it let the next ensureReady dlopen again,
+    // including when dlopen had already succeeded and init then failed.
   }
   return pending;
 }
 
 async function loadBinding(addonPath: string): Promise<NativeBinding> {
+  assertPinnedAddon(addonPath, "node-llama-cpp prebuilt");
   const holder: { exports: unknown } = { exports: {} };
   try {
     process.dlopen(holder, addonPath);

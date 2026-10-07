@@ -2,7 +2,12 @@
  * Supported node-llama-cpp prebuilts for the flair engine.
  * Exact optionalDependencies in package.json — CPU linux and Metal darwin
  * only. No CUDA, no Vulkan, no umbrella `node-llama-cpp` package.
+ *
+ * A different installed version is refused before dlopen. The stamp does
+ * not carry this version; the loader and provenance do.
  */
+export const PINNED_PREBUILT_VERSION = "3.18.1";
+
 export const SUPPORTED_PREBUILTS = [
   { platform: "linux", arch: "x64", packageName: "@node-llama-cpp/linux-x64" },
   { platform: "linux", arch: "arm64", packageName: "@node-llama-cpp/linux-arm64" },

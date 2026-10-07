@@ -7,9 +7,12 @@
  * Hugging Face token is attached.
  *
  * One downloader holds `<file>.downloading` (exclusive create, owner token).
- * Others wait. Reclaim and release touch only the lock inode the caller
- * still owns, so a stale reclaim cannot unlink a successor's lock. A
- * heartbeat refreshes that inode while `reader.read()` is stalled. Bytes go to
+ * Others wait. Release, acquisition-error cleanup, and stale-claim cleanup
+ * unlink a path only when a fresh lstat still shows the inode the caller
+ * opened. A child that replaces that path during the await before the check
+ * leaves the successor in place. That is the ownership the child-process
+ * test proves: the inode check and the unlink are still two calls. A
+ * heartbeat refreshes the owned inode while `reader.read()` is stalled. Bytes go to
  * a unique temp in the models directory, are fsync'd, then renamed. The file
  * is verified by descriptor (O_NOFOLLOW, fstat regular file, size, SHA-256)
  * after rename. An existing mismatch is quarantined and fetched again, never
@@ -68,6 +71,26 @@ export interface EnsureModelOptions {
    * The reclaim re-checks the inode and mtime after this returns.
    */
   beforeReclaimUnlink?: (lockPath: string) => Promise<void>;
+  /**
+   * Test seam: runs after this process created the lock and before
+   * acquisition returns it. A throw enters acquisition-error cleanup.
+   */
+  afterLockCreate?: (lockPath: string) => Promise<void>;
+  /**
+   * Test seam: runs after the lock fd is closed and before acquisition-error
+   * cleanup unlinks. Cleanup then unlinks only the inode this process opened.
+   */
+  beforeAcquireCleanup?: (lockPath: string) => Promise<void>;
+  /**
+   * Test seam: runs after release has confirmed ownership and before it
+   * unlinks. Release then unlinks only the inode this process opened.
+   */
+  beforeReleaseUnlink?: (lockPath: string) => Promise<void>;
+  /**
+   * Test seam: runs after the claim fd is closed and before claim cleanup
+   * unlinks. Cleanup then unlinks only the inode this process opened.
+   */
+  beforeClaimCleanup?: (claimPath: string) => Promise<void>;
   statDir?: (path: string) => Promise<DirFacts>;
   expectedUid?: number;
 }
@@ -207,12 +230,23 @@ export async function prepareModelsDir(modelsDir: string, opts: EnsureModelOptio
     existed = false;
   }
   if (!existed) {
-    await mkdir(modelsDir, { recursive: true, mode: 0o700 });
-    await chmod(modelsDir, 0o700);
+    try {
+      await mkdir(modelsDir, { recursive: true, mode: 0o700 });
+      await chmod(modelsDir, 0o700);
+    } catch (err) {
+      if (err instanceof EmbeddingModelError) throw err;
+      throw dirIoError(modelsDir, err, "create");
+    }
   }
-  const facts = opts.statDir
-    ? await opts.statDir(modelsDir)
-    : await stat(modelsDir).then((st) => ({ uid: st.uid, mode: st.mode }));
+  let facts: DirFacts;
+  try {
+    facts = opts.statDir
+      ? await opts.statDir(modelsDir)
+      : await stat(modelsDir).then((st) => ({ uid: st.uid, mode: st.mode }));
+  } catch (err) {
+    if (err instanceof EmbeddingModelError) throw err;
+    throw dirIoError(modelsDir, err, "stat");
+  }
   const uid = opts.expectedUid ?? (typeof process.getuid === "function" ? process.getuid() : facts.uid);
   if (facts.uid !== uid) {
     throw new EmbeddingModelError(
@@ -234,13 +268,14 @@ interface HeldLock {
   token: string;
   fd: Awaited<ReturnType<typeof open>>;
   ino: number;
+  dev: number;
   path: string;
 }
 
 function stillOwns(held: HeldLock): boolean {
   try {
     const st = lstatSync(held.path);
-    if (!st.isFile() || st.ino !== held.ino) return false;
+    if (!st.isFile() || st.ino !== held.ino || st.dev !== held.dev) return false;
     const buf = Buffer.alloc(held.token.length);
     const n = readSync(held.fd.fd, buf, 0, buf.length, 0);
     return n === held.token.length && buf.toString() === held.token;
@@ -278,7 +313,7 @@ function startHeartbeat(held: HeldLock, staleMs: number, now: () => number): () 
   return () => clearInterval(timer);
 }
 
-async function tryAcquireLock(lockPath: string): Promise<HeldLock | null> {
+async function tryAcquireLock(lockPath: string, opts: EnsureModelOptions): Promise<HeldLock | null> {
   let fd: Awaited<ReturnType<typeof open>>;
   try {
     fd = await open(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -291,24 +326,56 @@ async function tryAcquireLock(lockPath: string): Promise<HeldLock | null> {
     );
   }
   const token = randomBytes(16).toString("hex");
+  let owned: { ino: number; dev: number } | undefined;
   try {
     await fd.writeFile(token);
     await fd.sync();
     const st = await fd.stat();
-    return { token, fd, ino: st.ino, path: lockPath };
+    owned = { ino: st.ino, dev: st.dev };
+    if (opts.afterLockCreate) await opts.afterLockCreate(lockPath);
+    return { token, fd, ino: st.ino, dev: st.dev, path: lockPath };
   } catch (err) {
-    await fd.close().catch(() => undefined);
-    await unlink(lockPath).catch(() => undefined);
+    if (!owned) {
+      try {
+        const st = await fd.stat();
+        owned = { ino: st.ino, dev: st.dev };
+      } catch {
+        owned = undefined;
+      }
+    }
+    // Keep the fd open across the seam. Closing it first lets the successor
+    // reuse the inode number, and the following check would unlink that file.
+    try {
+      if (opts.beforeAcquireCleanup) await opts.beforeAcquireCleanup(lockPath);
+      if (owned) unlinkIfInode(lockPath, owned.ino, owned.dev);
+    } finally {
+      await fd.close().catch(() => undefined);
+    }
     throw err;
   }
 }
 
-async function releaseLock(held: HeldLock): Promise<void> {
+async function releaseLock(held: HeldLock, opts: EnsureModelOptions): Promise<void> {
   try {
-    if (stillOwns(held)) unlinkSync(held.path);
+    if (!stillOwns(held)) return;
+    if (opts.beforeReleaseUnlink) await opts.beforeReleaseUnlink(held.path);
+    unlinkIfInode(held.path, held.ino, held.dev);
   } finally {
     await held.fd.close().catch(() => undefined);
   }
+}
+
+/** Unlink `path` only when it still names `ino` on `dev`. A successor is left alone. */
+function unlinkIfInode(path: string, ino: number, dev: number): void {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(path);
+  } catch (err) {
+    if (errorCode(err) === "ENOENT") return;
+    throw err;
+  }
+  if (st.isSymbolicLink() || !st.isFile() || st.ino !== ino || st.dev !== dev) return;
+  unlinkSync(path);
 }
 
 async function withDownloadLock(
@@ -325,7 +392,7 @@ async function withDownloadLock(
   const deadline = now() + waitMs;
   while (true) {
     await reclaimStaleLock(lockPath, staleMs, now, opts);
-    const held = await tryAcquireLock(lockPath);
+    const held = await tryAcquireLock(lockPath, opts);
     if (!held) {
       const outcome = await waitForDownload(dest, lockPath, deadline, opts);
       if (outcome === "complete") return;
@@ -341,7 +408,7 @@ async function withDownloadLock(
       return;
     } finally {
       stopHeartbeat();
-      await releaseLock(held);
+      await releaseLock(held, opts);
     }
   }
 }
@@ -385,7 +452,7 @@ async function reclaimStaleLock(
     const again = await lstat(lockPath);
     if (again.isSymbolicLink() || again.ino !== observed.ino || now() - again.mtimeMs <= staleMs) return;
     if (opts.beforeReclaimUnlink) await opts.beforeReclaimUnlink(lockPath);
-    let pathSt: { ino: number; mtimeMs: number; isSymbolicLink: () => boolean };
+    let pathSt: { ino: number; dev: number; mtimeMs: number; isSymbolicLink: () => boolean };
     try {
       pathSt = lstatSync(lockPath);
     } catch (err) {
@@ -400,13 +467,28 @@ async function reclaimStaleLock(
       );
     }
     if (pathSt.ino !== observed.ino || now() - pathSt.mtimeMs <= staleMs) return;
-    unlinkSync(lockPath);
+    unlinkIfInode(lockPath, observed.ino, pathSt.dev);
   } catch (err) {
     if (err instanceof EmbeddingModelError) throw err;
     if (errorCode(err) === "ENOENT") return;
   } finally {
-    await claim.close().catch(() => undefined);
-    await unlink(claimPath).catch(() => undefined);
+    let owned: { ino: number; dev: number } | undefined;
+    if (claim) {
+      try {
+        const st = await claim.stat();
+        owned = { ino: st.ino, dev: st.dev };
+      } catch {
+        owned = undefined;
+      }
+    }
+    // The claim fd stays open until after the inode check so a replacement
+    // cannot reuse the inode and be removed as if it were ours.
+    try {
+      if (opts.beforeClaimCleanup) await opts.beforeClaimCleanup(claimPath);
+      if (owned) unlinkIfInode(claimPath, owned.ino, owned.dev);
+    } finally {
+      if (claim) await claim.close().catch(() => undefined);
+    }
   }
 }
 
@@ -414,7 +496,7 @@ async function dropStaleClaim(claimPath: string, staleMs: number, now: () => num
   try {
     const st = await lstat(claimPath);
     if (st.isSymbolicLink() || now() - st.mtimeMs <= staleMs) return;
-    unlinkSync(claimPath);
+    unlinkIfInode(claimPath, st.ino, st.dev);
   } catch {
     // The owner of a live claim keeps it. A missing claim is already gone.
   }
@@ -463,7 +545,19 @@ async function writeDownload(
   assertOwned: () => Promise<void>,
 ): Promise<void> {
   await assertOwned();
-  const response = await download(url);
+  let response: ModelDownloadResponse;
+  try {
+    response = await download(url);
+  } catch (err) {
+    if (err instanceof EmbeddingModelError) throw err;
+    const detail = err instanceof Error ? err.message : String(err);
+    const code = errorCode(err);
+    throw new EmbeddingModelError(
+      "unreadable",
+      `[embeddings] download of ${url} failed before a response (${code ? `${code}: ` : ""}${detail}).`,
+      "Retry the download. A rejected request is not a model file. Refusing to load.",
+    );
+  }
   await assertOwned();
   if (!response.ok) {
     throw new EmbeddingModelError(
@@ -690,6 +784,16 @@ async function downloadWithFetch(url: string): Promise<ModelDownloadResponse> {
     statusText: response.statusText,
     body: response.body,
   };
+}
+
+function dirIoError(modelsDir: string, err: unknown, action: "create" | "stat"): EmbeddingModelError {
+  const code = errorCode(err);
+  const detail = err instanceof Error ? err.message : String(err);
+  return new EmbeddingModelError(
+    "unreadable",
+    `[embeddings] could not ${action} models directory ${modelsDir} (${code ? `${code}: ` : ""}${detail}).`,
+    "Fix the models directory path and permissions. Refusing to fetch a model elsewhere.",
+  );
 }
 
 function errorCode(err: unknown): string | undefined {

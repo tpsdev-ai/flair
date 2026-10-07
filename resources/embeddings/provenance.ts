@@ -7,7 +7,7 @@
 import { createRequire } from "node:module";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { hostLabel, prebuiltForPlatform } from "./platforms.js";
+import { hostLabel, PINNED_PREBUILT_VERSION, prebuiltForPlatform } from "./platforms.js";
 import { EMBEDDING_PIPELINE_VERSION } from "./stamp-key.js";
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
@@ -54,7 +54,10 @@ export function readEmbeddingProvenance(
   };
 }
 
-/** Fail closed: empty, unreadable JSON, or a non-x.y.z version is not provenance. */
+/**
+ * Fail closed: empty, unreadable JSON, a non-x.y.z version, or any version
+ * other than the tested pin is not provenance.
+ */
 export function versionFromPackageJson(text: string, pkgPath = "package.json"): string {
   if (text.trim() === "") {
     throw new Error(
@@ -84,6 +87,11 @@ export function versionFromPackageJson(text: string, pkgPath = "package.json"): 
   if (version.includes(":")) {
     throw new Error(
       `[embeddings] prebuilt version must not contain ':'. Remedy: install a release whose version is x.y.z. Refusing to record provenance.`,
+    );
+  }
+  if (version !== PINNED_PREBUILT_VERSION) {
+    throw new Error(
+      `[embeddings] prebuilt package.json at ${pkgPath} is version ${version}; ${PINNED_PREBUILT_VERSION} is the tested pin. Remedy: install the pinned release. That version was not tested. Refusing to record provenance.`,
     );
   }
   return version;

@@ -71,7 +71,9 @@ describe("embedding stamp (S1 — default unchanged)", () => {
     expect(() => versionFromPackageJson("{")).toThrow(/not JSON/);
     expect(() => versionFromPackageJson("{}")).toThrow(/no exact x\.y\.z/);
     expect(() => versionFromPackageJson('{"version":"^3.22.1"}')).toThrow(/no exact x\.y\.z/);
-    expect(versionFromPackageJson('{"version":"3.22.1"}')).toBe("3.22.1");
+    expect(() => versionFromPackageJson('{"version":"3.22.1"}')).toThrow(/3\.18\.1/);
+    expect(() => versionFromPackageJson('{"version":"3.22.1"}')).toThrow(/was not tested/);
+    expect(versionFromPackageJson('{"version":"3.18.1"}')).toBe("3.18.1");
   });
 
   it("records the built-in nomic blob exactly", () => {

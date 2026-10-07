@@ -52,13 +52,17 @@ afterEach(() => {
   _resetFlairEmbeddingEngineForTests();
 });
 
-function plantAddon(root: string, name: string): string {
+function plantAddon(root: string, name: string, version = "3.18.1"): string {
   const entry = join(root, name, "dist", "index.js");
   const addon = join(root, name, "bins", "cpu", "llama-addon.node");
   mkdirSync(dirname(entry), { recursive: true });
   mkdirSync(dirname(addon), { recursive: true });
   writeFileSync(entry, "");
   writeFileSync(addon, "");
+  writeFileSync(join(root, name, "package.json"), JSON.stringify({
+    name: "@node-llama-cpp/linux-x64",
+    version,
+  }));
   return entry;
 }
 
@@ -243,5 +247,79 @@ describe("flair addon resolution", () => {
       resolvePackage: () => second,
       loadBinding: async () => fakeBinding(),
     })).toThrow(/worker thread/);
+  });
+
+  it("keeps a failed addon load sticky so a retry does not load again", async () => {
+    const root = tempDir("flair-addon-fail-");
+    const entry = plantAddon(root, "linux-x64");
+    const modelPath = join(root, "model.gguf");
+    writeFileSync(modelPath, meanGguf());
+    let loads = 0;
+    const engine = createFlairEmbeddingEngine({
+      modelPath,
+      threads: 1,
+      gpuLayers: 0,
+      platform: "linux",
+      arch: "x64",
+      resolvePackage: () => entry,
+      verifyBeforeLoad: async () => {},
+      loadBinding: async () => {
+        loads += 1;
+        throw new Error("init failed after dlopen");
+      },
+    });
+    await expect(engine.ensureReady()).rejects.toThrow(/init failed after dlopen/);
+    await expect(engine.ensureReady()).rejects.toThrow(/init failed after dlopen/);
+    expect(loads).toBe(1);
+    expect(flairAddonLoadCount()).toBe(1);
+  });
+
+  it("refuses a real package layout whose version is not 3.18.1 before dlopen", () => {
+    const root = tempDir("flair-pin-bad-");
+    const entry = plantAddon(root, "linux-x64", "3.18.2");
+    let loads = 0;
+    let dlopens = 0;
+    const orig = process.dlopen.bind(process);
+    process.dlopen = ((module: object, filename: string) => {
+      dlopens += 1;
+      return orig(module, filename);
+    }) as typeof process.dlopen;
+    try {
+      let caught: unknown;
+      try {
+        createFlairEmbeddingEngine({
+          modelPath: join(root, "model.gguf"),
+          threads: 1,
+          gpuLayers: 0,
+          platform: "linux",
+          arch: "x64",
+          resolvePackage: () => entry,
+          loadBinding: async () => {
+            loads += 1;
+            return fakeBinding();
+          },
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(EmbeddingModelError);
+      if (!(caught instanceof EmbeddingModelError)) return;
+      expect(caught.code).toBe("prebuilt");
+      expect(caught.message).toContain("3.18.1");
+      expect(caught.message).toContain("3.18.2");
+      expect(caught.message).toContain("was not tested");
+    } finally {
+      process.dlopen = orig;
+    }
+    expect(loads).toBe(0);
+    expect(dlopens).toBe(0);
+  });
+
+  it("accepts a real package layout pinned to 3.18.1", () => {
+    const root = tempDir("flair-pin-ok-");
+    const entry = plantAddon(root, "linux-x64", "3.18.1");
+    const addon = resolveFlairAddonPath(() => entry, "linux", "x64");
+    expect(addon.endsWith(`${join("bins", "cpu", "llama-addon.node")}`)).toBe(true);
+    expect(existsSync(addon)).toBe(true);
   });
 });

@@ -36,6 +36,8 @@ const SUPPORTED = [
 ] as const;
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
+/** Same pin as resources/embeddings/platforms.ts PINNED_PREBUILT_VERSION. */
+const PINNED_PREBUILT_VERSION = "3.18.1";
 
 export interface CliEmbeddingStamp {
   currentModel: string;
@@ -168,6 +170,11 @@ function versionFromPackageJson(text: string, pkgPath: string): string {
   if (typeof version !== "string" || !EXACT_VERSION.test(version) || version.includes(":")) {
     throw new Error(
       `[embeddings] prebuilt package.json at ${pkgPath} has no exact x.y.z version. Remedy: reinstall the pinned release. Refusing to record provenance.`,
+    );
+  }
+  if (version !== PINNED_PREBUILT_VERSION) {
+    throw new Error(
+      `[embeddings] prebuilt package.json at ${pkgPath} is version ${version}; ${PINNED_PREBUILT_VERSION} is the tested pin. Remedy: install the pinned release. That version was not tested. Refusing to record provenance.`,
     );
   }
   return version;

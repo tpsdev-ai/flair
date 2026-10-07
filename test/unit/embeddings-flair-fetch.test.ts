@@ -1,12 +1,16 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readdir, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { EmbeddingModelError } from "../../resources/embeddings/errors.ts";
+import { degradeForActivationFailure } from "../../resources/embeddings/degrade.ts";
 import {
   classifyProbeError,
   ensureModelFile,
+  prepareModelsDir,
   sha256File,
   type ModelDownloader,
 } from "../../resources/embeddings/fetch.ts";
@@ -391,4 +395,152 @@ describe("embeddings fetch (S1 verified model file)", () => {
     expect(() => modelDownloadUrl({ ...fixtureEntry(Buffer.from("abcd")), file: "a/../../x.gguf" })).toThrow(/path segment/);
     expect(buildModelDownloadUrl("o", "n", "abc", "a b.gguf")).toContain("a%20b.gguf");
   });
+
+  it("wraps a downloader that rejects as a model-file error", async () => {
+    const dir = scratch();
+    const entry = fixtureEntry(Buffer.from("abcd"));
+    const err = await ensureModelFile(entry, dir, {
+      download: async () => {
+        throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      },
+    }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(EmbeddingModelError);
+    if (!(err instanceof EmbeddingModelError)) return;
+    expect(err.code).toBe("unreadable");
+    expect(err.message).toContain("ECONNREFUSED");
+    const recorded = degradeForActivationFailure(err);
+    expect(recorded.message).toContain("could not be verified or fetched");
+    expect(recorded.message).not.toContain("embeddings did not start");
+    expect(recorded.message).not.toContain("did not load");
+  }, 10_000);
+
+  it("wraps mkdir when the models directory cannot be created", async () => {
+    const dir = scratch();
+    const parent = join(dir, "locked");
+    await mkdir(parent, { mode: 0o500 });
+    try {
+      const err = await prepareModelsDir(join(parent, "models")).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(EmbeddingModelError);
+      if (!(err instanceof EmbeddingModelError)) return;
+      expect(err.code).toBe("unreadable");
+      expect(err.message).toContain("could not create");
+      expect(err.message).toContain("EACCES");
+      const recorded = degradeForActivationFailure(err);
+      expect(recorded.message).toContain("could not be verified or fetched");
+      expect(recorded.message).not.toContain("embeddings did not start");
+    } finally {
+      await chmod(parent, 0o700);
+    }
+  }, 10_000);
+
+  it("wraps a models directory whose parent is a file", async () => {
+    const dir = scratch();
+    const parent = join(dir, "not-a-directory");
+    await writeFile(parent, "x");
+    const err = await prepareModelsDir(join(parent, "models")).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(EmbeddingModelError);
+    if (!(err instanceof EmbeddingModelError)) return;
+    expect(err.code).toBe("unreadable");
+    expect(err.message).toContain("ENOTDIR");
+    const recorded = degradeForActivationFailure(err);
+    expect(recorded.message).toContain("could not be verified or fetched");
+    expect(recorded.message).not.toContain("embeddings did not start");
+  }, 10_000);
+
+  it("wraps a stat of the models directory that rejects", async () => {
+    const dir = scratch();
+    const err = await prepareModelsDir(dir, {
+      statDir: async () => {
+        throw Object.assign(new Error("stat failed"), { code: "EIO" });
+      },
+    }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(EmbeddingModelError);
+    if (!(err instanceof EmbeddingModelError)) return;
+    expect(err.code).toBe("unreadable");
+    expect(err.message).toContain("EIO");
+    const recorded = degradeForActivationFailure(err);
+    expect(recorded.message).toContain("could not be verified or fetched");
+    expect(recorded.message).not.toContain("embeddings did not start");
+  }, 10_000);
+
+  it("does not unlink a successor lock a child process installed during release", async () => {
+    const dir = scratch();
+    const bytes = Buffer.from("abcd");
+    const entry = fixtureEntry(bytes);
+    const lock = join(dir, `${entry.file}.downloading`);
+    const successor = "successor-release-token";
+    const path = await ensureModelFile(entry, dir, {
+      download: async () => ({ ok: true, status: 200, statusText: "OK", body: bodyFrom(bytes) }),
+      beforeReleaseUnlink: (lockPath) => replaceWithChild(dir, lockPath, successor),
+    });
+    expect(await readFile(path)).toEqual(bytes);
+    expect(await readFile(lock, "utf8")).toBe(successor);
+  }, 10_000);
+
+  it("does not unlink a successor lock a child process installed during acquisition cleanup", async () => {
+    const dir = scratch();
+    const bytes = Buffer.from("abcd");
+    const entry = fixtureEntry(bytes);
+    const lock = join(dir, `${entry.file}.downloading`);
+    const successor = "successor-acquire-token";
+    let calls = 0;
+    const err = await ensureModelFile(entry, dir, {
+      afterLockCreate: async () => {
+        throw new Error("acquire-boom");
+      },
+      beforeAcquireCleanup: (lockPath) => replaceWithChild(dir, lockPath, successor),
+      download: async () => {
+        calls += 1;
+        return { ok: true, status: 200, statusText: "OK", body: bodyFrom(bytes) };
+      },
+    }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    if (err instanceof Error) expect(err.message).toContain("acquire-boom");
+    expect(calls).toBe(0);
+    expect(await readFile(lock, "utf8")).toBe(successor);
+  }, 10_000);
+
+  it("does not unlink a successor claim a child process installed during claim cleanup", async () => {
+    const dir = scratch();
+    const bytes = Buffer.from("abcd");
+    const entry = fixtureEntry(bytes);
+    const lock = join(dir, `${entry.file}.downloading`);
+    await writeFile(lock, "stale-owner");
+    const old = new Date(Date.now() - 120_000);
+    await utimes(lock, old, old);
+    const stale = await lstat(lock);
+    const claim = `${lock}.claim-${stale.ino}`;
+    const successor = "successor-claim-token";
+    const path = await ensureModelFile(entry, dir, {
+      download: async () => ({ ok: true, status: 200, statusText: "OK", body: bodyFrom(bytes) }),
+      beforeClaimCleanup: (claimPath) => replaceWithChild(dir, claimPath, successor),
+    });
+    expect(path).toBe(join(dir, entry.file));
+    expect(await readFile(claim, "utf8")).toBe(successor);
+  }, 10_000);
 });
+
+function replaceWithChild(dir: string, target: string, contents: string): Promise<void> {
+  const script = join(dir, `replace-lock-${contents.length}.mjs`);
+  writeFileSync(script, `
+    import { unlinkSync, writeFileSync } from "node:fs";
+    const target = process.argv[2];
+    const contents = process.argv[3];
+    try { unlinkSync(target); } catch (err) {
+      if (!err || err.code !== "ENOENT") throw err;
+    }
+    writeFileSync(target, contents);
+  `);
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [script, target, contents], { timeout: 10_000 });
+    let stderr = "";
+    child.stderr?.on("data", (buf: Buffer) => {
+      stderr += buf.toString();
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`replacer exited ${code}: ${stderr}`));
+    });
+  });
+}

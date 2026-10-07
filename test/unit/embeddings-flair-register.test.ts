@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { chmod, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -134,6 +134,10 @@ describe("flair backend registration", () => {
     mkdirSync(dirname(addon), { recursive: true });
     writeFileSync(entry, "");
     writeFileSync(addon, "");
+    writeFileSync(join(dir, "linux-x64", "package.json"), JSON.stringify({
+      name: "@node-llama-cpp/linux-x64",
+      version: "3.18.1",
+    }));
     let loaded = false;
     const err = await activateFlairBackend({
       modelsDir: dir,
@@ -283,6 +287,57 @@ describe("flair backend registration", () => {
     expect(recorded?.message).not.toContain("did not load");
     expect(models.calls).toEqual([]);
   }, 10_000);
+
+  it("boot records a rejecting downloader as a model-file failure", async () => {
+    process.env.FLAIR_EMBEDDINGS_ENGINE = "flair";
+    process.env.FLAIR_EMBED_GPU_LAYERS = "0";
+    const dir = tempDir("flair-embed-boot-fetch-");
+    process.env.FLAIR_MODELS_DIR = dir;
+    const models = fakeModels();
+    (globalThis as { models?: unknown }).models = models;
+    _resetEmbeddingsBackendRegistrationForTests();
+    _resetEmbeddingDegradeForTests();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (() => Promise.reject(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }))) as unknown as typeof fetch;
+    try {
+      await registerEmbeddingsBackend();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    const recorded = getEmbeddingDegrade();
+    expect(recorded).not.toBeNull();
+    expect(recorded?.message).toContain("could not be verified or fetched");
+    expect(recorded?.message).toContain("ECONNREFUSED");
+    expect(recorded?.message).not.toContain("embeddings did not start");
+    expect(recorded?.message).not.toContain("did not load");
+    expect(models.calls).toEqual([]);
+  }, 15_000);
+
+  it("boot records a models-directory mkdir failure as a model-file failure", async () => {
+    process.env.FLAIR_EMBEDDINGS_ENGINE = "flair";
+    process.env.FLAIR_EMBED_GPU_LAYERS = "0";
+    const root = tempDir("flair-embed-boot-mkdir-");
+    const parent = join(root, "locked");
+    await mkdir(parent, { mode: 0o500 });
+    process.env.FLAIR_MODELS_DIR = join(parent, "models");
+    const models = fakeModels();
+    (globalThis as { models?: unknown }).models = models;
+    _resetEmbeddingsBackendRegistrationForTests();
+    _resetEmbeddingDegradeForTests();
+    try {
+      await registerEmbeddingsBackend();
+    } finally {
+      await chmod(parent, 0o700);
+    }
+    const recorded = getEmbeddingDegrade();
+    expect(recorded).not.toBeNull();
+    expect(recorded?.message).toContain("could not be verified or fetched");
+    expect(recorded?.message).toContain("could not create");
+    expect(recorded?.message).toContain("EACCES");
+    expect(recorded?.message).not.toContain("embeddings did not start");
+    expect(recorded?.message).not.toContain("did not load");
+    expect(models.calls).toEqual([]);
+  }, 15_000);
 
   it("boot refuses an unknown engine and registers nothing", async () => {
     process.env.FLAIR_EMBEDDINGS_ENGINE = "nope";
