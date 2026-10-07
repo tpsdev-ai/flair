@@ -129,3 +129,15 @@ export function describeMcpRedirectFinding(readiness: McpProviderReadiness | nul
     fixHint: `set ${names.redirectUri} in the instance environment, or re-run: flair mcp enable; then restart`,
   };
 }
+export function parseMcpComponentEnv(text: string): Record<string, string> {
+  const assignments = /^\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?$/gm;
+  const values: Record<string, string> = {};
+  for (const match of text.replace(/\r\n?/g, "\n").matchAll(assignments)) {
+    let value = (match[2] ?? "").trim();
+    const quote = value[0];
+    value = value.replace(/^(['"`])([\s\S]*)\1$/gm, "$2");
+    if (quote === '"') value = value.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+    values[match[1]!] = value;
+  }
+  return values;
+}

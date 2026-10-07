@@ -1,5 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, chmodSync, statSync, readdirSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, chmodSync, statSync, readdirSync, mkdirSync, cpSync, symlinkSync } from "node:fs";
+import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +9,7 @@ import {
   guardMcpOAuthEnv, planRedirectMigration, describeMcpRedirectFinding,
   readMcpProviderReadiness, readTargetMcpRedirectFinding, renderRedirectMigration,
 } from "../../src/lib/mcp-oauth-env.ts";
+import { parseMcpComponentEnv } from "../../src/lib/mcp-oauth-env-core.ts";
 
 const REDIRECT = idpEnvNames().redirectUri;
 const configured = { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://flair.example.com", OAUTH_GITHUB_CLIENT_ID: "c", OAUTH_GITHUB_CLIENT_SECRET: "s" };
@@ -18,6 +21,35 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 const envPath = () => join(dir, ".env");
 const migrate = (env: Record<string, string | undefined> = configured) => planRedirectMigration({ configPath: join(dir, "config.yaml"), env });
+
+test("copied CLI imports without the harper package", () => {
+  const root = join(import.meta.dir, "../..");
+  cpSync(join(root, "src"), join(dir, "src"), { recursive: true });
+  cpSync(join(root, "package.json"), join(dir, "package.json"));
+  mkdirSync(join(dir, "node_modules"));
+  for (const entry of readdirSync(join(root, "node_modules"))) {
+    if (entry !== "harper") symlinkSync(join(root, "node_modules", entry), join(dir, "node_modules", entry));
+  }
+  symlinkSync(join(root, "packages"), join(dir, "packages"));
+  writeFileSync(join(dir, "drive.ts"), 'import { program } from "./src/cli.ts"; console.log(program.name());');
+  const result = spawnSync(process.execPath, [join(dir, "drive.ts")], { cwd: dir, encoding: "utf8", timeout: 10_000 });
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout.trim()).toBe("flair");
+}, 15_000);
+
+test.each([
+  'export FLAIR_MCP_OAUTH="true" # enabled\r\nFLAIR_MCP_ISSUER: https://flair.example\r\n',
+  "OAUTH_GITHUB_CLIENT_ID='client#id'\nOAUTH_GITHUB_CLIENT_SECRET=`secret#value`\n",
+  'OAUTH_GITHUB_CLIENT_SECRET="line\\nnext\\rend"\nEMPTY=\nRAW=first # comment\n',
+  'OTHER="multiline\nvalue"\nOAUTH_GITHUB_REDIRECT_URI=${OAUTH_GITHUB_REDIRECT_URI}\n',
+  "DUP=first\nDUP=second\rCR=third\r\nDOT.KEY=x\nDASH-KEY=y\nINVALID LINE\n",
+])("component env parsing matches Harper dotenv: %s", text => {
+  const require = createRequire(import.meta.url);
+  const harperRequire = createRequire(require.resolve("harper"));
+  const dotenv = harperRequire("dotenv") as { parse: (text: string) => Record<string, string> };
+  expect(parseMcpComponentEnv(text)).toEqual(dotenv.parse(text));
+});
 
 describe("redirect issuer", () => {
   test.each(["https://flair.example.com", "https://flair.example.com/", "https://flair.example.com:8443", "http://127.0.0.1:9926", "http://[::1]:9926", "http://localhost:9926"])("accepts origin %s", issuer => {

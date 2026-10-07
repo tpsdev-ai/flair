@@ -1,6 +1,5 @@
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { resolveHome } from "./home.js";
 import {
@@ -11,6 +10,7 @@ import {
   mcpOAuthEnabledIn,
   validateRedirectIssuer,
   describeMcpRedirectFinding,
+  parseMcpComponentEnv,
 } from "./mcp-oauth-env-core.js";
 
 export {
@@ -51,9 +51,6 @@ export function componentEnvPathForConfig(configPath: string): string {
   return join(dirname(configPath), ".env");
 }
 
-const require = createRequire(import.meta.url);
-const harperRequire = createRequire(require.resolve("harper"));
-const { parse } = harperRequire("dotenv") as { parse: (text: string) => Record<string, string> };
 const ASSIGNMENT_RE = /^[ \t]*(?:export[ \t]+)?([\w.-]+)[ \t]*(?:=|:[ \t]+)/;
 
 export type RedirectMigrationAction = "not-enabled" | "already-set" | "no-issuer" | "no-credentials" | "refused" | "staged";
@@ -108,7 +105,7 @@ export function planRedirectMigration(
     }
     assignments.add(key);
   }
-  const fileEnv = parse(envText);
+  const fileEnv = parseMcpComponentEnv(envText);
   const processEnv = deps.env ?? process.env;
   if (processEnv[names.redirectUri] !== undefined && isUnresolvedEnvValue(processEnv[names.redirectUri])) {
     return { ...result, action: "refused", reason: "redirect-env-masks-file" };
