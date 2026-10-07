@@ -55,7 +55,7 @@ for (const delayedFile of ["generation", "binding"]) {
     try {
       const result = await refreshActionRecallCache(client([]), { ...opts(), deadlineMs });
       expect(delayed).toBe(true);
-      expect(result.ok).toBe(false);
+      expect(result).toEqual({ ok: false, reason: "timeout" });
       expect(await readBinding(dir(), { url, principal, session })).toBeNull();
       if (delayedFile === "generation") expect(await fs.readdir(join(dir(), sha256Hex(instance)))).toEqual([]);
     } finally { openSpy.mockRestore(); }
