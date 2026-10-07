@@ -168,7 +168,15 @@ describe("flair#2199 — Memory resource writes and feed POST refuse an id endin
           expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
           return JSON.parse(text);
         };
-        const before = await readRows();
+        let before = await readRows();
+        if (state === "existing") {
+          const deadline = Date.now() + 150_000;
+          while (!before[0]?.embeddingModel && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            before = await readRows();
+          }
+          expect(before[0]?.embeddingModel).toBeTruthy();
+        }
         expect(before.length).toBe(state === "existing" ? 1 : 0);
         const res = await authSend(harper, author, method, `/Memory/${id}.content`, {
           id, agentId: author.id, content: "CHANGED BODY",
@@ -176,7 +184,7 @@ describe("flair#2199 — Memory resource writes and feed POST refuse an id endin
         expect(res.status).toBe(400);
         expect((await res.json()).error).toBe("memory_id_content_suffix");
         expect(await readRows()).toEqual(before);
-      }, 30_000);
+      }, 180_000);
     }
   }
 
