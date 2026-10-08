@@ -2,24 +2,29 @@
  * owner-delete-recheck-2355.test.ts — flair#2355, real Harper.
  *
  * A non-admin owner-scoped delete (Memory, Credential, MemoryGrant,
- * WorkspaceState, MemoryCandidate, Relationship) re-reads the row inside a
- * transaction it owns and confirms the COMMITTED row's owner before it deletes
- * (resources/owner-delete-recheck.ts). These cases change a row's owner around
- * that transaction (a raw table update, as an operator would make):
+ * WorkspaceState, MemoryCandidate, Relationship) re-reads the row and confirms
+ * the COMMITTED row's owner before the row is removed. Credential, MemoryGrant,
+ * WorkspaceState, MemoryCandidate and Relationship confirm through
+ * resources/owner-delete-recheck.ts, in a transaction the delete owns. Memory's
+ * ordinary-row check is inline in resources/Memory.ts (through
+ * withSharedWriteTransaction, which JOINS a request-owned transaction when one
+ * exists); its skill-tagged check is inline in the same file's version writer.
+ * These cases change a row's owner around that transaction (a raw table update,
+ * as an operator would make):
  *
- *   - (pause) the delete's owned transaction opens first and pauses between its
- *     ownership read and its delete (resources/txn-pause-point.ts, enabled by
+ *   - (pause) the delete pauses between the ownership read and the delete
+ *     (resources/txn-pause-point.ts, enabled by
  *     FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set for this
  *     file's Harper only). The test arms the pause, starts the delete, waits
  *     until it is paused, commits the competing owner change, then releases it.
  *     The change is visible at the confirmation read, so the delete is refused
  *     (409 `owner_changed`) and the row survives with the competing owner.
  *   - (pre) the competing owner change commits first: the pause holds the row
- *     still before the delete's transaction opens, the change commits, and the
- *     delete's in-transaction re-read sees it. The delete is refused and the row
- *     survives.
+ *     still before the delete's write transaction opens, the change commits, and
+ *     the delete's in-transaction re-read sees it. The delete is refused and the
+ *     row survives.
  *
- * Unchanged ownership is still deleted (the control cases).
+ * Unchanged ownership still succeeds (the control cases).
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -247,7 +252,9 @@ describe("flair#2355 — an owner-scoped delete confirms the owner in its commit
       );
       expect(released, `${c.name} delete was not paused and released by this test`).toBe("go");
       expect(competed, `the competing owner change failed for ${c.name}`).toBe(200);
-      expect(response.status, `${c.name} DELETE returned ${response.status}: ${(await response.text()).slice(0, 300)}`).toBe(409);
+      const text = await response.text();
+      expect(response.status, `${c.name} DELETE returned ${response.status}: ${text.slice(0, 300)}`).toBe(409);
+      expect(JSON.parse(text).error, `${c.name} refusal error`).toBe("owner_changed");
       const after = await readRow(harper, c.table, id);
       expect(after, `${c.name} row was deleted although its owner changed`).not.toBeNull();
       expect(after?.[c.ownerField], `${c.name} competing owner change not kept`).toBe(other.id);
@@ -264,10 +271,73 @@ describe("flair#2355 — an owner-scoped delete confirms the owner in its commit
       );
       expect(released, `${c.name} delete was not paused and released by this test`).toBe("go");
       expect(competed, `the competing owner change failed for ${c.name}`).toBe(200);
-      expect(response.status, `${c.name} DELETE returned ${response.status}: ${(await response.text()).slice(0, 300)}`).toBe(409);
+      const text = await response.text();
+      expect(response.status, `${c.name} DELETE returned ${response.status}: ${text.slice(0, 300)}`).toBe(409);
+      expect(JSON.parse(text).error, `${c.name} refusal error`).toBe("owner_changed");
       const after = await readRow(harper, c.table, id);
       expect(after, `${c.name} row was deleted although its owner changed`).not.toBeNull();
       expect(after?.[c.ownerField], `${c.name} competing owner change not kept`).toBe(other.id);
     }, 60_000);
   }
+});
+
+describe("flair#2355 — a skill-tagged Memory delete confirms the owner in its version writer (real Harper)", () => {
+  const SKILL: ResourceCase = {
+    name: "Memory(skill)", table: "Memory", ownerField: "agentId",
+    point: "memory-skill-delete", prePoint: "memory-skill-delete-pre",
+    seed: (id, ownerId) => ({
+      id, agentId: ownerId, tags: ["skill"], skillSubjectId: id,
+      content: "owner-delete skill target body, long enough for the gate.",
+      durability: "persistent", visibility: "shared", archived: false,
+      instanceToken: randomUUID(), createdAt: "2026-01-01T00:00:00.000Z",
+      embedding: [0.1, 0.1, 0.1], embeddingModel: getModelId(),
+    }),
+  };
+
+  it("unchanged ownership still closes the row", async () => {
+    const id = idFor(SKILL, "ctl");
+    await insertRow(harper, SKILL.table, SKILL.seed(id, owner.id));
+    const res = await authSend(harper, owner, "DELETE", `/${SKILL.table}/${id}`);
+    const text = await res.text();
+    expect(res.status, `skill DELETE returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+    const after = await readRow(harper, SKILL.table, id);
+    expect(after, "the skill row was physically removed").not.toBeNull();
+    expect(typeof after.validTo === "string" && after.validTo.length > 0, "the skill row was not closed").toBe(true);
+  }, 60_000);
+
+  it("(pause): an owner change committed while the delete is paused is refused and the row survives", async () => {
+    const id = idFor(SKILL, "pause");
+    await insertRow(harper, SKILL.table, SKILL.seed(id, owner.id));
+    const { response, competed, released } = await withPausedDelete(
+      SKILL.point,
+      () => authSend(harper, owner, "DELETE", `/${SKILL.table}/${id}`),
+      () => changeOwner(SKILL, id),
+    );
+    expect(released, "skill delete was not paused and released by this test").toBe("go");
+    expect(competed, "the competing owner change failed for the skill row").toBe(200);
+    const text = await response.text();
+    expect(response.status, `skill DELETE returned ${response.status}: ${text.slice(0, 300)}`).toBe(409);
+    expect(JSON.parse(text).error, "skill refusal error").toBe("owner_changed");
+    const after = await readRow(harper, SKILL.table, id);
+    expect(after, "the skill row was closed although its owner changed").not.toBeNull();
+    expect(after?.agentId, "competing owner change not kept").toBe(other.id);
+  }, 60_000);
+
+  it("(pre): an owner change committed before the delete's transaction opens is refused and the row survives", async () => {
+    const id = idFor(SKILL, "pre");
+    await insertRow(harper, SKILL.table, SKILL.seed(id, owner.id));
+    const { response, competed, released } = await withPausedDelete(
+      SKILL.prePoint,
+      () => authSend(harper, owner, "DELETE", `/${SKILL.table}/${id}`),
+      () => changeOwner(SKILL, id),
+    );
+    expect(released, "skill delete was not paused and released by this test").toBe("go");
+    expect(competed, "the competing owner change failed for the skill row").toBe(200);
+    const text = await response.text();
+    expect(response.status, `skill DELETE returned ${response.status}: ${text.slice(0, 300)}`).toBe(409);
+    expect(JSON.parse(text).error, "skill refusal error").toBe("owner_changed");
+    const after = await readRow(harper, SKILL.table, id);
+    expect(after, "the skill row was closed although its owner changed").not.toBeNull();
+    expect(after?.agentId, "competing owner change not kept").toBe(other.id);
+  }, 60_000);
 });

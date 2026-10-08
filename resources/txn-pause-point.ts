@@ -18,16 +18,20 @@ const POLL_MS = 20;
 /** One point per owned transaction that writes from a row it read.
  *
  * flair#2355 — a non-admin owner-scoped delete. Each delete has a `-pre` point
- * (after the pre-existing ownership read, before the delete's owned transaction
+ * (after the pre-existing ownership read, before the delete's write transaction
  * opens) and an in-transaction point (between that transaction's ownership
  * re-read and its delete), so both interleavings of a concurrent owner change
- * can be exercised.
+ * can be exercised. The write transaction is one the delete owns, except
+ * Memory's ordinary delete: withSharedWriteTransaction JOINS a request-owned
+ * transaction when one exists and creates one otherwise.
  */
 export type TxnPausePoint =
   | "supersede-close"
   | "embedding-stamp-content-suffix"
   | "memory-delete-pre"
   | "memory-delete"
+  | "memory-skill-delete-pre"
+  | "memory-skill-delete"
   | "credential-delete-pre"
   | "credential-delete"
   | "grant-delete-pre"

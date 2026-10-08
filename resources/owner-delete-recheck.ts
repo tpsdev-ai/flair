@@ -6,17 +6,18 @@
  * deletes it. Harper 5.2.8 has no compare-and-set on a table write: a
  * transaction does not fail when a row it read is changed by another write
  * before it commits; Harper applies both writes, ordered by transaction
- * timestamp. So an owner change committed between that read and the delete's
- * commit — an admin/internal write, or a raw table write, as an operator or a
- * migration would make — would let the delete remove a row that is no longer
- * the caller's.
+ * timestamp. So an owner change committed between that read and the
+ * confirmation read below — an admin/internal write, or a raw table write, as
+ * an operator or a migration would make — would let the delete remove a row
+ * that is no longer the caller's.
  *
  * This helper runs the read and the delete in ONE transaction the call OWNS
  * (withOwnedTransaction), re-reads the row there, and, for a non-admin caller,
  * pauses (a test-only point) between that read and the delete and re-reads the
- * COMMITTED row before the delete is staged. A row whose owner is no longer
- * the caller is refused (`owner_changed`) and not deleted; a row that is
- * gone is reported absent.
+ * COMMITTED row before the delete is staged. A row whose owner had changed by
+ * that confirmation read is refused (`owner_changed`) and not deleted; a row
+ * absent at the first read is reported absent. A change committed after the
+ * confirmation read is not caught.
  *
  * The owner field is immutable to a non-admin's own writes
  * (guardOwnerFieldImmutable, resources/owner-field-guard.ts), so the change this
@@ -75,10 +76,11 @@ export interface OwnerDeleteSpec {
  * Delete `spec.id` in a transaction this call owns, refusing unless the row is
  * still owned by `spec.callerId` (flair#2355).
  *
- * Returns `deleted` with the table delete's result, `absent` when no row is
- * there (the caller decides the no-op), or `refused` with the named 409 when
- * the stored or committed row's owner is not the caller. A delete whose row
- * exists but reports no success throws rather than a silent partial.
+ * Returns `deleted` with the table delete's result, `absent` when the first
+ * read finds no row (the caller decides the no-op), or `refused` with the
+ * named 409 when the stored or confirmed row's owner is not the caller. A
+ * delete whose row exists but reports no success throws rather than a silent
+ * partial.
  */
 export async function deleteOwnedRow(ctx: unknown, spec: OwnerDeleteSpec): Promise<OwnerDeleteOutcome> {
   return withOwnedTransaction(ctx, async (c) => {

@@ -1012,6 +1012,19 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
     agentId: String(record.agentId),
     head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
     plan: async (head, shared) => {
+      // flair#2355: for a non-admin caller, confirm the COMMITTED row's owner
+      // before the close, the same way the other owner-scoped deletes do. The
+      // snapshot check below reads the transaction's view; a competing owner
+      // change committed before this read is refused as an owner change, and the
+      // row is left in place.
+      if (auth.kind === "agent" && !auth.isAdmin) {
+        const pause = txnPausePoint("memory-skill-delete");
+        if (pause) await pause;
+        const confirmed = await (databases as any).flair.Memory.get(String(record.id), {});
+        if (confirmed && isForbiddenOwnerMutation(confirmed, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+          return ownerChangedRefusal("Memory");
+        }
+      }
       const stale = await validateSkillSnapshots(record, null, String(record.id), shared);
       if (stale) return stale;
       const denied = await authorizeSkillOwners(ctx, auth, [record, head], shared);
@@ -2221,6 +2234,11 @@ export class Memory extends (databases as any).flair.Memory {
     const reservedSeed = [id, (this as any).getId?.(), ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)]
       .some((candidate) => isReservedSeedId("Memory", candidate));
     if (!reservedSeed && rowIsSkill(record)) {
+      // flair#2355: hold the row still before the version writer's transaction
+      // opens, so a competing owner change can commit first and be seen by the
+      // confirmation read inside.
+      const beforeSkillDelete = txnPausePoint("memory-skill-delete-pre");
+      if (beforeSkillDelete) await beforeSkillDelete;
       return await writeSkillDelete({ ctx, auth, record });
     }
     // Durability controls retention, not the owner's authority to delete.
@@ -2236,8 +2254,10 @@ export class Memory extends (databases as any).flair.Memory {
     const deletionActor = auth.kind === "agent" ? auth.agentId : null;
     const deletionSourceClass: "agent" | "admin" | "internal" =
       auth.kind === "internal" ? "internal" : auth.isAdmin ? "admin" : "agent";
-    // flair#2355: hold the row still before the delete's transaction opens, so a
-    // competing owner change can commit first and be seen by the re-read inside.
+    // flair#2355: hold the row still before the delete stages, so a competing
+    // owner change can commit first and be seen by the re-read inside. This
+    // ordinary delete runs through withSharedWriteTransaction, which JOINS a
+    // request-owned transaction when one exists and creates one otherwise.
     const beforeDelete = txnPausePoint("memory-delete-pre");
     if (beforeDelete) await beforeDelete;
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {

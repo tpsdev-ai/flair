@@ -1,6 +1,8 @@
-- **A non-admin owner-scoped delete refuses a row whose owner changed before it commits.**
+- **A non-admin owner-scoped delete rechecks the committed row's owner.**
   `Memory`, `Credential`, `MemoryGrant`, `WorkspaceState`, `MemoryCandidate` and
-  `Relationship` deletes re-read the row in a transaction the delete owns and
-  confirm the committed row's owner before the row is removed. A row whose owner
-  changed after that read is refused with the named 409 (`owner_changed`) and
-  left in place; a row whose owner is unchanged is deleted as before.
+  `Relationship` deletes re-read the row and confirm the committed row's owner
+  before the write; Memory's ordinary delete runs through
+  withSharedWriteTransaction, which joins a request-owned transaction when one
+  exists. A row whose owner had changed by that confirmation read is refused
+  with the named 409 (`owner_changed`) and left in place; a row whose owner is
+  unchanged is handled as before.

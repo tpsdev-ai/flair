@@ -329,10 +329,9 @@ describe("WorkspaceState.delete() — ownership check uses the raw record (super
   it("deleting a non-existent id is a clean no-op (not mis-routed into FORBIDDEN by the new get() override)", async () => {
     const ws = makeWorkspace(agentCtx("agent-owner"));
     const res = await (ws as any).delete("does-not-exist");
-    // super.delete() on the mock returns true and is not the FORBIDDEN Response,
-    // proving delete() used super.get() (raw lookup, null for a missing id), not
-    // this.get() (which would 404 a denied id as a truthy Response and fall
-    // through into the ownership-mismatch branch).
+    // super.delete() on the mock returns true and is not the FORBIDDEN Response:
+    // no forbidden Response came back. This observes the outcome only — it does
+    // not by itself prove which get() ran.
     expect(res instanceof Response).toBe(false);
   });
 });
