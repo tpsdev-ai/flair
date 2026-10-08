@@ -47,15 +47,20 @@ type Disposition = "stamped-create" | "update-only" | "resource-internal";
  * only re-writes an EXISTING row is `update-only`; a resource's own raw
  * persistence (the row already carries the value decided above it) is
  * `resource-internal`. Every entry is asserted to be present with its count.
+ * A key whose sites differ lists one entry per disposition; their counts sum.
  */
-const POLICY: Record<string, { count: number; disposition: Disposition; note: string }> = {
+type PolicyEntry = { count: number; disposition: Disposition; note: string };
+const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   // Raw CREATE writers — must apply the rule themselves.
   "resources/AgentSeed.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "POST /AgentSeed raw Agent create" },
   "resources/AgentSeed.ts|Soul|put": { count: 1, disposition: "stamped-create", note: "POST /AgentSeed raw Soul create" },
   "resources/AgentSeed.ts|Memory|put": { count: 1, disposition: "stamped-create", note: "POST /AgentSeed raw starter-Memory create" },
   "resources/XAA.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "IdP principal raw Agent create" },
   "resources/mcp-handler.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "JIT OAuth principal raw Agent create" },
-  "resources/MemoryFeed.ts|Memory|put": { count: 2, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update, plus the dedup-repair re-PUT of an existing row (flair#2358)" },
+  "resources/MemoryFeed.ts|Memory|put": [
+    { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update" },
+    { count: 1, disposition: "update-only", note: "dedup expiry repair of an EXISTING row (flair#2358)" },
+  ],
   "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory and FeedMemories stamp successors in their transaction plans; predecessor closes retain stored stamps." },
   // Update-only / resource-internal raw writes — they re-write an existing row.
   "resources/Memory.ts|Memory|post": { count: 1, disposition: "resource-internal", note: "Memory writeMemoryRowPost fallback (content already stamped)" },
@@ -127,8 +132,9 @@ test("every raw synced-table write site under resources/ has a reviewed policy e
   // 1. every detected site must be reviewed (a NEW site fails here)
   for (const [key, count] of detected) {
     const entry = POLICY[key];
+    const expected = entry ? [entry].flat().reduce((n, e) => n + e.count, 0) : 0;
     if (!entry) undetectedInPolicy.push(`${key} (x${count})`);
-    else if (entry.count !== count) countMismatch.push(`${key}: policy ${entry.count}, detected ${count}`);
+    else if (expected !== count) countMismatch.push(`${key}: policy ${expected}, detected ${count}`);
   }
   // 2. every policy entry must still exist (a removed/relocated site is caught)
   const stale = Object.keys(POLICY).filter((key) => !detected.has(key));
@@ -137,7 +143,7 @@ test("every raw synced-table write site under resources/ has a reviewed policy e
 
 test("every stamped raw create writer applies the shared rule; dynamic exceptions still exist", () => {
   const missingStamp = Object.entries(POLICY)
-    .filter(([, entry]) => entry.disposition === "stamped-create")
+    .filter(([, entry]) => [entry].flat().some((e) => e.disposition === "stamped-create"))
     .filter(([key]) => {
       const file = key.split("|")[0];
       const src = readFileSync(file, "utf8");

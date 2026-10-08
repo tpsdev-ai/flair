@@ -1,5 +1,5 @@
-- **A deduplicated ephemeral feed row with no expiry now gets the tier TTL.**
-  When the feed's content-hash deduplication returns a stored row instead of
-  writing a new one, an ephemeral row that carries no expiry is stamped with the
-  tier expiry through the shared rule. A row that already has an expiry, and a
-  durable row, are left as they are (flair#2358).
+- **A stored ephemeral feed row with no expiry gets its tier expiry when a feed write deduplicates onto it.**
+  The feed stamps it through the shared tier rule and responds with the stored
+  row as read back. A matched row whose id the feed does not write is refused,
+  and one that changes during the request can be answered with
+  `409 feed_dedup_target_changed` instead (flair#2358).
