@@ -1114,7 +1114,7 @@ export class Memory extends (databases as any).flair.Memory {
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());
     if (seedDenial) return seedDenial;
-    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content), context);
     if (contentSuffixDenial) return contentSuffixDenial;
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;

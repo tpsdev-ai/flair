@@ -11,6 +11,8 @@
  *   t1  a POST whose pointer write throws leaves NO Memory row;
  *   t2  a PUT whose pointer write throws leaves the pre-existing row byte-identical;
  *   c3  a failing pointer delete fails the Memory delete and the row is still there;
+ *   c5  a failing pointer delete fails POST /MemoryPurge by name after the row is removed (pointer rows
+ *       are deleted only for rows a read after the commit finds gone); maintenance deletes the pointer row;
  *   r4-http  POST/PUT/PATCH/DELETE to MemoryHostSource are refused (non-admin AND admin), nothing written.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
@@ -107,6 +109,26 @@ describe("flair#1940 A1-iv item 7 — real-Harper atomicity + REST refusal", () 
     const res = await authFetch(agent, "DELETE", `/Memory/${id}`);
     expect(res.status).toBe(500); // assertion: the delete failed
     expect((await readRows("Memory", "id", id)).length).toBe(1); // assertion: the Memory row remains
+  }, 60_000);
+
+  it("c5: a failing pointer delete fails POST /MemoryPurge by name after the row is removed; the maintenance orphan sweep deletes the pointer row", async () => {
+    const id = `it-c5-${Date.now()}`;
+    const instanceToken = randomUUID();
+    const seedMem = await adminOp({ operation: "insert", database: "flair", table: "Memory", records: [{ id, agentId: agent.id, content: "c5", contentHash: "h", visibility: "shared", durability: "permanent", createdAt: new Date().toISOString(), archived: false, instanceToken }] });
+    expect(seedMem.status).toBe(200); // assertion: seeded the Memory row
+    const seedPtr = await adminOp({ operation: "insert", database: "flair", table: "MemoryHostSource", records: [{ memoryId: id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: agent.id, memoryInstanceToken: instanceToken, receivedAt: new Date().toISOString() }] });
+    expect(seedPtr.status).toBe(200); // assertion: seeded the pointer row
+    expect(await readRows("MemoryDeletionHistory", "memoryId", id)).toEqual([]); // assertion: no history yet
+    const res = await adminFetch("POST", "/MemoryPurge", { ids: [id] });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBe(500); // assertion: the purge failed
+    expect(JSON.parse(text)).toMatchObject({ error: "memory_purge_pointer_cleanup_failed", ids: [id], removedIds: [id] }); // assertion: by name, and the row is listed as removed
+    expect(await readRows("Memory", "id", id)).toEqual([]); // assertion: the row is removed
+    expect((await readRows("MemoryDeletionHistory", "memoryId", id)).length).toBe(1); // assertion: its removal is recorded
+    expect((await readRows("MemoryHostSource", "memoryId", id)).length).toBe(1); // assertion: its pointer row is left
+    const sweep = await adminFetch("POST", "/MemoryMaintenance", { agentId: agent.id });
+    expect(sweep.status).toBe(200); // assertion: maintenance ran
+    expect(await readRows("MemoryHostSource", "memoryId", id)).toEqual([]); // assertion: the orphan sweep deleted the pointer row
   }, 60_000);
 
   it("r4-http: every MemoryHostSource REST write verb is refused (non-admin and admin), nothing written", async () => {
