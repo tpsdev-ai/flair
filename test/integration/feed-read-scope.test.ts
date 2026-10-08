@@ -221,13 +221,17 @@ function memoryFeedCases(phase: string) {
 
   test("replay withholds a closed skill after its successor expires", async () => {
     const root = `${p}-expired-skill-root`;
+    // Creating the successor with expiresAt removes the separate
+    // operations-write visibility dependency.
     const body = { id: root, content: "skill v1", trigger: "when assigned", tags: ["skill"], durability: "persistent", visibility: "shared" };
     await feedWrite(A, body);
-    await feedWrite(A, { ...body, content: "skill v2" });
+    const expiresAt = new Date(Date.now() + 6_000).toISOString();
+    await feedWrite(A, { ...body, content: "skill v2", expiresAt });
     const query = await adminOp(harper, { operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "skillSubjectId", search_value: root, get_attributes: ["*"] });
     expect(query.status).toBe(200);
     const heads = (await query.json() as any[]).filter((row) => !row.validTo && row.archived !== true);
     expect(heads).toHaveLength(1);
+    expect(heads[0].expiresAt).toBe(expiresAt);
     expect(await readStatus(B, `/Memory/${root}`)).toBe(200);
     const before = await openAs(B, "/FeedMemories");
     try {
@@ -238,10 +242,9 @@ function memoryFeedCases(phase: string) {
     } finally {
       await before.stop();
     }
-    const expired = await adminOp(harper, { operation: "upsert", database: "flair", table: "Memory", records: [{ ...heads[0], expiresAt: "2020-01-01T00:00:00.000Z" }] });
-    expect(expired.status).toBe(200);
-    await expired.arrayBuffer();
-    // The observed post-upsert 200 may reflect cross-thread read visibility; the mechanism and duration have not been measured.
+    // The bounded poll requires the by-id read to return 404 before replay is checked.
+    const deadline = Date.parse(expiresAt);
+    while (Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
     expect(await readStatusUntil((signal) => readStatus(B, `/Memory/${root}`, signal), 404, 200)).toBe(404);
     const after = await openAs(B, "/FeedMemories");
     try {
