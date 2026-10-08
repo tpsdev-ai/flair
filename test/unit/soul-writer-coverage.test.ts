@@ -8,6 +8,8 @@ const add = (file: string, sites: string[], reason: string) => {
   for (const site of sites) classified.set(`resources/${file}.ts:${site}`, reason);
 };
 add("Soul", ["alias-source:(databases as any).flair.Soul#1", "writer:super.post#1", "writer:super.put#1", "writer:super.patch#1", "writer:super.delete#1"], "Resource boundary: operator or deliberate internal authorization; content backstop on writes.");
+add("instruction-version-record", ["alias-source:(databases as any).flair?.Soul#1"], "Destination occupancy read inside the version transaction.");
+add("instruction-version-record", ["writer:table.create#1", "writer:table.create#2", 'writer:createHash("sha256").update#1', 'writer:createHash("sha256").update#2'], "Version appends and hashes included by conservative sink enumeration.");
 add("AgentSeed", ["writer:(databases as any).flair.Soul.put#1"], "Provisioning: source authorization and whole-template content validation precede mutations.");
 add("AgentSeed", ["writer:(databases as any).flair.Agent.put#1", "writer:(databases as any).flair.Memory.put#1"], "Other tables in the provisioning module, included by conservative sink enumeration.");
 add("Federation", ["alias-source:(databases as any).flair.Soul#1", "writer:table.put#1"], "Explicit replication path: authenticated pinned instance keys and federation classification; preserve originating provenance.");
