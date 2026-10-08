@@ -3243,6 +3243,9 @@ export async function checkAgentRegistered(
 // Used during restart to confirm the old Harper process actually exited before
 // we start polling /Health — otherwise the still-shutting-down old process can
 // answer and we'd declare restart success while a gap is still ahead.
+// It starts no probe at or after its deadline (flair#2357): the loop checks the
+// clock before each probe, and a wait that runs out reports its timeout without
+// one more probe. The probe is injectable so that is unit-testable.
 /**
  * Is `pid` a process that exists right now? Signal 0 performs the permission
  * and existence checks without delivering anything (flair#1022) — a `hdb.pid`
@@ -3253,13 +3256,16 @@ function isProcessAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+export async function waitForProcessExit(
+  pid: number,
+  timeoutMs: number,
+  probe: (pid: number) => PidLiveness = probePidLiveness,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (probePidLiveness(pid).kind === "gone") return;
+    if (probe(pid).kind === "gone") return;
     await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
   }
-  if (probePidLiveness(pid).kind === "gone") return;
   throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms`);
 }
 
