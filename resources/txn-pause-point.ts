@@ -16,7 +16,7 @@ export const PAUSE_LIMIT_MS = 20_000;
 const POLL_MS = 20;
 
 /** One point per owned transaction that writes from a row it read. */
-export type TxnPausePoint = "supersede-close" | "embedding-stamp-content-suffix" | "integration-row-write" | "feed-dedup-repair";
+export type TxnPausePoint = "supersede-close" | "embedding-stamp-content-suffix" | "integration-row-write" | "feed-dedup-repair" | "memory-reembed";
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);

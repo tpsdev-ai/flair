@@ -33,7 +33,7 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
-add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#2"],
+add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#3"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the raw put (flair#1542).");
@@ -43,11 +43,11 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "wri
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer; delete only closes the stored head.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
-add("Memory", ["writer:super.patch#1"],
-  "Re-embed request (flair#2296): writes embedding, embeddingModel and updatedAt only, no skill content.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
+  "Re-embed request (flair#2296, re-read flair#2390): writes embedding, embeddingModel and updatedAt only, no skill content.");
 
 // ── REJECTING skill-writer sinks (400 skill_write_path) ──
-add("Memory", ["writer:super.patch#2"],
+add("Memory", ["writer:super.patch#1"],
   "Skill-writer: REJECTS skill-tagged patches (400 skill_write_path) — patch() routes past put()'s gate (flair#1542).");
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: REJECTS skill-tagged starter memories (400 skill_write_path) — admin-only seed bypasses the gate (flair#1542).");
