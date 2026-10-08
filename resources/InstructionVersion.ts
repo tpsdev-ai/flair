@@ -25,7 +25,7 @@
  */
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
-import { makeAuthGate, NOT_FOUND, UNAUTH } from "./record-type-kit.js";
+import { makeAuthGate, makeScopedSearch, NOT_FOUND, UNAUTH } from "./record-type-kit.js";
 import { SKILL_SUBJECT_TYPE, readHead, skillRefReadable, subjectTypeReadable } from "./instruction-version-record.js";
 
 const MUTATION_DENIED = (): Response =>
@@ -98,6 +98,64 @@ async function rowReadable(row: Record<string, any> | null | undefined, auth: an
   return false;
 }
 
+/**
+ * The portion of the read scope Harper can evaluate in the scan: a row of either
+ * readable subject type (Soul, or a skill reference). Pushed as the OUTERMOST
+ * `and` condition, so an unknown subject type is never returned and a
+ * caller-supplied `operator: "or"` cannot widen past it. A skill reference's own
+ * rule depends on its subject's head and Memory row — not a condition on this
+ * table — so it stays the per-row decision below.
+ */
+const readableSubjectScope = async (): Promise<{ condition: any; isAllowed: (row: any) => boolean }> => ({
+  condition: {
+    operator: "or",
+    conditions: [
+      { attribute: "subjectType", comparator: "equals", value: "soul" },
+      { attribute: "subjectType", comparator: "equals", value: SKILL_SUBJECT_TYPE },
+    ],
+  },
+  isAllowed: () => true,
+});
+const scopedSearch = makeScopedSearch(readableSubjectScope as any);
+
+/**
+ * Strip the caller's page and projection from the query handed to the scoped
+ * scan. Harper applies `limit`/`offset` to the rows it scans — before the
+ * per-row decision, so a page would count unreadable rows — and applies
+ * `select`/`property` to those rows, which hides the fields the decision reads.
+ * `limit`/`offset` are reapplied over the readable stream in search(); the
+ * selection is not reapplied, so a collection read returns the readable rows
+ * themselves. Not a selection parser: it removes only `select`, `property`,
+ * `limit` and `offset`.
+ */
+function withoutPagingOrSelection(query: any): any {
+  if (!query || typeof query !== "object") return query;
+  if (
+    (query as any).select === undefined &&
+    (query as any).property === undefined &&
+    (query as any).limit === undefined &&
+    (query as any).offset === undefined
+  ) {
+    return query;
+  }
+  const copy: any = Array.isArray(query) ? query.slice() : { ...query };
+  delete copy.select;
+  delete copy.property;
+  delete copy.limit;
+  delete copy.offset;
+  return copy;
+}
+
+function pagingOf(query: any): { limit: number | undefined; offset: number | undefined } {
+  if (!query || typeof query !== "object") return { limit: undefined, offset: undefined };
+  const rawLimit = (query as any).limit;
+  const rawOffset = (query as any).offset;
+  return {
+    limit: rawLimit == null ? undefined : Number(rawLimit),
+    offset: rawOffset == null ? undefined : Number(rawOffset),
+  };
+}
+
 export class InstructionVersion extends (databases as any).flair.InstructionVersion {
   allowRead() { return readGate.call(this); }
   allowCreate() { return false; }
@@ -113,21 +171,41 @@ export class InstructionVersion extends (databases as any).flair.InstructionVers
     if (!target || (typeof target === "object" && target.isCollection)) return this.search(target);
     const auth = await resolveAgentAuth((this as any).getContext?.());
     if (auth.kind === "anonymous") return NOT_FOUND();
-    const row = await super.get(target);
+    // The decision reads the STORED row's subject type and reference fields, so it
+    // runs on the unprojected row: a `select`/`property` read loads the full row
+    // by id first, then lets Harper project the authorized row.
+    const shaped =
+      typeof target === "object" && target !== null && (target.select != null || target.property != null);
+    const targetId = typeof target === "string" ? target : (target as any)?.id;
+    const row = await super.get(shaped && targetId != null ? { id: targetId } : target);
     if (!row || row instanceof Response) return NOT_FOUND();
-    return (await rowReadable(row as any, auth)) ? row : NOT_FOUND();
+    if (!(await rowReadable(row as any, auth))) return NOT_FOUND();
+    return shaped ? super.get(target) : row;
   }
 
   async search(query?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
     if (auth.kind === "anonymous") return UNAUTH();
-    // The caller's query narrows which rows are considered; it never widens what
-    // is authorized. Every returned row is re-checked per subject type, so a
-    // caller-supplied filter or projection cannot surface an unauthorized row.
-    const results = await super.search(query);
+    // The read scope applies before anything else: the readable subject types are
+    // pushed into the scan as the outermost AND condition, the caller's page and
+    // selection are stripped, and every surviving row is checked by rowReadable.
+    // The caller's offset/limit are then applied over the readable rows, so
+    // nothing unreadable is returned or counted.
+    const { limit, offset } = pagingOf(query);
+    const readerId = auth.kind === "agent" ? auth.agentId : "";
+    const source = scopedSearch(readerId, withoutPagingOrSelection(query), (q: any) => super.search(q));
     return (async function* authorizedRows(): AsyncGenerator<any> {
-      for await (const row of results) {
-        if (await rowReadable(row, auth)) yield row;
+      let skipped = 0;
+      let yielded = 0;
+      for await (const row of await (source as any)) {
+        if (!(await rowReadable(row, auth))) continue;
+        if (offset != null && skipped < offset) {
+          skipped += 1;
+          continue;
+        }
+        if (limit != null && yielded >= limit) return;
+        yielded += 1;
+        yield row;
       }
     })();
   }
