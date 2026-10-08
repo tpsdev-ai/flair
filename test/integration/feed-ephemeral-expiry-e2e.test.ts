@@ -120,7 +120,7 @@ describe("feed-written ephemeral expiry (flair#2274)", () => {
     expect(await readStored(harper, id)).toBeNull();
   }, 30_000);
 
-  test("no over-fire: a persistent feed write gets NO expiry", async () => {
+  test("no over-fire: a persistent feed write without a supplied expiry gets NO expiry", async () => {
     const id = `feed-persistent-${randomUUID()}`;
     const res = await authFetch(harper, agent, "POST", "/FeedMemories", {
       id, agentId: agent.id,
@@ -133,18 +133,20 @@ describe("feed-written ephemeral expiry (flair#2274)", () => {
     expect(stored?.expiresAt ?? null).toBeNull();
   }, 30_000);
 
-  test("a caller-supplied UTC expiry without fractions is stored canonical", async () => {
-    const id = `feed-eph-explicit-${randomUUID()}`;
-    const supplied = new Date(Date.now() + 3_600_000).toISOString().replace(/\.\d{3}Z$/, "Z");
-    const res = await authFetch(harper, agent, "POST", "/FeedMemories", {
-      id, agentId: agent.id,
-      content: `an explicitly dated feed row ${id}`,
-      durability: "ephemeral",
-      expiresAt: supplied,
-    });
-    expect(res.status).toBe(200);
-    expect((await readStored(harper, id))?.expiresAt).toBe(new Date(supplied).toISOString());
-  }, 30_000);
+  for (const suffix of ["Z", "+00:00"]) {
+    test(`a caller-supplied UTC expiry ending in ${suffix} is stored canonical`, async () => {
+      const id = `feed-eph-explicit-${randomUUID()}`;
+      const supplied = new Date(Date.now() + 3_600_000).toISOString().replace(/\.\d{3}Z$/, suffix);
+      const res = await authFetch(harper, agent, "POST", "/FeedMemories", {
+        id, agentId: agent.id,
+        content: `an explicitly dated feed row ${id}`,
+        durability: "ephemeral",
+        expiresAt: supplied,
+      });
+      expect(res.status).toBe(200);
+      expect((await readStored(harper, id))?.expiresAt).toBe(new Date(supplied).toISOString());
+    }, 30_000);
+  }
 
   test("a PATCH that flips a row to the ephemeral tier carries the tier expiry", async () => {
     const id = `memory-patch-eph-${randomUUID()}`;
@@ -282,7 +284,7 @@ describe("signed federation expiry", () => {
     return res.json();
   }
 
-  test("signed receive stores receiver-clock expiry when the incoming expiry is missing", async () => {
+  test("signed receive stores receiver-clock expiry when the incoming row wins last-write-wins without expiry", async () => {
     const id = `federated-missing-${randomUUID()}`;
     const insert = await adminOp(harper, {
       operation: "insert", database: "flair", table: "Memory",

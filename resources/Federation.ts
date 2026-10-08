@@ -845,9 +845,9 @@ export class FederationSync extends Resource {
         const incoming = { ...record.data };
         if (record.table === "Memory") {
           // Ephemeral peer expiry must be a valid UTC ISO date from the Unix
-          // epoch through receiver time + 365 days. Missing expiry uses the receiver's clock
-          // and configured TTL, even when a local expiry exists; malformed or
-          // out-of-bound ephemeral expiry skips the record before merging.
+          // epoch through receiver time + 365 days. Missing expiry uses the receiver's
+          // clock and configured TTL when the incoming row wins last-write-wins.
+          // Malformed or out-of-bound ephemeral expiry skips the record before merging.
           const expiryError = stampEphemeralExpiry(incoming, local, { incoming: true });
           if (expiryError) {
             recordSkip("invalid_expiry");

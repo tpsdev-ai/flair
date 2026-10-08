@@ -55,6 +55,20 @@ describe("stampEphemeralExpiry — the shared tier expiry rule", () => {
     }
   });
 
+  it("normalizes +00:00 UTC expiry for explicit, carried and incoming values", () => {
+    for (const expiresAt of ["2026-10-08T00:00:00+00:00", "2026-10-08T00:00+00:00", "2026-10-08T00:00:00.123456+00:00"]) {
+      const canonical = new Date(expiresAt).toISOString();
+      for (const incoming of [false, true]) {
+        const row: Record<string, any> = { durability: "ephemeral", expiresAt };
+        expect(stampEphemeralExpiry(row, null, { incoming })).toBeNull();
+        expect(row.expiresAt).toBe(canonical);
+      }
+      const carried: Record<string, any> = { content: "updated" };
+      expect(stampEphemeralExpiry(carried, { durability: "ephemeral", expiresAt })).toBeNull();
+      expect(carried.expiresAt).toBe(canonical);
+    }
+  });
+
   it("normalizes expanded UTC years", () => {
     for (const [expiresAt, canonical] of [
       ["+002026-10-08T00:00:00Z", "2026-10-08T00:00:00.000Z"],
@@ -66,8 +80,8 @@ describe("stampEphemeralExpiry — the shared tier expiry rule", () => {
     }
   });
 
-  it("refuses offsets, date-only values and malformed explicit expiry", () => {
-    for (const expiresAt of ["2026-10-08T00:00:00+00:00", "2026-10-08T01:00:00+01:00", "2026-10-08", "not-a-date", "2026-02-30T00:00:00Z", null]) {
+  it("refuses offsets other than +00:00, date-only values and malformed explicit expiry", () => {
+    for (const expiresAt of ["2026-10-08T00:00:00-00:00", "2026-10-08T01:00:00+01:00", "2026-10-08", "not-a-date", "2026-02-30T00:00:00Z", null]) {
       const row: Record<string, any> = { durability: "ephemeral", expiresAt };
       expect(stampEphemeralExpiry(row)).toBe("expiresAt must be a valid UTC ISO date");
     }
@@ -79,8 +93,8 @@ describe("stampEphemeralExpiry — the shared tier expiry rule", () => {
     expect(row.expiresAt).toBe("2026-10-08T00:00:00.000Z");
   });
 
-  it("refuses malformed stored expiry without carrying it", () => {
-    for (const expiresAt of ["not-a-date", "2026-10-08T00:00:00+00:00", "2026-10-08", "2026-02-30T00:00:00Z", 123]) {
+  it("refuses unsupported or malformed stored expiry without carrying it", () => {
+    for (const expiresAt of ["not-a-date", "2026-10-08T00:00:00-00:00", "2026-10-08", "2026-02-30T00:00:00Z", 123]) {
       const row: Record<string, any> = { content: "updated" };
       expect(stampEphemeralExpiry(row, { durability: "ephemeral", expiresAt })).toBe("expiresAt must be a valid UTC ISO date");
       expect(row.expiresAt).toBeUndefined();

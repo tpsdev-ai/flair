@@ -37,7 +37,7 @@ PYCODE
   if [ "$path" = AgentSeed ]; then
     title="AgentSeed ignores supplied expiry and stores a default for an ephemeral starter memory"
   else
-    title="signed receive stores receiver-clock expiry when the incoming expiry is missing"
+    title="signed receive stores receiver-clock expiry when the incoming row wins last-write-wins without expiry"
   fi
   if bun test "$suite" --test-name-pattern "$title" > "$scratch/$path.log" 2>&1; then
     cat "$scratch/$path.log"

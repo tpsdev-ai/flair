@@ -57,7 +57,8 @@ export function assertValidDurability(durability: unknown): string | null {
 const MS_PER_HOUR = 3600_000;
 
 /**
- * Tier expiry for Memory POST/PUT/PATCH, feed ingest, AgentSeed and federation.
+ * Tier expiry for Memory POST, ordinary PUT/PATCH (excluding _reindex PUT and
+ * re-embed PATCH), feed ingest, AgentSeed and federation.
  * Ephemeral explicit and carried UTC timestamps are validated and normalized.
  * AgentSeed ignores supplied expiry. Feed and federation call this rule before
  * their raw table writes.
@@ -81,7 +82,7 @@ export function stampEphemeralExpiry(
   if (explicitExpiry || carriedExpiry) {
     const value = explicitExpiry ? content.expiresAt : preExisting?.expiresAt;
     const timestamp = typeof value === "string"
-      ? /^(\d{4}|[+-]\d{6})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z$/.exec(value)
+      ? /^(\d{4}|[+-]\d{6})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|\+00:00)$/.exec(value)
       : null;
     const parsed = timestamp ? Date.parse(value) : NaN;
     const datePart = timestamp ? value.slice(0, value.indexOf("T")) : "";

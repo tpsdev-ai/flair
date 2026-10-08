@@ -67,7 +67,7 @@ describe("FeedMemories.post ephemeral expiry (flair#2274)", () => {
     expect(Math.abs(Date.parse(stored.expiresAt) - expected)).toBeLessThan(2000);
   });
 
-  test("no over-fire: a persistent feed write gets NO expiry", async () => {
+  test("no over-fire: a persistent feed write without a supplied expiry gets NO expiry", async () => {
     const result: any = await feed().post({ agentId: "alice", content: "a durable feed fact", durability: "persistent" });
     expect(result).not.toBeInstanceOf(Response);
     const stored = memoryStore.get(result.id);
@@ -109,8 +109,8 @@ for (const [expiresAt, canonical] of [
   });
 }
 
-test("feed refuses an offset expiry with invalid_expiry", async () => {
-  const result = await feed().post({ id: "offset-expiry", agentId: "alice", content: "offset feed note", durability: "ephemeral", expiresAt: "2026-10-08T00:00:00+00:00" });
+test("feed refuses a nonzero offset expiry with invalid_expiry", async () => {
+  const result = await feed().post({ id: "offset-expiry", agentId: "alice", content: "offset feed note", durability: "ephemeral", expiresAt: "2026-10-08T01:00:00+01:00" });
   expect(result).toBeInstanceOf(Response);
   expect((result as Response).status).toBe(400);
   expect((await (result as Response).json()).error).toBe("invalid_expiry");
