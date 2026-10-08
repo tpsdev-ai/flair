@@ -156,11 +156,154 @@ export function isVulnerable(version, range) {
  * Inputs                                                             *
  * ------------------------------------------------------------------ */
 
+/** A short description of a parsed JSON value, for audit-report refusal messages. */
+function jsonShapeOf(value) {
+  if (value === undefined) return "nothing";
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  if (typeof value !== "object") return `a ${typeof value}`;
+  const keys = Object.keys(value);
+  return keys.length === 0 ? "an empty object" : `an object with keys ${keys.slice(0, 6).join(", ")}`;
+}
+
+/** The remedy the report refusals below name, so an operator knows what to do. */
+const AUDIT_REMEDY = "Re-run the stage; if it keeps failing, check registry access.";
+
 /**
- * `bun audit --json` writes clean JSON to stdout and its banner to stderr.
- * It exits non-zero when advisories exist, so a non-zero exit is expected and
- * is NOT itself the failure signal — unparseable stdout is.
+ * Refuses a value that is not a JSON object (null, an array, a string, a
+ * number), and an object whose own `error` property is a string or an object.
+ * Returns the reason, or null. Passing this check does not make the value a
+ * report; each stage adds its own checks.
  */
+function errorEnvelopeRefusal(parsed) {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return `did not produce a JSON report object (got ${jsonShapeOf(parsed)})`;
+  }
+  const e = parsed.error;
+  if (
+    Object.hasOwn(parsed, "error") &&
+    (typeof e === "string" || (e !== null && typeof e === "object" && !Array.isArray(e)))
+  ) {
+    const code = e !== null && typeof e === "object" ? e.code : e;
+    return `returned an error object instead of a report${code === undefined ? "" : ` (${String(code)})`}`;
+  }
+  return null;
+}
+
+/**
+ * Refuses what `errorEnvelopeRefusal` refuses, and an object whose
+ * `vulnerabilities` property is missing or is not an object (the empty object
+ * `{}` included). `{"vulnerabilities":{}}` passes. The entries inside
+ * `vulnerabilities` are not checked here. Returns the reason, or null.
+ */
+export function npmAuditReportRefusal(parsed) {
+  const envelope = errorEnvelopeRefusal(parsed);
+  if (envelope) return envelope;
+  const v = parsed.vulnerabilities;
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    return `report has no "vulnerabilities" object (got ${jsonShapeOf(v)})`;
+  }
+  return null;
+}
+
+/**
+ * Applies the envelope check only, so `{}` passes. The values in bun's map of
+ * package name to advisory array are not checked here; `bunAuditOutcomeRefusal`
+ * compares the report with bun's exit status and stderr. Returns the reason,
+ * or null.
+ */
+export function bunAuditReportRefusal(parsed) {
+  return errorEnvelopeRefusal(parsed);
+}
+
+/** Refuse an audit report: the reason, then the stage and remedy an operator acts on. */
+function refuseAuditReport(stage, reason) {
+  return new Error(`${stage} ${reason}. ${AUDIT_REMEDY}`);
+}
+
+/** The first stderr line matching `pattern`, with ANSI colour codes removed, or null. */
+function stderrLineMatching(stderr, pattern) {
+  for (const raw of String(stderr ?? "").split(/\r?\n/)) {
+    const line = raw.replace(/\x1b\[[0-9;]*m/g, "").trim();
+    if (pattern.test(line)) return line.slice(0, 300);
+  }
+  return null;
+}
+
+/** How a refusal names the exit: spawnSync reports a null status when a signal ended the tool. */
+function exitText(status) {
+  return status === null || status === undefined ? "ended without an exit status" : `exited ${status}`;
+}
+
+/**
+ * The failure lines bun 1.3.10 printed in the real-tool tests:
+ * `error: ...` and `<Name>: audit request failed`.
+ */
+const BUN_STDERR_ERROR = /^error:|audit request failed/i;
+/**
+ * npm's failure lines: `npm error` (npm 10.9 and 11.19 in the real-tool tests)
+ * and the older `npm ERR!`.
+ */
+const NPM_STDERR_ERROR = /^npm (error|ERR!)/;
+
+/**
+ * Refuses a bun report when bun's stderr has a line matching
+ * `BUN_STDERR_ERROR`, or when bun exited non-zero (or without an exit status)
+ * and the report lists no advisories. bun exits 1 when its report lists
+ * advisories, so a non-zero exit with advisories passes this check. Returns
+ * the reason, or null.
+ */
+export function bunAuditOutcomeRefusal(parsed, status, stderr = "") {
+  const errorLine = stderrLineMatching(stderr, BUN_STDERR_ERROR);
+  if (errorLine) return `wrote an error to stderr (${errorLine})`;
+  if (status !== 0 && flattenAdvisories(parsed).length === 0) {
+    return `${exitText(status)} but its report lists no advisories`;
+  }
+  return null;
+}
+
+/**
+ * Refuses an npm report when npm's stderr has a line matching
+ * `NPM_STDERR_ERROR`, or when npm exited non-zero (or without an exit status)
+ * and the `vulnerabilities` object is empty. Returns the reason, or null.
+ */
+export function npmAuditOutcomeRefusal(parsed, status, stderr = "") {
+  const errorLine = stderrLineMatching(stderr, NPM_STDERR_ERROR);
+  if (errorLine) return `wrote an error to stderr (${errorLine})`;
+  if (status !== 0 && Object.keys(parsed.vulnerabilities).length === 0) {
+    return `${exitText(status)} but its report lists no vulnerabilities`;
+  }
+  return null;
+}
+
+/**
+ * Parse `bun audit --json` output. Refused: no stdout, stdout that is not valid
+ * JSON, the envelope check, and the exit-status and stderr checks in
+ * `bunAuditOutcomeRefusal`.
+ */
+export function parseBunAuditOutput(stdout, status, stderr = "") {
+  const stage = "`bun audit`";
+  const trimmed = (stdout || "").trim();
+  if (!trimmed) {
+    throw new Error(
+      `${stage} produced no output on stdout (exit ${status}). ` +
+        `stderr: ${(stderr || "").trim().slice(0, 500) || "<empty>"}`,
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (e) {
+    throw new Error(
+      `${stage} stdout was not valid JSON (exit ${status}): ${e.message}. ` +
+        `First 300 chars: ${trimmed.slice(0, 300)}`,
+    );
+  }
+  const refusal = bunAuditReportRefusal(parsed) ?? bunAuditOutcomeRefusal(parsed, status, stderr);
+  if (refusal) throw refuseAuditReport(stage, refusal);
+  return parsed;
+}
+
 export function runBunAudit() {
   const res = spawnSync("bun", ["audit", "--json"], {
     cwd: REPO_ROOT,
@@ -172,22 +315,7 @@ export function runBunAudit() {
     throw new Error(`could not execute \`bun audit\`: ${res.error.message}`);
   }
 
-  const stdout = (res.stdout || "").trim();
-  if (!stdout) {
-    throw new Error(
-      `\`bun audit\` produced no output on stdout (exit ${res.status}). ` +
-        `stderr: ${(res.stderr || "").trim().slice(0, 500) || "<empty>"}`,
-    );
-  }
-
-  try {
-    return JSON.parse(stdout);
-  } catch (e) {
-    throw new Error(
-      `\`bun audit\` stdout was not valid JSON (exit ${res.status}): ${e.message}. ` +
-        `First 300 chars: ${stdout.slice(0, 300)}`,
-    );
-  }
+  return parseBunAuditOutput(res.stdout, res.status, res.stderr);
 }
 
 /** Flatten bun's {package: [advisory,...]} shape into a flat advisory list. */
@@ -219,25 +347,31 @@ export function flattenAdvisories(auditJson) {
  * which the lockfile observation (`bun audit`) cannot — harper's
  * npm-shrinkwrap pins versions the root overrides never reach under npm.
  *
- * Like `runBunAudit`, a non-zero exit is expected when advisories exist and is
- * NOT itself the failure signal — unparseable stdout is.
+ * Refused: no stdout, stdout that is not valid JSON, the checks in
+ * `npmAuditReportRefusal`, and the exit-status and stderr checks in
+ * `npmAuditOutcomeRefusal`.
  */
 export function parseNpmAuditOutput(stdout, prefix, status, stderr = "") {
+  const stage = `\`npm audit --omit=dev --json\` in ${prefix}`;
   const trimmed = (stdout || "").trim();
   if (!trimmed) {
     throw new Error(
-      `\`npm audit --omit=dev --json\` in ${prefix} produced no output on stdout (exit ${status}). ` +
+      `${stage} produced no output on stdout (exit ${status}). ` +
         `stderr: ${(stderr || "").trim().slice(0, 500) || "<empty>"}`,
     );
   }
+  let parsed;
   try {
-    return JSON.parse(trimmed);
+    parsed = JSON.parse(trimmed);
   } catch (e) {
     throw new Error(
-      `\`npm audit --omit=dev --json\` in ${prefix} stdout was not valid JSON (exit ${status}): ${e.message}. ` +
+      `${stage} stdout was not valid JSON (exit ${status}): ${e.message}. ` +
         `First 300 chars: ${trimmed.slice(0, 300)}`,
     );
   }
+  const refusal = npmAuditReportRefusal(parsed) ?? npmAuditOutcomeRefusal(parsed, status, stderr);
+  if (refusal) throw refuseAuditReport(stage, refusal);
+  return parsed;
 }
 
 export function runNpmAudit(prefix) {

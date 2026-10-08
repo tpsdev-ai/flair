@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { existsSync, mkdirSync, renameSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, renameSync, readdirSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import * as render from "../render.js";
 import { loadEd25519PrivateKeyFromFile } from "../mcp-client-assertion.js";
@@ -189,46 +189,147 @@ export async function classifyKeysDir(
   return { aborted: false, entries, orphanRead };
 }
 
-/** Archive prunable agent keys; node-shaped files without .pub stay in place. */
+/** Sidecar path type without following symlinks (lstat). */
+type SidecarPathKind =
+  | { kind: "absent" }
+  | { kind: "regular" }
+  | { kind: "refused"; type: string }
+  | { kind: "unreadable"; error: string };
+
+/** Classify the path where `key`'s ownership sidecar would be (lstat — a symlink
+ *  is reported as itself, never followed). A failed lstat that is not ENOENT
+ *  is `unreadable`, not `absent`: prune must not move the key on unknown
+ *  evidence. */
+function sidecarPathKind(ownerPath: string): SidecarPathKind {
+  let st: Stats;
+  try {
+    st = lstatSync(ownerPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { kind: "absent" };
+    return { kind: "unreadable", error: code ?? String(err) };
+  }
+  if (st.isFile()) return { kind: "regular" };
+  if (st.isSymbolicLink()) return { kind: "refused", type: "symbolic link" };
+  if (st.isDirectory()) return { kind: "refused", type: "directory" };
+  if (st.isFIFO()) return { kind: "refused", type: "FIFO" };
+  if (st.isSocket()) return { kind: "refused", type: "socket" };
+  return { kind: "refused", type: "not a regular file" };
+}
+
+/** A key moved into the archive, with its destination path. */
+export interface KeysPruneMove {
+  name: string;
+  movedTo: string;
+}
+
+/** A prunable key left where it was, with why. */
+export interface KeysPruneSkip {
+  name: string;
+  ownerPath: string;
+  reason: string;
+}
+
+/** The outcome of an --apply run: what moved and what was left in place. */
+export interface KeysPruneOutcome {
+  moved: KeysPruneMove[];
+  skipped: KeysPruneSkip[];
+}
+
+/** Archive prunable agent keys; node-shaped files without .pub stay in place.
+ *  The post-move check tests the archive path's type, not object identity.
+ *  The source path can change after pre-move/absence checks; the archive path
+ *  can change between move and check or after the check, before the key moves. */
 export function applyKeyPrune(
   keysDir: string,
   entries: KeysPruneEntry[],
   dateStamp: string,
   move: typeof renameSync = renameSync,
-): Array<{ name: string; movedTo: string }> {
+): KeysPruneOutcome {
   const prunable = entries.filter((e) => {
     const nodeShaped = isNodeKeyId(e.name.replace(/\.key$/, ""), keysDir);
     return !nodeShaped && (e.class === "stale" || e.class === "invalid");
   });
-  if (prunable.length === 0) return [];
+  const moved: KeysPruneMove[] = [];
+  const skipped: KeysPruneSkip[] = [];
+  if (prunable.length === 0) return { moved, skipped };
 
   const destDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
-  mkdirSync(destDir, { recursive: true });
-  const existing = new Set(readdirSync(destDir));
+  // Created before the first attempted move.
+  let existing: Set<string> | undefined;
+  const archiveNames = (): Set<string> => {
+    if (!existing) {
+      mkdirSync(destDir, { recursive: true });
+      existing = new Set(readdirSync(destDir));
+    }
+    return existing;
+  };
 
-  const moved: Array<{ name: string; movedTo: string }> = [];
   for (const e of prunable) {
-    const destName = resolveCollisionSafeName(existing, e.name);
-    existing.add(destName);
+    const fromOwner = join(keysDir, `${e.name}${SEED_OWNER_SUFFIX}`);
+    const ownerKind = sidecarPathKind(fromOwner);
+    if (ownerKind.kind === "refused" || ownerKind.kind === "unreadable") {
+      const why = ownerKind.kind === "refused"
+        ? `${fromOwner} is a ${ownerKind.type}, not a regular file`
+        : `${fromOwner} could not be checked (${ownerKind.error})`;
+      skipped.push({
+        name: e.name,
+        ownerPath: fromOwner,
+        reason: `${why}; the key and the sidecar path are left in place`,
+      });
+      continue;
+    }
+
+    const names = archiveNames();
+    const destName = resolveCollisionSafeName(names, e.name);
+    names.add(destName);
     const from = join(keysDir, e.name);
     const to = join(destDir, destName);
-    const fromOwner = join(keysDir, `${e.name}${SEED_OWNER_SUFFIX}`);
-    let toOwner: string | undefined;
-    if (existsSync(fromOwner)) {
-      const destOwnerName = resolveCollisionSafeName(existing, `${destName}${SEED_OWNER_SUFFIX}`);
-      existing.add(destOwnerName);
-      toOwner = join(destDir, destOwnerName);
+    const destOwnerName = resolveCollisionSafeName(names, `${destName}${SEED_OWNER_SUFFIX}`);
+    const toOwner = join(destDir, destOwnerName);
+    let ownerMoved = false;
+    try {
       move(fromOwner, toOwner);
+      ownerMoved = true;
+      names.add(destOwnerName);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      if (sidecarPathKind(fromOwner).kind !== "absent") {
+        skipped.push({
+          name: e.name,
+          ownerPath: fromOwner,
+          reason: `${fromOwner} changed during the move attempt; the key is left in place`,
+        });
+        continue;
+      }
+    }
+    if (ownerMoved) {
+      const movedKind = sidecarPathKind(toOwner);
+      if (movedKind.kind !== "regular") {
+        move(toOwner, fromOwner);
+        names.delete(destOwnerName);
+        const why = movedKind.kind === "refused"
+          ? `is a ${movedKind.type}, not a regular file`
+          : movedKind.kind === "unreadable"
+            ? `could not be checked (${movedKind.error})`
+            : "was absent at its destination";
+        skipped.push({
+          name: e.name,
+          ownerPath: fromOwner,
+          reason: `${toOwner} ${why}; the archive-path entry was moved back and the key stayed active`,
+        });
+        continue;
+      }
     }
     try {
       move(from, to);
     } catch (err) {
-      if (toOwner) move(toOwner, fromOwner);
+      if (ownerMoved) move(toOwner, fromOwner);
       throw err;
     }
     moved.push({ name: e.name, movedTo: to });
   }
-  return moved;
+  return { moved, skipped };
 }
 
 /** Require the HTTP target's Instance id to match the sole ops Instance id. */
@@ -388,17 +489,20 @@ export function register(program: Command): void {
           `  ${render.wrap(render.c.dim, `${prunable.length} prunable (${stale.length} stale, ${invalid.length} invalid, ${orphanSeeds.length} orphan instance seed(s)), ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored`)}`,
         );
         if (prunable.length > 0) {
-          console.log(`  ${render.wrap(render.c.dim, "Run with --apply to move prunable keys to")} ${join(keysDir, PRUNED_DIR_NAME, pruneDateStamp())}`);
+          console.log(`  ${render.wrap(render.c.dim, "Run with --apply to move prunable keys (keys with refused sidecars stay in place) to")} ${join(keysDir, PRUNED_DIR_NAME, pruneDateStamp())}`);
         }
         console.log("");
         return;
       }
 
-      const moved = applyKeyPrune(keysDir, result.entries, pruneDateStamp());
+      const { moved, skipped } = applyKeyPrune(keysDir, result.entries, pruneDateStamp());
       console.log("");
       for (const m of moved) {
         console.log(`  ${render.icons.ok} moved ${m.name} -> ${m.movedTo}`);
       }
-      console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored\n`);
+      for (const s of skipped) {
+        console.log(`  ${render.icons.warn} ${render.wrap(render.c.bold, s.name)} — not moved: ${s.reason}`);
+      }
+      console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${skipped.length} left in place, ${orphan.length} orphan candidate(s) (left in place), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored\n`);
     });
 }
