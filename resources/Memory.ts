@@ -2276,8 +2276,8 @@ export class Memory extends (databases as any).flair.Memory {
       if (!stored) return false;
       const nonAdmin = auth.kind === "agent" && !auth.isAdmin;
       if (nonAdmin && isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
-        // The caller owned this row at the pre-read above, so a mismatch here
-        // is an owner change committed since — refuse it, do not delete.
+        // The caller passed the owner check at the pre-read above, so a
+        // mismatch here is a change committed since — refuse it, do not delete.
         return ownerChangedRefusal("Memory");
       }
       if (nonAdmin) {

@@ -111,7 +111,7 @@ interface ResourceCase {
   ownerField: string;
   /** The in-transaction pause point (between the ownership read and the delete). */
   point: string;
-  /** The pause point after the pre-read, before the delete's transaction opens. */
+  /** The pause point after the pre-read, before the delete's transactional re-read or staging. */
   prePoint: string;
   /** A row for `id`, owned by `ownerId`. */
   seed: (id: string, ownerId: string) => Record<string, unknown>;
@@ -131,7 +131,7 @@ const IDS = {
   Relationship: "odr-relationship-target",
 } as const;
 
-/** A fresh row id per (resource, case) so the three cases never share a row. */
+/** A fresh row id per (resource, case) so cases never share a row. */
 const idFor = (c: ResourceCase, which: string) => `${IDS[c.name as keyof typeof IDS]}-${which}`;
 
 const CASES: ResourceCase[] = [
