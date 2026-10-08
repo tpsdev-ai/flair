@@ -48,6 +48,7 @@ const getOutcomes: Array<[string, number | readonly number[], string]> = [
   ["MemoryGrant", 200, "resources/MemoryGrant.ts:57: allowRead allowVerified; get:67 by-id gate delegates collection to scoped search:71"],
   ["MemoryHostSource", 403, "resources/MemoryHostSource.ts:42: admin read gate refuses before get:48/scoped search:60"],
   ["MemoryMaintenance", 404, "resources/MemoryMaintenance.ts:41: no get/search/allowRead override"],
+  ["MemoryPurge", 404, "resources/MemoryPurge.ts:68: allowCreate operator POST path; no get/search/allowRead override"],
   ["MemoryReindex", 404, "resources/MemoryReindex.ts:46: no get/search/allowRead override"],
   ["MemoryUsage", 200, "resources/MemoryUsage.ts:91: allowRead allowVerified; get:93 delegates collection to filtered search:114"],
   ["Message", 200, "resources/Message.ts:74: verified read gate; get:105 delegates collection to scoped search:95"],

@@ -47,6 +47,7 @@ export const TPS_GET_ROUTE_STATUS: Record<string, number | readonly number[]> = 
   MemoryGrant: 200,
   MemoryHostSource: 403,
   MemoryMaintenance: 404,
+  MemoryPurge: 404,
   MemoryReindex: 404,
   MemoryUsage: 200,
   Message: 200,
