@@ -111,6 +111,22 @@ flair upgrade --tree /opt/flair --flair-version 0.50.0
 without touching the tree. A git checkout or a path that *is* the npm-global
 install is refused rather than overwritten.
 
+### A symlinked data directory is refused at boot
+
+The migration probe refuses a symlinked data directory or `.migrations` child.
+When no candidate is usable, the boot log and `/HealthDetail` report the failure;
+`flair doctor` does so with a verified agent and a reachable instance. Full paths
+appear in the operator log, admin `/HealthDetail` responses and admin `flair doctor` output.
+
+> **Heads-up:** for a link to a directory, only after verifying that the target is
+> dedicated to this Flair instance and safe to relocate, stop Flair, remove the
+> link, move its target to the configured path and start Flair. If ownership is
+> uncertain, leave the target in place: for a linked **data directory**, set
+> `FLAIR_MIGRATION_DATA_DIR` to the real directory path instead of the link and
+> restart; for a linked `.migrations` child, configure a different data directory
+> with an unlinked `.migrations` child. For a dangling link or a link to a file,
+> replace the link with a writable directory.
+
 ### After a Node bump: the CLI and the instance in different install trees
 
 A service unit bakes the node binary and install tree of the runtime it was

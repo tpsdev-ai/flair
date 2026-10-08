@@ -77,6 +77,7 @@
  * The probe creates only `.migrations` non-recursively inside an existing
  * candidate. It refuses symlinks present at the probe at either path.
  * Node offers no openat-style handle; a swap after the check is not prevented.
+ * A refusal names the configured path and any resolved target (flair#2277).
  * The first usable candidate wins.
  *
  * If NO candidate is usable, `resolveWritableMigrationDataDir` returns
@@ -86,7 +87,7 @@
  * `flair quality`'s `instance.migrationsClean`. An instance that cannot run
  * migrations now says so; that silence was the actual defect.
  */
-import { accessSync, constants, existsSync, lstatSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, realpathSync, statSync, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -155,18 +156,56 @@ export interface DataDirProbe {
   reason?: string;
 }
 
+/** Describes a refused link; surfaced when no candidate is usable. */
+export function describeSymlinkedDataDirRefusal(
+  configuredPath: string,
+  which: "data directory" | ".migrations directory",
+): string {
+  let target: string | null = null;
+  let targetKind = "a target of unconfirmed type at";
+  let directory = false;
+  try {
+    target = realpathSync(configuredPath);
+    const stat = statSync(target);
+    directory = stat.isDirectory();
+    if (directory) targetKind = "a directory at";
+    else if (stat.isFile()) targetKind = "a regular file at";
+  } catch {
+    /* retain any resolved path without assuming its type */
+  }
+  let remedy = `stop Flair, remove the symbolic link at ${configuredPath} and replace it with a writable directory, then start Flair`;
+  if (directory) {
+    remedy = `only after verifying that the target is dedicated to this Flair instance and safe to relocate, stop Flair, remove the symbolic link at ${configuredPath}, move the directory at ${target} to ${configuredPath}, and start Flair`;
+    if (which === "data directory") {
+      remedy += `; if ownership is uncertain, leave the target in place and set ${MIGRATION_DATA_DIR_ENV}=${target} instead of the link, then restart`;
+    } else {
+      remedy += "; if ownership is uncertain, leave the target in place and configure a different data directory with an unlinked .migrations child";
+    }
+  }
+  const link = target === null ? "a target that cannot be resolved" : `${targetKind} ${target}`;
+  return (
+    `refusing ${configuredPath}: it is a symbolic link to ${link}, and Flair refuses a symlinked ${which} here — ` +
+    `the link can be re-pointed after this check. Remedy: ${remedy}.`
+  );
+}
+
 /** Requires an existing directory, then creates only its `.migrations` child. */
 export function probeMigrationDataDir(dir: string): DataDirProbe {
+  let candidate: Stats;
   try {
-    if (!lstatSync(resolve(dir)).isDirectory()) {
-      return { dir, ok: false, reason: "not a directory" };
-    }
+    candidate = lstatSync(resolve(dir));
   } catch (err) {
     return {
       dir,
       ok: false,
       reason: `${(err as Error)?.message ?? String(err)}: cannot confirm the candidate is an existing directory — refusing to create it`,
     };
+  }
+  if (candidate.isSymbolicLink()) {
+    return { dir, ok: false, reason: describeSymlinkedDataDirRefusal(dir, "data directory") };
+  }
+  if (!candidate.isDirectory()) {
+    return { dir, ok: false, reason: "not a directory" };
   }
   const owned = join(dir, MIGRATIONS_SUBDIR);
   try {
@@ -175,7 +214,11 @@ export function probeMigrationDataDir(dir: string): DataDirProbe {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
-    if (!lstatSync(owned).isDirectory()) {
+    const ownedStat = lstatSync(owned);
+    if (ownedStat.isSymbolicLink()) {
+      return { dir, ok: false, reason: describeSymlinkedDataDirRefusal(owned, ".migrations directory") };
+    }
+    if (!ownedStat.isDirectory()) {
       return { dir, ok: false, reason: ".migrations is not a directory" };
     }
     accessSync(owned, constants.W_OK | constants.X_OK);
