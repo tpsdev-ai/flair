@@ -205,11 +205,11 @@ test("the listed entry paths run the decision, and its denial stops the path bef
 });
 
 test("the listed entry paths run the .content-suffix id decision on the ids it writes, and its denial stops the path before it writes", () => {
-  // The decision's inputs: the bound id and body ids (writeTargetIds), and for
-  // the by-id methods the request target too, so a suffix only in the URL counts.
+  // The decision's inputs: the bound id and body ids (writeTargetIds), and the
+  // request target too (#2343 added it for POST), so a suffix only in the URL counts.
   const memory = readFileSync("resources/Memory.ts", "utf8");
   for (const [signature, call] of [
-    ["  async post(content: any, context?: any) {", "refuseContentSuffixId(writeTargetIds(this, content));"],
+    ["  async post(content: any, context?: any) {", "refuseContentSuffixId(writeTargetIds(this, content), context);"],
     ["  async put(content: any, query?: any) {", "refuseContentSuffixId(writeTargetIds(this, content), query);"],
     ["  async patch(content: any, query?: any) {", "refuseContentSuffixId(writeTargetIds(this, content), query);"],
   ] as const) {
