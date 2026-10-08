@@ -1,6 +1,8 @@
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { deleteOwnedRow } from "./owner-delete-recheck.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import {
@@ -249,6 +251,25 @@ export class Relationship extends (databases as any).flair.Relationship {
     const existing = await super.get();
     if (existing?.agentId && existing.agentId !== gate.agentId) {
       return FORBIDDEN("cannot delete another agent's relationship");
+    }
+
+    // flair#2355: confirm, in a transaction this call owns, that the row is
+    // still owned by the caller; a row whose owner changed is refused, not
+    // deleted (resources/owner-delete-recheck.ts).
+    if (existing) {
+      const beforeDelete = txnPausePoint("relationship-delete-pre");
+      if (beforeDelete) await beforeDelete;
+      const outcome = await deleteOwnedRow(ctx, {
+        table: (databases as any).flair.Relationship,
+        tableName: "Relationship",
+        id: typeof _ === "string" ? _ : existing.id,
+        ownerField: "agentId",
+        callerId: gate.agentId,
+        point: "relationship-delete",
+      });
+      if (outcome.kind === "refused") return outcome.response;
+      if (outcome.kind === "absent") return super.delete(_);
+      return outcome.result;
     }
 
     return super.delete(_);

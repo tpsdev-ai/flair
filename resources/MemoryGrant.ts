@@ -1,6 +1,8 @@
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { deleteOwnedRow } from "./owner-delete-recheck.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { makeByIdReadGate, makeScopedSearch, type RecordTypeReadScope } from "./record-type-kit.js";
 
 // A grant is readable by either party: owner OR grantee. One scope object feeds
@@ -120,7 +122,22 @@ export class MemoryGrant extends (databases as any).flair.MemoryGrant {
     if (record.ownerId !== auth.agentId) {
       return FORBIDDEN("forbidden: cannot delete a grant owned by another agent");
     }
-    return super.delete(id, context);
+    // flair#2355: confirm, in a transaction this call owns, that the row is
+    // still owned by the caller; a row whose owner changed is refused, not
+    // deleted (resources/owner-delete-recheck.ts).
+    const beforeDelete = txnPausePoint("grant-delete-pre");
+    if (beforeDelete) await beforeDelete;
+    const outcome = await deleteOwnedRow((this as any).getContext?.(), {
+      table: (databases as any).flair.MemoryGrant,
+      tableName: "MemoryGrant",
+      id: typeof id === "string" ? id : record.id,
+      ownerField: "ownerId",
+      callerId: auth.agentId,
+      point: "grant-delete",
+    });
+    if (outcome.kind === "refused") return outcome.response;
+    if (outcome.kind === "absent") return super.delete(id, context);
+    return outcome.result;
   }
 
   private async _enforceOwnerWrite(content: any): Promise<Response | null> {

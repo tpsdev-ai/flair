@@ -95,7 +95,11 @@ class BaseWorkspaceState {
     }
     return gen();
   }
-  async delete(id: any) { workspaceStore.delete(id); return { ok: true }; }
+  async delete(id: any) { workspaceStore.delete(id); return true; }
+  // Harper's table is static-callable (`databases.flair.WorkspaceState.get/delete`),
+  // which is how the owner-delete confirmation reaches it (flair#2355).
+  static get(target: any) { return new BaseWorkspaceState().get(target); }
+  static delete(id: any) { workspaceStore.delete(id); return Promise.resolve(true); }
 }
 class BaseOrgEvent {
   async put(content: any) { orgEventPut = content; return { ok: true, ...content }; }
@@ -116,6 +120,11 @@ const databasesMock = {
 };
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: class {} }));
+
+// Harper assigns `transaction` onto the global at load; the owner-delete
+// confirmation (resources/owner-delete-recheck.ts) creates one when the caller
+// has none. This mock's delete is not staged, so the stand-in just runs the cb.
+(globalThis as any).transaction = (_ctx: any, cb: () => any) => cb();
 
 const { WorkspaceState } = await import("../../resources/WorkspaceState.ts");
 const { OrgEvent } = await import("../../resources/OrgEvent.ts");
@@ -320,10 +329,10 @@ describe("WorkspaceState.delete() — ownership check uses the raw record (super
   it("deleting a non-existent id is a clean no-op (not mis-routed into FORBIDDEN by the new get() override)", async () => {
     const ws = makeWorkspace(agentCtx("agent-owner"));
     const res = await (ws as any).delete("does-not-exist");
-    // super.delete() on the mock always returns { ok: true } — asserting it's
-    // NOT the FORBIDDEN Response proves delete() used super.get() (raw lookup,
-    // null for a missing id), not this.get() (which would 404 a denied id as
-    // a truthy Response and fall through into the ownership-mismatch branch).
+    // super.delete() on the mock returns true and is not the FORBIDDEN Response,
+    // proving delete() used super.get() (raw lookup, null for a missing id), not
+    // this.get() (which would 404 a denied id as a truthy Response and fall
+    // through into the ownership-mismatch branch).
     expect(res instanceof Response).toBe(false);
   });
 });

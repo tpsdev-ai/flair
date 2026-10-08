@@ -6,6 +6,7 @@ import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.j
 import { guardAuthorityFields } from "./authority-field-guard.js";
 import { isForbiddenOwnerMutation } from "./record-owner-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { ownerChangedRefusal } from "./owner-delete-recheck.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, keepStoredOriginator, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { isEmbeddingSpaceUniform, noteWriteStamp } from "./embedding-space-guard.js";
@@ -2235,14 +2236,32 @@ export class Memory extends (databases as any).flair.Memory {
     const deletionActor = auth.kind === "agent" ? auth.agentId : null;
     const deletionSourceClass: "agent" | "admin" | "internal" =
       auth.kind === "internal" ? "internal" : auth.isAdmin ? "admin" : "agent";
+    // flair#2355: hold the row still before the delete's transaction opens, so a
+    // competing owner change can commit first and be seen by the re-read inside.
+    const beforeDelete = txnPausePoint("memory-delete-pre");
+    if (beforeDelete) await beforeDelete;
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
       const deletedId = typeof id === "string" ? id : record?.id;
       if (typeof deletedId !== "string" || !deletedId) return false;
       const stored = await (databases as any).flair.Memory.get(deletedId, c);
       if (!stored) return false;
-      if (auth.kind === "agent" && !auth.isAdmin &&
-          isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
-        return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
+      const nonAdmin = auth.kind === "agent" && !auth.isAdmin;
+      if (nonAdmin && isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+        // The caller owned this row at the pre-read above, so a mismatch here
+        // is an owner change committed since — refuse it, do not delete.
+        return ownerChangedRefusal("Memory");
+      }
+      if (nonAdmin) {
+        // Test-only: the transaction pauses between its ownership read and its
+        // delete.
+        const pause = txnPausePoint("memory-delete");
+        if (pause) await pause;
+        // Confirmation read of the COMMITTED row in an explicit fresh context
+        // (never contextless — see resources/owner-delete-recheck.ts's header).
+        const confirmed = await (databases as any).flair.Memory.get(deletedId, {});
+        if (confirmed && isForbiddenOwnerMutation(confirmed, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+          return ownerChangedRefusal("Memory");
+        }
       }
       const d = await (databases as any).flair.Memory.delete(deletedId, c);
       if (d !== true) throw new Error("Memory row delete was not confirmed");
