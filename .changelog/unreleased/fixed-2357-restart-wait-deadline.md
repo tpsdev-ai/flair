@@ -1,1 +1,1 @@
-- **The restart wait for the old process to exit starts no probe at or after its deadline (#2357).** When time runs out it reports the timeout instead of starting one more liveness probe.
+- **The restart wait for the old process to exit starts no probe after its deadline (#2357).** Sleep requests are capped at the remaining time; a probe at the deadline is allowed.

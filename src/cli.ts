@@ -3239,13 +3239,6 @@ export async function checkAgentRegistered(
   }
 }
 
-// Blocks until the given PID is gone (ESRCH from signal 0), or timeout.
-// Used during restart to confirm the old Harper process actually exited before
-// we start polling /Health — otherwise the still-shutting-down old process can
-// answer and we'd declare restart success while a gap is still ahead.
-// It starts no probe at or after its deadline (flair#2357): the loop checks the
-// clock before each probe, and a wait that runs out reports its timeout without
-// one more probe. The probe is injectable so the wait is unit-testable.
 /**
  * Is `pid` a process that exists right now? Signal 0 performs the permission
  * and existence checks without delivering anything (flair#1022) — a `hdb.pid`
@@ -3256,13 +3249,17 @@ function isProcessAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+// Used during restart to confirm the old Harper process actually exited before
+// we start polling /Health — otherwise the still-shutting-down old process can
+// answer and we'd declare restart success while a gap is still ahead.
+// No probe starts after the deadline (flair#2357).
 export async function waitForProcessExit(
   pid: number,
   timeoutMs: number,
   probe: (pid: number) => PidLiveness = probePidLiveness,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  while (Date.now() <= deadline) {
     if (probe(pid).kind === "gone") return;
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;

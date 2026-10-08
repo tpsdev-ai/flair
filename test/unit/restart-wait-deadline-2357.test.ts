@@ -1,30 +1,22 @@
 /**
  * restart-wait-deadline-2357.test.ts — flair#2357.
  *
- * `waitForProcessExit` is the restart path's wait for the old Harper process to
- * exit before /Health is polled. It polled liveness on a loop and then started
- * one more probe after the deadline had passed, so a probe could begin at or
- * after the deadline. This test injects a slow probe and mocks the clock so each
- * probe's start time is recorded against the deadline, and asserts that no probe
- * starts at or after it.
+ * No probe starts after the deadline; a probe at the deadline is allowed.
  */
 import { describe, expect, spyOn, test } from "bun:test";
 import { waitForProcessExit } from "../../src/cli.ts";
 import type { PidLiveness } from "../../src/lib/daemon-liveness.ts";
 
-describe("flair#2357 — the restart wait starts no probe at or after its deadline", () => {
-  test.each(Array.from({ length: 20 }, (_, run) => run))("no probe starts at or after the deadline (run %i)", async () => {
+describe("flair#2357 — the restart wait starts no probe after its deadline", () => {
+  test.each(Array.from({ length: 20 }, (_, run) => run))("no probe starts after the deadline (run %i)", async () => {
     const timeoutMs = 30;
     let now = 1_000_000;
     const deadline = now + timeoutMs;
     const starts: number[] = [];
     const clock = spyOn(Date, "now").mockImplementation(() => now);
-    // A slow probe: its first call consumes the window up to the deadline (the
-    // mocked clock advances to it) and reports alive, so the wait can only stop
-    // by timing out.
     const probe = (_pid: number): PidLiveness => {
       starts.push(Date.now());
-      now = deadline;
+      now = deadline + 1;
       return { kind: "alive" };
     };
     try {
@@ -32,7 +24,7 @@ describe("flair#2357 — the restart wait starts no probe at or after its deadli
         `Process 4242 did not exit within ${timeoutMs}ms`,
       );
       expect(starts.length).toBeGreaterThan(0);
-      expect(starts.every((at) => at < deadline)).toBe(true);
+      expect(starts.every((at) => at <= deadline)).toBe(true);
     } finally {
       clock.mockRestore();
     }
@@ -57,7 +49,59 @@ describe("flair#2357 — the restart wait starts no probe at or after its deadli
       })).rejects.toThrow("Process 4242 did not exit within 750ms");
       expect(sleeps).toEqual([500, 250]);
       expect(now).toBe(deadline);
-      expect(starts).toEqual([deadline - 750, deadline - 250]);
+      expect(starts).toEqual([deadline - 750, deadline - 250, deadline]);
+    } finally {
+      timer.mockRestore();
+      clock.mockRestore();
+    }
+  });
+
+  test("observes an exit during the final sleep at the deadline", async () => {
+    let now = 1_000_000;
+    const deadline = now + 750;
+    const exitAt = deadline - 100;
+    const starts: number[] = [];
+    const sleeps: number[] = [];
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+      sleeps.push(delay);
+      now += delay;
+      callback();
+      return 0;
+    }) as typeof setTimeout);
+    try {
+      await expect(waitForProcessExit(4242, 750, () => {
+        starts.push(Date.now());
+        return { kind: now >= exitAt ? "gone" : "alive" };
+      })).resolves.toBeUndefined();
+      expect(sleeps).toEqual([500, 250]);
+      expect(starts).toEqual([deadline - 750, deadline - 250, deadline]);
+    } finally {
+      timer.mockRestore();
+      clock.mockRestore();
+    }
+  });
+
+  test("starts no probe after an overshooting sleep", async () => {
+    let now = 1_000_000;
+    const deadline = now + 30;
+    const starts: number[] = [];
+    const sleeps: number[] = [];
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+      sleeps.push(delay);
+      now += delay + 1;
+      callback();
+      return 0;
+    }) as typeof setTimeout);
+    try {
+      await expect(waitForProcessExit(4242, 30, () => {
+        starts.push(Date.now());
+        return { kind: "alive" };
+      })).rejects.toThrow("Process 4242 did not exit within 30ms");
+      expect(sleeps).toEqual([30]);
+      expect(now).toBeGreaterThan(deadline);
+      expect(starts).toEqual([deadline - 30]);
     } finally {
       timer.mockRestore();
       clock.mockRestore();
@@ -77,5 +121,4 @@ describe("flair#2357 — the restart wait starts no probe at or after its deadli
       await child.exited;
     }
   }, 5000);
-
 });
