@@ -56,6 +56,8 @@ export const CAPTURE_FLUSH_DEADLINE_MS = 5000;
 
 export const CAPTURE_LOCK_REFRESH_MS = 1000;
 
+const CAPTURE_TAKEOVER_STALE_MS = 500;
+
 // ── paths ───────────────────────────────────────────────────────────────────
 
 /** Where the spool lives. FLAIR_CAPTURE_DIR overrides the default. */
@@ -365,7 +367,7 @@ async function defaultClientFactory(agentId: string): Promise<CaptureClient> {
   });
 }
 
-function acquireSpoolLock(dir: string, agentId: string, warn: (message: string) => void = console.warn, path = lockPath(dir, agentId)): { release: () => void; isOwned: () => boolean; refresh: () => void } | null {
+function acquireSpoolLock(dir: string, agentId: string, warn: (message: string) => void = console.warn, path = lockPath(dir, agentId), staleMs = CAPTURE_LOCK_STALE_MS, takeover = false, depth = 0): { release: () => void; isOwned: () => boolean; refresh: () => void } | null {
   ensureCaptureDir(dir);
   const identity = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
   const readIdentity = (): string | null => {
@@ -408,60 +410,39 @@ function acquireSpoolLock(dir: string, agentId: string, warn: (message: string) 
         closeSync(fd);
       }
     };
-    try {
-      const previous = readLock(path);
-      const age = Date.now() - Number(previous.stat.mtimeMs);
+    const reclaimable = (lock: ReturnType<typeof readLock>): boolean => {
+      const age = Date.now() - Number(lock.stat.mtimeMs);
       let owner: { pid?: unknown; nonce?: unknown } | null = null;
-      try { owner = JSON.parse(previous.content ?? ""); } catch {}
+      try { owner = JSON.parse(lock.content ?? ""); } catch {}
       const valid = owner && typeof owner.pid === "number" && Number.isSafeInteger(owner.pid) && owner.pid > 0 &&
         typeof owner.nonce === "string" && owner.nonce.length > 0;
-      if (age <= CAPTURE_LOCK_STALE_MS) {
-        if (!valid) return null;
-        try {
-          process.kill(owner!.pid as number, 0);
-          return null;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") return null;
-        }
-      }
-      const parkedPath = `${path}.takeover-${randomUUID()}`;
-      renameSync(path, parkedPath);
-      let parked: ReturnType<typeof readLock>;
+      if (!valid) return !takeover && age > staleMs;
+      if (!takeover && age > staleMs) return true;
       try {
-        parked = readLock(parkedPath);
-      } catch {
-        warn(`capture lock unreadable; left parked at ${parkedPath}`);
-        return null;
+        process.kill(owner!.pid as number, 0);
+        return false;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ESRCH" && (!takeover || age > staleMs);
       }
-      if (parked.content !== previous.content || parked.stat.dev !== previous.stat.dev || parked.stat.ino !== previous.stat.ino || parked.stat.mtimeMs !== previous.stat.mtimeMs) {
-        if (parked.content === null) {
-          warn(`capture lock unreadable; left parked at ${parkedPath}`);
-          return null;
-        }
-        let fd: number;
-        try {
-          fd = openSync(path, "wx", 0o600);
-        } catch {
-          warn(`capture lock changed; left parked at ${parkedPath}`);
-          return null;
-        }
-        try {
-          writeFileSync(fd, parked.content);
-        } catch {
-          warn(`capture lock restore failed; left parked at ${parkedPath}`);
-          return null;
-        } finally {
-          closeSync(fd);
-        }
-        unlinkSync(parkedPath);
-        return null;
+    };
+    try {
+      const previous = readLock(path);
+      if (!reclaimable(previous) || depth >= 8) return null;
+      const mutex = acquireSpoolLock(dir, agentId, () => {}, `${path}.takeover`, CAPTURE_TAKEOVER_STALE_MS, true, depth + 1);
+      if (!mutex) return null;
+      try {
+        const current = readLock(path);
+        if (!mutex.isOwned() || current.content !== previous.content || current.stat.dev !== previous.stat.dev ||
+          current.stat.ino !== previous.stat.ino || current.stat.mtimeMs !== previous.stat.mtimeMs || !reclaimable(current)) return null;
+        unlinkSync(path);
+        if (!create()) return null;
+        warn(`capture lock reclaimed (age ${Math.round(Date.now() - Number(previous.stat.mtimeMs))} ms)`);
+      } finally {
+        mutex.release();
       }
-      unlinkSync(parkedPath);
-      warn(`capture lock reclaimed (age ${Math.round(age)} ms)`);
     } catch {
       return null;
     }
-    if (!create()) return null;
   }
   return {
     release,

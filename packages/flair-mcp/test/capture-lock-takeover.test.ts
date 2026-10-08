@@ -122,7 +122,7 @@ const fs = await import("node:fs");
 const real = { ...fs };
 const { join } = await import("node:path");
 const dir = process.env.CAPTURE_TEST_DIR;
-const lock = join(dir, "agent.flush.lock");
+const lock = join(dir, process.env.LOCK_KIND === "append" ? "agent.lock" : "agent.flush.lock");
 const cell = new Int32Array(new SharedArrayBuffer(4));
 function wait(path) {
   const deadline = Date.now() + 8000;
@@ -132,31 +132,71 @@ function wait(path) {
   }
 }
 let paused = false;
-function beforeMutation(path) {
-  if (process.env.CONTENDER === "a" && path === lock && !paused) {
+let observed = false;
+const descriptors = new Map();
+function beforeTakeover() {
+  if (process.env.CONTENDER === "a" && !paused) {
     paused = true;
     real.writeFileSync(join(dir, "a-validated"), "");
     wait(join(dir, "resume-a"));
   }
 }
+function afterAction() {
+  if (process.env.PROBE === "1" && process.env.CONTENDER === "a" && !observed) {
+    observed = true;
+    real.writeFileSync(join(dir, "a-after-action"), "");
+    wait(join(dir, "probe-done"));
+  }
+}
+function observeAbsence() {
+  if (real.existsSync(join(dir, "b-writing")) && !real.existsSync(join(dir, "finish")) && !real.existsSync(lock)) {
+    real.writeFileSync(join(dir, "live-lock-absent"), "");
+  }
+}
+function writing() {
+  real.writeFileSync(join(dir, process.env.CONTENDER + "-writing"), "");
+  wait(join(dir, "finish"));
+}
 mock.module("node:fs", () => ({ ...real,
-  unlinkSync(path) { beforeMutation(path); return real.unlinkSync(path); },
+  openSync(path, flags, ...args) {
+    if (path === lock + ".takeover" && flags === "wx") beforeTakeover();
+    const fd = real.openSync(path, flags, ...args);
+    descriptors.set(fd, path);
+    return fd;
+  },
+  readFileSync(path, ...args) {
+    const result = real.readFileSync(path, ...args);
+    if (paused && descriptors.get(path) === lock) afterAction();
+    return result;
+  },
+  closeSync(fd) { descriptors.delete(fd); return real.closeSync(fd); },
+  unlinkSync(path) {
+    const result = real.unlinkSync(path);
+    if (path === lock) observeAbsence();
+    return result;
+  },
   renameSync(path, target) {
-    beforeMutation(path);
+    if (path === lock) beforeTakeover();
     const result = real.renameSync(path, target);
-    if (path === lock && process.env.RESTORE_BLOCK === "1") real.writeFileSync(lock, "occupied", { flag: "wx" });
+    if (path === lock) { observeAbsence(); afterAction(); }
+    if (process.env.LOCK_KIND === "append" && target === join(dir, "agent.spool.json")) writing();
     return result;
   },
 }));
-const { runCaptureFlush } = await import(process.env.CAPTURE_TEST_MODULE);
+const { runCapture, runCaptureFlush } = await import(process.env.CAPTURE_TEST_MODULE);
 const warnings = [];
-const result = await runCaptureFlush({ warn: message => warnings.push(message), dir, env: { FLAIR_AGENT_ID: "agent" },
-  makeClient: () => ({ request: async () => {
-    real.writeFileSync(join(dir, process.env.CONTENDER + "-writing"), "");
-    while (!real.existsSync(join(dir, "finish"))) await new Promise(resolve => setTimeout(resolve, 2));
-    return {};
-  } }),
-});
+console.warn = message => warnings.push(message);
+const result = process.env.LOCK_KIND === "append"
+  ? runCapture(JSON.stringify({ hook_event_name: "Stop", last_assistant_message: "Decision: use host-" + process.env.CONTENDER + "." }), {
+      dir, env: { FLAIR_AGENT_ID: "agent" },
+    })
+  : await runCaptureFlush({ warn: message => warnings.push(message), dir, env: { FLAIR_AGENT_ID: "agent" },
+      makeClient: () => ({ request: async () => {
+        real.writeFileSync(join(dir, process.env.CONTENDER + "-writing"), "");
+        while (!real.existsSync(join(dir, "finish"))) await new Promise(resolve => setTimeout(resolve, 2));
+        return {};
+      } }),
+    });
 process.stdout.write(JSON.stringify({ ...result, warnings }));
 `;
 
@@ -168,66 +208,76 @@ async function waitFor(path: string): Promise<void> {
   }
 }
 
-test("a delayed dead-lock contender backs off after another contender starts writing", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "flair-takeover-"));
-  const children: ReturnType<typeof spawn>[] = [];
-  try {
-    runCapture(JSON.stringify({ hook_event_name: "Stop", last_assistant_message: "Decision: use host-a." }), {
-      dir, env: { FLAIR_AGENT_ID: "agent" },
-    });
-    const dead = spawn(process.execPath, ["-e", ""], { timeout: 1000 });
-    await new Promise<void>((resolve) => dead.once("close", () => resolve()));
-    writeFileSync(flushLockPath(dir, "agent"), JSON.stringify({ pid: dead.pid, nonce: "dead-owner" }), { flag: "wx", mode: 0o600 });
-    function contender(name: string) {
-      const child = spawn(process.execPath, ["-e", CONTENDER], {
-        env: { ...process.env, CONTENDER: name, CAPTURE_TEST_DIR: dir,
-          CAPTURE_TEST_MODULE: new URL("../src/capture-spool.ts", import.meta.url).pathname },
-        timeout: 10_000,
+for (const kind of ["append", "flush"]) {
+  test(`a delayed ${kind} taker and a third contender keep the live holder locked`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-takeover-"));
+    const children: ReturnType<typeof spawn>[] = [];
+    try {
+      runCapture(JSON.stringify({ hook_event_name: "Stop", last_assistant_message: "Decision: use host-a." }), {
+        dir, env: { FLAIR_AGENT_ID: "agent" },
       });
-      children.push(child);
-      let output = "";
-      let errors = "";
-      child.stdout!.on("data", (data) => { output += data; });
-      child.stderr!.on("data", (data) => { errors += data; });
-      return new Promise<string>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("close", (code) => code === 0 ? resolve(output) : reject(new Error(errors)));
-      });
+      const dead = spawn(process.execPath, ["-e", ""], { timeout: 1000 });
+      await new Promise<void>((resolve) => dead.once("close", () => resolve()));
+      const lock = kind === "append" ? lockPath(dir, "agent") : flushLockPath(dir, "agent");
+      writeFileSync(lock, JSON.stringify({ pid: dead.pid, nonce: "dead-owner" }), { flag: "wx", mode: 0o600 });
+      function contender(name: string) {
+        const child = spawn(process.execPath, ["-e", CONTENDER], {
+          env: { ...process.env, CONTENDER: name, CAPTURE_TEST_DIR: dir, LOCK_KIND: kind, PROBE: "1",
+            CAPTURE_TEST_MODULE: new URL("../src/capture-spool.ts", import.meta.url).pathname },
+          timeout: 10_000,
+        });
+        children.push(child);
+        let output = "";
+        let errors = "";
+        child.stdout!.on("data", (data) => { output += data; });
+        child.stderr!.on("data", (data) => { errors += data; });
+        return new Promise<string>((resolve, reject) => {
+          child.once("error", reject);
+          child.once("close", (code) => code === 0 ? resolve(output) : reject(new Error(errors)));
+        });
+      }
+      const a = contender("a");
+      void a.catch(() => {});
+      await waitFor(join(dir, "a-validated"));
+      const b = contender("b");
+      void b.catch(() => {});
+      await waitFor(join(dir, "b-writing"));
+      const survivor = readFileSync(lock, "utf8");
+      writeFileSync(join(dir, "resume-a"), "");
+      await waitFor(join(dir, "a-after-action"));
+      const c = contender("c");
+      void c.catch(() => {});
+      const third = await Promise.race([
+        c.then((output) => JSON.parse(output)),
+        waitFor(join(dir, "c-writing")).then(() => ({ reason: "acquired" })),
+      ]);
+      expect(third.reason).toBe(kind === "append" ? "refused" : "busy");
+      expect(readFileSync(lock, "utf8")).toBe(survivor);
+      expect(existsSync(join(dir, "live-lock-absent"))).toBe(false);
+      writeFileSync(join(dir, "probe-done"), "");
+      expect(JSON.parse(await a).reason).toBe(kind === "append" ? "refused" : "busy");
+      expect(existsSync(join(dir, "a-writing"))).toBe(false);
+      expect(existsSync(join(dir, "c-writing"))).toBe(false);
+      expect(readFileSync(lock, "utf8")).toBe(survivor);
+      expect(existsSync(join(dir, "live-lock-absent"))).toBe(false);
+      writeFileSync(join(dir, "finish"), "");
+      const holder = JSON.parse(await b);
+      expect(kind === "append" ? holder.reason : holder.flushed).toBe(kind === "append" ? "appended" : 1);
+    } finally {
+      writeFileSync(join(dir, "finish"), "");
+      writeFileSync(join(dir, "resume-a"), "");
+      writeFileSync(join(dir, "probe-done"), "");
+      for (const child of children) child.kill("SIGKILL");
+      await Promise.all(children.map((child) => child.exitCode !== null || child.signalCode !== null ? Promise.resolve() :
+        new Promise<void>((resolve) => child.once("close", () => resolve()))));
+      rmSync(dir, { recursive: true, force: true });
     }
-    const a = contender("a");
-    void a.catch(() => {});
-    await waitFor(join(dir, "a-validated"));
-    const b = contender("b");
-    void b.catch(() => {});
-    await waitFor(join(dir, "b-writing"));
-    const survivor = readFileSync(flushLockPath(dir, "agent"), "utf8");
-    writeFileSync(join(dir, "resume-a"), "");
-    let done = false;
-    void a.then(() => { done = true; }, () => { done = true; });
-    const deadline = Date.now() + 8000;
-    while (!done && !existsSync(join(dir, "a-writing"))) {
-      if (Date.now() > deadline) throw new Error("contender timeout");
-      await new Promise((resolve) => setTimeout(resolve, 2));
-    }
-    expect(existsSync(join(dir, "a-writing"))).toBe(false);
-    expect(readFileSync(flushLockPath(dir, "agent"), "utf8")).toBe(survivor);
-    writeFileSync(join(dir, "finish"), "");
-    expect(JSON.parse(await b).flushed).toBe(1);
-    expect(JSON.parse(await a).reason).toBe("busy");
-  } finally {
-    writeFileSync(join(dir, "finish"), "");
-    writeFileSync(join(dir, "resume-a"), "");
-    for (const child of children) child.kill("SIGKILL");
-    await Promise.all(children.map((child) => child.exitCode !== null || child.signalCode !== null ? Promise.resolve() :
-      new Promise<void>((resolve) => child.once("close", () => resolve()))));
-    rmSync(dir, { recursive: true, force: true });
-  }
-}, 20_000);
+  }, 20_000);
+}
 
 for (const scenario of ["inode", "owner", "occupied", "unreadable"]) {
-  const blocked = scenario === "occupied";
   const unreadable = scenario === "unreadable";
-  test(`a changed lock (${scenario}) returns busy and ${blocked || unreadable ? "stays parked" : "is restored"}`, async () => {
+  test(`a changed lock (${scenario}) returns busy without moving it`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-takeover-inode-"));
     let child: ReturnType<typeof spawn> | undefined;
     try {
@@ -241,7 +291,7 @@ for (const scenario of ["inode", "owner", "occupied", "unreadable"]) {
       writeFileSync(lock, identity, { flag: "wx", mode: 0o600 });
       const inode = statSync(lock).ino;
       child = spawn(process.execPath, ["-e", CONTENDER], {
-        env: { ...process.env, CONTENDER: "a", CAPTURE_TEST_DIR: dir, RESTORE_BLOCK: blocked ? "1" : "0",
+        env: { ...process.env, CONTENDER: "a", CAPTURE_TEST_DIR: dir,
           CAPTURE_TEST_MODULE: new URL("../src/capture-spool.ts", import.meta.url).pathname },
         timeout: 10_000,
       });
@@ -249,7 +299,8 @@ for (const scenario of ["inode", "owner", "occupied", "unreadable"]) {
       child.stdout!.on("data", (data) => { output += data; });
       const exited = new Promise<number | null>((resolve) => child!.once("close", resolve));
       await waitFor(join(dir, "a-validated"));
-      const replacement = scenario === "owner" ? JSON.stringify({ pid: process.pid, nonce: "live-owner" }) : identity;
+      const replacement = scenario === "occupied" ? "occupied" :
+        scenario === "owner" ? JSON.stringify({ pid: process.pid, nonce: "live-owner" }) : identity;
       if (scenario === "owner") {
         writeFileSync(lock, replacement);
         expect(statSync(lock).ino).toBe(inode);
@@ -271,14 +322,11 @@ for (const scenario of ["inode", "owner", "occupied", "unreadable"]) {
       expect(await exited).toBe(0);
       const outcome = JSON.parse(output);
       expect(outcome.reason).toBe("busy");
-      if (unreadable) expect(existsSync(lock)).toBe(false);
-      else expect(readFileSync(lock, "utf8")).toBe(blocked ? "occupied" : replacement);
-      expect(outcome.warnings).toHaveLength(blocked || unreadable ? 1 : 0);
-      if (blocked || unreadable) {
-        const parked = outcome.warnings[0].split("left parked at ")[1];
-        if (unreadable) chmodSync(parked, 0o600);
-        expect(readFileSync(parked, "utf8")).toBe(identity);
-      }
+      expect(existsSync(lock)).toBe(true);
+      if (unreadable) chmodSync(lock, 0o600);
+      expect(readFileSync(lock, "utf8")).toBe(replacement);
+      expect(outcome.warnings).toHaveLength(0);
+      expect(existsSync(`${lock}.takeover`)).toBe(false);
     } finally {
       writeFileSync(join(dir, "finish"), "");
       writeFileSync(join(dir, "resume-a"), "");
@@ -289,4 +337,38 @@ for (const scenario of ["inode", "owner", "occupied", "unreadable"]) {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
+}
+
+for (const scenario of ["live-aged", "dead-recent", "dead-aged", "malformed-aged"]) {
+  test(`a ${scenario} takeover mutex ${scenario !== "dead-aged" ? "blocks" : "permits"} capture`, async () => {
+    const home = mkdtempSync(join(tmpdir(), "flair-takeover-mutex-"));
+    const dir = join(home, ".flair", "capture");
+    try {
+      mkdirSync(dir, { recursive: true });
+      const dead = spawn(process.execPath, ["-e", ""], { timeout: 1000 });
+      await new Promise<void>((resolve) => dead.once("close", () => resolve()));
+      const lock = lockPath(dir, "agent");
+      writeFileSync(lock, "{", { flag: "wx", mode: 0o600 });
+      const old = new Date(Date.now() - CAPTURE_LOCK_STALE_MS - 1000);
+      utimesSync(lock, old, old);
+      const mutex = `${lock}.takeover`;
+      const identity = scenario === "malformed-aged" ? "{" : JSON.stringify({
+        pid: scenario === "live-aged" ? process.pid : dead.pid, nonce: "mutex-owner",
+      });
+      writeFileSync(mutex, identity, { flag: "wx", mode: 0o600 });
+      if (scenario !== "dead-recent") utimesSync(mutex, old, old);
+      const outcome = await captureChild(home, dir);
+      if (scenario !== "dead-aged") {
+        expect(outcome.result.reason).toBe("refused");
+        expect(readFileSync(mutex, "utf8")).toBe(identity);
+        expect(readFileSync(lock, "utf8")).toBe("{");
+      } else {
+        expect(outcome.result.reason).toBe("appended");
+        expect(existsSync(mutex)).toBe(false);
+        expect(existsSync(`${mutex}.takeover`)).toBe(false);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 10_000);
 }
