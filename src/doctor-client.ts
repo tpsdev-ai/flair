@@ -20,8 +20,9 @@
 // "not present", never a thrown error — doctor must never crash or hang on a
 // broken client config.
 
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync, type SpawnSyncOptions } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
 import type { SeedOwnerRead } from "./keystore.js";
@@ -1736,34 +1737,208 @@ export function evidenceLine(s: string, max = 200): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
-const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) => {
-  // `/bin/sh -c` is not a guess: it is exactly how Claude Code runs a
-  // `type: "command"` hook (spawn with `shell: true`, $SHELL never consulted).
-  // Probing through any other shell would answer a question the user never
-  // asked.
-  const res = spawnSync("/bin/sh", ["-c", command], {
-    input: "",
-    encoding: "utf-8",
-    timeout: timeoutMs,
-    env: {
-      ...process.env,
-      // Tell a #1007-or-later adapter to answer without side effects.
-      FLAIR_HOOK_PROBE: "1",
-      // Bound an OLDER adapter, which will do a real bootstrap + presence
-      // heartbeat because it has never heard of FLAIR_HOOK_PROBE.
-      FLAIR_HOOK_TIMEOUT_MS: "1500",
-      FLAIR_PRESENCE_TIMEOUT_MS: "500",
+/** How long to let a signaled process group exit before escalating to SIGKILL,
+ *  and how long to wait for the group to disappear after SIGKILL. Bounded, so a
+ *  descendant that ignores SIGTERM cannot make the probe hang. */
+const PROBE_GROUP_TERM_GRACE_MS = 200;
+const PROBE_GROUP_KILL_GRACE_MS = 2_000;
+
+/** Bounded synchronous sleep — no timers, and never longer than `ms`. */
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Is any process still in group `pgid`? A zombie counts until it is reaped. */
+function processGroupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/** End every process in group `pgid`: SIGTERM, then SIGKILL after a bounded grace. */
+function terminateProcessGroup(pgid: number): void {
+  try {
+    process.kill(-pgid, "SIGTERM");
+  } catch {
+    // ESRCH: the group is already gone — the common case when the command left
+    // no descendant and the shell was the only member.
+  }
+  const termDeadline = Date.now() + PROBE_GROUP_TERM_GRACE_MS;
+  while (processGroupAlive(pgid) && Date.now() < termDeadline) sleepMs(5);
+  if (!processGroupAlive(pgid)) return;
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {
+    // Already gone between the checks.
+  }
+  const killDeadline = Date.now() + PROBE_GROUP_KILL_GRACE_MS;
+  while (processGroupAlive(pgid) && Date.now() < killDeadline) sleepMs(5);
+}
+
+/** Read a probe output file, treating an unreadable file as empty output. */
+function readProbeFile(path: string): string {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+/** The `Bun.spawnSync` shape this probe needs. Under Bun the `node:child_process`
+ *  shim ignores `detached` (the shell stays in the caller's group, so a group
+ *  kill misses every descendant), while Bun's own spawner honours it — so the
+ *  probe picks the spawner that can actually create the group. */
+interface BunSyncSubprocess {
+  pid: number;
+  exitCode: number | null;
+  signalCode: string | null;
+  exitedDueToTimeout: boolean;
+}
+interface BunRuntime {
+  spawnSync(
+    command: string[],
+    options: {
+      detached: boolean;
+      stdin: Uint8Array;
+      stdout: number;
+      stderr: number;
+      timeout: number;
+      killSignal: string;
+      env: NodeJS.ProcessEnv;
     },
-  });
+  ): BunSyncSubprocess;
+}
+const bunRuntime = (globalThis as { Bun?: BunRuntime }).Bun;
+
+/** The normalized result of the bounded spawn, before the group is ended. */
+interface ProbeSpawn {
+  pid: number | null;
+  exitCode: number | null;
+  timedOut: boolean;
+  spawnError: string | null;
+}
+
+/** Spawn `/bin/sh -c command` into its own process group, bounded by `timeoutMs`,
+ *  with stdout/stderr written to the two file descriptors. */
+function spawnProbeBounded(
+  command: string,
+  timeoutMs: number,
+  input: string,
+  env: NodeJS.ProcessEnv,
+  outFd: number,
+  errFd: number,
+): ProbeSpawn {
+  if (bunRuntime) {
+    try {
+      const r = bunRuntime.spawnSync(["/bin/sh", "-c", command], {
+        detached: true,
+        stdin: Buffer.from(input),
+        stdout: outFd,
+        stderr: errFd,
+        timeout: timeoutMs,
+        killSignal: "SIGTERM",
+        env,
+      });
+      return { pid: r.pid, exitCode: r.exitCode, timedOut: r.exitedDueToTimeout === true, spawnError: null };
+    } catch (err: unknown) {
+      return { pid: null, exitCode: null, timedOut: false, spawnError: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  // `detached` groups the child (setsid); Node's `SpawnSyncOptions` type omits
+  // it even though `spawnSync` honours it at runtime, so the object is asserted.
+  const res = spawnSync("/bin/sh", ["-c", command], {
+    detached: true,
+    stdio: ["pipe", outFd, errFd],
+    input,
+    timeout: timeoutMs,
+    env,
+  } as SpawnSyncOptions);
   const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
   return {
+    pid: typeof res.pid === "number" ? res.pid : null,
     exitCode: res.status,
-    stdout: res.stdout ?? "",
-    stderr: res.stderr ?? "",
     timedOut,
     spawnError: res.error && !timedOut ? res.error.message : null,
   };
-};
+}
+
+/**
+ * flair#2385 — run a hook command in its OWN process group and end the whole
+ * group, so no descendant outlives the probe.
+ *
+ * `spawnSync`'s `timeout` signals only the direct `/bin/sh`. A descendant the
+ * command started (an `npx`/`npm exec` helper, say) keeps running after
+ * `flair hook status` returns, with the caller's environment. So the shell is
+ * spawned `detached` — on POSIX that is `setsid`, giving it a fresh process
+ * group whose id is the child's pid — and the group is terminated on BOTH
+ * paths: on the timeout and after a normal exit (a command can background a
+ * child and exit). SIGTERM first, then SIGKILL after a short bounded grace; the
+ * helper waits, bounded, for the group to disappear before it returns.
+ *
+ * stdout/stderr go to temp FILES, not pipes: under Node a descendant that
+ * inherits the write end of a pipe keeps `spawnSync` blocked on it until the
+ * timeout fires even after the shell has exited, stalling the normal path.
+ *
+ * Windows has no POSIX process group and `kill(-pid)` does not address one, so
+ * there the probe keeps `spawnSync`'s own bounded `timeout` and signals only the
+ * direct child.
+ */
+function runProbeInOwnGroup(
+  command: string,
+  timeoutMs: number,
+  input: string,
+  env: NodeJS.ProcessEnv,
+): HookProbeOutcome {
+  if (process.platform === "win32") {
+    const res = spawnSync("/bin/sh", ["-c", command], { input, encoding: "utf-8", timeout: timeoutMs, env });
+    const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
+    return { exitCode: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "", timedOut, spawnError: res.error && !timedOut ? res.error.message : null };
+  }
+  const dir = mkdtempSync(join(tmpdir(), "flair-hook-probe-"));
+  const outPath = join(dir, "stdout");
+  const errPath = join(dir, "stderr");
+  const spawned = ((): ProbeSpawn => {
+    let outFd = -1;
+    let errFd = -1;
+    try {
+      outFd = openSync(outPath, "w");
+      errFd = openSync(errPath, "w");
+      return spawnProbeBounded(command, timeoutMs, input, env, outFd, errFd);
+    } finally {
+      if (outFd >= 0) closeSync(outFd);
+      if (errFd >= 0) closeSync(errFd);
+    }
+  })();
+  // End the group on the timeout path AND after a normal exit: the shell exiting
+  // does not mean the command it started has.
+  if (spawned.pid !== null) terminateProcessGroup(spawned.pid);
+  const stdout = readProbeFile(outPath);
+  const stderr = readProbeFile(errPath);
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best effort: a failed cleanup must not turn a probe outcome into a throw.
+  }
+  return { exitCode: spawned.exitCode, stdout, stderr, timedOut: spawned.timedOut, spawnError: spawned.spawnError };
+}
+
+/** `/bin/sh -c` is not a guess: it is exactly how Claude Code runs a
+ *  `type: "command"` hook (spawn with `shell: true`, $SHELL never consulted).
+ *  Probing through any other shell would answer a question the user never
+ *  asked. */
+const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) =>
+  runProbeInOwnGroup(command, timeoutMs, "", {
+    ...process.env,
+    // Tell a #1007-or-later adapter to answer without side effects.
+    FLAIR_HOOK_PROBE: "1",
+    // Bound an OLDER adapter, which will do a real bootstrap + presence
+    // heartbeat because it has never heard of FLAIR_HOOK_PROBE.
+    FLAIR_HOOK_TIMEOUT_MS: "1500",
+    FLAIR_PRESENCE_TIMEOUT_MS: "500",
+  });
 
 /**
  * Delivery probe (flair#1734): run the registered command so we can classify
@@ -1775,28 +1950,14 @@ export function probeSessionStartHookDelivery(
   opts: { timeoutMs?: number; runner?: HookProbeRunner } = {},
 ): HookProbeOutcome {
   const timeoutMs = opts.timeoutMs ?? 8_000;
-  const runner = opts.runner ?? ((cmd, ms) => {
-    const res = spawnSync("/bin/sh", ["-c", cmd], {
-      input: "{}",
-      encoding: "utf-8",
-      timeout: ms,
-      env: {
-        ...process.env,
-        FLAIR_HOOK_PROBE: "0",
-        FLAIR_HOOK_DELIVERY_PROBE: "1",
-        FLAIR_HOOK_TIMEOUT_MS: "4000",
-        FLAIR_PRESENCE_TIMEOUT_MS: "1",
-      },
-    });
-    const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
-    return {
-      exitCode: res.status,
-      stdout: res.stdout ?? "",
-      stderr: res.stderr ?? "",
-      timedOut,
-      spawnError: res.error && !timedOut ? res.error.message : null,
-    };
-  });
+  const runner = opts.runner ?? ((cmd, ms) =>
+    runProbeInOwnGroup(cmd, ms, "{}", {
+      ...process.env,
+      FLAIR_HOOK_PROBE: "0",
+      FLAIR_HOOK_DELIVERY_PROBE: "1",
+      FLAIR_HOOK_TIMEOUT_MS: "4000",
+      FLAIR_PRESENCE_TIMEOUT_MS: "1",
+    }));
   try {
     return runner(command, timeoutMs);
   } catch (err: unknown) {
