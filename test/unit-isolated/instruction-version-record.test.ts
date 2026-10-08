@@ -10,6 +10,7 @@ const locks = new Set<string>();
 let onBlocked: (() => void) | undefined;
 let pausePatch: (() => Promise<void>) | undefined;
 let soulReads = 0;
+let forceCommitChange: Row | undefined;
 let hideHead = false;
 let failNextAppend = false;
 let failNextCommit = false;
@@ -58,9 +59,15 @@ class BaseSoul {
   getId() { return this.id; }
   static async get(id: string, ctx: any) {
     expect(locks.size).toBeGreaterThan(0);
-    expect(ctx?.transaction?.open).toBe(1);
-    soulReads++;
-    return (ctx?.transaction?.souls ?? soulStore).get(id) ?? null;
+    if (ctx?.transaction) {
+      // The in-transaction read: this transaction's snapshot.
+      expect(ctx.transaction.open).toBe(1);
+      soulReads++;
+      return (ctx.transaction.souls ?? soulStore).get(id) ?? null;
+    }
+    // The committed confirmation read: an explicit fresh context, no transaction.
+    if (forceCommitChange) return { ...(soulStore.get(id) ?? {}), ...forceCommitChange };
+    return soulStore.get(id) ?? null;
   }
   static async *search(query: any, ctx: any): AsyncGenerator<Row> {
     expect(locks.size).toBeGreaterThan(0);
@@ -77,6 +84,11 @@ class BaseSoul {
     rows.set(this.id, { ...rows.get(this.id), ...content });
     if (pausePatch) await pausePatch();
     return rows.get(this.id);
+  }
+  static async put(row: Row, ctx: any): Promise<void> {
+    const rows = ctx?.transaction?.souls ?? soulStore;
+    rows.set(row.id, { ...row });
+    if (pausePatch) await pausePatch();
   }
   async delete(target?: any) {
     if (target?.isCollection) this.ctx.transaction.souls.clear();
@@ -145,6 +157,7 @@ beforeEach(() => {
   pausePatch = undefined;
   onBlocked = undefined;
   soulReads = 0;
+  forceCommitChange = undefined;
   hideHead = false;
   failNextAppend = false;
   failNextCommit = false;
@@ -462,6 +475,37 @@ describe("Soul resource version snapshots", () => {
     expect(JSON.parse(versions[1].soulSnapshot).value).toBe("after");
     expect(JSON.parse(versions[1].soulSnapshot).durability).toBe("persistent");
     expect(JSON.parse(versions[1].soulSnapshot).originatorInstanceId).toBeUndefined();
+  }, 3000);
+
+  test("a Soul PATCH whose committed row keeps changing exhausts its attempts with a named conflict", async () => {
+    const id = "agent-a:role";
+    const stored = { id, agentId: "agent-a", key: "role", value: "before", durability: "permanent", createdAt: NOW };
+    soulStore.set(id, stored);
+    // Every confirmation read sees a committed row that differs from the
+    // attempt's read, so the PATCH never confirms and runs out of attempts.
+    forceCommitChange = { updatedAt: "2026-01-01T00:00:00.000Z" };
+    const result = await soul(id).patch({ value: "after" });
+    expect(result instanceof Response).toBe(true);
+    expect(result.status).toBe(409);
+    expect(await result.clone().json()).toEqual({ error: "soul_patch_conflict" });
+    // Every attempt aborted: the row and the history are unchanged.
+    expect(soulStore.get(id)).toEqual(stored);
+    expect(store.size).toBe(0);
+  }, 3000);
+
+  test("a Soul PATCH whose committed row is replaced by a different subject is refused", async () => {
+    const id = "agent-a:role";
+    const stored = { id, agentId: "agent-a", key: "role", value: "before", createdAt: NOW };
+    soulStore.set(id, stored);
+    // The committed row now belongs to a different subject (agentId + key).
+    forceCommitChange = { agentId: "agent-b", key: "role", value: "replaced" };
+    const result = await soul(id).patch({ value: "after" });
+    expect(result instanceof Response).toBe(true);
+    expect(result.status).toBe(409);
+    expect(await result.clone().json()).toEqual({ error: "soul_patch_row_changed" });
+    // The PATCH wrote nothing: the stored row and the history are unchanged.
+    expect(soulStore.get(id)).toEqual(stored);
+    expect(store.size).toBe(0);
   }, 3000);
 
   test("snapshot serialization failure aborts the staged Soul write and append", async () => {
