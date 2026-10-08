@@ -8,12 +8,10 @@
  * principal is not deactivated — such a request fails later on a missing
  * public key or an unknown user, not on this check.
  *
- * `flair principal show` and `principal list` report the same verdict and call
- * THIS function rather than re-deriving it. That matters because the operations
- * API materialises a cleared column as an explicit `null`: the two reporters
- * used to fold it into "active", so a deactivated principal displayed as active
- * while the gate refused it. Calling the shared predicate makes an explicit
- * null read as deactivated rather than active.
+ * `flair principal show` and `principal list` report the same verdict via THIS
+ * function, and read the principal as stored — `show` over REST, `list` from an
+ * unprojected row — so an absent `status` (active) stays distinct from an
+ * explicit `null`, which the gate treats as deactivated.
  *
  * Deliberately dependency-free (no `harper`, no resource) so both the CLI
  * (`src/`) and the server (`resources/`) import it: `src/` must not import

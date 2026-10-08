@@ -386,10 +386,12 @@ export function register(program: Command): void {
           table: "Agent",
           operator: "and",
           conditions,
-          // `role` is the authority behind admin status (flair#941); the
-          // projection used to omit it, so this listing could only ever report
-          // the mirror.
-          get_attributes: ["id", "name", "kind", "status", "defaultTrustTier", "role", "admin", "runtime", "createdAt"],
+          // Read rows as stored. A `get_attributes` projection materialises an
+          // absent column as an explicit `null` (Harper), which the `status`
+          // column would then read as deactivated; the raw row omits the key, so
+          // the absent-versus-null distinction the auth gate makes survives
+          // here (flair#2378). `role` — the authority behind admin, flair#941 —
+          // is read from the same unprojected row.
         }),
       });
       if (!res.ok) {
@@ -436,9 +438,8 @@ export function register(program: Command): void {
         {
           label: "status",
           key: "status",
-          // Report the verdict the gate applies (flair#2378): an absent status
-          // is active, but an explicit null — which the operations API
-          // materialises for a cleared column — is deactivated.
+          // Report what the gate applies (isPrincipalDeactivated, flair#2378):
+          // an explicit null status is deactivated, an absent status is active.
           format: (_v, row) => {
             const s = isPrincipalDeactivated(row) ? String(row.status ?? "deactivated") : "active";
             const color = s === "active" ? render.c.green : s === "disabled" ? render.c.red : render.c.yellow;
@@ -469,10 +470,8 @@ export function register(program: Command): void {
       console.log(render.wrap(render.c.bold, String(result.id)));
       if (result.name) console.log(render.kv("name", String(result.name)));
       if (result.kind) console.log(render.kv("kind", render.wrap(result.kind === "human" ? render.c.cyan : render.c.magenta, String(result.kind))));
-      // Report the verdict the auth path applies (isPrincipalDeactivated,
-      // flair#2378): an absent `status` is active, but an explicit `null` —
-      // which the operations API materialises for a cleared column — is
-      // deactivated, not active.
+      // Report what the gate applies (isPrincipalDeactivated, flair#2378): an
+      // explicit null `status` is deactivated; an absent one is active.
       const shownStatus = isPrincipalDeactivated(result) ? String(result.status ?? "deactivated") : "active";
       const statusColor = shownStatus === "active" ? render.c.green : shownStatus === "disabled" ? render.c.red : render.c.yellow;
       console.log(render.kv("status", render.wrap(statusColor, shownStatus)));
