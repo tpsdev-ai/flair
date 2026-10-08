@@ -499,6 +499,7 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   let lost = false;
   let rejectLost!: (error: Error) => void;
   const lockLost = new Promise<never>((_resolve, reject) => { rejectLost = reject; });
+  void lockLost.catch(() => {});
   const beat = setInterval(() => {
     try {
       held.refresh();
@@ -548,7 +549,7 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
         remaining = readSpool(dir, agentId).length;
       }
     }
-    return { flushed: written.size, remaining, reason: written.size > 0 ? "flushed" : "write-failed" };
+    return { flushed: written.size, remaining, reason: !lost && written.size > 0 ? "flushed" : "write-failed" };
   } finally {
     clearInterval(beat);
     held.release();

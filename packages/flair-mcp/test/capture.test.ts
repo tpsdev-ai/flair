@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,6 +26,7 @@ import {
   runCaptureFlush,
   spoolPath,
   CAPTURE_SPOOL_MAX_RECORDS,
+  CAPTURE_LOCK_REFRESH_MS,
   type CaptureClient,
 } from "../src/capture-spool.ts";
 
@@ -43,6 +44,63 @@ afterEach(() => {
 const SECRET = `ghp_${"a".repeat(24)}`;
 const BEARER = "Authorization: Bearer abcdefghijklmnopqrstuvwx123";
 const env = () => ({ FLAIR_AGENT_ID: "agent-a", FLAIR_CAPTURE_DIR: dir });
+
+for (const [timing, recordCount] of [["between writes", 2], ["after the last write", 1]] as const) {
+  test(`lock loss ${timing} returns write-failed without an unhandled rejection`, async () => {
+    for (let i = 0; i < recordCount; i++) {
+      expect(runCapture(JSON.stringify({ hook_event_name: "Stop", last_assistant_message: `Decision: use host-${i}.` }), {
+        env: env(), dir,
+      }).reason).toBe("appended");
+    }
+    const firstKey = readSpool(dir, "agent-a")[0]!.dedupKey;
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => { unhandled.push(error); };
+    process.on("unhandledRejection", onUnhandled);
+    let refresh!: () => void;
+    let fired = false;
+    let signal: AbortSignal | undefined;
+    const rows: unknown[] = [];
+    const realSetInterval = globalThis.setInterval;
+    const interval = spyOn(globalThis, "setInterval").mockImplementation(((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+      if (delay === CAPTURE_LOCK_REFRESH_MS) {
+        refresh = () => { if (typeof callback === "function") callback(...args); };
+        return realSetInterval(() => {}, 60_000);
+      }
+      return realSetInterval(callback, delay, ...args);
+    }) as typeof globalThis.setInterval);
+    const realAdd = Set.prototype.add;
+    const add = spyOn(Set.prototype, "add").mockImplementation(function (this: Set<unknown>, value: unknown) {
+      const result = realAdd.call(this, value);
+      if (value === firstKey && refresh && !fired) {
+        fired = true;
+        unlinkSync(lockPath(dir, "agent-a"));
+        refresh();
+      }
+      return result;
+    });
+    try {
+      const outcome = await runCaptureFlush({ env: env(), dir, makeClient: () => ({
+        request: async <T>(_method: string, _path: string, body?: unknown, opts?: { signal?: AbortSignal }): Promise<T> => {
+          signal = opts?.signal;
+          rows.push(body);
+          return {} as T;
+        },
+      }) });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(fired).toBe(true);
+      expect(rows).toHaveLength(1);
+      expect(signal?.aborted).toBe(true);
+      expect(outcome).toEqual({ flushed: 1, remaining: recordCount, reason: "write-failed" });
+      expect(readSpool(dir, "agent-a")).toHaveLength(recordCount);
+      expect(unhandled).toEqual([]);
+      expect(existsSync(lockPath(dir, "agent-a"))).toBe(false);
+    } finally {
+      add.mockRestore();
+      interval.mockRestore();
+      process.removeListener("unhandledRejection", onUnhandled);
+    }
+  });
+}
 
 function failedBash(command: string, error = "Exit code 1\nError: boom", extra: Record<string, unknown> = {}) {
   return JSON.stringify({
