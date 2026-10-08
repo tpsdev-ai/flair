@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
+import { AGENT_ID_RULE, isValidAgentId } from "./lib/agent-id-rule.js";
 import type { SeedOwnerRead } from "./keystore.js";
 import {
   ALL_CLIENTS,
@@ -2564,4 +2565,33 @@ export function resolveFixAgentId(args: {
   const candidate = optsAgent || envAgentId || anyKnownAgentId || inferSoleAgentId(keyAgentIds);
   if (candidate && isNodeKeyId(candidate, keysDir)) return undefined;
   return candidate;
+}
+
+/** A stored agent id outside the shared rule, as reported by `flair doctor`. */
+export interface AgentIdRuleFinding {
+  invalidIds: string[];
+  message: string;
+  fixHint: string;
+}
+
+/**
+ * Report every stored Agent id that is outside the shared agent-ID rule
+ * (flair#2359). `rows` is the Agent roster read from the instance. Returns null
+ * when every stored id conforms. PURE — it reports; nothing is rewritten.
+ */
+export function describeAgentIdRuleFinding(rows: Array<{ id?: unknown }>): AgentIdRuleFinding | null {
+  const invalidIds = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row == null || !isValidAgentId(row.id))
+    .map((row) => String(row?.id))
+    .sort();
+  if (invalidIds.length === 0) return null;
+  return {
+    invalidIds,
+    message:
+      `${invalidIds.length} stored agent id(s) are outside the agent-ID rule (${AGENT_ID_RULE}): ` +
+      invalidIds.join(", "),
+    fixHint:
+      "register each of these agents under a conforming id with `flair agent add <new-id>` " +
+      "(or remove the stale row with `flair agent remove <id>`); nothing is renamed automatically",
+  };
 }

@@ -3,6 +3,37 @@ import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCa
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
 import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js";
 import { applyOriginatorInstanceId, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
+import { AGENT_ID_ERROR, invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
+
+/**
+ * The id this write lands on: the URL-bound target (`getId()`) when there is
+ * one, otherwise the body `id` (an in-process call, where the body id IS the
+ * write key). A non-scalar target is ignored.
+ */
+function writeTargetId(resource: any, content: any): unknown {
+  try {
+    const getId = resource?.getId;
+    const id = typeof getId === "function" ? getId.call(resource) : undefined;
+    if (typeof id === "string" || typeof id === "number") return id;
+  } catch {
+    /* getId() threw — fall back to the body id below */
+  }
+  return content != null && typeof content === "object" ? content.id : undefined;
+}
+
+/** A 400 refusing an agent id outside the shared rule, before anything is
+ *  written. An ABSENT id is allowed: a collection POST with no body id lets
+ *  Harper generate one (a UUID, which matches the rule), and a PUT/PATCH with
+ *  neither a URL target nor a body id has no id to validate. Only a PRESENT id
+ *  is checked. */
+function agentIdDenial(id: unknown): Response | null {
+  if (id == null) return null;
+  if (isValidAgentId(id)) return null;
+  return new Response(
+    JSON.stringify({ error: AGENT_ID_ERROR, message: invalidAgentIdMessage(id) }),
+    { status: 400, headers: { "content-type": "application/json" } },
+  );
+}
 
 /**
  * Agent resource — serves as the Principal table in 1.0.
@@ -31,6 +62,11 @@ export class Agent extends (databases as any).flair.Agent {
   allowDelete() { return allowAdmin((this as any).getContext?.()); }
 
   async post(content: any, context: any) {
+    // flair#2359 — the ONE agent-ID rule, before any field is defaulted or
+    // written. A create must never store an id AgentSeed would refuse.
+    const idDenial = agentIdDenial(writeTargetId(this, content));
+    if (idDenial) return idDenial;
+
     const now = new Date().toISOString();
 
     // Backward compat: set type for legacy code
@@ -150,6 +186,11 @@ export class Agent extends (databases as any).flair.Agent {
   }
 
   async put(content: any) {
+    // flair#2359 — refuse an id outside the shared rule before any read or
+    // write. A PUT to a new id is a create (Harper's put is an upsert).
+    const idDenial = agentIdDenial(writeTargetId(this, content));
+    if (idDenial) return idDenial;
+
     const denial = await this.authorizePrincipalWrite(content);
     if (denial) return denial;
 
@@ -196,6 +237,11 @@ export class Agent extends (databases as any).flair.Agent {
    * Both verbs now share authorizePrincipalWrite().
    */
   async patch(content: any, query?: any) {
+    // flair#2359 — refuse an id outside the shared rule before any read or
+    // write.
+    const idDenial = agentIdDenial(writeTargetId(this, content));
+    if (idDenial) return idDenial;
+
     const denial = await this.authorizePrincipalWrite(content);
     if (denial) return denial;
 

@@ -33,6 +33,7 @@ import {
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
 
 export type AgentCli = {
@@ -276,6 +277,12 @@ export function register(program: Command): void {
     .option("--target <url>", "Remote Flair REST URL; derives ops URL (HTTPS no port/:443 → Fabric ops :9925; HTTP no port/:80 → :19925; other ports 2–65535 → port-1; port 1 refused; env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL to seed the Agent on (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (id: string, opts) => {
+      // flair#2359 — the ONE agent-ID rule, before any key file is written or
+      // any insert is attempted. Refuse a non-matching id by name.
+      if (!isValidAgentId(id)) {
+        console.error(`Error: ${invalidAgentIdMessage(id)}`);
+        process.exit(1);
+      }
       const httpPort = resolveHttpPort(opts);
       const opsPort = resolveOpsPort(opts);
       const keysDir: string = opts.keysDir ?? defaultKeysDir();

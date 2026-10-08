@@ -9,12 +9,13 @@
 import { Command } from "commander";
 import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
-import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
+import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, describeAgentIdRuleFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -1928,6 +1929,60 @@ program
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
           const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(presenceUrl), keyPath) };
           await fetchAndRenderFleetPresence(headers, true, "      ");
+        }
+      }
+    }
+
+    // 8b. Agent ID rule (flair#2359) — report every stored Agent id outside
+    // the shared agent-ID rule. Read-only: nothing is rewritten.
+    if (harperResponding) {
+      console.log(`\n  ${render.wrap(render.c.bold, "Agent IDs")}`);
+      let roster: Array<{ id?: unknown }> | null = null;
+      let rosterReadAttempted = false;
+      const agentListAdminPass = resolveLocalAdminPass(undefined);
+      if (agentListAdminPass) {
+        rosterReadAttempted = true;
+        const auth = Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64");
+        try {
+          // Same total "select all" predicate `flair agent list` uses: every
+          // Agent row has a non-null createdAt, so a `createdAt > 1970-01-01`
+          // index scan avoids the null-scanning a `starts_with ""` on id does.
+          const res = await fetch(`http://127.0.0.1:${resolveOpsPort(opts)}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+            body: JSON.stringify({
+              operation: "search_by_conditions",
+              schema: "flair",
+              table: "Agent",
+              operator: "and",
+              conditions: [{ search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" }],
+              get_attributes: ["id"],
+            }),
+            signal: AbortSignal.timeout(5000),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data)) roster = data as Array<{ id?: unknown }>;
+          }
+        } catch {
+          /* leave roster null — reported as unreadable below */
+        }
+      }
+      if (roster === null) {
+        // A failed read is never reported as "no ids": say which it was.
+        console.log(
+          rosterReadAttempted
+            ? `  ${render.icons.warn} Could not read the stored Agent roster, so the agent-id check did not run.`
+            : `  ${render.icons.info} Skipped: no admin credentials to read the stored Agent roster.`,
+        );
+      } else {
+        const finding = describeAgentIdRuleFinding(roster);
+        if (!finding) {
+          console.log(`  ${render.icons.ok} Every stored agent id matches ${AGENT_ID_RULE}.`);
+        } else {
+          issues++;
+          console.log(`  ${render.icons.warn} ${finding.message}`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
         }
       }
     }
