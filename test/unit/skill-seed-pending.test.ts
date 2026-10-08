@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +15,12 @@ const seeded: SkillSeedOutcome = {
 const refused: SkillSeedOutcome = { kind: "refused", error: "test", message: "refused" };
 
 describe("local --skip-start seed handoff", () => {
+  // CLI build memo is per test process (flair#1807).
+  // The helper allows 90 s per build step; this hook allows 210 s.
+  beforeAll(() => {
+    ensureCliBuild();
+  }, 210_000);
+
   it("runs on the next start, clears only after success, and does not run again", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-skill-pending-"));
     try {
@@ -46,7 +52,6 @@ describe("local --skip-start seed handoff", () => {
   });
 
   it("does not leave an unreachable pending marker for a custom data directory", async () => {
-    ensureCliBuild();
     const home = mkdtempSync(join(tmpdir(), "fsc-"));
     const dataDir = join(home, "custom data");
     const root = resolve(import.meta.dirname, "..", "..");
