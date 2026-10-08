@@ -35,7 +35,7 @@ path.write_text(text.replace(old, new))
 PYCODE
   bun run build
   if [ "$path" = AgentSeed ]; then
-    title="AgentSeed stores a default expiry for an ephemeral starter memory"
+    title="AgentSeed ignores supplied expiry and stores a default for an ephemeral starter memory"
   else
     title="signed receive stores receiver-clock expiry when the incoming expiry is missing"
   fi
