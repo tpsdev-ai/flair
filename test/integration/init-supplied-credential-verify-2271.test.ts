@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
@@ -204,6 +204,39 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentia
       writeFileSync(adminPassPath, before, { mode: 0o600 });
     }
   }, 150_000);
+
+  for (const flag of ["--agent", "--agent-id"]) {
+    for (const missingPass of [false, true]) {
+      test(`${flag}: running Harper config-only refusal preserves ${missingPass ? "pass file absence" : "pass file bytes"}`, async () => {
+        const before = readFileSync(adminPassPath);
+        if (missingPass) rmSync(adminPassPath);
+        const beforeStat = missingPass ? null : statSync(adminPassPath);
+        try {
+          expect(await adminStatus(installedPassword)).toBe(200);
+          const r = await runInit([...baseArgs(), flag, "config-only-2271"], {
+            FLAIR_ADMIN_PASS: "fixture-config-only-wrong-2271",
+          });
+          expect(r.code, r.out).toBe(1);
+          expect(r.out.slice(r.out.indexOf("Refusing to write "))).toBe(
+            `Refusing to write ${adminPassPath}: credential verification is deferred by --skip-start. ` +
+              `No pass file was written; any existing file is unchanged. ` +
+              `Re-run init without --skip-start to verify a different supplied credential.\n`,
+          );
+          if (beforeStat) {
+            expect(readFileSync(adminPassPath)).toEqual(before);
+            expect(statSync(adminPassPath).ino).toBe(beforeStat.ino);
+            expect(statSync(adminPassPath).mtimeMs).toBe(beforeStat.mtimeMs);
+          } else {
+            expect(existsSync(adminPassPath)).toBe(false);
+          }
+          expect(existsSync(join(home, ".flair", "keys", "config-only-2271.key"))).toBe(false);
+          expect(await adminStatus(installedPassword)).toBe(200);
+        } finally {
+          if (missingPass) writeFileSync(adminPassPath, before, { mode: 0o600 });
+        }
+      }, 150_000);
+    }
+  }
 
   test("FLAIR_ADMIN_USER cannot substitute another superuser's password", async () => {
     const alternate = "fixture-alternate-superuser-2271";

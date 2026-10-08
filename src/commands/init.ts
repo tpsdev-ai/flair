@@ -826,10 +826,16 @@ program
         }
       }
       if (!alreadyRunning && (existsSync(adminPassPath) || persistedAdminUser)) {
+        const verificationDeferred = opts.skipStart && !!agentId;
         console.error(
-          `Refusing to write ${adminPassPath}: no running instance; a saved admin-pass file or persisted admin user exists. ` +
+          `Refusing to write ${adminPassPath}: ` +
+            (verificationDeferred
+              ? `credential verification is deferred by --skip-start. `
+              : `no running instance; a saved admin-pass file or persisted admin user exists. `) +
             `No pass file was written; any existing file is unchanged. ` +
-            (harperConfigPath(dataDir) !== null
+            (verificationDeferred
+              ? `Re-run init without --skip-start to verify a different supplied credential.`
+              : harperConfigPath(dataDir) !== null
               ? `Start the instance and re-run init with the supplied credential, or run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
               : `Run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`)
         );
