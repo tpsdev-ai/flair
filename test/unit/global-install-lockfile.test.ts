@@ -143,10 +143,11 @@ describe("the reviewed floor (flair#1683)", () => {
   });
 
   test("sits below the healthy baseline and above the broken shape", () => {
-    expect(MIN).toBeLessThan(492);
+    // 0.53.0 (last good release): 543 added on npm 10, 560 on npm 11.
+    expect(MIN).toBeLessThan(543);
     expect(MIN).toBeGreaterThan(50); // 0.54.1, npm 10
     expect(MIN).toBeGreaterThan(44); // 0.54.1, npm 11 / macOS
-    expect(MIN).toBeGreaterThan(Math.floor(492 * 0.9)); // a 10% collapse must still trip it
+    expect(MIN).toBeGreaterThan(Math.floor(543 * 0.9)); // a 10% collapse must still trip it
   });
 
   test("a budget without the field is an error, never a silent zero floor", () => {

@@ -191,21 +191,9 @@ describe("vendor-pinned npm-install nodes", () => {
       }));
       writeFileSync(join(root, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
       writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
+      const entry = ALLOWLIST.entries.find((e: { ghsa: string }) => e.ghsa === "GHSA-w2qp-rph6-63g4");
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
-        policy: { maxLifetimeDaysBySeverity: { moderate: 180 } },
-        entries: [{
-          ghsa: "GHSA-w2qp-rph6-63g4",
-          package: "fastify",
-          severity: "moderate",
-          class: "vendor-pinned",
-          sources: ["npm-install"],
-          approvedBy: "fixture",
-          introducedBy: "harper -> fastify",
-          reason: "Fixture pin in harper's shrinkwrap.",
-          added: "2026-09-03",
-          expires: "2027-03-02",
-          removeWhen: "harper's shrinkwrap resolves fastify >=5.12.1",
-        }],
+        policy: ALLOWLIST.policy, entries: [entry],
       }));
       writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
       const report = { vulnerabilities: { fastify: { nodes, via: [{
@@ -343,18 +331,15 @@ describe("the committed allowlist", () => {
     // These are the advisories the npm-install observation surfaces that `bun
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
     // sources ["npm-install"] so the gate knows they are fixed for bun only.
-    const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fast-uri");
-    // Exact IDs catch missing or substituted fast-uri advisories.
-    expect(npmOnly.map((e) => e.ghsa).sort()).toEqual([
-      "GHSA-4c8g-83qw-93j6",
-      "GHSA-7p8r-x3mc-p8w7",
-      "GHSA-f65p-4m7j-42xc",
-      "GHSA-hrr3-gc8f-f4qj",
-      "GHSA-jqff-g426-hqxp",
-      "GHSA-q3j6-qgpj-74h6",
-      "GHSA-qw65-cvwx-89v3",
-      "GHSA-v2hh-gcrm-f6hx",
-      "GHSA-v39h-62p7-jpjc",
+    // joi joined this class when the root override moved bun.lock off 17.13.4.
+    const npmOnly = ALLOWLIST.entries.filter((e) => ["fastify", "joi"].includes(e.package));
+    // Name the joi entries: a non-empty check alone could be satisfied by the
+    // fastify entries while the joi entries had gone missing.
+    expect(npmOnly.filter((e) => e.package === "joi").map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-6h2x-m376-mqjq",
+      "GHSA-6w3j-5fw6-r9vr",
+      "GHSA-gg4h-3hg2-grpc",
+      "GHSA-wr44-6hxh-3jwq",
     ]);
     for (const e of npmOnly) {
       expect(e.sources).toEqual(["npm-install"]);

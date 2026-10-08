@@ -84,7 +84,22 @@ export function publicRosterEnabled(): boolean {
 }
 
 /**
- * Reuse the auth middleware verdict without consuming the nonce again.
+/**
+ * Resolve the GET /Presence read verdict from the verdict the AUTH MIDDLEWARE
+ * already established, rather than re-verifying the request here (flair#1880
+ * F2; exactly the collision resources/AttentionQuery.ts documents).
+ *
+ * GET /Presence/<id> is NOT on auth-middleware.ts's short-circuit list (only
+ * the exact "/Presence" collection GET is). The middleware verifies the
+ * TPS-Ed25519 signature and records the nonce in the ONE shared replay store,
+ * annotating request.tpsAgent but NOT verifyAgentRequest's per-request memo.
+ * Calling verifyAgentRequest() again would re-consume that same nonce, read as
+ * a replay (claimAgentNonce) and deny a legitimate agent. resolveAgentAuth()
+ * consults the middleware's tpsAgent/tpsAnonymous annotations FIRST, and only
+ * falls back to a header verify when the middleware never ran (the
+ * short-circuited collection GET) — so it reuses the established verdict
+ * instead of re-running a doomed second signature check. It is the repo's ONE
+ * resolver, not a second verifier.
  *
  *   verifiedReader        — kind !== "anonymous": a signature-verified agent,
  *                           the admin credential, or a trusted in-process call
@@ -380,6 +395,18 @@ export class Presence extends (databases as any).flair.Presence {
    * gets those three as null, exactly as before; anonymous/loopback/internal
    * without that signal likewise.
    *
+   * The READER decision is resolved from the auth MIDDLEWARE's already-
+   * established verdict via resolveAgentAuth() — NOT by re-verifying the header
+   * here (flair#1880 F2). /Presence is a public-passthrough in
+   * auth-middleware.ts, and GET /Presence/<id> is not: on a by-id read the
+   * middleware has ALREADY verified the signature and consumed its nonce in the
+   * one shared nonce store, so a second verifyAgentRequest() would read as a
+   * replay and deny a legitimate agent. resolveAgentAuth() checks the
+   * middleware's tpsAgent/tpsAnonymous annotations first and only falls back to
+   * a header verify for the short-circuited collection GET. The old
+   * authorizeLocal-forged-super_user vector (#610) stays closed: the middleware
+   * marks a credential-less request tpsAnonymous (checked first), and
+   * resolveAgentAuth never trusts a `context.user` without a credential header.
    * allowRead() is UNCHANGED (still `true`): the read gate lives in get() so it
    * can return 401 (allowRead()=false would return 403 — see that method).
    *

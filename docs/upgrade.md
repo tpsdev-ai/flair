@@ -685,10 +685,10 @@ the destructive replace unless you pass `--yes`); the equivalent by hand is `fla
 stop && rm -rf ~/.flair/data && mkdir -p ~/.flair/data && tar -xzf
 <snapshot> -C ~/.flair/data && flair start`, in case you'd rather not use the command.
 
-The only full rollback is restoring the pre-upgrade physical data-directory snapshot.
-`flair backup`/`restore` logically exports/imports only Agent, Memory and Soul rows
-through a running server into a fresh compatible instance; it does not restore the
-physical store or other tables.
+If you don't have a snapshot (upgraded without `--snapshot`, or on a version from
+before flair#637 shipped it), there is no tested way back short of restoring from a
+`flair backup` JSON export on the older version — do not assume an untested downgrade
+boot will work.
 
 ### Does the previous version actually boot against newer data? (tested, not assumed)
 
@@ -696,11 +696,8 @@ This used to be aspirational — nobody had actually checked. `test/compat/downg
 now checks it for real, nightly, alongside the mixed-version federation suite (both run
 from `.github/workflows/federation-compat.yml`'s `bun test test/compat/`): it boots the
 current build, writes a memory and a presence row, stops it *without* wiping the data
-directory, then starts a pinned earlier Flair release that uses the previous storage engine (`@tpsdev-ai/flair` 0.59.0) against that
-same directory through its own CLI in npm's nested layout. The test requires the two Harper engines to
-differ, and confirms the older CLI's backwards-engine guard refuses the store *before*
-Harper is spawned, naming the engine change, with regular-file paths and contents in the
-data directory unchanged.
+directory, then boots the last **npm-published** `@tpsdev-ai/flair` against that exact
+same directory and confirms it comes up healthy and can read both rows back.
 
 **The guarantee is now restated (flair#1050):** there is never a silent bad outcome.
 Either the old binary boots and serves the corpus correctly, **or** it refuses to start
@@ -723,13 +720,6 @@ recovery as the 5.1 → 5.2 break: `flair snapshot restore <path>`. The
 `downgrade-boot` suite treats that Harper crash as the loud-refusal branch of
 the flair#1050 invariant (it boots Harper via `startHarper`, so the CLI stamp
 phrasing is not on that path).
-
-**Engine-version break: Harper 5.2 → 5.3.** This release attempts to write an `engine-version.txt` stamp into
-`ROOTPATH` (or `~/.flair/data` when unset) at boot; the write is best effort. With a readable, nonempty stamp and a known installed Harper version, an older guarded Flair refuses before Harper opens the store if the stamp is newer or the versions cannot be compared. A failed write can leave a stale stamp.
-The only full rollback is restoring the pre-upgrade physical data-directory snapshot
-(`flair snapshot restore <path>`). `flair backup`/`restore` logically exports/imports
-only Agent, Memory and Soul rows through a running server into a fresh compatible
-instance; it does not restore the physical store or other tables.
 
 **As observed when this suite was added (2026-07-08):** the npm-published baseline
 (0.21.0) boots cleanly against data written by a HEAD build roughly 14 commits ahead of

@@ -150,19 +150,9 @@ export const HARPER_SYSTEM_DB_REL = join("database", "system");
 export const HDB_USER_PRIMARY_CF = "hdb_user/";
 
 /**
- * Match `hdb_user/` or the `hdb_user/@` prefix.
- */
-export function isHdbUserPrimaryColumn(column: string): boolean {
-  return column === HDB_USER_PRIMARY_CF || column.startsWith(`${HDB_USER_PRIMARY_CF}@`);
-}
-
-/**
- * Count the rows in the `hdb_user` primary store of a Harper 5 system
+ * Count the rows in the `hdb_user/` primary store of a Harper 5 system
  * database, opened READ-ONLY (RocksDB read-only needs no lock, so this works
  * while the instance is running, and writes nothing).
- *
- * Both physical layouts are accepted (see `isHdbUserPrimaryColumn`); every
- * matching family is counted.
  *
  * `@harperfast/rocksdb-js` is resolved through the installed `harper`
  * package: flair does not depend on it directly, and the reader must be the
@@ -184,30 +174,26 @@ export function countRocksAdminUsers(systemDbDir: string): number {
     };
   };
   const probe = RocksDatabase.open(systemDbDir, { readOnly: true });
-  let userStores: string[];
+  let hasUserStore: boolean;
   try {
     if (!Array.isArray(probe.columns) || !probe.columns.every(column => typeof column === "string")) {
       throw new Error(`Invalid RocksDB columns metadata at ${systemDbDir}`);
     }
-    userStores = probe.columns.filter(isHdbUserPrimaryColumn);
+    hasUserStore = probe.columns.includes(HDB_USER_PRIMARY_CF);
   } finally {
     probe.close?.();
   }
-  if (userStores.length === 0) {
+  if (!hasUserStore) {
     throw new Error(
       `MISSING_HDB_USER_COLUMN: existing system store at ${systemDbDir} lacks ${HDB_USER_PRIMARY_CF}. Repair the system store or select the correct --data-dir.`,
     );
   }
-  let total = 0;
-  for (const name of userStores) {
-    const users = RocksDatabase.open(systemDbDir, { name, readOnly: true });
-    try {
-      total += users.getKeysCount();
-    } finally {
-      users.close?.();
-    }
+  const users = RocksDatabase.open(systemDbDir, { name: HDB_USER_PRIMARY_CF, readOnly: true });
+  try {
+    return users.getKeysCount();
+  } finally {
+    users.close?.();
   }
-  return total;
 }
 
 /** A populated user store is evidence that the install is not fresh. */

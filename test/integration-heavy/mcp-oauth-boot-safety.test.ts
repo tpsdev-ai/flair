@@ -70,7 +70,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync, cpSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -131,7 +131,6 @@ function makeWorkDirWithShippedConfig(prefix: string, mutate?: (shipped: string)
   // the JS resources (mcp-oauth.ts, etc.).
   symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
   symlinkSync(join(REPO_ROOT, "dist"), join(workDir, "dist"));
-  cpSync(join(REPO_ROOT, "schemas"), join(workDir, "schemas"), { recursive: true });
   if (mutate) {
     const shipped = readFileSync(SHIPPED_CONFIG, "utf-8");
     writeFileSync(join(workDir, "config.yaml"), mutate(shipped), "utf-8");
