@@ -1201,23 +1201,26 @@ function computeActionRecallInstall(
   const newConfig = deepClone(config);
   let preToolUse: HookDeltaAction = "noop";
 
+  const groups = newConfig.hooks?.PreToolUse;
+  if (Array.isArray(groups)) {
+    for (const group of groups) {
+      if (!Array.isArray(group?.hooks) || hookGroupIsFlairOnly(group, isFlairActionRecallCommand)) continue;
+      const retained = group.hooks.filter((hook: any) => !isFlairActionRecallCommand(hook?.command));
+      if (retained.length !== group.hooks.length) {
+        group.hooks = retained;
+        preToolUse = "update";
+      }
+    }
+  }
+
   const existing = findActionRecallEntry(newConfig);
   if (existing) {
     const group = existing.group;
     const hook = group.hooks[existing.hookIndex];
-    if (hookGroupIsFlairOnly(group, isFlairActionRecallCommand)) {
-      if (hook.type !== "command" || hook.command !== command || group.matcher !== ACTION_RECALL_PRE_TOOL_USE_MATCHER) {
-        hook.command = command;
-        hook.type = "command";
-        group.matcher = ACTION_RECALL_PRE_TOOL_USE_MATCHER;
-        preToolUse = "update";
-      }
-    } else {
-      group.hooks.splice(existing.hookIndex, 1);
-      newConfig.hooks.PreToolUse.push({
-        matcher: ACTION_RECALL_PRE_TOOL_USE_MATCHER,
-        hooks: [{ type: "command", command }],
-      });
+    if (hook.type !== "command" || hook.command !== command || group.matcher !== ACTION_RECALL_PRE_TOOL_USE_MATCHER) {
+      hook.command = command;
+      hook.type = "command";
+      group.matcher = ACTION_RECALL_PRE_TOOL_USE_MATCHER;
       preToolUse = "update";
     }
   } else {
@@ -1227,7 +1230,7 @@ function computeActionRecallInstall(
       matcher: ACTION_RECALL_PRE_TOOL_USE_MATCHER,
       hooks: [{ type: "command", command }],
     });
-    preToolUse = "add";
+    if (preToolUse !== "update") preToolUse = "add";
   }
 
   let sessionStart: HookDeltaAction | "skipped" = "skipped";
@@ -1404,14 +1407,20 @@ export function installActionRecall(opts: ActionRecallInstallOptions): ActionRec
 function computeActionRecallRemoval(config: any): ActionRecallDelta {
   const newConfig = deepClone(config);
   let preToolUse: HookDeltaAction = "noop";
-  const entry = findActionRecallEntry(newConfig);
-  if (entry) {
-    const group = newConfig.hooks.PreToolUse[entry.groupIndex];
-    group.hooks.splice(entry.hookIndex, 1);
-    if (group.hooks.length === 0) newConfig.hooks.PreToolUse.splice(entry.groupIndex, 1);
-    if (newConfig.hooks.PreToolUse.length === 0) delete newConfig.hooks.PreToolUse;
-    preToolUse = "remove";
+  const groups = newConfig.hooks?.PreToolUse;
+  if (Array.isArray(groups)) {
+    for (let gi = groups.length - 1; gi >= 0; gi--) {
+      const group = groups[gi];
+      if (!Array.isArray(group?.hooks)) continue;
+      const retained = group.hooks.filter((hook: any) => !isFlairActionRecallCommand(hook?.command));
+      if (retained.length === group.hooks.length) continue;
+      group.hooks = retained;
+      if (retained.length === 0) groups.splice(gi, 1);
+      preToolUse = "remove";
+    }
+    if (preToolUse === "remove" && groups.length === 0) delete newConfig.hooks.PreToolUse;
   }
+
   let sessionStart: HookDeltaAction | "skipped" = "skipped";
   const ss = findHookEntry(newConfig);
   if (ss) {
@@ -1428,7 +1437,6 @@ function computeActionRecallRemoval(config: any): ActionRecallDelta {
   return { changed: preToolUse === "remove" || sessionStart === "update", newConfig, actions: { preToolUse, sessionStart } };
 }
 
-/** Remove the first marker-matched PreToolUse entry and compatible refresh flag. */
 export function uninstallActionRecall(opts: UninstallHookOptions): ActionRecallMutationResult {
   const { homeDir, harness } = opts;
   const dryRun = !!opts.dryRun;

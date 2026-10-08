@@ -69,6 +69,55 @@ function captureCommand(): string {
 }
 
 describe("flair#2264 — shared hook groups", () => {
+  it("action-recall install and uninstall remove duplicate canonical entries from shared groups", () => {
+    const canonical = { type: "command", command: actionRecallCommand() };
+    const decoy = { type: "command", command: `${actionRecallCommand()} `, timeout: 17 };
+    const preserved = {
+      matcher: "Read",
+      hooks: [USER_HOOK, decoy],
+      timeout: 23,
+    };
+    const other = { matcher: "Write", hooks: [USER_HOOK] };
+    const stop = [{ hooks: [USER_HOOK] }];
+    writeSettings({ hooks: {
+      PreToolUse: [
+        { ...preserved, hooks: [canonical, USER_HOOK, canonical, decoy] },
+        other,
+        { matcher: "Edit", hooks: [canonical, USER_HOOK, canonical] },
+      ],
+      Stop: stop,
+    } });
+
+    const installed = installActionRecall({ homeDir: home, harness: "claude-code", agentId: AGENT, flairUrl: URL, runtime: AR_RUNTIME });
+    expect(installed.ok).toBe(true);
+    const groups = [preserved, other, { matcher: "Edit", hooks: [USER_HOOK] }];
+    expect(settings().hooks.PreToolUse.slice(0, -1)).toEqual(groups);
+    expect(settings().hooks.PreToolUse.at(-1).hooks).toHaveLength(1);
+    expect(settings().hooks.Stop).toEqual(stop);
+
+    const removed = uninstallActionRecall({ homeDir: home, harness: "claude-code" });
+    expect(removed.ok).toBe(true);
+    expect(settings().hooks.PreToolUse).toEqual(groups);
+    expect(settings().hooks.Stop).toEqual(stop);
+  });
+
+  it("action-recall uninstall removes canonical entries from shared and dedicated groups", () => {
+    const canonical = { type: "command", command: actionRecallCommand() };
+    const decoy = { type: "command", command: "echo action-recall-hook.js" };
+    const preserved = { matcher: "Read", hooks: [USER_HOOK, decoy] };
+    writeSettings({ hooks: { PreToolUse: [
+      { ...preserved, hooks: [canonical, USER_HOOK, canonical, decoy] },
+      { matcher: "Bash", hooks: [canonical, canonical] },
+      { matcher: "Edit", hooks: [canonical] },
+    ] } });
+
+    expect(uninstallActionRecall({ homeDir: home, harness: "claude-code", dryRun: true }).actions?.preToolUse).toBe("remove");
+    expect(settings().hooks.PreToolUse).toHaveLength(3);
+    expect(uninstallActionRecall({ homeDir: home, harness: "claude-code" }).ok).toBe(true);
+    expect(settings().hooks.PreToolUse).toEqual([preserved]);
+    expect(uninstallActionRecall({ homeDir: home, harness: "claude-code" }).actions?.preToolUse).toBe("noop");
+  });
+
   it("action-recall install leaves the shared group's matcher and other hook serialized JSON unchanged and moves its entry to a dedicated group", () => {
     writeSettings({
       hooks: { PreToolUse: [{ matcher: "*", hooks: [USER_HOOK, { type: "command", command: actionRecallCommand() }] }] },
