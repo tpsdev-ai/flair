@@ -8,6 +8,15 @@
  * (Intercom npm Apr 30 2026), Ruby/Go sleeper packages (May 1), NuGet
  * typosquats (May 6), all in the past two weeks.
  *
+ * The checked fields are `dependencies`, `optionalDependencies` and
+ * `overrides` (root and every workspace package.json). An `overrides` entry
+ * pins the version a transitive dep resolves to, so it can put a fresh
+ * version in the tree without appearing in any `dependencies`.
+ *
+ * A known-good fresh SECURITY pin is exempted by a DATED entry naming the
+ * advisory, in .github/dep-age-allowlist.json; an expired entry fails the
+ * gate. Policy narrative: docs/supply-chain-policy.md.
+ *
  * THIS SCRIPT IS THE CLI ENTRY POINT. It imports the pure gate logic from
  * scripts/lib/check-dep-ages-collect.mjs and always runs the gate.
  * There is no "am I the main module" check: the gate ALWAYS executes.
@@ -39,7 +48,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectDeps } from "./lib/check-dep-ages-collect.mjs";
+import { collectDeps, collectNonExactOverrides } from "./lib/check-dep-ages-collect.mjs";
 
 const ARGS = process.argv.slice(2);
 
@@ -58,6 +67,86 @@ const REPO_ROOT = process.env.FLAIR_CHECK_DEP_AGES_ROOT ??
 
 function readPkg(path) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+// ── Dated exemption allowlist ──────────────────────────────────────────────
+//
+// A security fix can need a version younger than the bake window (a patch
+// release pinned through `overrides`, say). Those are enumerated with a hard
+// expiry in .github/dep-age-allowlist.json — one dated entry per pin, each
+// naming the advisory it fixes. An expired entry fails the gate: re-read the
+// reason before re-dating, or remove the entry.
+const ALLOWLIST_REL = join(".github", "dep-age-allowlist.json");
+const GHSA_RE = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/i;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Read and validate the exemption allowlist at <root>/.github/dep-age-allowlist.json.
+ * A MISSING file means "no exemptions" — test fixtures and downstream adopters
+ * have none. An unreadable or malformed file is an error, never a silent pass.
+ * Returns the unexpired entries and the expired ones separately.
+ */
+function readAllowlist(root) {
+  const path = join(root, ALLOWLIST_REL);
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return { entries: [], expired: [] };
+    throw new Error(`cannot read ${path}: ${err?.message ?? err}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`${path} is not valid JSON: ${err?.message ?? err}`);
+  }
+  if (!Array.isArray(parsed?.entries)) {
+    throw new Error(`${path} must have an "entries" array.`);
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const entries = [];
+  const expired = [];
+  const problems = [];
+  parsed.entries.forEach((entry, i) => {
+    const where = `${path} entries[${i}]`;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      problems.push(`${where} must be an object.`);
+      return;
+    }
+    const ghsa = Array.isArray(entry.ghsa) ? entry.ghsa : [entry.ghsa];
+    const bad = [];
+    if (typeof entry.package !== "string" || entry.package === "") bad.push(`"package" must be a non-empty string`);
+    if (typeof entry.version !== "string" || entry.version === "") bad.push(`"version" must be a non-empty string`);
+    if (ghsa.length === 0 || !ghsa.every((g) => typeof g === "string" && GHSA_RE.test(g))) {
+      bad.push(`"ghsa" must name at least one GHSA advisory id`);
+    }
+    if (!ISO_DATE_RE.test(entry.added ?? "")) bad.push(`"added" must be YYYY-MM-DD`);
+    if (!ISO_DATE_RE.test(entry.expires ?? "")) {
+      bad.push(`"expires" must be YYYY-MM-DD`);
+    } else if (ISO_DATE_RE.test(entry.added ?? "") && Date.parse(entry.expires) <= Date.parse(entry.added)) {
+      bad.push(`"expires" (${entry.expires}) must be after "added" (${entry.added})`);
+    }
+    if (typeof entry.reason !== "string" || entry.reason.trim() === "") bad.push(`"reason" must be a non-empty string`);
+    if (bad.length > 0) {
+      problems.push(`${where}: ${bad.join("; ")}`);
+      return;
+    }
+    const normalized = {
+      package: entry.package,
+      version: entry.version,
+      ghsa,
+      added: entry.added,
+      expires: entry.expires,
+      reason: entry.reason,
+    };
+    if (today >= entry.expires) expired.push(normalized);
+    else entries.push(normalized);
+  });
+  if (problems.length > 0) {
+    throw new Error(`Invalid ${path}:\n  - ${problems.join("\n  - ")}`);
+  }
+  return { entries, expired };
 }
 
 // ── Main gate logic (always runs — no main-detection guard) ──────────────────
@@ -117,6 +206,27 @@ async function main() {
   }
 
   const toCheck = collectDeps(allPkgs, KEEP_CURRENT);
+  const nonExactOverrides = collectNonExactOverrides(allPkgs);
+
+  const allowlist = readAllowlist(REPO_ROOT);
+  if (allowlist.expired.length > 0) {
+    console.error("Expired bake-time exemption(s) in .github/dep-age-allowlist.json:");
+    console.error("");
+    for (const e of allowlist.expired) {
+      console.error(`    ${e.package}@${e.version} — expired ${e.expires} (${e.ghsa.join(", ")})`);
+    }
+    console.error("");
+    console.error("Re-read the reason, then remove the entry or re-date it in a new one.");
+    process.exit(2);
+  }
+
+  if (nonExactOverrides.length > 0) {
+    console.log("Not age-checked (non-exact override specifiers, resolved only at install time):");
+    for (const o of nonExactOverrides) {
+      console.log(`    ${o.name} "${o.spec}" (declared in ${o.declaredIn})`);
+    }
+    console.log("");
+  }
 
   if (toCheck.size === 0) {
     console.log("✓ No external pinned production deps to check.");
@@ -231,10 +341,33 @@ async function main() {
   await runChecks();
 
   // ── Report ────────────────────────────────────────────────────────
-  if (tooFresh.length > 0) {
+  // Partition the too-fresh pins into those named by an unexpired dated
+  // exemption and those that are not. Expired entries were refused above.
+  const exempted = [];
+  const stillFresh = [];
+  for (const f of tooFresh) {
+    const entry = allowlist.entries.find((e) => e.package === f.name && e.version === f.version);
+    if (entry) exempted.push({ ...f, entry });
+    else stillFresh.push(f);
+  }
+
+  if (exempted.length > 0) {
+    console.log("Exempted fresh pins (dated exemption, see docs/supply-chain-policy.md):");
+    console.log("");
+    for (const f of exempted.sort((a, b) => b.publishedAt - a.publishedAt)) {
+      const days = f.ageDays.toFixed(1);
+      console.log(
+        `    ${f.name}@${f.version}    — published ${days} days ago (policy: >=${MIN_AGE_DAYS} days); exempt until ${f.entry.expires} (${f.entry.ghsa.join(", ")})`,
+      );
+      for (const p of f.declaredIn) console.log(`    declared in ${p}`);
+    }
+    console.log("");
+  }
+
+  if (stillFresh.length > 0) {
     console.error("Pinned production deps younger than the bake-time policy:");
     console.error("");
-    for (const f of tooFresh.sort((a, b) => b.publishedAt - a.publishedAt)) {
+    for (const f of stillFresh.sort((a, b) => b.publishedAt - a.publishedAt)) {
       const days = f.ageDays.toFixed(1);
       console.error(`    ${f.name}@${f.version}    — published ${days} days ago (policy: >=${MIN_AGE_DAYS} days)`);
       for (const p of f.declaredIn) console.error(`    declared in ${p}`);
@@ -245,7 +378,7 @@ async function main() {
     );
     console.error(
       "",
-      "To bypass for a known-good fresh dep: set FLAIR_DEP_MIN_AGE_DAYS=0 for this CI run, OR pin to an older version, OR document the exception in docs/supply-chain-policy.md.",
+      "To exempt a known-good fresh security pin: add a dated entry to .github/dep-age-allowlist.json naming the advisory (see docs/supply-chain-policy.md), OR pin to an older version.",
     );
     process.exit(1);
   }
@@ -260,9 +393,15 @@ async function main() {
     process.exit(2);
   }
 
-  console.log(
-    `All ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old.`,
-  );
+  if (exempted.length === 0) {
+    console.log(
+      `All ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old.`,
+    );
+  } else {
+    console.log(
+      `${toCheck.size - exempted.length} of ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old; ${exempted.length} exemption(s) listed above.`,
+    );
+  }
 }
 
 main().catch((err) => {

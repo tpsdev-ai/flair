@@ -20,7 +20,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectDeps } from "../../scripts/lib/check-dep-ages-collect.mjs";
+import { collectDeps, collectNonExactOverrides } from "../../scripts/lib/check-dep-ages-collect.mjs";
 
 /* ─────────────────────────── Unit tests ───────────────────────────── */
 
@@ -104,6 +104,66 @@ describe("collectDeps", () => {
         ]);
      });
    });
+
+  /* overrides */
+  describe("overrides", () => {
+    const pkgsOverrides = (overrides: Record<string,string>, p: string) => [
+      { pkg: { overrides }, path: p },
+    ];
+
+    it("collects an exact override pin from the root manifest", () => {
+      const result = collectDeps(pkgsOverrides({"some-pin":"1.2.3"},"package.json"), keepCurrent);
+      expect(result.size).toBe(1);
+      expect(result.get("some-pin@1.2.3")).toEqual({
+        name: "some-pin", version: "1.2.3", declaredIn: ["package.json"],
+      });
+    });
+
+    it("collects an exact override pin from a workspace manifest", () => {
+      const result = collectDeps(pkgsOverrides({"some-pin":"1.2.3"},"packages/foo/package.json"), keepCurrent);
+      expect(result.get("some-pin@1.2.3")!.declaredIn).toEqual(["packages/foo/package.json"]);
+    });
+
+    it("checks the target of an npm: alias, not the alias key", () => {
+      const result = collectDeps(pkgsOverrides({"alias-key":"npm:real-pkg@2.0.0"},"package.json"), keepCurrent);
+      expect(result.size).toBe(1);
+      expect(result.has("real-pkg@2.0.0")).toBe(true);
+      expect(result.has("alias-key@2.0.0")).toBe(false);
+    });
+
+    it("skips a non-exact override range", () => {
+      expect(collectDeps(pkgsOverrides({"some-pin":"^1.2.3"},"package.json"), keepCurrent).size).toBe(0);
+    });
+
+    it("dedups a pin declared in both dependencies and overrides of one manifest", () => {
+      const result = collectDeps([
+        { pkg: { dependencies: {"some-pin":"1.2.3"}, overrides: {"some-pin":"1.2.3"} }, path: "package.json" },
+      ], keepCurrent);
+      expect(result.size).toBe(1);
+      expect(result.get("some-pin@1.2.3")!.declaredIn).toEqual(["package.json"]);
+    });
+  });
+});
+
+/* ── Override specifiers the gate cannot age-check ────────────────────── */
+
+describe("collectNonExactOverrides", () => {
+  const pkgsOverrides = (overrides: Record<string,string>, p: string) => [
+    { pkg: { overrides }, path: p },
+  ];
+
+  it("reports a non-exact override range with its manifest", () => {
+    const gaps = collectNonExactOverrides(pkgsOverrides({"some-pin":"^1.2.3"},"package.json"));
+    expect(gaps).toEqual([{ name: "some-pin", spec: "^1.2.3", declaredIn: "package.json" }]);
+  });
+
+  it("does not report an exact override pin", () => {
+    expect(collectNonExactOverrides(pkgsOverrides({"some-pin":"1.2.3"},"package.json"))).toEqual([]);
+  });
+
+  it("does not report an exempt workspace: specifier", () => {
+    expect(collectNonExactOverrides(pkgsOverrides({"some-pin":"workspace:*"},"package.json"))).toEqual([]);
+  });
 });
 
 /* ───────────── CLI fail-closed exit tests ─────────────────────────── */
@@ -143,6 +203,36 @@ function writeFixtureRepo(root: string): string {
   }));
   if (!existsSync(join(root, "package.json"))) setupFailure(`fixture package.json not written under ${root}`);
   return root;
+}
+
+/** Write a repo root whose only pin is an `overrides` entry, and an empty packages/ dir. */
+function writeOverrideFixtureRepo(root: string, overrides: Record<string, string>): string {
+  mkdirSync(join(root, "packages"), { recursive: true });
+  writeFileSync(join(root, "package.json"), JSON.stringify({
+    name: "dep-ages-overrides-fixture",
+    version: "0.0.0",
+    overrides,
+  }));
+  if (!existsSync(join(root, "package.json"))) setupFailure(`fixture package.json not written under ${root}`);
+  return root;
+}
+
+/** Write the gate's dated exemption allowlist under a fixture root's .github/. */
+function writeAllowlist(root: string, entries: unknown[]): void {
+  mkdirSync(join(root, ".github"), { recursive: true });
+  writeFileSync(join(root, ".github", "dep-age-allowlist.json"), JSON.stringify({ entries }));
+}
+
+/** One well-formed dated exemption for the fixture pin, added on `added`, expiring on `expires`. */
+function exemption(added: string, expires: string): Record<string, unknown> {
+  return {
+    package: FIXTURE_DEP,
+    version: FIXTURE_VERSION,
+    ghsa: ["GHSA-1234-5678-9abc"],
+    added,
+    expires,
+    reason: "fixture: a security pin younger than the bake window",
+  };
 }
 
 /**
@@ -238,6 +328,72 @@ describe("CLI fail-closed exit — too-fresh dep", () => {
     } finally {
       registry.stop();
     }
+  }, 30_000);
+});
+
+describe("CLI — a pin through overrides and the dated exemption", () => {
+  it("exits 1 when a version pinned through overrides was published now", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-too-fresh"), { [FIXTURE_DEP]: FIXTURE_VERSION });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(registry.requests).toEqual([`/${FIXTURE_DEP}`]);
+      expect(output).toContain("Pinned production deps younger than the bake-time policy");
+      expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
+      expect(output).toContain("declared in package.json");
+      expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("exits 0 with a matching unexpired dated exemption", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-exempt"), { [FIXTURE_DEP]: FIXTURE_VERSION });
+    writeAllowlist(root, [exemption("2026-01-01", "2099-01-01")]);
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain("Exempted fresh pins");
+      expect(output).toContain("exempt until 2099-01-01");
+      expect(output).not.toContain("Pinned production deps younger than the bake-time policy");
+      expect(exitCode).toBe(0);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("exits 2 on an expired exemption, before fetching", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-expired"), { [FIXTURE_DEP]: FIXTURE_VERSION });
+    writeAllowlist(root, [exemption("2020-01-01", "2020-01-02")]);
+    const { exitCode, output } = await runGate(CLI_SCRIPT, {
+      FLAIR_CHECK_DEP_AGES_ROOT: root,
+      // A dead registry keeps a RED run off the real npm registry; the
+      // discriminating assertion is the message and the exit code.
+      FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
+    });
+    expect(output).toContain("Expired bake-time exemption");
+    expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
+    expect(output).toContain("2020-01-02");
+    expect(exitCode).toBe(2);
+  }, 30_000);
+
+  it("reports a non-exact override range and does not age-check it", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-range"), { [FIXTURE_DEP]: "^1.0.0" });
+    const { exitCode, output } = await runGate(CLI_SCRIPT, {
+      FLAIR_CHECK_DEP_AGES_ROOT: root,
+      // Nothing is age-checked, so the dead registry is never queried.
+      FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
+    });
+    expect(output).toContain("Not age-checked (non-exact override specifiers");
+    expect(output).toContain(`${FIXTURE_DEP} "^1.0.0"`);
+    expect(output).toContain("No external pinned production deps to check.");
+    expect(exitCode).toBe(0);
   }, 30_000);
 });
 
