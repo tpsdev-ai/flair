@@ -38,8 +38,9 @@ function json(status: number, body: unknown): Response {
  * A refusal or failure from Memory.get()/Memory.put() is a Harper `Response`
  * (it carries `.status` + `.json`); a successful read/write is a plain record.
  * Return the Response as-is so the endpoint answers with THAT HTTP status and
- * its named error, and pass a record through unchanged. Unwrapping the
- * Response into its body would serialize a refusal as a 200 (flair#2377).
+ * its named error, and pass a record through unchanged.
+ * Returning an unwrapped write refusal would serialize it as HTTP 200;
+ * unwrapping a read refusal would replace it with the generic 404 below.
  */
 function asResponse(value: any): Response | null {
   if (value && typeof value === "object" && typeof value.json === "function" && "status" in value) {

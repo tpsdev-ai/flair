@@ -997,9 +997,9 @@ describe("client-forged skillSubjectId", () => {
 
 // ─── flair#2377: a refused write answers with its own HTTP status, never 200 ──
 //
-// MemoryArchive unwrapped Memory.put/get's Harper Response into its JSON body,
-// so a refusal reached the client as HTTP 200. These pin the response path: a
-// guard Response passes through with ITS status and named error.
+// MemoryArchive returned unwrapped write refusals as HTTP 200 and replaced
+// read refusals with a generic 404. These tests pin the original refusal Response,
+// status, and error.
 describe("flair#2377 — a refused write keeps its own status, never 200", () => {
   it("(s1) Memory.put's 403 propagates as a 403 Response with the named error", async () => {
     seedMemory({ id: "mem-s1", agentId: "agent-a", visibility: "shared", content: "body" });
@@ -1020,18 +1020,21 @@ describe("flair#2377 — a refused write keeps its own status, never 200", () =>
     }
   });
 
-  it("(s2) a non-2xx Memory.get propagates its status rather than collapsing to 200", async () => {
+  it("(s2) Memory.get's refusal Response is returned unchanged", async () => {
     const realGet = (Memory as any).get;
-    (Memory as any).get = async () => new Response(
+    const readResponse = new Response(
       JSON.stringify({ error: "not found" }),
       { status: 404, headers: { "Content-Type": "application/json" } },
     );
+    (Memory as any).get = async () => readResponse;
     try {
       const arch: any = new (MemoryArchive as any)();
       arch.getContext = () => ({ request: agentCtx("agent-b") });
       const res: any = await arch.post({ id: "mem-s2", action: "basement" });
       expect(res instanceof Response).toBe(true);
       expect(res.status).toBe(404);
+      expect(res).toBe(readResponse);
+      expect((await res.json()).error).toBe("not found");
     } finally {
       (Memory as any).get = realGet;
     }
