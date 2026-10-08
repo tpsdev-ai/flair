@@ -122,9 +122,9 @@ export class MemoryGrant extends (databases as any).flair.MemoryGrant {
     if (record.ownerId !== auth.agentId) {
       return FORBIDDEN("forbidden: cannot delete a grant owned by another agent");
     }
-    // flair#2355: confirm, in a transaction this call owns, that the row is
-    // still owned by the caller; a row whose owner changed is refused, not
-    // deleted (resources/owner-delete-recheck.ts).
+    // flair#2355: a row that is no longer the caller's at the delete's re-read
+    // or confirmation read is refused, not deleted
+    // (resources/owner-delete-recheck.ts).
     const beforeDelete = txnPausePoint("grant-delete-pre");
     if (beforeDelete) await beforeDelete;
     const outcome = await deleteOwnedRow((this as any).getContext?.(), {

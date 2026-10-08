@@ -253,9 +253,9 @@ export class Relationship extends (databases as any).flair.Relationship {
       return FORBIDDEN("cannot delete another agent's relationship");
     }
 
-    // flair#2355: confirm, in a transaction this call owns, that the row is
-    // still owned by the caller; a row whose owner changed is refused, not
-    // deleted (resources/owner-delete-recheck.ts).
+    // flair#2355: a row that is no longer the caller's at the delete's re-read
+    // or confirmation read is refused, not deleted
+    // (resources/owner-delete-recheck.ts).
     if (existing) {
       const beforeDelete = txnPausePoint("relationship-delete-pre");
       if (beforeDelete) await beforeDelete;

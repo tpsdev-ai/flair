@@ -1012,17 +1012,26 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
     agentId: String(record.agentId),
     head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
     plan: async (head, shared) => {
-      // flair#2355: for a non-admin caller, confirm the COMMITTED row's owner
-      // before the close, the same way the other owner-scoped deletes do. The
-      // snapshot check below reads the transaction's view; a competing owner
-      // change committed before this read is refused as an owner change, and the
-      // row is left in place.
+      // flair#2355: for a non-admin caller, re-read the COMMITTED rows before
+      // the close. The delete is refused, and nothing is closed, when the
+      // addressed row is present with an owner other than the caller (409
+      // `owner_changed`), when the head this delete closes (a stale id resolves
+      // a different row as the head) is absent (409 `skill_head_missing`), or
+      // when the head's owner differs from the owner this transaction read and
+      // authorizeSkillOwners checks below (409 `owner_changed`).
       if (auth.kind === "agent" && !auth.isAdmin) {
         const pause = txnPausePoint("memory-skill-delete");
         if (pause) await pause;
         const confirmed = await (databases as any).flair.Memory.get(String(record.id), {});
         if (confirmed && isForbiddenOwnerMutation(confirmed, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
           return ownerChangedRefusal("Memory");
+        }
+        if (head) {
+          const confirmedHead = await (databases as any).flair.Memory.get(String(head.id), {});
+          if (!confirmedHead) return skillWriteConflict("skill_head_missing");
+          if (confirmedHead[RECORD_TYPES.Memory.ownerField] !== head[RECORD_TYPES.Memory.ownerField]) {
+            return ownerChangedRefusal("Memory");
+          }
         }
       }
       const stale = await validateSkillSnapshots(record, null, String(record.id), shared);

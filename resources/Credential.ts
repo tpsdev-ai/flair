@@ -193,9 +193,9 @@ export class Credential extends (databases as any).flair.Credential {
           status: 403, headers: { "content-type": "application/json" },
         });
       }
-      // flair#2355: confirm, in a transaction this call owns, that the row is
-      // still owned by the caller; a row whose owner changed is refused and
-      // not deleted (resources/owner-delete-recheck.ts).
+      // flair#2355: a row that is no longer the caller's at the delete's re-read
+      // or confirmation read is refused, not deleted
+      // (resources/owner-delete-recheck.ts).
       if (existing) {
         const beforeDelete = txnPausePoint("credential-delete-pre");
         if (beforeDelete) await beforeDelete;

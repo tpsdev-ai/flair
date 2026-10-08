@@ -24,8 +24,8 @@
  * confirmation catches comes from an admin or internal write, or a raw table
  * write — the writers that can re-point a stored row's owner.
  *
- * The confirmation read runs inside the owned transaction in an EXPLICIT
- * fresh context (`{}`), never contextless: a contextless read joins the
+ * The confirmation read runs while the owned transaction is open, in an
+ * EXPLICIT fresh context (`{}`), never contextless: a contextless read joins the
  * request's ambient operation transaction and reads that transaction's pinned
  * read snapshot (flair#2147), and a by-id read on the request Resource
  * instance reads that instance's request-time entry.
@@ -73,8 +73,9 @@ export interface OwnerDeleteSpec {
 }
 
 /**
- * Delete `spec.id` in a transaction this call owns, refusing unless the row is
- * still owned by `spec.callerId` (flair#2355).
+ * Delete `spec.id` in a transaction this call owns, refusing when the row read
+ * at the re-read or at the confirmation read has an owner other than
+ * `spec.callerId` (flair#2355).
  *
  * Returns `deleted` with the table delete's result, `absent` when the first
  * read finds no row (the caller decides the no-op), or `refused` with the
