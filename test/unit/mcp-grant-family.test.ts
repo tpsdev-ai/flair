@@ -144,7 +144,7 @@ describe("grantMcpClient — happy path", () => {
     expect(existsSync(manifestPath)).toBe(false);
   });
 
-  test("rejects a name starting with '_' before any I/O (the stricter key-filename/URL constraint)", async () => {
+  test("rejects a name starting with '_' before any I/O (MCP client naming policy)", async () => {
     const { fetchImpl, calls } = mockOpsFetch();
     await expect(
       grantMcpClient(
@@ -157,7 +157,7 @@ describe("grantMcpClient — happy path", () => {
     expect(existsSync(manifestPath)).toBe(false);
   });
 
-  test("rejects a name starting with '-' before any I/O (the stricter key-filename/URL constraint)", async () => {
+  test("rejects a name starting with '-' before any I/O (MCP client naming policy)", async () => {
     const { fetchImpl, calls } = mockOpsFetch();
     await expect(
       grantMcpClient(

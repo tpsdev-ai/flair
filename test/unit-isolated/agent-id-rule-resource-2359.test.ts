@@ -1,10 +1,7 @@
 /**
  * agent-id-rule-resource-2359.test.ts — flair#2359.
  *
- * The Agent resource's REST write paths (POST, PUT, PATCH) must apply the ONE
- * shared agent-ID rule before anything is stored, exactly as AgentSeed does.
- * Before this fix none of the three checked the id: a collection POST, a PUT to
- * a new id and a PATCH to a new id each stored whatever id the caller sent.
+ * Tests cover some IDs outside the AgentSeed rule on Agent POST, PUT and PATCH.
  *
  * Same mocking technique as test/unit/agent-originator-instance.test.ts: mock
  * harper so resources/Agent.ts loads outside a real Harper runtime. Isolated so

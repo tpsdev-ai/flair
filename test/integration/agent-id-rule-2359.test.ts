@@ -6,7 +6,7 @@
  * REST paths (POST/PUT/PATCH on /Agent and POST /AgentSeed), that a collection
  * POST with no id stores a Harper-generated id the rule accepts, an explicit
  * `id: null` on the collection POST, the doctor roster read (readAgentRoster)
- * with a row outside any created-at filter, and the federation merge
+ * with a row excluded by `createdAt > "1970-01-01"`, and the federation merge
  * (FederationSync) skipping a malformed inbound Agent row.
  *
  * The CLI write paths (`flair agent add`, `flair principal add`, `flair mcp
@@ -14,8 +14,7 @@
  * test/unit-isolated/principal-add-invalid-id-2359.test.ts and
  * test/unit/mcp-enable-idp-principal-2359.test.ts.
  *
- * Note on ids: Harper parses a path segment as `<id>.<property>`, so a dot in a
- * URL segment is not part of the id (`/Agent/bad.id` resolves to id `bad`). The
+ * Harper strips a recognized property suffix: `/Agent/bad.id` targets `bad`. The
  * PUT/PATCH cases therefore use an over-long id, which the path parser keeps
  * whole. The collection POST cases carry the id in the body.
  */

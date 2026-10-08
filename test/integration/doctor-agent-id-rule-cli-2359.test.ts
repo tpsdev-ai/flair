@@ -11,9 +11,8 @@
  * `flair doctor`'s "Agent IDs" section reports stored Agent ids outside the
  * shared rule (flair#2359). This file proves two things the section must not
  * get wrong on a real instance:
- *   1. a stored id whose createdAt sorts below any created-at window is still
- *      read and reported (the roster read is the whole table, not a filtered
- *      query), and the finding moves the summary count;
+ *   1. a stored id below the former `createdAt > "1970-01-01"` cutoff is
+ *      reported, and the finding moves the summary count;
  *   2. an Agent-ID check that could NOT run — no admin credential, or a failed
  *      roster read — is a counted issue, not a clean result.
  *

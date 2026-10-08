@@ -267,14 +267,10 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   if (!isValidAgentId(name)) {
     throw new Error(`Invalid machine client name '${name}' — ${invalidAgentIdMessage(name)}.`);
   }
-  // Stricter than the shared agent-ID rule: the name is also a key filename and
-  // a URL path segment, so it must start alphanumeric (a leading '-' or '_' is
-  // ambiguous as a CLI argument and as a filename). A name this accepts is a
-  // valid agent id.
+  // MCP client naming policy also requires a leading letter or digit.
   if (!/^[a-zA-Z0-9]/.test(name)) {
     throw new Error(
-      `Invalid machine client name '${name}' — must start with a letter or digit ` +
-        `(it becomes a key filename and a URL path segment).`,
+      `Invalid machine client name '${name}' — MCP client naming policy: must start with a letter or digit.`,
     );
   }
 

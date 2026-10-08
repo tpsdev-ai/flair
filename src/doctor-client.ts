@@ -2591,7 +2591,8 @@ export function describeAgentIdRuleFinding(rows: Array<{ id?: unknown }>): Agent
       `${invalidIds.length} stored agent id(s) are outside the agent-ID rule (${AGENT_ID_RULE}): ` +
       invalidIds.join(", "),
     fixHint:
-      "register each of these agents under a conforming id with `flair agent add <new-id>` " +
-      "(or remove the stale row with `flair agent remove <id>`); nothing is renamed automatically",
+      "after any needed data migration and registration with `flair agent add <new-id>`, " +
+      "remove the old row with `flair agent remove <id>`, or remove it alone if stale; " +
+      "`flair agent remove` also deletes the agent's Memory and Soul data",
   };
 }
