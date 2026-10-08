@@ -7,7 +7,7 @@ import { tempDir } from "../helpers/temp-dir.ts";
 import { classifyDaemonState } from "../../src/lib/daemon-liveness.ts";
 import { probePortListening } from "../../src/lib/stop-start-recovery.ts";
 
-/** A port nothing listens on: bind port 0, read the assigned port, close it. */
+/** Select an OS-assigned port, then close the listener before probing it. */
 async function freePort(): Promise<number> {
   const srv = createServer();
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));

@@ -28,4 +28,3 @@ describe("probePortListening (real sockets)", () => {
     expect(await probePortListening(port)).toBe("free");
   });
 });
-
