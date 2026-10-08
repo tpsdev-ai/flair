@@ -888,6 +888,9 @@ export interface HookStatusResult {
   /** What status verified, not what it configured (flair#1734). */
   delivery: HookDeliveryState;
   deliveryReasons: string[];
+  pinStale: boolean;
+  /** The stale pin that finding named, else null. */
+  stalePin: string | null;
 }
 
 /** Injectable so `hook status` can classify a real run without unit tests spawning npx. */
@@ -901,6 +904,12 @@ export type HookDeliveryProbe = (command: string) => {
 
 export interface HookStatusOptions {
   deliveryProbe?: HookDeliveryProbe;
+  stalePinFinding?: HookPinFinding | null;
+}
+
+export interface HookPinFinding {
+  pin: string | null;
+  direction: "ahead" | "behind" | "unknown";
 }
 
 /**
@@ -1063,12 +1072,14 @@ export function hookStatusFailureLine(status: Pick<HookStatusResult, "silenced" 
 /** Read-only report: is the hook wired, does it look right, and which agent
  *  / Flair instance does it point at (recovered from the wired command). */
 export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOptions = {}): HookStatusResult {
+  const pinStale = opts.stalePinFinding?.direction === "behind";
+  const stalePin = pinStale ? opts.stalePinFinding?.pin ?? null : null;
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   if (read.parseError) {
     return {
       harness, path, wired: false, correctShape: false, silenced: false, stderrDiscarded: false,
-      parseError: read.parseError, delivery: "absent", deliveryReasons: [],
+      parseError: read.parseError, delivery: "absent", deliveryReasons: [], pinStale: false, stalePin: null,
     };
   }
 
@@ -1077,7 +1088,7 @@ export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOp
   if (!existing) {
     return {
       harness, path, wired: false, correctShape: false, silenced: false, stderrDiscarded: false,
-      parseError: null, delivery: "absent", deliveryReasons: [],
+      parseError: null, delivery: "absent", deliveryReasons: [], pinStale: false, stalePin: null,
     };
   }
 
@@ -1094,6 +1105,7 @@ export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOp
     stderrDiscarded: hookCommandDiscardsStderr(command),
     agentId: env.agentId, flairUrl: env.flairUrl, command, parseError: null,
     delivery: assessed.delivery, deliveryReasons: assessed.deliveryReasons,
+    pinStale, stalePin,
   };
 }
 
