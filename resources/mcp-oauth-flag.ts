@@ -38,9 +38,9 @@
  * default applies; this function takes 1/true/yes/on. Consequences:
  *   - "true" is the ONE value that enables both sides (`flair mcp enable`
  *     stages exactly that).
- *   - "1"/"yes"/"on" turn flair's /mcp handler ON while the component AS
- *     stays OFF — fail-closed broken-on (every request 401s, no AS
- *     advertised).
+ *   - "1"/"yes"/"on" make this reader true while the component deletes the
+ *     value and stays off. The boot guard then refuses to mount /mcp and
+ *     names true.
  *   - garbage (e.g. "maybe") disables BOTH: the component deletes it, this
  *     stays false, no /mcp handler exists — no data path (flair's own
  *     discovery documents still serve whenever this flag is off, by design).
