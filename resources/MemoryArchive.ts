@@ -34,17 +34,18 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-/** Unwrap a Harper Response (has .json() + .status) into a plain object, else pass through. */
-async function unwrap(value: any): Promise<any> {
+/**
+ * A refusal or failure from Memory.get()/Memory.put() is a Harper `Response`
+ * (it carries `.status` + `.json`); a successful read/write is a plain record.
+ * Return the Response as-is so the endpoint answers with THAT HTTP status and
+ * its named error, and pass a record through unchanged. Unwrapping the
+ * Response into its body would serialize a refusal as a 200 (flair#2377).
+ */
+function asResponse(value: any): Response | null {
   if (value && typeof value === "object" && typeof value.json === "function" && "status" in value) {
-    try {
-      const body = await value.json();
-      return { ...body, status: value.status };
-    } catch {
-      return { error: "request failed", status: value.status };
-    }
+    return value as Response;
   }
-  return value;
+  return null;
 }
 
 export class MemoryArchive extends Resource {
@@ -68,7 +69,9 @@ export class MemoryArchive extends Resource {
     // Read the existing record — Memory.get()'s read-scope gate applies (own +
     // org-non-private only). A non-readable id returns a 404 Response.
     const existing = await Memory.get(id, ctx);
-    const record = await unwrap(existing);
+    const readRefusal = asResponse(existing);
+    if (readRefusal) return readRefusal;
+    const record = existing;
     if (!record || typeof record !== "object" || !record.id) {
       return json(404, { error: "memory not found" });
     }
@@ -103,6 +106,8 @@ export class MemoryArchive extends Resource {
     // Write back — Memory.put()'s ownership gate applies (stampAttribution), so
     // a non-admin caller cannot flip another agent's memory (403).
     const result = await Memory.put(merged, ctx);
-    return unwrap(result);
+    const writeRefusal = asResponse(result);
+    if (writeRefusal) return writeRefusal;
+    return result;
   }
 }

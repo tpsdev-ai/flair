@@ -994,3 +994,46 @@ describe("client-forged skillSubjectId", () => {
     expect(memoryStore.get("skill-strip-feed")?.skillSubjectId).toBeUndefined();
   });
 });
+
+// ─── flair#2377: a refused write answers with its own HTTP status, never 200 ──
+//
+// MemoryArchive unwrapped Memory.put/get's Harper Response into its JSON body,
+// so a refusal reached the client as HTTP 200. These pin the response path: a
+// guard Response passes through with ITS status and named error.
+describe("flair#2377 — a refused write keeps its own status, never 200", () => {
+  it("(s1) Memory.put's 403 propagates as a 403 Response with the named error", async () => {
+    seedMemory({ id: "mem-s1", agentId: "agent-a", visibility: "shared", content: "body" });
+    const realPut = (Memory as any).put;
+    (Memory as any).put = async () => new Response(
+      JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }),
+      { status: 403, headers: { "Content-Type": "application/json" } },
+    );
+    try {
+      const arch: any = new (MemoryArchive as any)();
+      arch.getContext = () => ({ request: agentCtx("agent-b") });
+      const res: any = await arch.post({ id: "mem-s1", action: "basement" });
+      expect(res instanceof Response).toBe(true); // assertion: a Response, not a 200 body
+      expect(res.status).toBe(403); // assertion: the put's own status survives
+      expect((await res.json()).error).toContain("forbidden"); // assertion: the named error survives
+    } finally {
+      (Memory as any).put = realPut;
+    }
+  });
+
+  it("(s2) a non-2xx Memory.get propagates its status rather than collapsing to 200", async () => {
+    const realGet = (Memory as any).get;
+    (Memory as any).get = async () => new Response(
+      JSON.stringify({ error: "not found" }),
+      { status: 404, headers: { "Content-Type": "application/json" } },
+    );
+    try {
+      const arch: any = new (MemoryArchive as any)();
+      arch.getContext = () => ({ request: agentCtx("agent-b") });
+      const res: any = await arch.post({ id: "mem-s2", action: "basement" });
+      expect(res instanceof Response).toBe(true);
+      expect(res.status).toBe(404);
+    } finally {
+      (Memory as any).get = realGet;
+    }
+  });
+});
