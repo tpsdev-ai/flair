@@ -224,7 +224,7 @@ describe("keystore seed-owner sidecar (flair#2200)", () => {
 });
 
 describe("makeReadInstanceIds — unverifiable directory binding", () => {
-  test("any supplied data directory is refused before anything is read or moved", async () => {
+  test("a supplied data directory is refused before target reads or key moves", async () => {
     const dir = tempDir("flair-seed-binding-");
     const other = join(dir, "other");
     const keys = join(dir, "keys");
