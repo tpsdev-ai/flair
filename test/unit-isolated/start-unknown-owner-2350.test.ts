@@ -1,10 +1,20 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { classifyDaemonState } from "../../src/lib/daemon-liveness.ts";
 import { probePortListening } from "../../src/lib/stop-start-recovery.ts";
+
+/** A port nothing listens on: bind port 0, read the assigned port, close it. */
+async function freePort(): Promise<number> {
+  const srv = createServer();
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as { port: number }).port;
+  await new Promise<void>((r) => srv.close(() => r()));
+  return port;
+}
 
 let replacements = 0;
 mock.module("node:child_process", () => ({
@@ -51,7 +61,7 @@ setInterval(() => {}, 1000);
     const deadline = Date.now() + 5000;
     while (!existsSync(ready) && Date.now() < deadline && child.exitCode === null) await Bun.sleep(10);
     expect(existsSync(ready)).toBe(true);
-    const port = 59995;
+    const port = await freePort();
     expect(await probePortListening(port)).toBe("free");
     writeFileSync(sidecar, JSON.stringify({ pid: child.pid, port, startTimeMs: Date.now(), flairVersion: "test" }));
     child.kill("SIGTERM");
