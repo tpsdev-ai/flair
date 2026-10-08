@@ -319,7 +319,10 @@ export function register(program: Command): void {
           return;
         }
         const recall = actionRecallHookStatus(home, harness);
-        if (recall.installed && recall.refreshEnabled) {
+        if (recall.problems.length > 0) {
+          process.exitCode = 1;
+          console.log(`  ${render.icons.warn} action recall: stale (${recall.problems.join("; ")})`);
+        } else if (recall.installed && recall.refreshEnabled) {
           console.log(`  ${render.icons.ok} action recall: PreToolUse (Bash) wired, refresh enabled`);
         } else if (recall.runtimeFailure) {
           process.exitCode = 1;
@@ -375,6 +378,7 @@ export function register(program: Command): void {
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
         renderContinuity();
         renderActionRecall();
+        renderCapture();
         console.log("");
         process.exit(1);
       }

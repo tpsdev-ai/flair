@@ -67,7 +67,8 @@ export type SkipReason =
   | "agent_status_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.
-  | "id_mismatch";
+  | "id_mismatch"
+  | "invalid_expiry";
 
 /**
  * Static policy for every table FederationSync will merge.
