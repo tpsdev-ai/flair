@@ -1698,7 +1698,12 @@ function describeCaptureActions(actions: Record<CaptureHookEvent, HookDeltaActio
 }
 
 function isHookStatusCandidate(command: unknown, marker: string): boolean {
-  return typeof command === "string" && command.includes("FLAIR_AGENT_ID=") && command.includes(marker);
+  if (typeof command !== "string") return false;
+  const prefix = marker === ACTION_RECALL_HOOK_MARKER ? "sh -c 'out=$(" : "sh -c '";
+  const redirect = marker === ACTION_RECALL_HOOK_MARKER ? "2>/dev/null)" : ">/dev/null";
+  const tokens = command.split(" ");
+  return command.startsWith(prefix) && tokens.some((token, index) =>
+    token.split("/").at(-1) === marker && tokens[index + 1] === redirect);
 }
 
 function findCaptureEntries(config: any, event: CaptureHookEvent | "PreToolUse", isMatch: (command: any) => boolean = isFlairCaptureCommand): Array<{ group: any; hookIndex: number; groupIndex: number }> {
