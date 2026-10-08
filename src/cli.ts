@@ -3264,7 +3264,9 @@ export async function waitForProcessExit(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (probe(pid).kind === "gone") return;
-    await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((r) => setTimeout(r, Math.min(HEALTH_POLL_INTERVAL_MS, remaining)));
   }
   throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms`);
 }
