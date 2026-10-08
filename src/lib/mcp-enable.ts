@@ -2408,6 +2408,7 @@ export async function captureBootDiscriminator(
 // ─── Orchestration ────────────────────────────────────────────────────────────
 
 export type EnableStepName =
+  | "principal-id-check"
   | "local-origin-check"
   | "target-shape-check"
   | "issuer-origin-check"
@@ -2571,6 +2572,17 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const idpProvider = params.idpProvider ?? "github";
   const principal = params.principal ?? "self";
   const principalKind = params.principalKind ?? "human";
+
+  // flair#2359 — the resolved principal becomes the id of the Agent row the
+  // identity-mapping step writes, so it must satisfy the shared agent-ID rule
+  // before the dry run reports success and before any secrets are staged or
+  // pushed.
+  if (!isValidAgentId(principal)) {
+    currentStep = "principal-id-check";
+    const message = `principal: ${invalidAgentIdMessage(principal)} Nothing was changed.`;
+    push(false, message);
+    return { ok: false, dryRun, refused: { reason: "invalid", message }, steps, failedStep: "principal-id-check" };
+  }
 
   const fabricTarget = isFabricTarget(params.instance, params.fabric);
 

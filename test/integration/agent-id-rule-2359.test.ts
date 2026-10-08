@@ -1,15 +1,18 @@
 /**
  * agent-id-rule-2359.test.ts — flair#2359, against a REAL Harper.
  *
- * Every path that creates an Agent applies the ONE shared agent-ID rule and
- * refuses a non-matching id with the named error before anything is written.
- * This file proves the resource REST paths (POST/PUT/PATCH on /Agent and POST
- * /AgentSeed), an explicit `id: null` on the collection POST, the doctor roster
- * read (readAgentRoster) with a row outside any created-at filter, and the
- * federation merge (FederationSync) skipping a malformed inbound Agent row.
+ * The Agent resource's REST write paths and the federation merge apply the ONE
+ * shared agent-ID rule before anything is written. This file proves the resource
+ * REST paths (POST/PUT/PATCH on /Agent and POST /AgentSeed), that a collection
+ * POST with no id stores a Harper-generated id the rule accepts, an explicit
+ * `id: null` on the collection POST, the doctor roster read (readAgentRoster)
+ * with a row outside any created-at filter, and the federation merge
+ * (FederationSync) skipping a malformed inbound Agent row.
  *
- * The `flair agent add` CLI path is exercised by
- * test/unit-isolated/agent-add-invalid-id-2359.test.ts.
+ * The CLI write paths (`flair agent add`, `flair principal add`, `flair mcp
+ * enable`) are exercised elsewhere: test/unit-isolated/agent-add-invalid-id-2359.test.ts,
+ * test/unit-isolated/principal-add-invalid-id-2359.test.ts and
+ * test/unit/mcp-enable-idp-principal-2359.test.ts.
  *
  * Note on ids: Harper parses a path segment as `<id>.<property>`, so a dot in a
  * URL segment is not part of the id (`/Agent/bad.id` resolves to id `bad`). The
@@ -138,6 +141,26 @@ describe("flair#2359 — the Agent REST write paths refuse an out-of-rule id on 
     expect(await rowIn("Agent", OUT_OF_RULE_BODY)).toBeNull();
     const souls = await ops({ operation: "search_by_value", table: "Soul", search_attribute: "agentId", search_value: OUT_OF_RULE_BODY, get_attributes: ["*"] });
     expect(souls).toEqual([]);
+
+    // An absent id is refused by the SAME rule, with the SAME named error.
+    const nul = await send("POST", "/AgentSeed", { agentId: null, displayName: "Bad" });
+    expect(nul.status, nul.raw).toBe(400);
+    expect(JSON.parse(nul.raw).error).toBe("invalid_agent_id");
+  });
+
+  test("POST /Agent/ with no id stores a Harper-generated id that matches the rule", async () => {
+    const res = await fetch(`${harper.httpURL}/Agent/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basic() },
+      body: JSON.stringify({ name: "generated-id-2359", role: "agent", publicKey: "body-public-key" }),
+    });
+    const raw = await res.text();
+    expect(res.status, `POST /Agent/ returned ${res.status}: ${raw.slice(0, 300)}`).toBeLessThan(300);
+    // Harper's collection POST answers with the generated id.
+    const generated = JSON.parse(raw);
+    expect(typeof generated, raw).toBe("string");
+    expect(generated, `generated id '${generated}' is outside the rule`).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+    expect((await rowIn("Agent", String(generated)))?.id).toBe(String(generated));
   });
 });
 

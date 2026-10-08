@@ -8,7 +8,10 @@
  * before sending any request.
  */
 import { describe, it, expect } from "bun:test";
-import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable.js";
+import { mkdtempSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { enableMcp, provisionIdpIdentityMapping } from "../../src/lib/mcp-enable.js";
 
 describe("flair#2359 — provisionIdpIdentityMapping refuses an out-of-rule principal before any ops call", () => {
   it("a dot in the principal id is refused with the named rule and no request is sent", async () => {
@@ -33,5 +36,56 @@ describe("flair#2359 — provisionIdpIdentityMapping refuses an out-of-rule prin
       ),
     ).rejects.toThrow(/invalid agent id/);
     expect(calls).toBe(0);
+  });
+});
+
+describe("flair#2359 — enableMcp refuses an out-of-rule principal before the dry run succeeds or anything is staged", () => {
+  const INSTANCE = "https://flair.example.harperfabric.com";
+  const params = {
+    instance: INSTANCE,
+    adminUser: "admin",
+    adminPass: "throwaway-admin-pass-not-a-secret",
+    idpProvider: "github" as const,
+    idpClientId: "id",
+    idpClientSecret: "throwaway-idp-secret-not-a-secret",
+    idpSubject: "octocat",
+    principal: "bad.id",
+    principalKind: "human" as const,
+  };
+
+  function fetchCounter() {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return new Response("[]", { status: 200 });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, calls: () => calls };
+  }
+
+  it("a dry run with an out-of-rule principal FAILS instead of reporting success, with no request", async () => {
+    const { fetchImpl, calls } = fetchCounter();
+    const res = await enableMcp({ ...params, dryRun: true }, { fetchImpl });
+    expect(res.ok).toBe(false);
+    expect(res.refused?.message).toContain("invalid agent id");
+    expect(calls()).toBe(0);
+  });
+
+  it("a real run with an out-of-rule principal is refused before any secrets are staged or pushed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-2359-enable-"));
+    try {
+      const { fetchImpl, calls } = fetchCounter();
+      const stagingPath = join(dir, "oauth-secrets.env");
+      const res = await enableMcp(
+        { ...params, secretsStagingPath: stagingPath, confirmSecretsApplied: true },
+        { fetchImpl },
+      );
+      expect(res.ok).toBe(false);
+      expect(res.refused?.message).toContain("invalid agent id");
+      expect(calls()).toBe(0);
+      expect(existsSync(stagingPath), "a refused principal staged a secrets file").toBe(false);
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

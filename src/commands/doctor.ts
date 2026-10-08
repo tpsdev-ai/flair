@@ -1951,11 +1951,14 @@ program
         });
       }
       if (roster === null) {
-        // A failed read is never reported as "no ids": say which it was.
+        // A check that could not run is not a clean result: it counts as an
+        // issue, so the summary and exit status never report "No issues found"
+        // for an Agent-ID check that did not happen.
+        issues++;
         console.log(
           rosterReadAttempted
             ? `  ${render.icons.warn} Could not read the stored Agent roster, so the agent-id check did not run.`
-            : `  ${render.icons.info} Skipped: no admin credentials to read the stored Agent roster.`,
+            : `  ${render.icons.warn} Skipped: no admin credentials to read the stored Agent roster, so the agent-id check did not run.`,
         );
       } else {
         const finding = describeAgentIdRuleFinding(roster);

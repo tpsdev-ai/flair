@@ -65,7 +65,8 @@ export class AgentSeed extends Resource {
     if (denied) return denied;
 
     const { agentId, displayName, role = "agent", soulTemplate, starterMemories } = data || {};
-    if (!agentId) return new Response(JSON.stringify({ error: "agentId required" }), { status: 400 });
+    // flair#2359 — the ONE shared agent-ID rule, which refuses an absent id
+    // (`undefined`/`null`/empty) exactly as it refuses a malformed one.
     if (!isValidAgentId(agentId)) {
       return new Response(
         JSON.stringify({ error: AGENT_ID_ERROR, message: invalidAgentIdMessage(agentId) }),
