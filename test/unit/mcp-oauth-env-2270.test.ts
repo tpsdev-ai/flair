@@ -180,6 +180,25 @@ describe("redirect migration files", () => {
     expect(migrate()).toMatchObject({ action: "refused", reason: `ambiguous-env:${REDIRECT}` });
     expect(readFileSync(envPath(), "utf8")).toBe(text);
   });
+  test("refuses a BOM-prefixed duplicate redirect without changing file bytes", () => {
+    const text = `\uFEFF${REDIRECT}=https://first.example/oauth\n${REDIRECT}=\n`;
+    writeFileSync(envPath(), text);
+    const before = readFileSync(envPath());
+    const require = createRequire(import.meta.url);
+    const harperRequire = createRequire(require.resolve("harper"));
+    const dotenv = harperRequire("dotenv") as { parse: (text: string) => Record<string, string> };
+    expect(dotenv.parse(`\uFEFF${REDIRECT}=https://first.example/oauth\n`)).toEqual({ [REDIRECT]: "https://first.example/oauth" });
+    expect(dotenv.parse(before.toString("utf8"))).toEqual({ [REDIRECT]: "" });
+    expect(parseMcpComponentEnv(before.toString("utf8"))).toEqual(dotenv.parse(before.toString("utf8")));
+    expect(migrate()).toMatchObject({ action: "refused", reason: `ambiguous-env:${REDIRECT}` });
+    expect(readFileSync(envPath())).toEqual(before);
+  });
+  test("replaces a BOM-prefixed blank redirect", () => {
+    const text = `\uFEFF${REDIRECT}=\n`;
+    writeFileSync(envPath(), text);
+    expect(migrate().action).toBe("staged");
+    expect(readFileSync(envPath(), "utf8")).toBe(`${REDIRECT}=https://flair.example.com/oauth\n`);
+  });
   test.each(["\r", "\r\n", "\n"])("replaces a blank redirect between assignments separated by %j", separator => {
     const text = `BEFORE=retained${separator}${REDIRECT}=${separator}AFTER=retained${separator}`;
     writeFileSync(envPath(), text);

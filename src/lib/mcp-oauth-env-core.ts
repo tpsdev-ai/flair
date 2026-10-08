@@ -28,8 +28,7 @@ export function idpEnvNames(provider: string = SHIPPED_IDP_PROVIDER): {
 
 const PLACEHOLDER_RE = /^\$\{[^}]*\}$/;
 
-/** True for an unexpanded whole-token `${VAR}` placeholder (and for blank). A
- *  value like this is "missing" to `@harperfast/oauth`'s `expandEnvVar`. */
+/** Provider configuration checks treat blanks and whole-token `${VAR}` placeholders as missing. */
 export function isUnresolvedEnvValue(value: string | undefined | null): boolean {
   if (value == null) return true;
   const trimmed = value.trim();

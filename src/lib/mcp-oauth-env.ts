@@ -49,7 +49,7 @@ export function componentEnvPathForConfig(configPath: string): string {
   return join(dirname(configPath), ".env");
 }
 
-const ASSIGNMENT_RE = /^[ \t]*(?:export[ \t]+)?([\w.-]+)[ \t]*(?:=|:[ \t]+)/;
+const ASSIGNMENT_RE = /^\s*(?:export\s+)?([\w.-]+)(?:\s*=|:\s+)/;
 
 export type RedirectMigrationAction = "not-enabled" | "already-set" | "no-issuer" | "no-credentials" | "refused" | "staged";
 

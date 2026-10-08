@@ -47,8 +47,7 @@ export function mcpOAuthDegraded(): DegradedGuardDecision {
   return state.decision;
 }
 
-// Fire once at module load. Guarded by the same opt-out the MCP route module
-// uses so a unit test importing this file never mutates the runner's env.
+// A unit test can set FLAIR_MCP_NO_AUTOSTART before import to avoid env mutation.
 if (process.env.FLAIR_MCP_NO_AUTOSTART == null) {
   runMcpOAuthEnvGuard();
 }
