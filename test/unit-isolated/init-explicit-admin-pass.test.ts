@@ -20,13 +20,14 @@ function markInstalled(dataDir: string): void {
   writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
 }
 
-function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false, options: { umask?: number; columns?: string } = {}) {
+function runInit(home: string, dataDir: string, source: typeof sources[number], platform: string, foreignOwner = false, options: { umask?: number; columns?: string; agent?: string; probeFailure?: number | "connection" | "timeout" } = {}) {
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|TPS_TEST_ROOT$|ROOTPATH$)/.test(key),
   ));
   Object.assign(env, { HOME: home, USERPROFILE: home, NO_COLOR: "1" });
   const args = ["init", "--data-dir", dataDir, "--port", "9", "--ops-port", "8",
     "--skip-start", "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md"];
+  if (options.agent) args.push("--agent", options.agent);
   if (source === "inline") args.push("--admin-pass", password);
   else if (source === "file") {
     const input = join(home, "input-pass");
@@ -35,7 +36,23 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
   } else env[source] = password;
   const script = `
     Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
-    globalThis.fetch = async () => { throw new Error("offline fixture"); };
+    globalThis.fetch = async input => {
+      const { appendFileSync } = await import("node:fs");
+      appendFileSync(${JSON.stringify(join(home, "requests.jsonl"))}, "request\\n");
+      ${options.probeFailure === undefined ? '' : `
+      if (new URL(String(input)).pathname === "/health") return Response.json({}, { status: 200 });
+      if (new URL(String(input)).pathname === "/FederationPeers") {
+        ${typeof options.probeFailure === "number"
+          ? `return new Response("fetch failed", { status: ${options.probeFailure} });`
+          : `throw new ${options.probeFailure === "timeout" ? 'DOMException("fixture timeout", "TimeoutError")' : 'TypeError("fetch failed")'};`}
+      }
+      `}
+      throw new Error("offline fixture");
+    };
+    const socketLimitPath = ${JSON.stringify(new URL("../../src/lib/socket-path-limit.ts", import.meta.url).href)};
+    const socketLimit = await import(socketLimitPath);
+    const { mock: mockSocketLimit } = await import("bun:test");
+    mockSocketLimit.module(socketLimitPath, () => ({ ...socketLimit, opsSocketPathRefusal: () => null }));
     ${options.umask === undefined ? "" : `process.umask(${options.umask});`}
     ${options.columns === undefined ? "" : `
       const { createRequire } = await import("node:module");
@@ -45,7 +62,22 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
         RocksDatabase: { open: () => ({ columns: ${options.columns}, close() {} }) },
       }));
     `}
-    const { program } = await import(${JSON.stringify(CLI)});
+    ${options.probeFailure === undefined ? '' : `
+    const dataDir = ${JSON.stringify(dataDir)};
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(dataDir + "/hdb.pid", String(process.pid));
+    const tcpPath = ${JSON.stringify(new URL("../../src/lib/init-tcp-probe.ts", import.meta.url).href)};
+    const tcp = await import(tcpPath);
+    mockSocketLimit.module(tcpPath, () => ({ ...tcp, localPortState: async port => port === 9 ? "listening" : "free" }));
+    const initPath = ${JSON.stringify(new URL("../../src/commands/init.ts", import.meta.url).href)};
+    const init = await import(initPath);
+    const bindCli = init.bindCli;
+    mockSocketLimit.module(initPath, () => ({ ...init, bindCli: fns => bindCli({ ...fns, resolveInstanceServingPid: () => process.pid }) }));
+    `}
+    const { program, setOccupiedListenerLookupForTests } = await import(${JSON.stringify(CLI)});
+    ${options.probeFailure === undefined ? '' : `
+    setOccupiedListenerLookupForTests({ pids: port => port === 9 ? [process.pid] : [], rootPath: () => ({ rootPath: ${JSON.stringify(dataDir)}, environReadable: true }) });
+    `}
     ${foreignOwner ? "const uid = process.getuid(); process.getuid = () => uid + 1;" : ""}
     await program.parseAsync(${JSON.stringify(args)}, { from: "user" });
   `;
@@ -92,6 +124,50 @@ describe("fresh init persists explicit admin credentials", () => {
     }
   }
 
+  for (const source of sources) {
+    for (const persisted of [false, true]) {
+      test(`${source}: stopped skip-start reuses identical saved bytes, persisted=${persisted}`, () => {
+        const home = tempDir("i-");
+        const dataDir = tempDir("d-");
+        const passPath = join(home, ".flair", "admin-pass");
+        mkdirSync(join(home, ".flair"));
+        markInstalled(dataDir);
+        if (persisted) {
+          mkdirSync(join(dataDir, "system"));
+          writeFileSync(join(dataDir, "system", "hdb_user.mdb"), "fixture-user");
+        }
+        writeFileSync(passPath, password + "\n\n", { mode: 0o600 });
+        const before = readFileSync(passPath);
+        const beforeStat = statSync(passPath);
+        const result = runInit(home, dataDir, source, "linux", false, { agent: "config-only" });
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(readFileSync(passPath)).toEqual(before);
+        expect(statSync(passPath).ino).toBe(beforeStat.ino);
+        expect(statSync(passPath).mtimeMs).toBe(beforeStat.mtimeMs);
+        expect(existsSync(join(home, "requests.jsonl"))).toBe(false);
+        expect(existsSync(join(home, ".flair", "keys", "config-only.key"))).toBe(true);
+        expect(result.stdout).toContain("Agent registration deferred");
+        expect(result.stdout).not.toContain("verified");
+      });
+    }
+  }
+
+  for (const posture of ["symlink", "foreign-owner", "open-mode"] as const) {
+    test(`identical supplied password refuses a saved ${posture} file`, () => {
+      const home = tempDir("i-");
+      const dataDir = tempDir("d-");
+      const passPath = join(home, ".flair", "admin-pass");
+      mkdirSync(join(home, ".flair"));
+      const target = posture === "symlink" ? join(home, "target") : passPath;
+      writeFileSync(target, password + "\n", { mode: posture === "open-mode" ? 0o644 : 0o600 });
+      if (posture === "symlink") symlinkSync(target, passPath);
+      const result = runInit(home, dataDir, "inline", "linux", posture === "foreign-owner");
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      expect(result.stderr).toContain(posture === "open-mode" ? "too open" : "no running instance; a saved admin-pass file or persisted admin user exists");
+      expect(readFileSync(target, "utf8")).toBe(password + "\n");
+    });
+  }
+
   for (const dangling of [false, true]) {
     test(`refuses a ${dangling ? "dangling " : ""}symlink destination`, () => {
       const home = tempDir("i-");
@@ -103,7 +179,7 @@ describe("fresh init persists explicit admin credentials", () => {
       symlinkSync(target, path);
       const result = runInit(home, dataDir, "inline", "linux");
       expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain("symbolic link");
+      expect(result.stderr).toContain(dangling ? "symbolic link" : "no running instance; a saved admin-pass file or persisted admin user exists");
       expect(lstatSync(path).isSymbolicLink()).toBe(true);
       if (!dangling) expect(readFileSync(target, "utf8")).toBe("unchanged");
       else expect(existsSync(target)).toBe(false);
@@ -118,7 +194,7 @@ describe("fresh init persists explicit admin credentials", () => {
     writeFileSync(path, "unchanged", { mode: 0o600 });
     const result = runInit(home, dataDir, "inline", "linux", true);
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("owned by another user");
+    expect(result.stderr).toContain("no running instance; a saved admin-pass file or persisted admin user exists");
     expect(readFileSync(path, "utf8")).toBe("unchanged");
   });
 });
@@ -234,3 +310,129 @@ describe("admin credential persistence refuses unassessed stores", () => {
     expect(issues(output)).toBe(issues(baseline) + 1);
   });
 });
+
+
+describe("supplied credentials without a running instance", () => {
+  test("a saved pass file beside a fresh data directory refuses without a start remedy", () => {
+    const home = tempDir("i-");
+    const dataDir = tempDir("d-");
+    const passPath = join(home, ".flair", "admin-pass");
+    mkdirSync(join(home, ".flair"));
+    const before = Buffer.from("saved-password\n");
+    writeFileSync(passPath, before, { mode: 0o600 });
+    const result = runInit(home, dataDir, "file", "linux");
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toBe(
+      `Refusing to write ${passPath}: no running instance; a saved admin-pass file or persisted admin user exists. ` +
+        `No pass file was written; any existing file is unchanged. Run:\n  flair init --reset-admin-pass\n`,
+    );
+    expect(readFileSync(passPath)).toEqual(before);
+    expect(existsSync(join(dataDir, "harper-config.yaml"))).toBe(false);
+  }, 60_000);
+
+  for (const persisted of [false, true]) {
+    for (const fileExists of [false, true]) {
+      if (!persisted && !fileExists) continue;
+      for (const source of sources) {
+        test(`${source}: no running instance, persisted=${persisted}, file=${fileExists}`, () => {
+          const home = tempDir("i-");
+          const dataDir = tempDir("d-");
+          const passPath = join(home, ".flair", "admin-pass");
+          mkdirSync(join(home, ".flair"));
+          markInstalled(dataDir);
+          if (persisted) {
+            mkdirSync(join(dataDir, "system"));
+            writeFileSync(join(dataDir, "system", "hdb_user.mdb"), "fixture-user");
+          }
+          const before = Buffer.from([0x73, 0x61, 0x76, 0x65, 0x64, 0x0d, 0x0a, 0xff]);
+          if (fileExists) writeFileSync(passPath, before, { mode: 0o600 });
+          const result = runInit(home, dataDir, source, "linux");
+          expect(result.error).toBeUndefined();
+          expect(result.status).not.toBe(0);
+          expect(result.stderr).toContain("no running instance; a saved admin-pass file or persisted admin user exists");
+          expect(result.stderr).not.toContain("install is stopped");
+          expect(result.stderr).toContain("Start the instance and re-run");
+          expect(result.stderr).toContain("flair init --reset-admin-pass");
+          if (fileExists) expect(readFileSync(passPath)).toEqual(before);
+          else expect(existsSync(passPath)).toBe(false);
+        }, 60_000);
+      }
+    }
+  }
+});
+
+test("the supplied-password probe pins admin despite FLAIR_ADMIN_USER", async () => {
+  const { proveAdminPassAgainstInstance } = await import("../../src/cli.ts");
+  const savedUser = process.env.FLAIR_ADMIN_USER;
+  const savedFetch = globalThis.fetch;
+  process.env.FLAIR_ADMIN_USER = "alternate-user";
+  const seen: Array<{ path: string; user: string }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const auth = new Headers(init?.headers).get("Authorization") ?? "";
+    const decoded = Buffer.from(auth.replace(/^Basic /, ""), "base64").toString();
+    const [user, pass] = decoded.split(":");
+    const path = new URL(String(input)).pathname;
+    seen.push({ path, user });
+    const accepted = user === "alternate-user" && pass === "fixture-alternate-password"
+      || user === "admin" && pass === "fixture-admin-password";
+    return Response.json({}, { status: accepted ? 200 : 401 });
+  }) as typeof fetch;
+  try {
+    expect(await proveAdminPassAgainstInstance(20991, "fixture-alternate-password")).not.toBeNull();
+    expect(await proveAdminPassAgainstInstance(20991, "fixture-admin-password")).toBeNull();
+    expect(seen).toEqual([
+      { path: "/FederationPeers", user: "admin" },
+      { path: "/FederationPeers", user: "admin" },
+    ]);
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedUser === undefined) delete process.env.FLAIR_ADMIN_USER;
+    else process.env.FLAIR_ADMIN_USER = savedUser;
+  }
+});
+
+for (const failure of [401, 403, 500, 503, "connection", "timeout"] as const) {
+  test(`supplied-password refusal wording for ${failure}`, () => {
+    const home = tempDir("i-");
+    const dataDir = tempDir("d-");
+    const passPath = join(home, ".flair", "admin-pass");
+    mkdirSync(join(home, ".flair"));
+    markInstalled(dataDir);
+    const before = Buffer.from("saved-password\n");
+    writeFileSync(passPath, before, { mode: 0o600 });
+    const result = runInit(home, dataDir, "inline", "linux", false, { probeFailure: failure });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    const rejected = failure === 401 || failure === 403;
+    expect(result.stderr).toContain(rejected
+      ? `the supplied admin credential was rejected (HTTP ${failure})`
+      : "admin credential verification could not be completed");
+    if (typeof failure === "number") expect(result.stderr).toContain(`HTTP ${failure}`);
+    if (!rejected) {
+      expect(result.stderr).not.toContain("does not authenticate");
+      expect(result.stderr).not.toContain("credential was rejected");
+    }
+    expect(result.stderr).toContain("flair init --reset-admin-pass");
+    expect(readFileSync(passPath)).toEqual(before);
+  });
+}
+
+test("a running install without a pass file refuses to write a rejected credential", () => {
+  const home = tempDir("i-");
+  const dataDir = tempDir("d-");
+  const passPath = join(home, ".flair", "admin-pass");
+  mkdirSync(join(home, ".flair"));
+  markInstalled(dataDir);
+  mkdirSync(join(dataDir, "system"));
+  writeFileSync(join(dataDir, "system", "hdb_user.mdb"), "fixture-user");
+  const result = runInit(home, dataDir, "file", "linux", false, { probeFailure: 401 });
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  expect(result.stderr).toBe(
+    `Refusing to write ${passPath}: the supplied admin credential was rejected (HTTP 401) on port 9. ` +
+      `No pass file was written; any existing file is unchanged. ` +
+      `To rotate the instance's admin password instead, run:\n  flair init --reset-admin-pass\n`,
+  );
+  expect(existsSync(passPath)).toBe(false);
+}, 60_000);

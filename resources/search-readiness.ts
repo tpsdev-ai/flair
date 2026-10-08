@@ -30,6 +30,7 @@
 
 import type { RetrievalMode } from "./bm25.js";
 import { bm25SearchLagReason } from "./bm25-status.js";
+import { MEMORY_REEMBED_PATCH_CAPABILITY } from "../src/lib/reembed-server-support.js";
 
 /**
  * How a ready result was verified. Constant strings — no interpolation
@@ -186,8 +187,10 @@ export function buildPublicHealthBody(
     version: identity.version,
     buildCommit: identity.buildCommit,
     searchReady: readiness.searchReady,
+    // flair#2337: this build advertises the re-embed PATCH token.
+    // The shared constant aligns this build's CLI and server literals.
+    capabilities: [MEMORY_REEMBED_PATCH_CAPABILITY],
   };
-  // Public shape is unchanged: searchReadyReason is still present iff !searchReady.
   // Ready-path verification constants stay on the decision object (flair#1411).
   if (!readiness.searchReady && readiness.searchReadyReason) {
     body.searchReadyReason = readiness.searchReadyReason;
