@@ -10,6 +10,9 @@ import {
   flattenAdvisories,
   flattenNpmAdvisories,
   parseNpmAuditOutput,
+  parseBunAuditOutput,
+  npmAuditReportRefusal,
+  bunAuditReportRefusal,
   registryUrlFor,
   vendorPinnedNodeProblems,
 } from "../../scripts/audit-gate.mjs";
@@ -191,9 +194,21 @@ describe("vendor-pinned npm-install nodes", () => {
       }));
       writeFileSync(join(root, harperNode, "package.json"), JSON.stringify({ version: installedVersion }));
       writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
-      const entry = ALLOWLIST.entries.find((e: { ghsa: string }) => e.ghsa === "GHSA-w2qp-rph6-63g4");
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
-        policy: ALLOWLIST.policy, entries: [entry],
+        policy: { maxLifetimeDaysBySeverity: { moderate: 180 } },
+        entries: [{
+          ghsa: "GHSA-w2qp-rph6-63g4",
+          package: "fastify",
+          severity: "moderate",
+          class: "vendor-pinned",
+          sources: ["npm-install"],
+          approvedBy: "fixture",
+          introducedBy: "harper -> fastify",
+          reason: "Fixture pin in harper's shrinkwrap.",
+          added: "2026-09-03",
+          expires: "2027-03-02",
+          removeWhen: "harper's shrinkwrap resolves fastify >=5.12.1",
+        }],
       }));
       writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
       const report = { vulnerabilities: { fastify: { nodes, via: [{
@@ -331,15 +346,18 @@ describe("the committed allowlist", () => {
     // These are the advisories the npm-install observation surfaces that `bun
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
     // sources ["npm-install"] so the gate knows they are fixed for bun only.
-    // joi joined this class when the root override moved bun.lock off 17.13.4.
-    const npmOnly = ALLOWLIST.entries.filter((e) => ["fastify", "joi"].includes(e.package));
-    // Name the joi entries: a non-empty check alone could be satisfied by the
-    // fastify entries while the joi entries had gone missing.
-    expect(npmOnly.filter((e) => e.package === "joi").map((e) => e.ghsa).sort()).toEqual([
-      "GHSA-6h2x-m376-mqjq",
-      "GHSA-6w3j-5fw6-r9vr",
-      "GHSA-gg4h-3hg2-grpc",
-      "GHSA-wr44-6hxh-3jwq",
+    const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fast-uri");
+    // Exact IDs catch missing or substituted fast-uri advisories.
+    expect(npmOnly.map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-4c8g-83qw-93j6",
+      "GHSA-7p8r-x3mc-p8w7",
+      "GHSA-f65p-4m7j-42xc",
+      "GHSA-hrr3-gc8f-f4qj",
+      "GHSA-jqff-g426-hqxp",
+      "GHSA-q3j6-qgpj-74h6",
+      "GHSA-qw65-cvwx-89v3",
+      "GHSA-v2hh-gcrm-f6hx",
+      "GHSA-v39h-62p7-jpjc",
     ]);
     for (const e of npmOnly) {
       expect(e.sources).toEqual(["npm-install"]);
@@ -467,8 +485,257 @@ describe("parseNpmAuditOutput", () => {
   });
 
   it("parses a valid JSON report", () => {
-    expect(parseNpmAuditOutput('{"vulnerabilities":{}}', "/tmp", 0)).toEqual({ vulnerabilities: {} });
+    const report = { auditReportVersion: 2, vulnerabilities: {}, metadata: {} };
+    expect(parseNpmAuditOutput(JSON.stringify(report), "/tmp", 0)).toEqual(report);
   });
+
+  // flair#2278: the parser refuses each value below. Before that change it
+  // returned them unchanged and flattenNpmAdvisories read each as zero
+  // advisories, so with an allowlist that has no entries the gate passed.
+  const NON_REPORTS = {
+    "an error object": { error: { code: "EAI_AGAIN", summary: "offline", detail: "registry" } },
+    "a missing vulnerabilities field": { auditReportVersion: 2, metadata: { vulnerabilities: {} } },
+    "an empty object": {},
+  };
+
+  for (const [name, value] of Object.entries(NON_REPORTS)) {
+    it(`throws on ${name}`, () => {
+      expect(() => parseNpmAuditOutput(JSON.stringify(value), "/tmp/prefix", 1)).toThrow(
+        /error object instead of a report|not a JSON report object|no "vulnerabilities" object/,
+      );
+    });
+  }
+
+  it("names the stage and the remedy for each non-report refusal", () => {
+    for (const value of Object.values(NON_REPORTS)) {
+      let err: Error | undefined;
+      try {
+        parseNpmAuditOutput(JSON.stringify(value), "/tmp/prefix", 1);
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err).toBeDefined();
+      expect(err?.message).toContain("npm audit --omit=dev --json");
+      expect(err?.message).toContain("/tmp/prefix");
+      expect(err?.message).toContain("Re-run the stage; if it keeps failing, check registry access.");
+    }
+  });
+
+  it("still passes a real zero-advisory report", () => {
+    const report = { auditReportVersion: 2, vulnerabilities: {}, metadata: {} };
+    expect(parseNpmAuditOutput(JSON.stringify(report), "/tmp/prefix", 0)).toEqual(report);
+  });
+});
+
+// ─── Exit status and stderr checks (flair#2278) ──────────────────────────────
+
+describe("audit exit status and stderr checks (flair#2278)", () => {
+  // The bun banner, the bun failure lines and the `npm error` line below are
+  // copied from runs of the pinned bun (1.3.10) and npm 11.19 against the local
+  // registry fixture in audit-gate-real-tools.test.ts. The `npm ERR!` and
+  // `npm warn` lines are written for these tests.
+  const BUN_BANNER = "\u001b[0m\u001b[1mbun audit \u001b[0m\u001b[2mv1.3.10 (30e609e0)\u001b[0m\n";
+  const BUN_REPORT = {
+    "audit-fixture-dep": [
+      {
+        id: 1,
+        url: "https://github.com/advisories/GHSA-0000-0000-0001",
+        title: "Fixture advisory",
+        severity: "high",
+        vulnerable_versions: "<1.0.1",
+      },
+    ],
+  };
+  const NPM_CLEAN = { auditReportVersion: 2, vulnerabilities: {}, metadata: {} };
+  const NPM_REPORT = {
+    auditReportVersion: 2,
+    vulnerabilities: {
+      "audit-fixture-dep": {
+        name: "audit-fixture-dep",
+        severity: "high",
+        nodes: ["node_modules/audit-fixture-dep"],
+        via: [{ url: "https://github.com/advisories/GHSA-0000-0000-0001", severity: "high", range: "<1.0.1" }],
+      },
+    },
+    metadata: {},
+  };
+  const REMEDY = "Re-run the stage; if it keeps failing, check registry access.";
+
+  it("accepts bun's {} with exit 0 and only the banner on stderr", () => {
+    expect(parseBunAuditOutput("{}\n", 0, BUN_BANNER)).toEqual({});
+  });
+
+  it("accepts a bun report that lists advisories with exit 1", () => {
+    expect(parseBunAuditOutput(JSON.stringify(BUN_REPORT), 1, BUN_BANNER)).toEqual(BUN_REPORT);
+  });
+
+  it("refuses bun output that lists no advisories when bun exited non-zero", () => {
+    for (const out of ["{}", '{"message":"audit failed"}', '{"audit-fixture-dep":[]}']) {
+      expect(() => parseBunAuditOutput(out, 1, BUN_BANNER)).toThrow(
+        `\`bun audit\` exited 1 but its report lists no advisories. ${REMEDY}`,
+      );
+    }
+  });
+
+  it("refuses bun output when bun ended without an exit status", () => {
+    expect(() => parseBunAuditOutput("{}", null, BUN_BANNER)).toThrow(
+      "`bun audit` ended without an exit status but its report lists no advisories.",
+    );
+  });
+
+  it("refuses bun output when bun's stderr carries a failure line", () => {
+    for (const line of [
+      "error: audit request failed to parse json. Is the registry down?",
+      "ConnectionRefused: audit request failed",
+    ]) {
+      for (const [out, status] of [["{}", 0], [JSON.stringify(BUN_REPORT), 1]] as const) {
+        expect(() => parseBunAuditOutput(out, status, `${BUN_BANNER}${line}\n`)).toThrow(
+          `\`bun audit\` wrote an error to stderr (${line}). ${REMEDY}`,
+        );
+      }
+    }
+  });
+
+  it("keeps the no-output and invalid-JSON refusals for bun", () => {
+    expect(() => parseBunAuditOutput("", 1, `${BUN_BANNER}error: Lockfile not found\n`)).toThrow(
+      /produced no output on stdout \(exit 1\)/,
+    );
+    expect(() => parseBunAuditOutput("{not json", 1, BUN_BANNER)).toThrow(/not valid JSON/);
+  });
+
+  it("accepts npm's zero-vulnerability report with exit 0, and a warning on stderr", () => {
+    expect(parseNpmAuditOutput(JSON.stringify(NPM_CLEAN), "/tmp/prefix", 0, "npm warn config fixture warning\n")).toEqual(NPM_CLEAN);
+  });
+
+  it("accepts an npm report that lists vulnerabilities with exit 1", () => {
+    expect(parseNpmAuditOutput(JSON.stringify(NPM_REPORT), "/tmp/prefix", 1, "")).toEqual(NPM_REPORT);
+  });
+
+  it("refuses an npm zero-vulnerability report when npm exited non-zero or without a status", () => {
+    expect(() => parseNpmAuditOutput(JSON.stringify(NPM_CLEAN), "/tmp/prefix", 1, "")).toThrow(
+      `exited 1 but its report lists no vulnerabilities. ${REMEDY}`,
+    );
+    expect(() => parseNpmAuditOutput(JSON.stringify(NPM_CLEAN), "/tmp/prefix", null, "")).toThrow(
+      "ended without an exit status but its report lists no vulnerabilities.",
+    );
+  });
+
+  it("refuses an npm report when npm's stderr carries an npm error line", () => {
+    for (const line of ["npm error audit endpoint returned an error", "npm ERR! code ENOLOCK"]) {
+      expect(() => parseNpmAuditOutput(JSON.stringify(NPM_REPORT), "/tmp/prefix", 1, `${line}\n`)).toThrow(
+        `wrote an error to stderr (${line}). ${REMEDY}`,
+      );
+    }
+  });
+});
+
+// ─── Non-report audit responses (flair#2278) ─────────────────────────────────
+
+describe("audit report refusal", () => {
+  it("accepts an npm report with an empty vulnerabilities object", () => {
+    expect(npmAuditReportRefusal({ vulnerabilities: {} })).toBeNull();
+  });
+
+  it("accepts an empty bun report but refuses a bun error envelope", () => {
+    expect(bunAuditReportRefusal({})).toBeNull();
+    expect(bunAuditReportRefusal({ error: { code: "EAI_AGAIN" } })).toMatch(/error object/);
+  });
+
+  it("refuses a non-object in either stage", () => {
+    for (const value of [null, [], "ok", 3]) {
+      expect(npmAuditReportRefusal(value)).toMatch(/did not produce a JSON report object/);
+      expect(bunAuditReportRefusal(value)).toMatch(/did not produce a JSON report object/);
+    }
+  });
+
+  it("does not mistake an advisory array on a package named error for an envelope", () => {
+    // bun's shape maps a package name to its advisory array; a package literally
+    // named "error" is a report, not the error envelope.
+    expect(bunAuditReportRefusal({ error: [{ id: 1, url: "" }] })).toBeNull();
+  });
+});
+
+// ─── The gate itself refuses a non-report response (flair#2278) ──────────────
+
+describe("the gate fails closed on a refused stage answer, stand-in tools (flair#2278)", () => {
+  // A minimal fixture: the real gate script, the real allowlist policy with no
+  // entries, and stand-in `bun`/`npm` scripts on PATH that print a fixed answer
+  // and exit 0. With no entries, a run that gets past both audit stages passes
+  // exactly when both report zero advisories, so the stage answer decides the
+  // outcome. Before flair#2278 the gate exited 0 on each refused answer below in
+  // this fixture. audit-gate-real-tools.test.ts runs the real bun and npm.
+  function runGate(bunOut: string, npmOut: string) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-nonreport-"));
+    try {
+      mkdirSync(join(root, "scripts"));
+      mkdirSync(join(root, ".github"));
+      mkdirSync(join(root, "bin"));
+      mkdirSync(join(root, "home"));
+      mkdirSync(join(root, "tmp"));
+      writeFileSync(
+        join(root, "scripts/audit-gate.mjs"),
+        readFileSync(join(REPO_ROOT, "scripts", "audit-gate.mjs")),
+      );
+      writeFileSync(
+        join(root, ".github/audit-allowlist.json"),
+        JSON.stringify({ policy: ALLOWLIST.policy, entries: [] }),
+      );
+      writeFileSync(join(root, "bin/bun"), `#!/bin/sh\nprintf '%s\\n' '${bunOut}'\n`);
+      writeFileSync(join(root, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' '${npmOut}'\n`);
+      chmodSync(join(root, "bin/bun"), 0o755);
+      chmodSync(join(root, "bin/npm"), 0o755);
+      return spawnSync(
+        process.execPath,
+        [join(root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", root],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          env: {
+            ...process.env,
+            PATH: `${join(root, "bin")}:${process.env.PATH}`,
+            HOME: join(root, "home"),
+            TMPDIR: join(root, "tmp"),
+            AUDIT_GATE_TODAY: "2026-10-01",
+          },
+        },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  const CLEAN_BUN = "{}";
+  const CLEAN_NPM = JSON.stringify({ auditReportVersion: 2, vulnerabilities: {}, metadata: {} });
+
+  it("passes on a real zero-advisory report from both stages", () => {
+    const res = runGate(CLEAN_BUN, CLEAN_NPM);
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+  }, 12_000);
+
+  const NPM_NON_REPORTS: Record<string, string> = {
+    "an error object": JSON.stringify({ error: { code: "EAI_AGAIN", summary: "offline" } }),
+    "a missing vulnerabilities field": JSON.stringify({ auditReportVersion: 2, metadata: {} }),
+    "an empty object": "{}",
+  };
+  for (const [name, out] of Object.entries(NPM_NON_REPORTS)) {
+    it(`fails the gate on ${name} from the npm stage`, () => {
+      const res = runGate(CLEAN_BUN, out);
+      expect(res.error).toBeUndefined();
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain("FAILED TO RUN");
+      expect(res.stdout).not.toContain("PASS —");
+    }, 12_000);
+  }
+
+  it("fails the gate on an error object from the bun stage", () => {
+    const res = runGate(JSON.stringify({ error: { code: "EAI_AGAIN" } }), CLEAN_NPM);
+    expect(res.error).toBeUndefined();
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("FAILED TO RUN");
+    expect(res.stdout).not.toContain("PASS —");
+  }, 12_000);
 });
 
 // ─── Registry URL construction ───────────────────────────────────────────────

@@ -18,7 +18,7 @@ Agents sign every request to Flair with this key. Flair refuses unsigned request
 - The `--admin-pass-file <path>` option allows reading the password from a file (for pre-staged secrets).
 - The `--admin-pass <pass>` option is deprecated due to shell history exposure; use `--admin-pass-file` or environment variables instead. A warning is printed when this option is used.
 - Environment variables `FLAIR_ADMIN_PASS` and `HDB_ADMIN_PASSWORD` are also supported.
-- After the first start, Harper's persisted user hash is the source of truth. `HDB_ADMIN_PASSWORD` will not rotate it. If `~/.flair/admin-pass` is missing and the data dir already has a user, `flair init` refuses rather than writing a file that 401s. Recovery is exact: `flair init --admin-pass-file <path>` if you have the original, or `flair init --reset-admin-pass` to rotate through the operations socket and rewrite the file.
+- After the first start, Harper's persisted user hash is the source of truth. `HDB_ADMIN_PASSWORD` will not rotate it. Without `--reset-admin-pass`, supplied credentials are refused when no instance is running and an admin-pass file or persisted admin user exists, except that `--skip-start` can reuse an identical securely read credential.
 ## What Flair does *not* own: API keys, tokens, third-party credentials
 
 Things that are NOT Flair's job:
@@ -147,8 +147,12 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 ## Key cleanup
 
 `flair keys prune` classifies every `.key` file in the key directory and, with
-`--apply`, MOVES prunable keys into `<keysDir>/.pruned/<date>/` — it never
-deletes.
+`--apply`, moves prunable keys into `<keysDir>/.pruned/<date>/`; keys with
+refused sidecars stay in place.
+It never deletes a file itself. A move can still replace an entry that a
+concurrent writer creates at the destination before the move lands: the selected
+archive name, or, when a failed key move rolls its sidecar back, the sidecar's
+original path.
 
 - Agent signing keys whose seed parses are prunable when the agent is not
   registered on the targeted instance, except node-shaped files without `.pub`.

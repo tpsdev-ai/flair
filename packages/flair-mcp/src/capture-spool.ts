@@ -8,11 +8,13 @@
  *   <dir>/<agentId>.pending.json  failed commands awaiting a matching follow-up (bounded)
  *   <dir>/<agentId>.flush.stamp   last background-flush time (cooldown)
  *   <dir>/<agentId>.lock
+ *   <dir>/<agentId>.flush.lock
  */
 
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 import { memoryPutPath } from "./record-id-path.js";
@@ -49,6 +51,13 @@ export const CAPTURE_LOCK_WAIT_MS = 200;
 
 export const CAPTURE_LOCK_STALE_MS = 5000;
 
+/** Deadline for asynchronous client setup and writes. */
+export const CAPTURE_FLUSH_DEADLINE_MS = 5000;
+
+export const CAPTURE_LOCK_REFRESH_MS = 1000;
+
+const CAPTURE_TAKEOVER_STALE_MS = 500;
+
 // ── paths ───────────────────────────────────────────────────────────────────
 
 /** Where the spool lives. FLAIR_CAPTURE_DIR overrides the default. */
@@ -75,6 +84,10 @@ export function flushStampPath(dir: string, agentId: string): string {
   return join(dir, `${agentId}.flush.stamp`);
 }
 
+export function flushLockPath(dir: string, agentId: string): string {
+  return join(dir, `${agentId}.flush.lock`);
+}
+
 export function lockPath(dir: string, agentId: string): string {
   return join(dir, `${agentId}.lock`);
 }
@@ -95,34 +108,24 @@ function ensureCaptureDir(dir: string): void {
   chmodSync(dir, 0o700);
 }
 
+interface LockAcquireState { stuckTakeover: boolean; warn: (message: string) => void; }
+
 const LOCK_BUSY: unique symbol = Symbol("capture-lock-busy");
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
 /** Run `fn` holding the per-agent lock (an exclusively created file), or
  *  return LOCK_BUSY when it is not free within CAPTURE_LOCK_WAIT_MS. */
-function withCaptureLock<T>(dir: string, agentId: string, fn: () => T): T | typeof LOCK_BUSY {
+function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }): T | typeof LOCK_BUSY {
   ensureCaptureDir(dir);
-  const path = lockPath(dir, agentId);
   const deadline = Date.now() + CAPTURE_LOCK_WAIT_MS;
   for (;;) {
-    let fd: number | null = null;
-    try {
-      fd = openSync(path, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    if (fd !== null) {
-      closeSync(fd);
+    const held = acquireSpoolLock(dir, agentId, console.warn, lockPath(dir, agentId), CAPTURE_LOCK_STALE_MS, false, 0, state);
+    if (held) {
       try {
         return fn();
       } finally {
-        try { unlinkSync(path); } catch {}
+        held.release();
       }
-    }
-    try {
-      if (Date.now() - statSync(path).mtimeMs > CAPTURE_LOCK_STALE_MS) unlinkSync(path);
-    } catch {
-      // Released meanwhile.
     }
     if (Date.now() >= deadline) return LOCK_BUSY;
     Atomics.wait(sleepCell, 0, 0, 2);
@@ -171,6 +174,20 @@ function isSpoolRecord(value: unknown, agentId: string): value is CaptureSpoolRe
   );
 }
 
+/** Read every record in the file, without the agent filter, so the flush's
+ *  rewrite can keep a record that belongs to another agent. Null when the file
+ *  cannot be read as a records file; the caller then leaves the file untouched. */
+function readSpoolFile(dir: string, agentId: string): unknown[] | null {
+  try {
+    const raw = readFileSync(spoolPath(dir, agentId), "utf-8");
+    const parsed = JSON.parse(raw) as { records?: unknown };
+    if (!parsed || !Array.isArray(parsed.records)) return null;
+    return parsed.records;
+  } catch {
+    return null;
+  }
+}
+
 /** Read the staged records, tolerating a missing/malformed file as empty. */
 export function readSpool(dir: string, agentId: string): CaptureSpoolRecord[] {
   try {
@@ -183,7 +200,7 @@ export function readSpool(dir: string, agentId: string): CaptureSpoolRecord[] {
   }
 }
 
-function serializeSpool(agentId: string, records: CaptureSpoolRecord[]): string {
+function serializeSpool(agentId: string, records: unknown[]): string {
   return `${JSON.stringify({ v: CAPTURE_VERSION, agentId, records })}\n`;
 }
 
@@ -319,7 +336,7 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
 /** The one client surface the flush touches — structurally satisfied by the
  *  real FlairClient, injectable in tests. */
 export interface CaptureClient {
-  request<T = unknown>(method: string, path: string, body?: unknown): Promise<T>;
+  request<T = unknown>(method: string, path: string, body?: unknown, opts?: { signal?: AbortSignal }): Promise<T>;
 }
 
 export interface FlushDeps {
@@ -328,12 +345,15 @@ export interface FlushDeps {
   now?: () => Date;
   makeClient?: (agentId: string) => CaptureClient | Promise<CaptureClient>;
   warn?: (message: string) => void;
+  /** Override the overall flush deadline (see CAPTURE_FLUSH_DEADLINE_MS). Tests
+   *  pass a short value so a hung write is observed without waiting the default. */
+  deadlineMs?: number;
 }
 
 export interface FlushOutcome {
   flushed: number;
   remaining: number;
-  reason: "flushed" | "nothing" | "no-agent-id" | "write-failed";
+  reason: "flushed" | "nothing" | "no-agent-id" | "write-failed" | "busy" | "busy-stuck-takeover";
 }
 
 /** LAZY on purpose: flair-client resolves via its built dist/, and this module
@@ -349,54 +369,228 @@ async function defaultClientFactory(agentId: string): Promise<CaptureClient> {
   });
 }
 
+function acquireSpoolLock(dir: string, agentId: string, warn: (message: string) => void = console.warn, path = lockPath(dir, agentId), staleMs = CAPTURE_LOCK_STALE_MS, takeover = false, depth = 0, state: LockAcquireState = { stuckTakeover: false, warn }): { release: () => void; isOwned: () => boolean; refresh: () => void } | null {
+  ensureCaptureDir(dir);
+  const identity = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
+  const readIdentity = (): string | null => {
+    try { return readFileSync(path, "utf8"); } catch { return null; }
+  };
+  const isOwned = (): boolean => readIdentity() === identity;
+  const release = (): void => {
+    try { if (isOwned()) unlinkSync(path); } catch {}
+  };
+  const create = (): boolean => {
+    let fd: number;
+    try {
+      fd = openSync(path, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      return false;
+    }
+    try {
+      writeFileSync(fd, identity);
+      closeSync(fd);
+    } catch (error) {
+      try { closeSync(fd); } catch {}
+      try { unlinkSync(path); } catch {}
+      throw error;
+    }
+    return true;
+  };
+  if (!create()) {
+    const readLock = (file: string) => {
+      let fd: number;
+      try { fd = openSync(file, "r"); } catch {
+        return { content: null, stat: statSync(file, { bigint: true }) };
+      }
+      try {
+        const stat = fstatSync(fd, { bigint: true });
+        let content: string | null = null;
+        try { content = readFileSync(fd, "utf8"); } catch {}
+        return { content, stat };
+      } finally {
+        closeSync(fd);
+      }
+    };
+    const reclaimable = (lock: ReturnType<typeof readLock>): boolean => {
+      const age = Date.now() - Number(lock.stat.mtimeMs);
+      let owner: { pid?: unknown; nonce?: unknown } | null = null;
+      try { owner = JSON.parse(lock.content ?? ""); } catch {}
+      const valid = owner && typeof owner.pid === "number" && Number.isSafeInteger(owner.pid) && owner.pid > 0 &&
+        typeof owner.nonce === "string" && owner.nonce.length > 0;
+      const reportStuck = (reason: string): void => {
+        if (!takeover || age <= CAPTURE_LOCK_STALE_MS || state.stuckTakeover) return;
+        state.stuckTakeover = true;
+        const mutexPath = resolve(path);
+        state.warn(`capture takeover mutex ${mutexPath} not reclaimed (age ${Math.round(age)} ms; ${reason}); remove ${mutexPath} if no capture flush is running`);
+      };
+      if (!valid) {
+        reportStuck("malformed identity");
+        return !takeover && age > staleMs;
+      }
+      if (!takeover && age > staleMs) return true;
+      try {
+        process.kill(owner!.pid as number, 0);
+        reportStuck(`holder pid ${owner!.pid} is alive`);
+        return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") reportStuck(`holder pid ${owner!.pid} cannot be proven dead`);
+        return (error as NodeJS.ErrnoException).code === "ESRCH" && (!takeover || age > staleMs);
+      }
+    };
+    try {
+      const previous = readLock(path);
+      if (!reclaimable(previous) || depth >= 8) return null;
+      const mutex = acquireSpoolLock(dir, agentId, () => {}, `${path}.takeover`, CAPTURE_TAKEOVER_STALE_MS, true, depth + 1, state);
+      if (!mutex) return null;
+      try {
+        const current = readLock(path);
+        if (!mutex.isOwned() || current.content !== previous.content || current.stat.dev !== previous.stat.dev ||
+          current.stat.ino !== previous.stat.ino || current.stat.mtimeMs !== previous.stat.mtimeMs || !reclaimable(current)) return null;
+        unlinkSync(path);
+        if (!create()) return null;
+        warn(`capture lock reclaimed (age ${Math.round(Date.now() - Number(previous.stat.mtimeMs))} ms)`);
+      } finally {
+        mutex.release();
+      }
+    } catch {
+      return null;
+    }
+  }
+  return {
+    release,
+    isOwned,
+    refresh: () => {
+      if (!isOwned()) throw new Error("capture lock ownership lost");
+      const now = new Date();
+      utimesSync(path, now, now);
+    },
+  };
+}
+
+/** Await `task`, or reject once `timeoutMs` elapses. `onTimeout` runs at the
+ *  bound (used to abort an in-flight write) before the rejection. */
+function withDeadline<T>(task: Promise<T>, timeoutMs: number, label: string, onTimeout?: () => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(`${label} deadline`));
+    }, timeoutMs);
+    timer.unref?.();
+    task.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+/** One flush write, bounded by `timeoutMs`. The abort signal reaches a real
+ *  client so it cancels the underlying fetch at the bound; the race is the bound
+ *  whether or not the client honours the signal. */
+function writeWithDeadline(client: CaptureClient, path: string, row: unknown, timeoutMs: number, signal: AbortSignal): Promise<unknown> {
+  const controller = new AbortController();
+  return withDeadline(
+    Promise.resolve().then(() => client.request("PUT", path, row, { signal: AbortSignal.any([controller.signal, signal]) })),
+    timeoutMs,
+    "capture flush write",
+    () => controller.abort(),
+  );
+}
+
 export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcome> {
   const env = deps.env ?? process.env;
   const warn = deps.warn ?? (() => {});
   const agentId = readEnvOrUnset("FLAIR_AGENT_ID", env);
   if (!isSafeFileId(agentId)) return { flushed: 0, remaining: 0, reason: "no-agent-id" };
   const dir = deps.dir ?? resolveCaptureDir(env);
-  const records = readSpool(dir, agentId);
+  let records = readSpool(dir, agentId);
   if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
 
   const now = deps.now ?? (() => new Date());
-  const makeClient = deps.makeClient ?? defaultClientFactory;
-  let client: CaptureClient;
-  try {
-    client = await makeClient(agentId);
-  } catch (error) {
-    warn(`flush skipped (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`);
-    return { flushed: 0, remaining: records.length, reason: "write-failed" };
-  }
-
-  const written = new Set<string>();
-  for (const record of records) {
+  const state: LockAcquireState = { stuckTakeover: false, warn: deps.warn ?? console.warn };
+  const held = acquireSpoolLock(dir, agentId, deps.warn ?? console.warn, flushLockPath(dir, agentId), CAPTURE_LOCK_STALE_MS, false, 0, state);
+  if (!held) return { flushed: 0, remaining: records.length, reason: state.stuckTakeover ? "busy-stuck-takeover" : "busy" };
+  const controller = new AbortController();
+  let lost = false;
+  let rejectLost!: (error: Error) => void;
+  const lockLost = new Promise<never>((_resolve, reject) => { rejectLost = reject; });
+  const beat = setInterval(() => {
     try {
-      const row = buildCaptureMemoryRow(
-        { kind: record.kind, content: record.content, dedupKey: record.dedupKey, provenance: record.provenance },
-        agentId,
-        now(),
-      );
-      await client.request("PUT", memoryPutPath(row.id), row);
-      written.add(record.dedupKey);
-    } catch (error) {
-      warn(`capture write skipped (${error instanceof Error ? error.message : String(error)})`);
-    }
-  }
-  let remaining = records.length;
-  if (written.size > 0) {
-    // Re-read under the lock and drop only what was written, so a record
-    // appended while the writes were in flight is kept.
-    try {
-      const kept = withCaptureLock(dir, agentId, () => {
-        const current = readSpool(dir, agentId).filter((r) => !written.has(r.dedupKey));
-        atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, current));
-        return current.length;
-      });
-      if (kept !== LOCK_BUSY) remaining = kept;
+      held.refresh();
     } catch {
+      lost = true;
+      controller.abort();
+      rejectLost(new Error("capture lock refresh failed"));
+      clearInterval(beat);
+      held.release();
     }
+  }, CAPTURE_LOCK_REFRESH_MS);
+  beat.unref?.();
+  const deadlineAt = Date.now() + (deps.deadlineMs ?? CAPTURE_FLUSH_DEADLINE_MS);
+  try {
+    const staged = withCaptureLock(dir, agentId, () => readSpoolFile(dir, agentId), state);
+    if (staged === LOCK_BUSY) return { flushed: 0, remaining: records.length, reason: state.stuckTakeover ? "busy-stuck-takeover" : "busy" };
+    records = (staged ?? []).filter((r): r is CaptureSpoolRecord => isSpoolRecord(r, agentId));
+    if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
+    const makeClient = deps.makeClient ?? defaultClientFactory;
+    let client: CaptureClient;
+    try {
+      // Race the client setup against the deadline as well.
+      client = await withDeadline(Promise.race([Promise.resolve().then(() => makeClient(agentId)), lockLost]), deadlineAt - Date.now(), "capture flush client");
+    } catch (error) {
+      warn(`flush skipped (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`);
+      return { flushed: 0, remaining: records.length, reason: "write-failed" };
+    }
+
+    const written = new Set<number>();
+    for (const [position, record] of (staged ?? []).entries()) {
+      if (!isSpoolRecord(record, agentId)) continue;
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0 || lost || !held.isOwned()) break;
+      try {
+        const row = buildCaptureMemoryRow(
+          { kind: record.kind, content: record.content, dedupKey: record.dedupKey, provenance: record.provenance },
+          agentId,
+          now(),
+        );
+        await Promise.race([writeWithDeadline(client, memoryPutPath(row.id), row, remainingMs, controller.signal), lockLost]);
+        written.add(position);
+      } catch (error) {
+        warn(`capture write skipped (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    let remaining = records.length;
+    if (written.size > 0 && !lost && held.isOwned() && staged !== null) {
+      try {
+        const kept = withCaptureLock(dir, agentId, () => {
+          const current = readSpoolFile(dir, agentId);
+          if (current === null) return readSpool(dir, agentId).length;
+          const completed = new Map<string, number>();
+          for (const position of written) {
+            const key = JSON.stringify(staged[position]);
+            completed.set(key, (completed.get(key) ?? 0) + 1);
+          }
+          const retained = current.filter((record) => {
+            if (!isSpoolRecord(record, agentId)) return true;
+            const key = JSON.stringify(record);
+            const count = completed.get(key) ?? 0;
+            if (count === 0) return true;
+            completed.set(key, count - 1);
+            return false;
+          });
+          atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, retained));
+          return readSpool(dir, agentId).length;
+        });
+        if (kept !== LOCK_BUSY) remaining = kept;
+      } catch (error) {
+        warn(`capture rewrite skipped (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    return { flushed: written.size, remaining, reason: !lost && written.size > 0 ? "flushed" : "write-failed" };
+  } finally {
+    clearInterval(beat);
+    held.release();
   }
-  return { flushed: written.size, remaining, reason: written.size > 0 ? "flushed" : "write-failed" };
 }
 
 // ── flush cooldown ──────────────────────────────────────────────────────────

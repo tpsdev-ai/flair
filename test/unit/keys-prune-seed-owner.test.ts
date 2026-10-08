@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { classifyKeysDir, applyKeyPrune, makeReadInstanceIds } from "../../src/commands/keys.ts";
 import { serializeSeedOwner, SEED_OWNER_SUFFIX, seedOwnerPath, readSeedOwner, readSeedOwnerAt, recordSeedOwner } from "../../src/keystore.ts";
@@ -48,7 +49,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const liveResult = await classifyKeysDir(dir, BASE_URL, reader([LIVE], "/stores/live"));
     expect(classes(liveResult.entries)).toEqual({ [LIVE]: "keep", [OTHER]: "unidentified" });
     expect(liveResult.entries.find((e) => e.agentId === OTHER)?.reason).toContain("not the targeted instance");
-    expect(applyKeyPrune(dir, liveResult.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, liveResult.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${LIVE}.key`))).toBe(true);
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
     expect(existsSync(join(dir, ".pruned"))).toBe(false);
@@ -57,7 +58,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const otherResult = await classifyKeysDir(dir, BASE_URL, reader([OTHER], "/stores/other"));
     expect(classes(otherResult.entries)).toEqual({ [OTHER]: "keep", [LIVE]: "unidentified" });
     expect(otherResult.entries.find((e) => e.agentId === LIVE)?.reason).toContain("not the targeted instance");
-    expect(applyKeyPrune(dir, otherResult.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, otherResult.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${LIVE}.key`))).toBe(true);
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
     expect(existsSync(join(dir, ".pruned"))).toBe(false);
@@ -70,7 +71,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const result = await classifyKeysDir(dir, BASE_URL, reader([LIVE], "/stores/live"));
     expect(result.entries.find((e) => e.agentId === OTHER)?.class).toBe("unidentified");
     expect(result.entries.find((e) => e.agentId === OTHER)?.reason).toContain("unauthenticated");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
     expect(existsSync(ownerPath(dir, OTHER))).toBe(true);
     expect(existsSync(join(dir, ".pruned"))).toBe(false);
@@ -84,7 +85,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     expect(entry?.class).toBe("unidentified");
     expect(entry?.reason).toContain("no owner record");
     expect(entry?.reason).toContain("ownership cannot be proven");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
     expect(existsSync(join(dir, ".pruned"))).toBe(false);
   });
@@ -97,7 +98,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const entry = result.entries.find((e) => e.agentId === OTHER);
     expect(entry?.class).toBe("unidentified");
     expect(entry?.reason).toContain("malformed");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
   });
 
@@ -110,7 +111,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     expect(entry?.class).toBe("unidentified");
     expect(entry?.reason).toContain("malformed");
     expect(entry?.reason).toContain("data directory");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
   });
 
@@ -122,7 +123,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const entry = result.entries.find((e) => e.agentId === OTHER);
     expect(entry?.class).toBe("unidentified");
     expect(entry?.reason).toContain("could not be read");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
   });
 
@@ -136,7 +137,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const entry = result.entries.find((e) => e.agentId === OTHER);
     expect(entry?.class).toBe("unidentified");
     expect(entry?.reason).toContain("does not belong to this seed");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
   });
 
@@ -144,7 +145,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const dir = tempDir("flair-seed-owner-defense-");
     writeNodeSeed(dir, ORPHAN);
     for (const classification of ["stale", "invalid", "orphan-seed"] as const) {
-      expect(applyKeyPrune(dir, [{ name: `${ORPHAN}.key`, class: classification, reason: "fixture" }], "2026-10-03")).toEqual([]);
+      expect(applyKeyPrune(dir, [{ name: `${ORPHAN}.key`, class: classification, reason: "fixture" }], "2026-10-03")).toEqual({ moved: [], skipped: [] });
       expect(existsSync(join(dir, `${ORPHAN}.key`))).toBe(true);
     }
     expect(existsSync(join(dir, ".pruned"))).toBe(false);
@@ -158,7 +159,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const entry = result.entries.find((e) => e.agentId === ORPHAN);
     expect(entry?.class).toBe("unidentified");
     expect(entry?.reason).toContain("Agent");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${ORPHAN}.key`))).toBe(true);
   });
 
@@ -168,7 +169,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     writeOwner(dir, OTHER, "/stores/live");
     const result = await classifyKeysDir(dir, BASE_URL, reader([LIVE], "/stores/live", []));
     expect(result.entries.find((e) => e.agentId === OTHER)?.class).toBe("unidentified");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${OTHER}.key`))).toBe(true);
   });
 
@@ -181,7 +182,7 @@ describe("keys prune — two instances sharing a home (flair#2200)", () => {
     const entry = result.entries.find((e) => e.agentId === ORPHAN);
     expect(entry?.class).toBe("unidentified");
     expect(entry?.reason).toContain("could not be established");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, `${ORPHAN}.key`))).toBe(true);
   });
 });
@@ -194,8 +195,13 @@ describe("keystore seed-owner sidecar (flair#2200)", () => {
     recordSeedOwner(id, "/stores/xyz");
     const read = readSeedOwner(id);
     expect(read).toEqual({ state: "ok", instanceId: id, dataDir: "/stores/xyz" });
-    expect(statSync(seedOwnerPath(id)).mode & 0o777).toBe(0o600);
-    expect(readFileSync(seedOwnerPath(id), "utf-8")).toContain("/stores/xyz");
+    const fd = openSync(seedOwnerPath(id), "r");
+    try {
+      expect(fstatSync(fd).mode & 0o777).toBe(0o600);
+      expect(readFileSync(fd, "utf-8")).toContain("/stores/xyz");
+    } finally {
+      closeSync(fd);
+    }
   });
 
   test("readSeedOwnerAt reports absent, malformed and unreadable distinctly", () => {
@@ -218,14 +224,9 @@ describe("keystore seed-owner sidecar (flair#2200)", () => {
 });
 
 describe("makeReadInstanceIds — unverifiable directory binding", () => {
-  test("another instance directory recording the same port refuses by name and moves nothing", async () => {
+  test("a supplied data directory is refused before target reads or key moves", async () => {
     const dir = tempDir("flair-seed-binding-");
-    const live = join(dir, "live");
     const other = join(dir, "other");
-    for (const dataDir of [live, other]) {
-      mkdirSync(dataDir);
-      writeFileSync(join(dataDir, "harperdb-config.yaml"), "http:\n  port: 19926\n");
-    }
     const keys = join(dir, "keys");
     mkdirSync(keys);
     writeNodeSeed(keys, OTHER);
@@ -239,7 +240,8 @@ describe("makeReadInstanceIds — unverifiable directory binding", () => {
     }) as unknown as typeof fetch;
     const read = makeReadInstanceIds({
       baseUrl: BASE_URL, dataDir: other,
-      resolveHttpPort: () => 19926, resolveOpsPort: () => 19925,
+      resolveHttpPort: () => { throw new Error("a supplied data directory is refused before the http port is resolved"); },
+      resolveOpsPort: () => { throw new Error("a supplied data directory is refused before the ops port is resolved"); },
       probe: async () => { probes++; return { state: "read", ids: [LIVE], agentIds: [] }; },
     });
     const result = await classifyKeysDir(keys, BASE_URL, read);
@@ -249,7 +251,7 @@ describe("makeReadInstanceIds — unverifiable directory binding", () => {
     expect(result.entries).toEqual([]);
     expect(probes).toBe(0);
     expect(fetches).toBe(0);
-    expect(applyKeyPrune(keys, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(keys, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(keys, `${OTHER}.key`))).toBe(true);
     expect(existsSync(join(keys, "agent-stale.key"))).toBe(true);
   });
@@ -262,7 +264,7 @@ describe("keys prune — sidecar move ordering", () => {
     writeFileSync(join(dir, name), "fixture");
     writeFileSync(join(dir, `${name}${SEED_OWNER_SUFFIX}`), "metadata");
     const order: string[] = [];
-    const moved = applyKeyPrune(dir, [{ name, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+    const { moved } = applyKeyPrune(dir, [{ name, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
       order.push(String(from));
       expect(existsSync(join(dir, name))).toBe(true);
       renameSync(from, to);
@@ -315,8 +317,189 @@ describe("keys prune — sidecar move ordering", () => {
     const dir = owner.slice(0, owner.lastIndexOf("/"));
     const result = await classifyKeysDir(dir, BASE_URL, reader([LIVE], "/stores/live"));
     expect(result.entries.find((e) => e.agentId === id)?.class).toBe("unidentified");
-    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual([]);
+    expect(applyKeyPrune(dir, result.entries, "2026-10-03")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(owner.slice(0, -SEED_OWNER_SUFFIX.length))).toBe(true);
+  });
+});
+
+describe("keys prune — sidecar file type checks (flair#2286)", () => {
+  const NAME = "agent-stale.key";
+
+  /** A temp keys dir holding one stale key and a sidecar path of `kind`. */
+  function sidecarFixture(
+    kind: "directory" | "symlink" | "dangling symlink" | "FIFO" | "regular",
+  ): { dir: string; sidecar: string } {
+    const dir = tempDir("flair-sidecar-kind-");
+    writeFileSync(join(dir, NAME), "fixture");
+    const sidecar = join(dir, `${NAME}${SEED_OWNER_SUFFIX}`);
+    if (kind === "directory") mkdirSync(sidecar);
+    else if (kind === "symlink") {
+      writeFileSync(join(dir, "target.json"), "{}");
+      symlinkSync(join(dir, "target.json"), sidecar);
+    } else if (kind === "dangling symlink") symlinkSync(join(dir, "missing.json"), sidecar);
+    else if (kind === "FIFO") execFileSync("mkfifo", [sidecar]);
+    else writeFileSync(sidecar, "metadata");
+    return { dir, sidecar };
+  }
+
+  for (const [kind, typeName] of [
+    ["directory", "directory"],
+    ["symlink", "symbolic link"],
+    ["dangling symlink", "symbolic link"],
+    ["FIFO", "FIFO"],
+  ] as const) {
+    test(`a ${kind} at the sidecar path leaves the key and the path in place, naming both`, () => {
+      const { dir, sidecar } = sidecarFixture(kind);
+      const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03");
+
+      expect(outcome.moved).toEqual([]);
+      expect(outcome.skipped).toHaveLength(1);
+      expect(outcome.skipped[0].name).toBe(NAME);
+      expect(outcome.skipped[0].ownerPath).toBe(sidecar);
+      expect(outcome.skipped[0].reason).toContain(sidecar);
+      expect(outcome.skipped[0].reason).toContain(typeName);
+
+      // Nothing moved: the key is still there and no archive was created.
+      expect(existsSync(join(dir, NAME))).toBe(true);
+      expect(existsSync(join(dir, ".pruned"))).toBe(false);
+      // The sidecar path still holds a non-regular file (read nothing — a FIFO
+      // read would block).
+      expect(lstatSync(sidecar).isFile()).toBe(false);
+    });
+  }
+
+  for (const replacement of ["directory", "symlink"] as const) {
+    test(`a ${replacement} moved from a changed sidecar path is restored before the key moves`, () => {
+      const { dir, sidecar } = sidecarFixture("regular");
+      let first = true;
+      const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+        if (first) {
+          first = false;
+          renameSync(sidecar, join(dir, "previous-owner.json"));
+          if (replacement === "directory") mkdirSync(sidecar);
+          else symlinkSync(join(dir, "missing.json"), sidecar);
+        }
+        renameSync(from, to);
+      });
+      expect(outcome.moved).toEqual([]);
+      expect(outcome.skipped).toHaveLength(1);
+      expect(outcome.skipped[0].reason).toContain(replacement === "directory" ? "directory" : "symbolic link");
+      expect(existsSync(join(dir, NAME))).toBe(true);
+      expect(lstatSync(sidecar).isFile()).toBe(false);
+      expect(existsSync(join(dir, ".pruned", "2026-10-03", NAME))).toBe(false);
+      expect(() => lstatSync(join(dir, ".pruned", "2026-10-03", `${NAME}${SEED_OWNER_SUFFIX}`))).toThrow();
+    });
+  }
+
+  for (const kind of ["directory", "regular"] as const) {
+    test(`a ${kind} sidecar appearing before its move is checked at the destination`, () => {
+      const dir = tempDir("flair-sidecar-appearing-");
+      const sidecar = join(dir, `${NAME}${SEED_OWNER_SUFFIX}`);
+      writeFileSync(join(dir, NAME), "fixture");
+      let first = true;
+      const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+        if (first) {
+          first = false;
+          if (kind === "directory") mkdirSync(sidecar);
+          else writeFileSync(sidecar, "metadata");
+        }
+        renameSync(from, to);
+      });
+      if (kind === "directory") {
+        expect(outcome.moved).toEqual([]);
+        expect(outcome.skipped).toHaveLength(1);
+        expect(existsSync(join(dir, NAME))).toBe(true);
+        expect(lstatSync(sidecar).isDirectory()).toBe(true);
+      } else {
+        expect(outcome.skipped).toEqual([]);
+        expect(outcome.moved).toHaveLength(1);
+        expect(readFileSync(join(dir, ".pruned", "2026-10-03", `${NAME}${SEED_OWNER_SUFFIX}`), "utf8")).toBe("metadata");
+        expect(existsSync(sidecar)).toBe(false);
+      }
+    });
+
+    test(`a ${kind} sidecar appearing after a missing-sidecar move leaves the key active`, () => {
+      const dir = tempDir("flair-sidecar-recheck-");
+      const sidecar = join(dir, `${NAME}${SEED_OWNER_SUFFIX}`);
+      writeFileSync(join(dir, NAME), "fixture");
+      const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+        if (String(from) === sidecar) {
+          try {
+            renameSync(from, to);
+          } catch (err) {
+            if (kind === "directory") mkdirSync(sidecar);
+            else writeFileSync(sidecar, "metadata");
+            throw err;
+          }
+        } else {
+          if (kind === "directory") mkdirSync(sidecar);
+          else writeFileSync(sidecar, "metadata");
+          renameSync(from, to);
+        }
+      });
+      expect(outcome.moved).toEqual([]);
+      expect(outcome.skipped).toHaveLength(1);
+      expect(existsSync(join(dir, NAME))).toBe(true);
+      expect(existsSync(sidecar)).toBe(true);
+      expect(existsSync(join(dir, ".pruned", "2026-10-03", NAME))).toBe(false);
+    });
+  }
+
+  for (const failure of ["type refusal", "key move failure"] as const) {
+    test(`rollback failure after ${failure} throws and leaves the key in place`, () => {
+      const { dir, sidecar } = sidecarFixture("regular");
+      const key = join(dir, NAME);
+      const archivedKey = join(dir, ".pruned", "2026-10-03", NAME);
+      const archivedSidecar = `${archivedKey}${SEED_OWNER_SUFFIX}`;
+      const rollbackError = Object.assign(new Error("sidecar rollback denied"), { code: "EACCES" });
+      const calls: Array<[string, string]> = [];
+      let thrown: unknown;
+      try {
+        applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03", (from, to) => {
+          calls.push([String(from), String(to)]);
+          if (String(from) === archivedSidecar) throw rollbackError;
+          if (String(from) === key) throw Object.assign(new Error("key move denied"), { code: "EACCES" });
+          if (failure === "type refusal") {
+            renameSync(sidecar, join(dir, "previous-owner.json"));
+            mkdirSync(sidecar);
+          }
+          renameSync(from, to);
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBe(rollbackError);
+      const expectedCalls: Array<[string, string]> = [[sidecar, archivedSidecar]];
+      if (failure === "key move failure") expectedCalls.push([key, archivedKey]);
+      expectedCalls.push([archivedSidecar, sidecar]);
+      expect(calls).toEqual(expectedCalls);
+      expect(readFileSync(key, "utf8")).toBe("fixture");
+      expect(existsSync(archivedKey)).toBe(false);
+      expect(existsSync(sidecar)).toBe(false);
+      if (failure === "type refusal") expect(lstatSync(archivedSidecar).isDirectory()).toBe(true);
+      else expect(readFileSync(archivedSidecar, "utf8")).toBe("metadata");
+    });
+  }
+
+  test("a regular sidecar still moves with its key", () => {
+    const { dir } = sidecarFixture("regular");
+    const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03");
+
+    expect(outcome.skipped).toEqual([]);
+    expect(outcome.moved).toHaveLength(1);
+    expect(outcome.moved[0].movedTo).toBe(join(dir, ".pruned", "2026-10-03", NAME));
+    expect(existsSync(join(dir, NAME))).toBe(false);
+    expect(existsSync(join(dir, ".pruned", "2026-10-03", NAME))).toBe(true);
+    expect(existsSync(join(dir, ".pruned", "2026-10-03", `${NAME}${SEED_OWNER_SUFFIX}`))).toBe(true);
+  });
+
+  test("a key with no sidecar at all still moves", () => {
+    const dir = tempDir("flair-sidecar-none-");
+    writeFileSync(join(dir, NAME), "fixture");
+    const outcome = applyKeyPrune(dir, [{ name: NAME, class: "stale", reason: "fixture" }], "2026-10-03");
+    expect(outcome.skipped).toEqual([]);
+    expect(outcome.moved).toHaveLength(1);
+    expect(existsSync(join(dir, ".pruned", "2026-10-03", NAME))).toBe(true);
   });
 });
 

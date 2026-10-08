@@ -3239,10 +3239,6 @@ export async function checkAgentRegistered(
   }
 }
 
-// Blocks until the given PID is gone (ESRCH from signal 0), or timeout.
-// Used during restart to confirm the old Harper process actually exited before
-// we start polling /Health — otherwise the still-shutting-down old process can
-// answer and we'd declare restart success while a gap is still ahead.
 /**
  * Is `pid` a process that exists right now? Signal 0 performs the permission
  * and existence checks without delivering anything (flair#1022) — a `hdb.pid`
@@ -3253,13 +3249,22 @@ function isProcessAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+// Used during restart to confirm the old Harper process actually exited before
+// we start polling /Health — otherwise the still-shutting-down old process can
+// answer and we'd declare restart success while a gap is still ahead.
+// Cap sleeps at the remaining time; probe once after the last wake, then stop (flair#2357).
+export async function waitForProcessExit(
+  pid: number,
+  timeoutMs: number,
+  probe: (pid: number) => PidLiveness = probePidLiveness,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (probePidLiveness(pid).kind === "gone") return;
-    await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+  while (true) {
+    if (probe(pid).kind === "gone") return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((r) => setTimeout(r, Math.min(HEALTH_POLL_INTERVAL_MS, remaining)));
   }
-  if (probePidLiveness(pid).kind === "gone") return;
   throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms`);
 }
 
@@ -4652,6 +4657,7 @@ bindInitCli({
   repointMainServiceUnit,
   resolveHttpPort,
   writeAdminPassFile,
+  proveAdminPassAgainstInstance,
   resolveOpsBindHost,
   resolveHttpBindFor,
   resolveOpsPort,
@@ -5133,35 +5139,42 @@ export function readSidecar(dataDir: string): SidecarRead {
   return { kind: "present", ...parsed };
 }
 
+export const DARWIN_STATE_READ_TIMEOUT_MS = 5_000;
+const DARWIN_STATE_READ_MIN_MS = 1_000;
+type StateReadErrorHandler = (error: unknown, timeoutMs: number) => void;
+
+function readDarwinProcessState(pid: number, timeoutMs: number, onReadError?: StateReadErrorHandler): string | null {
+  try {
+    const out = execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf-8",
+      env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out.length > 0 ? out[0] : null;
+  } catch (error) {
+    onReadError?.(error, timeoutMs);
+    return null;
+  }
+}
+
 /**
  * The kernel's state character for an existing pid, or null when it cannot be
  * read (flair#2313). Linux reads field 3 of `/proc/<pid>/stat`; Darwin reads the
- * first character of `ps -o stat=`. A read failure returns null — the caller
- * treats that as "not exited", never as exited (fail safe).
+ * first character of `/bin/ps -o stat=` (flair#2330). A read failure returns
+ * null — the caller treats that as "not exited", never as exited (fail safe).
  */
-function readProcessState(pid: number): string | null {
-  try {
-    if (process.platform === "linux") {
-      return parseProcStatState(readFileSync(`/proc/${pid}/stat`, "utf-8"));
-    }
-    if (process.platform === "darwin") {
-      const out = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
-        encoding: "utf-8",
-        env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
-        timeout: 2000,
-        killSignal: "SIGKILL",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      return out.length > 0 ? out[0] : null;
-    }
-  } catch {
-    return null;
+function readProcessState(pid: number, timeoutMs: number, onReadError?: StateReadErrorHandler): string | null {
+  if (process.platform === "linux") {
+    try { return parseProcStatState(readFileSync(`/proc/${pid}/stat`, "utf-8")); } catch { return null; }
   }
+  if (process.platform === "darwin") return readDarwinProcessState(pid, timeoutMs, onReadError);
   return null;
 }
 
 /**
- * `kill(pid, 0)` as a four-way: alive / gone (ESRCH) / eperm (another user's) /
+ * Process liveness: alive / gone (ESRCH or zombie) / eperm (another user's) /
  * unknown.
  *
  * Signal 0 says the pid EXISTS, which is not the same as running: an exited
@@ -5172,12 +5185,14 @@ function readProcessState(pid: number): string | null {
  * state stays `alive` — a read failure must never report a live process as
  * exited.
  *
- * The state reader is injectable so the unreadable branch is unit-testable
- * without a real unreadable process.
+ * The state reader is injectable so the unreadable and retried branches are
+ * unit-testable without a real unreadable process.
  */
 export function probePidLiveness(
   pid: number,
-  readState: (pid: number) => string | null = readProcessState,
+  readState: (pid: number, timeoutMs: number, onReadError?: StateReadErrorHandler) => string | null = readProcessState,
+  deadlineMs: number = Infinity,
+  onReadError?: StateReadErrorHandler,
 ): PidLiveness {
   try {
     process.kill(pid, 0);
@@ -5187,7 +5202,43 @@ export function probePidLiveness(
     // classifier's unknown state (flair#2055).
     return livenessFromKillError(err?.code);
   }
-  return isExitedState(readState(pid)) ? { kind: "gone" } : { kind: "alive" };
+  let state: string | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) break;
+    const timeoutMs = Math.min(DARWIN_STATE_READ_TIMEOUT_MS, Math.max(DARWIN_STATE_READ_MIN_MS, remainingMs));
+    state = readState(pid, timeoutMs, onReadError);
+    if (state !== null) break;
+  }
+  return isExitedState(state) ? { kind: "gone" } : { kind: "alive" };
+}
+
+/**
+ * Poll the process-liveness probe for `pid` until it reports `gone` or
+ * `deadlineMs` passes; return whether `gone` was read and the last read
+ * (flair#2330). This is `flair doctor`'s stop wait.
+ *
+ * If both state reads fail, that poll stays `alive`.
+ * Check expiry before each read; an admitted read gets at least 1s to finish.
+ * Readers honoring their timeout allow deadline + 1s, plus scheduling and subprocess overhead.
+ */
+export async function waitForPidGone(
+  pid: number,
+  deadlineMs: number,
+  readState: (pid: number, timeoutMs: number, onReadError?: StateReadErrorHandler) => string | null = readProcessState,
+  pollMs: number = HEALTH_POLL_INTERVAL_MS,
+  onReadError?: StateReadErrorHandler,
+): Promise<{ gone: boolean; last: PidLiveness }> {
+  let last: PidLiveness = { kind: "unknown", reason: "the stop deadline passed before a probe" };
+  while (Date.now() < deadlineMs) {
+    last = probePidLiveness(pid, readState, deadlineMs, onReadError);
+    if (last.kind === "gone") return { gone: true, last };
+    if (Date.now() >= deadlineMs) return { gone: false, last };
+    const remaining = deadlineMs - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((r) => setTimeout(r, Math.min(pollMs, remaining)));
+  }
+  return { gone: false, last };
 }
 
 /**
@@ -5321,15 +5372,24 @@ function inspectServingFlairPackage(pid: number): boolean | null {
   return resolveServingFlairPackage(pid) !== null;
 }
 
-/** Gather every piece of evidence the classifier needs, in one place. */
-export async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
+export function gatherDaemonOwnerEvidence(dataDir: string): Omit<DaemonEvidence, "identity" | "health"> & { sidecar: SidecarRead } {
   const dataDirUnsafe = checkDataDirSafe(dataDir);
   const pidfile = readPidfile(dataDir);
-  let sidecar = readSidecar(dataDir);
+  const sidecar = readSidecar(dataDir);
+  const sidecarLiveness = sidecar.kind === "present" ? probePidLiveness(sidecar.pid) : null;
   const lastKnownPid = pidfile.kind === "absent" && sidecar.kind === "present" ? sidecar.pid : undefined;
   const pidLiveness = pidfile.kind === "present" ? probePidLiveness(pidfile.pid)
     : lastKnownPid !== undefined ? probePidLiveness(lastKnownPid)
     : pidfile.kind === "absent" && sidecar.kind === "unreadable" ? { kind: "unknown" as const, reason: sidecar.reason } : null;
+
+  return { dataDirUnsafe, pidfile, lastKnownPid, pidLiveness, sidecar, sidecarLiveness };
+}
+
+/** Gather every piece of evidence the classifier needs, in one place. */
+export async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
+  const owner = gatherDaemonOwnerEvidence(dataDir);
+  const { dataDirUnsafe, pidfile, lastKnownPid, pidLiveness, sidecarLiveness } = owner;
+  let sidecar = owner.sidecar;
 
   // flair#2055: a sidecar that names a pid which is CONFIRMED gone is STALE, not
   // a disagreement with hdb.pid. After `flair stop` ended a directly started
@@ -5342,7 +5402,7 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
   // Liveness that cannot be determined is NOT stale: the sidecar stays and the
   // refusal stands (unknown evidence never licenses an action).
   if (sidecar.kind === "present" && dataDirUnsafe === null) {
-    if (classifySidecarStaleness(sidecar, probePidLiveness(sidecar.pid)).kind === "stale") {
+    if (classifySidecarStaleness(sidecar, sidecarLiveness!).kind === "stale") {
       sidecar = { kind: "absent" };
     }
   }
@@ -5414,7 +5474,7 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
     sidecar,
     readStartTime: readProcessStartTimeMs,
   });
-  return { dataDirUnsafe, pidfile, lastKnownPid, pidLiveness, identity, health };
+  return { ...owner, identity, health };
 }
 
 /**
@@ -5561,6 +5621,7 @@ bindServiceCli({
   ensureLaunchdServiceLoaded,
   flairPackageDir,
   gatherDaemonEvidence,
+  gatherDaemonOwnerEvidence,
   guardEngineNotBackwards,
   harperBinNotFoundMessage,
   harperSearchRoots,
@@ -6341,26 +6402,25 @@ function resolveAdminPassAvailability(path: string): AdminPassAvailability {
   };
 }
 
-/**
- * Prove an admin credential belongs to the running instance before adoption
- * materializes it into the 0600 pass file (flair#1685). The admin-gated
- * /HealthDetail read is the proof: a rejected Basic credential produces 401 and
- * is NOT retried through the agent-key floor (that floor only engages when no
- * credential was sent at all), so success here means THIS credential was
- * accepted by THIS instance. Never logs the secret.
- */
-async function proveAdminPassAgainstInstance(
+export async function proveAdminPassAgainstInstance(
   port: number,
   adminPass: string,
 ): Promise<string | null> {
   try {
-    await api("GET", "/HealthDetail", undefined, {
+    await api("GET", "/FederationPeers", undefined, {
       baseUrl: `http://127.0.0.1:${port}`,
       explicitAdminPass: adminPass,
+      adminUser: DEFAULT_ADMIN_USER,
     });
     return null;
   } catch (err) {
-    return err instanceof Error ? err.message : String(err);
+    if (err instanceof Error && err.cause instanceof ApiHttpError) err = err.cause;
+    if (err instanceof ApiHttpError && (err.status === 401 || err.status === 403)) {
+      return `the supplied admin credential was rejected (HTTP ${err.status})`;
+    }
+    const detail = err instanceof Error ? err.message : String(err);
+    const status = err instanceof ApiHttpError ? `HTTP ${err.status}: ` : "";
+    return `admin credential verification could not be completed (${status}${detail})`;
   }
 }
 
@@ -6464,10 +6524,6 @@ export type WriteInitLaunchdPlistResult =
  *      file and the command named and write NO plist. Never a plist whose
  *      launcher argv cannot be satisfied.
  *
- * The proof uses the same authed `GET /HealthDetail` as the doctor arms (a
- * rejected Basic credential is a 401 and never falls through to the agent-key
- * floor), so a credential that does not belong to THIS instance is refused
- * rather than baked into a pass file the instance would reject.
  */
 export async function writeInitLaunchdPlist(
   opts: WriteInitLaunchdPlistOptions,
@@ -7809,13 +7865,9 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
       readStartTime: (pid) => readProcessStartTimeMs(pid, Math.min(stopDeadline, Date.now() + 2_000)),
     });
     const identityObservedAt = Date.now();
-    while (Date.now() < stopDeadline && probePidLiveness(state.pid).kind !== "gone") {
-      const remaining = stopDeadline - Date.now();
-      if (remaining <= 0) break;
-      await new Promise((r) => setTimeout(r, Math.min(HEALTH_POLL_INTERVAL_MS, remaining)));
-    }
-    if (Date.now() >= stopDeadline) {
-      const liveness = probePidLiveness(state.pid);
+    const stopGone = await waitForPidGone(state.pid, stopDeadline);
+    if (!stopGone.gone) {
+      const liveness = stopGone.last;
       const result = timeoutResult(`waiting for direct Harper process ${state.pid} to exit`);
       const identityDetail = identityObservedAt < stopDeadline
         ? `${identity.kind}, observed at ${new Date(identityObservedAt).toISOString()}`
@@ -7823,7 +7875,6 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
       if (result.kind === "failed") result.detail += ` ${signalResult}; not observed to exit before the deadline (liveness: ${liveness.kind}; identity: ${identityDetail}).`;
       return failure(result);
     }
-    // The signalled process exited before the shared deadline (flair#2284).
     observedExit = true;
   }
   const stateDecision = decideAdoptStop(state, { kind: "refused" });
@@ -7882,6 +7933,11 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
   return null;
 }
 
+/** The restart flow's exit wait for the old process (flair#2365); injectable for tests. */
+type ExitWait = (pid: number, timeoutMs: number) => Promise<void>;
+
+type StopExitOutcome = { pid: number | null; exited: boolean };
+
 /**
  * Stop the local Flair (Harper) process — launchd `stop` on darwin when a
  * plist is present (falling back on failure), otherwise a manual SIGTERM by
@@ -7906,7 +7962,18 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
  * the liveness machine. Callers already treat a failed stop as fatal, which
  * is the point: refusing beats quiescing the wrong install.
  */
-async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
+async function stopFlairProcess(
+  port: number,
+  dataDir: string,
+  opts: { waitForExit?: ExitWait } = {},
+): Promise<StopExitOutcome> {
+  const waitForExit = opts.waitForExit ?? waitForProcessExit;
+  let launchdExitFailure: { pid: number; exited: false } | null = null;
+  const fallbackOutcome = (outcome: StopExitOutcome): StopExitOutcome => {
+    if (!launchdExitFailure) return outcome;
+    if (probePidLiveness(launchdExitFailure.pid).kind !== "gone") return launchdExitFailure;
+    return { pid: outcome.pid ?? launchdExitFailure.pid, exited: outcome.exited };
+  };
   if (process.platform === "darwin") {
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under (new instance-scoped, or a
@@ -7966,8 +8033,13 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
             + `${managed.remedy?.length ? ` Fix it with: ${managed.remedy.join(" && ")}` : ""}`,
           );
         }
-        if (oldPid) await waitForProcessExit(oldPid, STARTUP_TIMEOUT_MS);
-        return;
+        if (oldPid) {
+          try { await waitForExit(oldPid, STARTUP_TIMEOUT_MS); } catch (err) {
+            launchdExitFailure = { pid: oldPid, exited: false };
+            throw err;
+          }
+        }
+        return { pid: oldPid ?? null, exited: true };
       } catch (err: any) {
         console.error(`launchd stop failed, falling back to port-based stop: ${err.message}`);
       }
@@ -7995,26 +8067,30 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
       // blind sleep is not a guarantee — Harper may be flushing RocksDB
       // WAL/MANIFEST, and the next start fails with a locked data directory if
       // the old process hasn't released it yet.
-      try { await waitForProcessExit(pid, STARTUP_TIMEOUT_MS); } catch { /* best-effort — the next start will surface the real problem */ }
+      let exited = true;
+      try { await waitForExit(pid, STARTUP_TIMEOUT_MS); } catch { exited = false; /* best-effort — the restart leg refuses instead (flair#2365) */ }
       // flair#2055: once the process is CONFIRMED gone, drop the identity
       // sidecar. Gated on a fresh O_NOFOLLOW read that still names the pid it
       // named before (a sidecar another supervisor rewrote in between is left
       // alone); a process that survived the wait (or whose liveness is unknown)
       // removes nothing.
       removeStaleSidecarIfConfirmedDead(dataDir);
-      return;
+      return fallbackOutcome({ pid, exited });
     }
     case "NOT_RUNNING": {
       // Idempotent no-op for the process — but a sidecar left naming a pid that
       // is CONFIRMED gone is a leftover too (flair#2055), and removing it here
       // keeps a repeat stop from carrying the refusal forward.
       removeStaleSidecarIfConfirmedDead(dataDir);
-      return;
+      return fallbackOutcome({ pid: null, exited: true });
     }
     case "DISAGREEMENT":
     case "UNKNOWN":
       // Deliberately outside any catch: a refusal must reach the caller, not
       // be swallowed as "not running" and reported as a successful stop.
+      if (launchdExitFailure && !fallbackOutcome({ pid: null, exited: true }).exited) {
+        throw new StopExitWaitError(launchdExitFailure, `refusing to stop: ${state.detail}`);
+      }
       throw new Error(`refusing to stop: ${state.detail}`);
   }
 }
@@ -8184,6 +8260,30 @@ async function startFlairDirect(port: number, dataDir: string): Promise<number |
   return proc.pid ?? null;
 }
 
+class StopExitWaitError extends Error {
+  constructor(readonly outcome: StopExitOutcome, readonly detail?: string) {
+    super(`${detail ? `${detail}. ` : ""}Could not confirm that the old Flair process (pid ${outcome.pid ?? "unknown"}) exited within ${STARTUP_TIMEOUT_MS}ms`);
+  }
+}
+
+function refuseReplacementAfterExitTimeout(outcome: StopExitOutcome, detail?: string): void {
+  if (outcome.exited) return;
+  throw new Error(
+    `${detail ? `${detail}. ` : ""}Could not confirm that the old Flair process (pid ${outcome.pid ?? "unknown"}) exited within ${STARTUP_TIMEOUT_MS}ms; refusing to start a replacement. `
+    + `Stop it, then re-run 'flair restart'.`,
+  );
+}
+
+/**
+ * Injection seams for the restart flow (flair#2365): the stop leg's exit wait,
+ * and the replacement start a test observes was not reached. Both default to
+ * the real legs.
+ */
+type RestartFlairDeps = {
+  waitForExit?: ExitWait;
+  startReplacement?: (port: number, dataDir: string) => Promise<void>;
+};
+
 /**
  * The ONE restart mechanism for a local Flair install. Shared by `flair
  * restart` and `flair upgrade`'s post-install restart step (flair#635) so
@@ -8200,7 +8300,18 @@ async function startFlairDirect(port: number, dataDir: string): Promise<number |
  * named at the call site rather than assumed from `defaultDataDir()` two
  * frames down.
  */
-async function restartFlair(port: number, dataDir: string): Promise<void> {
+export async function restartFlair(port: number, dataDir: string, deps: RestartFlairDeps = {}): Promise<void> {
+  const startReplacement = deps.startReplacement ?? startFlairProcess;
+  const stopForRestart = async (): Promise<void> => {
+    let outcome: StopExitOutcome;
+    try {
+      outcome = await stopFlairProcess(port, dataDir, { waitForExit: deps.waitForExit });
+    } catch (err) {
+      if (err instanceof StopExitWaitError) refuseReplacementAfterExitTimeout(err.outcome, err.detail);
+      throw err;
+    }
+    refuseReplacementAfterExitTimeout(outcome);
+  };
   // flair#2034 §2: on Linux, an instance proven to run under a systemd USER
   // unit (found from the serving process's cgroup; its MainPID is that
   // process) is restarted THROUGH that unit, and the unit's new main process
@@ -8236,8 +8347,8 @@ async function restartFlair(port: number, dataDir: string): Promise<void> {
         if (s.unitTree !== null && samePathCanonical(s.unitTree, flairPackageDir())) guardEngineNotBackwards(dataDir);
       },
       direct: async () => {
-        await stopFlairProcess(port, dataDir);
-        await startFlairProcess(port, dataDir);
+        await stopForRestart();
+        await startReplacement(port, dataDir);
       },
       log: (line) => console.log(line),
     });
@@ -8246,8 +8357,8 @@ async function restartFlair(port: number, dataDir: string): Promise<void> {
       stampEngineVersionIfRunning(dataDir);
     }
   } else {
-    await stopFlairProcess(port, dataDir);
-    await startFlairProcess(port, dataDir);
+    await stopForRestart();
+    await startReplacement(port, dataDir);
   }
   // Bust the version-handshake cache so the next preAction nudge re-fetches
   // the LIVE version instead of the pre-restart cached one (the false

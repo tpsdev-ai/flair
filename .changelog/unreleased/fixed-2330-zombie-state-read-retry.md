@@ -1,0 +1,1 @@
+- **The process-liveness probe retries a failed or empty state read if time remains, and `flair doctor`'s stop wait rechecks liveness on each poll.** On macOS the state read (`/bin/ps -o stat=`) now uses a longer budget; a read that keeps failing still reports alive (fail safe).

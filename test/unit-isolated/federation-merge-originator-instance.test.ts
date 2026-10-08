@@ -49,7 +49,10 @@ function table(name: string) {
   return {
     get: async (id: string) => stores[name].get(id) ?? null,
     put: async (r: any) => {
-      stores[name].set(r.id, { ...r });
+      if (name === "Memory") {
+        for (const field of ["agentId", "content", "createdAt"]) expect(typeof r[field]).toBe("string");
+      }
+      stores[name].set(r.id, JSON.parse(JSON.stringify(r)));
       return r;
     },
     search: () => emptyGen(),
@@ -142,19 +145,19 @@ async function postSync(body: Record<string, any>, secretKey: Uint8Array) {
 const ROWS: Record<string, { data: (origin: string) => Record<string, any>; field: string }> = {
   Memory: {
     field: "content",
-    data: (origin) => ({ id: "row-1", agentId: "agent-a", content: "synced body", contentHash: "h1", visibility: "shared", originatorInstanceId: origin }),
+    data: (origin) => ({ id: "row-1", agentId: "agent-a", content: "synced body", contentHash: "h1", createdAt: OLD, visibility: "shared", originatorInstanceId: origin }),
   },
   Soul: {
     field: "value",
-    data: (origin) => ({ id: "row-1", agentId: "agent-a", key: "identity", value: "synced soul", originatorInstanceId: origin }),
+    data: (origin) => ({ id: "row-1", agentId: "agent-a", key: "identity", value: "synced soul", createdAt: OLD, originatorInstanceId: origin }),
   },
   Agent: {
     field: "name",
-    data: (origin) => ({ id: "row-1", name: "Synced Principal", originatorInstanceId: origin }),
+    data: (origin) => ({ id: "row-1", name: "Synced Principal", publicKey: "pending", createdAt: OLD, originatorInstanceId: origin }),
   },
   Relationship: {
     field: "object",
-    data: (origin) => ({ id: "row-1", agentId: "agent-a", subject: "a", predicate: "manages", object: "b", originatorInstanceId: origin }),
+    data: (origin) => ({ id: "row-1", agentId: "agent-a", subject: "a", predicate: "manages", object: "b", createdAt: OLD, originatorInstanceId: origin }),
   },
 };
 
@@ -168,7 +171,7 @@ describe("flair#1965 — the federated merge preserves an authenticated peer's r
   for (const tableName of ["Memory", "Soul", "Agent", "Relationship"]) {
     it(`${tableName}: a NEW inbound row is stored with the pushed ROW's originatorInstanceId (preserved verbatim), not the receiver's or sender's`, async () => {
       const { secretKey, publicKey } = keypair();
-      peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });
+      peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
       const data = ROWS[tableName].data(ORIGIN);
       const record = pushedRecord(tableName, data.id, data, NEW, secretKey);
       const res: any = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 1 }, secretKey);
@@ -184,7 +187,7 @@ describe("flair#1965 — the federated merge preserves an authenticated peer's r
 
     it(`${tableName}: a NEWER inbound update keeps the REMOTE (pushed-row) value over the local row's`, async () => {
       const { secretKey, publicKey } = keypair();
-      peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });
+      peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
       const local = ROWS[tableName].data(LOCAL_ORIGIN);
       stores[tableName].set(local.id, { ...local, updatedAt: OLD });
 
@@ -199,4 +202,27 @@ describe("flair#1965 — the federated merge preserves an authenticated peer's r
       expect(stored[ROWS[tableName].field]).toBe(data[ROWS[tableName].field]); // control: the merge really applied the remote row
     });
   }
+});
+
+describe("FederationSync ephemeral expiry", () => {
+  it("stores receiver-clock expiry with a backdated incoming createdAt", async () => {
+    const prior = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
+    process.env.FLAIR_EPHEMERAL_TTL_HOURS = "6";
+    try {
+      const { secretKey, publicKey } = keypair();
+      peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "spoke", status: "paired" });
+      const data = { id: "expiry-row", agentId: "agent-a", content: "received note", durability: "ephemeral", visibility: "private", createdAt: OLD, updatedAt: NEW };
+      stores.Memory.set(data.id, { ...data, updatedAt: OLD, expiresAt: OLD });
+      const before = Date.now();
+      const res: any = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Memory", data.id, data, NEW, secretKey)], lamportClock: 1 }, secretKey);
+      expect(res.merged).toBe(1);
+      const stored = stores.Memory.get(data.id);
+      expect(stored.createdAt).toBe(OLD);
+      expect(Date.parse(stored.expiresAt)).toBeGreaterThanOrEqual(before + 6 * 3600000);
+      expect(Date.parse(stored.expiresAt)).toBeLessThanOrEqual(Date.now() + 6 * 3600000);
+    } finally {
+      if (prior === undefined) delete process.env.FLAIR_EPHEMERAL_TTL_HOURS;
+      else process.env.FLAIR_EPHEMERAL_TTL_HOURS = prior;
+    }
+  });
 });

@@ -57,7 +57,7 @@ export type IdentityResult =
 /** `kill(pid, 0)` is a FOUR-way, not a boolean. */
 export type PidLiveness =
   | { kind: "alive" }
-  | { kind: "gone" }                     // ESRCH — the pid does not exist
+  | { kind: "gone" }                     // ESRCH or zombie
   | { kind: "eperm" }                    // exists, but another user's
   | { kind: "unknown"; reason: string };  // the probe failed for another reason — NOT gone
 
@@ -130,6 +130,8 @@ export interface DaemonEvidence {
   dataDirUnsafe: string | null;
   pidfile: PidfileRead;
   lastKnownPid?: number;
+  sidecar?: SidecarRead;
+  sidecarLiveness?: PidLiveness | null;
   pidLiveness: PidLiveness | null;
   identity: IdentityResult;
   health: HealthResult;

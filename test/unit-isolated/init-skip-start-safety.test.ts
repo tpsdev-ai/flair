@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.ts";
@@ -22,16 +22,22 @@ function fixture(installed = false) {
 }
 
 type Fixture = ReturnType<typeof fixture>;
-function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "local" | "foreign-ops" | "many" = "unknown", occupied = true, credential: "explicit" | "saved" = "explicit", httpOccupied = occupied) {
+function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "local" | "foreign-ops" | "many" = "unknown", occupied = true, credential: "explicit" | "saved" = "explicit", httpOccupied = occupied, runtime: "node" | "bun" = "node") {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
   ));
-  Object.assign(env, { HOME: f.home, USERPROFILE: f.home, NO_COLOR: "1" });
+  Object.assign(env, { HOME: f.home, USERPROFILE: f.home, NO_COLOR: "1", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" });
   if (credential === "explicit") env.FLAIR_ADMIN_PASS = PASSWORD;
   else writeFileSync(join(f.home, ".flair", "admin-pass"), PASSWORD + "\n", { mode: 0o600 });
   const argv = ["init", "--port", String(HTTP_PORT), "--ops-port", String(OPS_PORT),
     "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md", ...args];
   const script = `
+    ${runtime === "bun" ? `
+    const { mock } = await import("bun:test");
+    const socketLimitPath = ${JSON.stringify(pathToFileURL(join(ROOT, "dist/lib/socket-path-limit.js")).href)};
+    const socketLimit = await import(socketLimitPath);
+    mock.module(socketLimitPath, () => ({ ...socketLimit, opsSocketPathRefusal: () => null }));
+    ` : ""}
     const { appendFileSync } = await import("node:fs");
     const { EventEmitter } = await import("node:events");
     const net = await import("node:net");
@@ -62,7 +68,7 @@ function runInit(f: Fixture, args: string[], listener: "unknown" | "foreign" | "
     });
     await program.parseAsync(${JSON.stringify(argv)}, { from: "user" });
   `;
-  return spawnSync("node", ["--input-type=module", "-e", script], {
+  return spawnSync(runtime, ["--input-type=module", "-e", script], {
     cwd: ROOT, env, encoding: "utf8", timeout: 20_000,
   });
 }
@@ -100,11 +106,54 @@ describe("local init skip-start safety through the built CLI", () => {
       expect(existsSync(join(f.dataDir, "using-flair-seed-pending"))).toBe(true);
       expect(readFileSync(join(f.dataDir, "harper-config.yaml"), "utf8")).toBe(config);
       const key = readFileSync(join(f.home, ".flair", "keys", "canary.key"));
+      const passPath = join(f.home, ".flair", "admin-pass");
+      const pass = readFileSync(passPath);
+      const passStat = statSync(passPath);
       const rerun = runInit(f, ["--skip-start", flag, "canary"]);
       expect(rerun.status, rerun.stdout + rerun.stderr).toBe(0);
       expect(readFileSync(join(f.home, ".flair", "keys", "canary.key"))).toEqual(key);
+      expect(readFileSync(passPath)).toEqual(pass);
+      expect(statSync(passPath).ino).toBe(passStat.ino);
+      expect(statSync(passPath).mtimeMs).toBe(passStat.mtimeMs);
       expect(requests(f)).toEqual([]);
     }, 30_000);
+  }
+
+  for (const flag of ["--agent", "--agent-id"]) {
+    for (const missingPass of [false, true]) {
+      test(`${flag} with --skip-start refuses ${missingPass ? "a missing pass file with a persisted user" : "a different supplied password"} without requests or writes`, () => {
+        const f = fixture(true);
+        const passPath = join(f.home, ".flair", "admin-pass");
+        const dataDir = join(f.home, "d");
+        mkdirSync(dataDir);
+        writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
+        writeFileSync(join(dataDir, "hdb.pid"), "42\n");
+        if (missingPass) {
+          mkdirSync(join(dataDir, "system"));
+          writeFileSync(join(dataDir, "system", "hdb_user.mdb"), "fixture-user");
+        } else {
+          writeFileSync(passPath, "saved-password\n", { mode: 0o600 });
+        }
+        const snapshot = () => readdirSync(f.home, { recursive: true }).sort().map(name => {
+          const path = join(f.home, String(name));
+          const stat = lstatSync(path);
+          return { name, ino: stat.ino, mode: stat.mode, mtimeMs: stat.mtimeMs,
+            bytes: stat.isFile() ? readFileSync(path) : null };
+        });
+        const before = snapshot();
+        const result = runInit({ ...f, dataDir }, ["--data-dir", dataDir, "--skip-start", flag, "canary"], "local", true, "explicit", true, "bun");
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        expect(result.stderr).toBe(
+          `Refusing to write ${passPath}: credential verification is deferred by --skip-start. ` +
+            `No pass file was written; any existing file is unchanged. ` +
+            `Re-run init without --skip-start to verify a different supplied credential.\n`,
+        );
+        expect(snapshot()).toEqual(before);
+        expect(existsSync(passPath)).toBe(!missingPass);
+        expect(requests(f)).toEqual([]);
+      }, 30_000);
+    }
   }
 
   test("--agent with --skip-start refuses --reset-admin-pass without requests or writes", () => {

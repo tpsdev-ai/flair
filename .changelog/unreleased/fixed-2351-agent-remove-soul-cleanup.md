@@ -1,0 +1,1 @@
+- **`flair agent remove` fails when the agent's Soul rows cannot be confirmed gone, instead of reporting a completed removal (Closes #2351).**

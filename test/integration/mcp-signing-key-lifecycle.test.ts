@@ -54,7 +54,7 @@ afterAll(async () => {
       else process.env[k] = value;
     }
   }
-});
+}, 60_000);
 
 /** A temp app dir carrying the shipped config (or a mutated copy) + node_modules/dist symlinks. */
 function makeWorkDir(prefix: string, mutate?: (shipped: string) => string): string {

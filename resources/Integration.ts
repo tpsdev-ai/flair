@@ -1,10 +1,12 @@
 import { databases } from "harper";
+import { isDeepStrictEqual } from "node:util";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { makeByIdReadGate, makeReadScope, makeScopedSearch } from "./record-type-kit.js";
 import { resolveStoredRow } from "./originator-instance.js";
 import { soulWriteSource } from "./soul-write-policy.js";
 import { withOwnedTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import {
   TEAM_DIRECTORY_MAX_STRING_BYTES,
   TEAM_DIRECTORY_PLATFORM,
@@ -31,6 +33,13 @@ const CONFLICT = (error: string, message: string) =>
   new Response(JSON.stringify({ error, message }), { status: 409, headers: { "Content-Type": "application/json" } });
 const UNAVAILABLE = (error: string) =>
   new Response(JSON.stringify({ error }), { status: 503, headers: { "Content-Type": "application/json" } });
+const OWNER_CHANGED = () =>
+  new Response(JSON.stringify({
+    error: "integration_owner_changed",
+    message: "the record is owned by a different agent than the caller; the write was refused",
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
+const ROW_EXISTS = () =>
+  CONFLICT("integration_row_exists", "a record with this id already exists; the write was refused");
 
 /** The field whose value is the team-directory publication stamp. */
 const DIRECTORY_STAMP_FIELD = "directoryPublishedAt";
@@ -135,6 +144,86 @@ async function resolvePublicationStamp(
   return {};
 }
 
+/** Aborts an Integration write's owned transaction: the committed row changed after the decision read. */
+class IntegrationRowChangedDuringWrite extends Error {}
+
+/** Attempts of a per-row Integration write before it gives up on a row that keeps changing. */
+const INTEGRATION_WRITE_ATTEMPTS = 3;
+
+/** The row this write lands on: the URL-bound target, else an explicit body id. */
+function writeRowId(self: any, content: any): string | number | null {
+  let bound: unknown;
+  try {
+    bound = (self as any).getId?.();
+  } catch {
+    bound = undefined;
+  }
+  if (typeof bound === "string" || typeof bound === "number") return bound;
+  if (content != null && typeof content === "object") {
+    const id = content.id;
+    if (typeof id === "string" || typeof id === "number") return id;
+  }
+  return null;
+}
+
+type IntegrationWriteOutcome<T> =
+  | { kind: "denial"; denial: Response }
+  | { kind: "write"; id: string | number | null; expected: Record<string, any> | null; commit: (owned: any) => Promise<T> };
+
+/**
+ * Each attempt makes a per-row decision for an Integration write (flair#2340). The write's
+ * decisions and the write run inside ONE owned transaction. When the write
+ * names a stored row, the committed row is re-read OUTSIDE the transaction
+ * (Harper's latest committed state) before the write is staged; when it is no
+ * longer the row this attempt read, the transaction is aborted (nothing is
+ * staged) and the attempt is retried from the committed row, up to
+ * INTEGRATION_WRITE_ATTEMPTS times. If every attempt detects another change,
+ * the request returns integration_row_changed.
+ * A POST that names a row id, once its other checks pass, reads that row in
+ * the attempt and refuses an existing one with integration_row_exists; a
+ * generated-id POST names no row to read or re-read. A denial stages no write
+ * and is returned unchanged. Mirrors the
+ * re-read-then-abort pattern of flair#2307 (resources/Memory.ts).
+ */
+async function runIntegrationWrite<T>(
+  ctx: any,
+  attemptFn: (owned: any) => Promise<IntegrationWriteOutcome<T>>,
+): Promise<T | Response> {
+  const auth = await resolveAgentAuth(ctx);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await withOwnedTransaction(ctx, async (owned) => {
+        const outcome = await attemptFn(owned);
+        if (outcome.kind === "denial") return outcome.denial;
+        // Authorize non-admin agents against this attempt's stored row.
+        // By-id middleware checks ownership before this read.
+        // `expected` is null when the write lands on no stored row (a create).
+        if (outcome.expected && auth.kind === "agent" && !auth.isAdmin && outcome.expected.agentId !== auth.agentId) {
+          return OWNER_CHANGED();
+        }
+        // Test-only: inert unless the fault-injection env opt-in is set and armed.
+        const pause = txnPausePoint("integration-row-write");
+        if (pause) await pause;
+        if (outcome.id != null) {
+          const committed = await (databases as any).flair.Integration.get(outcome.id, {});
+          if (!isDeepStrictEqual(committed ?? null, outcome.expected ?? null)) {
+            throw new IntegrationRowChangedDuringWrite();
+          }
+        }
+        return await outcome.commit(owned);
+      });
+    } catch (err) {
+      if (!(err instanceof IntegrationRowChangedDuringWrite)) throw err;
+      if (attempt >= INTEGRATION_WRITE_ATTEMPTS) {
+        return CONFLICT(
+          "integration_row_changed",
+          "the record changed while this write was in progress; retry the write",
+        );
+      }
+    }
+  }
+}
+
 /**
  * Integration records are agent-owned. Auth: the non-rejecting gate annotates the
  * request; this resource self-enforces (resolveAgentAuth → internal/agent/anonymous).
@@ -194,13 +283,18 @@ export class Integration extends (databases as any).flair.Integration {
         headers: { "Content-Type": "application/json" },
       });
     }
-    return withOwnedTransaction((this as any).getContext?.(), async () => {
+    return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
       const pub = await resolvePublicationStamp(this, content, null, true);
-      if (pub.denial) return pub.denial;
+      if (pub.denial) return { kind: "denial" as const, denial: pub.denial };
+      // A POST creates its row: an id already stored at this read is refused.
+      const id = writeRowId(this, content);
+      if (id != null && (await (databases as any).flair.Integration.get(id, owned)) != null) {
+        return { kind: "denial" as const, denial: ROW_EXISTS() };
+      }
       const now = new Date().toISOString();
       const record: any = { ...content, createdAt: now, updatedAt: now };
       if (pub.stamp !== undefined) record[DIRECTORY_STAMP_FIELD] = pub.stamp;
-      return super.post(record, context);
+      return { kind: "write" as const, id, expected: null, commit: () => super.post(record, context) };
     });
   }
 
@@ -212,20 +306,25 @@ export class Integration extends (databases as any).flair.Integration {
     if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
       return FORBIDDEN("forbidden: cannot write integration for another agent");
     }
-    return withOwnedTransaction((this as any).getContext?.(), async () => {
+    return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
       const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
-      if (ownerDenial) return ownerDenial;
-      const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
-      if (stored.denial) return stored.denial;
+      if (ownerDenial) return { kind: "denial" as const, denial: ownerDenial };
+      const stored = await resolveStoredRow(this, "Integration", content, () => super.get(), owned);
+      if (stored.denial) return { kind: "denial" as const, denial: stored.denial };
       // An absent addressed row answers NOT_FOUND instead of reaching
-      // super.patch() (flair#2322): deliberate and fail-closed for the
+      // the write (flair#2322): deliberate and fail-closed for the
       // directory publication read, and a narrowing beyond that surface.
-      if (!stored.row) return NOT_FOUND();
+      if (!stored.row) return { kind: "denial" as const, denial: NOT_FOUND() };
       const pub = await resolvePublicationStamp(this, content, stored.row, false);
-      if (pub.denial) return pub.denial;
+      if (pub.denial) return { kind: "denial" as const, denial: pub.denial };
       const changes: any = { ...content, createdAt: stored.row.createdAt, updatedAt: new Date().toISOString() };
       if (pub.stamp !== undefined) changes[DIRECTORY_STAMP_FIELD] = pub.stamp;
-      return super.patch(changes, query);
+      // A patch merges into the row read in THIS attempt; the write is that row
+      // plus the changes, written through the static table with the attempt's
+      // owned context — not super.patch() on the request instance, whose cached
+      // request-time entry drops a field another write committed (flair#2340).
+      const merged: any = { ...stored.row, ...changes };
+      return { kind: "write" as const, id: writeRowId(this, content), expected: stored.row, commit: (owned) => (databases as any).flair.Integration.put(merged, owned) };
     });
   }
 
@@ -241,13 +340,13 @@ export class Integration extends (databases as any).flair.Integration {
         headers: { "Content-Type": "application/json" },
       });
     }
-    return withOwnedTransaction((this as any).getContext?.(), async () => {
+    return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
       const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
-      if (ownerDenial) return ownerDenial;
-      const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
-      if (stored.denial) return stored.denial;
+      if (ownerDenial) return { kind: "denial" as const, denial: ownerDenial };
+      const stored = await resolveStoredRow(this, "Integration", content, () => super.get(), owned);
+      if (stored.denial) return { kind: "denial" as const, denial: stored.denial };
       const pub = await resolvePublicationStamp(this, content, stored.row, true);
-      if (pub.denial) return pub.denial;
+      if (pub.denial) return { kind: "denial" as const, denial: pub.denial };
       const now = new Date().toISOString();
       const record: any = {
         ...content,
@@ -256,7 +355,12 @@ export class Integration extends (databases as any).flair.Integration {
       };
       if (pub.stamp !== undefined) record[DIRECTORY_STAMP_FIELD] = pub.stamp;
       else if (stored.row) record[DIRECTORY_STAMP_FIELD] = stored.row[DIRECTORY_STAMP_FIELD] ?? null;
-      return super.put(record, context);
+      const targetId = writeRowId(this, content);
+      if (targetId != null) record.id = targetId;
+      // A put REPLACES the row: full-replacement semantics, against the
+      // attempt's owned context (the static table write), not the request
+      // instance.
+      return { kind: "write" as const, id: targetId, expected: stored.row, commit: (owned) => (databases as any).flair.Integration.put(record, owned) };
     });
   }
 
@@ -281,26 +385,30 @@ export class Integration extends (databases as any).flair.Integration {
       return super.delete(id);
     }
 
-    // Authorize from the full stored row, read by id from the table.
-    const record = await (databases as any).flair.Integration.get(typeof id === "object" ? id.id : id, (this as any).getContext?.());
+    // Authorize from the full stored row, read by id from the table, as one
+    // per-row decision (flair#2340).
+    const targetId = typeof id === "object" ? id.id : id;
+    return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
+      const record = await (databases as any).flair.Integration.get(targetId, owned);
 
-    // Removing a published directory entry is operator-only — a withdrawal
-    // (directoryPublishedAt: null) is the routine way to hide it.
-    if (record && isValidPublicationStamp(record[DIRECTORY_STAMP_FIELD])) {
-      const denial = await requireOperator(this, "removing a published directory entry is operator-only; withdraw it instead");
-      if (denial) return denial;
-      return super.delete(id);
-    }
+      // Removing a published directory entry is operator-only — a withdrawal
+      // (directoryPublishedAt: null) is the routine way to hide it.
+      if (record && isValidPublicationStamp(record[DIRECTORY_STAMP_FIELD])) {
+        const denial = await requireOperator(this, "removing a published directory entry is operator-only; withdraw it instead");
+        if (denial) return { kind: "denial" as const, denial };
+        return { kind: "write" as const, id: targetId, expected: record, commit: (owned) => (databases as any).flair.Integration.delete(targetId, owned) };
+      }
 
-    const auth = await this._auth();
-    if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.delete(id);
-    }
-    if (!record) return super.delete(id);
-    if (record.agentId !== auth.agentId) {
-      return FORBIDDEN("forbidden: cannot delete integration for another agent");
-    }
-    return super.delete(id);
+      const auth = await this._auth();
+      if (auth.kind === "anonymous") return { kind: "denial" as const, denial: UNAUTH() };
+      if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
+        return { kind: "write" as const, id: targetId, expected: record, commit: (owned) => (databases as any).flair.Integration.delete(targetId, owned) };
+      }
+      if (!record) return { kind: "write" as const, id: targetId, expected: null, commit: (owned) => (databases as any).flair.Integration.delete(targetId, owned) };
+      if (record.agentId !== auth.agentId) {
+        return { kind: "denial" as const, denial: FORBIDDEN("forbidden: cannot delete integration for another agent") };
+      }
+      return { kind: "write" as const, id: targetId, expected: record, commit: (owned) => (databases as any).flair.Integration.delete(targetId, owned) };
+    });
   }
 }

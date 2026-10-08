@@ -71,6 +71,8 @@ add("promotion-stamp", ["writer:table.put#1"], "ECHO",
   "Promotion status stamp: get-then-put re-writes the existing local row.");
 add("migrations/graph-heal", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
+add("migrations/embedding-stamp", ["writer:table.put#1"], "ECHO",
+  "Content-suffix fallback: locally computed vector/current model; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
 add("migrations/visibility-backfill", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"], "ECHO",
@@ -85,6 +87,8 @@ add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Admin-only starter memories — the record carries no embedding/embeddingModel.");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Feed rows — the record carries no embedding/embeddingModel.");
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
+  "Dedup repair (flair#2358): read-modify-write re-writes the stored row's own stamp — only its expiresAt changes.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");
 // flair#1940 A1-iv item 6: Memory.ts no longer touches the MemoryHostSource

@@ -19,6 +19,7 @@ import {
   resolveSearchReadiness,
   type ResourceRegistry,
 } from "../../resources/search-readiness.ts";
+import { MEMORY_REEMBED_PATCH_CAPABILITY } from "../../src/lib/reembed-server-support.ts";
 
 function registry(names: string[]): ResourceRegistry {
   const set = new Set(names);
@@ -340,6 +341,7 @@ describe("buildPublicHealthBody (flair#1326)", () => {
       version: "0.46.0",
       buildCommit: identity.buildCommit,
       searchReady: true,
+      capabilities: [MEMORY_REEMBED_PATCH_CAPABILITY],
     });
     expect("searchReadyReason" in ready).toBe(false);
 

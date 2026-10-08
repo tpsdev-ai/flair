@@ -8,6 +8,13 @@
 import { Command } from "commander";
 import { authFetch, defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import {
+  MEMORY_REEMBED_PATCH_CAPABILITY,
+  healthVersion,
+  parseHealthCapabilities,
+  reembedUnsupportedMessage,
+  reembedUnverifiedMessage,
+} from "../lib/reembed-server-support.js";
 import { existsSync } from "node:fs";
 
 export type ReembedCli = {
@@ -55,6 +62,38 @@ export async function reembedRow(baseUrl: string, agentId: string, keyPath: stri
   return model === intendedModel;
 }
 
+/**
+ * flair#2337: refuse before the first write when the running server does not
+ * advertise the re-embed PATCH (#2298). Returns null when the token is present,
+ * else the refusal message to print. Reads the public `GET /Health` — no auth,
+ * so it works before any agent key is used and before the all-agents loop.
+ *
+ * Unreachable, non-200, non-JSON, or unparseable capability responses are refused.
+ */
+export async function reembedServerSupportError(baseUrl: string): Promise<string | null> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+  } catch (err) {
+    return reembedUnverifiedMessage(`GET /Health failed (${(err as Error)?.message ?? String(err)})`);
+  }
+  if (res.status !== 200) {
+    return reembedUnverifiedMessage(`GET /Health returned HTTP ${res.status}`);
+  }
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return reembedUnverifiedMessage("GET /Health did not return JSON");
+  }
+  const caps = parseHealthCapabilities(body);
+  if (caps === null) {
+    return reembedUnverifiedMessage("GET /Health reported capabilities in an unrecognized shape");
+  }
+  if (caps.includes(MEMORY_REEMBED_PATCH_CAPABILITY)) return null;
+  return reembedUnsupportedMessage(healthVersion(body));
+}
+
 export function register(program: Command): void {
 // ─── flair reembed ────────────────────────────────────────────────────────────
 //
@@ -98,6 +137,21 @@ program
     const dryRun = opts.dryRun ?? false;
     const batchSize = Number(opts.batchSize);
     const delayMs = Number(opts.delayMs);
+
+    // A call with neither --agent nor an admin password is a usage error; report
+    // it before the server check below so the existing message is not masked.
+    const adminPassEnv = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+    if (!agentId && !adminPassEnv) {
+      console.error("❌ Admin password required when --agent is not specified (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD)");
+      process.exit(1);
+    }
+
+    // flair#2337: require the advertised token before either PATCH loop.
+    const supportError = await reembedServerSupportError(baseUrl);
+    if (supportError) {
+      console.error(supportError);
+      process.exit(1);
+    }
 
     // flair#504 Phase 2: MUST match resources/embeddings-provider.ts's
     // getModelId() — including THE GATE (EMBEDDING_PREFIXES_ENABLED), not
@@ -148,11 +202,7 @@ program
 
     // When no agent specified, use admin auth to fetch all memories
     if (!agentId) {
-      const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
-      if (!adminPass) {
-        console.error("❌ Admin password required when --agent is not specified (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD)");
-        process.exit(1);
-      }
+      const adminPass = adminPassEnv!;
 
       // Fetch every memory via the Harper ops API (search_by_conditions on the
       // Memory table) rather than POST /SemanticSearch. SemanticSearch goes

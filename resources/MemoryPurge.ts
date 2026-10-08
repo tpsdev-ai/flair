@@ -177,7 +177,7 @@ export class MemoryPurge extends Resource {
     const pointerLeft: string[] = [];
     let pointerConfirmationError: string | null = null;
     try {
-      const pointers = await storedPointerIds(removedIds);
+      const pointers = await withOwnedTransaction(ctx, (c) => storedPointerIds(removedIds, c));
       if (pointers.size > 0) {
         await withOwnedTransaction(ctx, async (c) => {
           for (const id of removedIds) {

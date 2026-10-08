@@ -436,11 +436,15 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     mkdirSync(home, { recursive: true });
     mkdirSync(dataDir, { recursive: true });
     mkdirSync(keysDir, { recursive: true });
+    // Pin the modes a PID-file proof requires: ownedInitPidfilePid rejects a data
+    // dir or hdb.pid with group/other write bits, and default create modes inherit
+    // the umask (0002 yields 0775/0664).
+    chmodSync(dataDir, 0o700);
 
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
     const httpHolder = await startStub(dataDir, "http", httpLog, decoyPort === "ops");
     const opsHolder = await startStub(dataDir, "ops", opsLog);
-    if (decoyPort === "ops") writeFileSync(join(dataDir, "hdb.pid"), `${httpHolder.pid}\n`);
+    if (decoyPort === "ops") writeFileSync(join(dataDir, "hdb.pid"), `${httpHolder.pid}\n`, { mode: 0o600 });
     const { code, stdout, stderr } = await runInit([
       "--agent", "canary",
       "--port", String(httpHolder.httpPort),
@@ -480,7 +484,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     mkdirSync(keysDir);
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
     const listener = await startStub(dataDir, "both", logPath, true);
-    writeFileSync(join(dataDir, "hdb.pid"), String(listener.pid));
+    writeFileSync(join(dataDir, "hdb.pid"), String(listener.pid), { mode: 0o600 });
     const { stdout, stderr } = await runInit([
       "--agent", "canary",
       "--port", String(listener.httpPort), "--ops-port", String(listener.opsPort),

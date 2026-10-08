@@ -89,7 +89,7 @@ mock.module("node:child_process", () => ({
       if (finalProbe === "whitespace") return " \t\n";
       return "";
     }
-    if (cmd === "ps") return `node /fixture/node_modules/harper/dist/bin/harper.js run .`;
+    if (cmd === "/bin/ps" || cmd === "ps") return `node /fixture/node_modules/harper/dist/bin/harper.js run .`;
     throw new Error(`unexpected execFileSync: ${cmd}`);
   },
   spawn: () => { spawnCalls++; throw new Error("unexpected process spawn"); },
@@ -252,11 +252,11 @@ for (const code of ["EPERM", "EINVAL"]) {
   });
 }
 
-test("ESRCH at the deadline is reported without claiming the process is still alive", async () => {
+test("the stop timeout reports the last liveness observed before the deadline", async () => {
   goneAtDeadline = true;
   identityAfterTerm = null;
   const result = await failedStop();
-  expect(result.detail).toContain("liveness: gone");
+  expect(result.detail).toContain("liveness: alive");
   expect(spawnCalls).toBe(0);
   expect(result.detail).not.toContain("still alive");
   expect(elapsed).toBe(60_000);

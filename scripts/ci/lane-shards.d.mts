@@ -2,6 +2,7 @@ export const ROOT: string;
 export const ROOT_STEP_TIMEOUT_MS: number;
 export const LANE_SHARDS: number;
 export const WORKSPACE_PACKAGES: string[];
+export const NON_JS_TEST_PACKAGES: string[];
 
 export interface UnitStep {
   name: string;
@@ -23,11 +24,17 @@ export function assignLaneShards(steps: UnitStep[], of?: number): UnitStep[][];
 export function laneShardPlans(steps: UnitStep[], of?: number): UnitStep[][];
 export function shardSteps(index: number, of?: number, steps?: UnitStep[]): UnitStep[];
 export function listLaneFiles(root?: string): string[];
+export function discoveredTestPackages(root?: string): {
+  jsTestPackages: string[];
+  nonJsTestPackages: string[];
+};
+export function plannedTestPackages(steps: UnitStep[], root?: string): string[];
 export function commandFiles(step: UnitStep): string[];
 export function laneCoverage(
   steps: UnitStep[],
   shards: UnitStep[][],
   allFiles?: string[],
+  root?: string,
 ): {
   totalSteps: number;
   coveredSteps: number;
@@ -43,10 +50,13 @@ export function laneCoverage(
   invalidTestSteps: string[];
   invalidCommands: string[];
   fileMismatches: { step: string; declaredOnly: string[]; commandOnly: string[] }[];
+  missingTestPackages: string[];
+  unlistedTestPackages: string[];
   empty: number[];
 };
 export function verifyLaneShards(
   of?: number,
   steps?: UnitStep[],
   allFiles?: string[],
+  root?: string,
 ): ReturnType<typeof laneCoverage>;

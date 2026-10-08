@@ -8,7 +8,8 @@ import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } 
 import { checkHttpRateLimit } from "./rate-limit.js";
 import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
 import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
-import { idSegmentHasEncodedSlash, MEMORY_CONTENT_SELECTOR_SUFFIX } from "../src/lib/memory-id-policy.js";
+import { idSegmentHasEncodedSlash, decodeMemoryIdSegment, MEMORY_CONTENT_SELECTOR_SUFFIX } from "../src/lib/memory-id-policy.js";
+import { contentSuffixIdDenial } from "./memory-id-guard.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
 //
@@ -24,6 +25,16 @@ const DECLARED_MEMORY_ATTRIBUTE_SET = new Set<string>(
 
 function isMemoryReadPath(pathname: string): boolean {
   return pathname === "/Memory" || pathname === "/Memory/" || pathname.startsWith("/Memory/");
+}
+
+/** True when a path segment is valid percent-encoding. */
+function isValidPercentEncoding(segment: string): boolean {
+  try {
+    decodeURIComponent(segment);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Drop a caller's `select(...)` and `property` from a Memory read URL, keeping
@@ -45,7 +56,7 @@ function stripMemorySelection(rawUrl: string): string {
   // attribute, so it is left for Harper to read as a content type).
   const slash = pathPart.lastIndexOf("/");
   const seg = pathPart.slice(slash + 1);
-  const decodedSeg = decodePathSegment(seg);
+  const decodedSeg = decodeMemoryIdSegment(seg);
   const dot = decodedSeg.indexOf(".");
   // An encoded `/` in the id segment makes the segment ambiguous: the trailing
   // `.<declared attribute>` could be part of the id, or a selector on a
@@ -72,17 +83,6 @@ function stripMemorySelection(rawUrl: string): string {
   return query === "" ? pathPart : `${pathPart}?${query}`;
 }
 
-/** Decode a path segment the way Harper does before its property parse; fall
- *  back to the raw segment when it is not valid percent-encoding (Harper rejects
- *  the malformed request; the middleware must not crash on it). */
-function decodePathSegment(raw: string): string {
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
-}
-
 /**
  * True when a Memory by-id read path names an id segment that carries an encoded
  * `/` (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
@@ -96,7 +96,7 @@ function isAmbiguousEncodedSlashSelector(rawUrl: string): boolean {
   const slash = pathPart.lastIndexOf("/");
   const seg = pathPart.slice(slash + 1);
   if (!idSegmentHasEncodedSlash(seg)) return false;
-  const decodedSeg = decodePathSegment(seg);
+  const decodedSeg = decodeMemoryIdSegment(seg);
   const dot = decodedSeg.indexOf(".");
   return dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1));
 }
@@ -246,6 +246,21 @@ server.http(async (request: any, nextLayer: any) => {
   const limited = checkHttpRateLimit(request, url.pathname);
   if (limited) return limited;
 
+  // ── Malformed `.content` Memory path: the named 400, for every caller ────────
+  // flair#2307 item 2: Harper's OWN path decode answers a 500 for invalid
+  // percent-encoding, before any resource by-id guard can run. A Memory path
+  // whose last segment is invalid percent-encoding AND ends in the `.content`
+  // property suffix is refused here with the guard's named 400 instead. Placed
+  // before every auth branch (the public-path passthrough, the Basic-admin and
+  // anonymous early returns, the signed-agent path), so the refusal does not
+  // depend on the request's credential, and no row is read or written for it.
+  if (isMemoryReadPath(url.pathname)) {
+    const seg = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+    if (seg.endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX) && !isValidPercentEncoding(seg)) {
+      return contentSuffixIdDenial(seg);
+    }
+  }
+
   // A2A discovery endpoints: GET returns public agent-card metadata (per
   // A2A spec, cards are intentionally public). POST invokes JSON-RPC
   // actions (message/send writes OrgEvents on behalf of agents,
@@ -253,8 +268,10 @@ server.http(async (request: any, nextLayer: any) => {
   // OrgEvents) — those must be authenticated. Narrowing to GET-only
   // closes the P0 where any caller could forge OrgEvents as any agent
   // and read all internal Beads issues unauthenticated.
+  const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
+  const isTpsEd25519 = /^TPS-Ed25519(?:\s|$)/i.test(header);
   const isA2APath = url.pathname === "/a2a" || url.pathname === "/A2AAdapter" || url.pathname.startsWith("/A2AAdapter/");
-  if (
+  if (!isTpsEd25519 && (
     url.pathname === "/health" ||
     url.pathname === "/Health" ||
     (request.method === "GET" && isA2APath) ||
@@ -279,36 +296,8 @@ server.http(async (request: any, nextLayer: any) => {
     // The entry stays so the path is still public if that mount ever moves back
     // onto the default chain.
     url.pathname === "/.well-known/oauth-authorization-server" ||
-    url.pathname === "/OAuthMetadata" ||
-    // Presence roster is public-safe (field-allowlisted); GET serves the
-    // Office Space renderer without auth. Scoped to GET only (#604): the
-    // exact-path match used to match ANY method, so a bare `PUT /Presence`
-    // (collection-level, no id — Harper routes it to the same .put() as
-    // by-id PUT) early-returned here too, skipping this middleware entirely.
-    // A credential-less loopback PUT then reached Presence.put()'s
-    // resolveAgentAuth() call with NO tpsAnonymous/tpsAgent annotation, which
-    // fell through to raw `context.user` — populated by Harper's
-    // `authorizeLocal` (config true) ambient super_user injection for ANY
-    // credential-less loopback request — so the ownership check saw an
-    // "admin" caller (isAdmin=true) and let the write through unauthenticated
-    // (`super.put()`, no signature, no password). Mirrors the A2A GET-only
-    // pattern above: POST/PUT/DELETE now always transit the general
-    // middleware path below, which marks a genuinely headerless request
-    // tpsAnonymous BEFORE Harper's ambient elevation lands (resolveAgentAuth
-    // checks tpsAnonymous first — see agent-auth.ts's resolution order), so
-    // the ownership check in Presence.put()/delete() correctly denies it.
-    // POST (the heartbeat) is unaffected in practice: it already prefers
-    // request.tpsAgent when the middleware set it, and falls back to its own
-    // Ed25519 header parse otherwise — transiting the general path now just
-    // means a genuinely headerless POST gets marked anonymous (still 401)
-    // instead of skipping straight to that fallback parse.
-    (request.method === "GET" && url.pathname === "/Presence")
-  ) return nextLayer(request);
-
-  // Read the Authorization header ONCE, up front — the super_user branch below
-  // needs it too (hoisted from its former position just after the branch as part
-  // of the flair#610 belt-and-suspenders check).
-  const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
+    url.pathname === "/OAuthMetadata"
+  )) return nextLayer(request);
 
   // If Harper has already authorized this request (e.g. Basic admin, or
   // authorizeLocal=true on localhost), trust Harper's auth decision and pass
@@ -325,7 +314,7 @@ server.http(async (request: any, nextLayer: any) => {
   // live vector today — but it keeps the trust decision from ever hinging on
   // ambient elevation alone. (The root-cause gate lives in resolveAgentAuth; see
   // agent-auth.ts hasCredentialEvidence.)
-  if (header && request.user?.role?.permission?.super_user === true) {
+  if (!isTpsEd25519 && header && request.user?.role?.permission?.super_user === true) {
     const username = request.user.username ?? "admin";
     // Deactivation guard — same predicate as the Ed25519 path.
     // A deactivated principal must not receive a tpsAgent annotation, even
@@ -445,6 +434,7 @@ server.http(async (request: any, nextLayer: any) => {
   const parsed = parseTpsEd25519Header(header);
 
   if (!parsed) {
+    if (isTpsEd25519) return new Response(JSON.stringify({ error: "invalid_authorization_header" }), { status: 401 });
     // For browser-accessible admin pages, emit `WWW-Authenticate: Basic` so
     // the browser shows a native auth dialog instead of a bare 401 page.
     // JSON API endpoints don't get this — they should keep the structured
@@ -518,15 +508,6 @@ server.http(async (request: any, nextLayer: any) => {
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
-  // Grant Harper-level permissions for the cryptographically-verified agent by
-  // setting request.user directly. Setting request.user is the supported
-  // extension path (and the only one that works post-5.0.9: Harper resolves
-  // request.user from the Authorization header BEFORE this middleware runs, and
-  // a TPS-Ed25519 header matches no Basic/Bearer strategy, so request.user
-  // arrives null — see #456). getUser(name, null) looks up the record WITHOUT
-  // password validation, safe here because the Ed25519 signature already proved
-  // identity cryptographically.
-  //
   // RESHAPE (auth-rbac) — THE FLIP: per-agent DE-ELEVATION. A cryptographically-
   // verified NON-admin agent resolves to the least-privilege `flair-agent` user,
   // NOT admin super_user. The flair_agent role grants exactly the table CRUD agents
@@ -793,10 +774,13 @@ server.http(async (request: any, nextLayer: any) => {
   // contract, applied in `Memory.get`/`Memory.search`). The by-id
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
+  // (A malformed `.content` segment was refused before any auth branch, above.)
   if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(url.pathname)) {
     // flair#2199: an id segment carrying an encoded `/` before a declared
     // property suffix is ambiguous — the suffix could be part of the id or a
-    // selector on a slash-containing id.
+    // selector on a slash-containing id. This branch runs for a signed
+    // non-admin agent: Basic-admin and anonymous requests returned to the next
+    // layer before it.
     if (isAmbiguousEncodedSlashSelector(request.url)) {
       return new Response(method === "HEAD" ? null : JSON.stringify({
         error: "ambiguous_memory_id",
@@ -813,7 +797,7 @@ server.http(async (request: any, nextLayer: any) => {
   let memoryId: string | null = null;
   if (isMemoryWrite) {
     const pathParts = url.pathname.split("/").filter(Boolean);
-    memoryId = pathParts.length >= 2 ? decodeURIComponent(pathParts[1]) : (request.headers.get("x-memory-id") ?? null);
+    memoryId = pathParts.length >= 2 ? decodeMemoryIdSegment(pathParts[1]) : (request.headers.get("x-memory-id") ?? null);
   }
 
   const response = await nextLayer(request);
