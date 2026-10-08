@@ -2,40 +2,45 @@
  * agent-id-rule-writer-coverage-2359.test.ts — flair#2359.
  *
  * The one agent-ID rule is only as good as the set of paths that apply it. This
- * test enumerates every file under resources/ that can create or rename an Agent
- * row — the literal raw-table idiom (`(databases as any).flair.Agent.put(`), plus
- * the two dynamic/structural writers the idiom cannot see (resources/Agent.ts's
- * REST methods go through `super`, and resources/Federation.ts's merge resolves
- * the table through a variable) — and requires each to reference the shared
- * guard from src/lib/agent-id-rule.ts.
+ * test enumerates the files that can create an Agent row — the resource raw
+ * table idiom (`(databases as any).flair.Agent.put(`), the two structural
+ * resource writers the idiom cannot see (resources/Agent.ts's REST methods go
+ * through `super`; resources/Federation.ts's merge resolves the table through a
+ * variable), and the CLI's ops-API write literal in src/ — and requires each to
+ * reference the shared guard from src/lib/agent-id-rule.ts.
  *
- * The CLI paths (src/commands/agent.ts, src/cli.ts) are covered by
- * test/unit-isolated/agent-add-invalid-id-2359.test.ts; the resource REST paths
- * by test/unit-isolated/agent-id-rule-resource-2359.test.ts.
+ * The `flair agent add` CLI path is exercised behaviourally by
+ * test/unit-isolated/agent-add-invalid-id-2359.test.ts; the shared CLI insert
+ * helper (seedAgentViaOpsApi) is exercised directly below.
  */
-import { expect, test } from "bun:test";
+import { expect, test, spyOn } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { seedAgentViaOpsApi } from "../../src/cli.js";
 
-const SHARED_IMPORT = "../src/lib/agent-id-rule.js";
+const SHARED_MODULE = "agent-id-rule.js";
 
 /** The literal raw Agent write idiom, e.g. `(databases as any).flair.Agent.put(`. */
 const RAW_AGENT_WRITE_RE = /\.flair\.Agent\.(put|post|patch)\s*\(/g;
+
+/** The CLI's ops-API Agent write literal: a write `operation` on table "Agent". */
+const OPS_AGENT_WRITE_RE = /operation:\s*"(insert|upsert|update)"[\s\S]{0,220}?table:\s*"Agent"/g;
 
 /** Strip block + line comments so a doc example never counts as a write site. */
 function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 
-/** Every resources/ file that matches the literal raw Agent write idiom. */
-function rawAgentWriterFiles(root = "resources"): string[] {
+/** Every file under `root` that matches one of the Agent write idioms. */
+function agentWriterFiles(root: string): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path);
       else if (/\.ts$/.test(entry.name) && !/\.test\.ts$/.test(entry.name)) {
-        if (stripComments(readFileSync(path, "utf8")).match(RAW_AGENT_WRITE_RE)) out.push(path);
+        const src = stripComments(readFileSync(path, "utf8"));
+        if (src.match(RAW_AGENT_WRITE_RE) || src.match(OPS_AGENT_WRITE_RE)) out.push(path);
       }
     }
   };
@@ -43,28 +48,33 @@ function rawAgentWriterFiles(root = "resources"): string[] {
   return out.sort();
 }
 
-test("the detector finds a raw Agent write site (self-proof: a synthetic writer is detected)", () => {
-  const synthetic = "async function leak(id) {\n  await (databases as any).flair.Agent.put({ id });\n}\n";
-  expect(stripComments(synthetic).match(RAW_AGENT_WRITE_RE)).not.toBeNull();
+test("the detector finds both write idioms (self-proof: synthetic writers are detected)", () => {
+  const raw = "async function leak(id) {\n  await (databases as any).flair.Agent.put({ id });\n}\n";
+  const ops = 'await fetch(url, { body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [] }) });\n';
+  expect(stripComments(raw).match(RAW_AGENT_WRITE_RE)).not.toBeNull();
+  expect(stripComments(ops).match(OPS_AGENT_WRITE_RE)).not.toBeNull();
 });
 
-test("every file that writes an Agent row references the shared agent-ID rule", () => {
-  // Structural writers the literal idiom cannot see.
+test("the files that write an Agent row reference the shared agent-ID rule", () => {
+  // Structural writers the literal idioms cannot see.
   const structural = ["resources/Agent.ts", "resources/Federation.ts"];
-  const files = [...new Set([...rawAgentWriterFiles(), ...structural])].sort();
-  // The known raw writers must actually be detected — the enumeration is not vacuous.
-  for (const expected of ["resources/AgentSeed.ts", "resources/XAA.ts", "resources/mcp-handler.ts"]) {
+  const files = [...new Set([...agentWriterFiles("resources"), ...agentWriterFiles("src"), ...structural])].sort();
+  // The known writers must actually be detected — the enumeration is not vacuous.
+  for (const expected of [
+    "resources/AgentSeed.ts", "resources/XAA.ts", "resources/mcp-handler.ts",
+    "src/cli.ts", "src/commands/principal.ts", "src/lib/mcp-enable.ts",
+  ]) {
     expect(files, `${expected} is enumerated`).toContain(expected);
   }
   const missing: string[] = [];
   for (const file of files) {
     const src = readFileSync(file, "utf8");
-    if (!src.includes(SHARED_IMPORT) || !src.includes("isValidAgentId(")) missing.push(file);
+    if (!src.includes(SHARED_MODULE) || !src.includes("isValidAgentId(")) missing.push(file);
   }
   expect(missing).toEqual([]);
 });
 
-test("each Agent write path runs the guard before it writes", () => {
+test("each resource Agent write path runs the guard before it writes", () => {
   const agent = readFileSync("resources/Agent.ts", "utf8");
   for (const signature of ["  async post(content: any, context: any) {", "  async put(content: any) {", "  async patch(content: any, query?: any) {"]) {
     const start = agent.indexOf(signature);
@@ -89,4 +99,18 @@ test("each Agent write path runs the guard before it writes", () => {
   const skip = federation.indexOf("recordSkip(AGENT_ID_ERROR)");
   expect(skip).toBeGreaterThan(-1);
   expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
+});
+
+test("seedAgentViaOpsApi refuses an out-of-rule id before any HTTP call", async () => {
+  const calls: unknown[] = [];
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (...args: unknown[]) => {
+    calls.push(args);
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch);
+  try {
+    await expect(seedAgentViaOpsApi(19925, "bad.id", "pubkey", "admin", "throwaway-pass")).rejects.toThrow(/invalid agent id/);
+    expect(calls).toEqual([]);
+  } finally {
+    fetchSpy.mockRestore();
+  }
 });

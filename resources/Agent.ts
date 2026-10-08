@@ -8,29 +8,34 @@ import { AGENT_ID_ERROR, invalidAgentIdMessage, isValidAgentId } from "../src/li
 /**
  * The id this write lands on: the URL-bound target (`getId()`) when there is
  * one, otherwise the body `id` (an in-process call, where the body id IS the
- * write key). A non-scalar target is ignored.
+ * write key). `present` is true only when an id was SUPPLIED — a body carrying
+ * an `id` key whose value is `null` is present, while a body with no `id` key
+ * is absent. A non-scalar target is ignored.
  */
-function writeTargetId(resource: any, content: any): unknown {
+function writeTargetId(resource: any, content: any): { present: boolean; value: unknown } {
   try {
     const getId = resource?.getId;
     const id = typeof getId === "function" ? getId.call(resource) : undefined;
-    if (typeof id === "string" || typeof id === "number") return id;
+    if (typeof id === "string" || typeof id === "number") return { present: true, value: id };
   } catch {
     /* getId() threw — fall back to the body id below */
   }
-  return content != null && typeof content === "object" ? content.id : undefined;
+  if (content != null && typeof content === "object" && "id" in content && content.id !== undefined) {
+    return { present: true, value: content.id };
+  }
+  return { present: false, value: undefined };
 }
 
-/** A 400 refusing an agent id outside the shared rule, before anything is
- *  written. An ABSENT id is allowed: a collection POST with no body id lets
+/** A 400 refusing a SUPPLIED agent id outside the shared rule, before anything
+ *  is written. An ABSENT id is allowed: a collection POST with no `id` key lets
  *  Harper generate one (a UUID, which matches the rule), and a PUT/PATCH with
- *  neither a URL target nor a body id has no id to validate. Only a PRESENT id
- *  is checked. */
-function agentIdDenial(id: unknown): Response | null {
-  if (id == null) return null;
-  if (isValidAgentId(id)) return null;
+ *  neither a URL target nor a body id has no id to validate. A body that
+ *  supplies `id: null` is present and refused — null is not an id. */
+function agentIdDenial(target: { present: boolean; value: unknown }): Response | null {
+  if (!target.present) return null;
+  if (isValidAgentId(target.value)) return null;
   return new Response(
-    JSON.stringify({ error: AGENT_ID_ERROR, message: invalidAgentIdMessage(id) }),
+    JSON.stringify({ error: AGENT_ID_ERROR, message: invalidAgentIdMessage(target.value) }),
     { status: 400, headers: { "content-type": "application/json" } },
   );
 }

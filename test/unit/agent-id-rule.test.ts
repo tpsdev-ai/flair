@@ -1,6 +1,6 @@
 /**
  * agent-id-rule.test.ts — flair#2359. Unit tests for the ONE shared agent-ID
- * rule (src/lib/agent-id-rule.ts) that every Agent create/rename path uses.
+ * rule (src/lib/agent-id-rule.ts) that the Agent create paths use.
  */
 import { describe, it, expect } from "bun:test";
 import {

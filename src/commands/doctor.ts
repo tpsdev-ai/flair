@@ -16,6 +16,7 @@ import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
+import { readAgentRoster } from "../lib/agent-roster.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -1933,7 +1934,7 @@ program
       }
     }
 
-    // 8b. Agent ID rule (flair#2359) — report every stored Agent id outside
+    // 8b. Agent ID rule (flair#2359) — report a stored Agent id outside
     // the shared agent-ID rule. Read-only: nothing is rewritten.
     if (harperResponding) {
       console.log(`\n  ${render.wrap(render.c.bold, "Agent IDs")}`);
@@ -1943,30 +1944,11 @@ program
       if (agentListAdminPass) {
         rosterReadAttempted = true;
         const auth = Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64");
-        try {
-          // Same total "select all" predicate `flair agent list` uses: every
-          // Agent row has a non-null createdAt, so a `createdAt > 1970-01-01`
-          // index scan avoids the null-scanning a `starts_with ""` on id does.
-          const res = await fetch(`http://127.0.0.1:${resolveOpsPort(opts)}/`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-            body: JSON.stringify({
-              operation: "search_by_conditions",
-              schema: "flair",
-              table: "Agent",
-              operator: "and",
-              conditions: [{ search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" }],
-              get_attributes: ["id"],
-            }),
-            signal: AbortSignal.timeout(5000),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (Array.isArray(data)) roster = data as Array<{ id?: unknown }>;
-          }
-        } catch {
-          /* leave roster null — reported as unreadable below */
-        }
+        roster = await readAgentRoster({
+          opsUrl: `http://127.0.0.1:${resolveOpsPort(opts)}/`,
+          authHeader: `Basic ${auth}`,
+          timeoutMs: 5000,
+        });
       }
       if (roster === null) {
         // A failed read is never reported as "no ids": say which it was.
@@ -1978,7 +1960,7 @@ program
       } else {
         const finding = describeAgentIdRuleFinding(roster);
         if (!finding) {
-          console.log(`  ${render.icons.ok} Every stored agent id matches ${AGENT_ID_RULE}.`);
+          console.log(`  ${render.icons.ok} No stored agent id is outside ${AGENT_ID_RULE}.`);
         } else {
           issues++;
           console.log(`  ${render.icons.warn} ${finding.message}`);

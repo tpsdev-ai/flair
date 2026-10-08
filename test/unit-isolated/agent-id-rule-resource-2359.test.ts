@@ -128,6 +128,24 @@ describe("flair#2359 — Agent PUT refuses an id outside the shared rule, storin
   });
 });
 
+describe("flair#2359 — Agent POST distinguishes an omitted id from a supplied null", () => {
+  it("POST with an explicit id: null is refused 400 (invalid_agent_id), storing nothing", async () => {
+    const a = makeAgent(adminCtx);
+    const res: any = await a.post({ id: null, name: "NullId" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("invalid_agent_id");
+    expect(agentStore.size).toBe(0);
+  });
+
+  it("POST with no id key is left to Harper to generate one (not refused)", async () => {
+    const a = makeAgent(adminCtx);
+    const res: any = await a.post({ name: "Generated" });
+    expect(res instanceof Response).toBe(false);
+    expect(agentStore.size).toBe(1);
+  });
+});
+
 describe("flair#2359 — Agent PATCH refuses an id outside the shared rule, storing nothing", () => {
   it("PATCH whose URL target has no stored row and is out of rule: 400 named error, no row", async () => {
     const a: any = makeAgent(adminCtx);

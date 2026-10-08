@@ -2575,9 +2575,9 @@ export interface AgentIdRuleFinding {
 }
 
 /**
- * Report every stored Agent id that is outside the shared agent-ID rule
+ * Report a stored Agent id that is outside the shared agent-ID rule
  * (flair#2359). `rows` is the Agent roster read from the instance. Returns null
- * when every stored id conforms. PURE — it reports; nothing is rewritten.
+ * when the roster's ids conform. PURE — it reports; nothing is rewritten.
  */
 export function describeAgentIdRuleFinding(rows: Array<{ id?: unknown }>): AgentIdRuleFinding | null {
   const invalidIds = (Array.isArray(rows) ? rows : [])

@@ -1,25 +1,28 @@
 /**
  * agent-id-rule-2359.test.ts — flair#2359, against a REAL Harper.
  *
- * Every path that creates or renames an Agent applies the ONE shared agent-ID
- * rule and refuses a non-matching id with the named error before anything is
- * written. This file proves the resource REST paths (POST, PUT, PATCH on /Agent
- * and POST /AgentSeed) through the real component, and drives the real Agent
- * roster read through the doctor decision (describeAgentIdRuleFinding) after
- * seeding a stored non-conforming id.
+ * Every path that creates an Agent applies the ONE shared agent-ID rule and
+ * refuses a non-matching id with the named error before anything is written.
+ * This file proves the resource REST paths (POST/PUT/PATCH on /Agent and POST
+ * /AgentSeed), an explicit `id: null` on the collection POST, the doctor roster
+ * read (readAgentRoster) with a row outside any created-at filter, and the
+ * federation merge (FederationSync) skipping a malformed inbound Agent row.
  *
- * The CLI paths are covered by
+ * The `flair agent add` CLI path is exercised by
  * test/unit-isolated/agent-add-invalid-id-2359.test.ts.
  *
  * Note on ids: Harper parses a path segment as `<id>.<property>`, so a dot in a
  * URL segment is not part of the id (`/Agent/bad.id` resolves to id `bad`). The
  * PUT/PATCH cases therefore use an over-long id, which the path parser keeps
- * whole. The collection POST case carries the id in the body.
+ * whole. The collection POST cases carry the id in the body.
  */
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import nacl from "tweetnacl";
 import { tmpdir } from "node:os";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { describeAgentIdRuleFinding } from "../../src/doctor-client.js";
+import { readAgentRoster } from "../../src/lib/agent-roster.js";
 
 const OUT_OF_RULE_BODY = "bad.id"; // a dot is not in [A-Za-z0-9_-]
 const OUT_OF_RULE_PATH = "a".repeat(65); // one over the 64-character limit
@@ -67,6 +70,13 @@ async function rowIn(table: string, id: string): Promise<any | null> {
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+/** The doctor's own roster read, run against this instance. */
+async function roster(): Promise<Array<{ id?: unknown }>> {
+  const rows = await readAgentRoster({ opsUrl: harper.opsURL, authHeader: basic() });
+  expect(rows, "the doctor roster read failed against the live instance").not.toBeNull();
+  return rows!;
+}
+
 beforeAll(async () => {
   harper = await startHarper();
   assertOwnInstance(harper);
@@ -89,6 +99,21 @@ describe("flair#2359 — the Agent REST write paths refuse an out-of-rule id on 
     expect(r.status, r.raw).toBe(400);
     expect(JSON.parse(r.raw).error).toBe("invalid_agent_id");
     expect(await rowIn("Agent", OUT_OF_RULE_BODY)).toBeNull();
+  });
+
+  test("POST /Agent/ with an explicit null id is refused 400 (invalid_agent_id) and stores no row", async () => {
+    const before = await roster();
+    const r = await send("POST", "/Agent/", {
+      id: null,
+      name: "NullId",
+      role: "agent",
+      publicKey: "body-public-key",
+      createdAt: new Date().toISOString(),
+    });
+    expect(r.status, r.raw).toBe(400);
+    expect(JSON.parse(r.raw).error).toBe("invalid_agent_id");
+    expect((await roster()).length, "a supplied null id stored a row").toBe(before.length);
+    expect(await rowIn("Agent", "null")).toBeNull();
   });
 
   test("PUT /Agent/<out-of-rule> is refused 400 (invalid_agent_id) and stores no row", async () => {
@@ -116,28 +141,60 @@ describe("flair#2359 — the Agent REST write paths refuse an out-of-rule id on 
   });
 });
 
-describe("flair#2359 — the doctor decision reports a seeded stored non-conforming id", () => {
-  test("a stored Agent row outside the rule is reported by describeAgentIdRuleFinding", async () => {
-    const now = new Date().toISOString();
-    const seeded = "seed.bad.id";
+describe("flair#2359 — the doctor roster read reports a stored id outside the rule", () => {
+  test("a stored Agent row whose createdAt is below the old filter is still reported", async () => {
+    const seeded = "outside.filter.bad"; // a dot is not in the rule
+    // createdAt "1969-12-31T00:00:00.000Z" sorts BELOW "1970-01-01", so the old
+    // `createdAt > "1970-01-01"` search would have excluded this row entirely.
     await ops({
       operation: "insert",
       table: "Agent",
-      records: [{ id: seeded, name: seeded, role: "agent", status: "active", publicKey: "seeded-public-key", createdAt: now }],
+      records: [{ id: seeded, name: seeded, role: "agent", status: "active", publicKey: "seeded-public-key", createdAt: "1969-12-31T00:00:00.000Z" }],
     });
     expect((await rowIn("Agent", seeded))?.id).toBe(seeded);
 
-    // The same "select all" roster read `flair doctor` uses.
-    const roster = (await ops({
-      operation: "search_by_conditions",
-      schema: "flair",
-      table: "Agent",
-      operator: "and",
-      conditions: [{ search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" }],
-      get_attributes: ["id"],
-    })) as Array<{ id?: unknown }>;
-    const finding = describeAgentIdRuleFinding(roster);
+    // The doctor's own complete roster read.
+    const rows = await roster();
+    expect(rows.map((r) => r.id)).toContain(seeded);
+    const finding = describeAgentIdRuleFinding(rows);
     expect(finding).not.toBeNull();
     expect(finding!.invalidIds).toContain(seeded);
   });
+});
+
+describe("flair#2359 — the federation merge skips a malformed inbound Agent row", () => {
+  const sfx = Date.now().toString(36);
+  const HUB = `fed-hub-${sfx}`;
+  const VALID = `fed-valid-${sfx}`;
+  const INVALID = `fed.bad.${sfx}`; // a dot is not in the rule
+  const hub = nacl.sign.keyPair();
+  const now = () => new Date().toISOString();
+
+  test("a signed mixed batch lands the valid row, skips the invalid one, and names the skip", async () => {
+    await ops({
+      operation: "insert",
+      table: "Peer",
+      records: [{ id: HUB, publicKey: Buffer.from(hub.publicKey).toString("base64url"), role: "hub", status: "active", createdAt: now() }],
+    });
+
+    const ts = now();
+    const records = [
+      { table: "Agent", id: VALID, updatedAt: ts, originatorInstanceId: HUB, data: { id: VALID, name: VALID, role: "agent", status: "active", publicKey: "hub-public-key", createdAt: ts } },
+      { table: "Agent", id: INVALID, updatedAt: ts, originatorInstanceId: HUB, data: { id: INVALID, name: INVALID, role: "agent", status: "active", publicKey: "hub-public-key", createdAt: ts } },
+    ];
+    const body = signBodyFresh({ instanceId: HUB, records, lamportClock: Date.now() }, hub.secretKey);
+
+    const res = await fetch(`${harper.httpURL}/FederationSync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const raw = await res.text();
+    expect(res.status, `FederationSync returned ${res.status}: ${raw.slice(0, 300)}`).toBe(200);
+    const out = JSON.parse(raw);
+    expect(out.merged, JSON.stringify(out)).toBe(1);
+    expect(out.skippedReasons?.invalid_agent_id, JSON.stringify(out)).toBe(1);
+    expect((await rowIn("Agent", VALID))?.id, "the valid row did not land").toBe(VALID);
+    expect(await rowIn("Agent", INVALID), "the malformed row landed").toBeNull();
+  }, 30_000);
 });

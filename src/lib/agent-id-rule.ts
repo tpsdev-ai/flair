@@ -3,8 +3,8 @@
  * server (resources/).
  *
  * An agent ID is the key of an Agent row and is used in URLs, shell hooks and
- * federation payloads, so every path that creates or renames an Agent must
- * accept the same ids. Before this module the rule lived inline in
+ * federation payloads, so the paths that create an Agent must accept the same
+ * ids. Before this module the rule lived inline in
  * resources/AgentSeed.ts only: the Agent resource's REST writes,
  * `flair agent add` and the federation merge each accepted an id AgentSeed
  * would have refused, and the JIT-principal writers (XAA / MCP) built an id
@@ -28,13 +28,16 @@ export const AGENT_ID_MAX_LENGTH = 64;
 /** The rule as a matcher. */
 export const AGENT_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
-/** The named error every refusing path returns. */
+/** The named error the Agent resource's write paths and the federation merge
+ *  refuse with. The CLI and JIT-principal writers refuse with the same message
+ *  text but not this code. */
 export const AGENT_ID_ERROR = "invalid_agent_id";
 
 /**
- * Is `id` an agent ID this rule accepts? A non-string, non-number value
- * (including null/undefined) is never valid, so `String(id)` never turns an
- * absent id into the literal `"null"`/`"undefined"`.
+ * Is `id` an agent ID this rule accepts? A non-string, non-number value —
+ * including `null` — is never valid. A write path must distinguish an OMITTED
+ * id (nothing to check; Harper may generate one) from a SUPPLIED `null`, which
+ * this returns false for.
  */
 export function isValidAgentId(id: unknown): boolean {
   if (typeof id !== "string" && typeof id !== "number") return false;

@@ -12,7 +12,7 @@ import { describeAgentIdRuleFinding } from "../../src/doctor-client.js";
 import { AGENT_ID_RULE } from "../../src/lib/agent-id-rule.js";
 
 describe("flair#2359 — describeAgentIdRuleFinding", () => {
-  it("returns null when every stored id conforms", () => {
+  it("returns null when the roster's ids conform", () => {
     expect(
       describeAgentIdRuleFinding([{ id: "agent-a" }, { id: "Agent_B-2" }, { id: "x".repeat(64) }]),
     ).toBeNull();

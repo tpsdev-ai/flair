@@ -148,6 +148,7 @@ import { randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
 import { writeConfirmed } from "./instance-identity-row.js";
+import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
 import { defaultReadProcessCmdline, defaultReadProcessCwd } from "./upgrade-exec-path.js";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
@@ -1340,6 +1341,13 @@ export async function provisionIdpIdentityMapping(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = (deps.now ?? (() => new Date().toISOString()))();
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
+
+  // flair#2359 — the ONE shared agent-ID rule, before any read or write. The
+  // principal Agent below is inserted through the operations API, so the Agent
+  // resource's own guard never runs on it.
+  if (!isValidAgentId(params.principal)) {
+    throw new Error(`Identity mapping: ${invalidAgentIdMessage(params.principal)}`);
+  }
 
   // Ensure the principal Agent exists.
   const agentQuery = mappingReadQuery("Agent", { id: params.principal });
