@@ -2,12 +2,15 @@
  * txn-pause-point.test.ts — flair#2307: the test-only pause inside an owned
  * transaction (resources/txn-pause-point.ts) is inert unless every condition
  * holds, claims an arm file, and releases on `go` or on its limit.
+ * flair#2382: it also refuses a pause-point name that is not lowercase words and
+ * hyphens at call time, and this file scans the source for the names in use.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV, txnPausePoint } from "../../resources/txn-pause-point.ts";
+import { fileURLToPath } from "node:url";
+import { InvalidPausePointError, PAUSE_POINT_PATTERN, TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV, txnPausePoint } from "../../resources/txn-pause-point.ts";
 
 let dir: string;
 const env = (overrides: Record<string, string | undefined> = {}) => ({
@@ -156,4 +159,44 @@ describe("pause filesystem refusals", () => {
     });
   }
 
+});
+
+describe("pause-point names (flair#2382)", () => {
+  // The trees that may name a pause point. resources/ and src/ both compile
+  // into the published dist/, so a name in either is a call site.
+  const roots = ["resources", "src"].map((name) => fileURLToPath(new URL(`../../${name}`, import.meta.url)));
+
+  function collectTs(source: string, found: string[] = []): string[] {
+    for (const entry of readdirSync(source, { withFileTypes: true })) {
+      const full = join(source, entry.name);
+      if (entry.isDirectory()) collectTs(full, found);
+      else if (entry.name.endsWith(".ts")) found.push(full);
+    }
+    return found;
+  }
+
+  it("each literal txnPausePoint(\"...\") name in resources/ and src/ is well-formed and unique", () => {
+    const calls: { name: string; where: string }[] = [];
+    for (const file of roots.flatMap((root) => collectTs(root))) {
+      const text = readFileSync(file, "utf8");
+      for (const match of text.matchAll(/txnPausePoint\(\s*"([^"]*)"\s*[,)]/g)) {
+        calls.push({ name: match[1], where: file });
+      }
+    }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.filter((call) => !PAUSE_POINT_PATTERN.test(call.name))).toEqual([]);
+    const seen = new Set<string>();
+    const duplicates = calls.filter((call) => {
+      if (seen.has(call.name)) return true;
+      seen.add(call.name);
+      return false;
+    });
+    expect(duplicates).toEqual([]);
+  });
+
+  it("refuses a malformed name at call time with a named error", () => {
+    for (const bad of ["Bad Name", "no_underscores", "-leading", "trailing-", "double--hyphen", ""]) {
+      expect(() => txnPausePoint(bad, {} as NodeJS.ProcessEnv)).toThrow(InvalidPausePointError);
+    }
+  });
 });
