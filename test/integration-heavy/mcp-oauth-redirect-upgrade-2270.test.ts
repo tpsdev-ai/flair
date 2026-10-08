@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync, cpSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
@@ -59,6 +59,10 @@ function makeWorkDir(prefix: string): string {
   symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
   symlinkSync(join(REPO_ROOT, "dist"), join(workDir, "dist"));
   copyFileSync(SHIPPED_CONFIG, join(workDir, "config.yaml"));
+  // config.yaml loads schemas/*.graphql from the app dir; without them no flair resource loads
+  // (HealthDetail answers 403). Copied, not linked: Harper's schema glob does not follow a
+  // symlinked directory (as test/integration-heavy/deploy-public-url.test.ts also copies it).
+  cpSync(join(REPO_ROOT, "schemas"), join(workDir, "schemas"), { recursive: true });
   return workDir;
 }
 
