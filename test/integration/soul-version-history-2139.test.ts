@@ -338,6 +338,116 @@ describe("flair#2139 S1 — Soul lifecycle leaves a chained history", () => {
     expect(JSON.parse(versions[2].soulSnapshot)).toEqual(row);
   }, 120_000);
 
+  test("an agentId-only update to an unoccupied destination closes the old window", async () => {
+    // PUT — the verb the operator CLI's `soul set` and `restore` issue.
+    const putKey = `iv-agentid-put-${sfx}`;
+    const putId = `${A.id}:${putKey}`;
+    await createSoul(putId, A.id, putKey, "before");
+    const put = await call("basic", "PUT", soulPath(putId), { id: putId, agentId: B.id, key: putKey, value: "after" });
+    expect(put.status, put.text.slice(0, 200)).toBeLessThan(300);
+    expect((await versionsOf(`${A.id}:${putKey}`)).map((r) => r.kind)).toEqual(["create", "delete"]);
+    const putNew = await versionsOf(`${B.id}:${putKey}`);
+    expect(putNew.map((r) => r.kind)).toEqual(["update"]);
+    expect(putNew[0].agentId).toBe(B.id);
+    expect(putNew[0].previousVersionHash).toBeNull();
+
+    // PATCH.
+    const patchKey = `iv-agentid-patch-${sfx}`;
+    const patchId = `${A.id}:${patchKey}`;
+    await createSoul(patchId, A.id, patchKey, "before");
+    const patch = await call("basic", "PATCH", soulPath(patchId), { agentId: B.id });
+    expect(patch.status, patch.text.slice(0, 200)).toBeLessThan(300);
+    expect((await versionsOf(`${A.id}:${patchKey}`)).map((r) => r.kind)).toEqual(["create", "delete"]);
+    const patchNew = await versionsOf(`${B.id}:${patchKey}`);
+    expect(patchNew.map((r) => r.kind)).toEqual(["update"]);
+    expect(patchNew[0].agentId).toBe(B.id);
+  }, 180_000);
+
+  for (const method of ["PUT", "PATCH"] as const) {
+    test(`${method} closes the old window for colon-colliding identity pairs`, async () => {
+      const id = `iv-colon-${method}-${sfx}`;
+      const agentId = `iv-colon-agent-${method}-${sfx}`;
+      const oldSubject = `:${JSON.stringify([agentId, "b:c"])}`;
+      const newSubject = `:${JSON.stringify([`${agentId}:b`, "c"])}`;
+      await createSoul(id, agentId, "b:c", "before");
+      const result = await call("basic", method, soulPath(id), { agentId: `${agentId}:b`, key: "c", value: "after" });
+      expect(result.status, result.text).toBeLessThan(300);
+      const oldVersions = await versionsOf(oldSubject);
+      const newVersions = await versionsOf(newSubject);
+      expect(oldVersions.map((r) => r.kind)).toEqual(["create", "delete"]);
+      expect(oldVersions[1].previousVersionHash).toBe(oldVersions[0].recordHash);
+      expect(newVersions.map((r) => r.kind)).toEqual(["update"]);
+      expect(newVersions[0].previousVersionHash).toBeNull();
+      expect(newVersions[0].agentId).toBe(`${agentId}:b`);
+      expect(newVersions[0].key).toBe("c");
+      const read = await call(B, "GET", versionPath(oldVersions[1].id));
+      expect(read.status, read.text).toBe(200);
+      expect(JSON.parse(read.text).kind).toBe("delete");
+      expect((await soulRow(id)).agentId).toBe(`${agentId}:b`);
+    }, 120_000);
+
+    test(`${method} refuses an occupied destination without changing either row or history`, async () => {
+      for (const field of ["agentId", "key"] as const) {
+        const key = `iv-occupied-${method}-${field}-${sfx}`;
+        const id = `${A.id}:${key}`;
+        const destination = field === "agentId" ? { agentId: B.id, key } : { agentId: A.id, key: `${key}-other` };
+        const destinationId = `destination-${method}-${field}-${sfx}`;
+        await createSoul(id, A.id, key, "before");
+        await createSoul(destinationId, destination.agentId, destination.key, "occupied");
+        const beforeRows = await Promise.all([soulRow(id), soulRow(destinationId)]);
+        const beforeVersions = await Promise.all([versionsOf(`${A.id}:${key}`), versionsOf(`${destination.agentId}:${destination.key}`)]);
+        const result = await call("basic", method, soulPath(id), { ...destination, value: "after" });
+        expect(result.status, result.text).toBe(409);
+        expect(JSON.parse(result.text)).toEqual({ error: "soul_subject_occupied" });
+        expect(await Promise.all([soulRow(id), soulRow(destinationId)])).toEqual(beforeRows);
+        expect(await Promise.all([versionsOf(`${A.id}:${key}`), versionsOf(`${destination.agentId}:${destination.key}`)])).toEqual(beforeVersions);
+      }
+    }, 120_000);
+  }
+
+  test("legacy colon history remains readable and an update links to its pair's head", async () => {
+    const agentId = `iv-legacy-${sfx}`;
+    const key = "b:c";
+    const id = `legacy-row-${sfx}`;
+    const subjectId = `${agentId}:${key}`;
+    const createdAt = now();
+    const soul = { id, agentId, key, value: "before", durability: "permanent", createdAt, updatedAt: createdAt };
+    const legacy = {
+      id: `soul:${subjectId}:1`, subjectType: "soul", subjectId, agentId, key, version: 1,
+      kind: "create", rowId: id, valueHash: createHash("sha256").update(soul.value, "utf8").digest("hex"),
+      previousVersionHash: null, soulSnapshot: JSON.stringify(soul),
+      memoryId: null, visibility: null, actorKind: "operator", actorId: null, sourceClass: "operator",
+      createdAt, guarded: false, expectedVersion: null, recordHash: "",
+    };
+    legacy.recordHash = recordHashOf(legacy);
+    await upsert("Soul", [soul]);
+    await upsert("InstructionVersion", [legacy]);
+    const read = await call(B, "GET", versionPath(legacy.id));
+    expect(read.status, read.text).toBe(200);
+    expect(JSON.parse(read.text).recordHash).toBe(legacy.recordHash);
+    const result = await call("basic", "PATCH", soulPath(id), { value: "after" });
+    expect(result.status, result.text).toBeLessThan(300);
+    const [next] = await versionsOf(`:${JSON.stringify([agentId, key])}`);
+    expect(Number(next.version)).toBe(2);
+    expect(next.previousVersionHash).toBe(legacy.recordHash);
+    expect((await versionsOf(subjectId))[0].recordHash).toBe(legacy.recordHash);
+  }, 120_000);
+
+  test("an identity no-op Soul update opens no new window", async () => {
+    const key = `iv-agentid-noop-${sfx}`;
+    const id = `${A.id}:${key}`;
+    await createSoul(id, A.id, key, "before");
+    const put = await call("basic", "PUT", soulPath(id), { id, agentId: A.id, key, value: "v1" });
+    expect(put.status, put.text.slice(0, 200)).toBeLessThan(300);
+    const patch = await call("basic", "PATCH", soulPath(id), { value: "v2" });
+    expect(patch.status, patch.text.slice(0, 200)).toBeLessThan(300);
+    const versions = await versionsOf(`${A.id}:${key}`);
+    expect(versions.map((r) => r.kind)).toEqual(["create", "update", "update"]);
+    expect(versions.map((r) => Number(r.version))).toEqual([1, 2, 3]);
+    expect(versions.some((r) => r.kind === "delete")).toBe(false);
+    expect(await versionsOf(`${B.id}:${key}`)).toEqual([]);
+  }, 120_000);
+
   test("ordinary and key-change duplicate ids preserve the prior version and Soul row", async () => {
     for (const collision of ["ordinary", "tombstone", "successor"]) {
       const key = `iv-duplicate-${collision}-${sfx}`;

@@ -15,7 +15,7 @@
 import { Command } from "commander";
 
 import * as render from "../render.js";
-import { unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { continuityWriteBlockers, probeSessionStartHookDelivery, readClientMcpBlock } from "../doctor-client.js";
 import {
   installHook,
@@ -44,6 +44,7 @@ import {
 import { resolveActionRecallRuntime } from "../lib/action-recall-runtime.js";
 import { resolveCaptureRuntime } from "../lib/capture-runtime.js";
 import { resolveHome } from "../lib/home.js";
+import { sessionStartHookPinFindings } from "../lib/owned-pins.js";
 
 export type HookCli = {
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
@@ -273,8 +274,14 @@ export function register(program: Command): void {
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = resolveHome();
+      const pinFinding = sessionStartHookPinFindings(home).find(
+        (f) => f.reading.target.id === harness,
+      ) ?? null;
       const status = hookStatus(home, harness, {
         deliveryProbe: (command) => probeSessionStartHookDelivery(command),
+        stalePinFinding: pinFinding
+          ? { pin: pinFinding.reading.pin, direction: pinFinding.direction }
+          : null,
       });
 
       // Continuity pair (flair#1257) — reported alongside the SessionStart
@@ -364,6 +371,20 @@ export function register(program: Command): void {
         renderCapture();
         console.log("");
         process.exit(1);
+      }
+
+      if (status.pinStale) {
+        console.log(`  ${render.icons.error} SessionStart hook: command names older pin flair-mcp@${status.stalePin} (installed CLI is ${flairCliVersion()})`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
+        renderContinuity();
+        renderActionRecall();
+        console.log("");
+        process.exit(1);
+      }
+
+      // flair#2291: a held hook shape (see readOwnedPin) is reported.
+      if (pinFinding?.reading.held) {
+        console.log(`  ${render.icons.warn} SessionStart hook: ${pinFinding.reading.held}`);
       }
 
       const headline = hookStatusHeadline(status);
