@@ -85,11 +85,11 @@ function nodeBin(): string {
   return "node";
 }
 
-function runLocalInit(install: Install, extraArgs: string[], cwd = ROOT) {
+function runLocalInit(install: Install, extraArgs: string[], cwd = ROOT, supplyCredential = true) {
   const startedAt = Date.now();
   const res = spawnSync(
     nodeBin(),
-    [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), "--admin-pass", ADMIN_PASS,
+    [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), ...(supplyCredential ? ["--admin-pass", ADMIN_PASS] : []),
       "--skip-soul", "--no-mcp", "--skip-smoke", "--skip-claude-md", "--skip-hook", ...extraArgs],
     {
       cwd,
@@ -321,7 +321,7 @@ describe("flair#2197 — local init --skip-start installs without starting", () 
 
     const configBefore = readFileSync(join(install.dataDir, "harper-config.yaml"), "utf8");
 
-    const skipped = runLocalInit(install, ["--skip-start"]);
+    const skipped = runLocalInit(install, ["--skip-start"], ROOT, false);
     expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
     // Nothing started ...
     expect(await serves(install.httpPort), "--skip-start started an installed instance").toBe(false);

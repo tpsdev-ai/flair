@@ -8,7 +8,8 @@ import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } 
 import { checkHttpRateLimit } from "./rate-limit.js";
 import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
 import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
-import { idSegmentHasEncodedSlash, MEMORY_CONTENT_SELECTOR_SUFFIX } from "../src/lib/memory-id-policy.js";
+import { idSegmentHasEncodedSlash, decodeMemoryIdSegment, MEMORY_CONTENT_SELECTOR_SUFFIX } from "../src/lib/memory-id-policy.js";
+import { contentSuffixIdDenial } from "./memory-id-guard.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
 //
@@ -24,6 +25,16 @@ const DECLARED_MEMORY_ATTRIBUTE_SET = new Set<string>(
 
 function isMemoryReadPath(pathname: string): boolean {
   return pathname === "/Memory" || pathname === "/Memory/" || pathname.startsWith("/Memory/");
+}
+
+/** True when a path segment is valid percent-encoding. */
+function isValidPercentEncoding(segment: string): boolean {
+  try {
+    decodeURIComponent(segment);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Drop a caller's `select(...)` and `property` from a Memory read URL, keeping
@@ -45,7 +56,7 @@ function stripMemorySelection(rawUrl: string): string {
   // attribute, so it is left for Harper to read as a content type).
   const slash = pathPart.lastIndexOf("/");
   const seg = pathPart.slice(slash + 1);
-  const decodedSeg = decodePathSegment(seg);
+  const decodedSeg = decodeMemoryIdSegment(seg);
   const dot = decodedSeg.indexOf(".");
   // An encoded `/` in the id segment makes the segment ambiguous: the trailing
   // `.<declared attribute>` could be part of the id, or a selector on a
@@ -72,17 +83,6 @@ function stripMemorySelection(rawUrl: string): string {
   return query === "" ? pathPart : `${pathPart}?${query}`;
 }
 
-/** Decode a path segment the way Harper does before its property parse; fall
- *  back to the raw segment when it is not valid percent-encoding (Harper rejects
- *  the malformed request; the middleware must not crash on it). */
-function decodePathSegment(raw: string): string {
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
-}
-
 /**
  * True when a Memory by-id read path names an id segment that carries an encoded
  * `/` (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
@@ -96,7 +96,7 @@ function isAmbiguousEncodedSlashSelector(rawUrl: string): boolean {
   const slash = pathPart.lastIndexOf("/");
   const seg = pathPart.slice(slash + 1);
   if (!idSegmentHasEncodedSlash(seg)) return false;
-  const decodedSeg = decodePathSegment(seg);
+  const decodedSeg = decodeMemoryIdSegment(seg);
   const dot = decodedSeg.indexOf(".");
   return dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1));
 }
@@ -245,6 +245,21 @@ server.http(async (request: any, nextLayer: any) => {
   // actually use — returns null here and is untouched.
   const limited = checkHttpRateLimit(request, url.pathname);
   if (limited) return limited;
+
+  // ── Malformed `.content` Memory path: the named 400, for every caller ────────
+  // flair#2307 item 2: Harper's OWN path decode answers a 500 for invalid
+  // percent-encoding, before any resource by-id guard can run. A Memory path
+  // whose last segment is invalid percent-encoding AND ends in the `.content`
+  // property suffix is refused here with the guard's named 400 instead. Placed
+  // before every auth branch (the public-path passthrough, the Basic-admin and
+  // anonymous early returns, the signed-agent path), so the refusal does not
+  // depend on the request's credential, and no row is read or written for it.
+  if (isMemoryReadPath(url.pathname)) {
+    const seg = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+    if (seg.endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX) && !isValidPercentEncoding(seg)) {
+      return contentSuffixIdDenial(seg);
+    }
+  }
 
   // A2A discovery endpoints: GET returns public agent-card metadata (per
   // A2A spec, cards are intentionally public). POST invokes JSON-RPC
@@ -793,10 +808,13 @@ server.http(async (request: any, nextLayer: any) => {
   // contract, applied in `Memory.get`/`Memory.search`). The by-id
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
+  // (A malformed `.content` segment was refused before any auth branch, above.)
   if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(url.pathname)) {
     // flair#2199: an id segment carrying an encoded `/` before a declared
     // property suffix is ambiguous — the suffix could be part of the id or a
-    // selector on a slash-containing id.
+    // selector on a slash-containing id. This branch runs for a signed
+    // non-admin agent: Basic-admin and anonymous requests returned to the next
+    // layer before it.
     if (isAmbiguousEncodedSlashSelector(request.url)) {
       return new Response(method === "HEAD" ? null : JSON.stringify({
         error: "ambiguous_memory_id",
@@ -813,7 +831,7 @@ server.http(async (request: any, nextLayer: any) => {
   let memoryId: string | null = null;
   if (isMemoryWrite) {
     const pathParts = url.pathname.split("/").filter(Boolean);
-    memoryId = pathParts.length >= 2 ? decodeURIComponent(pathParts[1]) : (request.headers.get("x-memory-id") ?? null);
+    memoryId = pathParts.length >= 2 ? decodeMemoryIdSegment(pathParts[1]) : (request.headers.get("x-memory-id") ?? null);
   }
 
   const response = await nextLayer(request);

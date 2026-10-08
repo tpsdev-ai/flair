@@ -36,8 +36,8 @@ export class FeedMemories extends Resource {
     }
 
     const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
-    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
     if (seedDenial) return seedDenial;
+    const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));
     if (contentSuffixDenial) return contentSuffixDenial;
 
     // No-forge attribution: use the kit's stampAttribution to stamp agentId

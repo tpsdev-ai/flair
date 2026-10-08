@@ -23,6 +23,7 @@ import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
 import { stampEphemeralExpiry } from "./memory-durability.js";
 import { isReservedSeedId } from "./seed-reservation.js";
+import { endsWithContentSelectorSuffix } from "../src/lib/memory-id-policy.js";
 import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -880,6 +881,16 @@ export class FederationSync extends Resource {
         // (resources/seed-reservation.ts), whatever its tags.
         if (isReservedSeedId(record.table, record.id)) {
           recordSkip("seed_id_not_federated");
+          continue;
+        }
+
+        // flair#2307: Harper's REST by-id path reads a trailing `.content` as a
+        // property selector, and the Memory write paths refuse such an id, so a
+        // federated Memory row whose id ends in `.content` is skipped, as the
+        // seed reservation does just above. A legacy row with such an id that
+        // already exists on the sending peer is therefore not federated.
+        if (record.table === "Memory" && endsWithContentSelectorSuffix(mergedData.id)) {
+          recordSkip("content_suffix_id_not_federated");
           continue;
         }
 
