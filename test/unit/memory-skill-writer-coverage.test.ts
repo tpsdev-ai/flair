@@ -38,6 +38,8 @@ add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.po
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the raw put (flair#1542).");
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"],
+  "Dedup expiry repair (flair#2358): re-writes the row read in its transaction with expiresAt set; content and tags stay as stored.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer; delete only closes the stored head.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],

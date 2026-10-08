@@ -26,7 +26,7 @@ import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
-import { assertValidDurability } from "./memory-durability.js";
+import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
@@ -1408,10 +1408,8 @@ export class Memory extends (databases as any).flair.Memory {
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
 
-    if (content.durability === "ephemeral" && !content.expiresAt) {
-      const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
-      content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
-    }
+    const expiryError = stampEphemeralExpiry(content);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
 
     // Content safety scan — covers content + summary (defense-in-depth for
     // agent-set summaries).
@@ -1735,6 +1733,8 @@ export class Memory extends (databases as any).flair.Memory {
     // The receiver-side federation bookkeeping keeps its stored value (a patch
     // merges); a client body value is dropped.
     dropClientFederationBookkeeping(content);
+    const expiryError = stampEphemeralExpiry(content, existingForSkill);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
     return super.patch(content, query);
   }
 
@@ -1891,8 +1891,7 @@ export class Memory extends (databases as any).flair.Memory {
     // ── flair#1238: refuse an unrecognised durability (mirrors post()) ──
     // put() is the other HTTP-reachable write path (fresh create via CLI, and
     // the update/patch path). Same guard as post(): a present-but-unknown
-    // durability is refused with 400; absent is accepted (no default stamped
-    // here — put() leaves durability untouched for updates).
+    // durability is refused with 400; absent is accepted.
     {
       const durabilityError = assertValidDurability(content.durability);
       if (durabilityError) {
@@ -1980,29 +1979,8 @@ export class Memory extends (databases as any).flair.Memory {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
 
-    // ── flair#1257 slice 3: stamp the ephemeral TTL on the PUT path too ──────
-    // post() has stamped expiresAt for ephemeral rows since the tier shipped,
-    // but put() — the verb the continuity capture hook actually writes with
-    // (`PUT /Memory/<id>`, packages/flair-mcp/src/continuity-capture-hook.ts)
-    // — never did. MemoryMaintenance's reap keys on expiresAt (expired =
-    // expiresAt < now), so hook-written journal rows carried NO expiry and
-    // the tier's load-bearing 24h containment bound (the exposure window the
-    // #1257 rulings cite) silently never engaged on the real write path.
-    // Effective durability = the write's, else the pre-existing row's (same
-    // resolution the visibility guard above uses). A pre-existing expiry is
-    // carried forward, never re-stamped — an update must not extend the
-    // exposure window; an explicit caller-provided expiresAt always wins.
-    {
-      const effectiveDurability = content.durability ?? preExisting?.durability;
-      if (effectiveDurability === "ephemeral" && !content.expiresAt) {
-        if (preExisting?.expiresAt) {
-          content.expiresAt = preExisting.expiresAt;
-        } else {
-          const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
-          content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
-        }
-      }
-    }
+    const expiryError = stampEphemeralExpiry(content, preExisting);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
 
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared

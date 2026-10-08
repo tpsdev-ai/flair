@@ -34,7 +34,8 @@ export type TxnPausePoint =
   | "memory-archive-pre"
   // flair#2275 — embedding-stamp migration: after it reads a stale row, before
   // its re-embed request.
-  | "embedding-stamp-regen-pre";
+  | "embedding-stamp-regen-pre"
+  | "feed-dedup-repair";
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
