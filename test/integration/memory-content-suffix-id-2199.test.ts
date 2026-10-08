@@ -75,6 +75,12 @@ const DEL_BASE = "mcs-del-base";
 const DEL_OTHER_BASE = "mcs-del-other-base";
 const SLASH = "mcs-slash";
 const SLASH_BASE = `${SLASH}/base`;
+// flair#2307: the literal id a twice-encoded slash (`%252F`) decodes to.
+const DEEP = "mcs-deep";
+const DEEP_BASE = `${DEEP}%2Fbase`;
+// flair#2307: a segment that is not valid percent-encoding (the escapes are
+// well formed but are not UTF-8), ending in a literal `.content`.
+const MALFORMED = "mcs-bad%E0%A4";
 
 beforeAll(async () => {
   harper = await startHarper();
@@ -88,6 +94,7 @@ beforeAll(async () => {
   await insertRow(harper, DEL_BASE, "DEL BASE BODY");
   await insertRow(harper, DEL_OTHER_BASE, "DEL OTHER BASE BODY");
   await insertRow(harper, SLASH_BASE, "SLASH BASE BODY");
+  await insertRow(harper, DEEP_BASE, "DEEP BASE BODY");
 }, 240_000);
 
 afterAll(async () => { if (harper) await stopHarper(harper); });
@@ -220,4 +227,111 @@ describe("flair#2199 — Memory resource writes and feed POST refuse an id endin
     console.log("control POST:", res.status, (await res.text()).slice(0, 120));
     expect([200, 201]).toContain(res.status);
   }, 30_000);
+});
+
+describe("flair#2307 — a malformed `.content` segment and a twice-encoded slash, through real Harper", () => {
+  const readRows = async (ids: string[]) => {
+    const res = await adminOp(harper, {
+      operation: "search_by_hash", database: "flair", table: "Memory", hash_values: ids, get_attributes: ["*"],
+    });
+    const text = await res.text();
+    expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+    return JSON.parse(text);
+  };
+
+  it("a non-admin GET of a malformed segment ending in `.content` → 400 memory_id_content_suffix, no row served", async () => {
+    const res = await authSend(harper, reader, "GET", `/Memory/${MALFORMED}.content`);
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(400);
+    expect(body.error).toBe("memory_id_content_suffix");
+    expect(body.id).toBeUndefined(); // assertion: no record was served
+    expect(body.content).toBeUndefined();
+  }, 30_000);
+
+  it("a non-admin HEAD of a malformed segment ending in `.content` → 400", async () => {
+    const res = await authSend(harper, reader, "HEAD", `/Memory/${MALFORMED}.content`);
+    expect(res.status).toBe(400);
+  }, 30_000);
+
+  for (const method of ["PUT", "DELETE"]) {
+    it(`a ${method} to a malformed segment ending in \`.content\` → 400 memory_id_content_suffix, no row changed`, async () => {
+      const ids = [BASE, "mcs-bad", MALFORMED, `${MALFORMED}.content`];
+      const before = await readRows(ids);
+      const res = await authSend(harper, author, method, `/Memory/${MALFORMED}.content`,
+        method === "PUT" ? { agentId: author.id, content: "CHANGED BODY" } : undefined);
+      const body = await res.json();
+      expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(400);
+      expect(body.error).toBe("memory_id_content_suffix");
+      expect(await readRows(ids)).toEqual(before);
+    }, 30_000);
+  }
+
+  it("CONTROL: a non-admin GET of the twice-encoded slash with no suffix returns that exact row", async () => {
+    const res = await authSend(harper, reader, "GET", `/Memory/${DEEP}%252Fbase`);
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(200);
+    expect(body.id).toBe(DEEP_BASE);
+  }, 30_000);
+
+  for (const spelling of ["%252F", "%252f"]) {
+    it(`a non-admin GET of \`${DEEP}${spelling}base.content\` → 400 ambiguous_memory_id, no row served`, async () => {
+      const res = await authSend(harper, reader, "GET", `/Memory/${DEEP}${spelling}base.content`);
+      const body = await res.json();
+      expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(400);
+      expect(body.error).toBe("ambiguous_memory_id");
+      expect(body.id).toBeUndefined(); // assertion: no record was served
+      expect(body.content).toBeUndefined();
+    }, 30_000);
+  }
+
+  it("a non-admin HEAD of the twice-encoded slash before `.content` → 400 with no body", async () => {
+    const res = await authSend(harper, reader, "HEAD", `/Memory/${DEEP}%252Fbase.content`);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("");
+  }, 30_000);
+});
+
+describe("flair#2307 — the malformed `.content` segment refusal applies whatever the request's credential", () => {
+  const readRows = async (ids: string[]) => {
+    const res = await adminOp(harper, {
+      operation: "search_by_hash", database: "flair", table: "Memory", hash_values: ids, get_attributes: ["*"],
+    });
+    const text = await res.text();
+    expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+    return JSON.parse(text);
+  };
+  const ids = [BASE, "mcs-bad", MALFORMED, `${MALFORMED}.content`];
+  const credentials: Array<[string, () => Record<string, string>]> = [
+    ["a Basic admin", () => ({ Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) })],
+    ["an anonymous", () => ({})],
+  ];
+  /** The body as JSON, or the raw text when it is not JSON (Harper's own error page). */
+  const bodyOf = async (res: Response) => {
+    const text = await res.text();
+    try { return JSON.parse(text); } catch { return { raw: text.slice(0, 200) }; }
+  };
+
+  for (const [who, headers] of credentials) {
+    it(`${who} GET of a malformed segment ending in \`.content\` → 400 memory_id_content_suffix, no row served`, async () => {
+      const res = await fetch(`${harper.httpURL}/Memory/${MALFORMED}.content`, { headers: headers() });
+      const body = await bodyOf(res);
+      expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(400);
+      expect(body.error).toBe("memory_id_content_suffix");
+      expect(body.id).toBeUndefined(); // assertion: no record was served
+      expect(body.content).toBeUndefined();
+    }, 30_000);
+
+    it(`${who} PUT to a malformed segment ending in \`.content\` → 400 memory_id_content_suffix, no row changed`, async () => {
+      const before = await readRows(ids);
+      const res = await fetch(`${harper.httpURL}/Memory/${MALFORMED}.content`, {
+        method: "PUT",
+        headers: { ...headers(), "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: author.id, content: "CHANGED BODY" }),
+      });
+      const body = await bodyOf(res);
+      expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(400);
+      expect(body.error).toBe("memory_id_content_suffix");
+      expect(await readRows(ids)).toEqual(before);
+    }, 30_000);
+  }
 });

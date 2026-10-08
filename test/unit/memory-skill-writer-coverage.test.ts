@@ -98,6 +98,8 @@ add("promotion-stamp", ["writer:table.put#1"],
   "Promotion status stamp — non-skill.");
 add("migrations/graph-heal", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
+add("migrations/embedding-stamp", ["writer:table.put#1"],
+  "Content-suffix migration embeds skillEmbedText(row), staging embedding/embeddingModel; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
 add("migrations/visibility-backfill", ["writer:table.put#1"],

@@ -251,9 +251,14 @@ export function buildActionRecallHookCommand(
   return String.raw`sh -c 'out=$(${invocation} 2>/dev/null) && [ -n "$out" ] && [ "${"$"}{#out}" -le 4096 ] && printf %s "$out" || true'`;
 }
 
-/** Match the artifact marker in commands without npx. */
+const recognizeActionRecallCommand = installerCommandRecognizer(buildActionRecallHookCommand, ACTION_RECALL_HOOK_MARKER);
+
 export function isFlairActionRecallCommand(command: string): boolean {
-  return typeof command === "string" && command.includes(ACTION_RECALL_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
+  return recognizeActionRecallCommand(command) !== null;
+}
+
+export function parseActionRecallCommand(command: string): CaptureCommandParts | null {
+  return recognizeActionRecallCommand(command);
 }
 
 /**
@@ -473,8 +478,10 @@ export function buildCaptureHookCommand(
   return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null 2>/dev/null || true'`;
 }
 
+const recognizeCaptureCommand = installerCommandRecognizer(buildCaptureHookCommand, CAPTURE_HOOK_MARKER, true);
+
 export function isFlairCaptureCommand(command: string): boolean {
-  return typeof command === "string" && command.includes(CAPTURE_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
+  return recognizeCaptureCommand(command) !== null;
 }
 
 /** The bun/artifact/agent/url/spec a wired capture command carries, or null. */
@@ -487,12 +494,62 @@ export interface CaptureCommandParts {
 }
 
 export function parseCaptureCommand(command: string): CaptureCommandParts | null {
-  if (typeof command !== "string") return null;
-  const match = /^sh -c 'FLAIR_AGENT_ID=(\S+)(?: FLAIR_URL=(\S+))?(?: FLAIR_CAPTURE_FLUSH_SPEC=(\S+))? (\S+) (\S+) >\/dev\/null 2>\/dev\/null \|\| true'$/.exec(command);
-  if (!match) return null;
-  const [, agentId, flairUrl, flushSpec, bunPath, artifactPath] = match;
-  if (!agentId || !bunPath || !artifactPath) return null;
-  return { bunPath, artifactPath, agentId, ...(flairUrl ? { flairUrl } : {}), ...(flushSpec ? { flushSpec } : {}) };
+  return recognizeCaptureCommand(command);
+}
+
+function installerCommandRecognizer(
+  builder: (bunPath: string, artifactPath: string, agentId: string, flairUrl?: string, flushSpec?: string) => string,
+  marker: string,
+  withFlushSpec = false,
+): (command: unknown) => CaptureCommandParts | null {
+  const tokens = {
+    bunPath: "MATCH_BUN_PATH",
+    artifactPath: "MATCH_ARTIFACT_PATH",
+    agentId: "MATCH_AGENT_ID",
+    flairUrl: "MATCH_FLAIR_URL",
+    flushSpec: "@MATCH_FLUSH_PACKAGE@MATCH_FLUSH_VERSION",
+  };
+  const forms: Array<Array<{ literal: string } | { name: keyof CaptureCommandParts; prefix: string; suffix: string }>> = [];
+  for (const url of [undefined, tokens.flairUrl]) {
+    for (const spec of withFlushSpec ? [undefined, tokens.flushSpec] : [undefined]) {
+      forms.push(builder(tokens.bunPath, tokens.artifactPath, tokens.agentId, url, spec).split(" ").map((part) => {
+        for (const name of Object.keys(tokens) as Array<keyof typeof tokens>) {
+          const token = tokens[name];
+          const offset = part.indexOf(token);
+          if (offset !== -1) return { name, prefix: part.slice(0, offset), suffix: part.slice(offset + token.length) };
+        }
+        return { literal: part };
+      }));
+    }
+  }
+  return (command) => {
+    if (typeof command !== "string") return null;
+    const commandTokens = command.split(" ");
+    for (const form of forms) {
+      if (commandTokens.length !== form.length) continue;
+      const parts: Partial<CaptureCommandParts> = {};
+      const matches = form.every((part, index) => {
+        const value = commandTokens[index]!;
+        if ("literal" in part) return value === part.literal;
+        if (!value.startsWith(part.prefix) || !value.endsWith(part.suffix)) return false;
+        const captured = value.slice(part.prefix.length, value.length - part.suffix.length);
+        if (!captured) return false;
+        parts[part.name] = captured;
+        return true;
+      });
+      if (!matches || parts.artifactPath?.split("/").at(-1) !== marker) continue;
+      const { bunPath, artifactPath, agentId, flairUrl, flushSpec } = parts;
+      if (!bunPath || !artifactPath || !agentId) continue;
+      try {
+        if (command === builder(bunPath, artifactPath, agentId, flairUrl, flushSpec)) {
+          return { bunPath, artifactPath, agentId, ...(flairUrl ? { flairUrl } : {}), ...(flushSpec ? { flushSpec } : {}) };
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  };
 }
 
 /** The two hook events continuity registers under. */

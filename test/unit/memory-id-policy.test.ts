@@ -32,8 +32,8 @@ describe("flair#2199: Memory ids ending in the `.content` suffix", () => {
     }
   });
 
-  test("the encoded-slash predicate matches `%2F` in any case", () => {
-    for (const seg of ["a%2Fb", "a%2fb", "a%2Fb.content", "a%2Fb%2Econtent"]) {
+  test("the encoded-slash predicate matches `%2F` in any case, and a slash encoded one level deeper", () => {
+    for (const seg of ["a%2Fb", "a%2fb", "a%2Fb.content", "a%2Fb%2Econtent", "a%252Fb", "a%252fb.content"]) {
       expect(idSegmentHasEncodedSlash(seg), seg).toBe(true);
     }
     for (const seg of ["a/b", "a%20b", "ab", "a%25Fb"]) {

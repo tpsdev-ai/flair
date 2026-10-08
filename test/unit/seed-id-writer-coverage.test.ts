@@ -75,6 +75,9 @@ add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource po
 add("MemoryReindex", ["writer:Memory.put#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields.");
 add("promotion-stamp", ["writer:table.put#1"],
   "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id.");
+add("migrations/embedding-stamp", [
+  "writer:table.put#1",
+], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address.");
 add("migrations/graph-heal", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
 add("migrations/visibility-backfill", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
@@ -127,6 +130,38 @@ test("raw Memory write sites detected by the inventory are classified for the re
   expect([...classified.keys()].filter((key) => !sites.some((site) => site.key === key))).toEqual([]);
 });
 
+/**
+ * The end of a guard decision that STOPS the method on a denial:
+ * `const X = [await ]<call>(...);` immediately followed by `if (X) return X;`
+ * (or `if (X.denial) return X.denial;` when `denialField` is given). -1 when
+ * the decision is absent or its denial is not returned right there, so a
+ * decision whose result is ignored fails the checks below.
+ */
+function denialReturnEnd(body: string, call: string, denialField?: string): number {
+  const escaped = call.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const result = denialField ? `\\1\\.${denialField}` : "\\1";
+  const re = new RegExp(`const (\\w+) = (?:await )?${escaped}\\([\\s\\S]*?\\);\\s*if \\(${result}\\) return ${result};`);
+  const match = re.exec(body);
+  return match ? match.index + match[0].length : -1;
+}
+
+/** The end of `recordSkip("<reason>");` immediately followed by `continue;`; -1 otherwise. */
+function skipContinueEnd(src: string, reason: string): number {
+  const match = new RegExp(`recordSkip\\("${reason}"\\);\\s*continue;`).exec(src);
+  return match ? match.index + match[0].length : -1;
+}
+
+const WRITES = ["super.put(", "super.patch(", "writeMemoryRowPost(", ".flair.Memory.put(", ".flair.Memory.post(", ".flair.Memory.delete("];
+
+/** Every write in `body` (each of `writes`) sits after `stop`. */
+function expectWritesAfter(body: string, stop: number, label: string, writes: string[] = WRITES): void {
+  expect(stop, `${label}: the decision is missing or its denial does not stop the method`).toBeGreaterThan(-1);
+  for (const write of writes) {
+    const at = body.indexOf(write);
+    if (at !== -1) expect(at, `${label}: ${write} before the decision stops the method`).toBeGreaterThan(stop);
+  }
+}
+
 /** The body of `  async <name>(` up to the next class method. */
 function methodBody(src: string, signature: string): string {
   const start = src.indexOf(signature);
@@ -135,36 +170,71 @@ function methodBody(src: string, signature: string): string {
   return src.slice(start, next === -1 ? undefined : next);
 }
 
-test("each GUARDED path runs the decision before it writes", () => {
+test("the listed entry paths run the decision, and its denial stops the path before it writes", () => {
   const memory = readFileSync("resources/Memory.ts", "utf8");
   for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {", "  async patch(content: any, query?: any) {"]) {
     const body = methodBody(memory, signature);
-    const check = body.indexOf('refuseReservedSeedWrite("Memory", writeTargetIds(this, content)');
-    expect(check, `${signature} does not call the decision`).toBeGreaterThan(-1);
-    expect(body.indexOf("if (seedDenial) return seedDenial;"), signature).toBeGreaterThan(check);
-    for (const write of ["super.put(", "super.patch(", "writeMemoryRowPost(", ".flair.Memory.put("]) {
-      const at = body.indexOf(write);
-      if (at !== -1) expect(at, `${signature}: ${write} before the decision`).toBeGreaterThan(check);
-    }
+    expect(body, `${signature} does not call the decision`).toContain('refuseReservedSeedWrite("Memory", writeTargetIds(this, content)');
+    expectWritesAfter(body, denialReturnEnd(body, "refuseReservedSeedWrite"), signature);
   }
   const del = methodBody(memory, "  async delete(id: any) {");
-  const delCheck = del.indexOf('reservedSeedWriteDenial(\n      "Memory", [id,');
-  expect(delCheck, "delete() does not call the decision on its id").toBeGreaterThan(-1);
-  expect(del.indexOf(".flair.Memory.delete(")).toBeGreaterThan(delCheck);
+  expect(del, "delete() does not call the decision on its id").toContain('reservedSeedWriteDenial(\n      "Memory", [id,');
+  expectWritesAfter(del, denialReturnEnd(del, "reservedSeedWriteDenial"), "delete()");
 
   const supersede = memory.slice(memory.indexOf("async function validateAndAuthorizeSupersedes("));
-  expect(supersede.slice(0, supersede.indexOf("\n}\n"))).toContain('reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth)');
-  expect(memory.match(/validateAndAuthorizeSupersedes\(content, auth, ctx\)/g)?.length).toBe(2);
+  const supersedeBody = supersede.slice(0, supersede.indexOf("\n}\n"));
+  expect(supersedeBody).toContain('reservedSeedWriteDenial("Memory", [content.supersedes], ctx, auth)');
+  expect(supersedeBody, "the supersede decision's denial is not returned").toMatch(/const seedDenial = reservedSeedWriteDenial\("Memory", \[content\.supersedes\], ctx, auth\);\s*if \(seedDenial\) return refuse\(seedDenial\);/);
+  for (const signature of ["  async post(content: any, context?: any) {", "  async put(content: any, query?: any) {"]) {
+    const body = methodBody(memory, signature);
+    expect(body, `${signature} does not validate supersedes`).toContain("validateAndAuthorizeSupersedes(content, auth, ctx,");
+    // The _reindex branch of put() writes earlier but never reaches a supersede;
+    // the new-row write and the close must come after the denial returns.
+    expectWritesAfter(body, denialReturnEnd(body, "validateAndAuthorizeSupersedes", "denial"), `${signature} supersedes`,
+      ["writeMemoryRowPost(", ".flair.Memory.put(", "closeSupersededIfNeeded("]);
+  }
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
-  const feedCheck = feed.indexOf('reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes])');
-  expect(feedCheck).toBeGreaterThan(-1);
-  expect(feed.indexOf(".flair.Memory.put(")).toBeGreaterThan(feedCheck);
+  expect(feed).toContain('reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes])');
+  expectWritesAfter(feed, denialReturnEnd(feed, "reservedSeedFeedWriteDenial"), "FeedMemories.post");
 
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const skip = federation.indexOf('recordSkip("seed_id_not_federated")');
-  expect(skip).toBeGreaterThan(-1);
+  const skip = skipContinueEnd(federation, "seed_id_not_federated");
+  expect(skip, "the seed skip does not stop the record").toBeGreaterThan(-1);
   expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
+});
+
+test("the listed entry paths run the .content-suffix id decision on the ids it writes, and its denial stops the path before it writes", () => {
+  // The decision's inputs: the bound id and body ids (writeTargetIds), and the
+  // request target too (#2343 added it for POST), so a suffix only in the URL counts.
+  const memory = readFileSync("resources/Memory.ts", "utf8");
+  for (const [signature, call] of [
+    ["  async post(content: any, context?: any) {", "refuseContentSuffixId(writeTargetIds(this, content), context);"],
+    ["  async put(content: any, query?: any) {", "refuseContentSuffixId(writeTargetIds(this, content), query);"],
+    ["  async patch(content: any, query?: any) {", "refuseContentSuffixId(writeTargetIds(this, content), query);"],
+  ] as const) {
+    const body = methodBody(memory, signature);
+    expect(body, `${signature} does not run the decision on its write ids`).toContain(`const contentSuffixDenial = ${call}`);
+    expectWritesAfter(body, denialReturnEnd(body, "refuseContentSuffixId"), signature);
+  }
+  const del = methodBody(memory, "  async delete(id: any) {");
+  expect(del, "delete() does not run the decision on its id").toContain(
+    "refuseContentSuffixId(\n      [id, ...writeTargetIds(this, id && typeof id === \"object\" ? id : undefined)], id,\n    );",
+  );
+  expectWritesAfter(del, denialReturnEnd(del, "refuseContentSuffixId"), "delete()");
+
+  const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
+  expect(feed, "FeedMemories.post does not run the decision on its write ids").toContain("const contentSuffixDenial = refuseContentSuffixId(writeTargetIds(this, content));");
+  expectWritesAfter(feed, denialReturnEnd(feed, "refuseContentSuffixId"), "FeedMemories.post");
+
+  // The federation merge: the predicate runs on the id of the row it writes
+  // (`mergedData`), the skip stops the record, and the put of that row follows.
+  const federation = readFileSync("resources/Federation.ts", "utf8");
+  const guard = /if \(record\.table === "Memory" && endsWithContentSelectorSuffix\(mergedData\.id\)\) \{\s*recordSkip\("content_suffix_id_not_federated"\);\s*continue;/.exec(federation);
+  expect(guard, "the federation merge does not test endsWithContentSelectorSuffix(mergedData.id) before skipping, or the skip does not stop the record").not.toBeNull();
+  const skip = skipContinueEnd(federation, "content_suffix_id_not_federated");
+  expect(skip).toBe(guard!.index + guard![0].length);
+  expect(federation.indexOf("await table.put(mergedData);", skip), "the merge does not write the row the predicate checked after the skip").toBeGreaterThan(skip);
 });
 
 test("a new direct, aliased or computed Memory writer fails classification", () => {

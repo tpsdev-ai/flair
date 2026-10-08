@@ -20,6 +20,8 @@
  * jaccardSimilarity() implementations — nothing about that math is mocked.
  */
 import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
+import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
+import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
 
 // Defensive: `bun test <dir>` runs every file in one process, and
 // resources/rate-limiter.ts reads process.env LAZILY (not cached at import
@@ -199,10 +201,15 @@ class BaseMemory {
   static async get(id: any) {
     return memoryStore.get(id) ?? null;
   }
-  static async put(content: any) {
+  static async put(content: any, ctx?: any) {
     callOrder.push(`static-put:${content.id}`);
     const rec = { ...content };
-    memoryStore.set(content.id, rec);
+    // A put made through a transaction's context is staged and applied when
+    // that transaction commits (see the `transaction` stand-in below), so a
+    // read outside the transaction does not see it before then.
+    const staged = ctx?.transaction?.open === 1 ? ctx.transaction.staged : undefined;
+    if (Array.isArray(staged)) staged.push(rec);
+    else memoryStore.set(content.id, rec);
     return rec;
   }
   static search(query: any) {
@@ -245,7 +252,12 @@ const databasesMock = {
         return gen();
       },
     },
-    Agent: { get: async () => null, search: async () => [] },
+    Agent: {
+      get: async (id: string) => agentStore.get(id) ?? null,
+      search: async function* () {
+        for (const a of agentStore.values()) yield a;
+      },
+    },
     // federation-edge-hardening slice 1: resources/instance-identity.ts's
     // localInstanceId() reads this table to find THIS instance's own row.
     Instance: {
@@ -257,10 +269,30 @@ const databasesMock = {
         return gen();
       },
     },
+    // A signed request records its nonce here (flair#2061). Present so a
+    // harper-mocking sibling in this process can import auth-middleware
+    // whichever mock is in effect (flair#2307 item 6).
+    ReplayNonce: createFakeReplayNonceTable(),
   },
 };
 
-mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({
+  databases: databasesMock,
+  // A SHARED identity for the `server`/`Resource`/`RequestTarget` surface:
+  // bun's mock.module is process-global, so a second file that mocks `harper`
+  // in the same process must present a compatible shape or the module cache
+  // serves whichever registration won. These exports let a harper-mocking
+  // sibling (test/unit/memory-selection-middleware-1940.test.ts) import
+  // auth-middleware whichever mock is in effect (flair#2307 item 6).
+  server: {
+    getUser: async (_user: string, _pass: string | null, _request: any) => null,
+    http: (fn: any, _opts?: any) => {
+      middlewareCapture.value = fn;
+    },
+  },
+  Resource: class {},
+  RequestTarget: class {},
+}));
 
 const { Memory } = await import("../../resources/Memory.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
@@ -309,7 +341,17 @@ const FINDING_A_REWORDED =
 // to run a write unwrapped. Provide it in this isolated mock.
 (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
   if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
-  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  // Static puts made through this context are staged, applied at commit and
+  // discarded on abort.
+  const txn: any = {
+    open: 1, saveCommits: false, staged: [] as any[],
+    abort() { this.open = 0; this.staged = []; },
+    commit() {
+      this.open = 0;
+      for (const rec of this.staged) memoryStore.set(rec.id, rec);
+      this.staged = [];
+    },
+  };
   const c = ctx && typeof ctx === "object" ? ctx : {};
   c.transaction = txn;
   let r: any;
@@ -791,6 +833,9 @@ describe("supersede transaction (write-new-before-close-old fix)", () => {
     const closeWriteIdx = callOrder.findIndex((c) => c.startsWith("static-put:"));
     expect(newWriteIdx).toBeGreaterThanOrEqual(0);
     expect(closeWriteIdx).toBeGreaterThan(newWriteIdx);
+    // An unchanged target is closed in one attempt (no re-run of the close).
+    expect(callOrder.filter((c) => c === `static-put:${owned.id}`)).toHaveLength(1);
+    expect(memoryStore.get(owned.id).validTo).toBeDefined();
   });
 
   it("a close-old failure is logged (observable), never silent — and the new record is still safely written", async () => {
@@ -801,14 +846,19 @@ describe("supersede transaction (write-new-before-close-old fix)", () => {
       const owned = await mOwner.post({ agentId: "agent-1", content: "Original evolving state, long enough for the gate." });
 
       // Force the close-old step to fail: remove the target record out from
-      // under it (simulates a lost/racing record) right before the superseding
-      // write — the write-new-before-close-old ordering means the auth check's
-      // earlier .get() already ran/passed for a same-owner supersede (no grant
-      // lookup needed), so removing it here only affects the LATER close step.
-      memoryStore.delete(owned.id);
+      // under it (simulates a lost/racing record) AFTER the authorization read
+      // and the new write, so only the LATER close step sees it gone (a target
+      // already missing at the authorization read refuses the write instead —
+      // see the flair#2307 describe below).
+      const realPost = BaseMemory.post;
+      const postSpy = spyOn(BaseMemory, "post").mockImplementation(async (content: any, ctx?: any) => {
+        const written = await realPost(content, ctx);
+        memoryStore.delete(owned.id);
+        return written;
+      });
 
       const mNew = makeMemory(owner);
-      const result = await mNew.post({ agentId: "agent-1", content: "New version, long enough for the gate.", supersedes: owned.id });
+      const result = await mNew.post({ agentId: "agent-1", content: "New version, long enough for the gate.", supersedes: owned.id }).finally(() => postSpy.mockRestore());
 
       // The new record's write must have succeeded regardless of the failed close.
       expect((result as any).written).toBe(true);
@@ -827,6 +877,200 @@ describe("supersede transaction (write-new-before-close-old fix)", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+// ─── flair#2307: one canonical supersede target ─────────────────────────────
+// The `supersedes` reference is resolved once; the reserved-id check, the
+// authorization read, the stored reference and the close all use that id. A
+// failed target read refuses; a non-admin agent's missing target refuses unless
+// the stored reference is unchanged.
+describe("flair#2307: a supersede authorizes, stores and closes one target", () => {
+  const SUCCESSOR = "Successor text for the canonical target, long enough for the gate.";
+
+  for (const reference of ["sup-own.agentId", "sup-own%2EagentId"]) {
+    it(`a reference written as ${JSON.stringify(reference)} stores and closes the row it was authorized against`, async () => {
+      memoryStore.set("sup-own", { id: "sup-own", agentId: "agent-1", content: "Own row, long enough for the gate." });
+      memoryStore.set(reference, { id: reference, agentId: "agent-other", content: "Another agent's row, long enough for the gate." });
+
+      const res: any = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: reference });
+
+      expect(res instanceof Response).toBe(false);
+      expect(memoryStore.get(res.id).supersedes).toBe("sup-own");
+      expect(memoryStore.get("sup-own").validTo).toBeDefined();
+      expect(memoryStore.get(reference).validTo).toBeUndefined(); // assertion: the other agent's row is not closed
+    });
+  }
+
+  for (const failingRead of [1, 2]) {
+    it(`a failed target read (read #${failingRead}) refuses the write with supersedes_target_unreadable and writes nothing`, async () => {
+      memoryStore.set("sup-target", { id: "sup-target", agentId: "agent-1", content: "Target row, long enough for the gate." });
+      const realGet = BaseMemory.get;
+      let reads = 0;
+      const getSpy = spyOn(BaseMemory, "get").mockImplementation(async (id: any) => {
+        if (id === "sup-target" && ++reads >= failingRead) throw new Error("simulated read failure");
+        return realGet(id);
+      });
+      try {
+        const res = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-target" });
+        expect(res instanceof Response).toBe(true);
+        expect((res as Response).status).toBe(503);
+        expect((await (res as Response).json()).error).toBe("supersedes_target_unreadable");
+      } finally {
+        getSpy.mockRestore();
+      }
+      expect([...memoryStore.keys()]).toEqual(["sup-target"]); // nothing written
+      expect(memoryStore.get("sup-target").validTo).toBeUndefined();
+    });
+  }
+
+  it("a target that does not exist refuses the write with supersedes_target_missing and writes nothing", async () => {
+    const res = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-nowhere" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(409);
+    expect((await (res as Response).json()).error).toBe("supersedes_target_missing");
+    expect(memoryStore.size).toBe(0);
+  });
+
+  it("a re-PUT that keeps a successor's stored reference to a since-deleted target is accepted and closes nothing", async () => {
+    memoryStore.set("sup-old", { id: "sup-old", agentId: "agent-1", content: "Old row, long enough for the gate." });
+    const created: any = await makeMemory(agentCtx("agent-1")).put({ id: "sup-new", agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-old" });
+    expect(created instanceof Response).toBe(false);
+    memoryStore.delete("sup-old");
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const again = await makeMemory(agentCtx("agent-1")).put({ ...memoryStore.get("sup-new"), content: "Edited successor text, long enough for the gate." });
+      expect(again instanceof Response).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(memoryStore.get("sup-new").supersedes).toBe("sup-old");
+    expect(memoryStore.has("sup-old")).toBe(false); // assertion: nothing re-created by a close
+  });
+
+  it("the ordinary close checks the authorized owner", async () => {
+    memoryStore.set("sup-swap", { id: "sup-swap", agentId: "agent-1", content: "Own row, long enough for the gate." });
+    const realPost = BaseMemory.post;
+    const postSpy = spyOn(BaseMemory, "post").mockImplementation(async (content: any, ctx?: any) => {
+      const written = await realPost(content, ctx);
+      memoryStore.set("sup-swap", { id: "sup-swap", agentId: "agent-other", content: "Another agent's row, long enough for the gate." });
+      return written;
+    });
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res: any = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-swap" });
+      expect(res instanceof Response).toBe(false);
+      expect(memoryStore.has(res.id)).toBe(true);
+    } finally {
+      postSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+    expect(memoryStore.get("sup-swap").agentId).toBe("agent-other");
+    expect(memoryStore.get("sup-swap").validTo).toBeUndefined();
+  });
+
+  // The transaction stand-in above commits a staged write whether or not a row
+  // the transaction read has changed since (Harper has no compare-and-set), so
+  // these cases fail if the close writes from a row that changed after its read.
+  // The same interleavings against real Harper:
+  // test/integration/supersede-close-contention-2307.test.ts.
+  function changeTargetAfterCloseRead(id: string, change: (row: any) => any) {
+    const realGet = BaseMemory.get;
+    const realPost = BaseMemory.post;
+    let successorWritten = false;
+    const state = { injected: false };
+    const getSpy = spyOn(BaseMemory, "get").mockImplementation(async (gotId: any, c?: any) => {
+      const row = await realGet(gotId);
+      if (gotId === id && successorWritten && !state.injected) {
+        // The close has read the row; a competing write commits a change
+        // before the close's transaction commits.
+        state.injected = true;
+        memoryStore.set(id, change(row));
+      }
+      return row;
+    });
+    const postSpy = spyOn(BaseMemory, "post").mockImplementation(async (content: any, ctx?: any) => {
+      const written = await realPost(content, ctx);
+      successorWritten = true;
+      return written;
+    });
+    return { state, restore: () => { getSpy.mockRestore(); postSpy.mockRestore(); } };
+  }
+
+  it("an owner change visible at the committed re-read aborts the ordinary close", async () => {
+    memoryStore.set("sup-race", { id: "sup-race", agentId: "agent-1", content: "Own row, long enough for the gate." });
+    const race = changeTargetAfterCloseRead("sup-race", (row) => ({ ...row, agentId: "agent-other" }));
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let res: any;
+    try {
+      res = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-race" });
+    } finally {
+      race.restore();
+      errorSpy.mockRestore();
+    }
+    expect(race.state.injected).toBe(true);
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.has(res.id)).toBe(true);
+    expect(memoryStore.get("sup-race").agentId).toBe("agent-other"); // assertion: the competing owner change is kept
+    expect(memoryStore.get("sup-race").validTo).toBeUndefined();
+  });
+
+  it("a content edit visible at the committed re-read retries the ordinary close", async () => {
+    memoryStore.set("sup-edit", { id: "sup-edit", agentId: "agent-1", content: "Own row before the edit, long enough for the gate." });
+    const race = changeTargetAfterCloseRead("sup-edit", (row) => ({ ...row, content: "Own row AFTER the edit, long enough for the gate." }));
+    let res: any;
+    try {
+      res = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, supersedes: "sup-edit" });
+    } finally {
+      race.restore();
+    }
+    expect(race.state.injected).toBe(true);
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.get("sup-edit").content).toBe("Own row AFTER the edit, long enough for the gate."); // assertion: the edit is kept
+    expect(memoryStore.get("sup-edit").validTo).toBeDefined();
+  });
+
+  for (const [name, setup, status, error] of [
+    ["a missing target", () => {}, 409, "supersedes_target_missing"],
+    ["an unreadable target", () => memoryStore.set("sup-target", { id: "sup-target", agentId: "agent-1", content: "Target row, long enough for the gate." }), 503, "supersedes_target_unreadable"],
+  ] as const) {
+    it(`a write refused for ${name} leaves its derivedFrom source rows unchanged`, async () => {
+      const source = { id: "src-1", agentId: "agent-1", content: "Source row the new one derives from, long enough." };
+      memoryStore.set("src-1", { ...source });
+      setup();
+      // The first read of the target (the skill-body predecessor read) succeeds;
+      // the authorization read after it fails.
+      const realGet = BaseMemory.get;
+      let targetReads = 0;
+      const getSpy = spyOn(BaseMemory, "get").mockImplementation(async (id: any) => {
+        if (id === "sup-target" && ++targetReads >= 2) throw new Error("simulated read failure");
+        return realGet(id);
+      });
+      let res: any;
+      try {
+        res = await makeMemory(agentCtx("agent-1")).post({
+          agentId: "agent-1", content: SUCCESSOR, derivedFrom: ["src-1"],
+          supersedes: name === "a missing target" ? "sup-nowhere" : "sup-target",
+        });
+        await new Promise((r) => setTimeout(r, 10)); // let any unawaited bookkeeping land
+      } finally {
+        getSpy.mockRestore();
+      }
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(status);
+      expect((await (res as Response).json()).error).toBe(error);
+      expect(memoryStore.get("src-1")).toEqual(source); // assertion: the source row is unchanged (no lastReflected)
+    });
+  }
+
+  it("an accepted write with derivedFrom stamps lastReflected on its source rows", async () => {
+    memoryStore.set("src-1", { id: "src-1", agentId: "agent-1", content: "Source row the new one derives from, long enough." });
+    memoryStore.set("sup-ok", { id: "sup-ok", agentId: "agent-1", content: "Own row, long enough for the gate." });
+    const res: any = await makeMemory(agentCtx("agent-1")).post({ agentId: "agent-1", content: SUCCESSOR, derivedFrom: ["src-1"], supersedes: "sup-ok" });
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.get("src-1").lastReflected).toBe(memoryStore.get(res.id).updatedAt);
+    expect(memoryStore.get("sup-ok").validTo).toBeDefined();
   });
 });
 
