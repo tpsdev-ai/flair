@@ -2,8 +2,9 @@
  * Test pause for owned transactions (flair#2307), enabled by process environment.
  * Claims an arm file, writes pause/release markers, and waits for go or its limit.
  * Pinned by test/unit/txn-pause-point.test.ts and used by
- * test/integration/supersede-close-contention-2307.test.ts and
- * test/integration/embedding-stamp-contention-2307.test.ts and
+ * test/integration/supersede-close-contention-2307.test.ts,
+ * test/integration/embedding-stamp-contention-2307.test.ts,
+ * test/integration/owner-delete-recheck-2355.test.ts and
  * test/integration/integration-row-write-serialization-2340.test.ts.
  */
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -15,8 +16,6 @@ export const TEST_PAUSE_DIR_ENV = "FLAIR_TEST_PAUSE_DIR";
 export const PAUSE_LIMIT_MS = 20_000;
 const POLL_MS = 20;
 
-/** Pause points for owned transactions that write from a row they read: a
- *  point runs inside such a transaction, a `-pre` point before it opens. */
 export type TxnPausePoint =
   | "supersede-close"
   | "embedding-stamp-content-suffix"
@@ -37,6 +36,20 @@ export type TxnPausePoint =
   // flair#2275 — embedding-stamp migration: after it reads a stale row, before
   // its re-embed request.
   | "embedding-stamp-regen-pre"
+  | "memory-delete-pre"
+  | "memory-delete"
+  | "memory-skill-delete-pre"
+  | "memory-skill-delete"
+  | "credential-delete-pre"
+  | "credential-delete"
+  | "grant-delete-pre"
+  | "grant-delete"
+  | "workspace-delete-pre"
+  | "workspace-delete"
+  | "candidate-delete-pre"
+  | "candidate-delete"
+  | "relationship-delete-pre"
+  | "relationship-delete"
   | "feed-dedup-repair";
 
 function isInside(parent: string, child: string): boolean {

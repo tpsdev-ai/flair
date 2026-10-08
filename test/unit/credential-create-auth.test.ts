@@ -50,9 +50,18 @@ class BaseCredential {
   async delete(id: any) {
     _currentRecordId = id;
     credentialStore.delete(id);
-    return { ok: true };
+    return true;
   }
+  // Harper's table is static-callable (`databases.flair.Credential.get/delete`),
+  // which is how the owner-delete confirmation reaches it (flair#2355).
+  static get(target?: any) { return new BaseCredential().get(target); }
+  static delete(id: any) { return new BaseCredential().delete(id); }
 }
+
+// Harper assigns `transaction` onto the global at load; the owner-delete
+// confirmation (resources/owner-delete-recheck.ts) creates one when the caller
+// has none. This mock's delete is not staged, so the stand-in just runs the cb.
+(globalThis as any).transaction = (_ctx: any, cb: () => any) => cb();
 
 const databasesMock = {
   flair: {
