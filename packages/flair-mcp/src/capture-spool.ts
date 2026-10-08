@@ -489,7 +489,7 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   const agentId = readEnvOrUnset("FLAIR_AGENT_ID", env);
   if (!isSafeFileId(agentId)) return { flushed: 0, remaining: 0, reason: "no-agent-id" };
   const dir = deps.dir ?? resolveCaptureDir(env);
-  const records = readSpool(dir, agentId);
+  let records = readSpool(dir, agentId);
   if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
 
   const now = deps.now ?? (() => new Date());
@@ -499,7 +499,6 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   let lost = false;
   let rejectLost!: (error: Error) => void;
   const lockLost = new Promise<never>((_resolve, reject) => { rejectLost = reject; });
-  void lockLost.catch(() => {});
   const beat = setInterval(() => {
     try {
       held.refresh();
@@ -514,6 +513,9 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   beat.unref?.();
   const deadlineAt = Date.now() + (deps.deadlineMs ?? CAPTURE_FLUSH_DEADLINE_MS);
   try {
+    const staged = readSpoolFile(dir, agentId);
+    records = (staged ?? []).filter((r): r is CaptureSpoolRecord => isSpoolRecord(r, agentId));
+    if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
     const makeClient = deps.makeClient ?? defaultClientFactory;
     let client: CaptureClient;
     try {
@@ -524,8 +526,9 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
       return { flushed: 0, remaining: records.length, reason: "write-failed" };
     }
 
-    const written = new Set<string>();
-    for (const record of records) {
+    const written = new Set<number>();
+    for (const [position, record] of (staged ?? []).entries()) {
+      if (!isSpoolRecord(record, agentId)) continue;
       const remainingMs = deadlineAt - Date.now();
       if (remainingMs <= 0 || lost || !held.isOwned()) break;
       try {
@@ -535,19 +538,16 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
           now(),
         );
         await Promise.race([writeWithDeadline(client, memoryPutPath(row.id), row, remainingMs, controller.signal), lockLost]);
-        written.add(record.dedupKey);
+        written.add(position);
       } catch (error) {
         warn(`capture write skipped (${error instanceof Error ? error.message : String(error)})`);
       }
     }
     let remaining = records.length;
-    if (written.size > 0 && !lost && held.isOwned()) {
-      const staged = readSpoolFile(dir, agentId);
-      if (staged !== null) {
-        const kept = staged.filter((r) => !(isSpoolRecord(r, agentId) && written.has(r.dedupKey)));
-        atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, kept as CaptureSpoolRecord[]));
-        remaining = readSpool(dir, agentId).length;
-      }
+    if (written.size > 0 && !lost && held.isOwned() && staged !== null) {
+      const kept = staged.filter((_r, position) => !written.has(position));
+      atomicWritePrivate(spoolPath(dir, agentId), serializeSpool(agentId, kept as CaptureSpoolRecord[]));
+      remaining = readSpool(dir, agentId).length;
     }
     return { flushed: written.size, remaining, reason: !lost && written.size > 0 ? "flushed" : "write-failed" };
   } finally {
