@@ -112,12 +112,17 @@ function flairPackageDir(...args: any[]): any {
 }
 
 function stageMcpRedirect(packageRoot: string): void {
-  const migration = planRedirectMigration({
-    configPath: join(packageRoot, "config.yaml"),
-    env: process.env as Record<string, string | undefined>,
-  });
-  const line = renderRedirectMigration(migration);
-  if (line) console.log(`  ${line}`);
+  try {
+    const migration = planRedirectMigration({
+      configPath: join(packageRoot, "config.yaml"),
+      env: process.env as Record<string, string | undefined>,
+    });
+    const line = renderRedirectMigration(migration);
+    if (line) console.log(`  ${line}`);
+  } catch (err) {
+    const reason = err instanceof Error ? (err as NodeJS.ErrnoException).code ?? err.message : "unknown error";
+    console.error(`warning: MCP OAuth redirect migration failed (${reason}). Set OAUTH_GITHUB_REDIRECT_URI to your MCP issuer origin + /oauth in ${join(packageRoot, ".env")}, then run: flair restart.`);
+  }
 }
 
 function fleetSweepCallerExitMessage(...args: any[]): any {

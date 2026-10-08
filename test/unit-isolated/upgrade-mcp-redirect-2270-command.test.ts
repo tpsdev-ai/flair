@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { Command } from "commander";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { planRedirectMigration } from "../../src/lib/mcp-oauth-env.ts";
 
 let latestVersion = "0.60.0";
 const registry = await import("../../src/lib/npm-registry.ts");
@@ -101,6 +102,33 @@ test("fresh upgrade does not stage a provider", async () => {
   await upgrade(["--no-restart", "--no-verify"]);
   expect(installCalls).toBe(1);
   expect(existsSync(join(packageDir, ".env"))).toBe(false);
+});
+test("redirect write failure warns with a manual remedy and reaches restart", async () => {
+  configured();
+  const originalEnv = readFileSync(join(packageDir, ".env"), "utf8");
+  rebindCli({ restartAfterUpgrade: async () => {
+    restartCalls++;
+    expect(installCalls).toBe(1);
+    expect(readFileSync(join(packageDir, ".env"), "utf8")).toBe(originalEnv);
+    return true;
+  } });
+  chmodSync(packageDir, 0o500);
+  try {
+    expect(() => planRedirectMigration({ configPath: join(packageDir, "config.yaml"), env: {} })).toThrow("EACCES");
+    await upgrade(["--no-verify"]);
+    expect(restartCalls).toBe(1);
+    const warnings = log.filter(line => line.startsWith("warning: MCP OAuth redirect migration failed"));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("EACCES");
+    expect(warnings[0]).toContain(`Set OAUTH_GITHUB_REDIRECT_URI to your MCP issuer origin + /oauth in ${join(packageDir, ".env")}`);
+    expect(warnings[0]).toContain("flair restart");
+    expect(warnings[0]).not.toContain("fixture-secret");
+    expect(warnings[0]).not.toContain("fixture-id");
+    expect(warnings[0]).not.toContain("https://local.example");
+    expect(warnings[0]).not.toContain(originalEnv);
+  } finally {
+    chmodSync(packageDir, 0o700);
+  }
 });
 test("check leaves the redirect unstaged", async () => {
   configured();
