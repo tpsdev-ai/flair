@@ -1,0 +1,1 @@
+- **mariadb resolves to 3.5.4.** The root override moves from `~3.4.7` to `3.5.4`, the first release patched for GHSA-cx2f-j9fh-8g68; mariadb is reached only through the ADK workspace dependency chain.
