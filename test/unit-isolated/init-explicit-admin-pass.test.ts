@@ -313,6 +313,24 @@ describe("admin credential persistence refuses unassessed stores", () => {
 
 
 describe("supplied credentials without a running instance", () => {
+  test("a saved pass file beside a fresh data directory refuses without a start remedy", () => {
+    const home = tempDir("i-");
+    const dataDir = tempDir("d-");
+    const passPath = join(home, ".flair", "admin-pass");
+    mkdirSync(join(home, ".flair"));
+    const before = Buffer.from("saved-password\n");
+    writeFileSync(passPath, before, { mode: 0o600 });
+    const result = runInit(home, dataDir, "file", "linux");
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toBe(
+      `Refusing to write ${passPath}: no running instance; a saved admin-pass file or persisted admin user exists. ` +
+        `No pass file was written; any existing file is unchanged. Run:\n  flair init --reset-admin-pass\n`,
+    );
+    expect(readFileSync(passPath)).toEqual(before);
+    expect(existsSync(join(dataDir, "harper-config.yaml"))).toBe(false);
+  }, 60_000);
+
   for (const persisted of [false, true]) {
     for (const fileExists of [false, true]) {
       if (!persisted && !fileExists) continue;
@@ -399,3 +417,22 @@ for (const failure of [401, 403, 500, 503, "connection", "timeout"] as const) {
     expect(readFileSync(passPath)).toEqual(before);
   });
 }
+
+test("a running install without a pass file refuses to write a rejected credential", () => {
+  const home = tempDir("i-");
+  const dataDir = tempDir("d-");
+  const passPath = join(home, ".flair", "admin-pass");
+  mkdirSync(join(home, ".flair"));
+  markInstalled(dataDir);
+  mkdirSync(join(dataDir, "system"));
+  writeFileSync(join(dataDir, "system", "hdb_user.mdb"), "fixture-user");
+  const result = runInit(home, dataDir, "file", "linux", false, { probeFailure: 401 });
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  expect(result.stderr).toBe(
+    `Refusing to write ${passPath}: the supplied admin credential was rejected (HTTP 401) on port 9. ` +
+      `No pass file was written; any existing file is unchanged. ` +
+      `To rotate the instance's admin password instead, run:\n  flair init --reset-admin-pass\n`,
+  );
+  expect(existsSync(passPath)).toBe(false);
+}, 60_000);

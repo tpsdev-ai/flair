@@ -826,8 +826,11 @@ program
       }
       if (!alreadyRunning && (existsSync(adminPassPath) || persistedAdminUser)) {
         console.error(
-          `Refusing to replace ${adminPassPath}: no running instance; a saved admin-pass file or persisted admin user exists. ` +
-            `Start the instance and re-run init with the supplied credential, or run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
+          `Refusing to write ${adminPassPath}: no running instance; a saved admin-pass file or persisted admin user exists. ` +
+            `No pass file was written; any existing file is unchanged. ` +
+            (harperConfigPath(dataDir) !== null
+              ? `Start the instance and re-run init with the supplied credential, or run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
+              : `Run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`)
         );
         process.exit(1);
       }
@@ -835,7 +838,7 @@ program
         const failure = await proveAdminPassAgainstInstance(httpPort, adminPass);
         if (failure) {
           console.error(
-            `Refusing to replace ${adminPassPath}: ${failure} on port ${httpPort}. The stored file is unchanged. ` +
+            `Refusing to write ${adminPassPath}: ${failure} on port ${httpPort}. No pass file was written; any existing file is unchanged. ` +
               `To rotate the instance's admin password instead, run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
           );
           process.exit(1);

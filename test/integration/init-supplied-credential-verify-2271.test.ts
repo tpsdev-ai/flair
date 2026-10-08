@@ -188,6 +188,23 @@ describe.skipIf(process.platform !== "linux")("flair#2271 — supplied credentia
     }, 150_000);
   }
 
+  test("a running Harper install without a pass file refuses a wrong supplied credential", async () => {
+    const before = readFileSync(adminPassPath);
+    rmSync(adminPassPath);
+    try {
+      const { args, env } = credential("file", "fixture-wrong-credential-2271");
+      const r = await runInit([...baseArgs(), ...args], env);
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain(`Refusing to write ${adminPassPath}: the supplied admin credential was rejected (HTTP `);
+      expect(r.out).toContain("No pass file was written; any existing file is unchanged.");
+      expect(r.out).toContain(ROTATE_REMEDY);
+      expect(existsSync(adminPassPath)).toBe(false);
+      expect(await adminStatus(installedPassword)).toBe(200);
+    } finally {
+      writeFileSync(adminPassPath, before, { mode: 0o600 });
+    }
+  }, 150_000);
+
   test("FLAIR_ADMIN_USER cannot substitute another superuser's password", async () => {
     const alternate = "fixture-alternate-superuser-2271";
     const response = await fetch(`http://127.0.0.1:${opsPort}/`, {
