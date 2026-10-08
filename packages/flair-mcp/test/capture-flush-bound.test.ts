@@ -20,7 +20,7 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-/** A neutral, non-default agent id unique to each case, so no on-disk key can resolve. */
+/** A randomized, non-default agent id for each case. */
 function agentId(): string {
   return `agent-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -148,6 +148,7 @@ describe("capture flush bounds (flair#2321)", () => {
       const outcome = await runCaptureFlush({
         env,
         dir,
+        // An explicit key path that does not exist, so no on-disk key can resolve.
         makeClient: () => new FlairClient({ agentId: agent, url: stub.url, keyPath: join(home, "absent.key") }),
         deadlineMs,
       });
@@ -174,6 +175,7 @@ describe("capture flush bounds (flair#2321)", () => {
       const first = runCaptureFlush({
         env,
         dir,
+        // An explicit key path that does not exist, so no on-disk key can resolve.
         makeClient: () => new FlairClient({ agentId: agent, url: stub.url, keyPath: join(home, "absent.key") }),
         deadlineMs: 800,
       });

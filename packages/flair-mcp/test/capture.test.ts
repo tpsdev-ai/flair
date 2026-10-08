@@ -363,7 +363,7 @@ describe("capture spool", () => {
     expect(readSpool(dir, "agent-a")[0]!.content).toContain("host-a");
   });
 
-  test("a failed same-key PUT stays in its spool position after another PUT succeeds", async () => {
+  test("a failed same-key PUT remains staged after another PUT succeeds", async () => {
     const candidates = ["Error: first failure", "Error: second failure"].map((error) => {
       const pending = planPostToolUseFailure(JSON.parse(failedBash("bun test foo", error)), "2026-10-01T00:00:00.000Z")!;
       const action = planPostToolUse(JSON.parse(okBash("bun test foo")), [pending], "2026-10-01T00:00:00.000Z");
