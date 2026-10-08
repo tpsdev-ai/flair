@@ -5133,10 +5133,11 @@ export function readSidecar(dataDir: string): SidecarRead {
   return { kind: "present", ...parsed };
 }
 
-const DARWIN_STATE_READ_TIMEOUT_MS = 5_000;
+export const DARWIN_STATE_READ_TIMEOUT_MS = 5_000;
 const DARWIN_STATE_READ_MIN_MS = 1_000;
+type StateReadErrorHandler = (error: unknown, timeoutMs: number) => void;
 
-function readDarwinProcessState(pid: number, timeoutMs: number): string | null {
+function readDarwinProcessState(pid: number, timeoutMs: number, onReadError?: StateReadErrorHandler): string | null {
   try {
     const out = execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], {
       encoding: "utf-8",
@@ -5146,7 +5147,8 @@ function readDarwinProcessState(pid: number, timeoutMs: number): string | null {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     return out.length > 0 ? out[0] : null;
-  } catch {
+  } catch (error) {
+    onReadError?.(error, timeoutMs);
     return null;
   }
 }
@@ -5157,11 +5159,11 @@ function readDarwinProcessState(pid: number, timeoutMs: number): string | null {
  * first character of `/bin/ps -o stat=` (flair#2330). A read failure returns
  * null — the caller treats that as "not exited", never as exited (fail safe).
  */
-function readProcessState(pid: number, timeoutMs: number): string | null {
+function readProcessState(pid: number, timeoutMs: number, onReadError?: StateReadErrorHandler): string | null {
   if (process.platform === "linux") {
     try { return parseProcStatState(readFileSync(`/proc/${pid}/stat`, "utf-8")); } catch { return null; }
   }
-  if (process.platform === "darwin") return readDarwinProcessState(pid, timeoutMs);
+  if (process.platform === "darwin") return readDarwinProcessState(pid, timeoutMs, onReadError);
   return null;
 }
 
@@ -5182,8 +5184,9 @@ function readProcessState(pid: number, timeoutMs: number): string | null {
  */
 export function probePidLiveness(
   pid: number,
-  readState: (pid: number, timeoutMs: number) => string | null = readProcessState,
+  readState: (pid: number, timeoutMs: number, onReadError?: StateReadErrorHandler) => string | null = readProcessState,
   deadlineMs: number = Infinity,
+  onReadError?: StateReadErrorHandler,
 ): PidLiveness {
   try {
     process.kill(pid, 0);
@@ -5198,7 +5201,7 @@ export function probePidLiveness(
     const remainingMs = deadlineMs - Date.now();
     if (remainingMs <= 0) break;
     const timeoutMs = Math.min(DARWIN_STATE_READ_TIMEOUT_MS, Math.max(DARWIN_STATE_READ_MIN_MS, remainingMs));
-    state = readState(pid, timeoutMs);
+    state = readState(pid, timeoutMs, onReadError);
     if (state !== null) break;
   }
   return isExitedState(state) ? { kind: "gone" } : { kind: "alive" };
@@ -5216,12 +5219,13 @@ export function probePidLiveness(
 export async function waitForPidGone(
   pid: number,
   deadlineMs: number,
-  readState: (pid: number, timeoutMs: number) => string | null = readProcessState,
+  readState: (pid: number, timeoutMs: number, onReadError?: StateReadErrorHandler) => string | null = readProcessState,
   pollMs: number = HEALTH_POLL_INTERVAL_MS,
+  onReadError?: StateReadErrorHandler,
 ): Promise<{ gone: boolean; last: PidLiveness }> {
   let last: PidLiveness = { kind: "unknown", reason: "the stop deadline passed before a probe" };
   while (Date.now() < deadlineMs) {
-    last = probePidLiveness(pid, readState, deadlineMs);
+    last = probePidLiveness(pid, readState, deadlineMs, onReadError);
     if (last.kind === "gone") return { gone: true, last };
     if (Date.now() >= deadlineMs) return { gone: false, last };
     const remaining = deadlineMs - Date.now();

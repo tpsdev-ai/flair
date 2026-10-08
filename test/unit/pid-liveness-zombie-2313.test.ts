@@ -17,7 +17,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gatherDaemonEvidence, probePidLiveness, waitForPidGone } from "../../src/cli.ts";
+import { DARWIN_STATE_READ_TIMEOUT_MS, gatherDaemonEvidence, probePidLiveness, waitForPidGone } from "../../src/cli.ts";
 import { classifyDaemonState, isExitedState, parseProcStatState } from "../../src/lib/daemon-liveness.ts";
 
 const IS_LINUX = process.platform === "linux";
@@ -28,6 +28,7 @@ const ZOMBIE_WAIT_MS = 3_000;
 const DARWIN_ZOMBIE_WAIT_MS = 10_000;
 const DARWIN_CASE_TIMEOUT_MS = 240_000;
 let darwinReadLatencyMs = 0;
+let darwinReadError = "";
 const WAIT_POLL_MS = 10;
 
 const children: ChildProcess[] = [];
@@ -103,6 +104,7 @@ function darwinState(pid: number, deadline = Infinity): string {
     darwinReadLatencyMs = Math.max(darwinReadLatencyMs, Date.now() - started);
     const state = result.stdout?.trim();
     if (!result.error && result.status === 0 && state) return state;
+    darwinReadError = `timeout ${timeout}ms; error ${String(result.error)}; status ${result.status}; stderr ${result.stderr?.trim()}`;
   }
   return "";
 }
@@ -116,7 +118,7 @@ async function waitForDarwinZombie(pid: number): Promise<void> {
     if (state.startsWith("Z")) return;
     await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
   }
-  throw new Error(`pid ${pid} never became a Darwin zombie (last state: ${state})`);
+  throw new Error(`pid ${pid} never became a Darwin zombie (last state: ${state}; ${darwinReadError})`);
 }
 
 /** A 127.0.0.1 port nothing is listening on. */
@@ -156,16 +158,14 @@ describe("flair#2313 — the shared probe reports an unreaped zombie as exited",
     const { zombiePid, helper } = await spawnZombieHelper();
     try {
       await waitForDarwinZombie(zombiePid);
-      const waitMs = Math.max(DARWIN_ZOMBIE_WAIT_MS, 4 * darwinReadLatencyMs + 2_000);
+      const waitMs = 4 * Math.max(DARWIN_STATE_READ_TIMEOUT_MS, darwinReadLatencyMs) + 2_000;
       console.info(`Darwin ps maximum observed latency: ${darwinReadLatencyMs}ms; stop wait: ${waitMs}ms`);
-      expect((await waitForPidGone(zombiePid, Date.now() + waitMs)).gone).toBe(true);
-      // The Darwin state read is the path that failed under a loaded runner
-      // (#2330), so read the same zombie through the default probe 20 times
-      // (flair#2330).
-      for (let i = 0; i < 20; i++) {
-        expect(darwinState(zombiePid)).toMatch(/^Z/);
-        expect(probePidLiveness(zombiePid).kind).toBe("gone");
-      }
+      const onReadError = (error: unknown, timeoutMs: number) => {
+        console.info(`Darwin default ps read failed (timeout ${timeoutMs}ms): ${String(error)}`);
+      };
+      expect((await waitForPidGone(zombiePid, Date.now() + waitMs, undefined, undefined, onReadError)).gone).toBe(true);
+      expect(darwinState(zombiePid)).toMatch(/^Z/);
+      expect(probePidLiveness(zombiePid, undefined, undefined, onReadError).kind).toBe("gone");
     } finally {
       helper.kill("SIGKILL");
     }

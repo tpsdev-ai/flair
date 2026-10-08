@@ -283,6 +283,11 @@ jobs:
         run: bun run build && bun run build:cli
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
+      - name: Repeat Darwin zombie regression
+        run: |
+          for run in {1..20}; do
+            bun test test/unit/pid-liveness-zombie-2313.test.ts --test-name-pattern "a real Darwin zombie reads as gone through the default probe" || exit 1
+          done
       - name: Verify Darwin zombie regression rejects a missing state read
         timeout-minutes: 2
         run: |
@@ -291,7 +296,7 @@ jobs:
           import { spawnSync } from "node:child_process";
           const path = "src/cli.ts";
           const source = readFileSync(path, "utf8");
-          const original = 'if (process.platform === "darwin") return readDarwinProcessState(pid, timeoutMs);';
+          const original = 'if (process.platform === "darwin") return readDarwinProcessState(pid, timeoutMs, onReadError);';
           if (source.split(original).length !== 2) throw new Error("Darwin state reader not uniquely found");
           try {
             writeFileSync(path, source.replace(original, 'if (process.platform === "darwin") return null;'));
