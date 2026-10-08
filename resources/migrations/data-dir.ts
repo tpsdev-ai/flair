@@ -175,9 +175,11 @@ export function describeSymlinkedDataDirRefusal(
   }
   let remedy = `stop Flair, remove the symbolic link at ${configuredPath} and replace it with a writable directory, then start Flair`;
   if (directory) {
-    remedy = `stop Flair, remove the symbolic link at ${configuredPath}, move the directory at ${target} to ${configuredPath}, and start Flair`;
+    remedy = `only after verifying that the target is dedicated to this Flair instance and safe to relocate, stop Flair, remove the symbolic link at ${configuredPath}, move the directory at ${target} to ${configuredPath}, and start Flair`;
     if (which === "data directory") {
-      remedy += `; or set ${MIGRATION_DATA_DIR_ENV}=${target} and restart`;
+      remedy += `; if ownership is uncertain, leave the target in place and set ${MIGRATION_DATA_DIR_ENV}=${target} instead of the link, then restart`;
+    } else {
+      remedy += "; if ownership is uncertain, leave the target in place and configure a different data directory with an unlinked .migrations child";
     }
   }
   const link = target === null ? "a target that cannot be resolved" : `${targetKind} ${target}`;

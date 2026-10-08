@@ -59,6 +59,8 @@ describe("probeMigrationDataDir — a symlinked candidate (flair#2277)", () => {
     expect(probe.reason).toContain("re-pointed after this check"); // why it is refused
     expect(probe.reason).toContain("stop Flair"); // the remedy
     expect(probe.reason).toContain(MIGRATION_DATA_DIR_ENV);
+    expect(probe.reason).toContain("only after verifying that the target is dedicated to this Flair instance and safe to relocate");
+    expect(probe.reason).toContain(`if ownership is uncertain, leave the target in place and set ${MIGRATION_DATA_DIR_ENV}=${realDir} instead of the link, then restart`);
     // The refusal is a refusal: nothing was created through the link.
     expect(existsSync(join(realDir, MIGRATIONS_SUBDIR))).toBe(false);
   });
@@ -73,6 +75,8 @@ describe("probeMigrationDataDir — a symlinked candidate (flair#2277)", () => {
     expect(probe.reason).toContain(owned);
     expect(probe.reason).toContain(realDir);
     expect(probe.reason).toContain("stop Flair");
+    expect(probe.reason).toContain("only after verifying that the target is dedicated to this Flair instance and safe to relocate");
+    expect(probe.reason).toContain("if ownership is uncertain, leave the target in place and configure a different data directory with an unlinked .migrations child");
   });
 
   it("refuses a dangling symlink without a directory to move, naming the link and a remedy", () => {
