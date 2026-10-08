@@ -1,13 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FlairClient } from "../../flair-client/src/client.ts";
 import { CAPTURE_VERSION } from "../src/capture.ts";
-import { CAPTURE_LOCK_STALE_MS, lockPath, readSpool, runCapture, runCaptureFlush, spoolPath, type CaptureClient } from "../src/capture-spool.ts";
+import { CAPTURE_LOCK_REFRESH_MS, flushLockPath, lockPath, readSpool, runCapture, runCaptureFlush, spoolPath, type CaptureClient } from "../src/capture-spool.ts";
 
 let home: string;
 let dir: string;
@@ -30,7 +30,7 @@ function stop(text: string): string {
 }
 
 function recordingClient(rows: unknown[]): CaptureClient {
-  return { request: async (_method, _path, body) => { rows.push(body); return {}; } };
+  return { request: async <T>(_method: string, _path: string, body?: unknown): Promise<T> => { rows.push(body); return {} as T; } };
 }
 
 interface Stub {
@@ -52,8 +52,10 @@ async function startNeverAnswering(): Promise<Stub> {
     socket.on("error", () => {});
     seen();
   });
-  server.on("error", () => {});
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : 0;
   return {
@@ -76,30 +78,90 @@ const HOLD_LOCK_SCRIPT = [
 ].join("\n");
 
 describe("capture flush bounds (flair#2321)", () => {
-  test("a live holder keeps an aged lock during flush and capture", async () => {
+  test("the flush heartbeat refreshes its separate lock during a write", async () => {
     const agent = agentId();
     const env = { FLAIR_AGENT_ID: agent, FLAIR_CAPTURE_DIR: dir };
     runCapture(stop("Decision: prefer host-a."), { env, dir });
     let finish!: () => void;
     let entered!: () => void;
     const inside = new Promise<void>((resolve) => { entered = resolve; });
-    const first = runCaptureFlush({ env, dir, makeClient: () => ({ request: async () => {
+    const first = runCaptureFlush({ env, dir, deadlineMs: 4000, makeClient: () => ({ request: async <T>(): Promise<T> => {
       entered();
       await new Promise<void>((resolve) => { finish = resolve; });
-      return {};
+      return {} as T;
     } }) });
     await inside;
     try {
-      const old = new Date(Date.now() - CAPTURE_LOCK_STALE_MS - 1000);
-      utimesSync(lockPath(dir, agent), old, old);
-      const rows: unknown[] = [];
-      expect((await runCaptureFlush({ env, dir, makeClient: () => recordingClient(rows) })).reason).toBe("busy");
-      expect(rows).toEqual([]);
-      expect(runCapture(stop("Decision: prefer host-b."), { env, dir }).reason).toBe("refused");
+      const before = statSync(flushLockPath(dir, agent)).mtimeMs;
+      await new Promise((resolve) => setTimeout(resolve, CAPTURE_LOCK_REFRESH_MS + 200));
+      expect(statSync(flushLockPath(dir, agent)).mtimeMs).toBeGreaterThan(before);
+      expect((await runCaptureFlush({ env, dir, makeClient: () => recordingClient([]) })).reason).toBe("busy");
+      expect(existsSync(lockPath(dir, agent))).toBe(false);
     } finally {
       finish();
       await first;
     }
+  }, 10_000);
+
+  test("the flush deadline aborts a real client's fetch and retains the record", async () => {
+    const agent = agentId();
+    const env = { FLAIR_AGENT_ID: agent, FLAIR_CAPTURE_DIR: dir };
+    runCapture(stop("Decision: prefer host-a."), { env, dir });
+    let signal: AbortSignal | null | undefined;
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (_input: unknown, options?: RequestInit) => {
+      signal = options?.signal;
+      return await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    }, { preconnect: () => {} }));
+    try {
+      const started = Date.now();
+      const outcome = await runCaptureFlush({ env, dir, deadlineMs: 100,
+        makeClient: () => new FlairClient({ agentId: agent, url: "http://127.0.0.1:1", keyPath: join(home, "absent.key") }),
+      });
+      expect(outcome.reason).toBe("write-failed");
+      expect(signal?.aborted).toBe(true);
+      expect(Date.now() - started).toBeLessThan(600);
+      expect(readSpool(dir, agent)).toHaveLength(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("a capture during an in-flight write is spooled and survives the rewrite", async () => {
+    const agent = agentId();
+    const env = { FLAIR_AGENT_ID: agent, FLAIR_CAPTURE_DIR: dir };
+    runCapture(stop("Decision: prefer host-a."), { env, dir });
+    let finish!: () => void;
+    let entered!: () => void;
+    const inside = new Promise<void>((resolve) => { entered = resolve; });
+    const first = runCaptureFlush({ env, dir, makeClient: () => ({ request: async <T>(): Promise<T> => {
+      entered();
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return {} as T;
+    } }) });
+    await inside;
+    try {
+      const rows: unknown[] = [];
+      expect((await runCaptureFlush({ env, dir, makeClient: () => recordingClient(rows) })).reason).toBe("busy");
+      expect(rows).toEqual([]);
+      const child = spawn(process.execPath, ["-e", `
+        const { runCapture } = await import(process.env.CAPTURE_TEST_MODULE);
+        process.stdout.write(JSON.stringify(runCapture(process.env.CAPTURE_INPUT, {
+          dir: process.env.FLAIR_CAPTURE_DIR, env: process.env,
+        })));
+      `], { env: { ...process.env, HOME: home, ...env, CAPTURE_INPUT: stop("Decision: prefer host-b."),
+        CAPTURE_TEST_MODULE: new URL("../src/capture-spool.ts", import.meta.url).pathname }, timeout: 5000 });
+      let output = "";
+      child.stdout!.on("data", (data) => { output += data; });
+      expect(await new Promise<number | null>((resolve) => child.once("close", resolve))).toBe(0);
+      expect(JSON.parse(output).reason).toBe("appended");
+      expect(readSpool(dir, agent)).toHaveLength(2);
+    } finally {
+      finish();
+      await first;
+    }
+    expect(readSpool(dir, agent).map((record) => record.content)).toEqual(["Decision: prefer host-b."]);
   });
 
   test("a holder's release keeps a replacement lock", async () => {
@@ -107,12 +169,12 @@ describe("capture flush bounds (flair#2321)", () => {
     const env = { FLAIR_AGENT_ID: agent, FLAIR_CAPTURE_DIR: dir };
     runCapture(stop("Decision: prefer host-a."), { env, dir });
     const replacement = JSON.stringify({ pid: process.pid, nonce: "replacement" });
-    await runCaptureFlush({ env, dir, makeClient: () => ({ request: async () => {
-      unlinkSync(lockPath(dir, agent));
-      writeFileSync(lockPath(dir, agent), replacement, { flag: "wx", mode: 0o600 });
-      return {};
+    await runCaptureFlush({ env, dir, makeClient: () => ({ request: async <T>(): Promise<T> => {
+      unlinkSync(flushLockPath(dir, agent));
+      writeFileSync(flushLockPath(dir, agent), replacement, { flag: "wx", mode: 0o600 });
+      return {} as T;
     } }) });
-    expect(readFileSync(lockPath(dir, agent), "utf8")).toBe(replacement);
+    expect(readFileSync(flushLockPath(dir, agent), "utf8")).toBe(replacement);
     expect(readSpool(dir, agent)).toHaveLength(1);
   });
 
@@ -125,7 +187,7 @@ describe("capture flush bounds (flair#2321)", () => {
     const outcome = await runCaptureFlush({ env, dir, deadlineMs: 3000, makeClient: () => ({
       request: async (_method, _path, _row, opts) => {
         signal = opts?.signal;
-        unlinkSync(lockPath(dir, agent));
+        unlinkSync(flushLockPath(dir, agent));
         return await new Promise<never>(() => {});
       },
     }) });
@@ -133,7 +195,7 @@ describe("capture flush bounds (flair#2321)", () => {
     expect(signal?.aborted).toBe(true);
     expect(Date.now() - started).toBeLessThan(2000);
     expect(readSpool(dir, agent)).toHaveLength(1);
-    expect(existsSync(lockPath(dir, agent))).toBe(false);
+    expect(existsSync(flushLockPath(dir, agent))).toBe(false);
   }, 10_000);
 
   test("a flush whose deadline expires returns by the deadline plus a small margin and keeps the record", async () => {
@@ -179,9 +241,9 @@ describe("capture flush bounds (flair#2321)", () => {
         makeClient: () => new FlairClient({ agentId: agent, url: stub.url, keyPath: join(home, "absent.key") }),
         deadlineMs: 800,
       });
-      // The first flush is inside its write and holds the per-agent lock.
       await stub.sawConnection;
-      expect(existsSync(lockPath(dir, agent))).toBe(true);
+      expect(existsSync(flushLockPath(dir, agent))).toBe(true);
+      expect(existsSync(lockPath(dir, agent))).toBe(false);
 
       const rows: unknown[] = [];
       const second = await runCaptureFlush({ env, dir, makeClient: () => recordingClient(rows), deadlineMs: 800 });
@@ -225,7 +287,7 @@ describe("capture flush bounds (flair#2321)", () => {
     expect(runCapture(stop("Decision: prefer host-a for embeddings."), { env, dir }).reason).toBe("appended");
 
     // Kill a lock-holder helper.
-    const lock = lockPath(dir, agent);
+    const lock = flushLockPath(dir, agent);
     const child = spawn(process.execPath, ["-e", HOLD_LOCK_SCRIPT], { env: { ...process.env, LOCK_FILE: lock }, timeout: 10_000 });
     await new Promise<void>((resolve, reject) => {
       child.stdout.once("data", () => resolve());

@@ -18,6 +18,7 @@ import {
 import {
   appendRecord,
   flushStampPath,
+  flushLockPath,
   lockPath,
   pendingPath,
   readSpool,
@@ -69,7 +70,7 @@ for (const [timing, recordCount] of [["between writes", 2], ["after the last wri
       const result = realAdd.call(this, value);
       if (value === 0 && rows.length === 1 && refresh && !fired) {
         fired = true;
-        unlinkSync(lockPath(dir, "agent-a"));
+        unlinkSync(flushLockPath(dir, "agent-a"));
         refresh();
       }
       return result;
@@ -436,23 +437,22 @@ describe("capture spool", () => {
     expect(readSpool(dir, "agent-a").length).toBe(1);
   });
 
-  test("a capture during the flush's write is refused, not interleaved", async () => {
+  test("a capture during the flush write is spooled and retained", async () => {
     runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
     let attempted = false;
     const client: CaptureClient = {
       request: async <T>(): Promise<T> => {
         if (!attempted) {
           attempted = true;
-          // The flush holds the per-agent lock for its whole run.
-          expect(runCapture(stop("Decision: we will use host-b for search."), { env: env(), dir }).reason).toBe("refused");
+          expect(runCapture(stop("Decision: we will use host-b for search."), { env: env(), dir }).reason).toBe("appended");
         }
         return {} as T;
       },
     };
     const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
     expect(result.flushed).toBe(1);
-    expect(result.remaining).toBe(0);
-    expect(readSpool(dir, "agent-a")).toHaveLength(0);
+    expect(result.remaining).toBe(1);
+    expect(readSpool(dir, "agent-a")).toHaveLength(1);
   });
 
   test("Stop and failure writes refuse a held per-agent lock", () => {
@@ -464,15 +464,15 @@ describe("capture spool", () => {
     expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
     const old = new Date(Date.now() - 60_000);
     utimesSync(lockPath(dir, "agent-a"), old, old);
-    expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("refused");
-    expect(existsSync(lockPath(dir, "agent-a"))).toBe(true);
+    expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("appended");
+    expect(existsSync(lockPath(dir, "agent-a"))).toBe(false);
   });
 
-  test("the flush holds the per-agent lock for its whole run and releases it", async () => {
+  test("the flush holds a separate lock during writes and releases it", async () => {
     runCapture(stop("Decision: prefer host-a for embeddings."), { env: env(), dir });
     let heldDuringWrite = false;
     const client: CaptureClient = {
-      request: async <T>(): Promise<T> => { heldDuringWrite = existsSync(lockPath(dir, "agent-a")); return {} as T; },
+      request: async <T>(): Promise<T> => { heldDuringWrite = existsSync(flushLockPath(dir, "agent-a")); return {} as T; },
     };
     const result = await runCaptureFlush({ env: env(), dir, makeClient: () => client });
     expect(heldDuringWrite).toBe(true);
