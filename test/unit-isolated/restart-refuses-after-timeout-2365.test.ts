@@ -3,6 +3,7 @@ import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { classifyHealthProbe } from "../../src/lib/daemon-liveness.js";
 
 const started = Date.now();
 mock.module("../../src/lib/process-start-time.js", () => ({
@@ -219,9 +220,11 @@ fi
   test.each(["healthy", "unreachable"])("launchd fallback rechecks the live pid after a second wait resolves (health: %s)", async (health) => {
     const { pid, port } = await arrangeLiveInstance();
     arrangeLaunchd(pid);
+    const healthyBody = { ok: true, version: "test", searchReady: true, buildCommit: null };
+    expect(classifyHealthProbe({ kind: "response", status: 200, body: healthyBody })).toEqual({ kind: "ok" });
     fetchSpy.mockImplementation((async () => {
       if (health === "unreachable") throw new Error("unreachable");
-      return new Response(JSON.stringify({ ok: true, version: "test", searchReady: true }));
+      return new Response(JSON.stringify(healthyBody));
     }) as unknown as typeof fetch);
     let waits = 0;
     let replacementStarted = false;
