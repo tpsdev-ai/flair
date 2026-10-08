@@ -11,3 +11,10 @@
   owned transaction: a changed persisted row that is still readable is refused
   (`memory_changed`, 409), a row that is no longer readable returns
   404, and a change after the re-read is not checked.
+  The embedding-stamp migration re-embeds a stale row (other than a
+  `.content`-suffix id) with the re-embed `PATCH /Memory/<id>`
+  (`{"embedding": null, "embeddingModel": null}`), which embeds the row as
+  stored when the request runs and writes only `embedding`, `embeddingModel`
+  and `updatedAt`. In 0.59.0 it sent a full-row `PUT` built from
+  the row it had read, which overwrote a change committed between that read
+  and the write.

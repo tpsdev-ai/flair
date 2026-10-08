@@ -31,7 +31,10 @@ export type TxnPausePoint =
   | "maintenance-orphan"
   // flair#2275 — MemoryArchive: after its first read of the row, before the
   // owned transaction that re-reads it opens.
-  | "memory-archive-pre";
+  | "memory-archive-pre"
+  // flair#2275 — embedding-stamp migration: after it reads a stale row, before
+  // its re-embed request.
+  | "embedding-stamp-regen-pre";
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);

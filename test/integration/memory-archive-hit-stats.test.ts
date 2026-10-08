@@ -40,6 +40,7 @@ function assertOwnInstance(harper: HarperInstance): void {
 
 let harper: HarperInstance;
 let pauseDir: string;
+let embeddingModel: string;
 const owner = mkAgent(`agent-a-${randomUUID()}`);
 
 async function adminOp(op: Record<string, any>): Promise<Response> {
@@ -76,6 +77,29 @@ async function archive(agent: TestAgent, id: string, action: "basement" | "resto
   let body: any = text;
   try { body = JSON.parse(text); } catch { }
   return { status: res.status, body };
+}
+/**
+ * The embedding model id this instance stamps, read back from a probe row
+ * written through POST /Memory. Fixture rows carry it, so the embedding-stamp
+ * migration (resources/migrations/embedding-stamp.ts) does not select them: its
+ * boot pass and follow-up rechecks re-embed a row that has no current stamp,
+ * and a re-embed that lands between the archive's two reads changes the row.
+ */
+async function currentEmbeddingModel(agent: TestAgent): Promise<string> {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const id = `ma-probe-${randomUUID()}`;
+    const path = "/Memory";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "POST",
+      headers: { Authorization: ed25519Header(agent, "POST", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ id, agentId: agent.id, content: `${id} probe body`, durability: "persistent" }),
+    });
+    expect(res.status, `probe POST /Memory returned ${res.status}`).toBe(201);
+    const model = (await readMemory(id))?.embeddingModel;
+    if (typeof model === "string" && model.length > 0) return model;
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  throw new Error("no probe row was stamped with an embedding model after 30 attempts; fixture rows would be selected by the embedding-stamp migration");
 }
 async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -119,6 +143,7 @@ beforeAll(async () => {
   }
   assertOwnInstance(harper);
   await registerAgent(owner);
+  embeddingModel = await currentEmbeddingModel(owner);
 }, 240_000);
 
 afterAll(async () => {
@@ -129,7 +154,7 @@ afterAll(async () => {
 function row(id: string, overrides: Record<string, any> = {}): Record<string, any> {
   return {
     id, agentId: owner.id, content: `${id} body`, contentHash: id, visibility: "shared",
-    durability: "persistent", createdAt: PAST, archived: false, instanceToken: randomUUID(),
+    durability: "persistent", createdAt: PAST, archived: false, instanceToken: randomUUID(), embeddingModel,
     ...overrides,
   };
 }
