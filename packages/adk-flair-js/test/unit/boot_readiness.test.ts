@@ -266,7 +266,7 @@ function writeRecoveryMock(rootPath: string): string {
   const mockScript = join(rootPath, "recovery-mock.mjs");
   writeFileSync(mockScript, [
     "import { spawn } from 'node:child_process';",
-    "import { writeFileSync, rmSync } from 'node:fs';",
+    "import { writeFileSync, renameSync, rmSync } from 'node:fs';",
     "import { join } from 'node:path';",
     "",
     `const ROOT = ${JSON.stringify(rootPath)};`,
@@ -316,7 +316,10 @@ function writeRecoveryMock(rootPath: string): string {
     "try { child.kill('SIGKILL'); } catch {}",
     "rmSync(ROOT, { recursive: true, force: true });",
     "if (process.env.RECOVERY_MOCK_EXIT_FILE) {",
-    "  writeFileSync(process.env.RECOVERY_MOCK_EXIT_FILE, reason);",
+    "  const exitFile = process.env.RECOVERY_MOCK_EXIT_FILE;",
+    "  const tempFile = `${exitFile}.tmp`;",
+    "  writeFileSync(tempFile, reason);",
+    "  renameSync(tempFile, exitFile);",
     "}",
     "process.exit(0);",
   ].join("\n"), "utf-8");
@@ -546,7 +549,8 @@ test("recovery mock exits when its parent disappears", async () => {
     expect(wrapperPid).toBeGreaterThan(0);
     expect(harperPid).toBeGreaterThan(0);
 
-    await waitUntil(`parent-exit marker; launcher stderr: ${launcherStderr}`, () => existsSync(exitFile));
+    await waitUntil(`parent-exit marker; launcher stderr: ${launcherStderr}`, () =>
+      existsSync(exitFile) && readFileSync(exitFile, "utf-8") === "parent");
     expect(readFileSync(exitFile, "utf-8")).toBe("parent");
     expect(existsSync(rootPath)).toBe(false);
     await waitUntil("parentless recovery wrapper exit", () => !processRunning(wrapperPid!));
@@ -556,5 +560,6 @@ test("recovery mock exits when its parent disappears", async () => {
     killPid(harperPid ?? recordedMockPid(rootPath, "mock-child.pid"));
     try { rmSync(rootPath, { recursive: true, force: true }); } catch {}
     try { unlinkSync(exitFile); } catch {}
+    try { unlinkSync(`${exitFile}.tmp`); } catch {}
   }
 }, TEST_TIMEOUT_MS);
