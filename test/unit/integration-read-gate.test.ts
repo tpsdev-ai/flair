@@ -16,6 +16,11 @@ let integrationStore: Map<string, any>;
 let lastSearchTarget: any;
 let agents: Map<string, any>;
 let failAgentStore = false;
+// When set, the static table read returns a fresh row every call, so the
+// attempt's read and the pre-commit re-read never agree (retry exhaustion).
+let churningRow = false;
+let churnSeq = 0;
+let staticPutCalls = 0;
 
 function matchesCondition(record: any, cond: any): boolean {
   if (cond.operator && Array.isArray(cond.conditions)) {
@@ -31,11 +36,15 @@ function matchesCondition(record: any, cond: any): boolean {
 class BaseIntegration {
   // The STATIC table read (resolveStoredRow uses `databases.flair.Integration.get`).
   static async get(id: any) {
+    if (churningRow) {
+      return { id, agentId: "agent-a", platform: "tps-mail", email: `churn-${++churnSeq}@example.test` };
+    }
     return integrationStore.get(id) ?? null;
   }
   // The STATIC table writes (Integration.ts writes through the static handle with
   // the attempt's owned context, flair#2340).
   static async put(record: any) {
+    staticPutCalls += 1;
     integrationStore.set(record.id, { ...record });
     return { ...record };
   }
@@ -128,6 +137,9 @@ beforeEach(() => {
   agents.set("agent-a", { id: "agent-a", kind: "agent", status: "active" });
   agents.set("agent-b", { id: "agent-b", kind: "agent", status: "active" });
   failAgentStore = false;
+  churningRow = false;
+  churnSeq = 0;
+  staticPutCalls = 0;
   // request-transaction.ts needs Harper's global transaction() for the owned
   // write scope; a passthrough keeps the publication path exercisable.
   (globalThis as any).transaction = async (ctx: any, cb: any) => cb(ctx ?? {});
@@ -315,6 +327,21 @@ describe("Integration.delete() — ownership check uses the raw record", () => {
       expect([...integrationStore.keys()].sort()).toEqual(["int-a", "int-c", "int-control"]);
     });
   }
+});
+
+describe("Integration write — a stored row that keeps changing exhausts the attempts", () => {
+  it("answers the named conflict and never writes when every re-read disagrees", async () => {
+    integrationStore.set("int-1", { id: "int-1", agentId: "agent-a", platform: "tps-mail", email: "stable@example.test" });
+    churningRow = true;
+    const i = makeIntegration(agentCtx("agent-a"), "int-1");
+    const res = await (i as any).patch({ id: "int-1", metadata: "x" });
+    churningRow = false;
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(409);
+    expect((await (res as Response).json()).error).toBe("integration_row_changed");
+    expect(staticPutCalls).toBe(0);
+    expect(integrationStore.get("int-1").email).toBe("stable@example.test");
+  });
 });
 
 // ─── flair#2141 S3a — the team-directory publication gate ────────────────────

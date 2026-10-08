@@ -1,3 +1,3 @@
-- **Integration writes re-check the committed row before they commit.**
-  An owner's write that raced an operator publishing the same row is refused
-  or re-decided against the published row.
+- **An Integration write that names a stored row re-reads the committed row before it commits.**
+  When that row is no longer the row this attempt read, the write aborts and is
+  retried from the committed row (bounded).

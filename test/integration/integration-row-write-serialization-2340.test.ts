@@ -2,16 +2,17 @@
  * integration-row-write-serialization-2340.test.ts — flair#2340, real Harper.
  *
  * An Integration write (put, patch, by-id delete) makes one per-row decision
- * (resources/Integration.ts): the stored-row read, the operator-only and
- * frozen-binding decisions and the write run in one owned transaction. These
- * cases change the target AFTER that transaction has read the row and BEFORE it
- * commits: the spawned Harper carries the test-only pause
+ * (resources/Integration.ts): the stored-row read, the operator-only decision
+ * and the write run in one owned transaction. These cases change the target
+ * AFTER that transaction has read the row and BEFORE it commits: the spawned
+ * Harper carries the test-only pause
  * (resources/txn-pause-point.ts, enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION
  * and FLAIR_TEST_PAUSE_DIR, set for this file's Harper only), the test arms it,
- * starts an owner write, waits until it is paused inside its transaction, has
- * the operator publish the same row, then releases the write. The committed row
- * is re-read before the commit, so the change is visible: the owner's write is
- * refused (or re-decided) against the published row.
+ * starts one write, waits until it is paused inside its transaction, runs a
+ * competing write against the same row, then releases the first. The committed
+ * row is re-read before the commit, so a change committed before that re-read is
+ * visible. Some cases pause an owner's write and have the operator publish the
+ * same row; the reverse case pauses the operator's write while the owner writes.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -102,10 +103,9 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 }
 
 /**
- * Arm the pause, start an owner `write`, and once it is paused inside its
- * transaction run the operator `compete` (which publishes the same row), then
- * release the write. Returns the owner write's response, the competing step's
- * result and how the pause ended.
+ * Arm the pause, start `write`, and once it is paused inside its transaction
+ * run `compete`, then release the write. Returns the first write's response,
+ * the competing step's result and how the pause ended.
  */
 async function withPausedWrite<T>(write: () => Promise<Response>, compete: () => Promise<T>) {
   for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${POINT}`), { force: true });
@@ -126,9 +126,10 @@ async function withPausedWrite<T>(write: () => Promise<Response>, compete: () =>
 let harper: HarperInstance;
 let pauseDir: string;
 const owner = mkAgent("irw-owner");
+const other = mkAgent("irw-other");
 const PUB_EMAIL = "irw-published@example.test";
 
-/** The operator's publish of an existing row: same binding, plus a fresh stamp. */
+/** The operator's publish of a row held by `owner`: a fresh email and a fresh stamp. */
 function publish(harper: HarperInstance, id: string, extra: Record<string, unknown> = {}): Promise<Response> {
   return requestAs(harper, "operator", "PUT", `/Integration/${id}`, {
     id, agentId: owner.id, platform: PLATFORM, email: PUB_EMAIL,
@@ -136,10 +137,26 @@ function publish(harper: HarperInstance, id: string, extra: Record<string, unkno
   });
 }
 
-/** The operator's publish as a PATCH (a merge): same binding, plus a fresh stamp. */
+/** The operator's publish as a PATCH (a merge): a fresh stamp. */
 function publishPatch(harper: HarperInstance, id: string, email: string): Promise<Response> {
   return requestAs(harper, "operator", "PATCH", `/Integration/${id}`, {
     id, agentId: owner.id, platform: PLATFORM, email,
+    directoryPublishedAt: new Date().toISOString(),
+  });
+}
+
+/** The operator's transfer of a row to another active agent, published: a new agentId and stamp. */
+function transferPublish(harper: HarperInstance, id: string, agentId: string): Promise<Response> {
+  return requestAs(harper, "operator", "PUT", `/Integration/${id}`, {
+    id, agentId, platform: PLATFORM, email: PUB_EMAIL,
+    directoryPublishedAt: new Date().toISOString(),
+  });
+}
+
+/** The operator's transfer-and-publish as a PATCH (a merge): a new agentId and stamp. */
+function transferPublishPatch(harper: HarperInstance, id: string, agentId: string): Promise<Response> {
+  return requestAs(harper, "operator", "PATCH", `/Integration/${id}`, {
+    id, agentId, platform: PLATFORM, email: PUB_EMAIL,
     directoryPublishedAt: new Date().toISOString(),
   });
 }
@@ -163,10 +180,13 @@ beforeAll(async () => {
   }
   assertOwnInstance(harper);
   await registerAgent(harper, owner);
+  await registerAgent(harper, other);
   await seedRow(harper, "irw-put", owner.id, "irw-put-before@example.test");
   await seedRow(harper, "irw-patch", owner.id, "irw-patch-before@example.test");
   await seedRow(harper, "irw-del", owner.id, "irw-del-before@example.test");
   await seedRow(harper, "irw-rev", owner.id, "irw-rev-before@example.test");
+  await seedRow(harper, "irw-xfer-put", owner.id, "irw-xfer-put-before@example.test");
+  await seedRow(harper, "irw-xfer-patch", owner.id, "irw-xfer-patch-before@example.test");
 }, 240_000);
 
 afterAll(async () => {
@@ -233,5 +253,37 @@ describe("flair#2340 — the Integration per-row write under a publish committed
     const row = await storedRow(harper, "irw-del");
     expect(row, "the published row was deleted over the operator's publication").not.toBeNull();
     expect(row?.directoryPublishedAt).toBeString(); // assertion: the operator's publication is kept
+  }, 60_000);
+
+  it("an owner PATCH is refused once the operator transferred and published its row via PUT during the write", async () => {
+    const { response, competed, released } = await withPausedWrite(
+      () => requestAs(harper, owner, "PATCH", "/Integration/irw-xfer-put", { metadata: "former-owner-metadata" }),
+      () => transferPublish(harper, "irw-xfer-put", other.id)
+        .then(async (r) => ({ status: r.status, body: (await r.text()).slice(0, 300), row: await storedRow(harper, "irw-xfer-put") })),
+    );
+    expect(released, "the write was not paused and released by this test").toBe("go");
+    expect(competed?.status, `the operator transfer failed: ${competed?.body}`).toBeLessThan(300);
+    expect(competed?.row?.agentId, "the operator's transfer is the committed row").toBe(other.id);
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(403);
+    expect(JSON.parse(text).error).toBe("integration_owner_changed");
+    const row = await storedRow(harper, "irw-xfer-put");
+    expect(JSON.stringify(row), "the former owner's write changed the transferred row").toBe(JSON.stringify(competed?.row));
+  }, 60_000);
+
+  it("an owner PATCH is refused once the operator transferred and published its row via PATCH during the write", async () => {
+    const { response, competed, released } = await withPausedWrite(
+      () => requestAs(harper, owner, "PATCH", "/Integration/irw-xfer-patch", { metadata: "former-owner-metadata" }),
+      () => transferPublishPatch(harper, "irw-xfer-patch", other.id)
+        .then(async (r) => ({ status: r.status, body: (await r.text()).slice(0, 300), row: await storedRow(harper, "irw-xfer-patch") })),
+    );
+    expect(released, "the write was not paused and released by this test").toBe("go");
+    expect(competed?.status, `the operator transfer failed: ${competed?.body}`).toBeLessThan(300);
+    expect(competed?.row?.agentId, "the operator's transfer is the committed row").toBe(other.id);
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(403);
+    expect(JSON.parse(text).error).toBe("integration_owner_changed");
+    const row = await storedRow(harper, "irw-xfer-patch");
+    expect(JSON.stringify(row), "the former owner's write changed the transferred row").toBe(JSON.stringify(competed?.row));
   }, 60_000);
 });

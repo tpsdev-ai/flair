@@ -33,6 +33,11 @@ const CONFLICT = (error: string, message: string) =>
   new Response(JSON.stringify({ error, message }), { status: 409, headers: { "Content-Type": "application/json" } });
 const UNAVAILABLE = (error: string) =>
   new Response(JSON.stringify({ error }), { status: 503, headers: { "Content-Type": "application/json" } });
+const OWNER_CHANGED = () =>
+  new Response(JSON.stringify({
+    error: "integration_owner_changed",
+    message: "the record's owner changed while this write was in progress; the write was refused",
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
 
 /** The field whose value is the team-directory publication stamp. */
 const DIRECTORY_STAMP_FIELD = "directoryPublishedAt";
@@ -164,30 +169,35 @@ type IntegrationWriteOutcome<T> =
   | { kind: "write"; id: string | number | null; expected: Record<string, any> | null; commit: (owned: any) => Promise<T> };
 
 /**
- * One per-row decision for an Integration write (flair#2340). The stored-row
- * read, the operator-only and frozen-binding decisions and the write run inside
- * ONE owned transaction. Before the write is staged, the committed row is
- * re-read OUTSIDE the transaction (Harper's latest committed state); when it is
- * no longer the row the decision used, the transaction is aborted (nothing is
- * staged) and the decision is retried from the committed row, up to
- * INTEGRATION_WRITE_ATTEMPTS times. Harper has no compare-and-set — a
- * transaction does not fail when a row it read is changed before it commits,
- * and both writes apply ordered by timestamp (flair#2310) — so an owner write
- * that raced an operator publish is refused or re-decided from the published
- * row. A denial stages no write and is returned unchanged. Mirrors the
- * re-read-then-abort pattern of flair#2307 (resources/Memory.ts). The re-read
- * and the commit follow Harper's timestamp order (the same residual gap as
- * #2310).
+ * One per-row decision for an Integration write (flair#2340). The write's
+ * decisions and the write run inside ONE owned transaction. When the write
+ * names a stored row, the committed row is re-read OUTSIDE the transaction
+ * (Harper's latest committed state) before the write is staged; when it is no
+ * longer the row this attempt read, the transaction is aborted (nothing is
+ * staged) and the attempt is retried from the committed row, up to
+ * INTEGRATION_WRITE_ATTEMPTS times, then answered with the conflict response.
+ * POST reads no stored row; a generated-id POST names no row to re-read. A
+ * denial stages no write and is returned unchanged. Mirrors the
+ * re-read-then-abort pattern of flair#2307 (resources/Memory.ts).
  */
 async function runIntegrationWrite<T>(
   ctx: any,
   attemptFn: (owned: any) => Promise<IntegrationWriteOutcome<T>>,
 ): Promise<T | Response> {
+  const auth = await resolveAgentAuth(ctx);
   for (let attempt = 1; ; attempt++) {
     try {
       return await withOwnedTransaction(ctx, async (owned) => {
         const outcome = await attemptFn(owned);
         if (outcome.kind === "denial") return outcome.denial;
+        // Authorize against the committed row this attempt's decision read
+        // (flair#2340): the middleware's ownership check ran before this read,
+        // so a row transferred to another principal since the request began
+        // would otherwise be written. `expected` is that row, or null for a
+        // write that lands on no stored row (a create).
+        if (outcome.expected && auth.kind === "agent" && !auth.isAdmin && outcome.expected.agentId !== auth.agentId) {
+          return OWNER_CHANGED();
+        }
         // Test-only: inert unless the fault-injection env opt-in is set and armed.
         const pause = txnPausePoint("integration-row-write");
         if (pause) await pause;
@@ -368,9 +378,7 @@ export class Integration extends (databases as any).flair.Integration {
     }
 
     // Authorize from the full stored row, read by id from the table, as one
-    // per-row decision (flair#2340): the committed row is re-read before the
-    // delete commits, so an owner delete that raced an operator publish is
-    // refused instead of removing the published row.
+    // per-row decision (flair#2340).
     const targetId = typeof id === "object" ? id.id : id;
     return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
       const record = await (databases as any).flair.Integration.get(targetId, owned);
