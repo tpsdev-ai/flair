@@ -18,6 +18,7 @@
  */
 
 import { Resource, databases } from "harper";
+import { isDeepStrictEqual } from "node:util";
 import { MEMORY_HOST_SOURCE_TABLE } from "./memory-host-source.js";
 
 /** Maintenance creates an owned transaction for each expiry or archive item;
@@ -37,6 +38,7 @@ import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { recordMemoryDeletion } from "./memory-deletion-history.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 export class MemoryMaintenance extends Resource {
   /** POST requires auth — either an agent acting on its own memories, or admin. */
@@ -72,7 +74,7 @@ export class MemoryMaintenance extends Resource {
     }
 
     const now = new Date();
-    const stats = { expired: 0, archived: 0, total: 0, errors: 0, orphans: 0, agent: targetAgent || "all" };
+    const stats = { expired: 0, archived: 0, total: 0, errors: 0, orphans: 0, skipped: 0, agent: targetAgent || "all" };
 
     try {
       for await (const record of (databases as any).flair.Memory.search()) {
@@ -92,12 +94,29 @@ export class MemoryMaintenance extends Resource {
         ) {
           if (!dryRun) {
             try {
-              // A1'' item 2 (0c): the raw expiry delete runs in its OWN
-              // transaction together with the pointer delete, so a failed
-              // pointer delete aborts both and nothing is deleted.
-              const deleted = await withOwnedTransaction(ctx, async (c) => {
+              // flair#2275: another writer may open its transaction first and
+              // commit a change to this row before OUR transaction opens. This
+              // pause (inert unless the fault-injection opt-in is armed) holds
+              // the scan-selected row still while that writer runs; the owned
+              // transaction below then sees the change and skips.
+              const beforeAct = txnPausePoint("maintenance-expiry-pre");
+              if (beforeAct) await beforeAct;
+              // A1'' item 2 (0c) + flair#2275: the delete runs in a transaction
+              // this call OWNS, re-reads the row inside it, and acts only when
+              // the row is STILL the one the scan selected. A change is a SKIP
+              // (recorded as skipped), never a hard-delete of the changed row.
+              let deleted = false;
+              await withOwnedTransaction(ctx, async (c) => {
                 const stored = await (databases as any).flair.Memory.get(record.id, c);
-                if (!stored || stored.durability !== "ephemeral" || !stored.expiresAt || new Date(stored.expiresAt) >= now) return false;
+                if (!isDeepStrictEqual(stored, record)) return;
+                // The transaction pauses here, between its read and its act.
+                const pause = txnPausePoint("maintenance-expiry");
+                if (pause) await pause;
+                // Confirmation read: the committed row in an EXPLICIT fresh
+                // context (never contextless — a contextless read joins the
+                // request transaction and sees its old snapshot).
+                const confirmed = await (databases as any).flair.Memory.get(record.id, {});
+                if (!isDeepStrictEqual(confirmed, stored)) return;
                 const result = await (databases as any).flair.Memory.delete(record.id, c);
                 if (result !== true) throw new Error("Memory row delete was not confirmed");
                 await deletePointerRowOrThrow(record.id, c);
@@ -108,9 +127,9 @@ export class MemoryMaintenance extends Resource {
                   actor: actorId ?? null,
                   sourceClass: callerIsAdmin ? "admin" : "agent",
                 }, c);
-                return true;
+                deleted = true;
               });
-              if (!deleted) continue;
+              if (!deleted) { stats.skipped++; continue; }
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
               noteMemoryDelete(record.id);
@@ -136,19 +155,36 @@ export class MemoryMaintenance extends Resource {
         if (!record.archived && (validToExpired || oldSession)) {
           if (!dryRun) {
             try {
-              const archivedRow = {
-                ...record,
-                archived: true,
-                archivedAt: now.toISOString(),
-              };
-              stripUndeclaredMemoryAttributes(archivedRow);
-              // A1'' item 2 (0c): the archive write and its pointer delete
-              // share ONE OWNED transaction; a failed pointer delete cannot
-              // still commit the archived row.
+              // flair#2275: as for expiry, hold the scan-selected row still so
+              // another writer can commit first, then let the owned transaction
+              // below see the change and skip.
+              const beforeAct = txnPausePoint("maintenance-archive-pre");
+              if (beforeAct) await beforeAct;
+              // A1'' item 2 (0c) + flair#2275: the write is built from the row
+              // read INSIDE the transaction (never from the scan copy), and the
+              // action runs only when the row is still the one the scan
+              // selected. A change is a SKIP, so a concurrent edit survives.
+              let archivedRow: any;
               await withOwnedTransaction(ctx, async (c) => {
+                const stored = await (databases as any).flair.Memory.get(record.id, c);
+                if (!isDeepStrictEqual(stored, record)) return;
+                const pause = txnPausePoint("maintenance-archive");
+                if (pause) await pause;
+                const confirmed = await (databases as any).flair.Memory.get(record.id, {});
+                if (!isDeepStrictEqual(confirmed, stored)) return;
+                archivedRow = {
+                  ...stored,
+                  archived: true,
+                  archivedAt: now.toISOString(),
+                };
+                stripUndeclaredMemoryAttributes(archivedRow);
+                // A1'' item 2 (0c): the archive write and its pointer delete
+                // share ONE OWNED transaction; a failed pointer delete cannot
+                // still commit the archived row.
                 await (databases as any).flair.Memory.update(record.id, archivedRow, c);
                 await deletePointerRowOrThrow(record.id, c);
               });
+              if (!archivedRow) { stats.skipped++; continue; }
               // flair#1357 — an `archived` flip changes what the retrieval
               // conditions (`archived not_equal true`) admit, so the lexical
               // index has to see it, not just content writes.
@@ -179,13 +215,18 @@ export class MemoryMaintenance extends Resource {
           const memoryId = ptr?.memoryId;
           if (typeof memoryId !== "string" || memoryId.length === 0) continue;
           try {
-            const mem = await (databases as any).flair.Memory.get(memoryId, ctx);
+            // flair#2275: read the pointed Memory in an EXPLICIT fresh context
+            // (never contextless). Is this pointer an orphan — its Memory
+            // missing or archived?
+            const mem = await (databases as any).flair.Memory.get(memoryId, {});
             if (mem && mem.archived !== true) continue;
-            // 0d: RE-CHECK inside an OWNED transaction before deleting. The
-            // first read is outside it, so a new row reusing this id in
-            // between must not be orphan-deleted; the conditional re-read
-            // inside the transaction closes that read-to-delete gap. The
-            // re-read is passed the owned transaction `c` (Gauge pass-5 item 2).
+            // 0d + flair#2275: a new row reusing this id, or a promotion out of
+            // archived, may land before we open the owned transaction. Hold the
+            // row still so that writer can commit first, then re-check INSIDE
+            // the transaction and act only when the row is STILL the one the
+            // selection read saw; otherwise SKIP (the pointer stands).
+            const beforeAct = txnPausePoint("maintenance-orphan-pre");
+            if (beforeAct) await beforeAct;
             //
             // Round 22: one orphan's failure must abort only THAT orphan, not
             // the whole sweep — catch it, count stats.errors, and continue (the
@@ -194,14 +235,19 @@ export class MemoryMaintenance extends Resource {
             // of the callback). Pinned by test/unit/memory-host-source.test.ts
             // (r22-orphan-continues) — RED if the try/catch is removed.
             let committed = false;
+            let skipped = false;
             await withOwnedTransaction(ctx, async (c) => {
               const again = await (databases as any).flair.Memory.get(memoryId, c);
-              if (!again || again.archived === true) {
-                await deletePointerRowOrThrow(memoryId, c);
-                committed = true;
-              }
+              if (!isDeepStrictEqual(again, mem)) { skipped = true; return; }
+              const pause = txnPausePoint("maintenance-orphan");
+              if (pause) await pause;
+              const confirmed = await (databases as any).flair.Memory.get(memoryId, {});
+              if (!isDeepStrictEqual(confirmed, again)) { skipped = true; return; }
+              await deletePointerRowOrThrow(memoryId, c);
+              committed = true;
             });
             if (committed) stats.orphans++;
+            else if (skipped) stats.skipped++;
           } catch (err) {
             stats.errors++;
             console.error("MemoryMaintenance: orphan sweep failed (continuing)", err);
@@ -225,7 +271,7 @@ export class MemoryMaintenance extends Resource {
           error: "maintenance_incomplete",
           message: `${stats.errors} cleanup error(s); see counts`,
           stats, expired: stats.expired, archived: stats.archived, total: stats.total,
-          errors: stats.errors, orphans: stats.orphans,
+          errors: stats.errors, orphans: stats.orphans, skipped: stats.skipped,
         }),
         { status: 500, headers: { "content-type": "application/json" } },
       );
@@ -242,6 +288,7 @@ export class MemoryMaintenance extends Resource {
       total: stats.total,
       errors: stats.errors,
       orphans: stats.orphans,
+      skipped: stats.skipped,
     };
   }
 }
