@@ -94,7 +94,8 @@ export function planRedirectMigration(
   }
   const tracked = new Set(["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", ...Object.values(names)]);
   const assignments = new Set<string>();
-  for (const line of envText.split(/\r?\n/)) {
+  const envLines = envText.replace(/\r\n?/g, "\n").split("\n");
+  for (const line of envLines) {
     const assignment = ASSIGNMENT_RE.exec(line);
     const key = assignment?.[1];
     if (!key || !tracked.has(key)) continue;
@@ -124,7 +125,7 @@ export function planRedirectMigration(
   const issuer = issuerFromEnv(env);
   const validation = validateRedirectIssuer(issuer);
   if (!validation.redirect) return { ...result, action: issuer ? "refused" : "no-issuer", reason: validation.reason };
-  const lines = envText.split(/\r?\n/).filter(line => ASSIGNMENT_RE.exec(line)?.[1] !== names.redirectUri);
+  const lines = envLines.filter(line => ASSIGNMENT_RE.exec(line)?.[1] !== names.redirectUri);
   while (lines.at(-1) === "") lines.pop();
   lines.push(`${names.redirectUri}=${validation.redirect}`, "");
   const tempPath = `${envPath}.${randomUUID()}.tmp`;
@@ -158,7 +159,7 @@ export function renderRedirectMigration(result: RedirectMigrationResult): string
     case "staged":
       return `MCP OAuth: staged ${result.redirectVar} for the ${SHIPPED_IDP_PROVIDER} provider (${result.envPath}).`;
     case "no-issuer":
-      return `MCP OAuth: ${result.redirectVar} is missing and no public origin was available to derive it — set it in the instance environment, or re-run: flair mcp enable`;
+      return `MCP OAuth: ${result.redirectVar} is missing and FLAIR_MCP_ISSUER is missing — set ${result.redirectVar} in the instance environment, or re-run: flair mcp enable`;
     case "refused":
       return `MCP OAuth redirect migration refused: ${result.reason}. Set ${result.redirectVar} in the instance environment and restart.`;
     case "not-enabled":

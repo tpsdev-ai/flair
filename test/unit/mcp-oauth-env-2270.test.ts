@@ -111,7 +111,9 @@ describe("redirect migration files", () => {
     expect(migrate({ ...configured, FLAIR_PUBLIC_URL: "https://other.example" }).action).toBe("staged");
     expect(readFileSync(envPath(), "utf8")).toContain(`${REDIRECT}=https://flair.example.com/oauth`);
     rmSync(envPath());
-    expect(migrate({ ...configured, FLAIR_MCP_ISSUER: undefined, FLAIR_PUBLIC_URL: "https://public.example" }).action).toBe("no-issuer");
+    const result = migrate({ ...configured, FLAIR_MCP_ISSUER: undefined, FLAIR_PUBLIC_URL: "https://public.example" });
+    expect(result.action).toBe("no-issuer");
+    expect(renderRedirectMigration(result)).toBe(`MCP OAuth: ${REDIRECT} is missing and FLAIR_MCP_ISSUER is missing — set ${REDIRECT} in the instance environment, or re-run: flair mcp enable`);
   });
   test("requires enablement and both credentials", () => {
     expect(migrate({}).action).toBe("not-enabled");
@@ -139,10 +141,22 @@ describe("redirect migration files", () => {
     expect(statSync(envPath()).ino).not.toBe(inode);
     expect(statSync(envPath()).mode & 0o777).toBe(0o640);
   });
-  test.each([`${REDIRECT}=\n${REDIRECT}=https://kept.example/oauth\n`, `${REDIRECT}=https://kept.example/oauth\nexport ${REDIRECT}='${REDIRECT}'\n`])("refuses repeated redirect assignments", text => {
+  test.each([`${REDIRECT}=\n${REDIRECT}=https://kept.example/oauth\n`, `${REDIRECT}=https://kept.example/oauth\nexport ${REDIRECT}='${REDIRECT}'\n`, `${REDIRECT}=https://kept.example/oauth\r${REDIRECT}=\r`])("refuses repeated redirect assignments", text => {
     writeFileSync(envPath(), text);
     expect(migrate()).toMatchObject({ action: "refused", reason: `ambiguous-env:${REDIRECT}` });
     expect(readFileSync(envPath(), "utf8")).toBe(text);
+  });
+  test.each(["\r", "\r\n", "\n"])("replaces a blank redirect between assignments separated by %j", separator => {
+    const text = `BEFORE=retained${separator}${REDIRECT}=${separator}AFTER=retained${separator}`;
+    writeFileSync(envPath(), text);
+    expect(migrate().action).toBe("staged");
+    const rewritten = readFileSync(envPath(), "utf8");
+    expect(rewritten).toBe(`BEFORE=retained\nAFTER=retained\n${REDIRECT}=https://flair.example.com/oauth\n`);
+    expect(parseMcpComponentEnv(rewritten)).toEqual({ BEFORE: "retained", AFTER: "retained", [REDIRECT]: "https://flair.example.com/oauth" });
+    const require = createRequire(import.meta.url);
+    const harperRequire = createRequire(require.resolve("harper"));
+    const dotenv = harperRequire("dotenv") as { parse: (text: string) => Record<string, string> };
+    expect(dotenv.parse(rewritten)).toEqual(parseMcpComponentEnv(rewritten));
   });
   test("refuses unreadable files", () => {
     writeFileSync(envPath(), "# keep\n");

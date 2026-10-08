@@ -1315,6 +1315,7 @@ program
         );
         return;
       }
+      if (!checkOnly) stageMcpRedirect(treeLane?.dir ?? flairPackageDir());
       console.log(anyAhead || unknownFindings.length > 0 ? "\nNo upgrades available." : "\n✅ Everything is up to date.");
       return;
     }

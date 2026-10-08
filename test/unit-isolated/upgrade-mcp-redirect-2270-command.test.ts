@@ -134,10 +134,33 @@ test("plain-tree upgrade stages the redirect in the swapped tree", async () => {
   expect(readFileSync(join(packageDir, ".env"), "utf8")).toContain("OAUTH_GITHUB_REDIRECT_URI=https://local.example/oauth");
 });
 
-test("local upgrade stages a missing redirect when the package is current", async () => {
+test.each([false, true])("current packages stage a missing redirect unless check is %s", async check => {
   configured();
   latestVersion = "0.59.0";
+  rebindCli({ resolveFlairMcpFinding: () => ({ installed: latestVersion, status: "current" }) });
+  await upgrade(check ? ["--check"] : ["--no-restart", "--no-verify"]);
+  expect(installCalls).toBe(0);
+  expect(restartCalls).toBe(0);
+  expect(readFileSync(join(packageDir, ".env"), "utf8").includes("OAUTH_GITHUB_REDIRECT_URI=https://local.example/oauth")).toBe(!check);
+});
+
+test("current packages leave the redirect unstaged when the serving tree differs", async () => {
+  configured();
+  latestVersion = "0.59.0";
+  rebindCli({
+    resolveFlairMcpFinding: () => ({ installed: latestVersion, status: "current" }),
+    assessInstallTree: () => ({
+      state: "diverged",
+      cli: { dir: packageDir, version: latestVersion },
+      serving: {
+        kind: "proven", dir: join(root, "other-install"), version: latestVersion,
+        pid: 4242, manager: "launchd", unitName: "fixture", unitPath: join(root, "fixture.plist"),
+        unitNodeBin: null, unitTree: join(root, "other-install"), dropInPaths: [],
+      },
+    }),
+  });
   await upgrade(["--no-restart", "--no-verify"]);
   expect(installCalls).toBe(0);
-  expect(readFileSync(join(packageDir, ".env"), "utf8")).toContain("OAUTH_GITHUB_REDIRECT_URI=https://local.example/oauth");
+  expect(restartCalls).toBe(0);
+  expect(readFileSync(join(packageDir, ".env"), "utf8")).not.toContain("REDIRECT_URI=");
 });
