@@ -3,10 +3,15 @@
  * the auto-promote sweep or leave the candidate pending (Bugbot Medium on
  * #1534). Isolated: owns the harper + Memory mocks.
  */
-import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test";
+import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 
 const candidatePuts: any[] = [];
 const memoryPuts: any[] = [];
+
+// Model Harper's global transaction (the write-back helper reaches it there).
+const txn = installFakeHarperTransaction(() => {});
+afterAll(() => txn.restore());
 
 const candidates = [
   { id: "cand-1", agentId: "alice", status: "pending", claim: "Eligible auto-promote claim one about release rollback.", scopeTag: "adk:app:alice", sourceMemoryIds: [] },

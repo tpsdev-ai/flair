@@ -2,12 +2,17 @@
  * FeedMemories updates preserve the record's stored visibility unless the
  * write explicitly changes it. Isolated: owns the harper mock for MemoryFeed.ts.
  */
-import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
+import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 
 let memoryStore: Map<string, any>;
 let getCount = 0;
 let failGetAt: number | null = null;
+
+// Model Harper's global transaction (the write-back helper reaches it there).
+const txn = installFakeHarperTransaction((id, row) => memoryStore.set(id, row));
+afterAll(() => txn.restore());
 
 const databasesMock = {
   flair: {
@@ -17,8 +22,10 @@ const databasesMock = {
         if (failGetAt !== null && getCount === failGetAt) throw new Error("storage unavailable");
         return memoryStore.get(id) ?? null;
       },
-      // Harper PUT semantics: the stored row IS the record (full replacement).
+      // Harper PUT semantics: the stored row IS the record (full replacement);
+      // a write inside the owned transaction is staged (lands on commit).
       put: async (record: any) => {
+        if (txn.stage(record.id, { ...record })) return record;
         memoryStore.set(record.id, { ...record });
         return record;
       },

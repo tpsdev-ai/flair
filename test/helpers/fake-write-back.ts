@@ -14,7 +14,7 @@
  * re-reads the committed row and, if a competing write landed in between
  * (the `conflict` hook commits one), it aborts (performs no put) and retries
  * from the committed row. A row that keeps changing each attempt is a named
- * refusal, exactly as the real helper's WriteBackConflictError.
+ * refusal, like the real helper's WriteBackConflictError.
  */
 import { isDeepStrictEqual } from "node:util";
 import type { WriteBackFn, WriteBackPlan } from "../../resources/write-back.js";

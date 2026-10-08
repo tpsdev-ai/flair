@@ -21,10 +21,9 @@
  *   - `<path>`: a competing write commits AFTER this write-back's read/build —
  *     the committed re-read must abort the staged write and retry, keeping the
  *     competing change rather than reverting it.
- * The paths here are those reachable over HTTP on a serving instance; the
- * boot-keyed migrations and the embedding backfill are covered by their own
- * unit tests (the boot paths cannot be armed with a competing write before the
- * first cycle serves).
+ * The paths here are those a serving instance exposes over HTTP. The
+ * conversion also covers the embedding backfill and the visibility and
+ * synthetic boot migrations; those are not exercised here.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
