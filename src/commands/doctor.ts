@@ -841,7 +841,11 @@ program
       }
 
       const mcpRedirectFinding = await readTargetMcpRedirectFinding(() =>
-        api("GET", "/HealthDetail", undefined, { baseUrl, keysDir: defaultKeysDir(), agent: opts.agent }),
+        api("GET", "/HealthDetail", undefined, {
+          baseUrl,
+          keysDir: defaultKeysDir(),
+          ...(opts.agent ? { agentId: opts.agent, agentIdSource: "flag" } : {}),
+        }),
       );
       if (mcpRedirectFinding) {
         console.log(`  ${mcpRedirectFinding.isIssue ? render.icons.error : render.icons.warn} ${mcpRedirectFinding.message}`);
