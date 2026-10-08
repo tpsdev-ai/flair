@@ -6,7 +6,8 @@
  * the target AFTER that transaction has read it and BEFORE it writes: the
  * spawned Harper carries the test-only pause (resources/txn-pause-point.ts,
  * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, which
- * are set for this file's Harper only), the test arms it, starts a successor
+ * this file sets in the test process's environment while it starts its Harper,
+ * then restores), the test arms it, starts a successor
  * write that supersedes the target, waits until the close is paused inside its
  * transaction, commits a competing change to the target, then releases the
  * close. The change is visible at the committed re-read, which aborts; a change

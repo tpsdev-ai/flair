@@ -636,8 +636,8 @@ const SUPERSEDE_CLOSE_ATTEMPTS = 3;
  * committed state, not this transaction's snapshot or its staged write). If
  * that row is no longer the one read inside the transaction, the transaction
  * is aborted (the staged write is discarded) and the close starts over from
- * the committed row, up to SUPERSEDE_CLOSE_ATTEMPTS
- * times. A change committed after that re-read and before the commit is not
+ * the committed row: SUPERSEDE_CLOSE_ATTEMPTS (three) attempts in all, so at
+ * most two retries. A change committed after that re-read and before the commit is not
  * seen by it; Harper orders the two writes by timestamp.
  */
 async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>, expectedOwner?: string): Promise<void> {

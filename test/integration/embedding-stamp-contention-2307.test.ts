@@ -8,7 +8,8 @@
  * transaction. This case changes the row's content AFTER that transaction has
  * read it and BEFORE it writes: the spawned Harper carries the test-only pause
  * (resources/txn-pause-point.ts, enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION
- * and FLAIR_TEST_PAUSE_DIR, set for this file's Harper only), the test arms it
+ * and FLAIR_TEST_PAUSE_DIR, set in the test process's environment while this
+ * file starts its Harper, then restored), the test arms it
  * before the row exists, waits until a migration cycle is paused inside that
  * transaction, commits a competing content change, then releases it. The change
  * is visible at the committed re-read, which aborts; a change after that re-read
