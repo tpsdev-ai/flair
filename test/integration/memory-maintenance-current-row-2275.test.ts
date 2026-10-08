@@ -2,9 +2,11 @@
  * memory-maintenance-current-row-2275.test.ts — flair#2275, real Harper.
  *
  * Every MemoryMaintenance action (expiry delete, orphan pointer cleanup,
- * archive) re-reads the row inside a transaction it owns and acts only when the
- * row is STILL the one the scan selected; a changed row is skipped. These cases
- * commit a competing change to the row around that transaction:
+ * archive) re-reads the row (for orphan cleanup, the pointer row and its Memory
+ * row) inside a transaction it owns and in a fresh confirmation read, and acts
+ * only when those reads still match what the scan selected; a change either
+ * read sees is skipped. These cases commit a competing change to the row around
+ * that transaction:
  *
  *   - (pause) maintenance's owned transaction opens first and pauses between its
  *     read and its act (resources/txn-pause-point.ts, enabled by
@@ -77,6 +79,13 @@ async function insertPointer(memoryId: string): Promise<void> {
   });
   expect(res.status, `MemoryHostSource insert returned ${res.status}`).toBe(200);
 }
+async function replacePointer(memoryId: string, memoryInstanceToken: string): Promise<void> {
+  const res = await adminOp({
+    operation: "upsert", database: "flair", table: "MemoryHostSource",
+    records: [{ memoryId, hostSource: JSON.stringify({ ...POINTER, id: "run-bbbbbbbb" }), scopeAtWrite: null, authorId: "host-a", memoryInstanceToken, receivedAt: new Date().toISOString() }],
+  });
+  expect(res.status, `MemoryHostSource upsert returned ${res.status}`).toBe(200);
+}
 async function deletePointer(memoryId: string): Promise<void> {
   const res = await adminOp({ operation: "delete", database: "flair", table: "MemoryHostSource", hash_values: [memoryId] });
   expect([200, 404]).toContain(res.status);
@@ -107,8 +116,9 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 }
 
 /**
- * Arm `point`, start `run` (the maintenance pass), and once it is paused inside
- * its owned transaction run `compete` (the competing write), then release it.
+ * Arm `point`, start `run` (the maintenance pass), and once it is paused at that
+ * point (inside its owned transaction, or before it opens for a `-pre` point)
+ * run `compete` (the competing write), then release it.
  * Returns the pass's result, the competing step's result and how the pause
  * ended.
  */
@@ -277,6 +287,48 @@ describe("flair#2275 — MemoryMaintenance orphan sweep acts on the current row 
       expect((await readMemory("mc-orph-pre"))?.content).toBe(EDITED); // assertion: the competing edit is kept
     } finally {
       await deletePointer("mc-orph-pre");
+    }
+  }, 60_000);
+
+  it("orphan (pause): a pointer replaced while the cleanup is paused is kept and the cleanup is skipped", async () => {
+    const REPLACEMENT = randomUUID();
+    await insertMemory([{ id: "mc-ptr-pause", agentId: "mc-ptr-pause", content: "pointer target body", contentHash: "mc-ptr-pause", visibility: "shared", durability: "permanent", createdAt: PAST, archived: true, instanceToken: randomUUID() }]);
+    await insertPointer("mc-ptr-pause");
+    try {
+      const { result, released } = await withPausedAction(
+        "maintenance-orphan",
+        () => maintain("mc-ptr-pause"),
+        () => replacePointer("mc-ptr-pause", REPLACEMENT),
+      );
+      expect(released, "maintenance was not paused and released by this test").toBe("go");
+      expect(result.skipped, JSON.stringify(result)).toBeGreaterThanOrEqual(1);
+      const pointers = await readPointers("mc-ptr-pause");
+      expect(pointers.length, "the replaced pointer was swept").toBe(1);
+      expect(pointers[0]?.memoryInstanceToken).toBe(REPLACEMENT); // assertion: the replacement pointer is kept
+      expect((await readMemory("mc-ptr-pause"))?.archived).toBe(true); // control: the Memory row stayed archived
+    } finally {
+      await deletePointer("mc-ptr-pause");
+    }
+  }, 60_000);
+
+  it("orphan (pre): a pointer replaced before the cleanup's transaction opens is kept and the cleanup is skipped", async () => {
+    const REPLACEMENT = randomUUID();
+    await insertMemory([{ id: "mc-ptr-pre", agentId: "mc-ptr-pre", content: "pointer pre target body", contentHash: "mc-ptr-pre", visibility: "shared", durability: "permanent", createdAt: PAST, archived: true, instanceToken: randomUUID() }]);
+    await insertPointer("mc-ptr-pre");
+    try {
+      const { result, released } = await withPausedAction(
+        "maintenance-orphan-pre",
+        () => maintain("mc-ptr-pre"),
+        () => replacePointer("mc-ptr-pre", REPLACEMENT),
+      );
+      expect(released, "maintenance was not paused and released by this test").toBe("go");
+      expect(result.skipped, JSON.stringify(result)).toBeGreaterThanOrEqual(1);
+      const pointers = await readPointers("mc-ptr-pre");
+      expect(pointers.length, "the replaced pointer was swept").toBe(1);
+      expect(pointers[0]?.memoryInstanceToken).toBe(REPLACEMENT); // assertion: the replacement pointer is kept
+      expect((await readMemory("mc-ptr-pre"))?.archived).toBe(true); // control: the Memory row stayed archived
+    } finally {
+      await deletePointer("mc-ptr-pre");
     }
   }, 60_000);
 });

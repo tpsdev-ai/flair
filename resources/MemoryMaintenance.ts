@@ -103,8 +103,10 @@ export class MemoryMaintenance extends Resource {
               if (beforeAct) await beforeAct;
               // A1'' item 2 (0c) + flair#2275: the delete runs in a transaction
               // this call OWNS, re-reads the row inside it, and acts only when
-              // the row is STILL the one the scan selected. A change is a SKIP
-              // (recorded as skipped), never a hard-delete of the changed row.
+              // the row is STILL the one the scan selected. A change seen by that
+              // re-read or the confirmation read below is a SKIP (recorded as
+              // skipped); a change committed between the confirmation read and
+              // the commit is not checked.
               let deleted = false;
               await withOwnedTransaction(ctx, async (c) => {
                 const stored = await (databases as any).flair.Memory.get(record.id, c);
@@ -163,7 +165,9 @@ export class MemoryMaintenance extends Resource {
               // A1'' item 2 (0c) + flair#2275: the write is built from the row
               // read INSIDE the transaction (never from the scan copy), and the
               // action runs only when the row is still the one the scan
-              // selected. A change is a SKIP, so a concurrent edit survives.
+              // selected. A change seen by that read or the confirmation read is
+              // a SKIP; a change committed between the confirmation read and the
+              // commit is not checked.
               let archivedRow: any;
               await withOwnedTransaction(ctx, async (c) => {
                 const stored = await (databases as any).flair.Memory.get(record.id, c);
@@ -220,11 +224,12 @@ export class MemoryMaintenance extends Resource {
             // missing or archived?
             const mem = await (databases as any).flair.Memory.get(memoryId, {});
             if (mem && mem.archived !== true) continue;
-            // 0d + flair#2275: a new row reusing this id, or a promotion out of
-            // archived, may land before we open the owned transaction. Hold the
-            // row still so that writer can commit first, then re-check INSIDE
-            // the transaction and act only when the row is STILL the one the
-            // selection read saw; otherwise SKIP (the pointer stands).
+            // 0d + flair#2275: a new row reusing this id, a promotion out of
+            // archived, or a replaced pointer may land before we open the owned
+            // transaction. Hold the row still so that writer can commit first,
+            // then re-check the Memory row AND the pointer row inside the
+            // transaction and at the confirmation read, and act only when both
+            // are STILL the ones the selection read saw; otherwise SKIP.
             const beforeAct = txnPausePoint("maintenance-orphan-pre");
             if (beforeAct) await beforeAct;
             //
@@ -239,10 +244,14 @@ export class MemoryMaintenance extends Resource {
             await withOwnedTransaction(ctx, async (c) => {
               const again = await (databases as any).flair.Memory.get(memoryId, c);
               if (!isDeepStrictEqual(again, mem)) { skipped = true; return; }
+              const ptrAgain = await pointerTable.get(memoryId, c);
+              if (!isDeepStrictEqual(ptrAgain, ptr)) { skipped = true; return; }
               const pause = txnPausePoint("maintenance-orphan");
               if (pause) await pause;
               const confirmed = await (databases as any).flair.Memory.get(memoryId, {});
               if (!isDeepStrictEqual(confirmed, again)) { skipped = true; return; }
+              const ptrConfirmed = await pointerTable.get(memoryId, {});
+              if (!isDeepStrictEqual(ptrConfirmed, ptrAgain)) { skipped = true; return; }
               await deletePointerRowOrThrow(memoryId, c);
               committed = true;
             });

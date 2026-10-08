@@ -14,7 +14,8 @@ export const TEST_PAUSE_DIR_ENV = "FLAIR_TEST_PAUSE_DIR";
 export const PAUSE_LIMIT_MS = 20_000;
 const POLL_MS = 20;
 
-/** One point per owned transaction that writes from a row it read. */
+/** Pause points for owned transactions that write from a row they read: a
+ *  point runs inside such a transaction, a `-pre` point before it opens. */
 export type TxnPausePoint =
   | "supersede-close"
   | "embedding-stamp-content-suffix"
@@ -27,7 +28,10 @@ export type TxnPausePoint =
   | "maintenance-archive-pre"
   | "maintenance-archive"
   | "maintenance-orphan-pre"
-  | "maintenance-orphan";
+  | "maintenance-orphan"
+  // flair#2275 — MemoryArchive: after its first read of the row, before the
+  // owned transaction that re-reads it opens.
+  | "memory-archive-pre";
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
