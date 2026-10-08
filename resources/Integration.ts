@@ -38,6 +38,8 @@ const OWNER_CHANGED = () =>
     error: "integration_owner_changed",
     message: "the record is owned by a different agent than the caller; the write was refused",
   }), { status: 403, headers: { "Content-Type": "application/json" } });
+const ROW_EXISTS = () =>
+  CONFLICT("integration_row_exists", "a record with this id already exists; the write was refused");
 
 /** The field whose value is the team-directory publication stamp. */
 const DIRECTORY_STAMP_FIELD = "directoryPublishedAt";
@@ -177,8 +179,10 @@ type IntegrationWriteOutcome<T> =
  * staged) and the attempt is retried from the committed row, up to
  * INTEGRATION_WRITE_ATTEMPTS times. If every attempt detects another change,
  * the request returns integration_row_changed.
- * POST reads no stored row; a generated-id POST names no row to re-read. A
- * denial stages no write and is returned unchanged. Mirrors the
+ * A POST that names a row id, once its other checks pass, reads that row in
+ * the attempt and refuses an existing one with integration_row_exists; a
+ * generated-id POST names no row to read or re-read. A denial stages no write
+ * and is returned unchanged. Mirrors the
  * re-read-then-abort pattern of flair#2307 (resources/Memory.ts).
  */
 async function runIntegrationWrite<T>(
@@ -279,13 +283,18 @@ export class Integration extends (databases as any).flair.Integration {
         headers: { "Content-Type": "application/json" },
       });
     }
-    return runIntegrationWrite((this as any).getContext?.(), async () => {
+    return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
       const pub = await resolvePublicationStamp(this, content, null, true);
       if (pub.denial) return { kind: "denial" as const, denial: pub.denial };
+      // A POST creates its row: an id already stored at this read is refused.
+      const id = writeRowId(this, content);
+      if (id != null && (await (databases as any).flair.Integration.get(id, owned)) != null) {
+        return { kind: "denial" as const, denial: ROW_EXISTS() };
+      }
       const now = new Date().toISOString();
       const record: any = { ...content, createdAt: now, updatedAt: now };
       if (pub.stamp !== undefined) record[DIRECTORY_STAMP_FIELD] = pub.stamp;
-      return { kind: "write" as const, id: writeRowId(this, content), expected: null, commit: () => super.post(record, context) };
+      return { kind: "write" as const, id, expected: null, commit: () => super.post(record, context) };
     });
   }
 

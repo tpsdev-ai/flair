@@ -13,6 +13,7 @@
  * row is re-read before the commit, so a change committed before that re-read is
  * visible. Some cases pause an owner's write and have the operator publish the
  * same row; the reverse case pauses the operator's write while the owner writes.
+ * One case POSTs an id that is already stored, with no pause.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -187,6 +188,7 @@ beforeAll(async () => {
   await seedRow(harper, "irw-rev", owner.id, "irw-rev-before@example.test");
   await seedRow(harper, "irw-xfer-put", owner.id, "irw-xfer-put-before@example.test");
   await seedRow(harper, "irw-xfer-patch", owner.id, "irw-xfer-patch-before@example.test");
+  await seedRow(harper, "irw-dup", owner.id, "irw-dup-before@example.test");
 }, 240_000);
 
 afterAll(async () => {
@@ -285,5 +287,24 @@ describe("flair#2340 — the Integration per-row write under a publish committed
     expect(JSON.parse(text).error).toBe("integration_owner_changed");
     const row = await storedRow(harper, "irw-xfer-patch");
     expect(JSON.stringify(row), "the former owner's write changed the transferred row").toBe(JSON.stringify(competed?.row));
+  }, 60_000);
+});
+
+describe("flair#2340 — an Integration POST that names a stored row id (real Harper)", () => {
+  it("is refused with integration_row_exists and the stored row is unchanged", async () => {
+    const fullRow = async () => {
+      const res = await adminOp(harper, { operation: "search_by_id", database: "flair", table: "Integration", ids: ["irw-dup"], get_attributes: ["*"] });
+      expect(res.status, `search_by_id returned ${res.status}`).toBe(200);
+      return ((await res.json()) as any[])[0] ?? null;
+    };
+    const before = await fullRow();
+    expect(before?.email).toBe("irw-dup-before@example.test");
+    const response = await requestAs(harper, owner, "POST", "/Integration", {
+      id: "irw-dup", agentId: owner.id, platform: PLATFORM, email: "irw-dup-after@example.test",
+    });
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(409);
+    expect(JSON.parse(text).error).toBe("integration_row_exists");
+    expect(JSON.stringify(await fullRow()), "the POST changed the stored row").toBe(JSON.stringify(before));
   }, 60_000);
 });
