@@ -161,7 +161,7 @@ function writeRowId(self: any, content: any): string | number | null {
 
 type IntegrationWriteOutcome<T> =
   | { kind: "denial"; denial: Response }
-  | { kind: "write"; id: string | number | null; expected: Record<string, any> | null; commit: () => Promise<T> };
+  | { kind: "write"; id: string | number | null; expected: Record<string, any> | null; commit: (owned: any) => Promise<T> };
 
 /**
  * One per-row decision for an Integration write (flair#2340). The stored-row
@@ -181,12 +181,12 @@ type IntegrationWriteOutcome<T> =
  */
 async function runIntegrationWrite<T>(
   ctx: any,
-  attemptFn: () => Promise<IntegrationWriteOutcome<T>>,
+  attemptFn: (owned: any) => Promise<IntegrationWriteOutcome<T>>,
 ): Promise<T | Response> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return await withOwnedTransaction(ctx, async () => {
-        const outcome = await attemptFn();
+      return await withOwnedTransaction(ctx, async (owned) => {
+        const outcome = await attemptFn(owned);
         if (outcome.kind === "denial") return outcome.denial;
         // Test-only: inert unless the fault-injection env opt-in is set and armed.
         const pause = txnPausePoint("integration-row-write");
@@ -197,7 +197,7 @@ async function runIntegrationWrite<T>(
             throw new IntegrationRowChangedDuringWrite();
           }
         }
-        return await outcome.commit();
+        return await outcome.commit(owned);
       });
     } catch (err) {
       if (!(err instanceof IntegrationRowChangedDuringWrite)) throw err;
@@ -288,20 +288,25 @@ export class Integration extends (databases as any).flair.Integration {
     if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
       return FORBIDDEN("forbidden: cannot write integration for another agent");
     }
-    return runIntegrationWrite((this as any).getContext?.(), async () => {
+    return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
       const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
       if (ownerDenial) return { kind: "denial" as const, denial: ownerDenial };
-      const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
+      const stored = await resolveStoredRow(this, "Integration", content, () => super.get(), owned);
       if (stored.denial) return { kind: "denial" as const, denial: stored.denial };
       // An absent addressed row answers NOT_FOUND instead of reaching
-      // super.patch() (flair#2322): deliberate and fail-closed for the
+      // the write (flair#2322): deliberate and fail-closed for the
       // directory publication read, and a narrowing beyond that surface.
       if (!stored.row) return { kind: "denial" as const, denial: NOT_FOUND() };
       const pub = await resolvePublicationStamp(this, content, stored.row, false);
       if (pub.denial) return { kind: "denial" as const, denial: pub.denial };
       const changes: any = { ...content, createdAt: stored.row.createdAt, updatedAt: new Date().toISOString() };
       if (pub.stamp !== undefined) changes[DIRECTORY_STAMP_FIELD] = pub.stamp;
-      return { kind: "write" as const, id: writeRowId(this, content), expected: stored.row, commit: () => super.patch(changes, query) };
+      // A patch merges into the row read in THIS attempt; the write is that row
+      // plus the changes, written through the static table with the attempt's
+      // owned context — not super.patch() on the request instance, whose cached
+      // request-time entry drops a field another write committed (flair#2340).
+      const merged: any = { ...stored.row, ...changes };
+      return { kind: "write" as const, id: writeRowId(this, content), expected: stored.row, commit: (owned) => (databases as any).flair.Integration.put(merged, owned) };
     });
   }
 
@@ -317,10 +322,10 @@ export class Integration extends (databases as any).flair.Integration {
         headers: { "Content-Type": "application/json" },
       });
     }
-    return runIntegrationWrite((this as any).getContext?.(), async () => {
+    return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
       const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
       if (ownerDenial) return { kind: "denial" as const, denial: ownerDenial };
-      const stored = await resolveStoredRow(this, "Integration", content, () => super.get());
+      const stored = await resolveStoredRow(this, "Integration", content, () => super.get(), owned);
       if (stored.denial) return { kind: "denial" as const, denial: stored.denial };
       const pub = await resolvePublicationStamp(this, content, stored.row, true);
       if (pub.denial) return { kind: "denial" as const, denial: pub.denial };
@@ -332,7 +337,12 @@ export class Integration extends (databases as any).flair.Integration {
       };
       if (pub.stamp !== undefined) record[DIRECTORY_STAMP_FIELD] = pub.stamp;
       else if (stored.row) record[DIRECTORY_STAMP_FIELD] = stored.row[DIRECTORY_STAMP_FIELD] ?? null;
-      return { kind: "write" as const, id: writeRowId(this, content), expected: stored.row, commit: () => super.put(record, context) };
+      const targetId = writeRowId(this, content);
+      if (targetId != null) record.id = targetId;
+      // A put REPLACES the row: full-replacement semantics, against the
+      // attempt's owned context (the static table write), not the request
+      // instance.
+      return { kind: "write" as const, id: targetId, expected: stored.row, commit: (owned) => (databases as any).flair.Integration.put(record, owned) };
     });
   }
 
@@ -362,27 +372,27 @@ export class Integration extends (databases as any).flair.Integration {
     // delete commits, so an owner delete that raced an operator publish is
     // refused instead of removing the published row.
     const targetId = typeof id === "object" ? id.id : id;
-    return runIntegrationWrite((this as any).getContext?.(), async () => {
-      const record = await (databases as any).flair.Integration.get(targetId, (this as any).getContext?.());
+    return runIntegrationWrite((this as any).getContext?.(), async (owned) => {
+      const record = await (databases as any).flair.Integration.get(targetId, owned);
 
       // Removing a published directory entry is operator-only — a withdrawal
       // (directoryPublishedAt: null) is the routine way to hide it.
       if (record && isValidPublicationStamp(record[DIRECTORY_STAMP_FIELD])) {
         const denial = await requireOperator(this, "removing a published directory entry is operator-only; withdraw it instead");
         if (denial) return { kind: "denial" as const, denial };
-        return { kind: "write" as const, id: targetId, expected: record, commit: () => super.delete(id) };
+        return { kind: "write" as const, id: targetId, expected: record, commit: (owned) => (databases as any).flair.Integration.delete(targetId, owned) };
       }
 
       const auth = await this._auth();
       if (auth.kind === "anonymous") return { kind: "denial" as const, denial: UNAUTH() };
       if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-        return { kind: "write" as const, id: targetId, expected: record, commit: () => super.delete(id) };
+        return { kind: "write" as const, id: targetId, expected: record, commit: (owned) => (databases as any).flair.Integration.delete(targetId, owned) };
       }
-      if (!record) return { kind: "write" as const, id: targetId, expected: null, commit: () => super.delete(id) };
+      if (!record) return { kind: "write" as const, id: targetId, expected: null, commit: (owned) => (databases as any).flair.Integration.delete(targetId, owned) };
       if (record.agentId !== auth.agentId) {
         return { kind: "denial" as const, denial: FORBIDDEN("forbidden: cannot delete integration for another agent") };
       }
-      return { kind: "write" as const, id: targetId, expected: record, commit: () => super.delete(id) };
+      return { kind: "write" as const, id: targetId, expected: record, commit: (owned) => (databases as any).flair.Integration.delete(targetId, owned) };
     });
   }
 }

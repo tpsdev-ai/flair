@@ -86,7 +86,7 @@ async function seedRow(harper: HarperInstance, id: string, agentId: string, emai
 async function storedRow(harper: HarperInstance, id: string): Promise<any> {
   const res = await adminOp(harper, {
     operation: "search_by_id", database: "flair", table: "Integration", ids: [id],
-    get_attributes: ["id", "agentId", "platform", "email", "directoryPublishedAt"],
+    get_attributes: ["id", "agentId", "platform", "email", "metadata", "directoryPublishedAt"],
   });
   expect(res.status, `search_by_id returned ${res.status}`).toBe(200);
   const rows: any = await res.json();
@@ -136,6 +136,14 @@ function publish(harper: HarperInstance, id: string, extra: Record<string, unkno
   });
 }
 
+/** The operator's publish as a PATCH (a merge): same binding, plus a fresh stamp. */
+function publishPatch(harper: HarperInstance, id: string, email: string): Promise<Response> {
+  return requestAs(harper, "operator", "PATCH", `/Integration/${id}`, {
+    id, agentId: owner.id, platform: PLATFORM, email,
+    directoryPublishedAt: new Date().toISOString(),
+  });
+}
+
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-irw-pause-"));
   const saved = {
@@ -158,6 +166,7 @@ beforeAll(async () => {
   await seedRow(harper, "irw-put", owner.id, "irw-put-before@example.test");
   await seedRow(harper, "irw-patch", owner.id, "irw-patch-before@example.test");
   await seedRow(harper, "irw-del", owner.id, "irw-del-before@example.test");
+  await seedRow(harper, "irw-rev", owner.id, "irw-rev-before@example.test");
 }, 240_000);
 
 afterAll(async () => {
@@ -190,6 +199,27 @@ describe("flair#2340 — the Integration per-row write under a publish committed
     const row = await storedRow(harper, "irw-patch");
     expect(row?.directoryPublishedAt).toBeString(); // assertion: the operator's publication is kept
     expect(row?.email).toBe(PUB_EMAIL); // assertion: the owner's email change is not committed over it
+  }, 60_000);
+
+  it("an operator PATCH publish that raced an owner's metadata write keeps both changes", async () => {
+    // The reverse interleaving: the OPERATOR's write is the one that spans the
+    // race. It reads the unpublished row, pauses before it commits, the owner
+    // commits a different field (metadata), then the operator resumes. On the
+    // retry the operator's write must be built from the row read inside that
+    // attempt — the owner's metadata — rather than from the request instance's
+    // stale entry; both changes are kept.
+    const before = await storedRow(harper, "irw-rev");
+    const { response, competed, released } = await withPausedWrite(
+      () => publishPatch(harper, "irw-rev", before.email),
+      () => requestAs(harper, owner, "PATCH", "/Integration/irw-rev", { metadata: "owner-metadata" })
+        .then(async (r) => ({ status: r.status, body: (await r.text()).slice(0, 300) })),
+    );
+    expect(released, "the write was not paused and released by this test").toBe("go");
+    expect(competed?.status, `the owner's metadata write failed: ${competed?.body}`).toBeLessThan(300);
+    expect(response.status, (await response.text()).slice(0, 300)).toBeLessThan(300);
+    const row = await storedRow(harper, "irw-rev");
+    expect(row?.directoryPublishedAt).toBeString(); // the operator's publication is kept
+    expect(row?.metadata).toBe("owner-metadata"); // the owner's different field is kept too
   }, 60_000);
 
   it("an owner by-id DELETE is refused once the row was published during the write", async () => {

@@ -33,6 +33,16 @@ class BaseIntegration {
   static async get(id: any) {
     return integrationStore.get(id) ?? null;
   }
+  // The STATIC table writes (Integration.ts writes through the static handle with
+  // the attempt's owned context, flair#2340).
+  static async put(record: any) {
+    integrationStore.set(record.id, { ...record });
+    return { ...record };
+  }
+  static async delete(id: any) {
+    integrationStore.delete(id);
+    return { ok: true };
+  }
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id;
     return integrationStore.get(id) ?? null;
