@@ -13,8 +13,10 @@
   404, and a change after the re-read is not checked.
   The embedding-stamp migration re-embeds a stale row (other than a
   `.content`-suffix id) with the re-embed `PATCH /Memory/<id>`
-  (`{"embedding": null, "embeddingModel": null}`), which embeds the row as
-  stored when the request runs and writes only `embedding`, `embeddingModel`
-  and `updatedAt`. In 0.59.0 it sent a full-row `PUT` built from
+  (`{"embedding": null, "embeddingModel": null}`), which embeds the row the
+  PATCH handler reads and writes only `embedding`, `embeddingModel` and
+  `updatedAt`. Edits committed before that stored-row read are kept.
+  An edit committed while `Memory.patch()` awaits the embedding is a separate,
+  tracked window. In 0.59.0 it sent a full-row `PUT` built from
   the row it had read, which overwrote a change committed between that read
   and the write.

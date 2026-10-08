@@ -35,10 +35,10 @@
  *
  * The request is the re-embed PATCH (flair#2296): body
  * `{"embedding": null, "embeddingModel": null}`. Memory.patch() embeds the row
- * as stored when the request runs and writes `embedding`, `embeddingModel` and
- * `updatedAt`, so another writer's change to any other field, committed after
- * this migration read the row, is kept (flair#2275); a full-row PUT built from
- * that read would write the read copy back over it.
+ * the PATCH handler reads and writes `embedding`, `embeddingModel` and
+ * `updatedAt`. Edits committed after this migration's read and before the PATCH
+ * handler's stored-row read are kept (flair#2275). An edit committed while
+ * Memory.patch() awaits the embedding is a separate, tracked window.
  *
  * THIS IS LOAD-BEARING, confirmed empirically while building
  * test/integration/migrations-embedding-stamp-e2e.test.ts against real
