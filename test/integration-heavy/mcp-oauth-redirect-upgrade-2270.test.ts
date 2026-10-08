@@ -185,15 +185,15 @@ describe("flair#2270 provider with MCP disabled", () => {
     expect(harper.getLog?.()).not.toContain("Could not load component");
     expect(harper.getLog?.()).toContain(REDIRECT);
     const auth = `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64")}`;
-    const finding = await readTargetMcpRedirectFinding(async () => {
-      const res = await fetch(`${harper.httpURL}/HealthDetail`, {
-        headers: { Authorization: auth }, signal: AbortSignal.timeout(10_000),
-      });
-      expect(res.status).toBe(200);
-      const detail = await res.json();
-      expect(detail.mcpOAuthProvider).toEqual({ credentialsPresent: true, redirectPresent: false });
-      return detail;
+    // Read and assert OUTSIDE readTargetMcpRedirectFinding: it treats any throw from its reader as
+    // "target unavailable", which would swallow these assertions and leave only the isIssue check.
+    const res = await fetch(`${harper.httpURL}/HealthDetail`, {
+      headers: { Authorization: auth }, signal: AbortSignal.timeout(10_000),
     });
+    expect(res.status).toBe(200);
+    const detail = await res.json();
+    expect(detail.mcpOAuthProvider).toEqual({ credentialsPresent: true, redirectPresent: false });
+    const finding = await readTargetMcpRedirectFinding(async () => detail);
     expect(finding?.isIssue).toBe(true);
     expect(finding?.message).toContain(REDIRECT);
     const anonymous = await fetch(`${harper.httpURL}/HealthDetail`, { signal: AbortSignal.timeout(10_000) });
