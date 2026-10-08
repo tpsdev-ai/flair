@@ -1,7 +1,6 @@
 /**
  * init.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
- * Pure move, ZERO behavior change: `flair init` (first-run provisioning: config, admin pass, launchd service, soul wizard).
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
  * register(); this module never imports src/cli.ts. Top-level imports only
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
@@ -13,6 +12,7 @@ import { hookSettingsPath } from "../hook-install.js";
 import { ClientId, claudeCodeMcpEntry, detectClients, renderWiringSummary, wireAntigravity, wireClaudeCodeJson, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
 import { DEFAULT_ADMIN_USER, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
 import {
+  INIT_RESET_ADMIN_PASS_COMMAND,
   detectPersistedAdminUser,
   executeAdminPasswordRotate,
   initAdminPassRefusalMessage,
@@ -68,6 +68,7 @@ export type InitCli = {
   repointMainServiceUnit: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   writeAdminPassFile: (...args: any[]) => any;
+  proveAdminPassAgainstInstance: (port: number, adminPass: string) => Promise<string | null>;
   resolveOpsBindHost: (...args: any[]) => any;
   resolveHttpBindFor: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
@@ -201,6 +202,10 @@ function resolveHttpPort(...args: any[]): any {
 
 function writeAdminPassFile(...args: any[]): any {
   return cli.writeAdminPassFile(...args);
+}
+
+function proveAdminPassAgainstInstance(port: number, adminPass: string): Promise<string | null> {
+  return cli.proveAdminPassAgainstInstance(port, adminPass);
 }
 
 function resolveOpsBindHost(...args: any[]): any {
@@ -808,6 +813,47 @@ program
       process.exit(1);
     };
 
+    const persistSuppliedAdminPass = async (): Promise<void> => {
+      if (resolveInitAdminPasswordSource(false, passwordCtx) !== "re-persist") return;
+      if (opts.skipStart && !alreadyRunning && existsSync(adminPassPath)) {
+        try {
+          const saved = lstatSync(adminPassPath);
+          if (saved.isFile() && (typeof process.getuid !== "function" || saved.uid === process.getuid()) &&
+              readAdminPassFileSecure(adminPassPath) === adminPass) return;
+        } catch (err: unknown) {
+          console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(1);
+        }
+      }
+      if (!alreadyRunning && (existsSync(adminPassPath) || persistedAdminUser)) {
+        const verificationDeferred = opts.skipStart && !!agentId;
+        console.error(
+          `Refusing to write ${adminPassPath}: ` +
+            (verificationDeferred
+              ? `credential verification is deferred by --skip-start. `
+              : `no running instance; a saved admin-pass file or persisted admin user exists. `) +
+            `No pass file was written; any existing file is unchanged. ` +
+            (verificationDeferred
+              ? `Re-run init without --skip-start to verify a different supplied credential.`
+              : harperConfigPath(dataDir) !== null
+              ? `Start the instance and re-run init with the supplied credential, or run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
+              : `Run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`)
+        );
+        process.exit(1);
+      }
+      if (alreadyRunning) {
+        const failure = await proveAdminPassAgainstInstance(httpPort, adminPass);
+        if (failure) {
+          console.error(
+            `Refusing to write ${adminPassPath}: ${failure} on port ${httpPort}. No pass file was written; any existing file is unchanged. ` +
+              `To rotate the instance's admin password instead, run:\n  ${INIT_RESET_ADMIN_PASS_COMMAND}`
+          );
+          process.exit(1);
+        }
+      }
+      writeAdminPassFile(adminPassPath, adminPass + "\n");
+    };
+
     // Read from file if provided
     if (opts.adminPassFile) {
       try {
@@ -820,8 +866,8 @@ program
       if (opts.resetAdminPass) {
         refuseIfNeeded(false);
         pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
-      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
-        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else {
+        await persistSuppliedAdminPass();
       }
     } else if (process.env.FLAIR_ADMIN_PASS) {
       adminPass = process.env.FLAIR_ADMIN_PASS;
@@ -829,8 +875,8 @@ program
       if (opts.resetAdminPass) {
         refuseIfNeeded(false);
         pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
-      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
-        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else {
+        await persistSuppliedAdminPass();
       }
     } else if (process.env.HDB_ADMIN_PASSWORD) {
       adminPass = process.env.HDB_ADMIN_PASSWORD;
@@ -838,8 +884,8 @@ program
       if (opts.resetAdminPass) {
         refuseIfNeeded(false);
         pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
-      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
-        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else {
+        await persistSuppliedAdminPass();
       }
     } else if (opts.adminPass) {
       // Inline admin pass (deprecated)
@@ -848,16 +894,14 @@ program
       if (opts.resetAdminPass) {
         refuseIfNeeded(false);
         pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
-      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
-        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else {
+        await persistSuppliedAdminPass();
       }
     } else {
       passwordSource = "generated";
       const fileExists = existsSync(adminPassPath);
       const decision = resolveInitAdminPasswordSource(fileExists, passwordCtx);
       if (decision === "reuse-existing") {
-        // flair#827: an admin-pass file already on disk means a PRIOR `flair
-        // init` already bootstrapped Harper's admin user with this password.
         try {
           adminPass = readAdminPassFileSecure(adminPassPath);
         } catch (err: any) {

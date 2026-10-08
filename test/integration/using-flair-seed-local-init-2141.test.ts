@@ -112,11 +112,11 @@ function nodeBin(): string {
   return "node";
 }
 
-function runLocalInit(install: Install, extraArgs: string[]) {
+function runLocalInit(install: Install, extraArgs: string[], supplyCredential = true) {
   const startedAt = Date.now();
   const res = spawnSync(
     nodeBin(),
-    [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), "--admin-pass", ADMIN_PASS,
+    [CLI, "init", "--port", String(install.httpPort), "--ops-port", String(install.opsPort), ...(supplyCredential ? ["--admin-pass", ADMIN_PASS] : []),
       "--skip-soul", "--no-mcp", "--skip-smoke", "--skip-claude-md", "--skip-hook", ...extraArgs],
     {
       cwd: ROOT,
@@ -326,7 +326,7 @@ describe("flair#2141 S2 — local init and installed-instance handoff", () => {
     }, 267_250);
 
     test("--skip-start stays pending through a credential-less start", async () => {
-      const skipped = runLocalInit(install, ["--skip-start"]);
+      const skipped = runLocalInit(install, ["--skip-start"], false);
       expect(skipped.status, skipped.stdout + skipped.stderr).toBe(0);
       expect(skipped.stdout).toContain("using-flair skill: pending");
       expect(existsSync(skillSeedPendingPath(install.dataDir))).toBe(true);

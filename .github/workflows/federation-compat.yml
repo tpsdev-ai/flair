@@ -67,6 +67,13 @@ on:
       # not just federation), but there's no isolated federation-CLI module
       # to filter on more tightly today.
       - "src/cli.ts"
+      - "src/commands/reembed.ts"
+      - "src/lib/reembed-server-support.ts"
+      - "resources/Memory.ts"
+      - "resources/search-readiness.ts"
+      - "resources/health.ts"
+      - "schemas/memory.graphql"
+      - "schemas/agent.graphql"
       # Ed25519 instance-identity keystore federation pair/sync sign with.
       - "src/keystore.ts"
       # The compat suites themselves, the shared Harper spawn/reuse harness
@@ -158,5 +165,5 @@ jobs:
       - name: Pre-download embedding model
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
 
-      - name: Run compat suite (federation mixed-version + downgrade boot + upgrade liveness)
+      - name: Run compat suite (federation + downgrade + upgrade + reembed refusal)
         run: bun test test/compat/

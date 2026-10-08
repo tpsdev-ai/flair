@@ -47,7 +47,7 @@ test("apply rejects a node-shaped file even if supplied as stale or invalid", ()
   const name = "flair_deadbeef.key";
   writeFileSync(join(dir, name), Buffer.alloc(60, 42));
   for (const classification of ["stale", "invalid"] as const) {
-    expect(applyKeyPrune(dir, [{ name, class: classification, reason: "fixture" }], "2026-10-02")).toEqual([]);
+    expect(applyKeyPrune(dir, [{ name, class: classification, reason: "fixture" }], "2026-10-02")).toEqual({ moved: [], skipped: [] });
     expect(existsSync(join(dir, name))).toBe(true);
   }
 });
@@ -60,7 +60,7 @@ test("a registered Agent with a node-shaped id and missing .pub stays unidentifi
     async () => ({ state: "read", ids: [], agentIds: [id] }));
   expect(result.entries.map(entry => entry.class)).toEqual(["unidentified"]);
   expect(result.entries[0].reason).toContain("Agent");
-  expect(applyKeyPrune(dir, result.entries, "2026-10-02")).toEqual([]);
+  expect(applyKeyPrune(dir, result.entries, "2026-10-02")).toEqual({ moved: [], skipped: [] });
 });
 
 test("unknown Agent registration never licenses a candidate", async () => {

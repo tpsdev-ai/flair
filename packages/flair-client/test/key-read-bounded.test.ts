@@ -52,6 +52,16 @@ describe("flair#2086: the key-file read is asynchronous and bounded", () => {
     expect(await loadPrivateKeyBounded(p)).toBeInstanceOf(KeyObject);
   });
 
+  test("a missing key file rejects with the ENOENT readFileSync threw", async () => {
+    const p = join(scratch(), "absent.key");
+    await expect(loadPrivateKeyBounded(p)).rejects.toMatchObject({
+      code: "ENOENT",
+      errno: -2,
+      syscall: "open",
+      path: p,
+    });
+  });
+
   test("an oversized key file is refused before it is read", async () => {
     const p = join(scratch(), "big.key");
     writeFileSync(p, Buffer.alloc(KEY_FILE_MAX_BYTES + 1, 0x41));
