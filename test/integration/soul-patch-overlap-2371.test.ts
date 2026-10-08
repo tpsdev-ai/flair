@@ -1,27 +1,18 @@
 /**
  * soul-patch-overlap-2371.test.ts — flair#2371, real Harper.
  *
- * Soul.patch (resources/Soul.ts) read the stored row and merged the request onto
- * it in one transaction. Harper has no compare-or-set on a table write: a
- * transaction does not fail when a row it read is changed by another write
- * before it commits, so a PATCH built from an earlier read can drop a field a
- * concurrent write set, while both report success.
+ * A raw write racing a PATCH could drop the raw writer's field. Ordinary
+ * same-process PATCHes are serialized by the existing Soul write lock.
  *
- * The fix reads the row, merges and writes per attempt, then re-reads the
- * COMMITTED row before the transaction commits; a concurrent change aborts the
- * staged write (no version appended) and the attempt retries from the committed
- * row. A replaced row (a different subject, or gone) is refused with a named
- * error instead of written.
+ * The confirmation read detects changes visible there and aborts the staged
+ * write. A different or absent subject at confirmation is refused; the row
+ * is unchanged by that PATCH. Changes between confirmation and commit can
+ * still be overwritten because Harper has no compare-and-set.
  *
- * These cases drive a real HTTP PATCH against a spawned Harper carrying the
- * test-only pause (resources/txn-pause-point.ts, enabled by
- * FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set for this
- * file's Harper only). The PATCH is paused after its read; a competing write
- * to a different field commits while it is paused; the PATCH then confirms,
- * aborts and retries. A same-worker second PATCH would wait on the per-key
- * instruction lock (instruction_version_busy), so the competing write is a raw
- * table update — the interleaving, not the writer's identity, is what this
- * exercises.
+ * These cases require a Harper process spawned by startHarper for this file.
+ * Its test-only pause is enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and
+ * FLAIR_TEST_PAUSE_DIR. The raw writer commits while the PATCH is paused.
+ * A second PATCH waits on the existing lock and may succeed when it frees.
  *
  * Retry exhaustion (the bounded attempts ending in the named conflict) is
  * covered deterministically in test/unit-isolated/instruction-version-record.test.ts:
@@ -45,8 +36,10 @@ let pauseDir = "";
 const marker = (name: string) => join(pauseDir, `${name}.${POINT}`);
 const clearMarkers = () => { for (const m of MARKERS) rmSync(marker(m), { force: true }); };
 
-/** Refuse any target that is not the ephemeral instance this file started. */
+/** Require startHarper to have spawned this instance before any test writes. */
 function assertOwnInstance(h: HarperInstance): void {
+  expect(h.external, "external Harper instances are refused").toBe(false);
+  expect(h.process?.pid, "startHarper must return a spawned process").toBeGreaterThan(0);
   for (const url of [h.httpURL, h.opsURL]) {
     const u = new URL(url);
     expect(["127.0.0.1", "localhost"], url).toContain(u.hostname);
@@ -163,7 +156,7 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2371 — a Soul PATCH keeps every field when another write overlaps (real Harper)", () => {
+describe("flair#2371 — a Soul PATCH re-merges raw changes visible at confirmation (real Harper)", () => {
   test("the value writer commits last: the durability writer's field is not dropped", async () => {
     const key = `overlap-value-last-${sfx}`;
     const id = `soul-a-${sfx}:${key}`;
@@ -209,7 +202,7 @@ describe("flair#2371 — a Soul PATCH keeps every field when another write overl
     expect(JSON.parse(versions.at(-1)!.soulSnapshot)).toEqual(row);
   }, 60_000);
 
-  test("a PATCH whose soul row's owner changes mid-request is refused and changes nothing", async () => {
+  test("a Soul owner replacement visible at confirmation refuses the PATCH without changes by that PATCH", async () => {
     const key = `overlap-owner-${sfx}`;
     const id = `soul-a-${sfx}:${key}`;
     await createSoul(id, `soul-a-${sfx}`, key, "before");

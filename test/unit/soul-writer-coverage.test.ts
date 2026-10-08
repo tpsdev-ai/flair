@@ -10,7 +10,6 @@ const add = (file: string, sites: string[], reason: string) => {
 add("Soul", ["alias-source:(databases as any).flair.Soul#1", "writer:super.post#1", "writer:super.put#1", "writer:super.delete#1"], "Resource boundary: operator or deliberate internal authorization; content backstop on writes.");
 add("Soul", ["alias-source:(databases as any).flair?.Soul#1"], "Static-table handle the PATCH retry loop reads the committed row and writes this attempt's row from, inside the version transaction.");
 add("Soul", ["writer:table.put#1"], "The PATCH attempt's full-row write of the row built from that attempt's read; a confirmation read follows inside the transaction.");
-add("Soul", ["writer:super.put#2"], "The put path's write, recorded inside the version transaction.");
 add("instruction-version-record", ["alias-source:(databases as any).flair?.Soul#1"], "Destination occupancy read inside the version transaction.");
 add("instruction-version-record", ["writer:table.create#1", "writer:table.create#2", 'writer:createHash("sha256").update#1', 'writer:createHash("sha256").update#2'], "Version appends and hashes included by conservative sink enumeration.");
 add("AgentSeed", ["writer:(databases as any).flair.Soul.put#1"], "Provisioning: source authorization and whole-template content validation precede mutations.");
