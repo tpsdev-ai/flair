@@ -11,6 +11,7 @@ import {
 } from "../../src/hook-install.ts";
 import { isFlairCaptureCommand, parseCaptureCommand } from "../../src/doctor-client.ts";
 import { createCaptureRuntime } from "../helpers/capture-runtime.ts";
+import { FLAIR_MCP_PACKAGE, flairCliVersion } from "../../src/lib/mcp-spec.ts";
 
 const root = resolve(import.meta.dir, "../..");
 let home: string;
@@ -45,6 +46,25 @@ function status() {
   expect(result.signal).toBeNull();
   return result;
 }
+
+it("capture status names an edited entry when SessionStart has an older pin", () => {
+  expect(install().ok).toBe(true);
+  const config = settings();
+  const currentVersion = flairCliVersion();
+  const [major, minor, patch] = currentVersion.split(".").map(Number);
+  const olderVersion = patch > 0 ? `${major}.${minor}.${patch - 1}` : `${major}.${minor - 1}.0`;
+  const sessionStart = config.hooks.SessionStart[0].hooks[0];
+  expect(sessionStart.command).toContain(`${FLAIR_MCP_PACKAGE}@${currentVersion}`);
+  sessionStart.command = sessionStart.command.replace(`${FLAIR_MCP_PACKAGE}@${currentVersion}`, `${FLAIR_MCP_PACKAGE}@${olderVersion}`);
+  config.hooks.PostToolUse[0].hooks[0].command += " ";
+  save(config);
+
+  const result = status();
+  expect(result.status).toBe(1);
+  expect(result.stdout).toContain(`command names older pin flair-mcp@${olderVersion}`);
+  expect(result.stdout).toContain("capture: stale");
+  expect(result.stdout).toContain("PostToolUse[0].hooks[0]");
+}, 30_000);
 
 for (const variant of ["group", "nested", "drifted", "drifted first"] as const) {
   it(`install normalizes ${variant} duplicates in settings`, () => {

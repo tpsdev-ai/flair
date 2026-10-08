@@ -378,6 +378,7 @@ export function register(program: Command): void {
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
         renderContinuity();
         renderActionRecall();
+        renderCapture();
         console.log("");
         process.exit(1);
       }
