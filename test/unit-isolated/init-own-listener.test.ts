@@ -1,6 +1,6 @@
 import { beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.ts";
@@ -19,6 +19,10 @@ function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "declared"
   const dataDir = join(home, "data");
   const log = join(home, "requests.jsonl");
   mkdirSync(dataDir);
+  // Pin the modes a PID-file proof requires: ownedInitPidfilePid rejects a data
+  // dir or hdb.pid with group/other write bits, and default create modes inherit
+  // the umask (0002 yields 0775/0664).
+  chmodSync(dataDir, 0o700);
   writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
   const bin = join(home, "node_modules/harper/dist/bin");
   mkdirSync(bin, { recursive: true });
@@ -37,7 +41,7 @@ function runInit(proof: "own" | "foreign" | "other-pid" | "missing" | "declared"
     const child = spawn("node", ${JSON.stringify(proof === "unrelated" ? ["-e", "console.log('ready'); setTimeout(() => {}, 60000)"] : [entry, "run", "."])}, { stdio: ["ignore", "pipe", "ignore"] });
     await once(child.stdout, "data");
     try {
-      if (${proof !== "missing" && proof !== "declared"}) writeFileSync(${JSON.stringify(join(dataDir, "hdb.pid"))}, String(child.pid));
+      if (${proof !== "missing" && proof !== "declared"}) writeFileSync(${JSON.stringify(join(dataDir, "hdb.pid"))}, String(child.pid), { mode: 0o600 });
       if (${proof === "sidecar-pid" || proof === "sidecar-start"}) writeFileSync(${JSON.stringify(join(dataDir, "flair-daemon.json"))}, JSON.stringify({ pid: ${proof === "sidecar-pid" ? "child.pid + 1" : "child.pid"}, startTimeMs: 0, port: 20991 }));
       const init = await import(${JSON.stringify(INIT)});
       const bindCli = init.bindCli;
