@@ -18,6 +18,7 @@ import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
+import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
@@ -540,15 +541,15 @@ export function register(program: Command): void {
       }
 
       const ids = Array.from(allIds);
-      let deleted = 0;
-      for (const id of ids) {
-        await api("DELETE", `/Memory/${encodeRecordId(id)}`, undefined, {
-          baseUrl: instance.baseUrl, explicitAdminPass: adminPass,
-          adminUser: resolveAdminUser(undefined), agentId: null,
-        });
-        deleted++;
-        process.stdout.write(`\r  Deleting ${deleted}/${ids.length} (${Math.round((deleted / ids.length) * 100)}%)`);
-      }
+      // Remove the matched rows through the server's physical-removal path: a
+      // skill-tagged row expands to its whole lineage there. The count printed
+      // is the rows the response lists as removed; a response that does not
+      // list every matched id fails the command.
+      const purge = await api("POST", "/MemoryPurge", { ids }, {
+        baseUrl: instance.baseUrl, explicitAdminPass: adminPass,
+        adminUser: resolveAdminUser(undefined), agentId: null,
+      });
+      const deleted = confirmedPurgeIds(purge, ids).length;
       console.log(`\n\n✅ Deleted ${deleted} rows.`);
       console.log("");
       console.log("Note: this is a local-instance delete. Federated peers will keep their copies until");

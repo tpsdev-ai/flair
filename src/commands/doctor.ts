@@ -1377,7 +1377,10 @@ program
           // ✓ "still runs". Check freshness first so a stale pin cannot
           // hide behind the execution probe. Catalog owns the issue count.
           const claudeStale = sessionStartHookPinFindings(resolveHome()).find((f) => f.reading.target.id === "claude-code");
-          if (claudeStale && claudeStale.direction === "unknown") {
+          if (claudeStale?.reading.held) {
+            // flair#2291: a held hook shape (see readOwnedPin).
+            console.log(`  ${render.icons.warn} SessionStart hook: ${claudeStale.reading.held}`);
+          } else if (claudeStale && claudeStale.direction === "unknown") {
             // flair#1778: a pin we cannot compare is its OWN finding — a warn,
             // never the stale "old adapter" error, and NOT re-pinned (the
             // refresh holds an unreadable pin). Needs no --fix.
@@ -1565,7 +1568,10 @@ program
         const hook = codexHook;
         if (hook.present) {
           const codexStale = sessionStartHookPinFindings(resolveHome()).find((f) => f.reading.target.id === "codex");
-          if (codexStale && codexStale.direction === "unknown") {
+          if (codexStale?.reading.held) {
+            // flair#2291: same held rule as Claude Code above.
+            console.log(`  ${render.icons.warn} SessionStart hook (codex): ${codexStale.reading.held}`);
+          } else if (codexStale && codexStale.direction === "unknown") {
             // flair#1778: same direction rule as Claude Code above.
             console.log(`  ${render.icons.warn} SessionStart hook (codex): pin is not a version I can compare: ${codexStale.reading.pin} — not re-pinned; re-run flair init or edit the hook if this is unintended`);
           } else if (codexStale && codexStale.direction === "ahead") {

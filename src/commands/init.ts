@@ -7,7 +7,8 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { applyOrReportClaudeMdBootstrap, applyOrReportSessionStartHook } from "../doctor-client.js";
+import { applyOrReportClaudeMdBootstrap } from "../doctor-client.js";
+import { applyOrRepinSessionStartHook } from "../lib/owned-pins.js";
 import { hookSettingsPath } from "../hook-install.js";
 import { ClientId, claudeCodeMcpEntry, detectClients, renderWiringSummary, wireAntigravity, wireClaudeCodeJson, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
 import { DEFAULT_ADMIN_USER, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
@@ -1589,7 +1590,7 @@ program
             // ~/.claude/settings.json — without it, mcp__flair__bootstrap only
             // ever runs if the agent remembers to call it itself.
             // --skip-hook opts out and prints the exact JSON to add by hand.
-            const hookResult = applyOrReportSessionStartHook(resolveHome(), agentId, !!opts.skipHook);
+            const hookResult = applyOrRepinSessionStartHook(resolveHome(), agentId, !!opts.skipHook);
             console.log(`   ${hookResult.ok ? "✓" : "•"} ${hookResult.message}`);
             if (hookResult.hint) {
               for (const line of hookResult.hint.split("\n")) console.log(`   ${line}`);
@@ -1618,7 +1619,7 @@ program
             // consent to set up the client, same as the Claude Code hook
             // applied above. --skip-hook opts out and prints the JSON.
             if (clientId === "codex" && result.ok) {
-              const hookResult = applyOrReportSessionStartHook(
+              const hookResult = applyOrRepinSessionStartHook(
                 resolveHome(),
                 agentId,
                 !!opts.skipHook,
