@@ -3252,14 +3252,14 @@ function isProcessAlive(pid: number): boolean {
 // Used during restart to confirm the old Harper process actually exited before
 // we start polling /Health — otherwise the still-shutting-down old process can
 // answer and we'd declare restart success while a gap is still ahead.
-// No probe starts after the deadline (flair#2357).
+// Cap sleeps at the remaining time; probe once after the last wake, then stop (flair#2357).
 export async function waitForProcessExit(
   pid: number,
   timeoutMs: number,
   probe: (pid: number) => PidLiveness = probePidLiveness,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() <= deadline) {
+  while (true) {
     if (probe(pid).kind === "gone") return;
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;

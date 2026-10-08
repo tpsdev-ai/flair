@@ -1,1 +1,1 @@
-- **The restart wait for the old process to exit starts no probe after its deadline (#2357).** Sleep requests are capped at the remaining time; a probe at the deadline is allowed.
+- **The restart wait caps sleeps at the remaining time and probes once after the last wake (#2357).** Timer overshoot still permits that final probe; no probe follows it.
