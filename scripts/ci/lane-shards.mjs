@@ -214,7 +214,8 @@ export function discoveredTestPackages(root = ROOT) {
   const jsTestPackages = [];
   const nonJsTestPackages = [];
   for (const entry of readdirSync(base, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    if (!entry.isDirectory()) continue;
     const dir = join(base, entry.name);
     if (matchingFiles(dir, JS_TEST_FILE).length) jsTestPackages.push(entry.name);
     else if (matchingFiles(dir, NON_JS_TEST_FILE).length) nonJsTestPackages.push(entry.name);

@@ -95,6 +95,22 @@ describe("lane-shards — the plan", () => {
     expect(plannedTestPackages(unitPlan(ROOT), ROOT)).toEqual([...WORKSPACE_PACKAGES].sort());
   });
 
+  test("package discovery skips packages/node_modules and dot entries", () => {
+    const root = fixtureRoot([
+      "packages/node_modules/dependency/test/a.test.ts",
+      "packages/node_modules/python/tests/test_thing.py",
+      "packages/.hidden/test/a.test.ts",
+      "packages/.python/tests/test_thing.py",
+    ]);
+    expect(discoveredTestPackages(root)).toEqual({
+      jsTestPackages: [...WORKSPACE_PACKAGES].sort(),
+      nonJsTestPackages: [],
+    });
+    const res = verifyLaneShards(LANE_SHARDS, unitPlan(root), listLaneFiles(root), root);
+    expect(res.missingTestPackages).toEqual([]);
+    expect(res.unlistedTestPackages).toEqual([]);
+  });
+
   test("a wholly omitted package with a .test.ts file fails the verifier", () => {
     const root = fixtureRoot(["packages/x/test/a.test.ts"]);
     const res = verifyLaneShards(LANE_SHARDS, unitPlan(root), listLaneFiles(root), root);
