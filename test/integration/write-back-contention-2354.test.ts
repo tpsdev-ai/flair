@@ -21,9 +21,11 @@
  *   - `<path>`: a competing write commits AFTER this write-back's read/build —
  *     the committed re-read must abort the staged write and retry, keeping the
  *     competing change rather than reverting it.
- * The paths here are those a serving instance exposes over HTTP. The
- * conversion also covers the embedding backfill and the visibility and
- * synthetic boot migrations; those are not exercised here.
+ * The paths exercised here are those a serving instance exposes over HTTP:
+ * feed ingest, administrator reindex, the last-reflected stamp and the
+ * promotion stamp. The conversion also covers the embedding backfill and the
+ * visibility and synthetic boot migrations; those are not exercised here —
+ * their pause points cannot arm the window with a freshly started instance.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -130,6 +132,29 @@ async function withPaused<T>(point: string, trigger: () => Promise<Response>, co
   return { response, competed, released, paused };
 }
 
+/** The promoted Memory row a paused sweep wrote: the id is minted inside the
+ *  handler, so the competing writer finds it by its owning agent + content. */
+async function findPromotedRow(harper: HarperInstance, agentId: string, claim: string): Promise<any> {
+  const res = await adminOp(harper, {
+    operation: "search_by_value", database: "flair", table: "Memory",
+    search_attribute: "agentId", search_value: agentId, get_attributes: ["*"],
+  });
+  const text = await res.text();
+  expect(res.status, `search_by_value returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  const rows = JSON.parse(text) as any[];
+  return (Array.isArray(rows) ? rows : []).find((r) => r?.content === claim) ?? null;
+}
+
+/** Seed a PENDING ADK candidate (scopeTag-bearing, the shape the unattended
+ *  sweep accepts) directly through the admin ops API. */
+async function seedCandidate(harper: HarperInstance, agentId: string, row: Record<string, unknown>): Promise<void> {
+  const res = await adminOp(harper, {
+    operation: "insert", database: "flair", table: "MemoryCandidate",
+    records: [{ agentId, status: "pending", generatedAt: new Date().toISOString(), generatedBy: "test-seed", ...row }],
+  });
+  expect(res.status, `seed candidate ${String(row.id)} returned ${res.status}: ${(await res.text()).slice(0, 200)}`).toBe(200);
+}
+
 let harper: HarperInstance;
 let pauseDir: string;
 const feedAgent = mkAgent("wbc-feed");
@@ -229,6 +254,41 @@ describe("flair#2354 — the last-reflected patch write-back under a concurrent 
       console.log(`${point} reflect row:`, JSON.stringify({ content: row?.content, lastReflected: row?.lastReflected ?? null }));
       expect(row?.content, "the competing content edit is kept, not reverted by the patch").toBe("reflect edited");
       expect(row?.lastReflected, "the lastReflected bookkeeping landed").toBeTruthy();
+    }, 60_000);
+  }
+});
+
+describe("flair#2354 — the promotion stamp write-back under a concurrent change (real Harper)", () => {
+  for (const point of ["promotion-stamp-pre", "promotion-stamp"]) {
+    it(`keeps a competing content edit and incarnation token, and applies the promotion stamp (${point})`, async () => {
+      const agentId = `wbc-stamp-agent-${point}`;
+      const stampAgent = mkAgent(agentId);
+      await seedAgent(harper, stampAgent);
+      const claim = `promotion stamp claim for ${point}`;
+      await seedCandidate(harper, agentId, { id: `wbc-stamp-cand-${point}`, claim, scopeTag: `adk:app:${agentId}`, sourceMemoryIds: [] });
+      const TOKEN2 = randomUUID();
+      const COMPETED = `competing stamp edit for ${point}`;
+      const { response, released, paused, competed } = await withPaused(
+        point,
+        () => authSend(harper, stampAgent, "POST", "/AutoPromoteCandidates", { agentId }),
+        async () => {
+          const row = await findPromotedRow(harper, agentId, claim);
+          if (!row) throw new Error(`no promoted row for ${agentId} while paused at ${point}`);
+          const status = await updateRow(harper, { id: row.id, content: COMPETED, instanceToken: TOKEN2 });
+          expect(status, `competing update returned ${status}`).toBe(200);
+          return row.id as string;
+        },
+      );
+      expect(released, "the promotion stamp was not paused and released by this test").toBe("go");
+      expect(paused).toBe(true);
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+      expect(competed, "the competing writer did not run").toBeTruthy();
+      const row = await readRow(harper, competed as string);
+      console.log(`${point} stamp row:`, JSON.stringify({ content: row?.content, promotionStatus: row?.promotionStatus, instanceToken: row?.instanceToken }));
+      expect(row?.promotionStatus, "the promotion stamp landed").toBe("approved");
+      expect(row?.promotedBy, "the stamp records the promotion reviewer").toBeTruthy();
+      expect(row?.content, "the competing content edit is kept, not reverted by the stamp").toBe(COMPETED);
+      expect(row?.instanceToken, "the competing incarnation token is kept, not reverted").toBe(TOKEN2);
     }, 60_000);
   }
 });
