@@ -41,7 +41,8 @@ export type TxnPausePoint =
   | "candidate-delete-pre"
   | "candidate-delete"
   | "relationship-delete-pre"
-  | "relationship-delete";
+  | "relationship-delete"
+  | "feed-dedup-repair";
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);

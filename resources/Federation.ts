@@ -21,6 +21,7 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance, storeInstanceSeed } from "./instance-create-lock.js";
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
+import { stampEphemeralExpiry } from "./memory-durability.js";
 import { isReservedSeedId } from "./seed-reservation.js";
 import { endsWithContentSelectorSuffix } from "../src/lib/memory-id-policy.js";
 import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
@@ -842,7 +843,19 @@ export class FederationSync extends Resource {
           continue;
         }
 
-        const mergedData = mergeRecord(local, record);
+        const incoming = { ...record.data };
+        if (record.table === "Memory") {
+          // Ephemeral peer expiry must be a valid UTC ISO date from the Unix
+          // epoch through receiver time + 365 days. Missing expiry uses the receiver's
+          // clock and configured TTL when the incoming row wins last-write-wins.
+          // Malformed or out-of-bound ephemeral expiry skips the record before merging.
+          const expiryError = stampEphemeralExpiry(incoming, local, { incoming: true });
+          if (expiryError) {
+            recordSkip("invalid_expiry");
+            continue;
+          }
+        }
+        const mergedData = mergeRecord(local, { ...record, data: incoming });
 
         // ── flair#1940 A1'' item 8: the SAME declared-attribute whitelist the
         // writers apply. A dirty pushed row (a legacy direct-insert, or a raw

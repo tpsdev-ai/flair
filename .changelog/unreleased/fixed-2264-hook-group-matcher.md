@@ -1,0 +1,1 @@
+- **Action-recall and learning-capture installation preserve shared group matchers when moving recognized commands into dedicated groups.**

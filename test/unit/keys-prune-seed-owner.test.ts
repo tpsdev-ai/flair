@@ -224,14 +224,9 @@ describe("keystore seed-owner sidecar (flair#2200)", () => {
 });
 
 describe("makeReadInstanceIds — unverifiable directory binding", () => {
-  test("another instance directory recording the same port refuses by name and moves nothing", async () => {
+  test("a supplied data directory is refused before target reads or key moves", async () => {
     const dir = tempDir("flair-seed-binding-");
-    const live = join(dir, "live");
     const other = join(dir, "other");
-    for (const dataDir of [live, other]) {
-      mkdirSync(dataDir);
-      writeFileSync(join(dataDir, "harperdb-config.yaml"), "http:\n  port: 19926\n");
-    }
     const keys = join(dir, "keys");
     mkdirSync(keys);
     writeNodeSeed(keys, OTHER);
@@ -245,7 +240,8 @@ describe("makeReadInstanceIds — unverifiable directory binding", () => {
     }) as unknown as typeof fetch;
     const read = makeReadInstanceIds({
       baseUrl: BASE_URL, dataDir: other,
-      resolveHttpPort: () => 19926, resolveOpsPort: () => 19925,
+      resolveHttpPort: () => { throw new Error("a supplied data directory is refused before the http port is resolved"); },
+      resolveOpsPort: () => { throw new Error("a supplied data directory is refused before the ops port is resolved"); },
       probe: async () => { probes++; return { state: "read", ids: [LIVE], agentIds: [] }; },
     });
     const result = await classifyKeysDir(keys, BASE_URL, read);
