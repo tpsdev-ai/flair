@@ -36,12 +36,12 @@ import { txnPausePoint, type TxnPausePoint } from "./txn-pause-point.js";
 /** The named error for a delete refused because the row's owner changed (flair#2355). */
 export const OWNER_CHANGED_ERROR = "owner_changed";
 
-/** The named 409 for an owner-scoped delete whose row's owner is no longer the caller. */
+/** The named 409 for a delete refused because an owner confirmation failed. */
 export function ownerChangedRefusal(tableName: string): Response {
   return new Response(
     JSON.stringify({
       error: OWNER_CHANGED_ERROR,
-      message: `${tableName} row is no longer owned by the caller; not deleted`,
+      message: `${tableName} owner confirmation failed; not deleted`,
     }),
     { status: 409, headers: { "content-type": "application/json" } },
   );
