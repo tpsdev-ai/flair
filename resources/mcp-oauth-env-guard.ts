@@ -1,22 +1,37 @@
-import { guardMcpOAuthEnv, readMcpProviderReadiness, type DegradedGuardDecision } from "../src/lib/mcp-oauth-env-core.js";
+import { guardMcpOAuthEnv, readMcpProviderReadiness, type DegradedGuardDecision, type McpProviderReadiness } from "../src/lib/mcp-oauth-env-core.js";
 
-let decision: DegradedGuardDecision = { degraded: false, neutralizedVars: [] };
-
-const decisions = new WeakMap<Record<string, string | undefined>, DegradedGuardDecision>();
-let readiness = readMcpProviderReadiness(process.env);
+interface GuardState {
+  decision: DegradedGuardDecision;
+  readiness: McpProviderReadiness;
+  decisions: WeakMap<Record<string, string | undefined>, {
+    decision: DegradedGuardDecision;
+    readiness: McpProviderReadiness;
+  }>;
+}
+const GUARD_STATE = Symbol.for("flair.mcpOAuthEnvGuard");
+const guardProcess = process as typeof process & { [GUARD_STATE]?: GuardState };
+const state = guardProcess[GUARD_STATE] ??= {
+  decision: { degraded: false, neutralizedVars: [] },
+  readiness: readMcpProviderReadiness(process.env),
+  decisions: new WeakMap(),
+};
 
 export function mcpOAuthProviderReadiness() {
-  return { ...readiness };
+  return { ...state.readiness };
 }
 
 export function runMcpOAuthEnvGuard(
   env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
 ): DegradedGuardDecision {
-  const previous = decisions.get(env);
-  if (previous) return previous;
-  readiness = readMcpProviderReadiness(env);
-  decision = guardMcpOAuthEnv(env);
-  decisions.set(env, decision);
+  const previous = state.decisions.get(env);
+  if (previous) {
+    state.readiness = previous.readiness;
+    state.decision = previous.decision;
+    return previous.decision;
+  }
+  state.readiness = readMcpProviderReadiness(env);
+  const decision = state.decision = guardMcpOAuthEnv(env);
+  state.decisions.set(env, { decision, readiness: state.readiness });
   if (decision.degraded) {
     console.error(
       `[mcp-oauth] MCP auth unavailable: ${decision.reason}. ` +
@@ -29,7 +44,7 @@ export function runMcpOAuthEnvGuard(
 
 /** The decision recorded at boot; read by `/mcp` route reporting. */
 export function mcpOAuthDegraded(): DegradedGuardDecision {
-  return decision;
+  return state.decision;
 }
 
 // Fire once at module load. Guarded by the same opt-out the MCP route module

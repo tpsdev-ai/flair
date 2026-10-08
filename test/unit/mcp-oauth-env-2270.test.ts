@@ -168,6 +168,48 @@ describe("redirect migration files", () => {
 });
 
 describe("doctor target readiness", () => {
+  test("symlinked Harper guard loads retain disabled-MCP provider readiness for doctor", () => {
+    const root = join(import.meta.dir, "../..");
+    symlinkSync(join(root, "dist"), join(dir, "dist"));
+    const drive = join(dir, "guard-loader.mjs");
+    writeFileSync(drive, `
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const root = process.argv[2];
+const require = createRequire(join(root, "package.json"));
+const { scopedImport } = require(join(require.resolve("harper"), "../security/jsLoader.js"));
+const { describeMcpRedirectFinding } = await import(pathToFileURL(join(root, "dist/src/lib/mcp-oauth-env-core.js")));
+delete process.env.FLAIR_MCP_NO_AUTOSTART;
+delete process.env.OAUTH_GITHUB_REDIRECT_URI;
+const scope = { mode: "vm-current-context", name: "flair" };
+const readiness = [];
+const findings = [];
+for (const base of [process.argv[3], root]) {
+  const guard = await scopedImport(pathToFileURL(join(base, "dist/resources/mcp-oauth-env-guard.js")), scope);
+  const provider = guard.mcpOAuthProviderReadiness();
+  readiness.push(provider);
+  findings.push(describeMcpRedirectFinding(provider));
+}
+console.log(JSON.stringify({ readiness, findings }));
+`);
+    const result = spawnSync("node", ["--experimental-vm-modules", drive, root, dir], {
+      cwd: dir, encoding: "utf8", timeout: 10_000,
+      env: { ...process.env, STORAGE_PATH: dir, ROOTPATH: dir,
+        OAUTH_GITHUB_CLIENT_ID: "fixture-id", OAUTH_GITHUB_CLIENT_SECRET: "fixture-secret", FLAIR_MCP_OAUTH: "false" },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout.trim());
+    for (const finding of output.findings) {
+      expect(finding?.isIssue).toBe(true);
+      expect(finding?.message).toContain(REDIRECT);
+    }
+    expect(output.readiness).toEqual([
+      { credentialsPresent: true, redirectPresent: false },
+      { credentialsPresent: true, redirectPresent: false },
+    ]);
+  }, 15_000);
   test.each([undefined, "", "   ", "${OAUTH_GITHUB_REDIRECT_URI}"])("effective redirect %s is missing", async redirect => {
     const readiness = readMcpProviderReadiness({ ...configured, FLAIR_MCP_OAUTH: "false", [REDIRECT]: redirect });
     expect(readiness).toEqual({ credentialsPresent: true, redirectPresent: false });
