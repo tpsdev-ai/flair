@@ -32,15 +32,86 @@ export async function deletePointerRowViaTable() { throw new Error("test adapter
  *  can assert the composed file IS the failing adapter (a positive control). */
 export const FAILING_ADAPTER_SRC = FAILING_ADAPTER_JS;
 
+/** Where a composed copy writes the concurrent-write module: a top-level built
+ *  resource file, so the component loads it with the rest of `dist/resources`. */
+export const CONCURRENT_WRITE_MODULE_REL = join("dist", "resources", "zz-test-concurrent-write.js");
+
+/** A test-only module for a composed copy (see `componentWithConcurrentWrites`).
+ *  Right after the caller stages its own write,
+ *  the wrapper commits a newer write of the same row in a separate transaction,
+ *  so the caller's staged delete loses to that write at commit. A row opts in
+ *  by a marker in its Memory id:
+ *    skip-memory-delete   a deletion-history put for the row → a newer write of
+ *                         the Memory row (its delete is staged before the put);
+ *    skip-history-delete  a deletion-history delete for the row → a newer write
+ *                         of that history record;
+ *    skip-pointer-delete  a pointer-row delete for the row → a newer write of
+ *                         that pointer row.
+ */
+export const CONCURRENT_WRITE_MODULE_SRC = `import { databases } from "harper";
+const { Memory, MemoryDeletionHistory, MemoryHostSource } = databases.flair;
+const historyPut = MemoryDeletionHistory.put;
+const historyDelete = MemoryDeletionHistory.delete;
+const pointerPut = MemoryHostSource.put;
+const pointerDelete = MemoryHostSource.delete;
+const pointerSearch = MemoryHostSource.search;
+const pointerConfirmationFailures = new Set();
+async function separately(fn) {
+  const separate = {};
+  await globalThis.transaction(separate, () => fn(separate));
+}
+MemoryDeletionHistory.put = async function (record, ...rest) {
+  const result = await historyPut.call(this, record, ...rest);
+  const memoryId = record?.memoryId;
+  if (typeof memoryId === "string" && memoryId.includes("skip-memory-delete")) {
+    await separately(async (s) => {
+      const row = await Memory.get(memoryId, s);
+      if (row) await Memory.put({ ...row, content: "rewritten by a separate transaction" }, s);
+    });
+  }
+  return result;
+};
+MemoryDeletionHistory.delete = async function (id, ...rest) {
+  const result = await historyDelete.call(this, id, ...rest);
+  await separately(async (s) => {
+    const record = await MemoryDeletionHistory.get(id, s);
+    if (record && typeof record.memoryId === "string" && record.memoryId.includes("skip-history-delete")) {
+      await historyPut.call(MemoryDeletionHistory, { ...record }, s);
+    }
+  });
+  return result;
+};
+MemoryHostSource.delete = async function (memoryId, ...rest) {
+  const result = await pointerDelete.call(this, memoryId, ...rest);
+  if (typeof memoryId === "string" && memoryId.includes("fail-pointer-confirmation")) pointerConfirmationFailures.add(memoryId);
+  if (typeof memoryId === "string" && memoryId.includes("skip-pointer-delete")) {
+    await separately(async (s) => {
+      const row = await MemoryHostSource.get(memoryId, s);
+      if (row) await pointerPut.call(MemoryHostSource, { ...row, receivedAt: new Date().toISOString() }, s);
+    });
+  }
+  return result;
+};
+MemoryHostSource.search = function (query, ...rest) {
+  const failed = query?.conditions?.find((c) => pointerConfirmationFailures.has(c.value));
+  if (failed) {
+    pointerConfirmationFailures.delete(failed.value);
+    throw new Error("test component: forced pointer confirmation failure");
+  }
+  return pointerSearch.call(this, query, ...rest);
+};
+`;
+
 function repoRoot(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
-export function componentWithFailingHostPointer(opts: { sourceRoot?: string } = {}): FailingComponent {
-  const sourceRoot = opts.sourceRoot ?? repoRoot();
+/** Compose a private copy of the built component with `files` (path relative
+ *  to the copy → contents) written over or beside the built files. */
+function composeComponent(files: Record<string, string>, sourceRoot: string): FailingComponent {
   const sourceAdapter = join(sourceRoot, ADAPTER_REL);
   if (!existsSync(sourceAdapter)) {
-    throw new Error(`componentWithFailingHostPointer: source adapter not found at ${sourceAdapter} — run \`bun run build\`.`);
+    throw new Error(`composeComponent: source adapter not found at ${sourceAdapter} — run \`bun run build\`.`);
   }
   const dir = mkdtempSync(join(tmpdir(), "flair-failing-pointer-"));
   for (const entry of ["config.yaml", "package.json", "dist", "schemas"]) {
@@ -50,11 +121,21 @@ export function componentWithFailingHostPointer(opts: { sourceRoot?: string } = 
   }
   const nmSrc = join(sourceRoot, "node_modules");
   if (existsSync(nmSrc)) symlinkSync(nmSrc, join(dir, "node_modules"), "dir");
-  writeFileSync(join(dir, ADAPTER_REL), FAILING_ADAPTER_JS);
+  for (const [rel, contents] of Object.entries(files)) writeFileSync(join(dir, rel), contents);
   return {
     dir,
     cleanup: () => {
       try { rmSync(dir, { recursive: true, force: true, maxRetries: 4 }); } catch { /* best effort */ }
     },
   };
+}
+
+export function componentWithFailingHostPointer(opts: { sourceRoot?: string } = {}): FailingComponent {
+  return composeComponent({ [ADAPTER_REL]: FAILING_ADAPTER_JS }, opts.sourceRoot ?? repoRoot());
+}
+
+/** A composed copy that keeps the built pointer adapter and adds the
+ *  concurrent-write module (CONCURRENT_WRITE_MODULE_SRC). */
+export function componentWithConcurrentWrites(opts: { sourceRoot?: string } = {}): FailingComponent {
+  return composeComponent({ [CONCURRENT_WRITE_MODULE_REL]: CONCURRENT_WRITE_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
 }

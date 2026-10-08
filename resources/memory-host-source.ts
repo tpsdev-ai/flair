@@ -148,6 +148,20 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
 }
 
 /**
+ * The ids among `ids` that still have a stored pointer row: the check POST
+ * /MemoryPurge runs after its pointer deletes commit. Unlike loadPointerRows
+ * (the reader join, which reads a missing table as "no pointers"), it throws
+ * when the table cannot be searched, so a failed check never reads as "no
+ * pointer row left".
+ */
+export async function storedPointerIds(ids: readonly string[]): Promise<Set<string>> {
+  if (typeof pointerTable()?.search !== "function") {
+    throw new Error(`${MEMORY_HOST_SOURCE_TABLE} table unavailable`);
+  }
+  return new Set((await loadPointerRows(ids)).keys());
+}
+
+/**
  * flair#1940 A1-iv item 2 — the ONE reader helper. `Memory.get()`,
  * `Memory.search()` and `SemanticSearch` render pointers through the pointer
  * helper. Other Memory projections, bootstrap included, do not render pointers

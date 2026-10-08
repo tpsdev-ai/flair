@@ -33,6 +33,7 @@ import {
 } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
+import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
 
 export type AgentCli = {
   api: (method: string, path: string, body?: any, options?: any) => Promise<any>;
@@ -653,8 +654,15 @@ export function register(program: Command): void {
       const agentName = agentData?.[0]?.name ?? id;
 
       const memRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
-      const memories = memRes.ok ? await memRes.json().catch(() => []) : [];
-      const memoryCount = Array.isArray(memories) ? memories.length : 0;
+      const memories: unknown = memRes.ok ? await memRes.json().catch(() => undefined) : undefined;
+      if (!Array.isArray(memories) || !memories.every((mem: any) => typeof mem?.id === "string" && mem.id.length > 0)) {
+        throw new Error(
+          `The Memory scan for agent '${id}' ${memRes.ok ? "returned an unexpected response" : `failed (${memRes.status})`}; ` +
+          `nothing was removed. Check the operations API at ${instance.opsUrl} and retry.`,
+        );
+      }
+      const memoryIds: string[] = memories.map((mem: { id: string }) => mem.id);
+      const memoryCount = memoryIds.length;
 
       // Confirmation
       const isInteractive = process.stdin.isTTY;
@@ -683,16 +691,19 @@ export function register(program: Command): void {
         console.log(`Removing agent '${agentName}' (${id}) with ${memoryCount} memories...`);
       }
 
-      // Delete all memories
+      // Delete the scanned memories through the server's physical-removal
+      // path. A skill-tagged row expands to its whole lineage there, so
+      // superseded version rows go too. An accepted DELETE of a non-reserved
+      // skill closes its head; the reserved `using-flair` seed is physically
+      // deleted. A response that does not list every scanned id as
+      // removed stops the command before the Agent record is deleted.
       if (memoryCount > 0) {
         console.log(`Deleting ${memoryCount} memories...`);
-        for (const mem of (Array.isArray(memories) ? memories : [])) {
-          if (!mem?.id) continue;
-          await api("DELETE", `/Memory/${encodeRecordId(mem.id)}`, undefined, {
-            baseUrl: instance.baseUrl,
-            explicitAdminPass: adminPass, adminUser, agentId: null,
-          });
-        }
+        const purge = await api("POST", "/MemoryPurge", { ids: memoryIds }, {
+          baseUrl: instance.baseUrl,
+          explicitAdminPass: adminPass, adminUser, agentId: null,
+        });
+        confirmedPurgeIds(purge, memoryIds);
       }
 
       // Delete all souls
