@@ -12,7 +12,7 @@
  * state read and show the probe and the stop wait still reach `gone` within a
  * bounded time; a read that keeps failing stays `alive` (fail safe).
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { probePidLiveness, waitForPidGone } from "../../src/cli.ts";
 
 // A real, live pid, so `kill(pid, 0)` succeeds and the injected state read is
@@ -47,7 +47,7 @@ describe("flair#2330 — the probe retries a failed or empty state read if time 
   });
 });
 
-describe("flair#2330 — the stop wait re-reads the state on its next poll", () => {
+describe("flair#2330 — the stop wait rechecks liveness each poll", () => {
   test("a read that fails through the first poll then reports Z reaches gone within the wait", async () => {
     // Two failures exhaust one poll's read plus its single retry; the next poll
     // reads Z. A stop wait that trusted the first (failed) read would never see
@@ -91,14 +91,28 @@ describe("flair#2330 — the stop wait re-reads the state on its next poll", () 
     expect(Date.now()).toBeGreaterThanOrEqual(deadline - 50);
   });
 
-  test("the stop wait returns its last poll without a probe after expiry", async () => {
-    let calls = 0;
-    const outcome = await waitForPidGone(LIVE_PID, Date.now() + 30, () => {
-      calls++;
-      return "R";
-    }, 100);
-    expect(outcome).toEqual({ gone: false, last: { kind: "alive" } });
-    expect(calls).toBe(1);
+  test("the stop wait returns its last poll without a probe at or after expiry", async () => {
+    let now = Date.now();
+    const deadline = now + 30;
+    const starts: number[] = [];
+    const kill = process.kill;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const probe = spyOn(process, "kill").mockImplementation((pid, signal) => {
+      starts.push(Date.now());
+      return kill(pid, signal);
+    });
+    const timer = setTimeout(() => { now = deadline; }, 0);
+    try {
+      const outcome = await waitForPidGone(LIVE_PID, deadline, () => "R", 100);
+      expect(starts.length).toBeGreaterThan(0);
+      expect(starts.every((at) => at < deadline)).toBe(true);
+      expect(now).toBe(deadline);
+      expect(outcome).toEqual({ gone: false, last: { kind: "alive" } });
+    } finally {
+      clearTimeout(timer);
+      probe.mockRestore();
+      clock.mockRestore();
+    }
   });
 
   test("an expired stop wait does not probe", async () => {
