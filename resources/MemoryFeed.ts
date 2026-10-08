@@ -236,7 +236,6 @@ export class FeedMemories extends Resource {
 
     const existing = await findExistingMemoryByContentHash((databases as any).flair.Memory.search(), agentId, contentHash);
     if (existing) {
-      // flair#2358: an ephemeral dedup row with no expiry gets the tier expiry.
       if (existing.durability === "ephemeral" && existing.expiresAt == null) {
         return repairDeduplicatedExpiry(ctx, existing);
       }
@@ -501,7 +500,7 @@ async function storedRowReadable(
   return closedSkillPayloadReadable(stored, readerId);
 }
 
-/** The named error for a dedup expiry repair whose stored row is no longer the match (flair#2358). */
+/** The named error for a dedup expiry repair whose matched row changed during the request (flair#2358). */
 export const FEED_DEDUP_TARGET_CHANGED_ERROR = "feed_dedup_target_changed";
 
 /** Attempts of the dedup expiry repair before it gives up on a row that keeps changing. */
@@ -527,12 +526,13 @@ function isDedupMatch(row: any, match: any): boolean {
  * transaction this call owns, the row is re-read; unless its id, agentId and
  * contentHash equal the match's, the request is refused (409
  * FEED_DEDUP_TARGET_CHANGED_ERROR). A matching row that is no longer
- * ephemeral, or already has an expiry, is returned as read. Otherwise a
+ * ephemeral, or already has an expiry, is returned from that read. Otherwise a
  * committed read must equal the transaction's read before the write, else the
  * repair starts over (FEED_DEDUP_REPAIR_ATTEMPTS attempts, then the 409). A
  * change committed after that read and before the commit follows Harper's
  * timestamp order. After the commit, an owned read must show the match with
- * the written expiry (else the 409); that row is returned.
+ * the written expiry (else the 409); that row is returned. Returned rows carry
+ * no inline pointer fields (stripInlinePointerFields).
  */
 async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> {
   const id = String(match.id);

@@ -270,19 +270,21 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     const seedContent = `deduplicated reserved state ${randomUUID()}`;
     await adminOp(harper, { operation: "delete", database: "flair", table: "Memory", hash_values: [SEED_SKILL_ROW_ID] });
     await seedMemory(harper, agent, { id: SEED_SKILL_ROW_ID, agentId: agent.id, content: seedContent, durability: "ephemeral" });
+    const seedBefore = await readStored(harper, SEED_SKILL_ROW_ID);
     const seedRes = await authFetch(harper, agent, "POST", "/FeedMemories", { agentId: agent.id, content: seedContent });
     const seedText = await seedRes.text();
     expect(seedRes.status, seedText.slice(0, 300)).toBe(403);
     expect(seedText).toContain("seed_id_reserved");
-    expect((await readStored(harper, SEED_SKILL_ROW_ID))?.expiresAt ?? null).toBeNull();
+    expect(await readStored(harper, SEED_SKILL_ROW_ID)).toEqual(seedBefore!);
 
     const suffixContent = `deduplicated suffixed state ${randomUUID()}`;
     const suffixId = `dedup-suffix-${randomUUID()}.content`;
     await seedMemory(harper, agent, { id: suffixId, agentId: agent.id, content: suffixContent, durability: "ephemeral" });
+    const suffixBefore = await readStored(harper, suffixId);
     const suffixRes = await authFetch(harper, agent, "POST", "/FeedMemories", { agentId: agent.id, content: suffixContent });
     const suffixText = await suffixRes.text();
     expect(suffixRes.status, suffixText.slice(0, 300)).toBe(400);
     expect(JSON.parse(suffixText).error).toBe("memory_id_content_suffix");
-    expect((await readStored(harper, suffixId))?.expiresAt ?? null).toBeNull();
+    expect(await readStored(harper, suffixId)).toEqual(suffixBefore!);
   }, 30_000);
 });
