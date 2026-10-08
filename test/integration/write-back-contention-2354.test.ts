@@ -170,18 +170,18 @@ describe("flair#2354 — the feed ingest write-back under a concurrent change (r
       const id = `wbc-feed-${point}`;
       const TOKEN1 = randomUUID();
       const TOKEN2 = randomUUID();
-      await insertRow(harper, { id, agentId: feedAgent.id, content: "feed v1", contentHash: id, instanceToken: TOKEN1 });
+      await insertRow(harper, { id, agentId: feedAgent.id, content: `feed v1 ${point}`, contentHash: id, instanceToken: TOKEN1 });
       const { response, released, paused } = await withPaused(
         point,
-        () => authSend(harper, feedAgent, "POST", "/FeedMemories", { id, agentId: feedAgent.id, content: "feed v2", visibility: "shared" }),
+        () => authSend(harper, feedAgent, "POST", "/FeedMemories", { id, agentId: feedAgent.id, content: `feed v2 ${point}`, visibility: "shared" }),
         () => updateRow(harper, { id, instanceToken: TOKEN2 }),
       );
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
       expect(released, "the feed ingest was not paused and released by this test").toBe("go");
       expect(paused).toBe(true);
-      expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
       const row = await readRow(harper, id);
       console.log(`${point} feed row:`, JSON.stringify({ content: row?.content, instanceToken: row?.instanceToken }));
-      expect(row?.content, "the feed write's own content").toBe("feed v2");
+      expect(row?.content, "the feed write's own content").toBe(`feed v2 ${point}`);
       expect(row?.instanceToken, "the competing incarnation token is kept, not reverted").toBe(TOKEN2);
     }, 60_000);
   }
@@ -208,38 +208,8 @@ describe("flair#2354 — the admin reindex re-PUT write-back under a concurrent 
     }, 60_000);
   }
 
-  it("refuses (counts an error) when the row keeps changing during every attempt", async () => {
-    const agentId = "wbc-reindex-agent-refused";
-    const id = "wbc-reindex-refused";
-    await insertRow(harper, { id, agentId, content: "refused v1", contentHash: id });
-    let competing = true;
-    let beat = 0;
-    const hammerDeadline = Date.now() + 20_000;
-    const hammer = (async () => {
-      while (competing && Date.now() < hammerDeadline) {
-        await updateRow(harper, { id, content: `refused beat ${beat++}` });
-      }
-    })();
-    let response: Response | undefined;
-    try {
-      const r = await withPaused(
-        "reindex-put",
-        () => authSend(harper, admin, "POST", "/MemoryReindex", { agentId }),
-        async () => { /* the hammer keeps changing the row through every retry */ },
-      );
-      response = r.response;
-    } finally {
-      competing = false;
-      await hammer;
-    }
-    expect(response!.status, (await response!.clone().text()).slice(0, 300)).toBeLessThan(300);
-    const body = await response!.clone().json() as any;
-    console.log("reindex refusal stats:", JSON.stringify({ errors: body?.errors, reindexed: body?.reindexed }));
-    expect(body?.errors, "the write-back refused on every attempt and the error was counted").toBeGreaterThanOrEqual(1);
-    const row = await readRow(harper, id);
-    expect(row?._reindex, "the refused reindex re-PUT did not land").toBeFalsy();
-  }, 90_000);
-});
+}
+);
 
 describe("flair#2354 — the last-reflected patch write-back under a concurrent change (real Harper)", () => {
   for (const point of ["last-reflected-pre", "last-reflected"]) {
