@@ -11,6 +11,8 @@
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { deleteOwnedRow } from "./owner-delete-recheck.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import {
   makeAuthGate,
@@ -178,6 +180,21 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     if (record.agentId !== gate.agentId) {
       return FORBIDDEN("forbidden: cannot delete workspace state for another agent");
     }
-    return super.delete(id);
+    // flair#2355: a row that is no longer the caller's at the delete's re-read
+    // or confirmation read is refused, not deleted
+    // (resources/owner-delete-recheck.ts).
+    const beforeDelete = txnPausePoint("workspace-delete-pre");
+    if (beforeDelete) await beforeDelete;
+    const outcome = await deleteOwnedRow((this as any).getContext?.(), {
+      table: (databases as any).flair.WorkspaceState,
+      tableName: "WorkspaceState",
+      id: typeof id === "string" ? id : record.id,
+      ownerField: "agentId",
+      callerId: gate.agentId,
+      point: "workspace-delete",
+    });
+    if (outcome.kind === "refused") return outcome.response;
+    if (outcome.kind === "absent") return super.delete(id);
+    return outcome.result;
   }
 }

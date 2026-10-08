@@ -1,6 +1,8 @@
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { deleteOwnedRow } from "./owner-delete-recheck.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import {
   makeAuthGate,
   makeReadScope,
@@ -179,6 +181,21 @@ export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
     if (record[RECORD_TYPES.MemoryCandidate.ownerField] !== gate.agentId) {
       return FORBIDDEN("forbidden: cannot delete a memory candidate owned by another agent");
     }
-    return super.delete(id, context);
+    // flair#2355: a row that is no longer the caller's at the delete's re-read
+    // or confirmation read is refused, not deleted
+    // (resources/owner-delete-recheck.ts).
+    const beforeDelete = txnPausePoint("candidate-delete-pre");
+    if (beforeDelete) await beforeDelete;
+    const outcome = await deleteOwnedRow(ctx, {
+      table: (databases as any).flair.MemoryCandidate,
+      tableName: "MemoryCandidate",
+      id: typeof id === "string" ? id : record.id,
+      ownerField: RECORD_TYPES.MemoryCandidate.ownerField,
+      callerId: gate.agentId,
+      point: "candidate-delete",
+    });
+    if (outcome.kind === "refused") return outcome.response;
+    if (outcome.kind === "absent") return super.delete(id, context);
+    return outcome.result;
   }
 }
