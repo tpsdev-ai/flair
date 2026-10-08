@@ -49,7 +49,20 @@ export const CONCURRENT_WRITE_MODULE_REL = join("dist", "resources", "zz-test-co
  *                         that pointer row.
  */
 export const CONCURRENT_WRITE_MODULE_SRC = `import { databases } from "harper";
+import { MemoryPurge } from "./MemoryPurge.js";
 const { Memory, MemoryDeletionHistory, MemoryHostSource } = databases.flair;
+const purgePost = MemoryPurge.prototype.post;
+MemoryPurge.prototype.post = async function (data) {
+  const id = data?.ids?.find((id) => typeof id === "string" && id.includes("pinned-pointer-snapshot"));
+  if (!id) return purgePost.call(this, data);
+  return globalThis.transaction(this.getContext(), async () => {
+    const pointers = MemoryHostSource.search({ conditions: [{ attribute: "memoryId", comparator: "equals", value: id }] });
+    let found = false;
+    for await (const row of pointers) if (row.memoryId === id) found = true;
+    if (!found) throw new Error("test component: pointer row not found");
+    return purgePost.call(this, data);
+  });
+};
 const historyPut = MemoryDeletionHistory.put;
 const historyDelete = MemoryDeletionHistory.delete;
 const pointerPut = MemoryHostSource.put;

@@ -127,8 +127,13 @@ export function isPointerEchoOf(
 /**
  * Read the pointer rows for a WHOLE result set in ONE batched query (A1'
  * item 4). Empty input issues no query. Returns memoryId -> row.
+ *
+ * `context` is optional: the reader join omits it. A caller that must observe
+ * a delete committed earlier in the SAME request passes its own transaction
+ * context, because a contextless read joins the request's ambient transaction
+ * and reads that transaction's pinned read snapshot (see storedPointerIds).
  */
-export async function loadPointerRows(ids: readonly string[]): Promise<Map<string, PointerRow>> {
+export async function loadPointerRows(ids: readonly string[], context?: unknown): Promise<Map<string, PointerRow>> {
   const wanted = [...new Set(ids.filter((id) => typeof id === "string" && id.length > 0))];
   const map = new Map<string, PointerRow>();
   if (wanted.length === 0) return map;
@@ -140,7 +145,7 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
     wanted.length === 1
       ? { conditions: [{ attribute: "memoryId", comparator: "equals", value: wanted[0] }] }
       : { operator: "or", conditions: wanted.map((id) => ({ attribute: "memoryId", comparator: "equals", value: id })) };
-  const result = table.search(query);
+  const result = table.search(query, context);
   for await (const row of result as AsyncIterable<PointerRow>) {
     if (row && typeof (row as PointerRow).memoryId === "string") map.set((row as PointerRow).memoryId, row);
   }
@@ -153,12 +158,17 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
  * (the reader join, which reads a missing table as "no pointers"), it throws
  * when the table cannot be searched, so a failed check never reads as "no
  * pointer row left".
+ *
+ * The caller passes a transaction context it owns. A contextless read resolves
+ * the request's ambient operation transaction and reads that transaction's
+ * read snapshot, which was pinned before the purge's pointer delete committed,
+ * so it would report a deleted pointer row as still present.
  */
-export async function storedPointerIds(ids: readonly string[]): Promise<Set<string>> {
+export async function storedPointerIds(ids: readonly string[], context?: unknown): Promise<Set<string>> {
   if (typeof pointerTable()?.search !== "function") {
     throw new Error(`${MEMORY_HOST_SOURCE_TABLE} table unavailable`);
   }
-  return new Set((await loadPointerRows(ids)).keys());
+  return new Set((await loadPointerRows(ids, context)).keys());
 }
 
 /**
