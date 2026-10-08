@@ -2,15 +2,11 @@
  * restart-wait-deadline-2357.test.ts — flair#2357.
  *
  * `waitForProcessExit` is the restart path's wait for the old Harper process to
- * exit before /Health is polled. It polled liveness on a loop and then, after
- * the deadline had already passed, started one more probe. That probe begins at
- * or after the deadline, so a slow probe or one that answers late decides the
- * timeout report and the wait's "did not exit" claim covers a probe the deadline
- * never admitted.
- *
- * The wait now starts no probe at or after its deadline (flair#2357), matching
- * the doctor stop wait in #2332. This test injects a slow probe and mocks the
- * clock so each probe's start time can be recorded against the deadline.
+ * exit before /Health is polled. It polled liveness on a loop and then started
+ * one more probe after the deadline had passed, so a probe could begin at or
+ * after the deadline. This test injects a slow probe and mocks the clock so each
+ * probe's start time is recorded against the deadline, and asserts that no probe
+ * starts at or after it.
  */
 import { describe, expect, spyOn, test } from "bun:test";
 import { waitForProcessExit } from "../../src/cli.ts";

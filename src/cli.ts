@@ -3245,7 +3245,7 @@ export async function checkAgentRegistered(
 // answer and we'd declare restart success while a gap is still ahead.
 // It starts no probe at or after its deadline (flair#2357): the loop checks the
 // clock before each probe, and a wait that runs out reports its timeout without
-// one more probe. The probe is injectable so that is unit-testable.
+// one more probe. The probe is injectable so the wait is unit-testable.
 /**
  * Is `pid` a process that exists right now? Signal 0 performs the permission
  * and existence checks without delivering anything (flair#1022) — a `hdb.pid`
