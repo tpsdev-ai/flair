@@ -90,6 +90,7 @@
         "flair-continuity-capture": "dist/continuity-capture-hook.js",
         "flair-prompt-recall": "dist/prompt-recall-hook.js",
         "flair-action-recall": "dist/action-recall-hook.js",
+        "flair-capture": "dist/capture-hook.js",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.31.0",
@@ -183,6 +184,7 @@
     "fast-uri": "^4.1.5",
     "fastify": "^5.12.5",
     "form-data": "^4.0.6",
+    "handlebars": "4.7.10",
     "hono": "^4.13.5",
     "http-cache-semantics": "^4.3.0",
     "ip-address": "^10.5.1",
@@ -1452,7 +1454,7 @@
 
     "gunzip-maybe": ["gunzip-maybe@1.4.2", "", { "dependencies": { "browserify-zlib": "^0.1.4", "is-deflate": "^1.0.0", "is-gzip": "^1.0.0", "peek-stream": "^1.1.0", "pumpify": "^1.3.3", "through2": "^2.0.3" }, "bin": { "gunzip-maybe": "bin.js" } }, "sha512-4haO1M4mLO91PW57BMsDFf75UmwoRX0GkdD+Faw+Lr+r/OZrOCS0pIBwOL1xCKQqnQzbNFGgK2V2CpBUPeFNTw=="],
 
-    "handlebars": ["handlebars@4.7.9", "", { "dependencies": { "minimist": "^1.2.5", "neo-async": "^2.6.2", "source-map": "^0.6.1", "wordwrap": "^1.0.0" }, "optionalDependencies": { "uglify-js": "^3.1.4" }, "bin": { "handlebars": "bin/handlebars" } }, "sha512-4E71E0rpOaQuJR2A3xDZ+GM1HyWYv1clR58tC8emQNeQe3RH7MAzSbat+V0wG78LQBo6m6bzSG/L4pBuCsgnUQ=="],
+    "handlebars": ["handlebars@4.7.10", "", { "dependencies": { "minimist": "^1.2.8", "neo-async": "^2.6.2", "source-map": "^0.6.1", "wordwrap": "^1.0.0" }, "optionalDependencies": { "uglify-js": "^3.1.4" }, "bin": { "handlebars": "bin/handlebars" } }, "sha512-P5VJMVM7qgBn6vjXMw8WG9uVI+ncf2pi72j4de4yz5ZULLj2RGqLYaKOYGsgyrViQ0tePOVlN1tDCCXXtFqXKg=="],
 
     "harper": ["harper@5.3.1", "", { "dependencies": { "@endo/static-module-record": "^1.1.2", "@fastify/autoload": "^6.3.1", "@fastify/compress": "^8.3.1", "@fastify/cors": "^11.2.0", "@fastify/static": "^9.1.3", "@harperfast/extended-iterable": "1.0.3", "@harperfast/rocksdb-js": "2.10.0", "@harperfast/skills": "^1.10.8", "@inquirer/confirm": "^6.3.2", "@inquirer/input": "^5.1.6", "@inquirer/password": "^5.2.2", "@inquirer/select": "^5.2.5", "@turf/area": "6.5.0", "@turf/boolean-contains": "6.5.0", "@turf/boolean-disjoint": "6.5.0", "@turf/boolean-equal": "6.5.0", "@turf/circle": "6.5.0", "@turf/difference": "6.5.0", "@turf/distance": "6.5.0", "@turf/helpers": "6.5.0", "@turf/length": "6.5.0", "alasql": "4.19.1", "amaro": "^1.1.8", "argon2": "0.45.1", "asn1js": "3.0.10", "busboy": "^1.6.0", "cbor-x": "1.6.6", "chalk": "4.1.2", "chokidar": "^4.0.3", "cli-progress": "3.12.0", "clone": "2.1.2", "dotenv": "^16.4.7", "easy-ocsp": "1.3.2", "fast-glob": "3.3.3", "fastify": "^5.8.2", "fastify-plugin": "^5.1.0", "fs-extra": "11.4.0", "graphql": "^16.10.0", "graphql-http": "^1.22.4", "gunzip-maybe": "1.4.2", "human-readable-ids": "1.0.4", "is-number": "7.0.0", "joi": "17.13.8", "json-bigint-fixes": "1.1.0", "jsonata": "1.8.9", "jsonwebtoken": "9.0.3", "lmdb": "3.5.6", "lodash": "^4.17.23", "mathjs": "11.12.0", "micromatch": "^4.0.8", "minimist": "1.2.8", "moment": "2.31.0", "mqtt-packet": "~9.0.1", "msgpackr": "2.1.0", "needle": "3.5.0", "node-forge": "^1.3.1", "node-stream-zip": "1.16.0", "normalize-path": "^3.0.0", "ora": "8.2.0", "ordered-binary": "1.6.2", "papaparse": "5.7.0", "passport": "0.7.0", "passport-http": "0.3.0", "passport-local": "1.0.0", "pino": "8.21.0", "pkijs": "3.4.1", "properties-reader": "2.3.0", "recursive-iterator": "3.3.0", "semver": "7.8.5", "send": "^1.2.0", "ses": "^1.15.0", "stream-chain": "2.2.5", "stream-json": "1.9.1", "structon": "1.1.0", "systeminformation": "^5.31.4", "tar-fs": "^3.1.2", "tar-stream": "3.2.0", "ulidx": "0.5.0", "uuid": "11.1.1", "validate.js": "0.13.1", "weak-lru-cache": "^1.2.2", "ws": "8.21.3", "yaml": "2.9.1" }, "optionalDependencies": { "@harperfast/fulltext": "0.5.0", "@harperfast/hnsw": "0.4.0", "bufferutil": "4.1.0", "segfault-handler": "1.3.0", "utf-8-validate": "5.0.10" }, "peerDependencies": { "@aws-sdk/client-bedrock-runtime": "^3.0.0", "@aws-sdk/client-s3": "^3.0.0", "@aws-sdk/lib-storage": "^3.0.0", "uWebSockets.js": "20.68.0" }, "optionalPeers": ["@aws-sdk/client-bedrock-runtime", "@aws-sdk/client-s3", "@aws-sdk/lib-storage", "uWebSockets.js"], "bin": { "harper": "dist/bin/harper.js" } }, "sha512-ESiMdD5H5AZIjcMJ6ocMj9i78DpLtdIM46fLJJQfRmeoEjq+PFX2ifrmNMlDQI74qXM9nF65ygMNsxB5zMabmw=="],
 
