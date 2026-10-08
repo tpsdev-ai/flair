@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, chmodSync, statSync, readdirSync, mkdirSync, cpSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, chmodSync, statSync, readdirSync, mkdirSync, cpSync, symlinkSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -93,6 +93,40 @@ describe("provider guard", () => {
 });
 
 describe("redirect migration files", () => {
+  test("config search uses the explicit path or cwd and ignores home config", () => {
+    const home = join(dir, "home");
+    const cwd = join(realpathSync(dir), "component");
+    mkdirSync(join(home, ".flair"), { recursive: true });
+    mkdirSync(cwd);
+    writeFileSync(join(home, ".flair", "config.yaml"), "name: flair\n");
+    const homeEnv = Object.entries(configured).map(([key, value]) => `${key}=${value}\n`).join("");
+    const homeEnvPath = join(home, ".flair", ".env");
+    writeFileSync(homeEnvPath, homeEnv);
+    const helper = join(import.meta.dir, "../../src/lib/mcp-oauth-env.ts");
+    const script = `import { resolveInstanceConfigPath, planRedirectMigration } from ${JSON.stringify(helper)};
+      console.log(JSON.stringify({ path: resolveInstanceConfigPath(),
+        missing: resolveInstanceConfigPath("missing.yaml"),
+        migration: planRedirectMigration({ env: {} }) }));`;
+    const run = () => {
+      const result = spawnSync(process.execPath, ["-e", script], {
+        cwd, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: "utf8", timeout: 10_000,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      return JSON.parse(result.stdout);
+    };
+    expect(run()).toEqual({
+      path: null, missing: null,
+      migration: { redirectVar: REDIRECT, action: "refused", reason: "missing-config" },
+    });
+    writeFileSync(join(cwd, "config.yaml"), "name: flair\n");
+    expect(run()).toEqual({
+      path: join(cwd, "config.yaml"), missing: null,
+      migration: { redirectVar: REDIRECT, envPath: join(cwd, ".env"), action: "not-enabled" },
+    });
+    expect(readFileSync(homeEnvPath, "utf8")).toBe(homeEnv);
+    expect(existsSync(join(cwd, ".env"))).toBe(false);
+  }, 25_000);
   test("stages a redirect from local configuration", () => {
     const result = migrate();
     expect(result.action).toBe("staged");

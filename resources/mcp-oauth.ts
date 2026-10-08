@@ -6,11 +6,9 @@
  * urlPath subroute — its OWN dispatch chain, so flair's default auth-middleware
  * never runs for /mcp and can't clobber the Bearer challenge.
  *
- * ── Default-OFF (byte-identical when off) ───────────────────────────────────
- * The route is registered ONLY when `FLAIR_MCP_OAUTH` is truthy. When off, this
- * module does NOTHING at load — no `server.http` call, no `@harperfast/oauth`
- * import, no config injection. flair's default auth chain and prod behavior are
- * unchanged. This is the no-op contract the flag guarantees.
+ * With MCP disabled, registration does not mount `/mcp`. At load, the guard
+ * clears GitHub credentials when both are present and the redirect is missing,
+ * regardless of the flag (unless `FLAIR_MCP_NO_AUTOSTART` is set).
  *
  * The `@harperfast/oauth` authorization-server config itself (providers, mcp.*,
  * DCR gating) lives in `config.yaml` under the `@harperfast/oauth` key, but is

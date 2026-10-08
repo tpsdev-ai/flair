@@ -1,7 +1,6 @@
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import { resolveHome } from "./home.js";
 import {
   SHIPPED_IDP_PROVIDER,
   idpEnvNames,
@@ -33,12 +32,11 @@ export type { DegradedGuardDecision, McpProviderReadiness, McpRedirectDoctorFind
 
 // ─── Component `.env` (the upgrade writer) ───────────────────────────────────
 
-/** The instance's component `config.yaml`, resolved the way the runtime loads
- *  it: an explicit path, then `./config.yaml`, then `~/.flair/config.yaml`. */
+/** Search only the explicit path, or `./config.yaml` when no path is supplied. */
 export function resolveInstanceConfigPath(explicitPath?: string): string | null {
   const candidates = explicitPath
     ? [explicitPath]
-    : [join(process.cwd(), "config.yaml"), join(resolveHome(), ".flair", "config.yaml")];
+    : [join(process.cwd(), "config.yaml")];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
