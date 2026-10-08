@@ -1,4 +1,3 @@
-/** The direct stop helper preserves best-effort timeout behavior for snapshot and upgrade stop callers; restart rejects its failed exit-wait outcome. */
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +9,7 @@ mock.module("../../src/lib/process-start-time.js", () => ({
   readProcessStartTimeMs: () => started,
   readProcessStartSecondMs: () => started,
 }));
-const { launchdLabel, launchdPlistPath, probePidLiveness, restartFlair } = await import("../../src/cli.ts");
+const { launchdLabel, launchdPlistPath, probePidLiveness, program, restartFlair } = await import("../../src/cli.ts");
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
 const savedHome = process.env.HOME;
 const savedPath = process.env.PATH;
@@ -84,6 +83,30 @@ setInterval(() => {}, 1000);
     return { pid, port };
   }
 
+  function arrangeLaunchd(pid: number): void {
+    const agentsDir = join(home, "Library", "LaunchAgents");
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(launchdPlistPath(launchdLabel(dataDir), agentsDir), "<plist/>");
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "launchctl"), `#!/bin/sh
+if [ "$1" = "list" ]; then
+  echo '"PID" = ${pid};'
+else
+  kill -TERM ${pid}
+fi
+`, { mode: 0o755 });
+    process.env.PATH = `${bin}:${savedPath ?? ""}`;
+    const realExecSync = childProcess.execSync;
+    unloadSpy = spyOn(childProcess, "execSync").mockImplementation(((command, opts) =>
+      realExecSync(command, { ...opts, env: { ...process.env } })
+    ) as typeof childProcess.execSync);
+    const realSpawnSync = childProcess.spawnSync;
+    launchctlSpy = spyOn(childProcess, "spawnSync").mockImplementation(((cmd, args, opts) =>
+      realSpawnSync(cmd === "launchctl" ? join(bin, "launchctl") : cmd, args, opts)
+    ) as typeof childProcess.spawnSync);
+  }
+
   test("the refusal names the waited-on process and the remedy, and starts no replacement", async () => {
     const { pid, port } = await arrangeLiveInstance();
     let replacementStarted = false;
@@ -117,8 +140,8 @@ setInterval(() => {}, 1000);
         expect(probePidLiveness(pid)).toEqual({ kind: "gone" });
       },
       startReplacement: async () => {
-        expect(probePidLiveness(pid)).toEqual({ kind: "gone" });
         replacementStarted = true;
+        expect(probePidLiveness(pid)).toEqual({ kind: "gone" });
       },
     })).resolves.toBeUndefined();
     expect(replacementStarted).toBe(true);
@@ -126,27 +149,7 @@ setInterval(() => {}, 1000);
 
   test("launchd wait failure retains its pid and remedy after Harper removes the pidfile", async () => {
     const { pid, port } = await arrangeLiveInstance(true);
-    const agentsDir = join(home, "Library", "LaunchAgents");
-    mkdirSync(agentsDir, { recursive: true });
-    writeFileSync(launchdPlistPath(launchdLabel(dataDir), agentsDir), "<plist/>");
-    const bin = join(home, "bin");
-    mkdirSync(bin);
-    writeFileSync(join(bin, "launchctl"), `#!/bin/sh
-if [ "$1" = "list" ]; then
-  echo '"PID" = ${pid};'
-else
-  kill -TERM ${pid}
-fi
-`, { mode: 0o755 });
-    process.env.PATH = `${bin}:${savedPath ?? ""}`;
-    const realExecSync = childProcess.execSync;
-    unloadSpy = spyOn(childProcess, "execSync").mockImplementation(((command, opts) =>
-      realExecSync(command, { ...opts, env: { ...process.env } })
-    ) as typeof childProcess.execSync);
-    const realSpawnSync = childProcess.spawnSync;
-    launchctlSpy = spyOn(childProcess, "spawnSync").mockImplementation(((cmd, args, opts) =>
-      realSpawnSync(cmd === "launchctl" ? join(bin, "launchctl") : cmd, args, opts)
-    ) as typeof childProcess.spawnSync);
+    arrangeLaunchd(pid);
     let replacementStarted = false;
     let waited = false;
     const err = await restartFlair(port, dataDir, {
@@ -173,5 +176,101 @@ fi
     expect(probePidLiveness(pid)).toEqual({ kind: "alive" });
     expect(decoy!.exitCode).toBeNull();
     expect(replacementStarted).toBe(false);
+  }, 20_000);
+
+  test.each([false, true])("launchd fallback after a failed wait checks the retained pid (exited: %s)", async (exited) => {
+    const { pid, port } = await arrangeLiveInstance(true);
+    arrangeLaunchd(pid);
+    rmSync(join(dataDir, "flair-daemon.json"));
+    let replacementStarted = false;
+    const err = await restartFlair(port, dataDir, {
+      waitForExit: async (waitedPid, timeoutMs) => {
+        expect(waitedPid).toBe(pid);
+        const deadline = Date.now() + 5000;
+        while (!existsSync(join(home, "removed")) && Date.now() < deadline) await Bun.sleep(10);
+        expect(readFileSync(join(home, "removed"), "utf8")).toBe("true");
+        expect(existsSync(join(dataDir, "hdb.pid"))).toBe(false);
+        expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(false);
+        expect(probePidLiveness(pid)).toEqual({ kind: "alive" });
+        if (exited) {
+          decoy!.kill("SIGKILL");
+          await decoy!.exited;
+        }
+        throw new Error(`Process ${waitedPid} did not exit within ${timeoutMs}ms`);
+      },
+      startReplacement: async () => {
+        replacementStarted = true;
+        expect(probePidLiveness(pid)).toEqual({ kind: "gone" });
+      },
+    }).then(() => null, (e: unknown) => e as Error);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(replacementStarted).toBe(exited);
+    if (exited) {
+      expect(err).toBeNull();
+    } else {
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).toContain(`pid ${pid}`);
+      expect(err!.message).toContain("refusing to start a replacement");
+      expect(err!.message).toContain("Stop it, then re-run 'flair restart'");
+      expect(probePidLiveness(pid)).toEqual({ kind: "alive" });
+    }
+  }, 20_000);
+
+  test.each(["healthy", "unreachable"])("launchd fallback rechecks the live pid after a second wait resolves (health: %s)", async (health) => {
+    const { pid, port } = await arrangeLiveInstance();
+    arrangeLaunchd(pid);
+    fetchSpy.mockImplementation((async () => {
+      if (health === "unreachable") throw new Error("unreachable");
+      return new Response(JSON.stringify({ ok: true, version: "test", searchReady: true }));
+    }) as unknown as typeof fetch);
+    let waits = 0;
+    let replacementStarted = false;
+    const err = await restartFlair(port, dataDir, {
+      waitForExit: async (waitedPid) => {
+        expect(waitedPid).toBe(pid);
+        if (++waits === 1) throw new Error("launchd wait failed");
+      },
+      startReplacement: async () => { replacementStarted = true; },
+    }).then(() => null, (e: unknown) => e as Error);
+    expect(waits).toBe(2);
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toContain(`pid ${pid}`);
+    expect(err!.message).toContain("refusing to start a replacement");
+    expect(replacementStarted).toBe(false);
+    expect(probePidLiveness(pid)).toEqual({ kind: "alive" });
+  }, 20_000);
+
+  test("snapshot restore emits a stop failure without a restart remedy", async () => {
+    const { pid, port } = await arrangeLiveInstance(true);
+    arrangeLaunchd(pid);
+    const snapshot = join(home, "snapshot.tar.gz");
+    writeFileSync(snapshot, "unopened");
+    let elapsed = 0;
+    const now = spyOn(Date, "now").mockImplementation(() => started + elapsed);
+    const realSetTimeout = globalThis.setTimeout;
+    const sleep = spyOn(globalThis, "setTimeout").mockImplementation(((fn: (...args: unknown[]) => void, ms: number, ...args: unknown[]) => {
+      if (ms === 500) return realSetTimeout(() => { elapsed += ms; fn(...args); }, 10);
+      return realSetTimeout(fn, ms, ...args);
+    }) as typeof setTimeout);
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    const exit = spyOn(process, "exit").mockImplementation(((code) => {
+      throw new Error(`exit ${code}`);
+    }) as typeof process.exit);
+    try {
+      await expect(program.parseAsync(["node", "flair", "snapshot", "restore", snapshot,
+        "--data-dir", dataDir, "--port", String(port), "--yes"])).rejects.toThrow("exit 1");
+      const emitted = error.mock.calls.map(call => call.join(" ")).join("\n");
+      expect(emitted).toContain("failed to stop Flair: refusing to stop:");
+      expect(emitted).toContain(`pid ${pid}`);
+      expect(emitted).toContain("Could not confirm");
+      expect(emitted).not.toContain("flair restart");
+      expect(readFileSync(snapshot, "utf8")).toBe("unopened");
+      expect(probePidLiveness(pid)).toEqual({ kind: "alive" });
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      sleep.mockRestore();
+      now.mockRestore();
+    }
   }, 20_000);
 });

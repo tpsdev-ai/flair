@@ -7917,7 +7917,12 @@ async function stopFlairProcess(
   opts: { waitForExit?: ExitWait } = {},
 ): Promise<StopExitOutcome> {
   const waitForExit = opts.waitForExit ?? waitForProcessExit;
-  let launchdExitFailure: StopExitOutcome | null = null;
+  let launchdExitFailure: { pid: number; exited: false } | null = null;
+  const fallbackOutcome = (outcome: StopExitOutcome): StopExitOutcome => {
+    if (!launchdExitFailure) return outcome;
+    if (probePidLiveness(launchdExitFailure.pid).kind !== "gone") return launchdExitFailure;
+    return { pid: outcome.pid ?? launchdExitFailure.pid, exited: outcome.exited };
+  };
   if (process.platform === "darwin") {
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under (new instance-scoped, or a
@@ -8019,20 +8024,22 @@ async function stopFlairProcess(
       // alone); a process that survived the wait (or whose liveness is unknown)
       // removes nothing.
       removeStaleSidecarIfConfirmedDead(dataDir);
-      return { pid, exited };
+      return fallbackOutcome({ pid, exited });
     }
     case "NOT_RUNNING": {
       // Idempotent no-op for the process — but a sidecar left naming a pid that
       // is CONFIRMED gone is a leftover too (flair#2055), and removing it here
       // keeps a repeat stop from carrying the refusal forward.
       removeStaleSidecarIfConfirmedDead(dataDir);
-      return { pid: null, exited: true };
+      return fallbackOutcome({ pid: null, exited: true });
     }
     case "DISAGREEMENT":
     case "UNKNOWN":
       // Deliberately outside any catch: a refusal must reach the caller, not
       // be swallowed as "not running" and reported as a successful stop.
-      if (launchdExitFailure) refuseReplacementAfterExitTimeout(launchdExitFailure, `refusing to stop: ${state.detail}`);
+      if (launchdExitFailure && !fallbackOutcome({ pid: null, exited: true }).exited) {
+        throw new StopExitWaitError(launchdExitFailure, `refusing to stop: ${state.detail}`);
+      }
       throw new Error(`refusing to stop: ${state.detail}`);
   }
 }
@@ -8202,7 +8209,12 @@ async function startFlairDirect(port: number, dataDir: string): Promise<number |
   return proc.pid ?? null;
 }
 
-/** The direct stop helper preserves best-effort timeout behavior for snapshot and upgrade stop callers; restart rejects its failed exit-wait outcome. */
+class StopExitWaitError extends Error {
+  constructor(readonly outcome: StopExitOutcome, readonly detail?: string) {
+    super(`${detail ? `${detail}. ` : ""}Could not confirm that the old Flair process (pid ${outcome.pid ?? "unknown"}) exited within ${STARTUP_TIMEOUT_MS}ms`);
+  }
+}
+
 function refuseReplacementAfterExitTimeout(outcome: StopExitOutcome, detail?: string): void {
   if (outcome.exited) return;
   throw new Error(
@@ -8239,6 +8251,16 @@ type RestartFlairDeps = {
  */
 export async function restartFlair(port: number, dataDir: string, deps: RestartFlairDeps = {}): Promise<void> {
   const startReplacement = deps.startReplacement ?? startFlairProcess;
+  const stopForRestart = async (): Promise<void> => {
+    let outcome: StopExitOutcome;
+    try {
+      outcome = await stopFlairProcess(port, dataDir, { waitForExit: deps.waitForExit });
+    } catch (err) {
+      if (err instanceof StopExitWaitError) refuseReplacementAfterExitTimeout(err.outcome, err.detail);
+      throw err;
+    }
+    refuseReplacementAfterExitTimeout(outcome);
+  };
   // flair#2034 §2: on Linux, an instance proven to run under a systemd USER
   // unit (found from the serving process's cgroup; its MainPID is that
   // process) is restarted THROUGH that unit, and the unit's new main process
@@ -8274,8 +8296,7 @@ export async function restartFlair(port: number, dataDir: string, deps: RestartF
         if (s.unitTree !== null && samePathCanonical(s.unitTree, flairPackageDir())) guardEngineNotBackwards(dataDir);
       },
       direct: async () => {
-        const outcome = await stopFlairProcess(port, dataDir, { waitForExit: deps.waitForExit });
-        refuseReplacementAfterExitTimeout(outcome);
+        await stopForRestart();
         await startReplacement(port, dataDir);
       },
       log: (line) => console.log(line),
@@ -8285,8 +8306,7 @@ export async function restartFlair(port: number, dataDir: string, deps: RestartF
       stampEngineVersionIfRunning(dataDir);
     }
   } else {
-    const outcome = await stopFlairProcess(port, dataDir, { waitForExit: deps.waitForExit });
-    refuseReplacementAfterExitTimeout(outcome);
+    await stopForRestart();
     await startReplacement(port, dataDir);
   }
   // Bust the version-handshake cache so the next preAction nudge re-fetches
