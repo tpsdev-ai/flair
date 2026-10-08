@@ -1,4 +1,4 @@
-- **The `flair hook status` probe now ends every process its command started, not only the shell.**
+- **The `flair hook status` probe now ends the whole process group its command started.**
   A command that timed out used to leave its descendants — an `npx`/`npm exec`
   helper, say — running after `status` returned. The probe runs the command in
   its own process group and terminates the whole group (SIGTERM, then SIGKILL

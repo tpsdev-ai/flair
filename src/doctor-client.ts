@@ -1867,7 +1867,7 @@ function spawnProbeBounded(
 
 /**
  * flair#2385 — run a hook command in its OWN process group and end the whole
- * group, so no descendant outlives the probe.
+ * group, so the command's descendants go with it.
  *
  * `spawnSync`'s `timeout` signals only the direct `/bin/sh`. A descendant the
  * command started (an `npx`/`npm exec` helper, say) keeps running after

@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { probeSessionStartHookDelivery } from "../../src/doctor-client.ts";
 
 /**
- * flair#2385 — the `flair hook status` SessionStart probe must end EVERY
- * process it started, not only the direct `/bin/sh`.
+ * flair#2385 — the `flair hook status` SessionStart probe must end the whole
+ * process group its command started, not just the direct `/bin/sh` (POSIX
+ * process groups; the Windows fallback is in `runProbeInOwnGroup`).
  *
  * The probe runs the wired command in its own process group and, on the timeout
  * path and after a normal exit, terminates the whole group. These cases run a
