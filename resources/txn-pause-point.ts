@@ -3,7 +3,8 @@
  * Claims an arm file, writes pause/release markers, and waits for go or its limit.
  * Pinned by test/unit/txn-pause-point.test.ts and used by
  * test/integration/supersede-close-contention-2307.test.ts and
- * test/integration/embedding-stamp-contention-2307.test.ts.
+ * test/integration/embedding-stamp-contention-2307.test.ts and
+ * test/integration/integration-row-write-serialization-2340.test.ts.
  */
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +20,7 @@ const POLL_MS = 20;
 export type TxnPausePoint =
   | "supersede-close"
   | "embedding-stamp-content-suffix"
+  | "integration-row-write"
   // flair#2275 — MemoryMaintenance. Each action has a `-pre` point (after the
   // scan read, before the owned transaction opens) and an in-transaction point
   // (between that transaction's re-read and its act), so both interleavings of
