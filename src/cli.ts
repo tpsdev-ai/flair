@@ -7885,11 +7885,6 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
 /** The restart flow's exit wait for the old process (flair#2365); injectable for tests. */
 type ExitWait = (pid: number, timeoutMs: number) => Promise<void>;
 
-/**
- * What the stop leg's exit wait observed (flair#2365): `pid` names the process
- * the leg waited on (null when there was none), `exited` is true unless the wait
- * gave up on a live process.
- */
 type StopExitOutcome = { pid: number | null; exited: boolean };
 
 /**
@@ -7922,6 +7917,7 @@ async function stopFlairProcess(
   opts: { waitForExit?: ExitWait } = {},
 ): Promise<StopExitOutcome> {
   const waitForExit = opts.waitForExit ?? waitForProcessExit;
+  let launchdExitFailure: StopExitOutcome | null = null;
   if (process.platform === "darwin") {
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under (new instance-scoped, or a
@@ -7981,7 +7977,12 @@ async function stopFlairProcess(
             + `${managed.remedy?.length ? ` Fix it with: ${managed.remedy.join(" && ")}` : ""}`,
           );
         }
-        if (oldPid) await waitForExit(oldPid, STARTUP_TIMEOUT_MS);
+        if (oldPid) {
+          try { await waitForExit(oldPid, STARTUP_TIMEOUT_MS); } catch (err) {
+            launchdExitFailure = { pid: oldPid, exited: false };
+            throw err;
+          }
+        }
         return { pid: oldPid ?? null, exited: true };
       } catch (err: any) {
         console.error(`launchd stop failed, falling back to port-based stop: ${err.message}`);
@@ -8031,6 +8032,7 @@ async function stopFlairProcess(
     case "UNKNOWN":
       // Deliberately outside any catch: a refusal must reach the caller, not
       // be swallowed as "not running" and reported as a successful stop.
+      if (launchdExitFailure) refuseReplacementAfterExitTimeout(launchdExitFailure, `refusing to stop: ${state.detail}`);
       throw new Error(`refusing to stop: ${state.detail}`);
   }
 }
@@ -8200,18 +8202,11 @@ async function startFlairDirect(port: number, dataDir: string): Promise<number |
   return proc.pid ?? null;
 }
 
-/**
- * flair#2365 — the restart flow refuses to start the replacement when the stop
- * leg's wait for the old process to exit did not observe it gone.
- * `stopFlairProcess` treats that timeout as best-effort (an already-stopped
- * instance must stay a harmless no-op). Restart is about to start a SECOND
- * instance next to one that may still hold the data directory and the ports, so
- * it refuses, naming the process it waited on and the remedy.
- */
-function refuseReplacementAfterExitTimeout(outcome: StopExitOutcome): void {
+/** The direct stop helper preserves best-effort timeout behavior for snapshot and upgrade stop callers; restart rejects its failed exit-wait outcome. */
+function refuseReplacementAfterExitTimeout(outcome: StopExitOutcome, detail?: string): void {
   if (outcome.exited) return;
   throw new Error(
-    `The old Flair process (pid ${outcome.pid ?? "unknown"}) did not exit within ${STARTUP_TIMEOUT_MS}ms; refusing to start a replacement. `
+    `${detail ? `${detail}. ` : ""}Could not confirm that the old Flair process (pid ${outcome.pid ?? "unknown"}) exited within ${STARTUP_TIMEOUT_MS}ms; refusing to start a replacement. `
     + `Stop it, then re-run 'flair restart'.`,
   );
 }
