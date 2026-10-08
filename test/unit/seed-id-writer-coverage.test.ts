@@ -33,6 +33,7 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GUARDED ──
+add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
 add("Memory", [
   "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
   "writer:(databases as any).flair.Memory.put#2",

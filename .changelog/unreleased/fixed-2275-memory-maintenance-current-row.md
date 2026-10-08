@@ -8,6 +8,6 @@
   change committed between the confirmation read and the commit is not checked.
   The archive write is built from the re-read row. The user-facing
   archive/restore action (`MemoryArchive`) likewise re-reads the row inside an
-  owned transaction: a row that changed since it was read and is still readable
-  is refused (`memory_changed`, 409), a row that is no longer readable returns
+  owned transaction: a changed persisted row that is still readable is refused
+  (`memory_changed`, 409), a row that is no longer readable returns
   404, and a change after the re-read is not checked.
