@@ -18,6 +18,7 @@ import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
 import { refuseContentSuffixId } from "./memory-id-guard.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -231,7 +232,17 @@ export class FeedMemories extends Resource {
     const contentHash = computeContentHash(agentId, body);
 
     const existing = await findExistingMemoryByContentHash((databases as any).flair.Memory.search(), agentId, contentHash);
-    if (existing) return existing;
+    if (existing) {
+      // flair#2358: a dedup hit does not repair a missing tier expiry on the
+      // stored row. When the dedup row is an ephemeral row with no expiry,
+      // repair it (re-read + write in an owned transaction) and return the row
+      // with the confirmed expiry so the response matches the stored row.
+      if (existing.durability === "ephemeral" && existing.expiresAt == null) {
+        const repaired = await repairDeduplicatedExpiry(ctx, String(existing.id));
+        if (repaired) return { ...existing, expiresAt: repaired.expiresAt };
+      }
+      return existing;
+    }
 
     const record = {
       ...content,
@@ -489,4 +500,37 @@ async function storedRowReadable(
   if (stored == null || typeof stored !== "object" || typeof stored.agentId !== "string") return false;
   if (!isAllowed(stored)) return false;
   return closedSkillPayloadReadable(stored, readerId);
+}
+
+/**
+ * flair#2358: the content-hash dedup path returns the stored row instead of
+ * writing a new one. An ephemeral stored row that carries no expiry is
+ * repaired: read the row inside a transaction this call OWNS, stamp the tier
+ * expiry through the shared rule (#2274's stampEphemeralExpiry, the helper a
+ * fresh feed write uses), write it back through the static table handle with
+ * that transaction, then confirm the stored expiry with an owned read. A row
+ * that is not ephemeral, or that already carries an expiry, is left as stored.
+ * Returns the confirmed stored row when a repair landed, else null.
+ */
+async function repairDeduplicatedExpiry(ctx: unknown, id: string): Promise<any | null> {
+  let repaired = false;
+  await withOwnedTransaction(ctx, async (c) => {
+    const stored = await (databases as any).flair.Memory.get(id, c);
+    if (!stored || stored.durability !== "ephemeral" || stored.expiresAt != null) return;
+    const row: any = { ...stored };
+    // A stored null is "no expiry": drop it so the shared rule stamps a fresh
+    // tier TTL rather than refusing the null as malformed.
+    delete row.expiresAt;
+    const error = stampEphemeralExpiry(row);
+    if (error) throw new Error(`flair: deduplicated ephemeral row ${id} could not be repaired (${error})`);
+    await (databases as any).flair.Memory.put(row, c);
+    repaired = true;
+  });
+  if (!repaired) return null;
+  let confirmed: any = null;
+  await withOwnedTransaction(ctx, async (c) => {
+    const stored = await (databases as any).flair.Memory.get(id, c);
+    if (stored && stored.expiresAt != null) confirmed = stored;
+  });
+  return confirmed;
 }

@@ -45,6 +45,8 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "GUARDED: closeSupersededRecord closes `supersedes`, which validateAndAuthorizeSupersedes ran through the decision before the new row was written.");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "GUARDED: FeedMemories.post calls the decision on the body id before the raw put.");
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"],
+  "SERVER: the dedup repair (flair#2358) re-writes a stored row the server selected, under its own id — the decision ran when that row was created.");
 add("Federation", ["writer:table.put#1"],
   "GUARDED: the merge skips a reserved id (seed_id_not_federated) before the put.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],

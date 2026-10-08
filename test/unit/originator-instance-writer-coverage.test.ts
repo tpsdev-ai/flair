@@ -55,7 +55,7 @@ const POLICY: Record<string, { count: number; disposition: Disposition; note: st
   "resources/AgentSeed.ts|Memory|put": { count: 1, disposition: "stamped-create", note: "POST /AgentSeed raw starter-Memory create" },
   "resources/XAA.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "IdP principal raw Agent create" },
   "resources/mcp-handler.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "JIT OAuth principal raw Agent create" },
-  "resources/MemoryFeed.ts|Memory|put": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update" },
+  "resources/MemoryFeed.ts|Memory|put": { count: 2, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update, plus the dedup-repair re-PUT of an existing row (flair#2358)" },
   "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory and FeedMemories stamp successors in their transaction plans; predecessor closes retain stored stamps." },
   // Update-only / resource-internal raw writes — they re-write an existing row.
   "resources/Memory.ts|Memory|post": { count: 1, disposition: "resource-internal", note: "Memory writeMemoryRowPost fallback (content already stamped)" },

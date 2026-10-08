@@ -87,6 +87,8 @@ add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Admin-only starter memories — the record carries no embedding/embeddingModel.");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Feed rows — the record carries no embedding/embeddingModel.");
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
+  "Dedup repair (flair#2358): read-modify-write re-writes the stored row's own stamp — only its expiresAt changes.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");
 // flair#1940 A1-iv item 6: Memory.ts no longer touches the MemoryHostSource
