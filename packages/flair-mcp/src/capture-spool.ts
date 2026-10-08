@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 import { memoryPutPath } from "./record-id-path.js";
@@ -108,16 +108,18 @@ function ensureCaptureDir(dir: string): void {
   chmodSync(dir, 0o700);
 }
 
+interface LockAcquireState { stuckTakeover: boolean; warn: (message: string) => void; }
+
 const LOCK_BUSY: unique symbol = Symbol("capture-lock-busy");
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
 /** Run `fn` holding the per-agent lock (an exclusively created file), or
  *  return LOCK_BUSY when it is not free within CAPTURE_LOCK_WAIT_MS. */
-function withCaptureLock<T>(dir: string, agentId: string, fn: () => T): T | typeof LOCK_BUSY {
+function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }): T | typeof LOCK_BUSY {
   ensureCaptureDir(dir);
   const deadline = Date.now() + CAPTURE_LOCK_WAIT_MS;
   for (;;) {
-    const held = acquireSpoolLock(dir, agentId);
+    const held = acquireSpoolLock(dir, agentId, console.warn, lockPath(dir, agentId), CAPTURE_LOCK_STALE_MS, false, 0, state);
     if (held) {
       try {
         return fn();
@@ -351,7 +353,7 @@ export interface FlushDeps {
 export interface FlushOutcome {
   flushed: number;
   remaining: number;
-  reason: "flushed" | "nothing" | "no-agent-id" | "write-failed" | "busy";
+  reason: "flushed" | "nothing" | "no-agent-id" | "write-failed" | "busy" | "busy-stuck-takeover";
 }
 
 /** LAZY on purpose: flair-client resolves via its built dist/, and this module
@@ -367,7 +369,7 @@ async function defaultClientFactory(agentId: string): Promise<CaptureClient> {
   });
 }
 
-function acquireSpoolLock(dir: string, agentId: string, warn: (message: string) => void = console.warn, path = lockPath(dir, agentId), staleMs = CAPTURE_LOCK_STALE_MS, takeover = false, depth = 0): { release: () => void; isOwned: () => boolean; refresh: () => void } | null {
+function acquireSpoolLock(dir: string, agentId: string, warn: (message: string) => void = console.warn, path = lockPath(dir, agentId), staleMs = CAPTURE_LOCK_STALE_MS, takeover = false, depth = 0, state: LockAcquireState = { stuckTakeover: false, warn }): { release: () => void; isOwned: () => boolean; refresh: () => void } | null {
   ensureCaptureDir(dir);
   const identity = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
   const readIdentity = (): string | null => {
@@ -416,19 +418,30 @@ function acquireSpoolLock(dir: string, agentId: string, warn: (message: string) 
       try { owner = JSON.parse(lock.content ?? ""); } catch {}
       const valid = owner && typeof owner.pid === "number" && Number.isSafeInteger(owner.pid) && owner.pid > 0 &&
         typeof owner.nonce === "string" && owner.nonce.length > 0;
-      if (!valid) return !takeover && age > staleMs;
+      const reportStuck = (reason: string): void => {
+        if (!takeover || age <= CAPTURE_LOCK_STALE_MS || state.stuckTakeover) return;
+        state.stuckTakeover = true;
+        const mutexPath = resolve(path);
+        state.warn(`capture takeover mutex ${mutexPath} not reclaimed (age ${Math.round(age)} ms; ${reason}); remove ${mutexPath} if no capture flush is running`);
+      };
+      if (!valid) {
+        reportStuck("malformed identity");
+        return !takeover && age > staleMs;
+      }
       if (!takeover && age > staleMs) return true;
       try {
         process.kill(owner!.pid as number, 0);
+        reportStuck(`holder pid ${owner!.pid} is alive`);
         return false;
       } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") reportStuck(`holder pid ${owner!.pid} cannot be proven dead`);
         return (error as NodeJS.ErrnoException).code === "ESRCH" && (!takeover || age > staleMs);
       }
     };
     try {
       const previous = readLock(path);
       if (!reclaimable(previous) || depth >= 8) return null;
-      const mutex = acquireSpoolLock(dir, agentId, () => {}, `${path}.takeover`, CAPTURE_TAKEOVER_STALE_MS, true, depth + 1);
+      const mutex = acquireSpoolLock(dir, agentId, () => {}, `${path}.takeover`, CAPTURE_TAKEOVER_STALE_MS, true, depth + 1, state);
       if (!mutex) return null;
       try {
         const current = readLock(path);
@@ -494,8 +507,9 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
 
   const now = deps.now ?? (() => new Date());
-  const held = acquireSpoolLock(dir, agentId, deps.warn ?? console.warn, flushLockPath(dir, agentId));
-  if (!held) return { flushed: 0, remaining: records.length, reason: "busy" };
+  const state: LockAcquireState = { stuckTakeover: false, warn: deps.warn ?? console.warn };
+  const held = acquireSpoolLock(dir, agentId, deps.warn ?? console.warn, flushLockPath(dir, agentId), CAPTURE_LOCK_STALE_MS, false, 0, state);
+  if (!held) return { flushed: 0, remaining: records.length, reason: state.stuckTakeover ? "busy-stuck-takeover" : "busy" };
   const controller = new AbortController();
   let lost = false;
   let rejectLost!: (error: Error) => void;
@@ -514,8 +528,8 @@ export async function runCaptureFlush(deps: FlushDeps = {}): Promise<FlushOutcom
   beat.unref?.();
   const deadlineAt = Date.now() + (deps.deadlineMs ?? CAPTURE_FLUSH_DEADLINE_MS);
   try {
-    const staged = withCaptureLock(dir, agentId, () => readSpoolFile(dir, agentId));
-    if (staged === LOCK_BUSY) return { flushed: 0, remaining: records.length, reason: "busy" };
+    const staged = withCaptureLock(dir, agentId, () => readSpoolFile(dir, agentId), state);
+    if (staged === LOCK_BUSY) return { flushed: 0, remaining: records.length, reason: state.stuckTakeover ? "busy-stuck-takeover" : "busy" };
     records = (staged ?? []).filter((r): r is CaptureSpoolRecord => isSpoolRecord(r, agentId));
     if (records.length === 0) return { flushed: 0, remaining: 0, reason: "nothing" };
     const makeClient = deps.makeClient ?? defaultClientFactory;

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CAPTURE_LOCK_STALE_MS, flushLockPath, lockPath, runCapture } from "../src/capture-spool.ts";
+import { CAPTURE_LOCK_STALE_MS, flushLockPath, lockPath, runCapture, runCaptureFlush } from "../src/capture-spool.ts";
 
 const CAPTURE_CHILD = `
 const { mock } = await import("bun:test");
@@ -339,7 +339,7 @@ for (const scenario of ["inode", "owner", "occupied", "unreadable"]) {
   }, 20_000);
 }
 
-for (const scenario of ["live-aged", "dead-recent", "dead-aged", "malformed-aged"]) {
+for (const scenario of ["live-aged", "dead-recent", "dead-aged", "malformed-aged", "malformed-recent"]) {
   test(`a ${scenario} takeover mutex ${scenario !== "dead-aged" ? "blocks" : "permits"} capture`, async () => {
     const home = mkdtempSync(join(tmpdir(), "flair-takeover-mutex-"));
     const dir = join(home, ".flair", "capture");
@@ -352,16 +352,26 @@ for (const scenario of ["live-aged", "dead-recent", "dead-aged", "malformed-aged
       const old = new Date(Date.now() - CAPTURE_LOCK_STALE_MS - 1000);
       utimesSync(lock, old, old);
       const mutex = `${lock}.takeover`;
-      const identity = scenario === "malformed-aged" ? "{" : JSON.stringify({
+      const identity = scenario.startsWith("malformed-") ? "{" : JSON.stringify({
         pid: scenario === "live-aged" ? process.pid : dead.pid, nonce: "mutex-owner",
       });
       writeFileSync(mutex, identity, { flag: "wx", mode: 0o600 });
-      if (scenario !== "dead-recent") utimesSync(mutex, old, old);
+      const mutexTime = scenario.endsWith("aged") ? old : new Date(Date.now() - (scenario === "malformed-recent" ? CAPTURE_LOCK_STALE_MS / 2 : 0));
+      utimesSync(mutex, mutexTime, mutexTime);
       const outcome = await captureChild(home, dir);
       if (scenario !== "dead-aged") {
         expect(outcome.result.reason).toBe("refused");
         expect(readFileSync(mutex, "utf8")).toBe(identity);
         expect(readFileSync(lock, "utf8")).toBe("{");
+        if (scenario.endsWith("aged")) {
+          expect(outcome.warnings).toHaveLength(1);
+          expect(outcome.warnings[0]).toContain(mutex);
+          expect(outcome.warnings[0]).toMatch(/age \d+ ms/);
+          expect(outcome.warnings[0]).toContain(scenario.startsWith("malformed") ? "malformed identity" : `holder pid ${process.pid} is alive`);
+          expect(outcome.warnings[0]).toContain(`remove ${mutex} if no capture flush is running`);
+        } else {
+          expect(outcome.warnings).toHaveLength(0);
+        }
       } else {
         expect(outcome.result.reason).toBe("appended");
         expect(existsSync(mutex)).toBe(false);
@@ -372,3 +382,78 @@ for (const scenario of ["live-aged", "dead-recent", "dead-aged", "malformed-aged
     }
   }, 10_000);
 }
+
+for (const kind of ["append", "flush"]) {
+  for (const scenario of ["malformed-aged", "live-aged", "malformed-recent"]) {
+    test(`a ${scenario} ${kind} takeover mutex reports ${scenario.endsWith("aged") ? "busy-stuck-takeover" : "busy"}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "flair-stuck-takeover-"));
+      try {
+        const env = { FLAIR_AGENT_ID: "agent" };
+        runCapture(JSON.stringify({ hook_event_name: "Stop", last_assistant_message: "Decision: use host-a." }), { dir, env });
+        const lock = kind === "append" ? lockPath(dir, "agent") : flushLockPath(dir, "agent");
+        const mutex = `${lock}.takeover`;
+        const now = Date.now();
+        const old = new Date(now - CAPTURE_LOCK_STALE_MS - 1000);
+        writeFileSync(lock, "{", { flag: "wx", mode: 0o600 });
+        utimesSync(lock, old, old);
+        const identity = scenario === "live-aged" ? JSON.stringify({ pid: process.pid, nonce: "live-owner" }) : "{";
+        writeFileSync(mutex, identity, { flag: "wx", mode: 0o600 });
+        const mutexTime = scenario.endsWith("aged") ? old : new Date(now - CAPTURE_LOCK_STALE_MS / 2);
+        utimesSync(mutex, mutexTime, mutexTime);
+        const warnings: string[] = [];
+        const outcome = await runCaptureFlush({ dir, env, warn: (message) => warnings.push(message),
+          makeClient: () => { throw new Error("client must not be created while busy"); },
+        });
+        expect(outcome).toEqual({ flushed: 0, remaining: 1, reason: scenario.endsWith("aged") ? "busy-stuck-takeover" : "busy" });
+        expect(readFileSync(lock, "utf8")).toBe("{");
+        expect(readFileSync(mutex, "utf8")).toBe(identity);
+        if (scenario.endsWith("aged")) {
+          expect(warnings).toHaveLength(1);
+          expect(warnings[0]).toContain(mutex);
+          const age = Number(warnings[0]!.match(/age (\d+) ms/)?.[1]);
+          expect(age).toBeGreaterThanOrEqual(CAPTURE_LOCK_STALE_MS + 1000);
+          expect(age).toBeLessThanOrEqual(Date.now() - old.getTime() + 1);
+          expect(warnings[0]).toContain(scenario === "live-aged" ? `holder pid ${process.pid} is alive` : "malformed identity");
+          expect(warnings[0]).toContain(`remove ${mutex} if no capture flush is running`);
+        } else {
+          expect(warnings).toEqual([]);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test("the flush hook exits 0 with an aged malformed takeover mutex", async () => {
+  const home = mkdtempSync(join(tmpdir(), "flair-stuck-hook-"));
+  const dir = join(home, ".flair", "capture");
+  try {
+    const env = { FLAIR_AGENT_ID: "agent", FLAIR_CAPTURE_DIR: dir, HOME: home };
+    runCapture(JSON.stringify({ hook_event_name: "Stop", last_assistant_message: "Decision: use host-a." }), { dir, env });
+    const lock = flushLockPath(dir, "agent");
+    const mutex = `${lock}.takeover`;
+    const old = new Date(Date.now() - CAPTURE_LOCK_STALE_MS - 1000);
+    for (const path of [lock, mutex]) {
+      writeFileSync(path, "{", { flag: "wx", mode: 0o600 });
+      utimesSync(path, old, old);
+    }
+    const child = spawn(process.execPath, [new URL("../src/capture-hook.ts", import.meta.url).pathname, "--flush"], {
+      env: { ...process.env, ...env }, timeout: 5000,
+    });
+    let output = "";
+    let warnings = "";
+    child.stdout!.on("data", (data) => { output += data; });
+    child.stderr!.on("data", (data) => { warnings += data; });
+    expect(await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    })).toBe(0);
+    expect(output).toBe("");
+    expect(warnings.trim().split("\n")).toHaveLength(1);
+    expect(warnings).toContain(`remove ${mutex} if no capture flush is running`);
+    expect(readFileSync(mutex, "utf8")).toBe("{");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
