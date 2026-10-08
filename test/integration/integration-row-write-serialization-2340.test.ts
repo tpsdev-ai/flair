@@ -1,7 +1,7 @@
 /**
  * integration-row-write-serialization-2340.test.ts — flair#2340, real Harper.
  *
- * An Integration write (put, patch, by-id delete) makes one per-row decision
+ * For an Integration write (put, patch, by-id delete), each attempt makes a per-row decision
  * (resources/Integration.ts): the stored-row read, the operator-only decision
  * and the write run in one owned transaction. These cases change the target
  * AFTER that transaction has read the row and BEFORE it commits: the spawned

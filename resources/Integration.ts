@@ -36,7 +36,7 @@ const UNAVAILABLE = (error: string) =>
 const OWNER_CHANGED = () =>
   new Response(JSON.stringify({
     error: "integration_owner_changed",
-    message: "the record's owner changed while this write was in progress; the write was refused",
+    message: "the record is owned by a different agent than the caller; the write was refused",
   }), { status: 403, headers: { "Content-Type": "application/json" } });
 
 /** The field whose value is the team-directory publication stamp. */
@@ -169,13 +169,14 @@ type IntegrationWriteOutcome<T> =
   | { kind: "write"; id: string | number | null; expected: Record<string, any> | null; commit: (owned: any) => Promise<T> };
 
 /**
- * One per-row decision for an Integration write (flair#2340). The write's
+ * Each attempt makes a per-row decision for an Integration write (flair#2340). The write's
  * decisions and the write run inside ONE owned transaction. When the write
  * names a stored row, the committed row is re-read OUTSIDE the transaction
  * (Harper's latest committed state) before the write is staged; when it is no
  * longer the row this attempt read, the transaction is aborted (nothing is
  * staged) and the attempt is retried from the committed row, up to
- * INTEGRATION_WRITE_ATTEMPTS times, then answered with the conflict response.
+ * INTEGRATION_WRITE_ATTEMPTS times. If every attempt detects another change,
+ * the request returns integration_row_changed.
  * POST reads no stored row; a generated-id POST names no row to re-read. A
  * denial stages no write and is returned unchanged. Mirrors the
  * re-read-then-abort pattern of flair#2307 (resources/Memory.ts).
@@ -190,11 +191,9 @@ async function runIntegrationWrite<T>(
       return await withOwnedTransaction(ctx, async (owned) => {
         const outcome = await attemptFn(owned);
         if (outcome.kind === "denial") return outcome.denial;
-        // Authorize against the committed row this attempt's decision read
-        // (flair#2340): the middleware's ownership check ran before this read,
-        // so a row transferred to another principal since the request began
-        // would otherwise be written. `expected` is that row, or null for a
-        // write that lands on no stored row (a create).
+        // Authorize non-admin agents against this attempt's stored row.
+        // By-id middleware checks ownership before this read.
+        // `expected` is null when the write lands on no stored row (a create).
         if (outcome.expected && auth.kind === "agent" && !auth.isAdmin && outcome.expected.agentId !== auth.agentId) {
           return OWNER_CHANGED();
         }
