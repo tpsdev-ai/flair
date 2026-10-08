@@ -5507,37 +5507,52 @@ function writeDaemonSidecar(dataDir: string, pid: number, port: number, startTim
 }
 
 /**
- * Remove the identity sidecar left behind by a stop (flair#2055).
+ * Remove the identity sidecar left behind by a stop (flair#2055, flair#2391).
  *
  * A sidecar that still names a pid which is CONFIRMED gone is a leftover, and
  * leaving it makes a later instance under a DIFFERENT supervisor refuse
- * ("its identity could not be verified"). The removal is gated twice:
+ * ("its identity could not be verified").
  *
- *   1. the pid the sidecar names must be CONFIRMED gone (ESRCH) — `unknown` or
- *      EPERM liveness removes nothing; and
- *   2. a FRESH O_NOFOLLOW read taken just before the unlink must still name
- *      that pid. A sidecar another supervisor rewrote in between names a
- *      different pid and is left alone; a symlinked or malformed one reads as
- *      `unreadable` and is not removed either, because the re-read never
- *      followed the link.
+ * The pid's liveness is taken from `confirmedGonePid` when it names the pid the
+ * sidecar names: a caller that has already WAITED for that pid to exit — the
+ * stop paths run `waitForProcessExit` first — has confirmed it gone, and this
+ * cleanup must not read it again (flair#2391). A second read races the reaper:
+ * `kill(pid, 0)` succeeds on a process that is being reaped, and if the
+ * `/proc/<pid>/stat` read that follows then fails with ESRCH the probe reports
+ * `alive` (its fail-safe mapping of an unreadable state), the gate below skips
+ * the unlink, and `flair stop` returns with the sidecar still naming the pid it
+ * just confirmed gone. With no confirmation (the NOT_RUNNING legs, where a
+ * liveness read is the only evidence) `probe` is consulted instead.
  *
- * There is no lock: the re-read narrows the window to the gap between the read
- * and the unlink, and the only loser of that race is a start that rewrote the
- * sidecar in the gap — a live daemon left with no sidecar, which a later
- * port-based stop or restart can RECOVER by self-heal once the live process
- * supplies the required pidfile and health evidence (shouldAdoptMissingSidecar
- * adopts the identity from the live process; see the recovery test). `flair
- * status` does not re-adopt. A lock would buy
+ * A FRESH O_NOFOLLOW read taken just before the unlink must still name that
+ * pid. A sidecar another supervisor rewrote in between names a different pid
+ * and is left alone; a symlinked or malformed one reads as `unreadable` and is
+ * not removed either, because the re-read never followed the link.
+ *
+ * There is no lock: the only loser of the read/unlink window is a start that
+ * rewrote the sidecar in the gap — a live daemon left with no sidecar, which a
+ * later port-based stop or restart can RECOVER by self-heal once the live
+ * process supplies the required pidfile and health evidence
+ * (shouldAdoptMissingSidecar adopts the identity from the live process; see the
+ * recovery test). `flair status` does not re-adopt. A lock would buy
  * nothing here and add a crash-recovery hazard, so the design relies on the
  * self-heal instead. A writer OUTSIDE flair could substitute a symlink after
  * the final read; that is out of scope (same as any other path flair re-reads
  * by name). Best-effort: a failure to unlink is reported, never fatal.
+ *
+ * `probe` is injectable so the confirmation-vs-read decision is unit-testable
+ * without a reap race.
  */
-export function removeStaleSidecarIfConfirmedDead(dataDir: string): void {
+export function removeStaleSidecarIfConfirmedDead(
+  dataDir: string,
+  confirmedGonePid: number | null = null,
+  probe: (pid: number) => PidLiveness = probePidLiveness,
+): void {
   const observed = readSidecar(dataDir);
   if (observed.kind !== "present") return;
   const observedPid = observed.pid;
-  const observedPidLiveness = probePidLiveness(observedPid);
+  const observedPidLiveness: PidLiveness =
+    confirmedGonePid !== null && confirmedGonePid === observedPid ? { kind: "gone" } : probe(observedPid);
   // Re-read: only the sidecar that still names the confirmed-dead pid is ours
   // to remove (a sidecar rewritten in the gap is left alone).
   const fresh = readSidecar(dataDir);
@@ -8069,12 +8084,12 @@ async function stopFlairProcess(
       // the old process hasn't released it yet.
       let exited = true;
       try { await waitForExit(pid, STARTUP_TIMEOUT_MS); } catch { exited = false; /* best-effort — the restart leg refuses instead (flair#2365) */ }
-      // flair#2055: once the process is CONFIRMED gone, drop the identity
-      // sidecar. Gated on a fresh O_NOFOLLOW read that still names the pid it
-      // named before (a sidecar another supervisor rewrote in between is left
-      // alone); a process that survived the wait (or whose liveness is unknown)
-      // removes nothing.
-      removeStaleSidecarIfConfirmedDead(dataDir);
+      // flair#2055/#2391: drop the identity sidecar once the process is
+      // CONFIRMED gone, using the pid the wait confirmed — a survivor (or an
+      // unconfirmed exit) removes nothing (the pid is passed as null). Gated on
+      // a fresh O_NOFOLLOW read that still names the pid it named before (a
+      // sidecar another supervisor rewrote in between is left alone).
+      removeStaleSidecarIfConfirmedDead(dataDir, exited ? pid : null);
       return fallbackOutcome({ pid, exited });
     }
     case "NOT_RUNNING": {

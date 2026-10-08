@@ -73,6 +73,32 @@ describe("flair#2055 — the cleanup removes only a confirmed-dead sidecar", () 
   });
 });
 
+/**
+ * flair#2391 — the stop-time cleanup must not read the confirmed-gone pid's
+ * liveness a second time. `kill(pid, 0)` succeeds on a process that is being
+ * reaped, and if the `/proc/<pid>/stat` read that follows then fails with ESRCH
+ * the probe reports `alive`; the stop then returns with the sidecar still
+ * naming the pid it just confirmed gone. These drive the cleanup with the
+ * caller's confirmation and an injected probe standing in for that race.
+ */
+describe("flair#2391 — a confirmed-gone pid is not read again", () => {
+  test("the sidecar is dropped even when a fresh liveness read would report the pid alive", () => {
+    const dataDir = fixture();
+    // A pid a liveness read reports ALIVE — the shape the re-read takes after a
+    // reaped child. The caller already confirmed this pid exited.
+    writeSidecarJson(dataDir, process.pid);
+    removeStaleSidecarIfConfirmedDead(dataDir, process.pid, () => ({ kind: "alive" as const }));
+    expect(existsSync(sidecarPath(dataDir))).toBe(false);
+  });
+
+  test("the confirmation is keyed to the pid: a sidecar naming another pid is kept", () => {
+    const dataDir = fixture();
+    writeSidecarJson(dataDir, process.pid);
+    removeStaleSidecarIfConfirmedDead(dataDir, process.pid + 1, () => ({ kind: "alive" as const }));
+    expect(existsSync(sidecarPath(dataDir))).toBe(true);
+  });
+});
+
 describe("flair#2055 — a real symlinked sidecar is neither followed nor removed", () => {
   test("readSidecar reads a symlink as unreadable and cleanup leaves it and its target alone", async () => {
     const dataDir = fixture();

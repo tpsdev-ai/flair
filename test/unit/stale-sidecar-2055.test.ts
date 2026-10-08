@@ -77,10 +77,24 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
   function pidAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
-      return true;
     } catch {
       return false;
     }
+    // Signal 0 says the pid EXISTS, which is not the same as running: an exited
+    // child whose parent has not reaped it is a zombie (state `Z`) that still
+    // answers it. Flair's own liveness probe reports a zombie as gone
+    // (flair#2313), so this oracle must too, or a stopped child reads as still
+    // running (flair#2391). A read that finds the pid already gone is gone too.
+    if (process.platform === "linux") {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+        const close = stat.lastIndexOf(")");
+        if (close >= 0 && stat.slice(close + 1).trim().startsWith("Z")) return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** A pid that is CONFIRMED gone: spawn, record it, and wait until `kill(pid, 0)` says ESRCH. */

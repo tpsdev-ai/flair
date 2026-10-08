@@ -265,7 +265,7 @@ program
           execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
           // Verify the captured pid exited before attempting confirmed-dead cleanup.
           await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
-          removeStaleSidecarIfConfirmedDead(dataDir);
+          removeStaleSidecarIfConfirmedDead(dataDir, pid);
           console.log("✅ Flair stopped (launchd service unloaded)");
           return;
         } catch (err) {
@@ -305,12 +305,13 @@ program
           }
         }
         await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
-        // flair#2055: once the process is CONFIRMED gone, drop the identity
+        // flair#2055/#2391: once the process is CONFIRMED gone, drop the identity
         // sidecar — a leftover naming the stopped pid is what makes a later
-        // instance under another supervisor refuse. Gated on a fresh
-        // O_NOFOLLOW read that still names the pid it named before; unknown
-        // liveness removes nothing.
-        removeStaleSidecarIfConfirmedDead(dataDir);
+        // instance under another supervisor refuse. The pid the wait confirmed
+        // is passed in so the cleanup does not read its liveness again (a
+        // re-read can land after the child is reaped and report it alive); a
+        // fresh O_NOFOLLOW read that still names that pid still gates the unlink.
+        removeStaleSidecarIfConfirmedDead(dataDir, pid);
         const after = await probeHealth(port);
         if (after.kind === "refused") {
           console.log(`✅ Flair stopped (${label}, pid ${pid})`);
