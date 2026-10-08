@@ -10,6 +10,7 @@
  * third value), idempotency, and the exact query-condition shape.
  */
 import { describe, it, expect, mock } from "bun:test";
+import { makeFakeWriteBack } from "../helpers/fake-write-back";
 
 // visibility-backfill.ts imports `{ databases } from "harper"`
 // for its DEFAULT table accessor only (never used here — every test injects
@@ -21,6 +22,11 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 const { createVisibilityBackfillMigration, deriveVisibilityFromDurability, VISIBILITY_BACKFILL_ID } = await import(
   "../../resources/migrations/visibility-backfill.ts"
 );
+
+/** Every call site below injects the fake write-back (flair#2354); the real
+ *  helper is exercised in the contention test. */
+const makeMigration = (getTable: () => any, writeBack = makeFakeWriteBack()) =>
+  createVisibilityBackfillMigration(getTable, writeBack);
 
 type Row = Record<string, unknown> & { id: string };
 
@@ -84,7 +90,7 @@ function makeFakeMemoryTable(seed: Row[]) {
 describe("visibility-backfill migration — identity", () => {
   it("has the expected id, risk class, and affected tables", () => {
     const { table } = makeFakeMemoryTable([]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     expect(m.id).toBe(VISIBILITY_BACKFILL_ID);
     expect(m.riskClass).toBe("derived-only");
     expect(m.affectsTables).toEqual(["Memory"]);
@@ -142,7 +148,7 @@ describe("visibility-backfill migration — detect/countPending", () => {
       { id: "m1", content: "a", durability: "standard", visibility: "private" },
       { id: "m2", content: "b", durability: "permanent", visibility: "shared" },
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     expect(await m.detect()).toBe(false);
     expect(await m.countPending()).toBe(0);
   });
@@ -152,7 +158,7 @@ describe("visibility-backfill migration — detect/countPending", () => {
       { id: "m1", content: "a", durability: "permanent" }, // no `visibility` key whatsoever
       { id: "m2", content: "b", durability: "standard", visibility: "private" },
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     expect(await m.detect()).toBe(true);
     expect(await m.countPending()).toBe(1);
   });
@@ -162,7 +168,7 @@ describe("visibility-backfill migration — detect/countPending", () => {
       { id: "m1", content: "a", durability: "permanent", visibility: null },
       { id: "m2", content: "b", durability: "standard", visibility: "private" },
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     expect(await m.detect()).toBe(true);
     expect(await m.countPending()).toBe(1);
   });
@@ -174,7 +180,7 @@ describe("visibility-backfill migration — detect/countPending", () => {
       { id: "m3", content: "c", durability: "standard", visibility: "private" }, // already set
       { id: "m4", content: "d", durability: "permanent", visibility: "shared" }, // already set
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     expect(await m.countPending()).toBe(2);
   });
 });
@@ -188,7 +194,7 @@ describe("visibility-backfill migration — run() derives and writes visibility"
       { id: "m4", content: "d", durability: "ephemeral" },
       { id: "m5", content: "e" }, // no durability at all
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     const result = await m.run(50);
 
     expect(result.processed).toBe(5);
@@ -213,7 +219,7 @@ describe("visibility-backfill migration — run() derives and writes visibility"
         embeddingModel: "some-model",
       },
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     await m.run(50);
 
     expect(store.get("m1")).toEqual({
@@ -231,7 +237,7 @@ describe("visibility-backfill migration — run() derives and writes visibility"
   it("processes up to batchSize rows and reports the rest as still pending via countPending()", async () => {
     const rows: Row[] = Array.from({ length: 5 }, (_, i) => ({ id: `m${i}`, content: `c${i}`, durability: "standard" }));
     const { table } = makeFakeMemoryTable(rows);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
 
     const first = await m.run(2);
     expect(first.processed).toBe(2);
@@ -240,7 +246,7 @@ describe("visibility-backfill migration — run() derives and writes visibility"
 
   it("run() returns processed:0 once nothing is left (loop-termination signal)", async () => {
     const { table } = makeFakeMemoryTable([{ id: "m1", content: "a", durability: "standard", visibility: "private" }]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     const result = await m.run(50);
     expect(result.processed).toBe(0);
   });
@@ -250,7 +256,7 @@ describe("visibility-backfill migration — run() derives and writes visibility"
     const originalGet = table.get.bind(table);
     (table as any).get = async (id: string) => (id === "m1" ? null : originalGet(id));
 
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     const result = await m.run(50);
     expect(result.processed).toBe(0);
   });
@@ -261,7 +267,7 @@ describe("visibility-backfill migration — NEVER overwrites an existing visibil
     const { table, store } = makeFakeMemoryTable([
       { id: "m1", content: "a", durability: "permanent", visibility: "private" }, // author's explicit call
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     const result = await m.run(50);
 
     expect(result.processed).toBe(0);
@@ -273,7 +279,7 @@ describe("visibility-backfill migration — NEVER overwrites an existing visibil
     const { table, store } = makeFakeMemoryTable([
       { id: "m1", content: "a", durability: "standard", visibility: "shared" }, // author's explicit call
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     const result = await m.run(50);
 
     expect(result.processed).toBe(0);
@@ -286,7 +292,7 @@ describe("visibility-backfill migration — NEVER overwrites an existing visibil
     // can't exclude this case at the query level). The write-gate in run()
     // re-checks the freshly-read record and must skip it anyway.
     const { table, store } = makeFakeMemoryTable([{ id: "m1", content: "a", durability: "standard", visibility: "office" }]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     const result = await m.run(50);
 
     expect(result.processed).toBe(0);
@@ -300,7 +306,7 @@ describe("visibility-backfill migration — NEVER overwrites an existing visibil
       { id: "m2", content: "b", durability: "standard", visibility: "shared" }, // already set, untouched
       { id: "m3", content: "c", durability: "permanent" }, // pending -> shared
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
     const result = await m.run(50);
 
     expect(result.processed).toBe(2);
@@ -317,7 +323,7 @@ describe("visibility-backfill migration — idempotent and resumable", () => {
       { id: "m1", content: "a", durability: "standard" },
       { id: "m2", content: "b", durability: "permanent" },
     ]);
-    const m = createVisibilityBackfillMigration(() => table);
+    const m = makeMigration(() => table);
 
     const first = await m.run(50);
     expect(first.processed).toBe(2);
@@ -336,10 +342,10 @@ describe("visibility-backfill migration — idempotent and resumable", () => {
 
   it("is idempotent even when called across separate migration instances (fresh table read each time — no in-memory-only state)", async () => {
     const { table } = makeFakeMemoryTable([{ id: "m1", content: "a", durability: "ephemeral" }]);
-    const m1 = createVisibilityBackfillMigration(() => table);
+    const m1 = makeMigration(() => table);
     await m1.run(50);
 
-    const m2 = createVisibilityBackfillMigration(() => table);
+    const m2 = makeMigration(() => table);
     const result = await m2.run(50);
     expect(result.processed).toBe(0);
   });
@@ -356,7 +362,7 @@ describe("visibility-backfill migration — candidate query shape", () => {
         return table.search(query);
       },
     };
-    const m = createVisibilityBackfillMigration(() => spyTable);
+    const m = makeMigration(() => spyTable);
     await m.detect();
 
     expect(queries).toHaveLength(1);
@@ -368,5 +374,28 @@ describe("visibility-backfill migration — candidate query shape", () => {
       expect(c.comparator).not.toBe("not_equal");
     }
     expect(conditions.map((c: any) => c.value).sort()).toEqual(["private", "shared"]);
+  });
+});
+
+describe("visibility-backfill migration — write-back abort and retry (flair#2354)", () => {
+  it("aborts a staged write and retries from the committed row when a competing write lands after the read", async () => {
+    const { table, store } = makeFakeMemoryTable([
+      { id: "m1", content: "a", durability: "standard" },
+    ]);
+    // On the first attempt a competing writer commits a durability change after
+    // this write-back's read; the helper aborts the staged write and retries.
+    const writeBack = makeFakeWriteBack({
+      conflict: (attempt) => {
+        if (attempt === 1) store.set("m1", { ...store.get("m1")!, durability: "permanent" });
+      },
+    });
+    const m = makeMigration(() => table, writeBack);
+    const result = await m.run(50);
+    expect(result.processed).toBe(1);
+    expect(new Set(result.touchedIds)).toEqual(new Set(["m1"]));
+    // The first attempt derived "private"; it was aborted. The retry derived
+    // from the committed (permanent) row, so the stored value is "shared".
+    expect(store.get("m1")!.visibility).toBe("shared");
+    expect(store.get("m1")!.durability).toBe("permanent");
   });
 });

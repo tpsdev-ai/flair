@@ -28,6 +28,7 @@
 
 import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
+import { writeBackCommittedRow } from "./write-back.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
 
@@ -138,9 +139,17 @@ export class MemoryReindex extends Resource {
       const chunk = recordsToReindex.slice(i, i + batchSize);
       for (const id of chunk) {
         try {
-          const record = await Memory.get(id);
-          if (!record) { stats.errors++; continue; }
-          await Memory.put({ ...record, _reindex: true });
+          // flair#2354: the re-PUT is one owned write-back — the row is read
+          // inside the transaction and re-stated from THAT read, so a
+          // concurrent change is retried from the committed row rather than
+          // reverted by the scan copy.
+          const outcome = await writeBackCommittedRow(
+            Memory,
+            id,
+            (record: any) => (record ? { write: { ...record, _reindex: true } } : { skip: true }),
+            { ctx, label: "MemoryReindex", pausePre: "reindex-put-pre", pausePoint: "reindex-put" },
+          );
+          if ("skip" in outcome) { stats.errors++; continue; }
           stats.reindexed++;
         } catch (err: any) {
           stats.errors++;

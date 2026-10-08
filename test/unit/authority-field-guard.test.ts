@@ -66,7 +66,7 @@ describe("workflow authority guard", () => {
 const RESOURCES_DIR = join(import.meta.dir, "..", "..", "resources");
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
-type WriterVia = "direct-put" | "direct-update" | "patchRecord" | "alias-source";
+type WriterVia = "direct-put" | "direct-update" | "patchRecord" | "alias-source" | "write-back";
 type WriterKind = "strip" | "federation-merge" | "trusted-stamp" | "echo" | "seed" | "single-field" | "admin-restate";
 
 interface RawMemoryWriter {
@@ -77,20 +77,21 @@ interface RawMemoryWriter {
 }
 
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
-  { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(record)", kind: "strip" },
+  { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
   { file: "resources/Federation.ts", via: "alias-source", needle: "put(mergedData)", kind: "federation-merge" },
-  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row)", kind: "trusted-stamp" },
+  { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
   { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivedRow, c", kind: "echo" },
   { file: "resources/usage-recording.ts", via: "direct-put", needle: "put(usageRow)", kind: "echo" },
   { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
-  { file: "resources/auth-middleware.ts", via: "patchRecord", needle: "embedPatch", kind: "single-field" },
+  { file: "resources/auth-middleware.ts", via: "write-back", needle: 'label: "backfillEmbedding"', kind: "single-field" },
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
-  { file: "resources/migrations/visibility-backfill.ts", via: "alias-source", needle: "put(backfillRow)", kind: "echo" },
-  { file: "resources/migrations/synthetic-test-migration.ts", via: "alias-source", needle: "put(synthRow)", kind: "echo" },
-  { file: "resources/MemoryReindex.ts", via: "alias-source", needle: "_reindex: true", kind: "admin-restate" },
+  { file: "resources/table-helpers.ts", via: "write-back", needle: 'label: opts.label ?? "patchRecord"', kind: "single-field" },
+  { file: "resources/migrations/visibility-backfill.ts", via: "write-back", needle: 'label: "visibility-backfill"', kind: "echo" },
+  { file: "resources/migrations/synthetic-test-migration.ts", via: "write-back", needle: 'label: "synthetic-test-migration"', kind: "echo" },
+  { file: "resources/MemoryReindex.ts", via: "write-back", needle: "_reindex: true", kind: "admin-restate" },
   // Memory guards submitted authority fields; FeedMemories also strips successor stamps.
   { file: "resources/skill-version-write.ts", via: "direct-put", needle: "put(successor, shared)", kind: "trusted-stamp" },
   { file: "resources/skill-version-write.ts", via: "direct-put", needle: "put(closed, shared)", kind: "echo" },
@@ -163,6 +164,24 @@ function aliasBindsMemory(name: string, lines: string[], writeIdx: number, gette
   return false;
 }
 
+/** The whole call expression starting at `startLine`, whitespace-collapsed, so a
+ *  needle can key on an argument the call passes several lines down (e.g. its
+ *  `label`). */
+function callText(lines: string[], startLine: number): string {
+  const src = lines.slice(startLine).join("\n");
+  const open = src.indexOf("(");
+  if (open < 0) return src.slice(0, 200).replace(/\s+/g, " ");
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "(") depth++;
+    else if (src[i] === ")") {
+      depth--;
+      if (depth === 0) return src.slice(0, i + 1).replace(/\s+/g, " ");
+    }
+  }
+  return src.slice(0, 400).replace(/\s+/g, " ");
+}
+
 function enumerateRawMemoryWriters(): RawMemoryWriter[] {
   const writers: RawMemoryWriter[] = [];
   const seen = new Set<string>();
@@ -193,6 +212,13 @@ function enumerateRawMemoryWriters(): RawMemoryWriter[] {
           add({ file, line: i + 1, via: "patchRecord", excerpt: rawLines.slice(i, i + 6).map((l) => l.trim()).join(" ") });
         }
       }
+      // flair#2354: every call site of the shared write-back helper is a raw
+      // writer keyed at the CALL SITE, regardless of how its table argument is
+      // expressed. A new helper call with no classification below fails the
+      // gate. (The helper's own definition is not a call site.)
+      if (/writeBackCommittedRow\s*\(/.test(line) && !/function\s+writeBackCommittedRow\s*\(/.test(line)) {
+        add({ file, line: i + 1, via: "write-back", excerpt: callText(lines, i) });
+      }
       for (const m of line.matchAll(/\b([A-Za-z_]\w*)\.(put|update)\s*\(/g)) {
         if (m[1] === "flair" || /\.flair\.Memory\./.test(line)) continue;
         if (!aliasBindsMemory(m[1], lines, i, getters)) continue;
@@ -212,7 +238,7 @@ describe("raw flair.Memory handle coverage", () => {
 
   test("the enumerator finds writers — a silent zero would make this gate vacuous", () => {
     expect(writers.length).toBeGreaterThan(5);
-    expect(writers.some((w) => w.file === "resources/MemoryFeed.ts" && w.via === "direct-put")).toBe(true);
+    expect(writers.some((w) => w.file === "resources/MemoryFeed.ts" && w.via === "write-back")).toBe(true);
     expect(writers.some((w) => w.file === "resources/Federation.ts" && w.via === "alias-source" && w.excerpt.includes("mergedData"))).toBe(true);
   });
 

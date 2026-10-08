@@ -27,7 +27,25 @@ export type TxnPausePoint =
   | "maintenance-archive-pre"
   | "maintenance-archive"
   | "maintenance-orphan-pre"
-  | "maintenance-orphan";
+  | "maintenance-orphan"
+  // flair#2354 — one `-pre` point (before writeBackCommittedRow opens its
+  // owned transaction) and one in-transaction point (between that
+  // transaction's read/build and its write) per converted write-back path, so
+  // both interleavings of a concurrent writer can be exercised.
+  | "promotion-stamp-pre"
+  | "promotion-stamp"
+  | "last-reflected-pre"
+  | "last-reflected"
+  | "backfill-embedding-pre"
+  | "backfill-embedding"
+  | "reindex-put-pre"
+  | "reindex-put"
+  | "feed-ingest-pre"
+  | "feed-ingest"
+  | "visibility-backfill-pre"
+  | "visibility-backfill"
+  | "synthetic-test-pre"
+  | "synthetic-test";
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);

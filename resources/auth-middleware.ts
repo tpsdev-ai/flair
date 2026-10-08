@@ -1,4 +1,4 @@
-import { patchRecord } from "./table-helpers.js";
+import { writeBackCommittedRow } from "./write-back.js";
 import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
@@ -7,7 +7,7 @@ import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
 import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
-import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
+import { DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
 import { idSegmentHasEncodedSlash, decodeMemoryIdSegment, MEMORY_CONTENT_SELECTOR_SUFFIX } from "../src/lib/memory-id-policy.js";
 import { contentSuffixIdDenial } from "./memory-id-guard.js";
 
@@ -177,17 +177,24 @@ function getAdminPass(): string | null {
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
   try {
-    const record = await (databases as any).flair.Memory.get(memoryId);
-    if (!record?.content) return;
-    if (record.embedding?.length > 100) return;
-    // flair#504 Phase 2: 'document' — a backfilled embedding IS a stored
-    // document vector, same as the three Memory.ts sites; must match.
-    const embedding = await getEmbedding(record.content, "document");
-    if (!embedding) return;
-    const embedPatch = { embedding };
-    stripUndeclaredMemoryAttributes(embedPatch);
-    await patchRecord((databases as any).flair.Memory, memoryId, embedPatch);
-    console.log(`[auto-embed] ${memoryId}: ${embedding.length}d`);
+    const outcome = await writeBackCommittedRow(
+      (databases as any).flair.Memory,
+      memoryId,
+      async (record: any) => {
+        if (!record?.content) return { skip: true };
+        if (record.embedding?.length > 100) return { skip: true };
+        // flair#504 Phase 2: 'document' — a backfilled embedding IS a stored
+        // document vector, same as the three Memory.ts sites; must match. The
+        // embedding is (re)computed from the row read INSIDE the transaction,
+        // so a competing edit is embedded from ITS content, not the pre-read
+        // row's (flair#2354).
+        const embedding = await getEmbedding(record.content, "document");
+        if (!embedding) return { skip: true };
+        return { write: { ...record, embedding } };
+      },
+      { label: "backfillEmbedding", pausePre: "backfill-embedding-pre", pausePoint: "backfill-embedding" },
+    );
+    if ("write" in outcome) console.log(`[auto-embed] ${memoryId}: ${(outcome.write.embedding as number[]).length}d`);
   } catch (err: any) {
     console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);
   }

@@ -7,19 +7,35 @@
  * It does not promise atomic counters — search hit-tracking uses
  * `resources/hit-tracking.ts` (MemoryHitStat) instead of this helper.
  *
+ * flair#2354: the read, the write and the confirmation re-read run through
+ * {@link writeBackCommittedRow} — one owned transaction, the write built from
+ * the row read inside it, a committed re-read before commit, and an abort +
+ * retry (bounded) from the committed row on a concurrent change. `opts`
+ * forwards the context and the test-only pause points.
+ *
  * Usage:
  *   import { patchRecord } from "./table-helpers.js";
  *   await patchRecord(tables.Memory, id, { lastReflected: now });
  */
+import { writeBackCommittedRow, type WriteBackOptions } from "./write-back.js";
+
+export type PatchRecordOptions = Partial<Pick<WriteBackOptions, "ctx" | "pausePre" | "pausePoint" | "label" | "attempts">>;
 
 export async function patchRecord(
   table: any,
   id: string,
   patch: Record<string, unknown>,
+  opts: PatchRecordOptions = {},
 ): Promise<void> {
-  const existing = await table.get(id);
-  if (!existing) throw new Error(`Record ${id} not found`);
-  await table.put({ ...existing, ...patch });
+  await writeBackCommittedRow(
+    table,
+    id,
+    (existing) => {
+      if (!existing) throw new Error(`Record ${id} not found`);
+      return { write: { ...existing, ...patch } };
+    },
+    { ...opts, label: opts.label ?? "patchRecord" },
+  );
 }
 
 /**
@@ -31,8 +47,9 @@ export function patchRecordSilent(
   table: any,
   id: string,
   patch: Record<string, unknown>,
+  opts: PatchRecordOptions = {},
 ): void {
-  patchRecord(table, id, patch).catch(() => {});
+  patchRecord(table, id, patch, opts).catch(() => {});
 }
 
 // ── RULE ──────────────────────────────────────────────────────────────────────

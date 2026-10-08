@@ -346,7 +346,9 @@ export class ReflectMemories extends Resource {
           for (const memory of memories) {
             const reflectPatch = { lastReflected: now };
             stripUndeclaredMemoryAttributes(reflectPatch);
-            patchRecordSilent((databases as any).flair.Memory, memory.id, reflectPatch);
+            patchRecordSilent((databases as any).flair.Memory, memory.id, reflectPatch, {
+              pausePre: "last-reflected-pre", pausePoint: "last-reflected",
+            });
           }
         }
 

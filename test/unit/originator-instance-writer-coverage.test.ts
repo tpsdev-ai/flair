@@ -11,8 +11,10 @@
  * Round 2 pinned a FIXED list of files for ONE substring each, which could not
  * detect a NEW raw writer (and, per review, stayed green even when a stamp call
  * was removed from a file that had another stamp call). This version ENUMERATES
- * the raw write sites instead: it scans resources/ for the literal raw
- * synced-table write idiom, groups the sites by (file, table, verb), and
+ * the raw write sites instead: it scans resources/ for the raw synced-table
+ * write idiom — a literal `.flair.<Table>.<verb>(` call, or a
+ * `writeBackCommittedRow(` call whose table is passed literally — groups the
+ * sites by (file, table, verb), and
  * requires a REVIEWED policy entry with an expected count for every one. A new
  * site — a new file, a new table/verb in a known file, or an extra call in a
  * known file — has no policy entry (or the wrong count) and fails the lane.
@@ -39,6 +41,18 @@ const RAW_WRITE_RE = new RegExp(
   "g",
 );
 
+/**
+ * A synced-table write routed through the shared write-back helper (flair#2354),
+ * whose table is passed literally at the call (`writeBackCommittedRow(\n
+ * (databases as any).flair.Memory, ...`). Keyed as `<file>|<table>|write-back`.
+ * Its `plan` runs the originator rule for a create, so it is enumerated and
+ * classified like any other raw synced-table writer.
+ */
+const WRITE_BACK_RE = new RegExp(
+  `writeBackCommittedRow\\s*\\([^;]{0,240}?\\.flair\\.(${SYNCED_TABLES.join("|")})\\b`,
+  "g",
+);
+
 type Disposition = "stamped-create" | "update-only" | "resource-internal";
 
 /**
@@ -55,7 +69,8 @@ const POLICY: Record<string, { count: number; disposition: Disposition; note: st
   "resources/AgentSeed.ts|Memory|put": { count: 1, disposition: "stamped-create", note: "POST /AgentSeed raw starter-Memory create" },
   "resources/XAA.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "IdP principal raw Agent create" },
   "resources/mcp-handler.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "JIT OAuth principal raw Agent create" },
-  "resources/MemoryFeed.ts|Memory|put": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update" },
+  "resources/MemoryFeed.ts|Memory|write-back": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update, through the shared write-back helper (flair#2354); its plan applies applyOriginatorInstanceId" },
+  "resources/auth-middleware.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "embedding backfill on an EXISTING row, through the shared write-back helper (flair#2354)" },
   "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory and FeedMemories stamp successors in their transaction plans; predecessor closes retain stored stamps." },
   // Update-only / resource-internal raw writes — they re-write an existing row.
   "resources/Memory.ts|Memory|post": { count: 1, disposition: "resource-internal", note: "Memory writeMemoryRowPost fallback (content already stamped)" },
@@ -99,6 +114,11 @@ function enumerateRawWriteSites(src: string, file: string): Map<string, number> 
   const re = new RegExp(RAW_WRITE_RE.source, "g");
   for (const match of code.matchAll(re)) {
     const key = `${file}|${match[1]}|${match[2]}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const wb = new RegExp(WRITE_BACK_RE.source, "g");
+  for (const match of code.matchAll(wb)) {
+    const key = `${file}|${match[1]}|write-back`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;

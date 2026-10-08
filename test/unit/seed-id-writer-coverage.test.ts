@@ -43,8 +43,8 @@ add("Memory", [
 ], "GUARDED: Memory.post/put/patch/delete call the decision on the URL and body ids first (the put _reindex branch included).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "GUARDED: closeSupersededRecord closes `supersedes`, which validateAndAuthorizeSupersedes ran through the decision before the new row was written.");
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
-  "GUARDED: FeedMemories.post calls the decision on the body id before the raw put.");
+add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+  "GUARDED: FeedMemories.post calls the decision on the body id before the write-back through the shared helper (flair#2354).");
 add("Federation", ["writer:table.put#1"],
   "GUARDED: the merge skips a reserved id (seed_id_not_federated) before the put.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
@@ -63,8 +63,8 @@ add("Memory", ["writer:patchRecord#1"],
   "BOOKKEEPING: lastReflected on each derivedFrom source of a new row.");
 add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
   "BOOKKEEPING: usageCount + 1 on a row the caller can read; the rest of the row is the stored row.");
-add("auth-middleware", ["writer:patchRecord#1"],
-  "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision).");
+add("auth-middleware", ["writer:writeBackCommittedRow#1"],
+  "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354).");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "BOOKKEEPING: lastReflected on the rows a reflection run read.");
 
@@ -72,15 +72,15 @@ add("MemoryReflect", ["writer:patchRecordSilent#1"],
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "SERVER: the sweep selects rows by state (expired ephemeral, closed, old session notes). The seed row is persistent and closing it by supersede requires the operator-source decision.");
 add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource pointer rows, another table.");
-add("MemoryReindex", ["writer:Memory.put#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields.");
-add("promotion-stamp", ["writer:table.put#1"],
-  "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id.");
+add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields, through the shared helper (flair#2354).");
+add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+  "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id, via the shared write-back helper (flair#2354).");
 add("migrations/embedding-stamp", [
   "writer:table.put#1",
 ], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address.");
 add("migrations/graph-heal", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
-add("migrations/synthetic-test-migration", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
-add("migrations/visibility-backfill", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
+add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
+add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
   "writer:this.cache.delete#1",

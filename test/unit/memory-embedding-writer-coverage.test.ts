@@ -65,18 +65,18 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "closeSupersededRecord: read-modify-write validTo close, re-writes the existing stamp.");
 add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "usageCount bump: get-then-put re-writes the existing row's own stamp.");
-add("MemoryReindex", ["writer:Memory.put#1"], "ECHO",
-  "Admin re-embed re-PUT of an existing local row — re-stamps current / preserves, never external.");
-add("promotion-stamp", ["writer:table.put#1"], "ECHO",
-  "Promotion status stamp: get-then-put re-writes the existing local row.");
+add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Admin re-embed re-PUT of an existing local row — re-stamps current / preserves, never external, through the shared write-back helper (flair#2354).");
+add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Promotion status stamp: re-writes the existing local row through the shared write-back helper (flair#2354).");
 add("migrations/graph-heal", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
 add("migrations/embedding-stamp", ["writer:table.put#1"], "ECHO",
   "Content-suffix fallback: locally computed vector/current model; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
-add("migrations/visibility-backfill", ["writer:table.put#1"], "ECHO",
-  "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
-add("migrations/synthetic-test-migration", ["writer:table.put#1"], "ECHO",
-  "Test-only migration backfill of existing rows.");
+add("migrations/visibility-backfill", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Boot migration re-PUT of existing rows through the shared write-back helper (flair#2354); the boot scan also runs.");
+add("migrations/synthetic-test-migration", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Test-only migration backfill of existing rows through the shared write-back helper (flair#2354).");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "Memory computes or retains embeddings before this writer; FeedMemories does not compute embeddings.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
@@ -85,8 +85,8 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "EC
 // ── NON_EMBED: writes no stamp, or a partial update/patch/delete ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Admin-only starter memories — the record carries no embedding/embeddingModel.");
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
-  "Feed rows — the record carries no embedding/embeddingModel.");
+add("MemoryFeed", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
+  "Feed rows — the record carries no embedding/embeddingModel (written through the shared write-back helper, flair#2354).");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");
 // flair#1940 A1-iv item 6: Memory.ts no longer touches the MemoryHostSource
@@ -110,7 +110,7 @@ add("hit-tracking", [
   "writer:table.put#1",
   "writer:table.delete#1",
 ], "OTHER_TABLE", "MemoryHitStat ledger and in-memory maps — not a Memory writer.");
-add("auth-middleware", ["writer:patchRecord#1"], "NON_EMBED", "Auth bookkeeping patch — non-embedding.");
+add("auth-middleware", ["writer:writeBackCommittedRow#1"], "NON_EMBED", "Auth bookkeeping backfill — non-embedding, through the shared write-back helper (flair#2354).");
 
 // ── OTHER_TABLE: conservative sink-enumeration false-positives ──
 add("AgentSeed", ["writer:(databases as any).flair.Agent.put#1", "writer:(databases as any).flair.Soul.put#1"], "OTHER_TABLE", "Agent/Soul tables.");

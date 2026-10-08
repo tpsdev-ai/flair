@@ -7,6 +7,7 @@
  * even though the gate is what actually keeps it out of production).
  */
 import { describe, it, expect, mock } from "bun:test";
+import { makeFakeWriteBack } from "../helpers/fake-write-back";
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
@@ -18,6 +19,11 @@ const {
   SYNTHETIC_TARGET_MARKER,
   ENABLE_TEST_MIGRATIONS_ENV,
 } = await import("../../resources/migrations/synthetic-test-migration.ts");
+
+/** Every call site below injects the fake write-back (flair#2354); the real
+ *  helper is exercised in the contention test. */
+const makeMigration = (getTable: () => any, writeBack = makeFakeWriteBack()) =>
+  createSyntheticTestMigration(getTable, writeBack);
 
 type Row = Record<string, unknown> & { id: string };
 
@@ -78,7 +84,7 @@ describe("shouldRegisterSyntheticMigration — the no-ship gate", () => {
 describe("synthetic migration — identity and scoping", () => {
   it("has the expected id and risk class (schema-additive — the full-envelope gate path)", () => {
     const { table } = makeFakeMemoryTable([]);
-    const m = createSyntheticTestMigration(() => table);
+    const m = makeMigration(() => table);
     expect(m.id).toBe(SYNTHETIC_MIGRATION_ID);
     expect(m.riskClass).toBe("schema-additive");
     expect(m.affectsTables).toEqual(["Memory"]);
@@ -88,7 +94,7 @@ describe("synthetic migration — identity and scoping", () => {
     const { table, puts } = makeFakeMemoryTable([
       { id: "real-1", content: "a real memory", agentId: "nathan", source: "something-else" },
     ]);
-    const m = createSyntheticTestMigration(() => table);
+    const m = makeMigration(() => table);
     expect(await m.detect()).toBe(false); // scoped condition requires agentId === RESERVED_TEST_AGENT_ID
     expect(await m.countPending()).toBe(0);
     await m.run(50);
@@ -107,7 +113,7 @@ describe("synthetic migration — detect/run/marker convergence (the full runner
       { id: "s1", content: "x", agentId: RESERVED_TEST_AGENT_ID, source: "not-yet" },
       { id: "s2", content: "y", agentId: RESERVED_TEST_AGENT_ID, source: SYNTHETIC_TARGET_MARKER },
     ]);
-    const m = createSyntheticTestMigration(() => table);
+    const m = makeMigration(() => table);
     expect(await m.detect()).toBe(true);
     expect(await m.countPending()).toBe(1);
   });
@@ -116,7 +122,7 @@ describe("synthetic migration — detect/run/marker convergence (the full runner
     const { table, store } = makeFakeMemoryTable([
       { id: "s1", content: "x", agentId: RESERVED_TEST_AGENT_ID, tags: ["keep-me"], source: "not-yet" },
     ]);
-    const m = createSyntheticTestMigration(() => table);
+    const m = makeMigration(() => table);
     const result = await m.run(50);
     expect(result.processed).toBe(1);
     expect(result.touchedIds).toEqual(["s1"]);
@@ -133,7 +139,7 @@ describe("synthetic migration — detect/run/marker convergence (the full runner
     const { table, puts } = makeFakeMemoryTable([
       { id: "s1", content: "x", agentId: RESERVED_TEST_AGENT_ID, source: "not-yet" },
     ]);
-    const m = createSyntheticTestMigration(() => table);
+    const m = makeMigration(() => table);
     await m.run(50);
     expect(puts).toHaveLength(1);
 
@@ -150,7 +156,7 @@ describe("synthetic migration — detect/run/marker convergence (the full runner
       source: "not-yet",
     }));
     const { table } = makeFakeMemoryTable(rows);
-    const m = createSyntheticTestMigration(() => table);
+    const m = makeMigration(() => table);
 
     let totalProcessed = 0;
     for (;;) {
@@ -160,5 +166,27 @@ describe("synthetic migration — detect/run/marker convergence (the full runner
     }
     expect(totalProcessed).toBe(7);
     expect(await m.countPending()).toBe(0);
+  });
+});
+
+describe("synthetic migration — write-back abort and retry (flair#2354)", () => {
+  it("aborts a staged write and retries from the committed row when a competing write lands after the read", async () => {
+    const { table, store } = makeFakeMemoryTable([
+      { id: "s1", content: "x", agentId: RESERVED_TEST_AGENT_ID, source: "not-yet" },
+    ]);
+    // On the first attempt a competing writer commits a content change after
+    // this write-back's read; the helper aborts the staged write and retries.
+    const writeBack = makeFakeWriteBack({
+      conflict: (attempt) => {
+        if (attempt === 1) store.set("s1", { ...store.get("s1")!, content: "x-edited" });
+      },
+    });
+    const m = makeMigration(() => table, writeBack);
+    const result = await m.run(50);
+    expect(result.processed).toBe(1);
+    expect(result.touchedIds).toEqual(["s1"]);
+    // The retry built from the committed (competing) row, so its content is kept.
+    expect(store.get("s1")!.source).toBe(SYNTHETIC_TARGET_MARKER);
+    expect(store.get("s1")!.content).toBe("x-edited");
   });
 });

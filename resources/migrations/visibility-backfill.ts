@@ -135,6 +135,7 @@
  */
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
+import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export type BackfilledVisibility = "private" | "shared";
@@ -184,7 +185,10 @@ function pendingCondition() {
  * `embedding-stamp`, there is no separate HTTP mechanism to inject: the
  * write IS the table's own `.put()`, already covered by the same fake.
  */
-export function createVisibilityBackfillMigration(getTable: () => MemoryTableLike = defaultMemoryTable): Migration {
+export function createVisibilityBackfillMigration(
+  getTable: () => MemoryTableLike = defaultMemoryTable,
+  writeBackCommittedRow: WriteBackFn = writeBackCommittedRowImpl,
+): Migration {
   return {
     id: VISIBILITY_BACKFILL_ID,
     riskClass: "derived-only",
@@ -217,37 +221,48 @@ export function createVisibilityBackfillMigration(getTable: () => MemoryTableLik
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        const existing = await table.get(id);
-        if (!existing) continue; // deleted since the search above — nothing to fix
+        // flair#2354: the backfill is one owned write-back — the write-gate
+        // below re-checks the row read INSIDE the helper's transaction (never
+        // the stale search-result row) and the write is built from THAT read,
+        // so a concurrent change is retried from the committed row rather than
+        // reverted. The helper is injectable (the second argument, defaulting
+        // to the real one) so unit tests keep exercising detect/countPending/
+        // run against a plain fake; the real helper is exercised in the
+        // contention test. The table is the getTable() result above, named at
+        // this call.
+        const outcome = await writeBackCommittedRow(
+          table as unknown as Parameters<WriteBackFn>[0],
+          id,
+          (existing: any) => {
+            if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
 
-        // The write-gate: this is what actually enforces "never overwrite an
-        // existing visibility value", independent of how precisely the
-        // candidate query above narrowed things (see module doc — a
-        // garbage third value would still be pulled in as a candidate).
-        // Re-checks the FRESHLY-READ record, not the (possibly stale)
-        // search-result row, and doubles as the idempotency/concurrent-
-        // writer guard `embedding-stamp.ts` gets from its own analogous
-        // pre-write check.
-        if (existing.visibility !== undefined && existing.visibility !== null) continue;
+            // The write-gate: this is what actually enforces "never overwrite an
+            // existing visibility value", independent of how precisely the
+            // candidate query above narrowed things (see module doc — a
+            // garbage third value would still be pulled in as a candidate).
+            if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
 
-        const derived = deriveVisibilityFromDurability(existing.durability);
-        // Never-widen invariant, asserted, not just tested: the only two
-        // values `deriveVisibilityFromDurability` can ever produce are
-        // "private"/"shared" (see its own doc), so this can never fire
-        // today — it exists to fail loudly (halting this migration via the
-        // runner's mid-batch-throw path, never a silent bad write) if a
-        // future edit to that function ever widens its return type or is
-        // bypassed via a type-unsafe call.
-        if (derived !== "private" && derived !== "shared") {
-          throw new Error(
-            `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
-          );
-        }
+            const derived = deriveVisibilityFromDurability(existing.durability);
+            // Never-widen invariant, asserted, not just tested: the only two
+            // values `deriveVisibilityFromDurability` can ever produce are
+            // "private"/"shared" (see its own doc), so this can never fire
+            // today — it exists to fail loudly (halting this migration via the
+            // runner's mid-batch-throw path, never a silent bad write) if a
+            // future edit to that function ever widens its return type or is
+            // bypassed via a type-unsafe call.
+            if (derived !== "private" && derived !== "shared") {
+              throw new Error(
+                `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
+              );
+            }
 
-        const backfillRow = { ...existing, visibility: derived };
-        stripUndeclaredMemoryAttributes(backfillRow);
-        await table.put(backfillRow);
-        touchedIds.push(id);
+            const backfillRow = { ...existing, visibility: derived };
+            stripUndeclaredMemoryAttributes(backfillRow);
+            return { write: backfillRow };
+          },
+          { label: "visibility-backfill", pausePre: "visibility-backfill-pre", pausePoint: "visibility-backfill" },
+        );
+        if ("write" in outcome) touchedIds.push(id);
       }
 
       return { processed: touchedIds.length, touchedIds };

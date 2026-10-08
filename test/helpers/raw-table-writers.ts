@@ -57,7 +57,7 @@ export function rawTableWriteSites(file: string, source: string, tableName: stri
     if (isTable(node)) handles.push(node);
     if (ts.isCallExpression(node)) {
       const name = member(node.expression) ?? (ts.isIdentifier(node.expression) ? node.expression.text : "");
-      if (["create", "post", "put", "patch", "delete", "update", "patchRecord", "patchRecordSilent"].includes(name)) writes.push(node);
+      if (["create", "post", "put", "patch", "delete", "update", "patchRecord", "patchRecordSilent", "writeBackCommittedRow"].includes(name)) writes.push(node);
     }
     ts.forEachChild(node, visit);
   };

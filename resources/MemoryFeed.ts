@@ -18,6 +18,7 @@ import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
 import { refuseContentSuffixId } from "./memory-id-guard.js";
+import { writeBackCommittedRow } from "./write-back.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -271,37 +272,51 @@ export class FeedMemories extends Resource {
     // caller-supplied server-stamped field (instanceToken, provenance), then
     // PRESERVE the existing row's incarnation token, else generate one.
     stripServerStampedFields(record);
-    // flair#1940 A1-iv item 1: a failed existing-row lookup must FAIL the write,
-    // not fall back to a fresh token — rotating the token would hide a still-
-    // stored pointer row that is bound to the stored token (the same fail-closed
-    // rule #1956 applies to put()). No `.catch`: the rejection propagates.
-    const priorById = await (databases as any).flair.Memory.get(record.id);
-    record.instanceToken = priorById?.instanceToken ?? randomUUID();
-    // Feed ingest is a full-row write: it REPLACES the stored row, so a
-    // re-ingest with new content is a semantic re-authoring. Re-stamp
-    // provenance from the resolved (trusted) identity and ONE server clock read
-    // (inside buildProvenance) rather than carrying the stored blob forward — a
-    // legacy row whose `verified.timestamp` came from a client `createdAt` must
-    // not keep presenting that value after a new write (flair#1960 r2). The feed
-    // body's own `createdAt` is recorded only as the CLAIM
-    // `provenance.claimed.createdAt`, never as a verified timestamp. The
-    // incarnation token is still preserved above (a re-ingest is not a
-    // reincarnation), so only `provenance` is re-derived.
-    record.provenance = buildProvenance(auth, record.createdAt, content);
-    // flair#1965 r2: this raw table put REPLACES the row, bypassing the Memory
-    // resource's write methods, so the create/update rule is applied here
-    // explicitly: a CREATE (no stored row) stamps this instance's own id and
-    // ignores any body value; an UPDATE keeps the STORED value (a body value
-    // neither replaces nor clears it). The receiver-side federation bookkeeping
-    // (`_originatorInstanceId` et al.) is likewise unsettable from a body — it
-    // stands as stored, or is dropped on a create. See
-    // resources/originator-instance.ts.
-    await applyOriginatorInstanceId(record, priorById);
-    applyFederationBookkeeping(record, priorById);
-    await (databases as any).flair.Memory.put(record);
+    // flair#2354: the ingest write is one owned write-back. The stored row is
+    // read INSIDE the helper's transaction and the incarnation token,
+    // provenance and federation bookkeeping are built from THAT read (never
+    // from a pre-transaction copy), so a concurrent change is retried from the
+    // committed row rather than reverted. flair#1940 A1-iv item 1: a failed
+    // existing-row lookup fails the write (no fallback to a fresh token — that
+    // would hide a still-stored pointer row bound to the stored token; the
+    // same fail-closed rule #1956 applies to put()); the helper propagates the
+    // read's rejection.
+    const outcome = await writeBackCommittedRow(
+      (databases as any).flair.Memory,
+      record.id,
+      async (priorById: any) => {
+        const written: Record<string, any> = { ...record };
+        written.instanceToken = priorById?.instanceToken ?? randomUUID();
+        // Feed ingest is a full-row write: it REPLACES the stored row, so a
+        // re-ingest with new content is a semantic re-authoring. Re-stamp
+        // provenance from the resolved (trusted) identity and ONE server clock
+        // read (inside buildProvenance) rather than carrying the stored blob
+        // forward — a legacy row whose `verified.timestamp` came from a client
+        // `createdAt` must not keep presenting that value after a new write
+        // (flair#1960 r2). The feed body's own `createdAt` is recorded only as
+        // the CLAIM `provenance.claimed.createdAt`, never as a verified
+        // timestamp. The incarnation token is still preserved above (a
+        // re-ingest is not a reincarnation), so only `provenance` is
+        // re-derived.
+        written.provenance = buildProvenance(auth, written.createdAt, content);
+        // flair#1965 r2: this raw table write REPLACES the row, bypassing the
+        // Memory resource's write methods, so the create/update rule is
+        // applied here explicitly: a CREATE (no stored row) stamps this
+        // instance's own id and ignores any body value; an UPDATE keeps the
+        // STORED value (a body value neither replaces nor clears it). The
+        // receiver-side federation bookkeeping (`_originatorInstanceId` et al.)
+        // is likewise unsettable from a body — it stands as stored, or is
+        // dropped on a create. See resources/originator-instance.ts.
+        await applyOriginatorInstanceId(written, priorById);
+        applyFederationBookkeeping(written, priorById);
+        return { write: written };
+      },
+      { ctx, label: "MemoryFeed.ingest", pausePre: "feed-ingest-pre", pausePoint: "feed-ingest" },
+    );
+    const written = ("write" in outcome ? outcome.write : record) as any;
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
-    noteMemoryUpsert(record);
-    return record;
+    noteMemoryUpsert(written);
+    return written;
   }
 
   // Subscription admission: verified agents, admins and trusted internal

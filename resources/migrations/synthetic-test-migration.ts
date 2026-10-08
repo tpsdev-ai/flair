@@ -29,6 +29,7 @@
  */
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
+import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
@@ -56,7 +57,10 @@ function defaultMemoryTable(): MemoryTableLike {
   return (databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory;
 }
 
-export function createSyntheticTestMigration(getTable: () => MemoryTableLike = defaultMemoryTable): Migration {
+export function createSyntheticTestMigration(
+  getTable: () => MemoryTableLike = defaultMemoryTable,
+  writeBackCommittedRow: WriteBackFn = writeBackCommittedRowImpl,
+): Migration {
   function pendingCondition() {
     return [
       { attribute: "agentId", comparator: "equals", value: RESERVED_TEST_AGENT_ID },
@@ -95,14 +99,26 @@ export function createSyntheticTestMigration(getTable: () => MemoryTableLike = d
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        const existing = await table.get(id);
-        if (!existing) continue;
-        if (existing.source === SYNTHETIC_TARGET_MARKER) continue; // already stamped — idempotent skip
+        // flair#2354: one owned write-back (see visibility-backfill.ts) — the
+        // row is read inside the helper's transaction and the stamp is built
+        // from THAT read, so a concurrent change is retried from the committed
+        // row rather than reverted. The helper is injectable (the second
+        // argument, defaulting to the real one) for unit tests; the table is
+        // the getTable() result above, named at this call.
+        const outcome = await writeBackCommittedRow(
+          table as unknown as Parameters<WriteBackFn>[0],
+          id,
+          (existing: any) => {
+            if (!existing) return { skip: true } as const;
+            if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true } as const; // already stamped — idempotent skip
 
-        const synthRow = { ...existing, source: SYNTHETIC_TARGET_MARKER };
-        stripUndeclaredMemoryAttributes(synthRow);
-        await table.put(synthRow);
-        touchedIds.push(id);
+            const synthRow = { ...existing, source: SYNTHETIC_TARGET_MARKER };
+            stripUndeclaredMemoryAttributes(synthRow);
+            return { write: synthRow };
+          },
+          { label: "synthetic-test-migration", pausePre: "synthetic-test-pre", pausePoint: "synthetic-test" },
+        );
+        if ("write" in outcome) touchedIds.push(id);
       }
 
       return { processed: touchedIds.length, touchedIds };
