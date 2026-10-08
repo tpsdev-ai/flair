@@ -34,6 +34,7 @@ import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { fetchErrorLabel, redactUrl } from "./federation.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { isPrincipalDeactivated } from "../lib/principal-status.js";
 import {
   linkPrincipalMapping,
   unlinkPrincipalMapping,
@@ -435,8 +436,11 @@ export function register(program: Command): void {
         {
           label: "status",
           key: "status",
-          format: (v) => {
-            const s = String(v ?? "active");
+          // Report the verdict the gate applies (flair#2378): an absent status
+          // is active, but an explicit null — which the operations API
+          // materialises for a cleared column — is deactivated.
+          format: (_v, row) => {
+            const s = isPrincipalDeactivated(row) ? String(row.status ?? "deactivated") : "active";
             const color = s === "active" ? render.c.green : s === "disabled" ? render.c.red : render.c.yellow;
             return render.wrap(color, s);
           },
@@ -465,11 +469,11 @@ export function register(program: Command): void {
       console.log(render.wrap(render.c.bold, String(result.id)));
       if (result.name) console.log(render.kv("name", String(result.name)));
       if (result.kind) console.log(render.kv("kind", render.wrap(result.kind === "human" ? render.c.cyan : render.c.magenta, String(result.kind))));
-      // A principal with no `status` is active, so report the effective value
-      // rather than omitting the line — the same rule the auth path and
-      // `principal list` apply. A missing field is `undefined` on a record and
-      // `null` when the operations API materialises it.
-      const shownStatus = result.status == null ? "active" : String(result.status);
+      // Report the verdict the auth path applies (isPrincipalDeactivated,
+      // flair#2378): an absent `status` is active, but an explicit `null` —
+      // which the operations API materialises for a cleared column — is
+      // deactivated, not active.
+      const shownStatus = isPrincipalDeactivated(result) ? String(result.status ?? "deactivated") : "active";
       const statusColor = shownStatus === "active" ? render.c.green : shownStatus === "disabled" ? render.c.red : render.c.yellow;
       console.log(render.kv("status", render.wrap(statusColor, shownStatus)));
       if (result.defaultTrustTier) console.log(render.kv("trust tier", String(result.defaultTrustTier)));
