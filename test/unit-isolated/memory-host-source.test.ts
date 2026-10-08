@@ -12,6 +12,7 @@ import {
   harnessState,
   resetHarnessState,
   installMemoryHarperMock,
+  databasesMock,
 } from "../helpers/memory-search-harness";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
@@ -23,6 +24,7 @@ const { MemoryMaintenance } = await import("../../resources/MemoryMaintenance.ts
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { MemoryArchive } = await import("../../resources/MemoryArchive.ts");
 const { SemanticSearch } = await import("../../resources/SemanticSearch.ts");
+const { storedPointerIds } = await import("../../resources/memory-host-source.ts");
 const memoryStore = harnessState.memoryStore;
 const pointerStore = harnessState.pointerStore;
 
@@ -577,7 +579,8 @@ describe("A1-iv items 2/3 — one reader helper and one server-stamped strip lis
     // memory-host-source.ts is the ONE module that reads the table (loadPointerRows).
     // MemoryHostSource.ts is the admin/operator RESOURCE; MemoryMaintenance.ts is
     // the cleanup (hygiene) path. Memory.ts writes the table on the write path but
-    // must not READ it (it goes through the helper).
+    // must not READ it (it goes through the helper). MemoryPurge.ts checks its
+    // pointer cleanup through storedPointerIds, which also lives in the helper.
     const offenders: string[] = [];
     for (const name of readdirSync(dir)) {
       if (!name.endsWith(".ts") || name === "memory-host-source.ts") continue;
@@ -585,6 +588,19 @@ describe("A1-iv items 2/3 — one reader helper and one server-stamped strip lis
       if (/\bloadPointerRows\b/.test(src)) offenders.push(name);
     }
     expect(offenders).toEqual([]); // assertion: no module outside the helper reads the table
+  });
+
+  it("(r2c) storedPointerIds lists the ids that still have a pointer row and fails closed without the table", async () => {
+    pointerStore.set("mem-r2c-a", { memoryId: "mem-r2c-a", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: "t" });
+    expect([...(await storedPointerIds(["mem-r2c-a", "mem-r2c-b"]))]).toEqual(["mem-r2c-a"]); // assertion: only the stored one
+    expect((await storedPointerIds([])).size).toBe(0); // assertion: no ids, no rows
+    const table = databasesMock.flair.MemoryHostSource;
+    (databasesMock.flair as any).MemoryHostSource = undefined;
+    try {
+      await expect(storedPointerIds(["mem-r2c-a"])).rejects.toThrow("MemoryHostSource table unavailable"); // assertion: never "none left"
+    } finally {
+      (databasesMock.flair as any).MemoryHostSource = table;
+    }
   });
 
   it("(r2b) Memory.get, Memory.search and SemanticSearch each RUN the pointer helper", async () => {

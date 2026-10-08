@@ -79,6 +79,44 @@ describe("principal state command, socket-free", () => {
     expect(result.logs).toContain("activated");
   });
 
+  for (const verb of ["disable", "enable"] as const) {
+    for (const status of ["suspended", ""]) {
+      test(`${verb}: pre-read status ${JSON.stringify(status)} refuses without an update`, async () => {
+        const result = await invoke(verb, remote, (call) => call.body.operation === "update" ? ok(call)
+          : new Response(JSON.stringify([{ id: "alice", status }])));
+        expect(result.exited).toBe(true);
+        expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value"]);
+        expect(result.errors).toContain("before the");
+        expect(result.logs).toBe("");
+      });
+    }
+    for (const status of [undefined, null]) {
+      test(`${verb}: missing pre-read status ${String(status)} permits a confirmed write`, async () => {
+        const requested = verb === "enable" ? "active" : "deactivated";
+        const result = await invoke(verb, remote, (call, index) => new Response(JSON.stringify(
+          call.body.operation === "update" ? { update_hashes: ["alice"] }
+            : [{ id: "alice", status: index === 0 ? status : requested }],
+        )));
+        expect(result.exited).toBe(false);
+        expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
+        expect(result.calls[1].body.records[0].status).toBe(requested);
+        expect(result.logs).toContain(`stored status: ${requested}`);
+      });
+    }
+  }
+
+  for (const status of [undefined, null]) {
+    test(`enable: missing read-back status ${String(status)} refuses confirmation`, async () => {
+      const result = await invoke("enable", remote, (call, index) => index < 2 ? ok(call)
+        : new Response(JSON.stringify([{ id: "alice", status }])));
+      expect(result.exited).toBe(true);
+      expect(result.calls.map((c) => c.body.operation)).toEqual(["search_by_value", "update", "search_by_value"]);
+      expect(result.calls[1].body.records[0].status).toBe("active");
+      expect(result.errors).toContain("the stored status is not active");
+      expect(result.logs).toBe("");
+    });
+  }
+
   test("empty explicit instance refuses before ambient target or credential can be used", async () => {
     const result = await invoke("disable", ["--instance", "", "--admin-pass", "pass"], ok, { FLAIR_URL: "https://wrong.example", FLAIR_OPS_TARGET: "https://wrong.example" });
     expect(result.exited).toBe(true);
