@@ -1,40 +1,18 @@
-/**
- * stop-start-recovery-2350.test.ts — the decision behind flair#2350, plus the
- * port probe it rides on (exercised through a REAL TCP listener).
- *
- *   `decideStartOnUnknown`: `flair start`'s resolution of the classifier's
- *   UNKNOWN "no pid + health silent" verdict — proceed on a provably free
- *   port, else refuse and name the remedy.
- *
- * The probe is checked against a real server and a real closed port, not a
- * stub: the whole point is what a live socket does.
- */
 import { describe, test, expect } from "bun:test";
-import { createServer } from "node:net";
-import { createServer as createHttpServer } from "node:http";
+import type { DaemonEvidence } from "../../src/lib/daemon-liveness.ts";
 import {
   classifyPortProbe,
   decideStartOnUnknown,
-  probePortListening,
 } from "../../src/lib/stop-start-recovery.ts";
-
-/** Ask the OS for a free port and release it, so a probe against it is "free". */
-async function freePort(): Promise<number> {
-  const srv = createServer();
-  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
-  const port = (srv.address() as { port: number }).port;
-  await new Promise<void>((r) => srv.close(() => r()));
-  return port;
-}
 
 describe("classifyPortProbe", () => {
   test("an accepted connection is a listener", () => {
     expect(classifyPortProbe(undefined, true)).toBe("listening");
   });
-  test("only the unreachable errnos are 'free'", () => {
+  test("only ECONNREFUSED returns free", () => {
     expect(classifyPortProbe("ECONNREFUSED", false)).toBe("free");
-    expect(classifyPortProbe("EHOSTUNREACH", false)).toBe("free");
-    expect(classifyPortProbe("ENETUNREACH", false)).toBe("free");
+    expect(classifyPortProbe("EHOSTUNREACH", false)).toBe("unknown");
+    expect(classifyPortProbe("ENETUNREACH", false)).toBe("unknown");
   });
   test("a timeout or any other error is 'unknown', never 'free'", () => {
     expect(classifyPortProbe(undefined, false)).toBe("unknown");
@@ -43,42 +21,42 @@ describe("classifyPortProbe", () => {
   });
 });
 
-describe("probePortListening (real sockets)", () => {
-  test("reports 'listening' for a real server", async () => {
-    const srv = createHttpServer(() => {});
-    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
-    const port = (srv.address() as { port: number }).port;
-    try {
-      expect(await probePortListening(port)).toBe("listening");
-    } finally {
-      await new Promise<void>((r) => srv.close(() => r()));
-    }
-  });
-
-  test("reports 'free' for a port nothing is bound to", async () => {
-    const port = await freePort();
-    expect(await probePortListening(port)).toBe("free");
-  });
-});
+function exitedOwner(): DaemonEvidence {
+  return { dataDirUnsafe: null, pidfile: { kind: "absent" }, lastKnownPid: 12345,
+    pidLiveness: { kind: "gone" }, identity: { kind: "none" }, health: { kind: "unreachable" } };
+}
 
 describe("decideStartOnUnknown", () => {
-  test("a provably free port proceeds to start", () => {
-    const d = decideStartOnUnknown({ detail: "no pid is recorded and the health check did not respond", port: 19995, probe: "free" });
+  test.each([
+    ["unsafe data directory", { dataDirUnsafe: "unsafe directory" }],
+    ["unreadable pid file", { pidfile: { kind: "unreadable", reason: "unreadable pid" } }],
+    ["indeterminate PID liveness", { pidLiveness: { kind: "unknown", reason: "EACCES" } }],
+    ["unreadable sidecar", { sidecar: { kind: "unreadable", reason: "unreadable sidecar" } }],
+    ["different live sidecar owner", { sidecar: { kind: "present", pid: 54321, port: 19995, startTimeMs: 1, flairVersion: "test" }, sidecarLiveness: { kind: "alive" } }],
+    ["no recorded owner", { lastKnownPid: undefined, pidLiveness: null }],
+    ["live owner without a listener", { pidLiveness: { kind: "alive" } }],
+    ["owner belonging to another user", { pidLiveness: { kind: "eperm" } }],
+  ] as const)("refuses %s despite a refused connection", (_name, patch) => {
+    const evidence = { ...exitedOwner(), ...patch } as DaemonEvidence;
+    expect(decideStartOnUnknown({ evidence, detail: "unknown", port: 19995, probe: "free" }).proceed).toBe(false);
+  });
+  test("an exited recorded owner and a refused connection permit recovery", () => {
+    const d = decideStartOnUnknown({ evidence: exitedOwner(), detail: "no pid is recorded and the health check did not respond", port: 19995, probe: "free" });
     expect(d.proceed).toBe(true);
-    expect(d.lines.join("\n")).toContain("Nothing is accepting connections on port 19995");
+    expect(d.lines.join("\n")).toContain("Recorded owner has exited");
     expect(d.lines.join("\n")).not.toContain("Refusing");
   });
 
-  test("a listener refuses and names the stop remedy", () => {
-    const d = decideStartOnUnknown({ detail: "no pid is recorded and the health check did not respond", port: 19995, probe: "listening" });
+  test("a listener refuses and names the diagnostic action", () => {
+    const d = decideStartOnUnknown({ evidence: exitedOwner(), detail: "no pid is recorded and the health check did not respond", port: 19995, probe: "listening" });
     expect(d.proceed).toBe(false);
     const text = d.lines.join("\n");
     expect(text).toContain("Refusing to start");
-    expect(text).toContain("flair stop --port 19995");
+    expect(text).toContain("flair doctor");
   });
 
-  test("an undecidable probe refuses and names the inspect remedy", () => {
-    const d = decideStartOnUnknown({ detail: "no pid is recorded and the health check did not respond", port: 19995, probe: "unknown" });
+  test("an undecidable probe refuses and names the diagnostic action", () => {
+    const d = decideStartOnUnknown({ evidence: exitedOwner(), detail: "no pid is recorded and the health check did not respond", port: 19995, probe: "unknown" });
     expect(d.proceed).toBe(false);
     const text = d.lines.join("\n");
     expect(text).toContain("Refusing to start");

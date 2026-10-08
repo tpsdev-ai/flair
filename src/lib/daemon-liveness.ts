@@ -130,6 +130,8 @@ export interface DaemonEvidence {
   dataDirUnsafe: string | null;
   pidfile: PidfileRead;
   lastKnownPid?: number;
+  sidecar?: SidecarRead;
+  sidecarLiveness?: PidLiveness | null;
   pidLiveness: PidLiveness | null;
   identity: IdentityResult;
   health: HealthResult;

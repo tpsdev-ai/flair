@@ -35,6 +35,7 @@ export type ServiceCli = {
   ensureLaunchdServiceLoaded: (...args: any[]) => any;
   flairPackageDir: (...args: any[]) => any;
   gatherDaemonEvidence: (...args: any[]) => any;
+  gatherDaemonOwnerEvidence: (...args: any[]) => any;
   guardEngineNotBackwards: (...args: any[]) => any;
   harperBinNotFoundMessage: (...args: any[]) => any;
   harperSearchRoots: (...args: any[]) => any;
@@ -363,12 +364,10 @@ program
         }
 
      // Already-running check via the five-state liveness machine (flair#1454).
-    // The old check was a bare `fetch /Health` that treated "got a response"
-    // as "already running" and exited 0 — half of #1454. Now the machine
-    // classifies, and every non-NOT_RUNNING state refuses with a non-zero exit.
     const evidence = await gatherDaemonEvidence(port, dataDir);
     const state = classifyDaemonState(evidence, { port, dataDir });
 
+    let recoveryPid: number | undefined;
     switch (state.state) {
       case "NOT_RUNNING":
         break; // proceed to boot
@@ -387,17 +386,33 @@ program
         console.error(`   To inspect: flair doctor`);
         process.exit(1);
       case "UNKNOWN": {
-        // flair#2350: "no pid recorded and the health check did not respond".
-        // The health probe is a bounded request; verify the port directly
-        // before refusing, so a port with nothing listening starts. Any other
-        // outcome (a listener, or an undecidable probe) still refuses.
         const probe = await probePortListening(port);
-        const decision = decideStartOnUnknown({ detail: state.detail, port, probe });
+        const decision = decideStartOnUnknown({ evidence, detail: state.detail, port, probe });
         for (const line of decision.lines) console.error(line);
-        if (decision.proceed) break;
+        if (decision.proceed) {
+          recoveryPid = evidence.pidfile.kind === "present" ? evidence.pidfile.pid : evidence.lastKnownPid;
+          break;
+        }
         process.exit(1);
       }
     }
+
+    const recheckRecovery = async (): Promise<void> => {
+      if (recoveryPid === undefined) return;
+      const observed = await gatherDaemonEvidence(port, dataDir);
+      const probe = await probePortListening(port);
+      const fresh = { ...observed, ...cli.gatherDaemonOwnerEvidence(dataDir) };
+      const pid = fresh.pidfile.kind === "present" ? fresh.pidfile.pid : fresh.lastKnownPid;
+      const decision = decideStartOnUnknown({
+        evidence: pid === recoveryPid ? fresh : { ...fresh, pidLiveness: { kind: "unknown", reason: "recorded owner changed" } },
+        detail: "Rechecking the recorded owner before start.", port,
+        probe,
+      });
+      if (pid !== recoveryPid || !decision.proceed) {
+        for (const line of decision.lines) console.error(line);
+        process.exit(1);
+      }
+    };
 
     if (!existsSync(dataDir)) {
       console.error("❌ No Flair data directory found. Run 'flair init' first.");
@@ -448,6 +463,7 @@ program
             }
             const { execSync } = await import("node:child_process");
             // Targeted at gui/<uid> — the domain the preflight probed (flair#2040).
+            await recheckRecovery();
             const { label, migrated } = ensureLaunchdServiceLoaded(dataDir, (cmd: string) => execSync(cmd, { stdio: "pipe" }));
             await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
             readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
@@ -516,6 +532,7 @@ program
       adminPass,
     }));
 
+    await recheckRecovery();
     const proc = spawn(process.execPath, [bin, "run", "."], {
       cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
     });

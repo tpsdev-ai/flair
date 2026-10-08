@@ -5321,15 +5321,24 @@ function inspectServingFlairPackage(pid: number): boolean | null {
   return resolveServingFlairPackage(pid) !== null;
 }
 
-/** Gather every piece of evidence the classifier needs, in one place. */
-export async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
+export function gatherDaemonOwnerEvidence(dataDir: string): Omit<DaemonEvidence, "identity" | "health"> & { sidecar: SidecarRead } {
   const dataDirUnsafe = checkDataDirSafe(dataDir);
   const pidfile = readPidfile(dataDir);
-  let sidecar = readSidecar(dataDir);
+  const sidecar = readSidecar(dataDir);
+  const sidecarLiveness = sidecar.kind === "present" ? probePidLiveness(sidecar.pid) : null;
   const lastKnownPid = pidfile.kind === "absent" && sidecar.kind === "present" ? sidecar.pid : undefined;
   const pidLiveness = pidfile.kind === "present" ? probePidLiveness(pidfile.pid)
     : lastKnownPid !== undefined ? probePidLiveness(lastKnownPid)
     : pidfile.kind === "absent" && sidecar.kind === "unreadable" ? { kind: "unknown" as const, reason: sidecar.reason } : null;
+
+  return { dataDirUnsafe, pidfile, lastKnownPid, pidLiveness, sidecar, sidecarLiveness };
+}
+
+/** Gather every piece of evidence the classifier needs, in one place. */
+export async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
+  const owner = gatherDaemonOwnerEvidence(dataDir);
+  const { dataDirUnsafe, pidfile, lastKnownPid, pidLiveness, sidecarLiveness } = owner;
+  let sidecar = owner.sidecar;
 
   // flair#2055: a sidecar that names a pid which is CONFIRMED gone is STALE, not
   // a disagreement with hdb.pid. After `flair stop` ended a directly started
@@ -5342,7 +5351,7 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
   // Liveness that cannot be determined is NOT stale: the sidecar stays and the
   // refusal stands (unknown evidence never licenses an action).
   if (sidecar.kind === "present" && dataDirUnsafe === null) {
-    if (classifySidecarStaleness(sidecar, probePidLiveness(sidecar.pid)).kind === "stale") {
+    if (classifySidecarStaleness(sidecar, sidecarLiveness!).kind === "stale") {
       sidecar = { kind: "absent" };
     }
   }
@@ -5414,7 +5423,7 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
     sidecar,
     readStartTime: readProcessStartTimeMs,
   });
-  return { dataDirUnsafe, pidfile, lastKnownPid, pidLiveness, identity, health };
+  return { ...owner, identity, health };
 }
 
 /**
@@ -5561,6 +5570,7 @@ bindServiceCli({
   ensureLaunchdServiceLoaded,
   flairPackageDir,
   gatherDaemonEvidence,
+  gatherDaemonOwnerEvidence,
   guardEngineNotBackwards,
   harperBinNotFoundMessage,
   harperSearchRoots,
