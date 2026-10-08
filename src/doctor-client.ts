@@ -21,7 +21,7 @@
 // broken client config.
 
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
@@ -1708,6 +1708,12 @@ export interface HookProbeOutcome {
   timedOut: boolean;
   /** Set when the probe process could not be started at all. */
   spawnError: string | null;
+  /** Set when the probe could not confirm that the command's process group
+   *  ended (flair#2385). */
+  cleanupError?: string | null;
+  /** Set when stdout or stderr held more than HOOK_PROBE_MAX_OUTPUT_BYTES; the
+   *  probe keeps at most that many bytes of each. */
+  outputOverflow?: boolean;
 }
 
 export type HookExecutionState = "runs" | "broken" | "unknown";
@@ -1737,54 +1743,115 @@ export function evidenceLine(s: string, max = 200): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
-/** How long to let a signaled process group exit before escalating to SIGKILL,
- *  and how long to wait for the group to disappear after SIGKILL. Bounded, so a
- *  descendant that ignores SIGTERM cannot make the probe hang. */
+/** How long the group gets after SIGTERM before SIGKILL, and how long the probe
+ *  then waits for it to disappear. Each wait ends at a monotonic deadline. */
 const PROBE_GROUP_TERM_GRACE_MS = 200;
 const PROBE_GROUP_KILL_GRACE_MS = 2_000;
 
-/** Bounded synchronous sleep — no timers, and never longer than `ms`. */
+/** How many seconds the group's pin outlives the probe's own timeout. */
+const PROBE_PIN_MARGIN_S = 60;
+
+/** The most the probe reads back of each output stream: Node `spawnSync`'s
+ *  default `maxBuffer`. */
+export const HOOK_PROBE_MAX_OUTPUT_BYTES = 1024 * 1024;
+
+/** Synchronous sleep of about `ms`; it can overrun under load, so callers bound
+ *  their waits with a monotonic deadline rather than with this. */
 function sleepMs(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
 }
 
-/** Is any process still in group `pgid`? A zombie counts until it is reaped. */
-function processGroupAlive(pgid: number): boolean {
+/** Sleep until the monotonic clock (`performance.now()`) passes `deadline`. */
+function sleepUntil(deadline: number): void {
+  for (let now = performance.now(); now < deadline; now = performance.now()) sleepMs(Math.min(5, deadline - now));
+}
+
+/** `process.kill`'s shape; injectable so tests can observe or drop signals. */
+export type ProbeSignalSender = (pid: number, signal: NodeJS.Signals | 0) => void;
+const sendSignal: ProbeSignalSender = (pid, signal) => {
+  process.kill(pid, signal);
+};
+
+/** Can `target` (a pid, or a negated group id) still be signalled? A zombie
+ *  counts until it is reaped; EPERM counts as present. */
+function signalTargetPresent(target: number, kill: ProbeSignalSender): boolean {
   try {
-    process.kill(-pgid, 0);
+    kill(target, 0);
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
-/** End every process in group `pgid`: SIGTERM, then SIGKILL after a bounded grace. */
-function terminateProcessGroup(pgid: number): void {
-  try {
-    process.kill(-pgid, "SIGTERM");
-  } catch {
-    // ESRCH: the group is already gone — the common case when the command left
-    // no descendant and the shell was the only member.
-  }
-  const termDeadline = Date.now() + PROBE_GROUP_TERM_GRACE_MS;
-  while (processGroupAlive(pgid) && Date.now() < termDeadline) sleepMs(5);
-  if (!processGroupAlive(pgid)) return;
-  try {
-    process.kill(-pgid, "SIGKILL");
-  } catch {
-    // Already gone between the checks.
-  }
-  const killDeadline = Date.now() + PROBE_GROUP_KILL_GRACE_MS;
-  while (processGroupAlive(pgid) && Date.now() < killDeadline) sleepMs(5);
+/**
+ * flair#2385 — signal the probe's process group `pgid` and check that it is
+ * gone. Returns null when no process is left in the group, else why that could
+ * not be confirmed.
+ *
+ * Each signal is sent only after `pinPid` — the pin the probe's wrapper put in
+ * the group, which ignores SIGHUP/SIGINT/SIGQUIT/SIGTERM — has answered signal 0;
+ * while a group has a member, its id is not reused. When the pin does not
+ * answer, nothing but signal 0 is sent to the group.
+ */
+export function endProbeProcessGroup(
+  pgid: number,
+  pinPid: number | null,
+  kill: ProbeSignalSender = sendSignal,
+): string | null {
+  const groupGone = (): boolean => !signalTargetPresent(-pgid, kill);
+  const pinned = (): boolean => pinPid !== null && signalTargetPresent(pinPid, kill);
+  const unconfirmed = (reason: string): string | null => (groupGone() ? null : reason);
+  let signalError = "";
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    try {
+      kill(-pgid, signal);
+    } catch (err) {
+      signalError = `; ${signal} failed: ${(err as NodeJS.ErrnoException).code ?? String(err)}`;
+    }
+  };
+  if (!pinned()) return unconfirmed("its pin process was not present, so the group was not signalled");
+  signalGroup("SIGTERM");
+  // The pin ignores SIGTERM, so the group is still present here: wait out the grace.
+  sleepUntil(performance.now() + PROBE_GROUP_TERM_GRACE_MS);
+  if (!pinned()) return unconfirmed(`its pin process exited before SIGKILL, so SIGKILL was not sent${signalError}`);
+  signalGroup("SIGKILL");
+  const deadline = performance.now() + PROBE_GROUP_KILL_GRACE_MS;
+  while (!groupGone() && performance.now() < deadline) sleepMs(5);
+  return unconfirmed(`the group was still present ${PROBE_GROUP_KILL_GRACE_MS} ms after SIGKILL${signalError}`);
 }
 
-/** Read a probe output file, treating an unreadable file as empty output. */
-function readProbeFile(path: string): string {
+/** The pin's pid as the wrapper recorded it, or null when it is missing or malformed. */
+function readPinPid(path: string): number | null {
+  let fd = -1;
   try {
-    return readFileSync(path, "utf-8");
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(32);
+    const text = buf.toString("utf-8", 0, readSync(fd, buf, 0, buf.length, 0));
+    if (!/^[1-9][0-9]{0,9}$/.test(text)) return null;
+    const pid = Number(text);
+    return pid > 1 && pid <= 0x7fffffff ? pid : null;
   } catch {
-    return "";
+    // No pin recorded: the group is then never signalled (endProbeProcessGroup).
+    return null;
+  } finally {
+    if (fd >= 0) closeSync(fd);
   }
+}
+
+/** Read at most HOOK_PROBE_MAX_OUTPUT_BYTES of an output file through its open
+ *  descriptor; `overflow` when the file holds more. */
+function readCappedOutput(fd: number): { text: string; overflow: boolean } {
+  const buf = Buffer.alloc(HOOK_PROBE_MAX_OUTPUT_BYTES + 1);
+  let total = 0;
+  while (total < buf.length) {
+    const n = readSync(fd, buf, total, buf.length - total, total);
+    if (n === 0) break;
+    total += n;
+  }
+  return {
+    text: buf.toString("utf-8", 0, Math.min(total, HOOK_PROBE_MAX_OUTPUT_BYTES)),
+    overflow: total > HOOK_PROBE_MAX_OUTPUT_BYTES,
+  };
 }
 
 /** The `Bun.spawnSync` shape this probe needs. Under Bun the `node:child_process`
@@ -1821,8 +1888,19 @@ interface ProbeSpawn {
   spawnError: string | null;
 }
 
-/** Spawn `/bin/sh -c command` into its own process group, bounded by `timeoutMs`,
- *  with stdout/stderr written to the two file descriptors. */
+/** The script the probe runs as `/bin/sh -c PROBE_WRAPPER flair-hook-probe
+ *  <pin file> <pin seconds> <command>`. From a subshell (so it is not a child the
+ *  command can `wait` for) it starts the group's pin — a `sleep` that ignores
+ *  SIGHUP/SIGINT/SIGQUIT/SIGTERM and exits by itself after <pin seconds>, found
+ *  on PATH with /bin and /usr/bin appended in that subshell only — and records
+ *  its pid; then it `exec`s `/bin/sh -c <command>`, so the command's shell keeps
+ *  this process's pid, which is the group id. */
+const PROBE_WRAPPER =
+  `( ( trap '' HUP INT QUIT TERM; PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
+  `printf '%s' "$!" >"$1" ); exec /bin/sh -c "$3"`;
+
+/** Spawn the wrapper into its own process group, bounded by `timeoutMs`, with
+ *  stdout/stderr written to the two file descriptors. */
 function spawnProbeBounded(
   command: string,
   timeoutMs: number,
@@ -1830,10 +1908,13 @@ function spawnProbeBounded(
   env: NodeJS.ProcessEnv,
   outFd: number,
   errFd: number,
+  pinPath: string,
 ): ProbeSpawn {
+  const pinSeconds = String(Math.ceil(timeoutMs / 1000) + PROBE_PIN_MARGIN_S);
+  const args = ["-c", PROBE_WRAPPER, "flair-hook-probe", pinPath, pinSeconds, command];
   if (bunRuntime) {
     try {
-      const r = bunRuntime.spawnSync(["/bin/sh", "-c", command], {
+      const r = bunRuntime.spawnSync(["/bin/sh", ...args], {
         detached: true,
         stdin: Buffer.from(input),
         stdout: outFd,
@@ -1849,7 +1930,7 @@ function spawnProbeBounded(
   }
   // `detached` groups the child (setsid); Node's `SpawnSyncOptions` type omits
   // it even though `spawnSync` honours it at runtime, so the object is asserted.
-  const res = spawnSync("/bin/sh", ["-c", command], {
+  const res = spawnSync("/bin/sh", args, {
     detached: true,
     stdio: ["pipe", outFd, errFd],
     input,
@@ -1858,71 +1939,96 @@ function spawnProbeBounded(
   } as SpawnSyncOptions);
   const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
   return {
-    pid: typeof res.pid === "number" ? res.pid : null,
+    // A failed Node spawn reports pid 0, and `kill(-0)` would address the
+    // CALLER's own group: only a real child pid names the probe's group.
+    pid: typeof res.pid === "number" && res.pid > 1 ? res.pid : null,
     exitCode: res.status,
     timedOut,
     spawnError: res.error && !timedOut ? res.error.message : null,
   };
 }
 
+/** How `runProbeInOwnGroup` runs one command. `kill`, `tmpRoot` and
+ *  `openOutput` are test seams. */
+export interface ProbeRunOptions {
+  input: string;
+  env: NodeJS.ProcessEnv;
+  kill?: ProbeSignalSender;
+  tmpRoot?: string;
+  openOutput?: (path: string) => number;
+}
+
 /**
- * flair#2385 — run a hook command in its OWN process group and end the whole
- * group, so the command's descendants go with it.
+ * flair#2385 — run a hook command in its OWN process group, then clean that group up.
  *
- * `spawnSync`'s `timeout` signals only the direct `/bin/sh`. A descendant the
- * command started (an `npx`/`npm exec` helper, say) keeps running after
- * `flair hook status` returns, with the caller's environment. So the shell is
- * spawned `detached` — on POSIX that is `setsid`, giving it a fresh process
- * group whose id is the child's pid — and the group is terminated on BOTH
- * paths: on the timeout and after a normal exit (a command can background a
- * child and exit). SIGTERM first, then SIGKILL after a short bounded grace; the
- * helper waits, bounded, for the group to disappear before it returns.
+ * `spawnSync`'s `timeout` signals only the direct `/bin/sh`, so a descendant the
+ * command started (an `npx`/`npm exec` helper, say) kept running after
+ * `flair hook status` returned, with the caller's environment. So the shell is
+ * spawned `detached`, which gives it a fresh process group whose id is its pid,
+ * and once it has exited — on its own or after the timeout's SIGTERM — the
+ * probe calls endProbeProcessGroup, which signals the group while its pin is
+ * present (SIGTERM, then SIGKILL after a short grace) and then waits, bounded,
+ * for it to disappear. When that cannot be confirmed, the outcome carries
+ * `cleanupError`, which both classifiers report instead of the command's own
+ * result. A descendant that moved itself into another process group or session
+ * is not signalled.
  *
  * stdout/stderr go to temp FILES, not pipes: under Node a descendant that
  * inherits the write end of a pipe keeps `spawnSync` blocked on it until the
  * timeout fires even after the shell has exited, stalling the normal path.
+ * The files are not size-limited while the command runs; the probe reads back
+ * at most HOOK_PROBE_MAX_OUTPUT_BYTES of each and sets `outputOverflow` when a
+ * file holds more. The temp directory's removal runs in a `finally`.
  *
- * Windows has no POSIX process group and `kill(-pid)` does not address one, so
- * there the probe keeps `spawnSync`'s own bounded `timeout` and signals only the
- * direct child.
+ * On Windows the probe calls `spawnSync("/bin/sh", ...)` directly, as it did
+ * before flair#2385, with no process-group handling; where `/bin/sh` cannot be
+ * started there, the outcome is a spawn error.
  */
-function runProbeInOwnGroup(
-  command: string,
-  timeoutMs: number,
-  input: string,
-  env: NodeJS.ProcessEnv,
-): HookProbeOutcome {
+export function runProbeInOwnGroup(command: string, timeoutMs: number, opts: ProbeRunOptions): HookProbeOutcome {
+  const { input, env } = opts;
   if (process.platform === "win32") {
     const res = spawnSync("/bin/sh", ["-c", command], { input, encoding: "utf-8", timeout: timeoutMs, env });
     const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
     return { exitCode: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "", timedOut, spawnError: res.error && !timedOut ? res.error.message : null };
   }
-  const dir = mkdtempSync(join(tmpdir(), "flair-hook-probe-"));
-  const outPath = join(dir, "stdout");
-  const errPath = join(dir, "stderr");
-  const spawned = ((): ProbeSpawn => {
-    let outFd = -1;
-    let errFd = -1;
-    try {
-      outFd = openSync(outPath, "w");
-      errFd = openSync(errPath, "w");
-      return spawnProbeBounded(command, timeoutMs, input, env, outFd, errFd);
-    } finally {
-      if (outFd >= 0) closeSync(outFd);
-      if (errFd >= 0) closeSync(errFd);
-    }
-  })();
-  // End the group on the timeout path AND after a normal exit: the shell exiting
-  // does not mean the command it started has.
-  if (spawned.pid !== null) terminateProcessGroup(spawned.pid);
-  const stdout = readProbeFile(outPath);
-  const stderr = readProbeFile(errPath);
+  const openOutput = opts.openOutput ?? ((path: string) => openSync(path, "w+"));
+  const dir = mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "flair-hook-probe-"));
+  const fds: number[] = [];
   try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    // Best effort: a failed cleanup must not turn a probe outcome into a throw.
+    const outFd = openOutput(join(dir, "stdout"));
+    fds.push(outFd);
+    const errFd = openOutput(join(dir, "stderr"));
+    fds.push(errFd);
+    const pinPath = join(dir, "pin");
+    const spawned = spawnProbeBounded(command, timeoutMs, input, env, outFd, errFd, pinPath);
+    // Clean up the group on the timeout path AND after a normal exit: the shell
+    // exiting does not mean the command it started has.
+    const cleanupError = spawned.pid === null ? null : endProbeProcessGroup(spawned.pid, readPinPid(pinPath), opts.kill);
+    const out = readCappedOutput(outFd);
+    const err = readCappedOutput(errFd);
+    return {
+      exitCode: spawned.exitCode,
+      stdout: out.text,
+      stderr: err.text,
+      timedOut: spawned.timedOut,
+      spawnError: spawned.spawnError,
+      cleanupError,
+      outputOverflow: out.overflow || err.overflow,
+    };
+  } finally {
+    for (const fd of fds) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Closing is best effort; the directory is removed either way.
+      }
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // A failed removal must not turn a probe outcome into a throw.
+    }
   }
-  return { exitCode: spawned.exitCode, stdout, stderr, timedOut: spawned.timedOut, spawnError: spawned.spawnError };
 }
 
 /** `/bin/sh -c` is not a guess: it is exactly how Claude Code runs a
@@ -1930,14 +2036,17 @@ function runProbeInOwnGroup(
  *  Probing through any other shell would answer a question the user never
  *  asked. */
 const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) =>
-  runProbeInOwnGroup(command, timeoutMs, "", {
-    ...process.env,
-    // Tell a #1007-or-later adapter to answer without side effects.
-    FLAIR_HOOK_PROBE: "1",
-    // Bound an OLDER adapter, which will do a real bootstrap + presence
-    // heartbeat because it has never heard of FLAIR_HOOK_PROBE.
-    FLAIR_HOOK_TIMEOUT_MS: "1500",
-    FLAIR_PRESENCE_TIMEOUT_MS: "500",
+  runProbeInOwnGroup(command, timeoutMs, {
+    input: "",
+    env: {
+      ...process.env,
+      // Tell a #1007-or-later adapter to answer without side effects.
+      FLAIR_HOOK_PROBE: "1",
+      // Bound an OLDER adapter, which will do a real bootstrap + presence
+      // heartbeat because it has never heard of FLAIR_HOOK_PROBE.
+      FLAIR_HOOK_TIMEOUT_MS: "1500",
+      FLAIR_PRESENCE_TIMEOUT_MS: "500",
+    },
   });
 
 /**
@@ -1951,12 +2060,15 @@ export function probeSessionStartHookDelivery(
 ): HookProbeOutcome {
   const timeoutMs = opts.timeoutMs ?? 8_000;
   const runner = opts.runner ?? ((cmd, ms) =>
-    runProbeInOwnGroup(cmd, ms, "{}", {
-      ...process.env,
-      FLAIR_HOOK_PROBE: "0",
-      FLAIR_HOOK_DELIVERY_PROBE: "1",
-      FLAIR_HOOK_TIMEOUT_MS: "4000",
-      FLAIR_PRESENCE_TIMEOUT_MS: "1",
+    runProbeInOwnGroup(cmd, ms, {
+      input: "{}",
+      env: {
+        ...process.env,
+        FLAIR_HOOK_PROBE: "0",
+        FLAIR_HOOK_DELIVERY_PROBE: "1",
+        FLAIR_HOOK_TIMEOUT_MS: "4000",
+        FLAIR_PRESENCE_TIMEOUT_MS: "1",
+      },
     }));
   try {
     return runner(command, timeoutMs);
@@ -1988,6 +2100,12 @@ export function probeSessionStartHookCommand(
 /** Pure: probe outcome -> verdict. See the section doc for why "exit 0, no
  *  output" is a definite failure rather than an ambiguous one. */
 export function classifyHookProbe(outcome: HookProbeOutcome): HookProbeVerdict {
+  if (outcome.cleanupError) {
+    return { execution: "unknown", detail: `could not confirm the command's process group ended (${outcome.cleanupError})` };
+  }
+  if (outcome.outputOverflow) {
+    return { execution: "unknown", detail: `the command's output exceeded the probe's ${HOOK_PROBE_MAX_OUTPUT_BYTES}-byte limit` };
+  }
   if (outcome.timedOut) {
     return { execution: "unknown", detail: "the command did not answer in time" };
   }
