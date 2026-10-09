@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { AUTHORITY_FIELDS, guardAuthorityFields, stripAuthorityFields } from "../../resources/authority-field-guard";
+import { writerHelperCalls } from "../helpers/raw-table-writers";
 
 describe("workflow authority guard", () => {
   test("each verdict field rejects creation, replacement and clearing", async () => {
@@ -166,25 +167,7 @@ function aliasBindsMemory(name: string, lines: string[], writeIdx: number, gette
   return false;
 }
 
-/** The whole call expression starting at `startLine`, whitespace-collapsed, so a
- *  needle can key on an argument the call passes several lines down (e.g. its
- *  `label`). */
-function callText(lines: string[], startLine: number): string {
-  const src = lines.slice(startLine).join("\n");
-  const open = src.indexOf("(");
-  if (open < 0) return src.slice(0, 200).replace(/\s+/g, " ");
-  let depth = 0;
-  for (let i = open; i < src.length; i++) {
-    if (src[i] === "(") depth++;
-    else if (src[i] === ")") {
-      depth--;
-      if (depth === 0) return src.slice(0, i + 1).replace(/\s+/g, " ");
-    }
-  }
-  return src.slice(0, 400).replace(/\s+/g, " ");
-}
-
-function enumerateRawMemoryWriters(): RawMemoryWriter[] {
+function enumerateRawMemoryWriters(extra: { file: string; text: string }[] = []): RawMemoryWriter[] {
   const writers: RawMemoryWriter[] = [];
   const seen = new Set<string>();
   const add = (w: RawMemoryWriter) => {
@@ -193,13 +176,26 @@ function enumerateRawMemoryWriters(): RawMemoryWriter[] {
     seen.add(key);
     writers.push(w);
   };
-  for (const full of walkTs(RESOURCES_DIR)) {
-    const file = relative(REPO_ROOT, full).replaceAll("\\", "/");
-    const raw = readFileSync(full, "utf8");
+  const sources = [
+    ...walkTs(RESOURCES_DIR).map((full) => ({ file: relative(REPO_ROOT, full).replaceAll("\\", "/"), text: readFileSync(full, "utf8") })),
+    ...extra,
+  ];
+  for (const { file, text: raw } of sources) {
     const stripped = stripComments(raw);
     const rawLines = raw.split("\n");
     const lines = stripped.split("\n");
     const getters = memoryGetterNames(stripped);
+    // flair#2354: every call of the shared write-back helper is a raw writer
+    // keyed at the CALL SITE, however its table argument is expressed and
+    // under whatever import or local alias it is called; a helper reference
+    // the scan cannot follow to a call throws (writerHelperCalls). A new call
+    // with no classification below fails the gate. An aliased patchRecord
+    // call is added the same way when it names the Memory table.
+    for (const call of writerHelperCalls(file, raw)) {
+      const excerpt = call.call.getText().replace(/\s+/g, " ");
+      if (call.helper === "writeBackCommittedRow") add({ file, line: call.line, via: "write-back", excerpt });
+      else if (call.callee !== call.helper && /\.flair\.Memory\b/.test(excerpt)) add({ file, line: call.line, via: "patchRecord", excerpt });
+    }
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (/\.flair\.Memory\.put\s*\(/.test(line)) {
@@ -213,13 +209,6 @@ function enumerateRawMemoryWriters(): RawMemoryWriter[] {
         if (/\.flair\.Memory\b/.test(window)) {
           add({ file, line: i + 1, via: "patchRecord", excerpt: rawLines.slice(i, i + 6).map((l) => l.trim()).join(" ") });
         }
-      }
-      // flair#2354: every call site of the shared write-back helper is a raw
-      // writer keyed at the CALL SITE, regardless of how its table argument is
-      // expressed. A new helper call with no classification below fails the
-      // gate. (The helper's own definition is not a call site.)
-      if (/writeBackCommittedRow\s*\(/.test(line) && !/function\s+writeBackCommittedRow\s*\(/.test(line)) {
-        add({ file, line: i + 1, via: "write-back", excerpt: callText(lines, i) });
       }
       for (const m of line.matchAll(/\b([A-Za-z_]\w*)\.(put|update)\s*\(/g)) {
         if (m[1] === "flair" || /\.flair\.Memory\./.test(line)) continue;
@@ -301,5 +290,40 @@ describe("raw flair.Memory handle coverage", () => {
 
   test("graph-heal OrgEvent ledger put is not a Memory writer", () => {
     expect(writers.some((w) => w.file.includes("migrations/graph-heal"))).toBe(false);
+  });
+});
+
+describe("the raw Memory writer inventory follows writer-helper aliases (flair#2354)", () => {
+  const FIXTURE = "resources/zz-fixture-aliased-write-back.ts";
+  const fixture = (lines: string[]) => [{ file: FIXTURE, text: lines.join("\n") }];
+  const call = 'await wb((databases as any).flair.Memory, id, (row: any) => ({ write: { ...row } }), { label: "fixture-aliased" });';
+  const fixtureWriters = (lines: string[]) => enumerateRawMemoryWriters(fixture(lines)).filter((w) => w.file === FIXTURE);
+
+  test("an import-aliased write-back call is enumerated, unclassified", () => {
+    const found = fixtureWriters([
+      'import { databases } from "harper";',
+      'import { writeBackCommittedRow as wb } from "./write-back.js";',
+      "export async function fixture(id: string) {", `  ${call}`, "}",
+    ]);
+    expect(found.map((w) => w.via)).toEqual(["write-back"]);
+    expect(classify(found[0])).toEqual([]);
+  });
+
+  test("a local alias of the write-back helper is enumerated, unclassified", () => {
+    const found = fixtureWriters([
+      'import { databases } from "harper";',
+      'import { writeBackCommittedRow } from "./write-back.js";',
+      "const wb = writeBackCommittedRow;",
+      "export async function fixture(id: string) {", `  ${call}`, "}",
+    ]);
+    expect(found.map((w) => w.via)).toEqual(["write-back"]);
+    expect(classify(found[0])).toEqual([]);
+  });
+
+  test("a helper reference the scan cannot follow to a call fails the inventory", () => {
+    expect(() => enumerateRawMemoryWriters(fixture([
+      'import { writeBackCommittedRow } from "./write-back.js";',
+      "export const helpers = { run: writeBackCommittedRow };",
+    ]))).toThrow("unresolved writer-helper reference");
   });
 });

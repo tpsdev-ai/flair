@@ -324,7 +324,7 @@ export class FeedMemories extends Resource {
         // `createdAt` must not keep presenting that value after a new write
         // (flair#1960 r2). The feed body's own `createdAt` is recorded only as
         // the CLAIM `provenance.claimed.createdAt`, never as a verified
-        // timestamp. The incarnation token is still preserved above (a
+        // timestamp. The incarnation token is retained above when present (a
         // re-ingest is not a reincarnation), so only `provenance` is
         // re-derived.
         written.provenance = buildProvenance(auth, written.createdAt, content);

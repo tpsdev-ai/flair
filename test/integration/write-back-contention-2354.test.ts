@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
 import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
@@ -128,6 +128,9 @@ async function seedCandidate(harper: HarperInstance, agentId: string, row: Recor
 
 let harper: HarperInstance;
 let pauseDir: string;
+// The deterministic generative backend ReflectMemories' execute mode calls
+// (test/fixtures/stub-generative-backend.mjs): it returns this file's content.
+let stubDir: string;
 const feedAgent = mkAgent("wbc-feed");
 const reflectAgent = mkAgent("wbc-reflect");
 const admin = mkAgent("wbc-admin");
@@ -141,7 +144,17 @@ beforeAll(async () => {
   process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
   process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
   try {
-    harper = await startHarper();
+    stubDir = mkdtempSync(join(tmpdir(), "flair-wbc-stub-"));
+    writeFileSync(join(stubDir, "generate-response.json"), JSON.stringify({ candidates: [] }));
+    harper = await startHarper({
+      appendRootConfigYaml: [
+        "models:",
+        "  generative:",
+        "    default:",
+        `      backend: ${resolve(process.cwd(), "test/fixtures/stub-generative-backend.mjs")}`,
+        `      responseFile: ${join(stubDir, "generate-response.json")}`,
+      ].join("\n"),
+    });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -157,6 +170,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  if (stubDir) rmSync(stubDir, { recursive: true, force: true });
 });
 
 describe("flair#2354 — the feed ingest write-back under a concurrent change (real Harper)", () => {
@@ -310,8 +324,106 @@ describe("flair#2354 — the last-reflected patch write-back under a concurrent 
   }
 });
 
+/** The release marker of a pause whose write-back the request does not await:
+ *  read it until it is written. */
+async function releaseMarker(point: string, initial: string): Promise<string> {
+  let marker = initial;
+  for (const until = Date.now() + 5_000; !marker && Date.now() < until;) {
+    await new Promise((r) => setTimeout(r, 25));
+    try { marker = readFileSync(join(pauseDir, `released.${point}`), "utf8"); } catch { marker = ""; }
+  }
+  return marker;
+}
+
+/** Read `id` until `done(row)` holds or `ms` passes; the last read is returned. */
+async function readUntil(id: string, done: (row: any) => boolean, ms: number): Promise<any> {
+  const deadline = Date.now() + ms;
+  let row = await readRow(harper, id);
+  while (!done(row) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    row = await readRow(harper, id);
+  }
+  return row;
+}
+
+describe("flair#2354 — the ReflectMemories source stamp in execute mode (real Harper)", () => {
+  async function reflectSource(agentId: string, id: string): Promise<TestAgent> {
+    const agent = mkAgent(agentId);
+    await seedAgent(harper, agent);
+    await insertRow(harper, {
+      id, agentId, content: `reflect source ${id}`, contentHash: id, instanceToken: randomUUID(),
+      durability: "standard", createdAt: new Date().toISOString(),
+    });
+    return agent;
+  }
+  const reflect = (agent: TestAgent) => authSend(harper, agent, "POST", "/ReflectMemories", { agentId: agent.id, execute: true });
+
+  it("stamps lastReflected on a gathered source row", async () => {
+    const id = "wbc-reflect-clean";
+    const agent = await reflectSource("wbc-reflect-clean-agent", id);
+    const response = await reflect(agent);
+    expect(response.status, (await response.clone().text()).slice(0, 300)).toBe(200);
+    const row = await readUntil(id, (r) => !!r?.lastReflected, 10_000);
+    expect(row?.lastReflected, "the source stamp landed").toBeTruthy();
+    expect(row?.content).toBe(`reflect source ${id}`);
+  }, 60_000);
+
+  for (const point of ["reflect-sources-pre", "reflect-sources"]) {
+    it(`does not stamp a source whose gathered content changed (${point})`, async () => {
+      const id = `wbc-reflect-content-${point}`;
+      const agent = await reflectSource(`wbc-reflect-content-agent-${point}`, id);
+      const { response, released, paused, competed } = await withPaused(
+        point,
+        () => reflect(agent),
+        () => updateRow(harper, { id, content: "reflect source edited" }),
+      );
+      expect(paused).toBe(true);
+      expect(await releaseMarker(point, released), "the source stamp was not paused and released by this test").toBe("go");
+      expect(competed, "the competing edit was not applied").toBe(200);
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBe(200);
+      // Give the released write-back time to finish before reading.
+      const row = await readUntil(id, (r) => !!r?.lastReflected, 2_000);
+      expect(row?.content, "the competing content edit is kept").toBe("reflect source edited");
+      expect(row?.lastReflected ?? null, "a source changed since the gather is not stamped").toBeNull();
+    }, 60_000);
+
+    it(`stamps a source whose ungathered field changed and keeps that edit (${point})`, async () => {
+      const id = `wbc-reflect-subject-${point}`;
+      const agent = await reflectSource(`wbc-reflect-subject-agent-${point}`, id);
+      const { response, released, paused, competed } = await withPaused(
+        point,
+        () => reflect(agent),
+        () => updateRow(harper, { id, subject: "reflect subject edited" }),
+      );
+      expect(paused).toBe(true);
+      expect(await releaseMarker(point, released), "the source stamp was not paused and released by this test").toBe("go");
+      expect(competed, "the competing edit was not applied").toBe(200);
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBe(200);
+      const row = await readUntil(id, (r) => !!r?.lastReflected, 10_000);
+      expect(row?.lastReflected, "the source stamp landed").toBeTruthy();
+      expect(row?.subject, "the competing edit is kept").toBe("reflect subject edited");
+      expect(row?.content).toBe(`reflect source ${id}`);
+    }, 60_000);
+  }
+});
+
 describe("flair#2354 — the promotion stamp write-back under a concurrent change (real Harper)", () => {
-  for (const point of ["promotion-stamp-pre", "promotion-stamp"]) {
+  it("stamps the row an unpaused auto-promotion wrote", async () => {
+    const agentId = "wbc-stamp-agent-clean";
+    const stampAgent = mkAgent(agentId);
+    await seedAgent(harper, stampAgent);
+    const claim = "promotion stamp claim for the clean run";
+    await seedCandidate(harper, agentId, { id: "wbc-stamp-cand-clean", claim, scopeTag: `adk:app:${agentId}`, sourceMemoryIds: [] });
+    const response = await authSend(harper, stampAgent, "POST", "/AutoPromoteCandidates", { agentId });
+    expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const row = await findPromotedRow(harper, agentId, claim);
+    expect(row?.promotionStatus, "the verdict landed on the written row").toBe("approved");
+    expect(row?.promotedBy).toBeTruthy();
+  }, 60_000);
+
+  // promotion-stamp-select: between the Memory write and the stamp's first
+  // read; the other two are the write-back helper's own points.
+  for (const point of ["promotion-stamp-select", "promotion-stamp-pre", "promotion-stamp"]) {
     it(`refuses a promotion stamp on a replaced row (${point})`, async () => {
       const agentId = `wbc-stamp-agent-${point}`;
       const stampAgent = mkAgent(agentId);

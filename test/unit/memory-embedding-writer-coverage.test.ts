@@ -162,3 +162,19 @@ test("every LATCH/GATED writer's file trips the latch (calls noteWriteStamp) —
   ).toEqual([]);
   expect(mustTrip.has("resources/Federation.ts")).toBe(true); // the hole this test exists to keep closed
 });
+
+test("an aliased write-back call is an enumerated writer, and an unfollowable helper reference fails (flair#2354)", () => {
+  const file = "resources/zz-fixture-aliased-write-back.ts";
+  const head = ['import { databases } from "harper";'];
+  const call = 'await wb((databases as any).flair.Memory, id, (row: any) => ({ write: { ...row } }), { label: "fixture-aliased" });';
+  for (const binding of ['import { writeBackCommittedRow as wb } from "./write-back.js";',
+    'import { writeBackCommittedRow } from "./write-back.js";\nconst wb = writeBackCommittedRow;']) {
+    const source = [...head, binding, "export async function fixture(id: string) {", `  ${call}`, "}"].join("\n");
+    const writers = rawTableWriteSites(file, source, "Memory").filter((site) => site.kind === "writer").map((site) => site.key);
+    expect(writers).toContain(`${file}:writer:wb#1`);
+    expect(classified.has(`${file}:writer:wb#1`)).toBe(false);
+  }
+  const escaping = [...head, 'import { writeBackCommittedRow } from "./write-back.js";',
+    "export const helpers = { run: writeBackCommittedRow, table: (databases as any).flair.Memory };"].join("\n");
+  expect(() => rawTableWriteSites(file, escaping, "Memory")).toThrow("unresolved writer-helper reference");
+});
