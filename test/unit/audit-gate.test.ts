@@ -194,7 +194,8 @@ describe("vendor-pinned npm-install nodes", () => {
     });
   });
 
-  function runFixtureGate(nodes: string[], installedVersion = "5.11.3", adk = false) {
+  function runFixtureGate(nodes: string[], installedVersion = "5.11.3", adk = false,
+    adkVersions: { installed?: string | null; reported?: string } = {}) {
     const root = mkdtempSync(join(tmpdir(), "flair-audit-gate-"));
     try {
       mkdirSync(join(root, "scripts"));
@@ -233,10 +234,15 @@ describe("vendor-pinned npm-install nodes", () => {
         parent = join(parent, "node_modules", pkg);
         mkdirSync(parent, { recursive: true });
         writeFileSync(join(parent, "package.json"), JSON.stringify({
-          name: pkg, version: "9.0.1", dependencies: i + 1 < chain.length ? { [chain[i + 1]!]: "*" } : {},
+          name: pkg, version: pkg === "uuid" ? (adkVersions.installed === null ? undefined : adkVersions.installed ?? "9.0.1") : "1.0.0",
+          dependencies: i + 1 < chain.length ? { [chain[i + 1]!]: "*" } : {},
         }));
       }
-      const report = { vulnerabilities: { [adk ? "uuid" : "fastify"]: { nodes, via: [{
+      const report = {
+        ...(adkVersions.reported === undefined ? {} : { packages: Object.fromEntries(
+          nodes.map((node) => [node, { version: adkVersions.reported }]),
+        ) }),
+        vulnerabilities: { [adk ? "uuid" : "fastify"]: { nodes, via: [{
         url: `https://github.com/advisories/${adk ? "GHSA-w5hq-g745-h8pq" : "GHSA-w2qp-rph6-63g4"}`,
         severity: "moderate", range: adk ? "<11.1.1" : "<5.12.1",
       }] } } };
@@ -269,13 +275,29 @@ esac
 
   const adkUuidNode = "node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid";
 
-  it("passes an ADK-source uuid advisory at the named chain", () => {
-    const { res, wrote } = runFixtureGate([adkUuidNode], "5.11.3", true);
+  it("passes an ADK-source uuid advisory with matching installed, allowlist and reported versions", () => {
+    const { res, wrote } = runFixtureGate([adkUuidNode], "5.11.3", true, { reported: "9.0.1" });
     expect(res.error).toBeUndefined();
     expect(res.status).toBe(0);
     expect(res.stdout).toContain("PASS —");
     expect(wrote).toBe(false);
   }, 12_000);
+
+  for (const refusal of [
+    { name: "missing installed version", installed: null, reported: undefined, error: "missing or invalid installed version" },
+    { name: "different installed version", installed: "9.0.2", reported: undefined, error: "installed version 9.0.2 differs from allowlist version 9.0.1" },
+    { name: "conflicting audit version", installed: "9.0.1", reported: "9.0.2", error: 'audit version "9.0.2" conflicts with installed version 9.0.1' },
+  ]) {
+    it(`blocks an ADK-source uuid advisory with ${refusal.name}`, () => {
+      const { res, wrote } = runFixtureGate([adkUuidNode], "5.11.3", true, refusal);
+      expect(res.error).toBeUndefined();
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain(adkUuidNode);
+      expect(res.stdout).toContain(refusal.error);
+      expect(res.stdout).not.toContain("PASS —");
+      expect(wrote).toBe(false);
+    }, 12_000);
+  }
 
   it("blocks an ADK-source uuid advisory outside the named chain", () => {
     const outside = "node_modules/other/node_modules/uuid";

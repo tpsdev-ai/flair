@@ -520,6 +520,7 @@
     {
       "ghsa": "GHSA-w5hq-g745-h8pq",
       "package": "uuid",
+      "version": "9.0.1",
       "severity": "moderate",
       "class": "vendor-pinned",
       "sources": [

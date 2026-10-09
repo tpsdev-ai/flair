@@ -121,6 +121,7 @@ function respond(answer: Answer, url: string, res: ServerResponse): void {
     name: "uuid", "dist-tags": { latest: "11.1.1" },
     versions: {
       "9.0.1": { name: "uuid", version: "9.0.1" },
+      "9.0.2": { name: "uuid", version: "9.0.2" },
       "11.1.1": { name: "uuid", version: "11.1.1" },
     },
   }));
@@ -453,8 +454,12 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
 });
 
 describe("ADK uuid paths from real npm audit", () => {
-  for (const outside of [false, true]) {
-    it(outside ? "blocks the additional uuid path" : "allows the named uuid chain", async () => {
+  for (const { outside, version, title } of [
+    { outside: false, version: "9.0.1", title: "allows the named uuid chain at the allowlist version" },
+    { outside: true, version: "9.0.1", title: "blocks the additional uuid path" },
+    { outside: false, version: "9.0.2", title: "blocks a different installed uuid version" },
+  ]) {
+    it(title, async () => {
       const bunRegistry = await startRegistry("clean");
       const npmRegistry = await startRegistry("uuid");
       try {
@@ -468,7 +473,7 @@ describe("ADK uuid paths from real npm audit", () => {
         let node = "";
         for (const [i, pkg] of chain.entries()) {
           node += `${node ? "/" : ""}node_modules/${pkg}`;
-          const row = { name: pkg, version: pkg === "uuid" ? "9.0.1" : "1.0.0",
+          const row = { name: pkg, version: pkg === "uuid" ? version : "1.0.0",
             dependencies: i + 1 < chain.length ? { [chain[i + 1]!]: "*" } : {},
           };
           packages[node] = row;
@@ -494,10 +499,13 @@ describe("ADK uuid paths from real npm audit", () => {
         ], f.root, f.env, GATE_TIMEOUT_MS);
         expect(run.timedOut).toBe(false);
         expect(run.stderr).not.toContain("FAILED TO RUN");
-        expect(run.status).toBe(outside ? 1 : 0);
+        expect(run.status).toBe(outside || version !== "9.0.1" ? 1 : 0);
         expect(npmRegistry.requests).toContain(BULK_REQUEST);
         if (outside) {
           expect(run.stdout).toContain('node "node_modules/uuid" is outside the dependency chain');
+          expect(run.stdout).not.toContain(PASS_MARKER);
+        } else if (version !== "9.0.1") {
+          expect(run.stdout).toContain(`installed version ${version} differs from allowlist version 9.0.1`);
           expect(run.stdout).not.toContain(PASS_MARKER);
         } else {
           expect(run.stdout).toContain(PASS_MARKER);

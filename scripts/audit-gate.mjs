@@ -636,9 +636,30 @@ function adkVendorPinnedNodeProblems(adv, npmPrefix, entry) {
       if (manifest.name !== pkg) throw new Error(`package name mismatch for ${pkg}`);
     }
     const expected = relative(prefix, parent).split("\\").join("/");
-    return adv.nodes.filter((node) => node !== expected).map((node) =>
-      `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside the dependency chain ${entry.introducedBy} (resolved node ${expected}).`,
-    );
+    return adv.nodes.flatMap((node) => {
+      if (node !== expected) {
+        return [`${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside the dependency chain ${entry.introducedBy} (resolved node ${expected}).`];
+      }
+      try {
+        const installed = JSON.parse(readFileSync(join(prefix, node, "package.json"), "utf8"))?.version;
+        const reported = adv.nodeVersions?.[node];
+        if (typeof entry.version !== "string" || !entry.version.trim()) {
+          throw new Error("missing or invalid allowlist version");
+        }
+        if (typeof installed !== "string" || !installed.trim()) {
+          throw new Error("missing or invalid installed version");
+        }
+        if (installed !== entry.version) {
+          throw new Error(`installed version ${installed} differs from allowlist version ${entry.version}`);
+        }
+        if (reported !== undefined && reported !== installed) {
+          throw new Error(`audit version ${JSON.stringify(reported)} conflicts with installed version ${installed}`);
+        }
+        return [];
+      } catch (e) {
+        return [`${adv.ghsa} (${adv.package}): cannot verify ADK node ${JSON.stringify(node)} version: ${e.message}.`];
+      }
+    });
   } catch (e) {
     return [`${adv.ghsa} (${adv.package}): cannot verify ADK dependency chain: ${e.message}.`];
   }
