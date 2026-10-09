@@ -29,8 +29,7 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  *                  noteWriteStamp (slice 1). The owning file MUST call it too.
  *   LOCAL        — replaces an existing row's stamp with the current local
  *                  model ID and a locally computed vector.
- *   DELEGATED    — embedding handling belongs to Memory.post()/put() or
- *                  FeedMemories, rather than this site's own stamp handling.
+ *   DELEGATED    — embedding handling belongs to Memory.post()/put().
  *   ECHO         — preserves an EXISTING row's embeddingModel.
  *   UNLATCHED    — the feed accepts a supplied stamp without noteWriteStamp.
  *   NON_EMBED    — writes no embeddingModel (starter rows), or a partial
@@ -67,8 +66,6 @@ add("migrations/embedding-stamp", ["writer:table.put#1"], "LOCAL",
 
 // ── DELEGATED: embedding handling occurs in the resource write path ──
 add("MemoryArchive", ["writer:Memory.put#1"], "DELEGATED", "Existing row through Memory.put().");
-add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "DELEGATED",
-  "Memory computes or retains embeddings before this writer; FeedMemories does not compute embeddings.");
 
 // ── ECHO: preserves an EXISTING row's stamp ──
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
@@ -90,6 +87,8 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
   "Dedup repair (flair#2358): read-modify-write re-writes the stored row's own stamp — only its expiresAt changes.");
 
 // ── UNLATCHED: accepts supplied stamps without tripping the latch ──
+add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "UNLATCHED",
+  "Memory's skill caller calls noteWriteStamp after writing; Feed's skill caller can carry a supplied embeddingModel without tripping the latch.");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "UNLATCHED",
   "Feed copies supplied embedding fields without computing embeddings or calling noteWriteStamp.");
 
