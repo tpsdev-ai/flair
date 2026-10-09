@@ -1,4 +1,2 @@
-- **A claim to redeem an authorization code or rotate a refresh token is recorded once per instance before any token is issued.** (flair#2145)
-  Authorization codes and refresh tokens are refused after a successful claim
-  on the same instance. If the claim store is unavailable, token issuance is
-  refused with `503 temporarily_unavailable`.
+- **OAuth authorization codes and refresh tokens are single-use across workers of one instance (flair#2145).**
+  If the replay store cannot confirm use, token issuance is refused; boot reports store-configuration gaps.

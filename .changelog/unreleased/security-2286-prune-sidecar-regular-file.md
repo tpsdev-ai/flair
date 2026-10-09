@@ -1,0 +1,1 @@
+- **`flair keys prune` leaves a nonregular ownership sidecar in place when its path checks detect one.**

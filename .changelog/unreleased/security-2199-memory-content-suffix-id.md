@@ -1,0 +1,1 @@
+- **Memory, Feed, and bridge writes reject IDs that conflict with reserved property selectors.**

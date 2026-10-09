@@ -1,0 +1,1 @@
+- **`flair mcp enable` refuses noncanonical targets before writes.**
