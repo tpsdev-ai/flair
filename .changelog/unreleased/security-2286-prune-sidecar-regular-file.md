@@ -1,1 +1,1 @@
-- **`flair keys prune` leaves a nonregular ownership sidecar in place when its path checks detect one.**
+- **`flair keys prune` leaves the key active when its path checks detect a nonregular ownership sidecar.**

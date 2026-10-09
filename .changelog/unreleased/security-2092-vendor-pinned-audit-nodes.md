@@ -1,1 +1,1 @@
-- **The audit gate verifies the location and installed version of vendor-pinned findings and refuses unverifiable reports.**
+- **For npm-install vendor-pinned findings, the audit gate verifies locations and installed versions and refuses unverifiable evidence.**

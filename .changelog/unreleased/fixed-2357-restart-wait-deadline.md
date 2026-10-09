@@ -1,1 +1,1 @@
-- **`flair restart` probes through the stop deadline and refuses replacement unless the prior PID is confirmed gone.**
+- **Direct-process restarts probe through the stop deadline and refuse replacement after an unconfirmed stop.**

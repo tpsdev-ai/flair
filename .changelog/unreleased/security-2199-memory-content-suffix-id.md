@@ -1,1 +1,1 @@
-- **Memory, Feed, and bridge writes reject IDs that conflict with reserved property selectors.**
+- **Memory, Feed, and bridge writes enforce the reserved content-property ID restriction.**

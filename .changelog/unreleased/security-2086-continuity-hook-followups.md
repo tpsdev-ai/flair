@@ -1,1 +1,1 @@
-- **Client key loading is asynchronous and size-bounded; continuity capture redacts additional credential formats (#2086).**
+- **flair-client adds an asynchronous, size-bounded key loader; continuity capture redacts additional credential formats (#2086).**
