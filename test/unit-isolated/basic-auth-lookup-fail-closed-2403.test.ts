@@ -1,24 +1,8 @@
 // basic-auth-lookup-fail-closed-2403.test.ts — flair#2403.
 //
-// A credentialed Basic-auth path reads the Agent row to decide whether the caller
-// is admitted. When that read FAILS (a throw, a timeout, an unreadable result) the
-// request is refused with the named `agent_lookup_failed` error, and never mapped
-// to an absent/null principal that is then admitted. A read that SUCCEEDS still
-// decides as before: an active principal is admitted, an absent row is not refused
-// by the failed-read rule.
-//
-// The lookup sites in resources/agent-auth.ts and resources/auth-middleware.ts:
-//   1. resolveAgentAuth — credentialed super_user branch (agent-auth.ts)
-//   2. resolveAgentAuth — credentialed per-agent branch (agent-auth.ts)
-//   3. auth-middleware — Harper ambient super_user ("Branch 1")
-//   4. auth-middleware — env-var admin fast-path ("Path 1")
-//   5. auth-middleware — Harper super_user check ("Path 2")
-//   6. auth-middleware — flair_pair_initiator ("Path 3")
-// Sites 1-5 are exercised below. Site 6 sits behind the /FederationPair public-path
-// passthrough (auth-middleware.ts), so the Basic block is never reached for that
-// path; it shares the same `readCredentialedPrincipal`/refusal as 3-5 and is
-// covered by those. The Ed25519 reads (agent-auth.ts doVerify; the middleware
-// Ed25519 block) are not Basic-auth paths and are unchanged.
+// Injected Agent.get throws exercise the shared helper, resolveAgentAuth,
+// and the reachable middleware Basic branches.
+// The flair_pair_initiator site is covered only through its shared helper.
 //
 // Lives in test/unit-isolated/ because mock.module is process-global: this file
 // mocks the Agent read to THROW on demand, so it must not race a sibling file's
@@ -166,7 +150,7 @@ describe("resolveAgentAuth — a successful read decides exactly as before", () 
   });
 });
 
-// ─── sites 3-6: the four middleware Basic lookup sites ────────────────────────
+// ─── reachable middleware Basic lookup sites ───────────────────────────────
 
 describe("authMiddleware — a failed Agent read REFUSES (500, agent_lookup_failed)", () => {
   it("Branch 1 (Harper ambient super_user): read throws → refusal, no tpsAgent stamped", async () => {

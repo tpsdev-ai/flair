@@ -1,11 +1,7 @@
 // basic-auth-lookup-fail-closed-2403.test.ts — flair#2403.
 //
-// A credentialed Basic-auth path reads the Agent row to decide whether the caller
-// is admitted. When that read FAILS (a throw, a timeout, an unreadable result) the
-// request is refused with the named `agent_lookup_failed` error, and never mapped
-// to an absent/null principal that is then admitted. A read that SUCCEEDS still
-// decides as before: an active principal is admitted, an absent row is not refused
-// by the failed-read rule.
+// An injected Agent-read rejection is refused with `agent_lookup_failed`
+// on real Harper.
 //
 // Real Harper: booted from a private copy of the built component with one test-only
 // resource added (test/fixtures/basic-auth-lookup-fail-2403/probe.js, composed by
