@@ -459,7 +459,11 @@ describe("capture spool", () => {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(lockPath(dir, "agent-a"), "held");
     expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("refused");
-    expect(runCapture(failedBash("bun test foo"), { env: env(), dir }).reason).toBe("refused");
+    const warnings: string[] = [];
+    expect(runCapture(failedBash("bun test foo"), { env: env(), dir, warn: (message) => warnings.push(message) }).reason).toBe("refused");
+    // A refused pending error is surfaced, never dropped silently (flair#2395).
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("not recorded");
     expect(existsSync(spoolPath(dir, "agent-a"))).toBe(false);
     expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
     const old = new Date(Date.now() - 60_000);

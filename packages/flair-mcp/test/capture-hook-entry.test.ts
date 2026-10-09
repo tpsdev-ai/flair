@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { installCapturePackage } from "../../../test/helpers/capture-package.ts";
-import { pendingPath, spoolPath } from "../src/capture-spool.ts";
+import { CAPTURE_LOCK_WAIT_MS, lockPath, pendingPath, spoolPath } from "../src/capture-spool.ts";
 
 const ENTRY = join(import.meta.dir, "..", "src", "capture-hook.ts");
 const CHILD_DEADLINE_MS = 10_000;
@@ -66,6 +66,16 @@ function records(): unknown[] {
   }
 }
 
+/** The pending error commands, or [] when the file is absent, so the assertion is
+ *  what fails rather than the read. */
+function pendingCommands(): string[] {
+  try {
+    return (JSON.parse(readFileSync(pendingPath(dir, "agent-a"), "utf-8")) as { pending: Array<{ command: string }> }).pending.map((p) => p.command);
+  } catch {
+    return [];
+  }
+}
+
 describe("capture entry point (spawned)", () => {
   test("a cue-matching turn exits 0 with no output and stages one candidate", async () => {
     const res = await run({ hook_event_name: "Stop", session_id: "s1", last_assistant_message: "Decision: prefer host-a for embeddings." });
@@ -102,6 +112,29 @@ describe("capture entry point (spawned)", () => {
     const pending = JSON.parse(readFileSync(pendingPath(dir, "agent-a"), "utf-8")).pending as Array<{ command: string }>;
     expect(pending.map((p) => p.command).sort()).toEqual([...commands].sort());
   });
+
+  test("a failure hook keeps its pending error when the append lock is held past the spool wait", async () => {
+    // Hold the per-agent append lock as a live owner, then release it while the
+    // hook is still waiting: the hook must keep the error rather than refuse
+    // after CAPTURE_LOCK_WAIT_MS (flair#2395).
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const lock = lockPath(dir, "agent-a");
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, nonce: "held-for-2395" }), { flag: "wx", mode: 0o600 });
+    const pending = run(failure("bun test foo"));
+    try {
+      await new Promise((resolve) => setTimeout(resolve, CAPTURE_LOCK_WAIT_MS + 400));
+      unlinkSync(lock);
+      const res = await pending;
+      expect(res.status).toBe(0);
+      // The error is kept, not refused.
+      expect(pendingCommands()).toEqual(["bun test foo"]);
+      // No refusal, so nothing is reported on stderr.
+      expect(res.stderr).toBe("");
+    } finally {
+      // The hook acquires and releases the same lock path once it proceeds.
+      try { unlinkSync(lock); } catch { /* already released */ }
+    }
+  }, 20_000);
 
   test("a malformed payload exits 0 and writes nothing", async () => {
     const child = spawn(process.execPath, [ENTRY], { env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });

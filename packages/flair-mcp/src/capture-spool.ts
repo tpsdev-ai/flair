@@ -49,6 +49,12 @@ export const CAPTURE_STDIN_MAX_BYTES = 1 * 1024 * 1024;
 /** How long a hook waits for the per-agent lock before it captures nothing. */
 export const CAPTURE_LOCK_WAIT_MS = 200;
 
+/** How long a failed-tool hook waits for the per-agent lock before it gives up
+ *  recording its pending error. A live holder releases the lock synchronously,
+ *  so waiting longer here keeps a contended error instead of dropping it
+ *  (flair#2395); the spool's own CAPTURE_LOCK_WAIT_MS is unchanged. */
+export const CAPTURE_PENDING_LOCK_WAIT_MS = 2000;
+
 export const CAPTURE_LOCK_STALE_MS = 5000;
 
 /** Deadline for asynchronous client setup and writes. */
@@ -115,9 +121,9 @@ const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
 /** Run `fn` holding the per-agent lock (an exclusively created file), or
  *  return LOCK_BUSY when it is not free within CAPTURE_LOCK_WAIT_MS. */
-function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }): T | typeof LOCK_BUSY {
+function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }, waitMs: number = CAPTURE_LOCK_WAIT_MS): T | typeof LOCK_BUSY {
   ensureCaptureDir(dir);
-  const deadline = Date.now() + CAPTURE_LOCK_WAIT_MS;
+  const deadline = Date.now() + waitMs;
   for (;;) {
     const held = acquireSpoolLock(dir, agentId, console.warn, lockPath(dir, agentId), CAPTURE_LOCK_STALE_MS, false, 0, state);
     if (held) {
@@ -133,9 +139,9 @@ function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: Lo
 }
 
 /** `fn` under the lock; "refused" when the lock is busy or `fn` throws. */
-function underLock<T extends string>(dir: string, agentId: string, fn: () => T): T | "refused" {
+function underLock<T extends string>(dir: string, agentId: string, fn: () => T, waitMs: number = CAPTURE_LOCK_WAIT_MS): T | "refused" {
   try {
-    const result = withCaptureLock(dir, agentId, fn);
+    const result = withCaptureLock(dir, agentId, fn, undefined, waitMs);
     return result === LOCK_BUSY ? "refused" : result;
   } catch {
     return "refused";
@@ -307,7 +313,13 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
     const result = underLock(dir, agentId, () => {
       writePendingLocked(dir, agentId, [...readPending(dir, agentId), error]);
       return "error-recorded" as const;
-    });
+    }, CAPTURE_PENDING_LOCK_WAIT_MS);
+    if (result === "refused") {
+      // Never drop a pending error silently (flair#2395).
+      (deps.warn ?? console.warn)(
+        `capture: a failed call was not recorded; the append lock stayed busy for ${CAPTURE_PENDING_LOCK_WAIT_MS} ms`,
+      );
+    }
     return { captured: false, reason: result };
   }
 
