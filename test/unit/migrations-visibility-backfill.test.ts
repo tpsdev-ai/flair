@@ -399,3 +399,18 @@ describe("visibility-backfill migration — write-back abort and retry (flair#23
     expect(store.get("m1")!.durability).toBe("permanent");
   });
 });
+
+  it("does not stamp a row whose owner changed after selection", async () => {
+    const { table, store } = makeFakeMemoryTable([
+      { id: "m1", agentId: "owner", content: "original", createdAt: "2026-01-01T00:00:00.000Z", durability: "standard" },
+    ]);
+    const get = table.get.bind(table);
+    table.get = async (id: string) => {
+      store.set(id, { ...store.get(id)!, agentId: "replacement-owner" });
+      return get(id);
+    };
+    const run = makeMigration(() => table).run(1);
+    await expect(run).rejects.toThrow("target m1 changed");
+    expect(store.get("m1")?.agentId).toBe("replacement-owner");
+    expect(store.get("m1")?.visibility).toBeUndefined();
+  });

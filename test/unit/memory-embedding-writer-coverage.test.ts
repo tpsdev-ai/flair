@@ -69,6 +69,7 @@ add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Admin re-embed re-PUT of an existing local row — re-stamps current / preserves, never external, through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Promotion status stamp: re-writes the existing local row through the shared write-back helper (flair#2354).");
+add("MemoryArchive", ["writer:Memory.put#1"], "ECHO", "Existing row through Memory.put().");
 add("migrations/graph-heal", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
 add("migrations/embedding-stamp", ["writer:table.put#1"], "ECHO",
@@ -87,6 +88,8 @@ add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Admin-only starter memories — the record carries no embedding/embeddingModel.");
 add("MemoryFeed", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
   "Feed rows — the record carries no embedding/embeddingModel (written through the shared write-back helper, flair#2354).");
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
+  "Dedup repair (flair#2358): read-modify-write re-writes the stored row's own stamp — only its expiresAt changes.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");
 // flair#1940 A1-iv item 6: Memory.ts no longer touches the MemoryHostSource

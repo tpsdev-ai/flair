@@ -157,3 +157,11 @@ describe("pause filesystem refusals", () => {
   }
 
 });
+
+it("pause-point names are unique and match the marker grammar", () => {
+  const source = readFileSync(new URL("../../resources/txn-pause-point.ts", import.meta.url), "utf8");
+  const names = [...source.matchAll(/\| "([^"]+)"/g)].map((m) => m[1]);
+  expect(names.length).toBeGreaterThan(0);
+  expect(new Set(names).size).toBe(names.length);
+  for (const name of names) expect(name).toMatch(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/);
+});

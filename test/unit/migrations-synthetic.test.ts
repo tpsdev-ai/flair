@@ -190,3 +190,18 @@ describe("synthetic migration — write-back abort and retry (flair#2354)", () =
     expect(store.get("s1")!.content).toBe("x-edited");
   });
 });
+
+  it("does not stamp a row whose owner changed after selection", async () => {
+    const { table, store } = makeFakeMemoryTable([
+      { id: "s1", agentId: RESERVED_TEST_AGENT_ID, content: "original", createdAt: "2026-01-01T00:00:00.000Z", source: "pending" },
+    ]);
+    const get = table.get.bind(table);
+    table.get = async (id: string) => {
+      store.set(id, { ...store.get(id)!, agentId: "replacement-owner" });
+      return get(id);
+    };
+    const run = makeMigration(() => table).run(1);
+    expect((await run).processed).toBe(0);
+    expect(store.get("s1")?.agentId).toBe("replacement-owner");
+    expect(store.get("s1")?.source).toBe("pending");
+  });

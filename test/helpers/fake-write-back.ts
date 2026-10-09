@@ -1,23 +1,5 @@
-/**
- * fake-write-back.ts — an in-memory stand-in for writeBackCommittedRow for the
- * migration unit tests (flair#2354).
- *
- * The real helper (resources/write-back.ts) reads the row inside a transaction
- * it owns, builds the write from THAT read, re-reads the COMMITTED row (an
- * empty context, never the transaction's snapshot or its staged write), and on
- * a change aborts the transaction — discarding the staged write — and retries
- * from the committed row, up to a bounded number of attempts, then refuses.
- *
- * This fake models that contract over a fake table's get/put, so a unit test
- * can exercise the abort-and-retry path without a real Harper transaction. It
- * reads the committed row, hands it to `plan`; when the plan returns a write it
- * re-reads the committed row and, if a competing write landed in between
- * (the `conflict` hook commits one), it aborts (performs no put) and retries
- * from the committed row. A row that keeps changing each attempt is a named
- * refusal, like the real helper's WriteBackConflictError.
- */
 import { isDeepStrictEqual } from "node:util";
-import type { WriteBackFn, WriteBackPlan } from "../../resources/write-back.js";
+import type { WriteBackFn, WriteBackPlan, WriteBackOptions } from "../../resources/write-back.js";
 
 export interface FakeWriteBackOptions {
   /** Bounded attempts before the named refusal. Default 3. */
@@ -32,14 +14,22 @@ export interface FakeWriteBackOptions {
 
 export function makeFakeWriteBack(opts: FakeWriteBackOptions = {}): WriteBackFn {
   const attempts = opts.attempts ?? 3;
-  const fn = async (table: { get(id: string): Promise<any>; put(row: any): Promise<any> }, id: string, plan: (row: any) => WriteBackPlan | Promise<WriteBackPlan>): Promise<WriteBackPlan> => {
+  const fn = async (table: { get(id: string): Promise<any>; put(row: any): Promise<any> }, id: string, plan: (row: any) => WriteBackPlan | Promise<WriteBackPlan>, options: WriteBackOptions): Promise<WriteBackPlan> => {
+    const selected = "expectedRow" in options ? options.expectedRow : await table.get(id);
+    const basis = selected == null ? selected : { ...selected };
+    const sameTarget = (row: any) => row == null ? basis == null : basis != null &&
+      String(row.id) === String(basis.id) && row.agentId === basis.agentId &&
+      row.instanceToken === basis.instanceToken && row.contentHash === basis.contentHash && row.createdAt === basis.createdAt &&
+      (options.matchFields ?? []).every((field) => isDeepStrictEqual(row[field], basis[field]));
     for (let attempt = 1; ; attempt++) {
       const row = await table.get(id);
+      if (options.matches && !options.matches(row)) return { skip: true };
       const decision = await plan(row);
       if ("skip" in decision) return decision;
+      if (!sameTarget(row)) throw new Error(`write-back: target ${id} changed`);
       if (opts.conflict) await opts.conflict(attempt);
       const committed = await table.get(id);
-      if (committed !== null && !isDeepStrictEqual(committed, row)) {
+      if (!isDeepStrictEqual(committed, row)) {
         if (attempt >= attempts) throw new Error(`write-back: row ${id} changed during each of ${attempts} attempts; write not applied`);
         continue;
       }

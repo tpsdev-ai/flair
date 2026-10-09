@@ -78,6 +78,7 @@ interface RawMemoryWriter {
 
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
   { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
+  { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(row, c)", kind: "echo" },
   { file: "resources/Federation.ts", via: "alias-source", needle: "put(mergedData)", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },

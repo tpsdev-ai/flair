@@ -46,6 +46,7 @@
  */
 
 import { Resource, databases, logger } from "harper";
+import { isDeepStrictEqual } from "node:util";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -82,7 +83,7 @@ const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
 
 const GATHER_SELECT = [
   "id", "agentId", "archived", "durability", "expiresAt", "tags",
-  "createdAt", "lastReflected", "content",
+  "createdAt", "lastReflected", "content", "instanceToken", "contentHash",
 ];
 
 export class ReflectMemories extends Resource {
@@ -347,7 +348,8 @@ export class ReflectMemories extends Resource {
             const reflectPatch = { lastReflected: now };
             stripUndeclaredMemoryAttributes(reflectPatch);
             patchRecordSilent((databases as any).flair.Memory, memory.id, reflectPatch, {
-              pausePre: "last-reflected-pre", pausePoint: "last-reflected",
+              pausePre: "reflect-sources-pre", pausePoint: "reflect-sources", expectedRow: memory,
+              matches: (row) => row != null && GATHER_SELECT.every((key) => isDeepStrictEqual(row[key], memory[key])),
             });
           }
         }

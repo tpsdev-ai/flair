@@ -23,11 +23,12 @@
  * `jsResource: files: dist/resources/*.js` (named export → export name).
  */
 
-import { Resource } from "harper";
+import { Resource, databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
 import { Memory } from "./Memory.js";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { withOwnedTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -74,21 +75,28 @@ export class MemoryArchive extends Resource {
     if (!basis || typeof basis !== "object" || !basis.id) {
       return json(404, { error: "memory not found" });
     }
+    const persistedBasis = await (databases as any).flair.Memory.get(id, ctx);
+    if (!persistedBasis) return json(404, { error: "memory not found" });
 
     const archived = action === "basement";
 
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    const beforeReread = txnPausePoint("memory-archive-pre");
+    if (beforeReread) await beforeReread;
+
     // flair#2275: re-read the row INSIDE a transaction this call OWNS and build
     // the write from THAT read — never from the basis above, which another
-    // writer may have changed before the write. If the row is no longer the one
-    // just read, the action is refused (409) rather than reverting a concurrent
-    // change with a full-row write-back. A change after this re-read and before
-    // the commit is settled by Harper's timestamp order (PR residual-gap note).
+    // writer may have changed before the write. Unequal persisted rows are
+    // refused (409); a non-readable row returns 404. Changes after the re-read
+    // are not checked.
     return await withOwnedTransaction(ctx, async (c) => {
       const reread = await unwrap(await Memory.get(id, c));
       if (!reread || typeof reread !== "object" || !reread.id) {
         return json(404, { error: "memory not found" });
       }
-      if (!isDeepStrictEqual(reread, basis)) {
+      const persistedReread = await (databases as any).flair.Memory.get(id, c);
+      if (!persistedReread) return json(404, { error: "memory not found" });
+      if (!isDeepStrictEqual(persistedReread, persistedBasis)) {
         return json(409, { error: "memory_changed" });
       }
       const merged: Record<string, unknown> = {

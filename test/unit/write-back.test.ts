@@ -140,3 +140,38 @@ describe("writeBackCommittedRow — failures are never swallowed", () => {
     ).rejects.toThrow("read unavailable");
   });
 });
+
+for (const field of ["agentId", "contentHash", "instanceToken", "createdAt"]) {
+  test(`refuses a changed ${field} before the owned read`, async () => {
+    const basis = { id: "m1", agentId: "owner", contentHash: "hash", instanceToken: "token", content: "a", createdAt: "2026-01-01T00:00:00.000Z" };
+    const { table, commits } = stagedTable([{ ...basis, [field]: "replacement" }]);
+    await expect(writeBackCommittedRow(table, "m1", (row) => ({ write: { ...row, content: "written" } }),
+      { label: "replacement", expectedRow: basis })).rejects.toThrow(WriteBackConflictError);
+    expect(commits).toHaveLength(0);
+  });
+  test(`refuses a changed ${field} on retry`, async () => {
+    const basis = { id: "m1", agentId: "owner", contentHash: "hash", instanceToken: "token", content: "a", createdAt: "2026-01-01T00:00:00.000Z" };
+    const { table, store, commits } = stagedTable([basis]);
+    table.setCompeting(() => {
+      table.setCompeting(undefined);
+      store.set("m1", { ...basis, [field]: "replacement" });
+    });
+    await expect(writeBackCommittedRow(table, "m1", (row) => ({ write: { ...row, content: "written" } }),
+      { label: "replacement" })).rejects.toThrow(WriteBackConflictError);
+    expect(commits).toHaveLength(0);
+    expect(store.get("m1")?.[field]).toBe("replacement");
+  });
+}
+
+test("refuses a changed decision field on retry", async () => {
+  const basis = { id: "m1", agentId: "owner", content: "reviewed", createdAt: "2026-01-01T00:00:00.000Z" };
+  const { table, store, commits } = stagedTable([basis]);
+  table.setCompeting(() => {
+    table.setCompeting(undefined);
+    store.set("m1", { ...basis, content: "unreviewed" });
+  });
+  await expect(writeBackCommittedRow(table, "m1", (row) => ({ write: { ...row, promotionStatus: "approved" } }),
+    { label: "promotion", matchFields: ["content"] })).rejects.toThrow(WriteBackConflictError);
+  expect(commits).toHaveLength(0);
+  expect(store.get("m1")?.content).toBe("unreviewed");
+});

@@ -53,7 +53,7 @@ const databasesMock = {
     },
     MemoryHostSource: {
       search: () => (async function* () { yield* pointerStore.values(); })(),
-      get: async () => null,
+      get: async (id: string) => pointerStore.get(id) ?? null,
       put: async (row: any) => row,
       delete: async (id: string) => { pointerStore.delete(id); return { ok: true }; },
     },

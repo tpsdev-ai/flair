@@ -7,9 +7,6 @@ import { writeBackCommittedRow } from "./write-back.js";
 // through its resource (safety, embedding, ownership and provenance still run).
 // Auto-promotion supplies its enumeration context: its Memory write used a
 // separate agentContext, so that enumeration snapshot cannot see the new row.
-// flair#2354: the stamp is one owned write-back — the row is read inside the
-// transaction, the stamp is built from THAT read, and a concurrent change is
-// retried from the committed row rather than reverted by a stale copy.
 export async function stampMemoryPromotion(id: string, reviewerId: string, decidedAt: string, enumerationContext?: any): Promise<void> {
   const table = (databases as any).flair.Memory;
   const outcome = await writeBackCommittedRow(
@@ -21,7 +18,7 @@ export async function stampMemoryPromotion(id: string, reviewerId: string, decid
       stripUndeclaredMemoryAttributes(row);
       return { write: row };
     },
-    { ctx: enumerationContext, label: "promotion-stamp", pausePre: "promotion-stamp-pre", pausePoint: "promotion-stamp" },
+    { ctx: enumerationContext, label: "promotion-stamp", pausePre: "promotion-stamp-pre", pausePoint: "promotion-stamp", matchFields: ["content"] },
   );
   if ("write" in outcome) noteMemoryUpsert(outcome.write);
 }

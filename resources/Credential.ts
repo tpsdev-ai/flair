@@ -1,6 +1,8 @@
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { deleteOwnedRow } from "./owner-delete-recheck.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { makeReadScope, makeScopedSearch, stampAttribution, UNAUTH } from "./record-type-kit.js";
 
@@ -175,7 +177,8 @@ export class Credential extends (databases as any).flair.Credential {
   }
 
   async delete(_: any) {
-    const auth = await resolveAgentAuth((this as any).getContext?.());
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
 
     if (auth.kind === "anonymous") {
       return new Response(JSON.stringify({ error: "authentication required" }), {
@@ -189,6 +192,24 @@ export class Credential extends (databases as any).flair.Credential {
         return new Response(JSON.stringify({ error: "only admin principals can revoke other principals' credentials" }), {
           status: 403, headers: { "content-type": "application/json" },
         });
+      }
+      // flair#2355: a row that is no longer the caller's at the delete's re-read
+      // or confirmation read is refused, not deleted
+      // (resources/owner-delete-recheck.ts).
+      if (existing) {
+        const beforeDelete = txnPausePoint("credential-delete-pre");
+        if (beforeDelete) await beforeDelete;
+        const outcome = await deleteOwnedRow(ctx, {
+          table: (databases as any).flair.Credential,
+          tableName: "Credential",
+          id: typeof _ === "string" ? _ : existing.id,
+          ownerField: "principalId",
+          callerId: auth.agentId,
+          point: "credential-delete",
+        });
+        if (outcome.kind === "refused") return outcome.response;
+        if (outcome.kind === "absent") return super.delete(_);
+        return outcome.result;
       }
     }
 

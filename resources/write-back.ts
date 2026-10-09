@@ -1,35 +1,3 @@
-/**
- * write-back.ts — one shared read-modify-write for FULL-ROW Memory write-backs
- * (flair#2354, slice 1 of the #2333 audit).
- *
- * A "full-row write-back" reads a row and writes the whole row back (Harper's
- * `put()` replaces the record). Harper 5.2.8 has no compare-and-set on a table
- * write: a transaction does not fail when a row it read is changed by another
- * write before it commits — Harper applies both writes, ordered by transaction
- * timestamp. So a write-back built from a read can silently revert a concurrent
- * change while reporting success.
- *
- * {@link writeBackCommittedRow} removes that window the way #2310's close and
- * embedding-stamp paths do, generalized to one helper:
- *
- *   1. read the row INSIDE a transaction this call OWNS (withOwnedTransaction);
- *   2. build the write from THAT read (the `plan` callback — never from a copy
- *      read before the transaction opened);
- *   3. write through the caller's static table handle with that context;
- *   4. re-read the COMMITTED row in an explicit empty context (`{}`: Harper's
- *      latest committed state, never this transaction's snapshot or its staged
- *      write) before the transaction commits;
- *   5. on a change, abort the transaction (the staged write is discarded) and
- *      retry from the committed row, up to a bounded number of attempts; a row
- *      that keeps changing each attempt is a named refusal, never a success.
- *
- * A `plan` may also return `{ skip: true }` — the row no longer needs the write
- * (an idempotent guard, or a decision that does not apply to the committed
- * row). A skip performs no write and no retry.
- *
- * A change committed after the final re-read and before the commit is not seen
- * by it; Harper orders the two writes by timestamp (the #2310 residual gap).
- */
 import { isDeepStrictEqual } from "node:util";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint, type TxnPausePoint } from "./txn-pause-point.js";
@@ -54,6 +22,9 @@ export interface WriteBackOptions {
   label: string;
   /** Bounded attempts before the named refusal. Default {@link WRITE_BACK_ATTEMPTS}. */
   attempts?: number;
+  expectedRow?: any;
+  matches?: (row: any) => boolean;
+  matchFields?: string[];
   /** Test-only pause BEFORE this call's owned transaction opens — the
    *  interleaving where the other writer's transaction opens first. */
   pausePre?: TxnPausePoint;
@@ -65,11 +36,10 @@ export interface WriteBackOptions {
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
 export const WRITE_BACK_ATTEMPTS = 3;
 
-/** Thrown when a row changed during every attempt: the write-back refused. */
 export class WriteBackConflictError extends Error {
   readonly id: string;
   constructor(label: string, id: string, attempts: number) {
-    super(`${label}: row ${id} changed during each of ${attempts} attempts; write not applied`);
+    super(`${label}: row ${id} changed; write not applied (${attempts} attempts)`);
     this.name = "WriteBackConflictError";
     this.id = id;
   }
@@ -91,6 +61,12 @@ export async function writeBackCommittedRow(
   opts: WriteBackOptions,
 ): Promise<WriteBackPlan> {
   const attempts = opts.attempts ?? WRITE_BACK_ATTEMPTS;
+  const selected = "expectedRow" in opts ? opts.expectedRow : await table.get(id, {});
+  const basis = selected == null ? selected : { ...selected };
+  const sameTarget = (row: any) => row == null ? basis == null : basis != null &&
+    String(row.id) === String(basis.id) && row.agentId === basis.agentId &&
+    row.instanceToken === basis.instanceToken && row.contentHash === basis.contentHash && row.createdAt === basis.createdAt &&
+    (opts.matchFields ?? []).every((field) => isDeepStrictEqual(row[field], basis[field]));
   if (opts.pausePre) {
     const pre = txnPausePoint(opts.pausePre);
     if (pre) await pre;
@@ -99,8 +75,10 @@ export async function writeBackCommittedRow(
     try {
       return await withOwnedTransaction(opts.ctx, async (c) => {
         const row = await table.get(id, c);
+        if (opts.matches && !opts.matches(row)) return { skip: true };
         const decision = await plan(row);
         if ("skip" in decision) return decision;
+        if (!sameTarget(row)) throw new WriteBackConflictError(opts.label, id, attempt);
         // Test-only: inert unless the fault-injection opt-in is armed.
         if (opts.pausePoint) {
           const pause = txnPausePoint(opts.pausePoint);

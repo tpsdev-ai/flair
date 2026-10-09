@@ -1,32 +1,3 @@
-/**
- * write-back-contention-2354.test.ts — flair#2354, real Harper.
- *
- * One shared helper (resources/write-back.ts: writeBackCommittedRow) now owns
- * every converted full-row Memory write-back: it reads the row inside a
- * transaction it owns, builds the write from THAT read, re-reads the COMMITTED
- * row before commit, and on a concurrent change aborts the transaction (the
- * staged write is discarded) and retries from the committed row. Without the
- * helper, a write built from a copy read before the transaction would revert
- * the concurrent change while reporting success (Harper has no
- * compare-and-set on a table write; it applies both writes in timestamp
- * order).
- *
- * Each case drives a converted path through its HTTP entry point against a
- * spawned Harper carrying the test-only pause (resources/txn-pause-point.ts,
- * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set
- * for this file's Harper only). Two interleavings are exercised per path:
- *   - `<path>-pre`: a competing write commits BEFORE this write-back's owned
- *     transaction opens — the write-back must read the committed row and keep
- *     the competing change;
- *   - `<path>`: a competing write commits AFTER this write-back's read/build —
- *     the committed re-read must abort the staged write and retry, keeping the
- *     competing change rather than reverting it.
- * The paths exercised here are those a serving instance exposes over HTTP:
- * feed ingest, administrator reindex, the last-reflected stamp and the
- * promotion stamp. The conversion also covers the embedding backfill and the
- * visibility and synthetic boot migrations; those are not exercised here —
- * their pause points cannot arm the window with a freshly started instance.
- */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -190,7 +161,7 @@ afterAll(async () => {
 
 describe("flair#2354 — the feed ingest write-back under a concurrent change (real Harper)", () => {
   for (const point of ["feed-ingest-pre", "feed-ingest"]) {
-    it(`keeps a competing incarnation-token change and applies the feed write (${point})`, async () => {
+    it(`refuses a replaced feed target (${point})`, async () => {
       const id = `wbc-feed-${point}`;
       const TOKEN1 = randomUUID();
       const TOKEN2 = randomUUID();
@@ -200,12 +171,12 @@ describe("flair#2354 — the feed ingest write-back under a concurrent change (r
         () => authSend(harper, feedAgent, "POST", "/FeedMemories", { id, agentId: feedAgent.id, content: `feed v2 ${point}`, visibility: "shared" }),
         () => updateRow(harper, { id, instanceToken: TOKEN2 }),
       );
-      expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBeGreaterThanOrEqual(400);
       expect(released, "the feed ingest was not paused and released by this test").toBe("go");
       expect(paused).toBe(true);
       const row = await readRow(harper, id);
       console.log(`${point} feed row:`, JSON.stringify({ content: row?.content, instanceToken: row?.instanceToken }));
-      expect(row?.content, "the feed write's own content").toBe(`feed v2 ${point}`);
+      expect(row?.content).toBe(`feed v1 ${point}`);
       expect(row?.instanceToken, "the competing incarnation token is kept, not reverted").toBe(TOKEN2);
     }, 60_000);
   }
@@ -260,7 +231,7 @@ describe("flair#2354 — the last-reflected patch write-back under a concurrent 
 
 describe("flair#2354 — the promotion stamp write-back under a concurrent change (real Harper)", () => {
   for (const point of ["promotion-stamp-pre", "promotion-stamp"]) {
-    it(`keeps a competing content edit and incarnation token, and applies the promotion stamp (${point})`, async () => {
+    it(`refuses a promotion stamp on a replaced row (${point})`, async () => {
       const agentId = `wbc-stamp-agent-${point}`;
       const stampAgent = mkAgent(agentId);
       await seedAgent(harper, stampAgent);
@@ -285,10 +256,27 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
       expect(competed, "the competing writer did not run").toBeTruthy();
       const row = await readRow(harper, competed as string);
       console.log(`${point} stamp row:`, JSON.stringify({ content: row?.content, promotionStatus: row?.promotionStatus, instanceToken: row?.instanceToken }));
-      expect(row?.promotionStatus, "the promotion stamp landed").toBe("approved");
-      expect(row?.promotedBy, "the stamp records the promotion reviewer").toBeTruthy();
+      expect(row?.promotedBy).toBeFalsy();
       expect(row?.content, "the competing content edit is kept, not reverted by the stamp").toBe(COMPETED);
       expect(row?.instanceToken, "the competing incarnation token is kept, not reverted").toBe(TOKEN2);
     }, 60_000);
   }
 });
+
+for (const point of ["feed-ingest-pre", "feed-ingest"]) {
+  for (const field of ["agentId", "contentHash"]) {
+    it(`refuses a changed feed ${field} (${point})`, async () => {
+      const id = `wbc-feed-replaced-${field}-${point}`;
+      await insertRow(harper, { id, agentId: feedAgent.id, content: "original", contentHash: id, instanceToken: randomUUID() });
+      const { response, released, paused } = await withPaused(point,
+        () => authSend(harper, feedAgent, "POST", "/FeedMemories", { id, agentId: feedAgent.id, content: "submitted" }),
+        () => updateRow(harper, { id, [field]: "replacement" }));
+      expect(paused).toBe(true);
+      expect(released).toBe("go");
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      const row = await readRow(harper, id);
+      expect(row?.[field]).toBe("replacement");
+      expect(row?.content).toBe("original");
+    }, 60_000);
+  }
+}

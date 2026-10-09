@@ -221,15 +221,6 @@ export function createVisibilityBackfillMigration(
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        // flair#2354: the backfill is one owned write-back — the write-gate
-        // below re-checks the row read INSIDE the helper's transaction (never
-        // the stale search-result row) and the write is built from THAT read,
-        // so a concurrent change is retried from the committed row rather than
-        // reverted. The helper is injectable (the second argument, defaulting
-        // to the real one) so unit tests keep exercising detect/countPending/
-        // run against a plain fake; the real helper is exercised in the
-        // contention test. The table is the getTable() result above, named at
-        // this call.
         const outcome = await writeBackCommittedRow(
           table as unknown as Parameters<WriteBackFn>[0],
           id,
@@ -260,7 +251,7 @@ export function createVisibilityBackfillMigration(
             stripUndeclaredMemoryAttributes(backfillRow);
             return { write: backfillRow };
           },
-          { label: "visibility-backfill", pausePre: "visibility-backfill-pre", pausePoint: "visibility-backfill" },
+          { label: "visibility-backfill", pausePre: "visibility-backfill-pre", pausePoint: "visibility-backfill", expectedRow: row },
         );
         if ("write" in outcome) touchedIds.push(id);
       }

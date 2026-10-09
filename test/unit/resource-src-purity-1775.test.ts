@@ -21,10 +21,15 @@ function staticDependencies(file: string): string[] {
 // Inspect emitted JavaScript, including loads nested inside function bodies.
 // A computed argument still constitutes a dependency: never discard the call
 // just because its module name cannot be resolved statically.
-function allModuleLoads(file: string): string[] {
+function allModuleLoads(file: string, topLevelResolutionsOnly = false): string[] {
   const ast = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
   const loads: string[] = [];
+  const requireNames = new Set(["require"]);
+  let functionDepth = 0;
   function visit(node: ts.Node): void {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+      ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression) &&
+      node.initializer.expression.text === "createRequire") requireNames.add(node.name.text);
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier &&
@@ -34,7 +39,9 @@ function allModuleLoads(file: string): string[] {
     } else if (
       ts.isCallExpression(node) &&
       (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (ts.isIdentifier(node.expression) && node.expression.text === "require"))
+        (ts.isIdentifier(node.expression) && requireNames.has(node.expression.text)) ||
+        (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "resolve" &&
+          (!topLevelResolutionsOnly || functionDepth === 0)))
     ) {
       const specifier = node.arguments[0];
       loads.push(
@@ -43,11 +50,23 @@ function allModuleLoads(file: string): string[] {
           : node.getText(ast),
       );
     }
+    if (ts.isFunctionLike(node)) functionDepth++;
     ts.forEachChild(node, visit);
+    if (ts.isFunctionLike(node)) functionDepth--;
   }
   visit(ast);
   return loads;
 }
+
+test("src excludes harper imports and top-level resolution", () => {
+  const violations: string[] = [];
+  for (const source of new Bun.Glob("src/**/*.{ts,tsx,js,mjs,cjs}").scanSync({ cwd: root })) {
+    for (const spec of allModuleLoads(join(root, source), true)) {
+      if (spec === "harper" || spec.startsWith("harper/")) violations.push(`${source}: ${spec}`);
+    }
+  }
+  expect(violations).toEqual([]);
+});
 
 test("the shared unit lane emits server modules before checking the boundary", () => {
   const plan = unitPlan(root);
@@ -106,6 +125,16 @@ const loadCases: Array<{ name: string; source: string; expected: string[] }> = [
     name: "nested require()",
     source: 'export function load() { return require("node:fs"); }',
     expected: ["node:fs"],
+  },
+  {
+    name: "require.resolve()",
+    source: 'const dependency = require.resolve("harper");',
+    expected: ["harper"],
+  },
+  {
+    name: "createRequire alias",
+    source: 'const load = createRequire(import.meta.url); load("harper");',
+    expected: ["harper"],
   },
   {
     name: "computed import()",

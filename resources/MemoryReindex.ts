@@ -87,11 +87,13 @@ export class MemoryReindex extends Resource {
     // Pass 1: primary-store scan. Count records per agent.
     const primaryByAgent = new Map<string, number>();
     const recordsToReindex: string[] = [];
+    const selectedRows = new Map<string, any>();
     for await (const record of Memory.search()) {
       if (agentFilter && record.agentId !== agentFilter) continue;
       if (!record.id || !record.agentId) continue;
       primaryByAgent.set(record.agentId, (primaryByAgent.get(record.agentId) ?? 0) + 1);
       recordsToReindex.push(record.id);
+      selectedRows.set(record.id, record);
     }
     stats.scanned = recordsToReindex.length;
 
@@ -139,15 +141,11 @@ export class MemoryReindex extends Resource {
       const chunk = recordsToReindex.slice(i, i + batchSize);
       for (const id of chunk) {
         try {
-          // flair#2354: the re-PUT is one owned write-back — the row is read
-          // inside the transaction and re-stated from THAT read, so a
-          // concurrent change is retried from the committed row rather than
-          // reverted by the scan copy.
           const outcome = await writeBackCommittedRow(
             Memory,
             id,
             (record: any) => (record ? { write: { ...record, _reindex: true } } : { skip: true }),
-            { ctx, label: "MemoryReindex", pausePre: "reindex-put-pre", pausePoint: "reindex-put" },
+            { ctx, label: "MemoryReindex", pausePre: "reindex-put-pre", pausePoint: "reindex-put", expectedRow: selectedRows.get(id) },
           );
           if ("skip" in outcome) { stats.errors++; continue; }
           stats.reindexed++;

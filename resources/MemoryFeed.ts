@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-guard.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
-import { assertValidDurability } from "./memory-durability.js";
+import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
@@ -19,6 +20,9 @@ import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
 import { refuseContentSuffixId } from "./memory-id-guard.js";
 import { writeBackCommittedRow } from "./write-back.js";
+import { withOwnedTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
+import { stripInlinePointerFields } from "./host-source-visibility.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -232,7 +236,12 @@ export class FeedMemories extends Resource {
     const contentHash = computeContentHash(agentId, body);
 
     const existing = await findExistingMemoryByContentHash((databases as any).flair.Memory.search(), agentId, contentHash);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.durability === "ephemeral" && existing.expiresAt == null) {
+        return repairDeduplicatedExpiry(ctx, existing);
+      }
+      return existing;
+    }
 
     const record = {
       ...content,
@@ -272,19 +281,15 @@ export class FeedMemories extends Resource {
     // caller-supplied server-stamped field (instanceToken, provenance), then
     // PRESERVE the existing row's incarnation token, else generate one.
     stripServerStampedFields(record);
-    // flair#2354: the ingest write is one owned write-back. The stored row is
-    // read INSIDE the helper's transaction and the incarnation token,
-    // provenance and federation bookkeeping are built from THAT read (never
-    // from a pre-transaction copy), so a concurrent change is retried from the
-    // committed row rather than reverted. flair#1940 A1-iv item 1: a failed
-    // existing-row lookup fails the write (no fallback to a fresh token — that
-    // would hide a still-stored pointer row bound to the stored token; the
-    // same fail-closed rule #1956 applies to put()); the helper propagates the
-    // read's rejection.
+    let refusal: Response | undefined;
     const outcome = await writeBackCommittedRow(
       (databases as any).flair.Memory,
       record.id,
       async (priorById: any) => {
+        if (priorById && priorById.agentId !== agentId) {
+          refusal = FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
+          return { skip: true };
+        }
         const written: Record<string, any> = { ...record };
         written.instanceToken = priorById?.instanceToken ?? randomUUID();
         // Feed ingest is a full-row write: it REPLACES the stored row, so a
@@ -309,11 +314,18 @@ export class FeedMemories extends Resource {
         // dropped on a create. See resources/originator-instance.ts.
         await applyOriginatorInstanceId(written, priorById);
         applyFederationBookkeeping(written, priorById);
+        const expiryError = stampEphemeralExpiry(written, priorById);
+        if (expiryError) {
+          refusal = Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
+          return { skip: true };
+        }
         return { write: written };
       },
-      { ctx, label: "MemoryFeed.ingest", pausePre: "feed-ingest-pre", pausePoint: "feed-ingest" },
+      { ctx, label: "MemoryFeed.ingest", pausePre: "feed-ingest-pre", pausePoint: "feed-ingest", expectedRow: existingRecord },
     );
-    const written = ("write" in outcome ? outcome.write : record) as any;
+    if (refusal) return refusal;
+    if ("skip" in outcome) return feedDedupTargetChanged(record.id);
+    const written = outcome.write;
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(written);
     return written;
@@ -502,4 +514,73 @@ async function storedRowReadable(
   if (stored == null || typeof stored !== "object" || typeof stored.agentId !== "string") return false;
   if (!isAllowed(stored)) return false;
   return closedSkillPayloadReadable(stored, readerId);
+}
+
+/** The named error for a dedup expiry repair whose matched row changed during the request (flair#2358). */
+export const FEED_DEDUP_TARGET_CHANGED_ERROR = "feed_dedup_target_changed";
+
+/** Attempts of the dedup expiry repair before it gives up on a row that keeps changing. */
+const FEED_DEDUP_REPAIR_ATTEMPTS = 3;
+
+function feedDedupTargetChanged(id: string): Response {
+  return Response.json({
+    error: FEED_DEDUP_TARGET_CHANGED_ERROR,
+    message: `the stored row ${JSON.stringify(id)} this write matched changed during the request; retry the write`,
+  }, { status: 409 });
+}
+
+/** The row is still the dedup match: the same id, owner and content hash. */
+function isDedupMatch(row: any, match: any): boolean {
+  return row != null && typeof row === "object" && String(row.id) === String(match.id) &&
+    row.agentId === match.agentId && row.contentHash === match.contentHash;
+}
+
+/**
+ * flair#2358: stamp the tier expiry (stampEphemeralExpiry) on the ephemeral
+ * row the content-hash dedup matched by agentId + contentHash. The match's id
+ * is refused first when it is a reserved seed id or ends in `.content`. In a
+ * transaction this call owns, the row is re-read; unless its id, agentId and
+ * contentHash equal the match's, the request is refused (409
+ * FEED_DEDUP_TARGET_CHANGED_ERROR). A matching row that is no longer
+ * ephemeral, or already has an expiry, is returned from that read. Otherwise a
+ * committed read must equal the transaction's read before the write, else the
+ * repair starts over (FEED_DEDUP_REPAIR_ATTEMPTS attempts, then the 409). A
+ * change committed after that read and before the commit follows Harper's
+ * timestamp order. After the commit, an owned read must show the match with
+ * the written expiry (else the 409); that row is returned. Returned rows carry
+ * no inline pointer fields (stripInlinePointerFields).
+ */
+async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> {
+  const id = String(match.id);
+  const idDenial = reservedSeedFeedWriteDenial("Memory", [id]) ?? refuseContentSuffixId([id]);
+  if (idDenial) return idDenial;
+  for (let attempt = 1; attempt <= FEED_DEDUP_REPAIR_ATTEMPTS; attempt++) {
+    const outcome: { kind: "changed" } | { kind: "retry" } | { kind: "current"; row: any } | { kind: "written"; row: any } =
+      await withOwnedTransaction(ctx, async (c) => {
+        const stored = await (databases as any).flair.Memory.get(id, c);
+        if (!isDedupMatch(stored, match)) return { kind: "changed" as const };
+        if (stored.durability !== "ephemeral" || stored.expiresAt != null) return { kind: "current" as const, row: stored };
+        // Test-only: inert unless the fault-injection env opt-in is set and armed.
+        const pause = txnPausePoint("feed-dedup-repair");
+        if (pause) await pause;
+        // The committed row, in an explicit fresh context (not this transaction's snapshot).
+        const committed = await (databases as any).flair.Memory.get(id, {});
+        if (!isDeepStrictEqual(committed, stored)) return { kind: "retry" as const };
+        const row: any = { ...stored };
+        // A stored null is "no expiry": drop it so the shared rule stamps a fresh
+        // tier TTL rather than refusing the null as malformed.
+        delete row.expiresAt;
+        const error = stampEphemeralExpiry(row);
+        if (error) throw new Error(`flair: deduplicated ephemeral row ${id} could not be repaired (${error})`);
+        await (databases as any).flair.Memory.put(row, c);
+        return { kind: "written" as const, row };
+      });
+    if (outcome.kind === "retry") continue;
+    if (outcome.kind === "changed") return feedDedupTargetChanged(id);
+    if (outcome.kind === "current") return stripInlinePointerFields(outcome.row);
+    const confirmed = await withOwnedTransaction(ctx, async (c) => (databases as any).flair.Memory.get(id, c));
+    if (!isDedupMatch(confirmed, match) || confirmed.expiresAt !== outcome.row.expiresAt) return feedDedupTargetChanged(id);
+    return stripInlinePointerFields(confirmed);
+  }
+  return feedDedupTargetChanged(id);
 }

@@ -2,8 +2,10 @@
  * Test pause for owned transactions (flair#2307), enabled by process environment.
  * Claims an arm file, writes pause/release markers, and waits for go or its limit.
  * Pinned by test/unit/txn-pause-point.test.ts and used by
- * test/integration/supersede-close-contention-2307.test.ts and
- * test/integration/embedding-stamp-contention-2307.test.ts.
+ * test/integration/supersede-close-contention-2307.test.ts,
+ * test/integration/embedding-stamp-contention-2307.test.ts,
+ * test/integration/owner-delete-recheck-2355.test.ts and
+ * test/integration/integration-row-write-serialization-2340.test.ts.
  */
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,10 +16,10 @@ export const TEST_PAUSE_DIR_ENV = "FLAIR_TEST_PAUSE_DIR";
 export const PAUSE_LIMIT_MS = 20_000;
 const POLL_MS = 20;
 
-/** One point per owned transaction that writes from a row it read. */
 export type TxnPausePoint =
   | "supersede-close"
   | "embedding-stamp-content-suffix"
+  | "integration-row-write"
   // flair#2275 — MemoryMaintenance. Each action has a `-pre` point (after the
   // scan read, before the owned transaction opens) and an in-transaction point
   // (between that transaction's re-read and its act), so both interleavings of
@@ -36,6 +38,8 @@ export type TxnPausePoint =
   | "promotion-stamp"
   | "last-reflected-pre"
   | "last-reflected"
+  | "reflect-sources-pre"
+  | "reflect-sources"
   | "backfill-embedding-pre"
   | "backfill-embedding"
   | "reindex-put-pre"
@@ -45,7 +49,28 @@ export type TxnPausePoint =
   | "visibility-backfill-pre"
   | "visibility-backfill"
   | "synthetic-test-pre"
-  | "synthetic-test";
+  | "synthetic-test"
+  // flair#2275 — MemoryArchive: after its first read of the row, before the
+  // owned transaction that re-reads it opens.
+  | "memory-archive-pre"
+  // flair#2275 — embedding-stamp migration: after it reads a stale row, before
+  // its re-embed request.
+  | "embedding-stamp-regen-pre"
+  | "memory-delete-pre"
+  | "memory-delete"
+  | "memory-skill-delete-pre"
+  | "memory-skill-delete"
+  | "credential-delete-pre"
+  | "credential-delete"
+  | "grant-delete-pre"
+  | "grant-delete"
+  | "workspace-delete-pre"
+  | "workspace-delete"
+  | "candidate-delete-pre"
+  | "candidate-delete"
+  | "relationship-delete-pre"
+  | "relationship-delete"
+  | "feed-dedup-repair";
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
