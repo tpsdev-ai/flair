@@ -1,0 +1,1146 @@
+{
+  "$documentation": [
+    "How npm itself reads each `overrides` case, RECORDED from npm's own modules by",
+    "record.cjs in this directory (a vendored fixture of npm's behaviour, not a live",
+    "call: this repo has no npm dependency). `recordedWith` names the versions it was",
+    "recorded with. Each rule is one node of npm's OverrideSet (@npmcli/arborist), its",
+    "`value` parsed the way an overridden edge is parsed (npm-package-arg resolve).",
+    "Re-record after adding a case: node record.cjs \"$(npm root -g)/npm/node_modules\"."
+  ],
+  "recordedWith": {
+    "npm": "11.19.0",
+    "@npmcli/arborist": "9.9.1",
+    "npm-package-arg": "13.0.2",
+    "semver": "7.8.5"
+  },
+  "cases": [
+    {
+      "name": "exact version",
+      "overrides": {
+        "fixture-dep": "1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "exact prerelease",
+      "overrides": {
+        "fixture-dep": "1.0.0-beta.1"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.0.0-beta.1",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0-beta.1"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "exact with build metadata",
+      "overrides": {
+        "fixture-dep": "1.0.0+build.5"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.0.0+build.5",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "v-prefixed version",
+      "overrides": {
+        "fixture-dep": "v1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "v1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "=-prefixed version",
+      "overrides": {
+        "fixture-dep": "=1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "=1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "leading-zero version",
+      "overrides": {
+        "fixture-dep": "01.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "01.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "caret range",
+      "overrides": {
+        "fixture-dep": "^1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "^1.0.0",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "tilde range",
+      "overrides": {
+        "fixture-dep": "~1.2.3"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "~1.2.3",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "x-range",
+      "overrides": {
+        "fixture-dep": "1.x"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.x",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "major-only range",
+      "overrides": {
+        "fixture-dep": "1"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "major.minor range",
+      "overrides": {
+        "fixture-dep": "1.2"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.2",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "hyphen range",
+      "overrides": {
+        "fixture-dep": "1 - 2"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1 - 2",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "or-range of versions",
+      "overrides": {
+        "fixture-dep": "1.0.0 || 2.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.0.0 || 2.0.0",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "comparator pair",
+      "overrides": {
+        "fixture-dep": ">=1.0.0 <2.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": ">=1.0.0 <2.0.0",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "operator with a space",
+      "overrides": {
+        "fixture-dep": ">= 1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": ">= 1.0.0",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "star",
+      "overrides": {
+        "fixture-dep": "*"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "*",
+            "parsed": {
+              "type": "no-override"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty string",
+      "overrides": {
+        "fixture-dep": ""
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "*",
+            "parsed": {
+              "type": "no-override"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dist-tag",
+      "overrides": {
+        "fixture-dep": "latest"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "latest",
+            "parsed": {
+              "type": "tag"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "alias to an exact version",
+      "overrides": {
+        "fixture-dep": "npm:other-dep@2.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "npm:other-dep@2.0.0",
+            "parsed": {
+              "type": "alias",
+              "target": "other-dep",
+              "targetType": "version",
+              "version": "2.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "alias to a range",
+      "overrides": {
+        "fixture-dep": "npm:other-dep@^2.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "npm:other-dep@^2.0.0",
+            "parsed": {
+              "type": "alias",
+              "target": "other-dep",
+              "targetType": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "alias to a scoped package",
+      "overrides": {
+        "fixture-dep": "npm:@scope/other-dep@2.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "npm:@scope/other-dep@2.0.0",
+            "parsed": {
+              "type": "alias",
+              "target": "@scope/other-dep",
+              "targetType": "version",
+              "version": "2.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "alias with no version",
+      "overrides": {
+        "fixture-dep": "npm:other-dep"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "npm:other-dep",
+            "parsed": {
+              "type": "alias",
+              "target": "other-dep",
+              "targetType": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "alias of the same package",
+      "overrides": {
+        "fixture-dep": "npm:fixture-dep@1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "npm:fixture-dep@1.0.0",
+            "parsed": {
+              "type": "alias",
+              "target": "fixture-dep",
+              "targetType": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "alias to a dist-tag",
+      "overrides": {
+        "fixture-dep": "npm:other-dep@latest"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "npm:other-dep@latest",
+            "parsed": {
+              "type": "alias",
+              "target": "other-dep",
+              "targetType": "tag"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "dollar reference",
+      "overrides": {
+        "fixture-dep": "$fixture-dep"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "$fixture-dep",
+            "parsed": {
+              "type": "reference"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "file specifier",
+      "overrides": {
+        "fixture-dep": "file:../local-dep"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "file:../local-dep",
+            "parsed": {
+              "type": "directory"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "github specifier",
+      "overrides": {
+        "fixture-dep": "github:owner-a/repo-a"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "github:owner-a/repo-a",
+            "parsed": {
+              "type": "git"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "git+https specifier",
+      "overrides": {
+        "fixture-dep": "git+https://example.com/repo-a.git"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "git+https://example.com/repo-a.git",
+            "parsed": {
+              "type": "git"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "tarball URL",
+      "overrides": {
+        "fixture-dep": "https://example.com/fixture-dep-1.0.0.tgz"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "https://example.com/fixture-dep-1.0.0.tgz",
+            "parsed": {
+              "type": "remote"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "hosted git shorthand",
+      "overrides": {
+        "fixture-dep": "owner-a/repo-a"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "owner-a/repo-a",
+            "parsed": {
+              "type": "git"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "workspace protocol",
+      "overrides": {
+        "fixture-dep": "workspace:*"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "workspace:*",
+            "parsed": {
+              "type": "error",
+              "error": "Unsupported URL Type \"workspace:\": workspace:*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "link protocol",
+      "overrides": {
+        "fixture-dep": "link:../local-dep"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "link:../local-dep",
+            "parsed": {
+              "type": "error",
+              "error": "Unsupported URL Type \"link:\": link:../local-dep"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested pin under a parent",
+      "overrides": {
+        "parent-dep": {
+          "fixture-dep": "1.0.0"
+        }
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "parent-dep"
+            ],
+            "name": "parent-dep",
+            "keySpec": "*",
+            "value": "*",
+            "parsed": {
+              "type": "no-override"
+            }
+          },
+          {
+            "path": [
+              "parent-dep",
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "self key",
+      "overrides": {
+        "fixture-dep": {
+          ".": "1.0.0"
+        }
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "self key with a nested range",
+      "overrides": {
+        "parent-dep": {
+          ".": "3.0.0",
+          "fixture-dep": "^1.0.0"
+        }
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "parent-dep"
+            ],
+            "name": "parent-dep",
+            "keySpec": "*",
+            "value": "3.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "3.0.0"
+            }
+          },
+          {
+            "path": [
+              "parent-dep",
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "^1.0.0",
+            "parsed": {
+              "type": "range"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "two levels deep",
+      "overrides": {
+        "a-dep": {
+          "b-dep": {
+            "fixture-dep": "1.0.0"
+          }
+        }
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "a-dep"
+            ],
+            "name": "a-dep",
+            "keySpec": "*",
+            "value": "*",
+            "parsed": {
+              "type": "no-override"
+            }
+          },
+          {
+            "path": [
+              "a-dep",
+              "b-dep"
+            ],
+            "name": "b-dep",
+            "keySpec": "*",
+            "value": "*",
+            "parsed": {
+              "type": "no-override"
+            }
+          },
+          {
+            "path": [
+              "a-dep",
+              "b-dep",
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty self key",
+      "overrides": {
+        "fixture-dep": {
+          ".": ""
+        }
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "*",
+            "parsed": {
+              "type": "no-override"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "selector key with an exact value",
+      "overrides": {
+        "fixture-dep@^1": "1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep@^1"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "^1",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "scoped selector key",
+      "overrides": {
+        "@scope/fixture-dep@^1": "1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "@scope/fixture-dep@^1"
+            ],
+            "name": "@scope/fixture-dep",
+            "keySpec": "^1",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "scoped key",
+      "overrides": {
+        "@scope/fixture-dep": "1.0.0"
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "@scope/fixture-dep"
+            ],
+            "name": "@scope/fixture-dep",
+            "keySpec": "*",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "range selector on a parent object",
+      "overrides": {
+        "fixture-dep@1.x": {
+          "child-dep": "2.0.0"
+        }
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep@1.x"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "1.x",
+            "value": "1.x",
+            "parsed": {
+              "type": "range"
+            }
+          },
+          {
+            "path": [
+              "fixture-dep@1.x",
+              "child-dep"
+            ],
+            "name": "child-dep",
+            "keySpec": "*",
+            "value": "2.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "2.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "exact selector on a parent object",
+      "overrides": {
+        "fixture-dep@1.0.0": {
+          "child-dep": "2.0.0"
+        }
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep@1.0.0"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "1.0.0",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "path": [
+              "fixture-dep@1.0.0",
+              "child-dep"
+            ],
+            "name": "child-dep",
+            "keySpec": "*",
+            "value": "2.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "2.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "URL key",
+      "overrides": {
+        "https://example.com/x": "1.0.0"
+      },
+      "npm": {
+        "error": "Override without name: https://example.com/x"
+      }
+    },
+    {
+      "name": "path-shaped key",
+      "overrides": {
+        "owner-a/repo-a": "1.0.0"
+      },
+      "npm": {
+        "error": "Override without name: owner-a/repo-a"
+      }
+    },
+    {
+      "name": "number value",
+      "overrides": {
+        "fixture-dep": 1
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "*",
+            "parsed": {
+              "type": "no-override"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "null value",
+      "overrides": {
+        "fixture-dep": null
+      },
+      "npm": {
+        "error": "Cannot read properties of null (reading '.')"
+      }
+    },
+    {
+      "name": "array value",
+      "overrides": {
+        "fixture-dep": [
+          "1.0.0"
+        ]
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": "*",
+            "parsed": {
+              "type": "no-override"
+            }
+          },
+          {
+            "path": [
+              "fixture-dep",
+              "0"
+            ],
+            "name": "0",
+            "keySpec": "*",
+            "value": "1.0.0",
+            "parsed": {
+              "type": "version",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "self key at the top level",
+      "overrides": {
+        ".": "1.0.0"
+      },
+      "npm": {
+        "rules": []
+      }
+    },
+    {
+      "name": "non-string self key",
+      "overrides": {
+        "fixture-dep": {
+          ".": 1
+        }
+      },
+      "npm": {
+        "rules": [
+          {
+            "path": [
+              "fixture-dep"
+            ],
+            "name": "fixture-dep",
+            "keySpec": "*",
+            "value": null,
+            "parsed": {
+              "type": "not-a-string"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "overrides is a string",
+      "overrides": "1.0.0",
+      "npm": {
+        "rules": []
+      }
+    }
+  ]
+}
