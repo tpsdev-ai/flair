@@ -1857,9 +1857,16 @@ interface ProbeSpawn {
   spawnError: string | null;
 }
 
+// The pin must never sit at SIGTERM's default disposition: cleanup sends SIGKILL
+// only while the pin answers signal 0, so a pin killed by the probe's own
+// SIGTERM skips that SIGKILL. Ignoring the signals here, before the fork, lets
+// the pin inherit them across fork and exec instead of racing to run its own
+// `trap`; the command's shell gets the defaults back via `trap -` before its exec.
 const PROBE_WRAPPER =
-  `( ( trap '' HUP INT QUIT TERM; PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
-  `printf '%s' "$!" >"$1" ); exec /bin/sh -c "$3"`;
+  `trap '' HUP INT QUIT TERM; ` +
+  `( ( PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
+  `printf '%s' "$!" >"$1" ); ` +
+  `trap - HUP INT QUIT TERM; exec /bin/sh -c "$3"`;
 
 function spawnProbeBounded(
   command: string,
