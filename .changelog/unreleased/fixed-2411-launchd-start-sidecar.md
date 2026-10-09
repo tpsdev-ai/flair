@@ -1,6 +1,6 @@
-- **A launchd-managed start records the identity sidecar for the instance it started, once the pid is confirmed.**
-  The managed start waits for the instance to answer health, then writes the sidecar the
-  direct start path writes, naming the pid launchd reported. When that pid cannot be
-  confirmed — launchctl reports none, health does not answer, or the process answering is
-  not launchd's — the start writes no sidecar and prints a warning naming the failed check
-  (flair#2411).
+- **CLI-managed launchd starts write identity sidecars only for confirmed processes (flair#2411).**
+  `flair start` and the start leg of `flair restart` or `flair upgrade` write it only
+  when launchd reports one stable pid, that pid is the sole port listener, Flair-shaped
+  health answers, hdb.pid agrees, and its actual start time is readable. Unconfirmed starts warn
+  and write no sidecar. A launchd KeepAlive relaunch through the launcher does
+  not write a sidecar.

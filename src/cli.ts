@@ -5425,8 +5425,7 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
   // A stale or foreign pid holding the port is NOT healed. False-green is
   // worse than no self-heal.
   //
-  // The write uses the same O_NOFOLLOW / 0600 / atomic-rename posture as every
-  // other sidecar write. We skip self-heal when the dataDir is unsafe
+  // The write uses mode 0600 and atomic rename. We skip self-heal when the dataDir is unsafe
   // (symlink / world-writable) — the check has already happened above.
   let portOwner: PortOwnerResult = { kind: "unavailable" };
   let instanceMatch: InstanceMatch = { kind: "unavailable" };
@@ -5478,12 +5477,11 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
 }
 
 /**
- * Write the identity sidecar atomically (temp + rename) at spawn time or
- * during self-heal (flair#1454 decision 3). `pid` is the spawned process's
- * pid — the same number Harper writes to `hdb.pid`, since Harper runs
- * in-process. `startTimeMs` defaults to `Date.now()` for a fresh spawn.
+ * Write the identity sidecar atomically (temp + rename) for direct starts,
+ * confirmed managed starts, or self-heal (flair#1454 decision 3).
+ * `startTimeMs` defaults to `Date.now()` for a fresh direct spawn.
  *
- * Self-heal callers pass the live process's actual start time (from
+ * Managed start and self-heal callers pass the live process's actual start time (from
  * readProcessStartTimeMs) so the sidecar records an accurate epoch, not a
  * wall-clock approximation. Note: in the self-heal path the ±2s start-time
  * check in verifyIdentity is NOT what prevents recycled-pid adoption —
@@ -6244,15 +6242,13 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
 
 /**
  * Record the identity sidecar for the instance a launchd-managed start brought
- * up (flair#2411). The direct start path writes one immediately after spawn; the
- * managed path did not, so after a launchd restart the data directory could name
- * no running pid until something else wrote a sidecar.
+ * up during a CLI-managed start (flair#2411). The direct start path writes one
+ * immediately after spawn. A launchd KeepAlive relaunch does not write one.
  *
- * The sidecar is written only when the identity is CONFIRMED: launchd reports a
- * pid for `label`, the instance answers health, and the pid serving the instance
- * is launchd's own. Any other outcome writes nothing and names the check that
- * failed. The write is the direct path's own writeDaemonSidecar — the same
- * atomic temp+rename, 0600, O_NOFOLLOW-posture write — never a second writer.
+ * The sidecar is written after launchd reports the same pid before and after a
+ * Flair-shaped health response and matching serving-pid and hdb.pid reads.
+ * The writer uses an atomic temp+rename and mode 0600; pidfile and sidecar
+ * reads use O_NOFOLLOW.
  *
  * A health failure rethrows the original error so the caller's existing
  * fallback still runs; the other unconfirmed cases return `recorded: false`.
@@ -6267,8 +6263,10 @@ export async function recordManagedStartSidecar(
     timeoutMs?: number;
     list?: LaunchctlLister;
     waitForHealth?: (port: number, adminUser: string, adminPass: string, timeoutMs: number) => Promise<void>;
+    probeHealth?: (port: number) => Promise<HealthResult>;
     servingPid?: (dataDir: string, port: number) => number | null;
-    write?: (dataDir: string, pid: number, port: number) => void;
+    readStartTime?: (pid: number) => number | null;
+    write?: (dataDir: string, pid: number, port: number, startTimeMs: number) => void;
     warn?: (line: string) => void;
   } = {},
 ): Promise<{ recorded: true; pid: number; detail: string } | { recorded: false; detail: string }> {
@@ -6286,12 +6284,26 @@ export async function recordManagedStartSidecar(
     throw err;
   }
   const job = readLaunchctlJobState(label, deps.list ?? realLaunchctlLister);
+  if (!job.registered) {
+    const detail = `could not read launchd job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
   if (job.pid === null) {
     const detail = `launchd did not report a running pid for job ${label}, so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
     return { recorded: false, detail };
   }
-  const serving = (deps.servingPid ?? resolveInstanceServingPid)(dataDir, port);
+  const health = await (deps.probeHealth ?? probeHealth)(port);
+  if (health.kind !== "ok") {
+    const detail = `the instance for launchd job ${label} did not return Flair health (${health.kind}), so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const serving = (deps.servingPid ?? ((_dataDir, httpPort) => {
+    const listeners = resolveListenerPids(httpPort);
+    return listeners?.length === 1 ? listeners[0] : null;
+  }))(dataDir, port);
   if (serving === null) {
     const detail = `launchd job ${label} runs as process ${job.pid}, but the process serving this instance could not be identified, so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
@@ -6302,7 +6314,30 @@ export async function recordManagedStartSidecar(
     warn(`⚠️  ${detail}`);
     return { recorded: false, detail };
   }
-  (deps.write ?? writeDaemonSidecar)(dataDir, job.pid, port);
+  const again = readLaunchctlJobState(label, deps.list ?? realLaunchctlLister);
+  if (!again.registered) {
+    const detail = `could not re-read launchd job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  if (again.pid !== job.pid) {
+    const detail = `launchd job ${label} changed pid during health confirmation, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const pidfile = readPidfile(dataDir);
+  if (pidfile.kind !== "present" || pidfile.pid !== job.pid) {
+    const detail = `hdb.pid does not confirm launchd job ${label}'s process ${job.pid}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const startTimeMs = (deps.readStartTime ?? readProcessStartTimeMs)(job.pid);
+  if (startTimeMs === null) {
+    const detail = `could not read the start time of launchd job ${label}'s process ${job.pid}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  (deps.write ?? writeDaemonSidecar)(dataDir, job.pid, port, startTimeMs);
   return { recorded: true, pid: job.pid, detail: `launchd job ${label} is running as process ${job.pid}` };
 }
 
