@@ -17,6 +17,7 @@ import { classifyDaemonState, type DaemonEvidence } from "../lib/daemon-liveness
 import { renderVerifiedSummary } from "../lib/doctor-run.js";
 import { isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { FLAIR_MCP_PACKAGE, clearFlairCliVersionCache } from "../lib/mcp-spec.js";
+import { planRedirectMigration, renderRedirectMigration } from "../lib/mcp-oauth-env.js";
 import { createRegistryNoticePrinter, fetchLatestVersion, fetchVersionDeprecation, isStrictSemver } from "../lib/npm-registry.js";
 import { classifyUpgradePriorLiveness, type PriorLiveness } from "../lib/upgrade-prior-liveness.js";
 import { decideAfterRestartFailure, decideDeprecatedRollback, formatKnownBrokenRollbackRestart, type DeprecationLookup, type RollbackRecoveryLane } from "../lib/upgrade-rollback.js";
@@ -108,6 +109,20 @@ function doctorRunAfterUpgrade(...args: any[]): any {
 
 function flairPackageDir(...args: any[]): any {
   return cli.flairPackageDir(...args);
+}
+
+function stageMcpRedirect(packageRoot: string): void {
+  try {
+    const migration = planRedirectMigration({
+      configPath: join(packageRoot, "config.yaml"),
+      env: process.env as Record<string, string | undefined>,
+    });
+    const line = renderRedirectMigration(migration);
+    if (line) console.log(`  ${line}`);
+  } catch (err) {
+    const reason = err instanceof Error ? (err as NodeJS.ErrnoException).code ?? err.message : "unknown error";
+    console.error(`warning: MCP OAuth redirect migration failed (${reason}). Set OAUTH_GITHUB_REDIRECT_URI to your MCP issuer origin + /oauth in ${join(packageRoot, ".env")}, then run: flair restart.`);
+  }
 }
 
 function fleetSweepCallerExitMessage(...args: any[]): any {
@@ -949,6 +964,7 @@ program
   .action(async (opts) => {
     // ── Fabric-upgrade branch ───────────────────────────────────────────────
     if (opts.target) {
+      if (!opts.check) console.log("OAuth redirect migration is local-only; --target requires target-side OAuth environment configuration.");
       await runFabricUpgrade(opts);
       return;
     }
@@ -1304,6 +1320,7 @@ program
         );
         return;
       }
+      if (!checkOnly) stageMcpRedirect(treeLane?.dir ?? flairPackageDir());
       console.log(anyAhead || unknownFindings.length > 0 ? "\nNo upgrades available." : "\n✅ Everything is up to date.");
       return;
     }
@@ -1340,6 +1357,7 @@ program
     // run will do. `npm install -g` remains wrong for flair-mcp either way
     // (#1168/#1208).
     if (totalUpgrades === 0) {
+      if (!checkOnly) stageMcpRedirect(treeLane?.dir ?? flairPackageDir());
       if (missing.length > 0) {
         const npmMissing = missing.filter((f) => f.name !== FLAIR_MCP_PACKAGE);
         const mcpMissing = missing.some((f) => f.name === FLAIR_MCP_PACKAGE);
@@ -1613,6 +1631,9 @@ program
       console.error("warning: --restart is deprecated and is now a no-op — flair upgrade restarts by default. Use --no-restart to skip it.");
     }
 
+    const swappedPackageRoot = treePlan?.treeDir ?? flairPackageDir();
+    stageMcpRedirect(swappedPackageRoot);
+
     if (!shouldRestart) {
       console.log("\nRun: flair restart to use the new version");
       if (treePlan) {
@@ -1835,7 +1856,6 @@ program
     // from disk AFTER the swap. `null` (flair itself wasn't swapped, or the new
     // tree can't be verified) falls back to an in-process restart, announced.
     const flairWasSwapped = flairIsUpgrading && !flairInstallFailed;
-    const swappedPackageRoot = treePlan?.treeDir ?? flairPackageDir();
     let newCli: { cliPath: string; version: string } | null = null;
     if (flairWasSwapped) {
       const resolved = resolveInstalledFlairCli(swappedPackageRoot, expectedFlairVersion);
