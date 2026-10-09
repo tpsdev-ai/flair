@@ -31,6 +31,7 @@ import { checkToolArguments, withoutNullArguments } from "./mcp-tool-arguments.j
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "./agent-auth.js";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
 import { resolveVersion } from "./version.js";
 
 // The MCP protocol revision we implement (initialize handshake).
@@ -286,6 +287,10 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
 async function jitProvisionPrincipal(sub: string): Promise<{ principalId: string; credential: any }> {
   const now = new Date().toISOString();
   const principalId = `agt_mcp_${sub.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 24)}_${randomBytes(4).toString("hex")}`;
+  // flair#2359 — the shared agent-ID rule. The id above is built to conform,
+  // but the rule is enforced on the value that is actually written, so a future
+  // change to this construction cannot store an id AgentSeed would refuse.
+  if (!isValidAgentId(principalId)) throw new Error(invalidAgentIdMessage(principalId));
 
   // flair#1965 r2: this is a raw Agent create (it bypasses the Agent resource's
   // post()), so stamp the local instance id here — every create path carries it.

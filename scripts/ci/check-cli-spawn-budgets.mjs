@@ -67,6 +67,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isUnitTestFile } from "./test-files.mjs";
 
 /**
  * The trusted baseline of exceptions (flair#1825). It replaces the old in-script
@@ -966,7 +967,7 @@ export function testFilesUnder(root) {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path);
-      else if (/\.test\.[jt]sx?$/.test(entry.name)) out.push(path);
+      else if (isUnitTestFile(entry.name)) out.push(path);
     }
   };
   if (existsDir(testDir)) walk(testDir);

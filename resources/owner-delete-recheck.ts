@@ -31,7 +31,7 @@
  * instance reads that instance's request-time entry.
  */
 import { withOwnedTransaction } from "./request-transaction.js";
-import { txnPausePoint, type TxnPausePoint } from "./txn-pause-point.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 /** The named error for a delete refused because the row's owner changed (flair#2355). */
 export const OWNER_CHANGED_ERROR = "owner_changed";
@@ -69,7 +69,7 @@ export interface OwnerDeleteSpec {
   /** The authenticated non-admin caller. */
   callerId: string;
   /** The in-transaction pause point (between the ownership read and the delete). */
-  point: TxnPausePoint;
+  point: string;
 }
 
 /**
@@ -90,7 +90,7 @@ export async function deleteOwnedRow(ctx: unknown, spec: OwnerDeleteSpec): Promi
     if (stored[spec.ownerField] !== spec.callerId) {
       return { kind: "refused", response: ownerChangedRefusal(spec.tableName) } as OwnerDeleteOutcome;
     }
-    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // Test-only: valid names are inert unless fault injection is enabled and armed.
     const pause = txnPausePoint(spec.point);
     if (pause) await pause;
     // Confirmation read: the committed row in an explicit fresh context (see

@@ -23,6 +23,7 @@ import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
 import { stampEphemeralExpiry } from "./memory-durability.js";
 import { isReservedSeedId } from "./seed-reservation.js";
+import { AGENT_ID_ERROR, isValidAgentId } from "../src/lib/agent-id-rule.js";
 import { endsWithContentSelectorSuffix } from "../src/lib/memory-id-policy.js";
 import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
@@ -856,6 +857,14 @@ export class FederationSync extends Resource {
           }
         }
         const mergedData = mergeRecord(local, { ...record, data: incoming });
+
+        // ── flair#2359: an inbound Agent row must satisfy the same agent-ID
+        // rule as a locally-created one. This raw merge is the receiver's write
+        // path, so a peer pushing a malformed id must not land a row here.
+        if (record.table === "Agent" && !isValidAgentId(record.id)) {
+          recordSkip(AGENT_ID_ERROR);
+          continue;
+        }
 
         // ── flair#1940 A1'' item 8: the SAME declared-attribute whitelist the
         // writers apply. A dirty pushed row (a legacy direct-insert, or a raw
