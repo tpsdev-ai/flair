@@ -78,7 +78,7 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory and FeedMemories stamp successors in their transaction plans; predecessor closes retain stored stamps." },
   // Update-only / resource-internal raw writes — they re-write an existing row.
   "resources/Memory.ts|Memory|post": { count: 1, disposition: "resource-internal", note: "Memory writeMemoryRowPost fallback (content already stamped)" },
-  "resources/Memory.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord (existing row)" },
+  "resources/Memory.ts|Memory|put": { count: 3, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord + re-embed" },
   "resources/Memory.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "Memory.delete raw table delete" },
   "resources/MemoryMaintenance.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "reap/delete of existing rows" },
   "resources/usage-recording.ts|Memory|put": { count: 1, disposition: "update-only", note: "usage counters on an EXISTING row" },

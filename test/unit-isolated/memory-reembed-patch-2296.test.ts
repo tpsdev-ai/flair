@@ -142,6 +142,49 @@ test("a failed stored-row read writes nothing", async () => {
   expect(documentEmbeds()).toEqual([]);
 }, 10_000);
 
+test("text changes on every write attempt return 409 without an extra embedding call", async () => {
+  const before = row("m1");
+  harnessState.memoryStore.set("m1", { ...before });
+  embedImpl = async () => {
+    const call = documentEmbeds().length;
+    if (call > 3) throw new Error("unexpected extra embedding call");
+    harnessState.memoryStore.set("m1", { ...before, content: `changed text ${call}` });
+    return [[0.25, 0.5, 0.75]];
+  };
+  const put = spyOn(databasesMock.flair.Memory, "put");
+  try {
+    const res = await resource("m1", agent("agent-a")).patch({ ...REEMBED });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("reembed_row_changed");
+    expect(documentEmbeds().map((c) => c.text)).toEqual(["content of m1", "changed text 1", "changed text 2"]);
+    expect(put).not.toHaveBeenCalled();
+    expect(harnessState.memoryStore.get("m1")).toEqual({ ...before, content: "changed text 3" });
+  } finally {
+    put.mockRestore();
+  }
+}, 10_000);
+
+test("provider failure on a non-final retry returns 503", async () => {
+  const before = row("m1");
+  harnessState.memoryStore.set("m1", { ...before });
+  embedImpl = async () => {
+    if (documentEmbeds().length === 2) throw new Error("engine down");
+    harnessState.memoryStore.set("m1", { ...before, content: "changed text" });
+    return [[0.25, 0.5, 0.75]];
+  };
+  const put = spyOn(databasesMock.flair.Memory, "put");
+  try {
+    const res = await resource("m1", agent("agent-a")).patch({ ...REEMBED });
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("embedding_unavailable");
+    expect(documentEmbeds().map((c) => c.text)).toEqual(["content of m1", "changed text"]);
+    expect(put).not.toHaveBeenCalled();
+    expect(harnessState.memoryStore.get("m1")).toEqual({ ...before, content: "changed text" });
+  } finally {
+    put.mockRestore();
+  }
+}, 10_000);
+
 test("a body that also sets another field is an ordinary PATCH (a skill row stays refused)", async () => {
   const before = row("s1", { tags: ["skill"], trigger: "when releasing", archived: false });
   harnessState.memoryStore.set("s1", { ...before });
