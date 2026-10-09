@@ -679,6 +679,45 @@ export function renderDetachedWarning(m: LaunchdManagement, headline: string): s
   return lines;
 }
 
+// ─── the managed-start confirmation warning (flair#2422) ────────────────────
+
+/**
+ * What a CLI-managed launchd start's confirmation probe saw on the instance's
+ * port (flair#2422): a Flair-shaped answer (`flair`), a foreign listener
+ * (`foreign`), a refused connection (`refused`), or an unreachable port
+ * (`unreachable`). The reachability wait that precedes the probe accepts any
+ * 2xx or 401, so it cannot tell Flair from a decoy; the probe requires a
+ * Flair-shaped body.
+ */
+export type ManagedStartConfirmation = "flair" | "foreign" | "refused" | "unreachable";
+
+/**
+ * The lines for an unconfirmed managed start (flair#2422). Names what was
+ * observed: the reachability wait before the probe passed, and the probe's
+ * result by name. "Flair is running" is printed for `flair` — the result whose
+ * probe saw Flair shape — and the other results say what they saw instead.
+ * Kept here so the wording is assertable without a launchd host.
+ */
+export function renderManagedStartUnconfirmed(input: {
+  port: number;
+  confirmation: ManagedStartConfirmation;
+  detail: string;
+  moved?: string;
+  remedy?: string[];
+}): string[] {
+  const { port, confirmation, detail, moved, remedy } = input;
+  const headline: Record<ManagedStartConfirmation, string> = {
+    flair: `Flair is running on port ${port}, but it is NOT verified as launchd-managed`,
+    foreign: `The initial reachability wait on port ${port} passed, but the confirmation probe found a foreign listener, so Flair is NOT verified as launchd-managed`,
+    refused: `The initial reachability wait on port ${port} passed, but the confirmation probe's connection was refused (nothing was listening), so Flair is NOT verified as launchd-managed`,
+    unreachable: `The initial reachability wait on port ${port} passed, but the confirmation probe could not reach the port, so Flair is NOT verified as launchd-managed`,
+  };
+  const lines = [`⚠️  ${headline[confirmation]}`, `   ${detail}`];
+  if (moved) lines.push(`   ${moved}`);
+  if (remedy?.length) lines.push(`   Fix: ${remedy.join(" && ")}`);
+  return lines;
+}
+
 // renderVerifiedSummary used to live here and qualify ✅ from version +
 // LaunchdManagement alone (flair#1022). That signature was the ceiling on
 // what it could notice — a blacklist of one known-unhealthy form. The
