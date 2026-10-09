@@ -50,8 +50,12 @@ class BaseMemoryCandidate {
   }
   async delete(id: any) {
     candidateStore.delete(id);
-    return { ok: true };
+    return true;
   }
+  // Harper's table is static-callable (`databases.flair.MemoryCandidate.get/delete`),
+  // which is how the owner-delete confirmation reaches it (flair#2355).
+  static get(target?: any) { return new BaseMemoryCandidate().get(target); }
+  static delete(id: any) { candidateStore.delete(id); return Promise.resolve(true); }
   search(query?: any) {
     const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
     let records = Array.from(candidateStore.values());
@@ -71,6 +75,11 @@ const databasesMock = {
 };
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: class {} }));
+
+// Harper assigns `transaction` onto the global at load; the owner-delete
+// confirmation (resources/owner-delete-recheck.ts) creates one when the caller
+// has none. This mock's delete is not staged, so the stand-in just runs the cb.
+(globalThis as any).transaction = (_ctx: any, cb: () => any) => cb();
 
 const { MemoryCandidate } = await import("../../resources/MemoryCandidate.ts");
 

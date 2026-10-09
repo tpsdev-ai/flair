@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { databasesMock, harnessState, installMemoryHarperMock, resetHarnessState } from "../helpers/memory-search-harness";
+import { databasesMock, harnessState, installMemoryHarperMock, matchesCondition, resetHarnessState } from "../helpers/memory-search-harness";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 await installMemoryHarperMock();
@@ -14,7 +14,26 @@ const historyTable = {
 (databasesMock.flair as any).MemoryDeletionHistory = historyTable;
 
 const spies: Array<{ mockRestore(): void }> = [];
-beforeEach(resetHarnessState);
+let requestPointerSnapshot: Map<string, any> | null = null;
+beforeEach(() => {
+  resetHarnessState();
+  requestPointerSnapshot = null;
+  spies.push(spyOn(databasesMock.flair.MemoryHostSource, "delete").mockImplementation(async (id: any, context?: any) => {
+    context.transaction.staged.push(() => harnessState.pointerStore.delete(typeof id === "string" ? id : id?.memoryId));
+    return { ok: true };
+  }));
+  const search = databasesMock.flair.MemoryHostSource.search;
+  spies.push(spyOn(databasesMock.flair.MemoryHostSource, "search").mockImplementation((query: any, context?: unknown) => {
+    // When captured, the request snapshot serves contextless searches; explicit contexts read the committed store.
+    if (context !== undefined || requestPointerSnapshot === null) return search(query);
+    const snapshot = requestPointerSnapshot;
+    return (async function* () {
+      for (const row of snapshot.values()) {
+        if (matchesCondition(row, { operator: query?.operator ?? "and", conditions: query?.conditions ?? [] })) yield row;
+      }
+    })();
+  }));
+});
 afterEach(() => {
   for (const spy of spies.splice(0)) spy.mockRestore();
 });
@@ -25,9 +44,12 @@ function seed(id: string) {
 }
 
 async function purge(ids: string[]) {
+  requestPointerSnapshot = new Map(harnessState.pointerStore);
   const resource: any = new MemoryPurge();
-  resource.getContext = () => ({});
+  const context = { transaction: { open: 1, saveCommits: false, staged: [] } };
+  resource.getContext = () => context;
   const response = await resource.post({ ids });
+  if (!(response instanceof Response)) return { status: 200, body: response };
   expect(response).toBeInstanceOf(Response);
   return { status: response.status, body: await response.json() };
 }
@@ -39,6 +61,17 @@ function keepMemory(id: string) {
     return originalDelete(target, ctx);
   }));
 }
+
+test("healthy purge confirms cleanup of pointer-bearing rows", async () => {
+  seed("removed-a");
+  seed("removed-b");
+  const { status, body } = await purge(["removed-a", "removed-b"]);
+  expect(status).toBe(200);
+  expect(body).toEqual({ removed: 2, removedIds: ["removed-a", "removed-b"] });
+  expect(harnessState.memoryStore.size).toBe(0);
+  expect(harnessState.pointerStore.size).toBe(0);
+  expect([...harnessState.deletionStore.values()].map((row) => row.memoryId)).toEqual(["removed-a", "removed-b"]);
+});
 
 test("history still stored returns the named 500 before the still-stored 409", async () => {
   seed("stored");

@@ -28,6 +28,8 @@ import { decideInstanceAnswer, INSTANCE_ROW_PRUNE_REMEDY } from "../src/lib/inst
 import { summarizeExpiredByAgent, expiredByAgentWarningLines, type NightlyDriverFacts } from "../src/lib/expired-by-agent.js";
 import { readAllInstanceRows } from "./Federation.js";
 
+import { mcpOAuthProviderReadiness } from "./mcp-oauth-env-guard.js";
+
 const db = databases as any;
 
 const redactHome = (p: string): string => {
@@ -186,7 +188,7 @@ export class HealthDetail extends Resource {
   }
 
   async get() {
-    const stats: Record<string, any> = { ok: true };
+    const stats: Record<string, any> = { ok: true, mcpOAuthProvider: mcpOAuthProviderReadiness() };
     const nowMs = Date.now();
     const warnings: Array<{ level: "warn" | "info"; message: string }> = [];
     // flair#1073: set while walking memories, consumed after the migrations

@@ -59,6 +59,7 @@ mock.module("harper", () => ({
         if (memoryReadError) throw new Error("memory read failed");
         yield* rows;
       },
+      get: async (id: string) => rows.find((r) => r.id === id) ?? null,
       update: async (id: string, row: Record<string, unknown>, ctx: any) => {
         expect(ctx?.transaction?.open).toBe(1);
         const index = rows.findIndex((r) => r.id === id);
