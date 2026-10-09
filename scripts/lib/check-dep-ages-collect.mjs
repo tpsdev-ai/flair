@@ -14,7 +14,10 @@
  * - `dependencies` / `optionalDependencies`: npm and bun install
  *   optionalDependencies by default (a failed install is non-fatal, not
  *   skipped), so they install just like any other dep and represent the same
- *   supply-chain risk.
+ *   supply-chain risk. An entry is classified by the same version classifier
+ *   the override grammar uses (classifyRegistrySpec): an exact version is
+ *   age-checked, a range such as `1.x` is reported and not fetched as an exact
+ *   version (see collectNonExactDeps).
  * - `overrides`: an entry here pins the version a transitive dep resolves to,
  *   so a fresh version can enter the tree without appearing in any
  *   `dependencies`. An `npm:` alias pins its target package; the alias TARGET
@@ -22,13 +25,12 @@
  *   objects are read too (see classifyOverrides).
  *
  * Exemptions, in all three fields: `@tpsdev-ai/*`, the keep-current list,
- * `workspace:`, `file:`/`link:`, `git+`/`github:`, and ranges (in
- * `dependencies` and `optionalDependencies`, a version not starting with a
- * digit).
+ * `workspace:`, `file:`/`link:`, `git+`/`github:`.
  *
  * `peerDependencies` are NOT checked: peers are resolved from a range by the
  * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed.
+ * describe what actually gets installed. `devDependencies` are NOT checked:
+ * they do not ship in our tarballs.
  */
 
 /** Specifiers that name no registry version, so there is no publish date to check. */
@@ -84,7 +86,11 @@ function isRange(spec) {
 
 const refused = (reason) => ({ kind: "refused", reason });
 
-/** Classify a registry specifier: exact, range, or refused. */
+/**
+ * Classify a registry specifier: exact, range, or refused. One classifier for
+ * both the override grammar and the `dependencies` / `optionalDependencies`
+ * fields, so a specifier reads the same wherever it appears.
+ */
 function classifyRegistrySpec(name, spec) {
   if (EXACT_VERSION_RE.test(spec)) return { kind: "exact", name, version: spec };
   if (LOOSE_VERSION_RE.test(spec)) {
@@ -190,12 +196,14 @@ function formatOverridePath(path) {
  * not collected here (collectUnsupportedOverrides lists them).
  *
  * Exemptions: `@tpsdev-ai/*`, keep-current list, `workspace:`, `file:`/`link:`,
- * `git+`/`github:`, and ranges (in `dependencies` and `optionalDependencies`,
- * a version not starting with a digit).
+ * `git+`/`github:`. A `dependencies` / `optionalDependencies` entry is
+ * classified by classifyRegistrySpec; only an exact version is age-checked (a
+ * range is reported by collectNonExactDeps).
  *
  * `peerDependencies` are NOT checked: peers are resolved from a range by the
  * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed.
+ * describe what actually gets installed. `devDependencies` are NOT checked:
+ * they do not ship in our tarballs.
  *
  * @param pkgs — package objects with paths
  * @param keepCurrent — the keep-current allow-list
@@ -204,15 +212,18 @@ function formatOverridePath(path) {
 export function collectDeps(pkgs, keepCurrent) {
   const toCheck = new Map(); // key: "name@version", value: { name, version, declaredIn[] }
 
-  function record(name, version, declaredIn) {
+  function record(name, spec, declaredIn) {
     if (name.startsWith("@tpsdev-ai/")) return; // workspace-internal — exempt
     if (keepCurrent.has(name)) return; // explicitly kept-current — exempt
-    if (version.startsWith("workspace:")) return;
-    if (version.startsWith("file:") || version.startsWith("link:")) return;
-    if (version.startsWith("git+") || version.startsWith("github:")) return;
-    // Only check exact-pinned. This gate reads manifests, not the lockfile;
-    // the version a range resolves to is outside its scope.
-    if (!/^\d/.test(version)) return;
+    if (isNonRegistrySpecifier(spec)) return; // names no registry version — exempt
+    // Only exact-pinned entries are age-checked. Classify the specifier with
+    // the same classifier the override grammar uses: this gate reads
+    // manifests, not the lockfile, so the version a range resolves to is
+    // outside its scope — a range such as "1.x" is reported (see
+    // collectNonExactDeps), never fetched as an exact version.
+    const classified = classifyRegistrySpec(name, spec);
+    if (classified.kind !== "exact") return;
+    const version = classified.version;
     const key = `${name}@${version}`;
     if (!toCheck.has(key)) {
       toCheck.set(key, { name, version, declaredIn: [] });
@@ -222,9 +233,9 @@ export function collectDeps(pkgs, keepCurrent) {
   }
 
   function recordDeps(deps, declaredIn) {
-    for (const [name, version] of Object.entries(deps)) {
-      if (typeof version !== "string") continue;
-      record(name, version, declaredIn);
+    for (const [name, spec] of Object.entries(deps)) {
+      if (typeof spec !== "string") continue;
+      record(name, spec, declaredIn);
     }
   }
 
@@ -242,18 +253,37 @@ export function collectDeps(pkgs, keepCurrent) {
 }
 
 /**
- * The override rules the bake-time gate does not age-check because they are
- * ranges. The CLI prints them; the gate does not fail on them.
+ * The `dependencies`, `optionalDependencies` and `overrides` entries the
+ * bake-time gate does not age-check because they are ranges (nested override
+ * rules included). The CLI prints them; the gate does not fail on them. One
+ * line per (name, spec, declaredIn): a range declared in both `dependencies`
+ * and `overrides` of one manifest is listed once.
  *
  * @param pkgs — package objects with paths
  * @returns Array<{ name, spec, declaredIn }>
  */
-export function collectNonExactOverrides(pkgs) {
+export function collectNonExactDeps(pkgs) {
   const gaps = [];
+  const seen = new Set();
+  function add(name, spec, declaredIn) {
+    const key = `${name}\u0000${spec}\u0000${declaredIn}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    gaps.push({ name, spec, declaredIn });
+  }
+  function recordDeps(deps, declaredIn) {
+    for (const [name, spec] of Object.entries(deps)) {
+      if (typeof spec !== "string") continue;
+      if (isNonRegistrySpecifier(spec)) continue;
+      if (classifyRegistrySpec(name, spec).kind === "range") add(name, spec, declaredIn);
+    }
+  }
   for (const { pkg, path } of pkgs) {
+    if (pkg.dependencies) recordDeps(pkg.dependencies, path);
+    if (pkg.optionalDependencies) recordDeps(pkg.optionalDependencies, path);
     if (pkg.overrides === undefined) continue;
     for (const rule of classifyOverrides(pkg.overrides)) {
-      if (rule.kind === "range") gaps.push({ name: rule.name, spec: rule.spec, declaredIn: path });
+      if (rule.kind === "range") add(rule.name, rule.spec, path);
     }
   }
   return gaps;

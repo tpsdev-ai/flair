@@ -11,7 +11,7 @@ export interface DepEntry {
   declaredIn: string[];
 }
 
-export interface NonExactOverride {
+export interface NonExactDep {
   name: string;
   spec: string;
   declaredIn: string;
@@ -46,12 +46,14 @@ export function classifyOverrides(overrides: unknown): OverrideRule[];
  * included; refused override forms are not collected here.
  *
  * Exemptions: `@tpsdev-ai/*`, keep-current list, `workspace:`, `file:`/`link:`,
- * `git+`/`github:`, and ranges (in `dependencies` and `optionalDependencies`,
- * a version not starting with a digit).
+ * `git+`/`github:`. A `dependencies` / `optionalDependencies` entry is
+ * classified by the same version classifier the override grammar uses; only
+ * an exact version is age-checked (a range is reported by collectNonExactDeps).
  *
  * `peerDependencies` are NOT checked: peers are resolved from a range by the
  * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed.
+ * describe what actually gets installed. `devDependencies` are NOT checked:
+ * they do not ship in our tarballs.
  *
  * @param pkgs — package objects with paths
  * @param keepCurrent — the keep-current allow-list
@@ -63,12 +65,14 @@ export function collectDeps(
 ): Map<string, DepEntry>;
 
 /**
- * The override rules the bake-time gate does not age-check because they are
- * ranges. The CLI prints them; the gate does not fail on them.
+ * The `dependencies`, `optionalDependencies` and `overrides` entries the
+ * bake-time gate does not age-check because they are ranges (nested override
+ * rules included). The CLI prints them; the gate does not fail on them. One
+ * line per (name, spec, declaredIn).
  */
-export function collectNonExactOverrides(
+export function collectNonExactDeps(
   pkgs: Array<{ pkg: Record<string, unknown>; path: string }>,
-): NonExactOverride[];
+): NonExactDep[];
 
 /**
  * The override rules in a form this gate does not support. The CLI refuses to
