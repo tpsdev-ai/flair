@@ -1221,6 +1221,9 @@ test.skipIf(skipFixtureCase)(
     expect(isAlive(pid)).toBe(false);
     const managed = assertManaged(sb);
     expect(managed.pid).not.toBe(pid);
+    // flair#2411: the launchd-managed replacement start records a sidecar
+    // naming the pid it started.
+    expect(readSidecar(sb.dataDir)).toMatchObject({ kind: "present", pid: managed.pid, port: sb.httpPort });
   }),
   850_000,
 );

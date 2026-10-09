@@ -5612,6 +5612,7 @@ bindServiceCli({
   observeLaunchdManagement,
   probeHealth,
   readyOpsSocketPosture,
+  recordManagedStartSidecar,
   resolveHarperBin,
   resolveHttpBindHost,
   resolveHttpPort,
@@ -6239,6 +6240,70 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
     plistExists: existsSync,
     list: realLaunchctlLister,
   });
+}
+
+/**
+ * Record the identity sidecar for the instance a launchd-managed start brought
+ * up (flair#2411). The direct start path writes one immediately after spawn; the
+ * managed path did not, so after a launchd restart the data directory could name
+ * no running pid until something else wrote a sidecar.
+ *
+ * The sidecar is written only when the identity is CONFIRMED: launchd reports a
+ * pid for `label`, the instance answers health, and the pid serving the instance
+ * is launchd's own. Any other outcome writes nothing and names the check that
+ * failed. The write is the direct path's own writeDaemonSidecar — the same
+ * atomic temp+rename, 0600, O_NOFOLLOW-posture write — never a second writer.
+ *
+ * A health failure rethrows the original error so the caller's existing
+ * fallback still runs; the other unconfirmed cases return `recorded: false`.
+ */
+export async function recordManagedStartSidecar(
+  dataDir: string,
+  port: number,
+  label: string,
+  deps: {
+    adminUser?: string;
+    adminPass?: string;
+    timeoutMs?: number;
+    list?: LaunchctlLister;
+    waitForHealth?: (port: number, adminUser: string, adminPass: string, timeoutMs: number) => Promise<void>;
+    servingPid?: (dataDir: string, port: number) => number | null;
+    write?: (dataDir: string, pid: number, port: number) => void;
+    warn?: (line: string) => void;
+  } = {},
+): Promise<{ recorded: true; pid: number; detail: string } | { recorded: false; detail: string }> {
+  const warn = deps.warn ?? ((line: string) => console.error(line));
+  const timeoutMs = deps.timeoutMs ?? STARTUP_TIMEOUT_MS;
+  try {
+    await (deps.waitForHealth ?? waitForHealth)(
+      port,
+      deps.adminUser ?? DEFAULT_ADMIN_USER,
+      deps.adminPass ?? process.env.HDB_ADMIN_PASSWORD ?? "",
+      timeoutMs,
+    );
+  } catch (err: any) {
+    warn(`⚠️  the instance for launchd job ${label} did not answer health within ${timeoutMs}ms, so its identity sidecar was not written (${err?.message ?? err})`);
+    throw err;
+  }
+  const job = readLaunchctlJobState(label, deps.list ?? realLaunchctlLister);
+  if (job.pid === null) {
+    const detail = `launchd did not report a running pid for job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const serving = (deps.servingPid ?? resolveInstanceServingPid)(dataDir, port);
+  if (serving === null) {
+    const detail = `launchd job ${label} runs as process ${job.pid}, but the process serving this instance could not be identified, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  if (serving !== job.pid) {
+    const detail = `the process answering on port ${port} is ${serving}, not launchd's process ${job.pid} for job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  (deps.write ?? writeDaemonSidecar)(dataDir, job.pid, port);
+  return { recorded: true, pid: job.pid, detail: `launchd job ${label} is running as process ${job.pid}` };
 }
 
 // `preserveHttpPortValue` / `preserveSecurePort` / `bindHostOf` live in
@@ -8166,7 +8231,9 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
             throw new LaunchdValidationRefusal(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
           }
           ensureLaunchdServiceLoaded(dataDir, realLaunchctlCommand);
-          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+          await recordManagedStartSidecar(dataDir, port, launchdLabel(dataDir), {
+            adminPass: process.env.HDB_ADMIN_PASSWORD ?? "",
+          });
           readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade
           stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
           return;
