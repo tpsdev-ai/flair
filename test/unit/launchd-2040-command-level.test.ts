@@ -984,9 +984,10 @@ describe("flair#2040 — `flair start` claims launchd only after verifying it", 
       expect(stdout).not.toContain("✅ Flair started (launchd");
       expect(stderr).toContain("NOT verified as launchd-managed");
       // The port served Flair, so the warning says it is running; the failed
-      // launchd check is named too (flair#2422).
+      // launchd check and the observer's launchd state are named too (flair#2422).
       expect(stderr).toContain("Flair is running on port");
       expect(stderr).toContain("did not report a running pid");
+      expect(stderr).toContain(`is loaded but not running`);
     },
     90_000,
   );

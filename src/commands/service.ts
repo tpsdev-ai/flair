@@ -12,7 +12,7 @@ import { seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { reconcilePendingSkillSeed, skillSeedPendingPath } from "../lib/skill-seed-pending.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
 import { decideStartOnUnknown, probePortListening } from "../lib/stop-start-recovery.js";
-import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, renderManagedStartUnconfirmed } from "../lib/launchd-management.js";
+import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, renderManagedStartUnconfirmed, type ManagedStartConfirmation } from "../lib/launchd-management.js";
 import {
   LaunchdValidationRefusal,
   loadabilityAllowsAttempt,
@@ -96,6 +96,27 @@ export function restartTreeReport(a: TreeAssessment | null): { ok: boolean; line
     };
   }
   return { ok: true, lines: [`   ${formatServingTreeLine(a)}`] };
+}
+
+/**
+ * flair#2422: the warning lines `flair start` prints for an unconfirmed
+ * launchd-managed start. Forwards the sidecar outcome's confirmation and
+ * detail, and the launchd observer's detail and remedy, to the renderer.
+ */
+export function managedStartUnconfirmedLines(input: {
+  port: number;
+  recorded: { confirmation: ManagedStartConfirmation; detail: string };
+  managed: { detail: string; remedy?: string[] };
+  moved?: string;
+}): string[] {
+  return renderManagedStartUnconfirmed({
+    port: input.port,
+    confirmation: input.recorded.confirmation,
+    detail: input.recorded.detail,
+    moved: input.moved,
+    launchdDetail: input.managed.detail,
+    remedy: input.managed.remedy,
+  });
 }
 
 function closedDirectSpawnEnv(...args: any[]): any {
@@ -486,14 +507,13 @@ program
             // Flair is running for the Flair-shaped answer, and names the probe's
             // other results instead.
             const managed = observeLaunchdManagement(dataDir, port);
-            for (const line of renderManagedStartUnconfirmed({
+            for (const line of managedStartUnconfirmedLines({
               port,
-              confirmation: recorded.confirmation,
-              detail: recorded.detail,
+              recorded,
+              managed,
               moved: migrated
                 ? `The launchd service was moved off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label}.`
                 : undefined,
-              remedy: managed.remedy,
             })) {
               console.error(line);
             }

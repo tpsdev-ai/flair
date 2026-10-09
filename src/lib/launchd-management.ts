@@ -683,11 +683,12 @@ export function renderDetachedWarning(m: LaunchdManagement, headline: string): s
 
 /**
  * What a CLI-managed launchd start's confirmation probe saw on the instance's
- * port (flair#2422): a Flair-shaped answer (`flair`), a foreign listener
- * (`foreign`), a refused connection (`refused`), or an unreachable port
- * (`unreachable`). The reachability wait that precedes the probe accepts any
- * 2xx or 401, so it cannot tell Flair from a decoy; the probe requires a
- * Flair-shaped body.
+ * port (flair#2422): a Flair-shaped answer (`flair`); a response that was not
+ * a Flair health answer, non-2xx or not Flair-shaped (`foreign`); a refused
+ * connection (`refused`); or it could not reach the port, from a timeout or
+ * network error (`unreachable`). The reachability wait that precedes the probe
+ * accepts any 2xx or 401, so it cannot tell Flair from a decoy; the probe
+ * requires a Flair-shaped body.
  */
 export type ManagedStartConfirmation = "flair" | "foreign" | "refused" | "unreachable";
 
@@ -703,17 +704,20 @@ export function renderManagedStartUnconfirmed(input: {
   confirmation: ManagedStartConfirmation;
   detail: string;
   moved?: string;
+  /** The launchd observer's detail (LaunchdManagement.detail), printed on its own line. */
+  launchdDetail?: string;
   remedy?: string[];
 }): string[] {
-  const { port, confirmation, detail, moved, remedy } = input;
+  const { port, confirmation, detail, moved, launchdDetail, remedy } = input;
   const headline: Record<ManagedStartConfirmation, string> = {
     flair: `Flair is running on port ${port}, but it is NOT verified as launchd-managed`,
-    foreign: `The initial reachability wait on port ${port} passed, but the confirmation probe found a foreign listener, so Flair is NOT verified as launchd-managed`,
+    foreign: `The initial reachability wait on port ${port} passed, but the confirmation probe got a response that was not a Flair health answer (non-2xx or not Flair-shaped), so Flair is NOT verified as launchd-managed`,
     refused: `The initial reachability wait on port ${port} passed, but the confirmation probe's connection was refused (nothing was listening), so Flair is NOT verified as launchd-managed`,
-    unreachable: `The initial reachability wait on port ${port} passed, but the confirmation probe could not reach the port, so Flair is NOT verified as launchd-managed`,
+    unreachable: `The initial reachability wait on port ${port} passed, but the confirmation probe could not reach the port (timeout or network error), so Flair is NOT verified as launchd-managed`,
   };
   const lines = [`⚠️  ${headline[confirmation]}`, `   ${detail}`];
   if (moved) lines.push(`   ${moved}`);
+  if (launchdDetail) lines.push(`   ${launchdDetail}`);
   if (remedy?.length) lines.push(`   Fix: ${remedy.join(" && ")}`);
   return lines;
 }
