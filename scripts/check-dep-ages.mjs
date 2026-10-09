@@ -42,13 +42,18 @@
  *   1 — at least one dep too fresh
  *   2 — registry fetch failure (treated as fail, not warn — better safe), a
  *       REFUSED CI run (the fixture-root override present together with `--ci`),
- *       or an unexpected argument
+ *       an unexpected argument, an unsupported `overrides` form, or an invalid
+ *       or expired exemption allowlist entry
  */
 
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectDeps, collectNonExactOverrides } from "./lib/check-dep-ages-collect.mjs";
+import {
+  collectDeps,
+  collectNonExactOverrides,
+  collectUnsupportedOverrides,
+} from "./lib/check-dep-ages-collect.mjs";
 
 const ARGS = process.argv.slice(2);
 
@@ -79,6 +84,18 @@ function readPkg(path) {
 const ALLOWLIST_REL = join(".github", "dep-age-allowlist.json");
 const GHSA_RE = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The UTC midnight of a calendar date written as YYYY-MM-DD, or null. Only a
+ * string that names a real day passes: the parsed date must format back to the
+ * same string, so "2099-13-01" and "2026-02-30" are refused.
+ */
+function parseCalendarDate(value) {
+  if (typeof value !== "string" || !ISO_DATE_RE.test(value)) return null;
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString().slice(0, 10) === value ? ms : null;
+}
 
 /**
  * Read and validate the exemption allowlist at <root>/.github/dep-age-allowlist.json.
@@ -121,10 +138,12 @@ function readAllowlist(root) {
     if (ghsa.length === 0 || !ghsa.every((g) => typeof g === "string" && GHSA_RE.test(g))) {
       bad.push(`"ghsa" must name at least one GHSA advisory id`);
     }
-    if (!ISO_DATE_RE.test(entry.added ?? "")) bad.push(`"added" must be YYYY-MM-DD`);
-    if (!ISO_DATE_RE.test(entry.expires ?? "")) {
-      bad.push(`"expires" must be YYYY-MM-DD`);
-    } else if (ISO_DATE_RE.test(entry.added ?? "") && Date.parse(entry.expires) <= Date.parse(entry.added)) {
+    const added = parseCalendarDate(entry.added);
+    const expires = parseCalendarDate(entry.expires);
+    if (added === null) bad.push(`"added" must be a calendar date string, YYYY-MM-DD`);
+    if (expires === null) {
+      bad.push(`"expires" must be a calendar date string, YYYY-MM-DD`);
+    } else if (added !== null && expires <= added) {
       bad.push(`"expires" (${entry.expires}) must be after "added" (${entry.added})`);
     }
     if (typeof entry.reason !== "string" || entry.reason.trim() === "") bad.push(`"reason" must be a non-empty string`);
@@ -205,6 +224,16 @@ async function main() {
     }
   }
 
+  const unsupportedOverrides = collectUnsupportedOverrides(allPkgs);
+  if (unsupportedOverrides.length > 0) {
+    console.error("Unsupported `overrides` entries:");
+    console.error("");
+    for (const u of unsupportedOverrides) {
+      console.error(`    ${u.declaredIn} ${u.at}: ${u.reason}`);
+    }
+    process.exit(2);
+  }
+
   const toCheck = collectDeps(allPkgs, KEEP_CURRENT);
   const nonExactOverrides = collectNonExactOverrides(allPkgs);
 
@@ -221,7 +250,7 @@ async function main() {
   }
 
   if (nonExactOverrides.length > 0) {
-    console.log("Not age-checked (non-exact override specifiers, resolved only at install time):");
+    console.log("Not age-checked (override ranges):");
     for (const o of nonExactOverrides) {
       console.log(`    ${o.name} "${o.spec}" (declared in ${o.declaredIn})`);
     }

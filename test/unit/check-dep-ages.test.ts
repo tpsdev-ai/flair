@@ -20,7 +20,11 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectDeps, collectNonExactOverrides } from "../../scripts/lib/check-dep-ages-collect.mjs";
+import {
+  collectDeps,
+  collectNonExactOverrides,
+  collectUnsupportedOverrides,
+} from "../../scripts/lib/check-dep-ages-collect.mjs";
 
 /* ─────────────────────────── Unit tests ───────────────────────────── */
 
@@ -135,6 +139,22 @@ describe("collectDeps", () => {
       expect(collectDeps(pkgsOverrides({"some-pin":"^1.2.3"},"package.json"), keepCurrent).size).toBe(0);
     });
 
+    it("collects a pin nested under a parent package and through a \".\" self key", () => {
+      const result = collectDeps([
+        { pkg: { overrides: { "parent-dep": { "nested-pin": "1.2.3" }, "self-pin": { ".": "4.5.6" } } }, path: "package.json" },
+      ], keepCurrent);
+      expect([...result.keys()].sort()).toEqual(["nested-pin@1.2.3", "self-pin@4.5.6"]);
+    });
+
+    it("names the package of a selector key, not the key", () => {
+      const result = collectDeps(pkgsOverrides({"some-pin@^1":"1.2.3"},"package.json"), keepCurrent);
+      expect([...result.keys()]).toEqual(["some-pin@1.2.3"]);
+    });
+
+    it("skips a digit-leading range like 1.x", () => {
+      expect(collectDeps(pkgsOverrides({"some-pin":"1.x"},"package.json"), keepCurrent).size).toBe(0);
+    });
+
     it("dedups a pin declared in both dependencies and overrides of one manifest", () => {
       const result = collectDeps([
         { pkg: { dependencies: {"some-pin":"1.2.3"}, overrides: {"some-pin":"1.2.3"} }, path: "package.json" },
@@ -163,6 +183,34 @@ describe("collectNonExactOverrides", () => {
 
   it("does not report an exempt workspace: specifier", () => {
     expect(collectNonExactOverrides(pkgsOverrides({"some-pin":"workspace:*"},"package.json"))).toEqual([]);
+  });
+
+  it("reports digit-leading and nested ranges", () => {
+    const gaps = collectNonExactOverrides([
+      { pkg: { overrides: { "some-pin": "1.0.0 || 2.0.0", "parent-dep": { "nested-pin": "1 - 2" } } }, path: "package.json" },
+    ]);
+    expect(gaps).toEqual([
+      { name: "some-pin", spec: "1.0.0 || 2.0.0", declaredIn: "package.json" },
+      { name: "nested-pin", spec: "1 - 2", declaredIn: "package.json" },
+    ]);
+  });
+});
+
+describe("collectUnsupportedOverrides", () => {
+  it("names the manifest, the rule and the reason", () => {
+    const unsupported = collectUnsupportedOverrides([
+      { pkg: { overrides: { "parent-dep": { "some-pin": "latest" } } }, path: "packages/foo/package.json" },
+    ]);
+    expect(unsupported).toEqual([{
+      declaredIn: "packages/foo/package.json",
+      at: 'overrides["parent-dep"]["some-pin"]',
+      reason: '"latest" is not an exact version, a semver range or an npm: alias of one',
+    }]);
+  });
+
+  it("refuses a value that is neither a string nor an object", () => {
+    const unsupported = collectUnsupportedOverrides([{ pkg: { overrides: { "some-pin": 1 } }, path: "package.json" }]);
+    expect(unsupported.map((u) => u.at)).toEqual(['overrides["some-pin"]']);
   });
 });
 
@@ -206,7 +254,7 @@ function writeFixtureRepo(root: string): string {
 }
 
 /** Write a repo root whose only pin is an `overrides` entry, and an empty packages/ dir. */
-function writeOverrideFixtureRepo(root: string, overrides: Record<string, string>): string {
+function writeOverrideFixtureRepo(root: string, overrides: Record<string, unknown>): string {
   mkdirSync(join(root, "packages"), { recursive: true });
   writeFileSync(join(root, "package.json"), JSON.stringify({
     name: "dep-ages-overrides-fixture",
@@ -390,10 +438,136 @@ describe("CLI — a pin through overrides and the dated exemption", () => {
       // Nothing is age-checked, so the dead registry is never queried.
       FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
     });
-    expect(output).toContain("Not age-checked (non-exact override specifiers");
+    expect(output).toContain("Not age-checked (override ranges)");
     expect(output).toContain(`${FIXTURE_DEP} "^1.0.0"`);
     expect(output).toContain("No external pinned production deps to check.");
     expect(exitCode).toBe(0);
+  }, 30_000);
+});
+
+describe("CLI — override forms", () => {
+  it("exits 1 when the fresh pin is nested under a parent package", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-nested"), {
+      "parent-dep": { [FIXTURE_DEP]: FIXTURE_VERSION },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(registry.requests).toEqual([`/${FIXTURE_DEP}`]);
+      expect(output).toContain("Pinned production deps younger than the bake-time policy");
+      expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
+      expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("exits 1 when the fresh override exists only in a workspace manifest", async () => {
+    const root = writeFixtureRepo(join(scratch, "override-workspace-only"));
+    // The root manifest pins nothing; the only pin is a workspace override.
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "dep-ages-fixture", version: "0.0.0" }));
+    mkdirSync(join(root, "packages", "ws-a"), { recursive: true });
+    writeFileSync(join(root, "packages", "ws-a", "package.json"), JSON.stringify({
+      name: "ws-a",
+      version: "0.0.0",
+      overrides: { [FIXTURE_DEP]: FIXTURE_VERSION },
+    }));
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(registry.requests).toEqual([`/${FIXTURE_DEP}`]);
+      expect(output).toContain("Pinned production deps younger than the bake-time policy");
+      expect(output).toContain("declared in packages/ws-a/package.json");
+      expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("reports a digit-leading range and does not age-check it", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-digit-range"), { [FIXTURE_DEP]: "1.x" });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain(`${FIXTURE_DEP} "1.x"`);
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(0);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("exits 2 on an unsupported override form, naming it, before fetching", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-unsupported"), {
+      [FIXTURE_DEP]: FIXTURE_VERSION,
+      "parent-dep": { "other-dep": "latest" },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain("Unsupported `overrides` entries");
+      expect(output).toContain('package.json overrides["parent-dep"]["other-dep"]: "latest" is not an exact version');
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(2);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+});
+
+describe("CLI — a malformed exemption date fails the gate", () => {
+  // A fresh override pin with ONE exemption entry whose dates are malformed.
+  // The gate must refuse the allowlist (exit 2, naming the field) before any
+  // registry request — never exempt the pin.
+  async function assertMalformed(label: string, dates: { added: unknown; expires: unknown }, diagnostic: string) {
+    const root = writeOverrideFixtureRepo(join(scratch, `malformed-${label}`), { [FIXTURE_DEP]: FIXTURE_VERSION });
+    writeAllowlist(root, [{ ...exemption("2026-01-01", "2099-01-01"), ...dates }]);
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain("dep-age-allowlist.json entries[0]");
+      expect(output).toContain(diagnostic);
+      expect(output).not.toContain("Exempted fresh pins");
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(2);
+    } finally {
+      registry.stop();
+    }
+  }
+
+  it("an invalid month", async () => {
+    await assertMalformed("month", { added: "2026-01-01", expires: "2099-13-01" },
+      '"expires" must be a calendar date string, YYYY-MM-DD');
+  }, 30_000);
+
+  it("an impossible day", async () => {
+    await assertMalformed("day", { added: "2026-02-30", expires: "2099-01-01" },
+      '"added" must be a calendar date string, YYYY-MM-DD');
+  }, 30_000);
+
+  it("an array date", async () => {
+    await assertMalformed("array", { added: "2026-01-01", expires: ["2099-01-01"] },
+      '"expires" must be a calendar date string, YYYY-MM-DD');
+  }, 30_000);
+
+  it("an expiry before the added date", async () => {
+    await assertMalformed("reversed", { added: "2099-01-02", expires: "2099-01-01" },
+      '"expires" (2099-01-01) must be after "added" (2099-01-02)');
   }, 30_000);
 });
 
