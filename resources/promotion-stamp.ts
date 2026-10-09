@@ -8,8 +8,8 @@ import { isJoinableTransaction } from "./request-transaction.js";
 // through its resource (safety, embedding, ownership and provenance still run).
 // Auto-promotion supplies its enumeration context: its Memory write used a
 // separate agentContext, so that enumeration snapshot cannot see the new row.
-// Manual promotion keeps the stamp in its own write transaction: it passes its
-// request context, and while that context's transaction is open the stamp joins it.
+// Manual promotion passes the context of the open transaction its Memory write
+// used, and the stamp joins it.
 export async function stampMemoryPromotion(id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, stagedContext?: any): Promise<void> {
   const table = (databases as any).flair.Memory;
   const stamp = (stored: any) => {
@@ -34,7 +34,9 @@ export async function stampMemoryPromotion(id: string, reviewerId: string, decid
 }
 
 /** Stamp after a successful Memory write. Failures must not abort a sweep or
- * leave a candidate pending (that re-writes the same claim next cycle). */
+ * leave a candidate pending (that re-writes the same claim next cycle).
+ * Auto-promotion uses this non-fatal wrapper; manual promotion calls
+ * stampMemoryPromotion directly, so a stamp failure fails that request. */
 export async function stampMemoryPromotionIsolated(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, stagedContext?: any,
 ): Promise<boolean> {

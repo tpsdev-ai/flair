@@ -180,14 +180,55 @@ describe("flair#2354 — the feed ingest write-back under a concurrent change (r
       expect(row?.instanceToken, "the competing incarnation token is kept, not reverted").toBe(TOKEN2);
     }, 60_000);
   }
+
+  for (const point of ["feed-ingest-pre", "feed-ingest"]) {
+    it(`an update that omits visibility keeps a concurrent shared -> private change (${point})`, async () => {
+      const id = `wbc-feed-vis-${point}`;
+      await insertRow(harper, { id, agentId: feedAgent.id, content: `feed vis v1 ${point}`, contentHash: id, instanceToken: randomUUID(), visibility: "shared" });
+      const { response, released, paused, competed } = await withPaused(
+        point,
+        () => authSend(harper, feedAgent, "POST", "/FeedMemories", { id, agentId: feedAgent.id, content: `feed vis v2 ${point}` }),
+        () => updateRow(harper, { id, visibility: "private" }),
+      );
+      expect(released, "the feed ingest was not paused and released by this test").toBe("go");
+      expect(paused).toBe(true);
+      expect(competed, "the competing visibility change was not applied").toBe(200);
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBe(200);
+      const row = await readRow(harper, id);
+      expect(row?.content, "the feed write landed").toBe(`feed vis v2 ${point}`);
+      expect(row?.visibility, "the concurrent private change is kept").toBe("private");
+    }, 60_000);
+  }
+
+  it("refuses a body embedding or embeddingModel with a named 400 and writes nothing", async () => {
+    const id = "wbc-feed-embedding";
+    await insertRow(harper, { id, agentId: feedAgent.id, content: "feed embedding v1", contentHash: id, instanceToken: randomUUID() });
+    const before = await readRow(harper, id);
+    const bodies = [
+      { id, agentId: feedAgent.id, content: "feed embedding v2", embedding: [0.5, 0.5, 0.5] },
+      { id, agentId: feedAgent.id, content: "feed embedding v2", embeddingModel: "foreign-model" },
+      { id: "wbc-feed-embedding-new", agentId: feedAgent.id, content: "feed embedding create", embedding: [0.5, 0.5, 0.5], embeddingModel: "foreign-model" },
+    ];
+    for (const body of bodies) {
+      const res = await authSend(harper, feedAgent, "POST", "/FeedMemories", body);
+      const text = await res.text();
+      expect(res.status, text.slice(0, 300)).toBe(400);
+      expect(JSON.parse(text).error).toBe("feed_embedding_not_writable");
+    }
+    expect(await readRow(harper, id)).toEqual(before);
+    expect(await readRow(harper, "wbc-feed-embedding-new")).toBeNull();
+  }, 60_000);
 });
 
 describe("flair#2354 — the admin reindex re-PUT write-back under a concurrent change (real Harper)", () => {
   for (const point of ["reindex-put-pre", "reindex-put"]) {
-    it(`keeps a competing content edit and applies _reindex (${point})`, async () => {
+    it(`keeps a competing content edit and stores no _reindex flag (${point})`, async () => {
       const agentId = `wbc-reindex-agent-${point}`;
       const id = `wbc-reindex-${point}`;
-      await insertRow(harper, { id, agentId, content: "reindex v1", contentHash: id });
+      // No instanceToken, and one undeclared field: the re-PUT generates the
+      // token and strips the field, as Memory.put()'s `_reindex` branch does.
+      await insertRow(harper, { id, agentId, content: "reindex v1", contentHash: id, undeclaredReindexProbe: "x" });
+      expect((await readRow(harper, id))?.undeclaredReindexProbe, "the undeclared field was stored before the reindex").toBe("x");
       const { response, released, paused } = await withPaused(
         point,
         () => authSend(harper, admin, "POST", "/MemoryReindex", { agentId }),
@@ -196,15 +237,55 @@ describe("flair#2354 — the admin reindex re-PUT write-back under a concurrent 
       expect(released, "the reindex write-back was not paused and released by this test").toBe("go");
       expect(paused).toBe(true);
       expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+      const body = await response.json() as any;
+      expect(body.stats.reindexed, JSON.stringify(body.stats)).toBe(1);
       const row = await readRow(harper, id);
-      console.log(`${point} reindex row:`, JSON.stringify({ content: row?.content, _reindex: row?._reindex }));
+      console.log(`${point} reindex row:`, JSON.stringify({ content: row?.content, _reindex: row?._reindex, instanceToken: row?.instanceToken }));
       expect(row?.content, "the competing content edit is kept, not reverted by the scan copy").toBe("reindex edited");
-      expect(row?._reindex, "the reindex re-PUT landed").toBe(true);
+      expect(row?._reindex ?? null, "the _reindex flag is not stored").toBeNull();
+      expect(row?.undeclaredReindexProbe ?? null, "the undeclared field is stripped").toBeNull();
+      expect(typeof row?.instanceToken === "string" && row.instanceToken.length > 0, "an absent instance token is generated").toBe(true);
     }, 60_000);
   }
 
 }
 );
+
+describe("flair#2354 — the embedding backfill after a Memory write (real Harper)", () => {
+  for (const point of ["backfill-embedding-pre", "backfill-embedding"]) {
+    it(`fills the embedding and keeps a competing content edit (${point})`, async () => {
+      const id = `wbc-backfill-${point}`;
+      // insertRow's 3-value embedding is below the backfill's length threshold.
+      await insertRow(harper, { id, agentId: reflectAgent.id, content: "backfill v1", contentHash: id, instanceToken: randomUUID() });
+      const { response, released, paused, competed } = await withPaused(
+        point,
+        () => authSend(harper, reflectAgent, "PATCH", `/Memory/${id}`, { subject: "backfill-subject" }),
+        () => updateRow(harper, { id, content: "backfill edited" }),
+      );
+      expect(paused).toBe(true);
+      // The backfill is not awaited by the PATCH request, so the release marker
+      // can be written after withPaused returns: read it until it is written.
+      let releaseMarker = released;
+      for (const until = Date.now() + 5_000; !releaseMarker && Date.now() < until;) {
+        await new Promise((r) => setTimeout(r, 25));
+        try { releaseMarker = readFileSync(join(pauseDir, `released.${point}`), "utf8"); } catch { releaseMarker = ""; }
+      }
+      expect(releaseMarker, "the embedding backfill was not paused and released by this test").toBe("go");
+      expect(competed, "the competing content edit was not applied").toBe(200);
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+      const deadline = Date.now() + 120_000;
+      let row = await readRow(harper, id);
+      while (!(Array.isArray(row?.embedding) && row.embedding.length > 100) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 250));
+        row = await readRow(harper, id);
+      }
+      console.log(`${point} backfill row:`, JSON.stringify({ content: row?.content, subject: row?.subject, dims: row?.embedding?.length }));
+      expect(row?.embedding?.length, "the backfill wrote a computed embedding").toBeGreaterThan(100);
+      expect(row?.content, "the competing content edit is kept").toBe("backfill edited");
+      expect(row?.subject, "the PATCH that triggered the backfill is kept").toBe("backfill-subject");
+    }, 180_000);
+  }
+});
 
 describe("flair#2354 — the last-reflected patch write-back under a concurrent change (real Harper)", () => {
   for (const point of ["last-reflected-pre", "last-reflected"]) {

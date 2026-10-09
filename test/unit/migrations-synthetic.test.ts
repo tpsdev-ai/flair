@@ -169,13 +169,14 @@ describe("synthetic migration — detect/run/marker convergence (the full runner
   });
 });
 
-describe("synthetic migration — write-back abort and retry (flair#2354)", () => {
-  it("aborts a staged write and retries from the committed row when a competing write lands after the read", async () => {
+describe("synthetic migration — simulated write-back retry (flair#2354)", () => {
+  it("with a simulated write-back, retries from the committed row when a competing write lands after the read", async () => {
     const { table, store } = makeFakeMemoryTable([
       { id: "s1", content: "x", agentId: RESERVED_TEST_AGENT_ID, source: "not-yet" },
     ]);
     // On the first attempt a competing writer commits a content change after
-    // this write-back's read; the helper aborts the staged write and retries.
+    // this write-back's read; the simulated write-back sees it at its
+    // confirmation read, skips that attempt's put and retries.
     const writeBack = makeFakeWriteBack({
       conflict: (attempt) => {
         if (attempt === 1) store.set("s1", { ...store.get("s1")!, content: "x-edited" });

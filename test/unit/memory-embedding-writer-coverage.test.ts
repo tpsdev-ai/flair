@@ -66,7 +66,7 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
 add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "usageCount bump: get-then-put re-writes the existing row's own stamp.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
-  "Admin re-embed re-PUT of an existing local row — re-stamps current / preserves, never external, through the shared write-back helper (flair#2354).");
+  "Admin reindex re-PUT of an existing local row through the shared write-back helper (flair#2354): echoes the stored embedding and embeddingModel; no re-embed.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Promotion status stamp: re-writes the existing local row through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.put#1"], "ECHO",
@@ -89,7 +89,7 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "EC
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Admin-only starter memories — the record carries no embedding/embeddingModel.");
 add("MemoryFeed", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
-  "Feed rows — the record carries no embedding/embeddingModel (written through the shared write-back helper, flair#2354).");
+  "Feed rows through the shared write-back helper (flair#2354): POST /FeedMemories refuses a body embedding or embeddingModel (400 feed_embedding_not_writable), so the record carries neither.");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "Dedup repair (flair#2358): read-modify-write re-writes the stored row's own stamp — only its expiresAt changes.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
@@ -115,7 +115,8 @@ add("hit-tracking", [
   "writer:table.put#1",
   "writer:table.delete#1",
 ], "OTHER_TABLE", "MemoryHitStat ledger and in-memory maps — not a Memory writer.");
-add("auth-middleware", ["writer:writeBackCommittedRow#1"], "NON_EMBED", "Auth bookkeeping backfill — non-embedding, through the shared write-back helper (flair#2354).");
+add("auth-middleware", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Embedding backfill through the shared write-back helper (flair#2354): writes a locally computed embedding vector and echoes the row's stored embeddingModel.");
 
 // ── OTHER_TABLE: conservative sink-enumeration false-positives ──
 add("AgentSeed", ["writer:(databases as any).flair.Agent.put#1", "writer:(databases as any).flair.Soul.put#1"], "OTHER_TABLE", "Agent/Soul tables.");

@@ -29,6 +29,7 @@
 import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
 import { writeBackCommittedRow } from "./write-back.js";
+import { buildReindexRow } from "./Memory.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
 
@@ -144,7 +145,14 @@ export class MemoryReindex extends Resource {
           const outcome = await writeBackCommittedRow(
             Memory,
             id,
-            (record: any) => (record ? { write: { ...record, _reindex: true } } : { skip: true }),
+            (record: any) => {
+              if (!record) return { skip: true };
+              // Built by the function Memory.put()'s `_reindex` branch uses,
+              // from this transaction's read.
+              const built = buildReindexRow({ ...record, _reindex: true }, record);
+              if (!("row" in built)) throw new Error(`${built.error}: ${built.message}`);
+              return { write: built.row };
+            },
             { ctx, label: "MemoryReindex", pausePre: "reindex-put-pre", pausePoint: "reindex-put", expectedRow: selectedRows.get(id) },
           );
           if ("skip" in outcome) { stats.errors++; continue; }

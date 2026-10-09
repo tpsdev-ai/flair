@@ -610,6 +610,65 @@ function reindexDrift(content: any, existing: Record<string, any>): string | nul
   return null;
 }
 
+/** The row a `_reindex` re-PUT writes over `existing` (the stored row), or its
+ *  refusal. Memory.put()'s `_reindex` branch and the MemoryReindex write-back
+ *  both build their row here (flair#2354). */
+export function buildReindexRow(
+  content: any,
+  existing: Record<string, any> | null | undefined,
+): { row: Record<string, any> } | { status: 404 | 409; error: string; message: string } {
+  delete content._reindex;
+  // A1' item 1: the reindex branch keeps declared and named retained
+  // attributes. Pinned by test/unit/memory-host-source.test.ts
+  // (r20-put-reindex) — RED if this call is removed.
+  stripUndeclaredMemoryAttributes(content);
+  // A1-iv items 1/3: strip a client-supplied server-stamped field, then
+  // PRESERVE the existing row's incarnation token (reindex is a re-PUT of
+  // an existing row, never a reincarnation).
+  const reindexBody = { ...content };
+  stripServerStampedFields(content);
+  // A reindex is a re-PUT of an EXISTING row, so an absent stored row is
+  // refused — it is never re-created/re-stamped.
+  if (!existing) {
+    return { status: 404, error: "reindex_row_not_found", message: "the _reindex re-PUT requires an existing stored row" };
+  }
+  const drift = reindexDrift(reindexBody, existing);
+  if (drift) {
+    return { status: 409, error: "reindex_would_change_row", message: `the _reindex re-PUT may not change '${drift}'` };
+  }
+  stampInstanceToken(content, existing);
+  for (const field of REINDEX_PROTECTED_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(content, field) && existing[field] !== undefined) {
+      content[field] = existing[field];
+    }
+  }
+  // Keep the EXISTING row's STORED provenance byte-for-byte. The rest of
+  // the row is filtered above and may gain an absent incarnation token.
+  // The body's provenance was stripped above so it cannot be forged;
+  // restoring it from `existing` (never from the submitted value)
+  // keeps provenance byte-identical across a corpus-wide reindex.
+  // Pinned by test/unit/memory-host-source.test.ts (r20-put-reindex) — RED
+  // if this restore is removed.
+  if (typeof existing.provenance === "string") {
+    content.provenance = existing.provenance;
+  }
+  // flair#1965: a reindex is a re-PUT of an EXISTING row (an UPDATE), so the
+  // row's stored originatorInstanceId stands; a body value is dropped, and a
+  // legacy row with no value is left un-stamped. See
+  // resources/originator-instance.ts.
+  keepStoredOriginator(content, existing);
+  // The receiver-side federation bookkeeping likewise stands as stored.
+  applyFederationBookkeeping(content, existing);
+  // Preserve stored visibility on updates before applying write policy:
+  // a reindex payload that omits it keeps the record's stored value.
+  if (content.visibility === undefined || content.visibility === null) {
+    if (existing.visibility === PRIVATE_VISIBILITY || existing.visibility === SHARED_VISIBILITY) {
+      content.visibility = existing.visibility;
+    }
+  }
+  return { row: content };
+}
+
 /** Aborts the close's owned transaction: the row changed after the transaction read it. */
 class CloseTargetChanged extends Error {}
 
@@ -1790,16 +1849,6 @@ export class Memory extends (databases as any).flair.Memory {
           headers: { "Content-Type": "application/json" },
         });
       }
-      delete content._reindex;
-      // A1' item 1: the reindex branch keeps declared and named retained
-      // attributes. Pinned by test/unit/memory-host-source.test.ts
-      // (r20-put-reindex) — RED if this call is removed.
-      stripUndeclaredMemoryAttributes(content);
-      // A1-iv items 1/3: strip a client-supplied server-stamped field, then
-      // PRESERVE the existing row's incarnation token (reindex is a re-PUT of
-      // an existing row, never a reincarnation).
-      const reindexBody = { ...content };
-      stripServerStampedFields(content);
       // flair#1965 r3: resolve the stored row by the URL-BOUND target id (never a
       // body id alone); a body id that disagrees with the address, or a lookup
       // that FAILS, refuses the reindex. A reindex is a re-PUT of an EXISTING
@@ -1808,56 +1857,12 @@ export class Memory extends (databases as any).flair.Memory {
       // resources/originator-instance.ts's resolveStoredRow.
       const resolvedReindex = await resolveStoredRow(this, "Memory", content, () => super.get());
       if (resolvedReindex.denial) return resolvedReindex.denial;
-      const reindexExisting = resolvedReindex.row;
-      if (!reindexExisting) {
+      const built = buildReindexRow(content, resolvedReindex.row);
+      if (!("row" in built)) {
         return new Response(
-          JSON.stringify({
-            error: "reindex_row_not_found",
-            message: "the _reindex re-PUT requires an existing stored row",
-          }),
-          { status: 404, headers: { "content-type": "application/json" } },
+          JSON.stringify({ error: built.error, message: built.message }),
+          { status: built.status, headers: { "content-type": "application/json" } },
         );
-      }
-      const drift = reindexDrift(reindexBody, reindexExisting);
-      if (drift) {
-        return new Response(
-          JSON.stringify({
-            error: "reindex_would_change_row",
-            message: `the _reindex re-PUT may not change '${drift}'`,
-          }),
-          { status: 409, headers: { "content-type": "application/json" } },
-        );
-      }
-      stampInstanceToken(content, reindexExisting);
-      for (const field of REINDEX_PROTECTED_FIELDS) {
-        if (!Object.prototype.hasOwnProperty.call(content, field) && reindexExisting[field] !== undefined) {
-          content[field] = reindexExisting[field];
-        }
-      }
-      // Keep the EXISTING row's STORED provenance byte-for-byte. The rest of
-      // the row is filtered above and may gain an absent incarnation token.
-      // The body's provenance was stripped above so it cannot be forged;
-      // restoring it from `reindexExisting` (never from the submitted value)
-      // keeps provenance byte-identical across a corpus-wide reindex.
-      // Pinned by test/unit/memory-host-source.test.ts (r20-put-reindex) — RED
-      // if this restore is removed.
-      if (reindexExisting && typeof reindexExisting.provenance === "string") {
-        content.provenance = reindexExisting.provenance;
-      }
-      // flair#1965: a reindex is a re-PUT of an EXISTING row (an UPDATE), so the
-      // row's stored originatorInstanceId stands; a body value is dropped, and a
-      // legacy row with no value is left un-stamped. See
-      // resources/originator-instance.ts.
-      keepStoredOriginator(content, reindexExisting);
-      // The receiver-side federation bookkeeping likewise stands as stored.
-      applyFederationBookkeeping(content, reindexExisting);
-      // Preserve stored visibility on updates before applying write policy:
-      // a reindex payload that omits it keeps the record's stored value.
-      if (content.visibility === undefined || content.visibility === null) {
-        const stored = await super.get();
-        if (stored && (stored.visibility === PRIVATE_VISIBILITY || stored.visibility === SHARED_VISIBILITY)) {
-          content.visibility = stored.visibility;
-        }
       }
       const reindexed = await super.put(content);
       noteMemoryUpsert(content);

@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { Memory } from "./Memory.js";
 import { MemoryCandidate } from "./MemoryCandidate.js";
-import { stampMemoryPromotionIsolated } from "./promotion-stamp.js";
+import { stampMemoryPromotion } from "./promotion-stamp.js";
+import { withSharedWriteTransaction } from "./request-transaction.js";
 import { derivePromotedTags, derivePromotedVisibility, validateHumanReviewerId, type SourceMemoryFetch } from "../src/rem/promote-policy.js";
 
 const error = (status: number, message: string) => new Response(JSON.stringify({ error: message }), {
@@ -50,13 +51,20 @@ export class PromoteMemoryCandidate extends Resource {
     const visibility = derivePromotedVisibility(candidate);
     const decidedAt = new Date().toISOString();
     const memoryId = `${candidate.agentId}-promoted-${randomUUID()}`;
-    const written = await (Memory as any).put({
-      id: memoryId, agentId: candidate.agentId, content: candidate.claim, durability: "persistent",
-      ...(visibility ? { visibility } : {}), tags: tags.tags,
-      derivedFrom: candidate.sourceMemoryIds ?? [], createdAt: decidedAt,
-    }, ctx);
+    // The Memory write and its verdict stamp share one transaction (the
+    // request's while it is open): a stamp failure fails this request and the
+    // Memory write rolls back with it.
+    const written = await withSharedWriteTransaction(ctx, async (shared) => {
+      const result = await (Memory as any).put({
+        id: memoryId, agentId: candidate.agentId, content: candidate.claim, durability: "persistent",
+        ...(visibility ? { visibility } : {}), tags: tags.tags,
+        derivedFrom: candidate.sourceMemoryIds ?? [], createdAt: decidedAt,
+      }, shared);
+      if (result instanceof Response && !result.ok) return result;
+      await stampMemoryPromotion(memoryId, reviewerId, decidedAt, undefined, shared);
+      return result;
+    });
     if (written instanceof Response && !written.ok) return written;
-    await stampMemoryPromotionIsolated(memoryId, reviewerId, decidedAt, undefined, ctx);
     await (databases as any).flair.MemoryCandidate.put({
       ...candidate, status: "promoted", target: "memory", reviewerId,
       reviewRationale: data.rationale, decidedAt,

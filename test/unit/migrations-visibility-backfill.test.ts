@@ -377,13 +377,14 @@ describe("visibility-backfill migration — candidate query shape", () => {
   });
 });
 
-describe("visibility-backfill migration — write-back abort and retry (flair#2354)", () => {
-  it("aborts a staged write and retries from the committed row when a competing write lands after the read", async () => {
+describe("visibility-backfill migration — simulated write-back retry (flair#2354)", () => {
+  it("with a simulated write-back, retries from the committed row when a competing write lands after the read", async () => {
     const { table, store } = makeFakeMemoryTable([
       { id: "m1", content: "a", durability: "standard" },
     ]);
     // On the first attempt a competing writer commits a durability change after
-    // this write-back's read; the helper aborts the staged write and retries.
+    // this write-back's read; the simulated write-back sees it at its
+    // confirmation read, skips that attempt's put and retries.
     const writeBack = makeFakeWriteBack({
       conflict: (attempt) => {
         if (attempt === 1) store.set("m1", { ...store.get("m1")!, durability: "permanent" });
@@ -393,7 +394,7 @@ describe("visibility-backfill migration — write-back abort and retry (flair#23
     const result = await m.run(50);
     expect(result.processed).toBe(1);
     expect(new Set(result.touchedIds)).toEqual(new Set(["m1"]));
-    // The first attempt derived "private"; it was aborted. The retry derived
+    // The first attempt derived "private"; it was not written. The retry derived
     // from the committed (permanent) row, so the stored value is "shared".
     expect(store.get("m1")!.visibility).toBe("shared");
     expect(store.get("m1")!.durability).toBe("permanent");

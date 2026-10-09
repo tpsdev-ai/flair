@@ -1,13 +1,15 @@
 /**
  * stampMemoryPromotion failure after a successful Memory write must not abort
  * the auto-promote sweep or leave the candidate pending (Bugbot Medium on
- * #1534). Isolated: owns the harper + Memory mocks.
+ * #1534); on the manual path it fails the request (flair#2354). Isolated: owns
+ * the harper + Memory mocks.
  */
 import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 
 const candidatePuts: any[] = [];
 const memoryPuts: any[] = [];
+const stampReadContexts: any[] = [];
 
 // Model Harper's global transaction (the write-back helper reaches it there).
 const txn = installFakeHarperTransaction(() => {});
@@ -52,7 +54,7 @@ mock.module("harper", () => ({
       // Stamp reads the raw table. Returning null makes stampMemoryPromotion
       // throw — the Isolated wrapper must catch that.
       Memory: {
-        get: async () => null,
+        get: async (_id: string, ctx?: any) => { stampReadContexts.push(ctx); return null; },
         put: async () => { throw new Error("stamp put should not run when get misses"); },
       },
     },
@@ -75,6 +77,7 @@ const { PromoteMemoryCandidate } = await import("../../resources/PromoteMemoryCa
 beforeEach(() => {
   candidatePuts.length = 0;
   memoryPuts.length = 0;
+  stampReadContexts.length = 0;
 });
 
 describe("stampMemoryPromotionIsolated", () => {
@@ -98,14 +101,15 @@ describe("AutoPromoteCandidates stamp isolation", () => {
   });
 });
 
-describe("PromoteMemoryCandidate stamp isolation", () => {
-  test("a stamp failure still marks the candidate promoted so a retry is 409, not a second write", async () => {
+describe("PromoteMemoryCandidate stamp failure", () => {
+  test("with the request transaction open, a stamp failure fails the request and leaves the candidate pending", async () => {
     const r: any = new (PromoteMemoryCandidate as any)();
-    r.getContext = () => ({ request: { tpsAgent: "alice", tpsAgentIsAdmin: false } });
-    const result = await r.post({ candidateId: "cand-manual", rationale: "reviewed the claim" });
-    expect(result.memoryId).toBeDefined();
-    expect(result.candidateId).toBe("cand-manual");
-    expect(candidatePuts.at(-1)?.status).toBe("promoted");
-    expect(candidatePuts.at(-1)?.id).toBe("cand-manual");
+    // A modelled open request transaction (the shape isJoinableTransaction
+    // accepts), so the stamp takes its in-transaction branch.
+    const ctx = { request: { tpsAgent: "alice", tpsAgentIsAdmin: false }, transaction: { open: 1 } };
+    r.getContext = () => ctx;
+    await expect(r.post({ candidateId: "cand-manual", rationale: "reviewed the claim" })).rejects.toThrow("was not written");
+    expect(stampReadContexts).toEqual([ctx]);
+    expect(candidatePuts).toHaveLength(0);
   });
 });

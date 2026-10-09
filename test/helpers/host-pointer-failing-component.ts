@@ -115,6 +115,29 @@ MemoryHostSource.search = function (query, ...rest) {
 };
 `;
 
+/** Where a composed copy writes the failing promotion-stamp module: a
+ *  top-level built resource file, loaded with the rest of `dist/resources`. */
+export const FAILING_STAMP_MODULE_REL = join("dist", "resources", "zz-test-failing-promotion-stamp.js");
+
+/** A test-only module for a composed copy (see
+ *  `componentWithFailingPromotionStamp`): a Memory table write that carries an
+ *  approved promotion verdict for an agent whose id contains
+ *  `stamp-failure` throws. The message says whether the write's context
+ *  carried an open, joinable transaction (the shape `isJoinableTransaction`
+ *  accepts), so a test can assert which stamp branch it reached. */
+export const FAILING_STAMP_MODULE_SRC = `import { databases } from "harper";
+const { Memory } = databases.flair;
+const memoryPut = Memory.put;
+Memory.put = function (record, ...rest) {
+  if (record?.promotionStatus === "approved" && typeof record?.agentId === "string" && record.agentId.includes("stamp-failure")) {
+    const t = rest[0]?.transaction;
+    const open = !!t && t.open === 1 && !t.saveCommits;
+    throw new Error("test component: forced promotion stamp failure (" + (open ? "transaction open" : "no open transaction") + ")");
+  }
+  return memoryPut.call(this, record, ...rest);
+};
+`;
+
 function repoRoot(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
@@ -151,4 +174,10 @@ export function componentWithFailingHostPointer(opts: { sourceRoot?: string } = 
  *  concurrent-write module (CONCURRENT_WRITE_MODULE_SRC). */
 export function componentWithConcurrentWrites(opts: { sourceRoot?: string } = {}): FailingComponent {
   return composeComponent({ [CONCURRENT_WRITE_MODULE_REL]: CONCURRENT_WRITE_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
+}
+
+/** A composed copy that keeps every built resource and adds the failing
+ *  promotion-stamp module (FAILING_STAMP_MODULE_SRC). */
+export function componentWithFailingPromotionStamp(opts: { sourceRoot?: string } = {}): FailingComponent {
+  return composeComponent({ [FAILING_STAMP_MODULE_REL]: FAILING_STAMP_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
 }

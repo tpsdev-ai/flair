@@ -68,6 +68,15 @@ export class FeedMemories extends Resource {
     const attr = stampAttribution(auth, content, 'agentId', 'stamp-strict', 'forbidden: cannot attribute a feed memory to another agent');
     if (attr.denied) return attr.denied;
 
+    // The feed writes the raw table without the embedding-space latch, so a
+    // body may not supply the embedding stamp.
+    if (content?.embedding !== undefined || content?.embeddingModel !== undefined) {
+      return Response.json({
+        error: "feed_embedding_not_writable",
+        message: "a feed write may not set embedding or embeddingModel; omit both fields",
+      }, { status: 400 });
+    }
+
     // Guard against body-supplied id targeting another agent's record.
     const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => null);
     if (resolvedExisting.denial) return resolvedExisting.denial;
@@ -77,6 +86,10 @@ export class FeedMemories extends Resource {
       (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
       content.id = urlTargetId;
     }
+    // An omitted visibility keeps the stored row's private/shared value: copied
+    // here for the checks below, and taken again for the write itself from the
+    // row the write-back reads inside its transaction.
+    const visibilityOmitted = content?.visibility === undefined || content?.visibility === null;
     if (content?.id) {
       if (existingRecord && existingRecord.agentId !== content.agentId) {
         return FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
@@ -291,6 +304,17 @@ export class FeedMemories extends Resource {
           return { skip: true };
         }
         const written: Record<string, any> = { ...record };
+        if (visibilityOmitted) {
+          const stored = priorById?.visibility;
+          if (stored === PRIVATE_VISIBILITY || stored === SHARED_VISIBILITY) written.visibility = stored;
+          else if (durability === "ephemeral") written.visibility = PRIVATE_VISIBILITY;
+          else delete written.visibility;
+          const tierError = assertVisibilityAllowedForDurability(durability, written.visibility);
+          if (tierError) {
+            refusal = Response.json({ error: "invalid_visibility_for_durability", message: tierError }, { status: 400 });
+            return { skip: true };
+          }
+        }
         written.instanceToken = priorById?.instanceToken ?? randomUUID();
         // Feed ingest is a full-row write: it REPLACES the stored row, so a
         // re-ingest with new content is a semantic re-authoring. Re-stamp

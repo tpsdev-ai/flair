@@ -36,8 +36,6 @@ const add = (file: string, sites: string[], reason: string) => {
 add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#2"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
-add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
-  "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the write-back through the shared helper (flair#1542, #2354).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Dedup expiry repair (flair#2358): re-writes the row read in its transaction with expiresAt set; content and tags stay as stored.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
@@ -70,6 +68,8 @@ add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(
   "Read-only table alias (get/search) — no write through this handle.");
 
 // ── Non-skill writers in other modules ──
+add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+  "Non-skill feed write through the shared write-back helper (flair#2354); a skill-tagged feed write returns earlier through the skill version writer (FeedMemories.post's isSkillWrite branch).");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "Maintenance (archive/expiry) — non-skill.");
 add("MemoryMaintenance", ["writer:table.delete#1"],
@@ -83,7 +83,7 @@ add("MemoryPurge", ["alias-source:(databases as any).flair?.Memory#1"],
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"],
-  "Admin-only re-embed re-PUT (reindex_admin_only gate) — preserves existing content, not a new skill write, through the shared write-back helper (flair#2354).");
+  "Admin-only reindex re-PUT through the shared write-back helper (flair#2354): re-writes the row it reads, not a new skill write.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
   "writer:this.cache.delete#1",

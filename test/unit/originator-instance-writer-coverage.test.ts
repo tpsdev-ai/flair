@@ -44,9 +44,8 @@ const RAW_WRITE_RE = new RegExp(
 /**
  * A synced-table write routed through the shared write-back helper (flair#2354),
  * whose table is passed literally at the call (`writeBackCommittedRow(\n
- * (databases as any).flair.Memory, ...`). Keyed as `<file>|<table>|write-back`.
- * Its `plan` runs the originator rule for a create, so it is enumerated and
- * classified like any other raw synced-table writer.
+ * (databases as any).flair.Memory, ...`). Keyed as `<file>|<table>|write-back`
+ * and classified like any other raw synced-table writer.
  */
 const WRITE_BACK_RE = new RegExp(
   `writeBackCommittedRow\\s*\\([^;]{0,240}?\\.flair\\.(${SYNCED_TABLES.join("|")})\\b`,

@@ -7,13 +7,13 @@
  * A unit test that mocks `harper` with an in-memory table must therefore model
  * it, or the helper refuses (A7: no unwrapped write).
  *
- * This installs a model of Harper's transaction that matches the helper's
- * contract: a write made with the transaction context (the object the callback
- * receives) is STAGED; get() still returns the committed store, so a staged
- * write is invisible to the committed re-read; the staged writes land when the
- * callback resolves and are discarded if it throws (abort). A test's fake
- * table's put() calls `stage()` and, when it returns true, leaves the commit to
- * this model.
+ * This installs a simulation of Harper's transaction: while a transaction
+ * callback is running, every `stage()` call is staged, whatever context the
+ * write carries (the simulation does not check it); get() still returns the
+ * committed store, so a staged write is invisible to the committed re-read;
+ * the staged writes land when the callback resolves and are discarded if it
+ * throws. A test's fake table's put() calls `stage()` and, when it returns
+ * true, leaves the commit to this simulation.
  */
 export function installFakeHarperTransaction(commit: (id: string, row: any) => void) {
   const saved = (globalThis as { transaction?: unknown }).transaction;
@@ -30,8 +30,8 @@ export function installFakeHarperTransaction(commit: (id: string, row: any) => v
     }
   };
   return {
-    /** Stage a write when inside the owned transaction; a plain write (outside
-     *  one) returns false and the caller commits it itself. */
+    /** Stage a write while a transaction callback is running; outside one it
+     *  returns false and the caller commits the write itself. */
     stage(id: string, row: any): boolean {
       if (!staged) return false;
       staged.set(id, row);
