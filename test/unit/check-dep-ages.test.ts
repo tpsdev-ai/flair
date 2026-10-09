@@ -19,7 +19,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectDeps,
   collectNonExactOverrides,
@@ -525,6 +525,44 @@ describe("CLI — override forms", () => {
       registry.stop();
     }
   }, 30_000);
+});
+
+describe("CLI — malformed exemption metadata", () => {
+  const cases: [string, Record<string, unknown>, string][] = [
+    ["missing ghsa", { ghsa: undefined }, '"ghsa" must name at least one GHSA advisory id'],
+    ["empty ghsa", { ghsa: "" }, '"ghsa" must name at least one GHSA advisory id'],
+    ["empty ghsa array", { ghsa: [] }, '"ghsa" must name at least one GHSA advisory id'],
+    ["non-GHSA-shaped ghsa", { ghsa: "CVE-2026-1234" }, '"ghsa" must name at least one GHSA advisory id'],
+    ["empty reason", { reason: "" }, '"reason" must be a non-empty string'],
+    ["whitespace reason", { reason: " \t " }, '"reason" must be a non-empty string'],
+    ["missing reason", { reason: undefined }, '"reason" must be a non-empty string'],
+    ["empty package", { package: "" }, '"package" must be a non-empty string'],
+    ["missing package", { package: undefined }, '"package" must be a non-empty string'],
+    ["empty version", { version: "" }, '"version" must be a non-empty string'],
+    ["missing version", { version: undefined }, '"version" must be a non-empty string'],
+  ];
+
+  for (const [label, fields, diagnostic] of cases) {
+    it(`exits 2 for ${label}, naming the field, before fetching`, async () => {
+      const root = writeOverrideFixtureRepo(join(scratch, `metadata-${label}`), { [FIXTURE_DEP]: FIXTURE_VERSION });
+      writeAllowlist(root, [{ ...exemption("2026-01-01", "2099-01-01"), ...fields }]);
+      const recorder = join(root, "fetch-recorder.mjs");
+      writeFileSync(recorder, `globalThis.fetch = async () => {
+        process.stderr.write("REGISTRY_FETCH\\n");
+        return Response.json({ time: { "${FIXTURE_VERSION}": new Date().toISOString() } });
+      };`);
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
+        NODE_OPTIONS: `--import=${pathToFileURL(recorder).href}`,
+      });
+      expect(output).toContain("dep-age-allowlist.json entries[0]");
+      expect(output).toContain(diagnostic);
+      expect(output).not.toContain("Exempted fresh pins");
+      expect(output).not.toContain("REGISTRY_FETCH");
+      expect(exitCode).toBe(2);
+    }, 30_000);
+  }
 });
 
 describe("CLI — a malformed exemption date fails the gate", () => {
