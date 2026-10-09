@@ -1,7 +1,7 @@
 // ─── flair#2139 S1 — the shared InstructionVersion append helper ─────────────
 //
 import { describe, expect, test, beforeEach } from "bun:test";
-import { mock } from "bun:test";
+import { mock, spyOn } from "bun:test";
 
 type Row = Record<string, any>;
 const store = new Map<string, Row>();
@@ -10,6 +10,7 @@ const locks = new Set<string>();
 let onBlocked: (() => void) | undefined;
 let pausePatch: (() => Promise<void>) | undefined;
 let soulReads = 0;
+let forceCommitChange: Row | undefined;
 let hideHead = false;
 let failNextAppend = false;
 let failNextCommit = false;
@@ -58,9 +59,15 @@ class BaseSoul {
   getId() { return this.id; }
   static async get(id: string, ctx: any) {
     expect(locks.size).toBeGreaterThan(0);
-    expect(ctx?.transaction?.open).toBe(1);
-    soulReads++;
-    return (ctx?.transaction?.souls ?? soulStore).get(id) ?? null;
+    if (ctx?.transaction) {
+      // The in-transaction read: this transaction's snapshot.
+      expect(ctx.transaction.open).toBe(1);
+      soulReads++;
+      return (ctx.transaction.souls ?? soulStore).get(id) ?? null;
+    }
+    // The committed confirmation read: an explicit fresh context, no transaction.
+    if (forceCommitChange) return { ...(soulStore.get(id) ?? {}), ...forceCommitChange };
+    return soulStore.get(id) ?? null;
   }
   static async *search(query: any, ctx: any): AsyncGenerator<Row> {
     expect(locks.size).toBeGreaterThan(0);
@@ -78,15 +85,21 @@ class BaseSoul {
     if (pausePatch) await pausePatch();
     return rows.get(this.id);
   }
+  static async put(row: Row, ctx: any): Promise<void> {
+    const rows = ctx?.transaction?.souls ?? soulStore;
+    rows.set(row.id, { ...row });
+    if (pausePatch) await pausePatch();
+  }
   async delete(target?: any) {
     if (target?.isCollection) this.ctx.transaction.souls.clear();
     else this.ctx.transaction.souls.delete(this.id);
   }
 }
 const empty = { async *search() {} };
+const flairTables = { InstructionVersion: InstructionVersionTable, Soul: BaseSoul as any, Memory: empty, MemoryCandidate: empty, Instance: empty };
 mock.module("harper", () => ({
   Resource: class {}, server: { http() {} },
-  databases: { flair: { InstructionVersion: InstructionVersionTable, Soul: BaseSoul, Memory: empty, MemoryCandidate: empty, Instance: empty } },
+  databases: { flair: flairTables },
 }));
 
 function mockTransaction(ctx: any, cb: (txn: any) => any): any {
@@ -139,12 +152,14 @@ function input(overrides: Row = {}): any {
 }
 
 beforeEach(() => {
+  flairTables.Soul = BaseSoul;
   store.clear();
   soulStore.clear();
   locks.clear();
   pausePatch = undefined;
   onBlocked = undefined;
   soulReads = 0;
+  forceCommitChange = undefined;
   hideHead = false;
   failNextAppend = false;
   failNextCommit = false;
@@ -462,6 +477,65 @@ describe("Soul resource version snapshots", () => {
     expect(JSON.parse(versions[1].soulSnapshot).value).toBe("after");
     expect(JSON.parse(versions[1].soulSnapshot).durability).toBe("persistent");
     expect(JSON.parse(versions[1].soulSnapshot).originatorInstanceId).toBeUndefined();
+  }, 3000);
+
+  for (const missing of ["get", "put", "table"]) {
+    test(`a Soul PATCH without the static ${missing} capability is refused before writing`, async () => {
+      const id = "agent-a:role";
+      const stored = { id, agentId: "agent-a", key: "role", value: "before", createdAt: NOW };
+      soulStore.set(id, stored);
+      const staticWrite = spyOn(BaseSoul, "put");
+      const resourceWrite = spyOn(BaseSoul.prototype, "put");
+      flairTables.Soul = missing === "table" ? null : {
+        get: missing === "get" ? undefined : BaseSoul.get,
+        put: missing === "put" ? undefined : BaseSoul.put,
+      };
+      try {
+        const result = await soul(id).patch({ value: "after" });
+        expect(result).toBeInstanceOf(Response);
+        expect(result.status).toBe(503);
+        expect(await result.json()).toEqual({ error: "soul_patch_table_unavailable" });
+        expect(staticWrite).not.toHaveBeenCalled();
+        expect(resourceWrite).not.toHaveBeenCalled();
+        expect(soulStore.get(id)).toEqual(stored);
+        expect(store.size).toBe(0);
+      } finally {
+        flairTables.Soul = BaseSoul;
+        staticWrite.mockRestore();
+        resourceWrite.mockRestore();
+      }
+    });
+  }
+
+  test("a Soul PATCH whose committed row keeps changing exhausts its attempts with a named conflict", async () => {
+    const id = "agent-a:role";
+    const stored = { id, agentId: "agent-a", key: "role", value: "before", durability: "permanent", createdAt: NOW };
+    soulStore.set(id, stored);
+    // Every confirmation read sees a committed row that differs from the
+    // attempt's read, so the PATCH never confirms and runs out of attempts.
+    forceCommitChange = { updatedAt: "2026-01-01T00:00:00.000Z" };
+    const result = await soul(id).patch({ value: "after" });
+    expect(result instanceof Response).toBe(true);
+    expect(result.status).toBe(409);
+    expect(await result.clone().json()).toEqual({ error: "soul_patch_conflict" });
+    // Every attempt aborted: the row and the history are unchanged.
+    expect(soulStore.get(id)).toEqual(stored);
+    expect(store.size).toBe(0);
+  }, 3000);
+
+  test("a Soul PATCH whose committed row is replaced by a different subject is refused", async () => {
+    const id = "agent-a:role";
+    const stored = { id, agentId: "agent-a", key: "role", value: "before", createdAt: NOW };
+    soulStore.set(id, stored);
+    // The committed row now belongs to a different subject (agentId + key).
+    forceCommitChange = { agentId: "agent-b", key: "role", value: "replaced" };
+    const result = await soul(id).patch({ value: "after" });
+    expect(result instanceof Response).toBe(true);
+    expect(result.status).toBe(409);
+    expect(await result.clone().json()).toEqual({ error: "soul_patch_row_changed" });
+    // The PATCH wrote nothing: the stored row and the history are unchanged.
+    expect(soulStore.get(id)).toEqual(stored);
+    expect(store.size).toBe(0);
   }, 3000);
 
   test("snapshot serialization failure aborts the staged Soul write and append", async () => {

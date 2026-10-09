@@ -30,3 +30,8 @@ ui/office-space*.html
 .env.*
 !.env.example
 .venv/
+
+# PR draft bodies — scratch, not documentation (flair#2404). Root-anchored so a
+# nested file with the same name stays trackable.
+/pr-body.md
+/pr-body.new.md

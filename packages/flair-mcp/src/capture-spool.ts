@@ -46,8 +46,11 @@ export const CAPTURE_FLUSH_COOLDOWN_MS = 1000;
 /** The largest hook payload read from stdin; a larger one is not captured. */
 export const CAPTURE_STDIN_MAX_BYTES = 1 * 1024 * 1024;
 
-/** How long a hook waits for the per-agent lock before it captures nothing. */
+/** Default append-lock wait for Stop, PostToolUse and flush snapshot/rewrite. */
 export const CAPTURE_LOCK_WAIT_MS = 200;
+
+/** Failed-tool append lock wait; refusal if the lock remains busy. */
+export const CAPTURE_PENDING_LOCK_WAIT_MS = 2000;
 
 export const CAPTURE_LOCK_STALE_MS = 5000;
 
@@ -113,13 +116,17 @@ interface LockAcquireState { stuckTakeover: boolean; warn: (message: string) => 
 const LOCK_BUSY: unique symbol = Symbol("capture-lock-busy");
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
-/** Run `fn` holding the per-agent lock (an exclusively created file), or
- *  return LOCK_BUSY when it is not free within CAPTURE_LOCK_WAIT_MS. */
-function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }): T | typeof LOCK_BUSY {
+/** Run `fn` holding the per-agent lock, or return LOCK_BUSY after `waitMs`. */
+function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }, waitMs: number = CAPTURE_LOCK_WAIT_MS, markFirstAttempt = false): T | typeof LOCK_BUSY {
   ensureCaptureDir(dir);
-  const deadline = Date.now() + CAPTURE_LOCK_WAIT_MS;
+  const deadline = Date.now() + waitMs;
+  let firstAttempt = true;
   for (;;) {
     const held = acquireSpoolLock(dir, agentId, console.warn, lockPath(dir, agentId), CAPTURE_LOCK_STALE_MS, false, 0, state);
+    if (firstAttempt && markFirstAttempt) {
+      try { writeFileSync(join(dir, ".first-lock-attempt"), "attempted", { flag: "wx", mode: 0o600 }); } catch {}
+    }
+    firstAttempt = false;
     if (held) {
       try {
         return fn();
@@ -132,13 +139,14 @@ function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: Lo
   }
 }
 
-/** `fn` under the lock; "refused" when the lock is busy or `fn` throws. */
-function underLock<T extends string>(dir: string, agentId: string, fn: () => T): T | "refused" {
+type LockRefusal = { reason: "lock_busy" } | { reason: "write_failed"; code: string };
+
+function underLock<T extends string>(dir: string, agentId: string, fn: () => T, waitMs: number = CAPTURE_LOCK_WAIT_MS, markFirstAttempt = false): T | LockRefusal {
   try {
-    const result = withCaptureLock(dir, agentId, fn);
-    return result === LOCK_BUSY ? "refused" : result;
-  } catch {
-    return "refused";
+    const result = withCaptureLock(dir, agentId, fn, undefined, waitMs, markFirstAttempt);
+    return result === LOCK_BUSY ? { reason: "lock_busy" } : result;
+  } catch (error) {
+    return { reason: "write_failed", code: (error as NodeJS.ErrnoException)?.code ?? "UNKNOWN" };
   }
 }
 
@@ -217,7 +225,8 @@ function trimRecords(records: CaptureSpoolRecord[]): CaptureSpoolRecord[] {
  * staged. Returns "appended", "deduplicated" or "refused".
  */
 export function appendRecord(dir: string, agentId: string, candidate: CaptureCandidate): "appended" | "deduplicated" | "refused" {
-  return underLock(dir, agentId, () => appendRecordLocked(dir, agentId, candidate));
+  const result = underLock(dir, agentId, () => appendRecordLocked(dir, agentId, candidate));
+  return typeof result === "string" ? result : "refused";
 }
 
 function appendRecordLocked(dir: string, agentId: string, candidate: CaptureCandidate): "appended" | "deduplicated" {
@@ -307,7 +316,13 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
     const result = underLock(dir, agentId, () => {
       writePendingLocked(dir, agentId, [...readPending(dir, agentId), error]);
       return "error-recorded" as const;
-    });
+    }, CAPTURE_PENDING_LOCK_WAIT_MS, env.FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT === "1");
+    if (typeof result !== "string") {
+      (deps.warn ?? console.warn)(result.reason === "lock_busy"
+        ? `capture: a failed call was not recorded; append lock busy for ${CAPTURE_PENDING_LOCK_WAIT_MS} ms`
+        : `capture: could not write pending error: ${result.code}`);
+      return { captured: false, reason: "refused" };
+    }
     return { captured: false, reason: result };
   }
 
@@ -325,7 +340,7 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
       return appended;
     });
     if (result === "appended") deps.kickFlush?.(agentId, dir);
-    return { captured: result === "appended" || result === "deduplicated", reason: result };
+    return { captured: result === "appended" || result === "deduplicated", reason: typeof result === "string" ? result : "refused" };
   }
 
   return { captured: false, reason: "not-capturable" };

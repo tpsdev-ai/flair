@@ -5,6 +5,7 @@ const { Memory } = await installMemoryHarperMock();
 const { MemoryArchive } = await import("../../resources/MemoryArchive.ts");
 const { resetLiveHitTracker } = await import("../../resources/hit-tracking.ts");
 const originalGet = (Memory as any).get;
+const originalPut = (Memory as any).put;
 const tables = databasesMock.flair as any;
 const originalStats = tables.MemoryHitStat;
 const ctx = { request: { tpsAgent: "agent-a", tpsAgentIsAdmin: true } };
@@ -32,6 +33,7 @@ beforeEach(() => {
 
 afterEach(() => {
   (Memory as any).get = originalGet;
+  (Memory as any).put = originalPut;
   tables.MemoryHitStat = originalStats;
   resetLiveHitTracker();
 });
@@ -44,6 +46,30 @@ async function archive(action: string) {
 
 for (const action of ["basement", "restore"]) {
   describe(action, () => {
+    for (const status of [403, 503]) {
+      for (const stage of ["initial read", "transaction read", "write"]) {
+        it(`returns the ${status} Response from the ${stage}`, async () => {
+          const response = new Response(JSON.stringify({ error: `failure-${status}` }), { status });
+          const before = { ...harnessState.memoryStore.get("memory") };
+          if (stage === "write") {
+            (Memory as any).put = async () => response;
+          } else {
+            const realGet = (Memory as any).get;
+            let calls = 0;
+            (Memory as any).get = async (id: string, context: any) => {
+              if (++calls === (stage === "initial read" ? 1 : 2)) return response;
+              return realGet(id, context);
+            };
+          }
+          const result = await archive(action);
+          expect(result).toBe(response);
+          expect(result.status).toBe(status);
+          expect(await result.json()).toEqual({ error: `failure-${status}` });
+          expect(harnessState.memoryStore.get("memory")).toEqual(before);
+        });
+      }
+    }
+
     it("accepts an unchanged persisted row when hit stats appear on the second read", async () => {
       let calls = 0;
       tables.MemoryHitStat = {

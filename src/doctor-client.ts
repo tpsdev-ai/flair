@@ -20,8 +20,9 @@
 // "not present", never a thrown error — doctor must never crash or hang on a
 // broken client config.
 
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync, type SpawnSyncOptions } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
 import type { SeedOwnerRead } from "./keystore.js";
@@ -413,9 +414,7 @@ export function isFlairContinuityCommand(command: string): boolean {
 //
 // Runs the provisioned absolute runtime + artifact paths (same Flair-owned
 // provisioning as the action-recall hook). One binary serves all three events; the
-// payload's hook_event_name tells it which fired. Unlike the SessionStart and
-// action-recall hooks it emits NOTHING to the harness, so the wrapper discards
-// both streams and absorbs failure (`>/dev/null 2>/dev/null || true`).
+// payload's hook_event_name tells it which fired.
 
 /** Matches this substring unless npx is bounded by whitespace or string edges; a match does not prove ownership. */
 export const CAPTURE_HOOK_MARKER = "capture-hook.js";
@@ -475,10 +474,16 @@ export function buildCaptureHookCommand(
   const parts = [`FLAIR_AGENT_ID=${agentId}`];
   if (flairUrl) parts.push(`FLAIR_URL=${flairUrl}`);
   if (flushSpec) parts.push(`FLAIR_CAPTURE_FLUSH_SPEC=${flushSpec}`);
-  return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null 2>/dev/null || true'`;
+  return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null || true'`;
 }
 
-const recognizeCaptureCommand = installerCommandRecognizer(buildCaptureHookCommand, CAPTURE_HOOK_MARKER, true);
+const recognizeCurrentCaptureCommand = installerCommandRecognizer(buildCaptureHookCommand, CAPTURE_HOOK_MARKER, true);
+const recognizeLegacyCaptureCommand = installerCommandRecognizer(
+  (...args) => buildCaptureHookCommand(...args).replace(" >/dev/null || true'", " >/dev/null 2>/dev/null || true'"),
+  CAPTURE_HOOK_MARKER,
+  true,
+);
+const recognizeCaptureCommand = (command: unknown) => recognizeCurrentCaptureCommand(command) ?? recognizeLegacyCaptureCommand(command);
 
 export function isFlairCaptureCommand(command: string): boolean {
   return recognizeCaptureCommand(command) !== null;
@@ -1707,6 +1712,8 @@ export interface HookProbeOutcome {
   timedOut: boolean;
   /** Set when the probe process could not be started at all. */
   spawnError: string | null;
+  cleanupError?: string | null;
+  outputOverflow?: boolean;
 }
 
 export type HookExecutionState = "runs" | "broken" | "unknown";
@@ -1736,15 +1743,221 @@ export function evidenceLine(s: string, max = 200): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
-const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) => {
-  // `/bin/sh -c` is not a guess: it is exactly how Claude Code runs a
-  // `type: "command"` hook (spawn with `shell: true`, $SHELL never consulted).
-  // Probing through any other shell would answer a question the user never
-  // asked.
-  const res = spawnSync("/bin/sh", ["-c", command], {
-    input: "",
-    encoding: "utf-8",
+const PROBE_GROUP_TERM_GRACE_MS = 200;
+const PROBE_GROUP_KILL_GRACE_MS = 2_000;
+
+const PROBE_PIN_MARGIN_S = 60;
+
+export const HOOK_PROBE_MAX_OUTPUT_BYTES = 1024 * 1024;
+
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+}
+
+function sleepUntil(deadline: number): void {
+  for (let now = performance.now(); now < deadline; now = performance.now()) sleepMs(Math.min(5, deadline - now));
+}
+
+export type ProbeSignalSender = (pid: number, signal: NodeJS.Signals | 0) => void;
+const sendSignal: ProbeSignalSender = (pid, signal) => {
+  process.kill(pid, signal);
+};
+
+function signalTargetPresent(target: number, kill: ProbeSignalSender): boolean {
+  try {
+    kill(target, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+export function endProbeProcessGroup(
+  pgid: number,
+  pinPid: number | null,
+  kill: ProbeSignalSender = sendSignal,
+): string | null {
+  const groupGone = (): boolean => !signalTargetPresent(-pgid, kill);
+  const pinned = (): boolean => pinPid !== null && signalTargetPresent(pinPid, kill);
+  const unconfirmed = (reason: string): string | null => (groupGone() ? null : reason);
+  let signalError = "";
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    try {
+      kill(-pgid, signal);
+    } catch (err) {
+      signalError = `; ${signal} failed: ${(err as NodeJS.ErrnoException).code ?? String(err)}`;
+    }
+  };
+  if (!pinned()) return unconfirmed("its pin process was not present, so the group was not signalled");
+  signalGroup("SIGTERM");
+  sleepUntil(performance.now() + PROBE_GROUP_TERM_GRACE_MS);
+  if (!pinned()) return unconfirmed(`its pin process exited before SIGKILL, so SIGKILL was not sent${signalError}`);
+  signalGroup("SIGKILL");
+  const deadline = performance.now() + PROBE_GROUP_KILL_GRACE_MS;
+  while (!groupGone() && performance.now() < deadline) sleepMs(5);
+  return unconfirmed(`the group was still present ${PROBE_GROUP_KILL_GRACE_MS} ms after SIGKILL${signalError}`);
+}
+
+function readPinPid(path: string): number | null {
+  let fd = -1;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(32);
+    const text = buf.toString("utf-8", 0, readSync(fd, buf, 0, buf.length, 0));
+    if (!/^[1-9][0-9]{0,9}$/.test(text)) return null;
+    const pid = Number(text);
+    return pid > 1 && pid <= 0x7fffffff ? pid : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
+}
+
+function readCappedOutput(fd: number): { text: string; overflow: boolean } {
+  const buf = Buffer.alloc(HOOK_PROBE_MAX_OUTPUT_BYTES + 1);
+  let total = 0;
+  while (total < buf.length) {
+    const n = readSync(fd, buf, total, buf.length - total, total);
+    if (n === 0) break;
+    total += n;
+  }
+  return {
+    text: buf.toString("utf-8", 0, Math.min(total, HOOK_PROBE_MAX_OUTPUT_BYTES)),
+    overflow: total > HOOK_PROBE_MAX_OUTPUT_BYTES,
+  };
+}
+
+interface BunSyncSubprocess {
+  pid: number;
+  exitCode: number | null;
+  signalCode: string | null;
+  exitedDueToTimeout: boolean;
+}
+interface BunRuntime {
+  spawnSync(
+    command: string[],
+    options: {
+      detached: boolean;
+      stdin: Uint8Array;
+      stdout: number;
+      stderr: number;
+      timeout: number;
+      killSignal: string;
+      env: NodeJS.ProcessEnv;
+    },
+  ): BunSyncSubprocess;
+}
+const bunRuntime = (globalThis as { Bun?: BunRuntime }).Bun;
+
+interface ProbeSpawn {
+  pid: number | null;
+  exitCode: number | null;
+  timedOut: boolean;
+  spawnError: string | null;
+}
+
+const PROBE_WRAPPER =
+  `( ( trap '' HUP INT QUIT TERM; PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
+  `printf '%s' "$!" >"$1" ); exec /bin/sh -c "$3"`;
+
+function spawnProbeBounded(
+  command: string,
+  timeoutMs: number,
+  input: string,
+  env: NodeJS.ProcessEnv,
+  outFd: number,
+  errFd: number,
+  pinPath: string,
+): ProbeSpawn {
+  const pinSeconds = String(Math.ceil(timeoutMs / 1000) + PROBE_PIN_MARGIN_S);
+  const args = ["-c", PROBE_WRAPPER, "flair-hook-probe", pinPath, pinSeconds, command];
+  if (bunRuntime) {
+    try {
+      const r = bunRuntime.spawnSync(["/bin/sh", ...args], {
+        detached: true,
+        stdin: Buffer.from(input),
+        stdout: outFd,
+        stderr: errFd,
+        timeout: timeoutMs,
+        killSignal: "SIGTERM",
+        env,
+      });
+      return { pid: r.pid, exitCode: r.exitCode, timedOut: r.exitedDueToTimeout === true, spawnError: null };
+    } catch (err: unknown) {
+      return { pid: null, exitCode: null, timedOut: false, spawnError: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  const res = spawnSync("/bin/sh", args, {
+    detached: true,
+    stdio: ["pipe", outFd, errFd],
+    input,
     timeout: timeoutMs,
+    env,
+  } as SpawnSyncOptions);
+  const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
+  return {
+    pid: typeof res.pid === "number" && res.pid > 1 ? res.pid : null,
+    exitCode: res.status,
+    timedOut,
+    spawnError: res.error && !timedOut ? res.error.message : null,
+  };
+}
+
+export interface ProbeRunOptions {
+  input: string;
+  env: NodeJS.ProcessEnv;
+  kill?: ProbeSignalSender;
+  tmpRoot?: string;
+  openOutput?: (path: string) => number;
+}
+
+export function runProbeInOwnGroup(command: string, timeoutMs: number, opts: ProbeRunOptions): HookProbeOutcome {
+  const { input, env } = opts;
+  if (process.platform === "win32") {
+    const res = spawnSync("/bin/sh", ["-c", command], { input, encoding: "utf-8", timeout: timeoutMs, env });
+    const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
+    return { exitCode: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "", timedOut, spawnError: res.error && !timedOut ? res.error.message : null };
+  }
+  const openOutput = opts.openOutput ?? ((path: string) => openSync(path, "w+"));
+  const dir = mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "flair-hook-probe-"));
+  const fds: number[] = [];
+  try {
+    const outFd = openOutput(join(dir, "stdout"));
+    fds.push(outFd);
+    const errFd = openOutput(join(dir, "stderr"));
+    fds.push(errFd);
+    const pinPath = join(dir, "pin");
+    const spawned = spawnProbeBounded(command, timeoutMs, input, env, outFd, errFd, pinPath);
+    const cleanupError = spawned.pid === null ? null : endProbeProcessGroup(spawned.pid, readPinPid(pinPath), opts.kill);
+    const out = readCappedOutput(outFd);
+    const err = readCappedOutput(errFd);
+    return {
+      exitCode: spawned.exitCode,
+      stdout: out.text,
+      stderr: err.text,
+      timedOut: spawned.timedOut,
+      spawnError: spawned.spawnError,
+      cleanupError,
+      outputOverflow: out.overflow || err.overflow,
+    };
+  } finally {
+    for (const fd of fds) {
+      try {
+        closeSync(fd);
+      } catch {
+      }
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+
+const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) =>
+  runProbeInOwnGroup(command, timeoutMs, {
+    input: "",
     env: {
       ...process.env,
       // Tell a #1007-or-later adapter to answer without side effects.
@@ -1755,15 +1968,6 @@ const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) => {
       FLAIR_PRESENCE_TIMEOUT_MS: "500",
     },
   });
-  const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
-  return {
-    exitCode: res.status,
-    stdout: res.stdout ?? "",
-    stderr: res.stderr ?? "",
-    timedOut,
-    spawnError: res.error && !timedOut ? res.error.message : null,
-  };
-};
 
 /**
  * Delivery probe (flair#1734): run the registered command so we can classify
@@ -1775,11 +1979,9 @@ export function probeSessionStartHookDelivery(
   opts: { timeoutMs?: number; runner?: HookProbeRunner } = {},
 ): HookProbeOutcome {
   const timeoutMs = opts.timeoutMs ?? 8_000;
-  const runner = opts.runner ?? ((cmd, ms) => {
-    const res = spawnSync("/bin/sh", ["-c", cmd], {
+  const runner = opts.runner ?? ((cmd, ms) =>
+    runProbeInOwnGroup(cmd, ms, {
       input: "{}",
-      encoding: "utf-8",
-      timeout: ms,
       env: {
         ...process.env,
         FLAIR_HOOK_PROBE: "0",
@@ -1787,16 +1989,7 @@ export function probeSessionStartHookDelivery(
         FLAIR_HOOK_TIMEOUT_MS: "4000",
         FLAIR_PRESENCE_TIMEOUT_MS: "1",
       },
-    });
-    const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
-    return {
-      exitCode: res.status,
-      stdout: res.stdout ?? "",
-      stderr: res.stderr ?? "",
-      timedOut,
-      spawnError: res.error && !timedOut ? res.error.message : null,
-    };
-  });
+    }));
   try {
     return runner(command, timeoutMs);
   } catch (err: unknown) {
@@ -1827,6 +2020,12 @@ export function probeSessionStartHookCommand(
 /** Pure: probe outcome -> verdict. See the section doc for why "exit 0, no
  *  output" is a definite failure rather than an ambiguous one. */
 export function classifyHookProbe(outcome: HookProbeOutcome): HookProbeVerdict {
+  if (outcome.cleanupError) {
+    return { execution: "unknown", detail: `could not confirm the command's process group ended (${outcome.cleanupError})` };
+  }
+  if (outcome.outputOverflow) {
+    return { execution: "unknown", detail: `the command's output exceeded the probe's ${HOOK_PROBE_MAX_OUTPUT_BYTES}-byte limit` };
+  }
   if (outcome.timedOut) {
     return { execution: "unknown", detail: "the command did not answer in time" };
   }

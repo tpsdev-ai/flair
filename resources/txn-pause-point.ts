@@ -16,42 +16,29 @@ export const TEST_PAUSE_DIR_ENV = "FLAIR_TEST_PAUSE_DIR";
 export const PAUSE_LIMIT_MS = 20_000;
 const POLL_MS = 20;
 
-export type TxnPausePoint =
-  | "supersede-close"
-  | "embedding-stamp-content-suffix"
-  | "integration-row-write"
-  // flair#2275 — MemoryMaintenance. Each action has a `-pre` point (after the
-  // scan read, before the owned transaction opens) and an in-transaction point
-  // (between that transaction's re-read and its act), so both interleavings of
-  // a concurrent writer can be exercised.
-  | "maintenance-expiry-pre"
-  | "maintenance-expiry"
-  | "maintenance-archive-pre"
-  | "maintenance-archive"
-  | "maintenance-orphan-pre"
-  | "maintenance-orphan"
-  // flair#2275 — MemoryArchive: after its first read of the row, before the
-  // owned transaction that re-reads it opens.
-  | "memory-archive-pre"
-  // flair#2275 — embedding-stamp migration: after it reads a stale row, before
-  // its re-embed request.
-  | "embedding-stamp-regen-pre"
-  | "memory-delete-pre"
-  | "memory-delete"
-  | "memory-skill-delete-pre"
-  | "memory-skill-delete"
-  | "credential-delete-pre"
-  | "credential-delete"
-  | "grant-delete-pre"
-  | "grant-delete"
-  | "workspace-delete-pre"
-  | "workspace-delete"
-  | "candidate-delete-pre"
-  | "candidate-delete"
-  | "relationship-delete-pre"
-  | "relationship-delete"
-  | "feed-dedup-repair"
-  | "memory-reembed";
+/**
+ * The shape of a pause-point name: lowercase words joined by single hyphens
+ * (flair#2382). Removing the shared union list removes that merge conflict.
+ * Valid names keep their pause behaviour; malformed names throw
+ * `InvalidPausePointError` before the fault-injection gate.
+ *
+ * flair#2355 — a non-admin owner-scoped delete. Each delete has a `-pre` point
+ * (after the pre-existing ownership read, before the delete's transactional
+ * re-read or staging) and an in-transaction point (between that transaction's
+ * ownership re-read and its delete), so both interleavings of a concurrent
+ * owner change can be exercised. The write transaction is one the delete
+ * owns, except Memory's ordinary delete: withSharedWriteTransaction JOINS a
+ * request-owned transaction when one exists and creates one otherwise.
+ */
+export const PAUSE_POINT_PATTERN = /^[a-z]+(?:-[a-z]+)*$/;
+
+/** The named error a pause-point name that does not match `PAUSE_POINT_PATTERN` is refused with (flair#2382). */
+export class InvalidPausePointError extends Error {
+  constructor(point: string) {
+    super(`invalid pause point name: ${JSON.stringify(point)}`);
+    this.name = "InvalidPausePointError";
+  }
+}
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -66,10 +53,11 @@ function logRefusal(): void {
 }
 
 export function txnPausePoint(
-  point: TxnPausePoint,
+  point: string,
   env: NodeJS.ProcessEnv = process.env,
   limitMs: number = PAUSE_LIMIT_MS,
 ): Promise<void> | undefined {
+  if (!PAUSE_POINT_PATTERN.test(point)) throw new InvalidPausePointError(point);
   if (env[TEST_FAULT_INJECTION_ENV] !== "1") return undefined;
   let armFd: number | undefined;
   let pausedFd: number | undefined;
