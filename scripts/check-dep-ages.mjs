@@ -42,9 +42,9 @@
  *   1 — at least one dep too fresh
  *   2 — registry fetch failure (treated as fail, not warn — better safe), a
  *       REFUSED CI run (the fixture-root override present together with `--ci`),
- *       an unexpected argument, an unsupported `overrides` form, a workspace
- *       manifest that cannot be read or parsed, or an invalid or expired
- *       exemption allowlist entry
+ *       an unexpected argument, an unsupported `overrides` form, a manifest
+ *       that cannot be read or parsed, or an invalid or expired exemption
+ *       allowlist entry
  */
 
 import { readFileSync } from "node:fs";
