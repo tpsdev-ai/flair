@@ -176,7 +176,7 @@ export function shardSteps(index, of = LANE_SHARDS, steps = unitPlan()) {
   return assignLaneShards(steps, of)[index - 1];
 }
 
-/** Files matching `.test.[jt]s` or `.test.[jt]sx` in the planned directories. */
+/** Files ending in .test/_test/.spec/_spec plus js/jsx/ts/tsx/mjs/cjs/mts/cts, case-insensitively, in planned directories. */
 export function listLaneFiles(root = ROOT) {
   const found = [
     ...testFiles(join(root, "test"), false),

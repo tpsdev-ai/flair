@@ -1,35 +1,30 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import {
   ROOT, SHARDS, assignShards, coverageReport, listUnitFiles, shardFiles, verifyShards,
 } from "../../scripts/ci/unit-shards.mjs";
 import { unitPlan } from "../../scripts/test-unit.ts";
+import { testFilesUnder } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
 
 const ALL = listUnitFiles();
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-// Bun's runner extensions and the `.test` suffix; the fixture also plants the
-// other three suffixes, so discovery exercises every suffix and extension the
-// shared predicate accepts (flair#2288).
+const SUFFIXES = [".test", "_test", ".spec", "_spec"];
 const EXTENSIONS = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
 const DIRS = ["test", "test/unit", "test/unit/nested"];
-const SUFFIX_FILES = ["test/unit/nested/sample.spec.ts", "test/unit/nested/sample_test.ts", "test/unit/nested/sample_spec.ts"];
+const FIXTURE_FILES = DIRS.flatMap(dir => SUFFIXES.flatMap(suffix =>
+  EXTENSIONS.map(extension => `${dir}/sample${suffix}.${extension}`)));
 
 function fixtureRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "flair-shard-fixture-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "flair-shard-fixture-")));
   fixtures.push(root);
   mkdirSync(join(root, "scripts/ci"), { recursive: true });
   mkdirSync(join(root, "test/unit/nested"), { recursive: true });
-  for (const extension of EXTENSIONS) {
-    for (const dir of DIRS) {
-      writeFileSync(join(root, dir, `sample.test.${extension}`), "");
-    }
-  }
-  for (const file of SUFFIX_FILES) writeFileSync(join(root, file), "");
+  for (const file of FIXTURE_FILES) writeFileSync(join(root, file), "");
   writeFileSync(join(root, "test/unit/not-a-test.ts"), "");
   cpSync(join(ROOT, "scripts/ci/test-files.mjs"), join(root, "scripts/ci/test-files.mjs"));
   cpSync(join(ROOT, "scripts/ci/unit-shards.mjs"), join(root, "scripts/ci/unit-shards.mjs"));
@@ -56,11 +51,9 @@ describe("unit-shards — discovery", () => {
 
   test("includes every runner suffix and extension at both root boundaries", () => {
     const root = fixtureRoot();
-    const expected = [
-      ...EXTENSIONS.flatMap(extension => DIRS.map(dir => `${dir}/sample.test.${extension}`)),
-      ...SUFFIX_FILES,
-    ].sort();
+    const expected = [...FIXTURE_FILES].sort();
     expect(listUnitFiles(root)).toEqual(expected);
+    expect(testFilesUnder(root).map(file => relative(root, file))).toEqual(expected);
     const result = spawnSync("node", [join(root, "scripts/ci/unit-shards.mjs"), "--verify", "--of", "1"], {
       encoding: "utf8", timeout: 20_000,
     });
@@ -78,8 +71,8 @@ describe("unit-shards — discovery", () => {
         } else if (defect === "missing") {
           rmSync(join(root, dir), { recursive: true });
         } else {
-          for (const extension of EXTENSIONS) {
-            rmSync(join(root, dir, `sample.test.${extension}`));
+          for (const file of FIXTURE_FILES.filter(file => file.startsWith(`${dir}/sample`))) {
+            rmSync(join(root, file));
           }
         }
         expect(() => listUnitFiles(root)).toThrow();
