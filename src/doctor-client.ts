@@ -1708,11 +1708,7 @@ export interface HookProbeOutcome {
   timedOut: boolean;
   /** Set when the probe process could not be started at all. */
   spawnError: string | null;
-  /** Set when the probe could not confirm that the command's process group
-   *  ended (flair#2385). */
   cleanupError?: string | null;
-  /** Set when stdout or stderr held more than HOOK_PROBE_MAX_OUTPUT_BYTES; the
-   *  probe keeps at most that many bytes of each. */
   outputOverflow?: boolean;
 }
 
@@ -1743,37 +1739,26 @@ export function evidenceLine(s: string, max = 200): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
-/** How long the group gets after SIGTERM before SIGKILL, and how long the probe
- *  then waits for it to disappear. Each wait ends at a monotonic deadline. */
 const PROBE_GROUP_TERM_GRACE_MS = 200;
 const PROBE_GROUP_KILL_GRACE_MS = 2_000;
 
-/** Seconds added to the timeout rounded up to whole seconds for the group's pin. */
 const PROBE_PIN_MARGIN_S = 60;
 
-/** The most the probe reads back of each output stream: Node `spawnSync`'s
- *  default `maxBuffer`. */
 export const HOOK_PROBE_MAX_OUTPUT_BYTES = 1024 * 1024;
 
-/** Synchronous sleep of about `ms`; it can overrun under load, so callers bound
- *  their waits with a monotonic deadline rather than with this. */
 function sleepMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
 }
 
-/** Sleep until the monotonic clock (`performance.now()`) passes `deadline`. */
 function sleepUntil(deadline: number): void {
   for (let now = performance.now(); now < deadline; now = performance.now()) sleepMs(Math.min(5, deadline - now));
 }
 
-/** `process.kill`'s shape; injectable so tests can observe or drop signals. */
 export type ProbeSignalSender = (pid: number, signal: NodeJS.Signals | 0) => void;
 const sendSignal: ProbeSignalSender = (pid, signal) => {
   process.kill(pid, signal);
 };
 
-/** Can `target` (a pid, or a negated group id) still be signalled? A zombie
- *  counts until it is reaped; EPERM counts as present. */
 function signalTargetPresent(target: number, kill: ProbeSignalSender): boolean {
   try {
     kill(target, 0);
@@ -1783,16 +1768,6 @@ function signalTargetPresent(target: number, kill: ProbeSignalSender): boolean {
   }
 }
 
-/**
- * flair#2385 — signal the probe's process group `pgid` and check that it is
- * gone. Returns null when no process is left in the group, else why that could
- * not be confirmed.
- *
- * Each signal is sent only after `pinPid` — the pin the probe's wrapper put in
- * the group, which ignores SIGHUP/SIGINT/SIGQUIT/SIGTERM — has answered signal 0;
- * while a group has a member, its id is not reused. When the pin does not
- * answer, nothing but signal 0 is sent to the group.
- */
 export function endProbeProcessGroup(
   pgid: number,
   pinPid: number | null,
@@ -1811,7 +1786,6 @@ export function endProbeProcessGroup(
   };
   if (!pinned()) return unconfirmed("its pin process was not present, so the group was not signalled");
   signalGroup("SIGTERM");
-  // The pin ignores SIGTERM, so the group is still present here: wait out the grace.
   sleepUntil(performance.now() + PROBE_GROUP_TERM_GRACE_MS);
   if (!pinned()) return unconfirmed(`its pin process exited before SIGKILL, so SIGKILL was not sent${signalError}`);
   signalGroup("SIGKILL");
@@ -1820,7 +1794,6 @@ export function endProbeProcessGroup(
   return unconfirmed(`the group was still present ${PROBE_GROUP_KILL_GRACE_MS} ms after SIGKILL${signalError}`);
 }
 
-/** The pin's pid as the wrapper recorded it, or null when it is missing or malformed. */
 function readPinPid(path: string): number | null {
   let fd = -1;
   try {
@@ -1831,15 +1804,12 @@ function readPinPid(path: string): number | null {
     const pid = Number(text);
     return pid > 1 && pid <= 0x7fffffff ? pid : null;
   } catch {
-    // No pin recorded: the group is then never signalled (endProbeProcessGroup).
     return null;
   } finally {
     if (fd >= 0) closeSync(fd);
   }
 }
 
-/** Return at most HOOK_PROBE_MAX_OUTPUT_BYTES of an output file through its open
- *  descriptor; `overflow` when the file holds more. */
 function readCappedOutput(fd: number): { text: string; overflow: boolean } {
   const buf = Buffer.alloc(HOOK_PROBE_MAX_OUTPUT_BYTES + 1);
   let total = 0;
@@ -1854,10 +1824,6 @@ function readCappedOutput(fd: number): { text: string; overflow: boolean } {
   };
 }
 
-/** The `Bun.spawnSync` shape this probe needs. Under Bun the `node:child_process`
- *  shim ignores `detached` (the shell stays in the caller's group, so a group
- *  kill misses every descendant), while Bun's own spawner honours it — so the
- *  probe picks the spawner that can actually create the group. */
 interface BunSyncSubprocess {
   pid: number;
   exitCode: number | null;
@@ -1880,7 +1846,6 @@ interface BunRuntime {
 }
 const bunRuntime = (globalThis as { Bun?: BunRuntime }).Bun;
 
-/** The normalized spawn result, before the group is ended. */
 interface ProbeSpawn {
   pid: number | null;
   exitCode: number | null;
@@ -1888,19 +1853,10 @@ interface ProbeSpawn {
   spawnError: string | null;
 }
 
-/** The script the probe runs as `/bin/sh -c PROBE_WRAPPER flair-hook-probe
- *  <pin file> <pin seconds> <command>`. From a subshell (so it is not a child the
- *  command can `wait` for) it starts the group's pin — a `sleep` that ignores
- *  SIGHUP/SIGINT/SIGQUIT/SIGTERM and exits by itself after <pin seconds>, found
- *  on PATH with /bin and /usr/bin appended in that subshell only — and records
- *  its pid; then it `exec`s `/bin/sh -c <command>`, so the command's shell keeps
- *  this process's pid, which is the group id. */
 const PROBE_WRAPPER =
   `( ( trap '' HUP INT QUIT TERM; PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
   `printf '%s' "$!" >"$1" ); exec /bin/sh -c "$3"`;
 
-/** Spawn the wrapper into its own process group with stdout/stderr written to
- *  the two file descriptors. `timeoutMs` sets when to signal the shell, not a deadline for its exit. */
 function spawnProbeBounded(
   command: string,
   timeoutMs: number,
@@ -1928,8 +1884,6 @@ function spawnProbeBounded(
       return { pid: null, exitCode: null, timedOut: false, spawnError: err instanceof Error ? err.message : String(err) };
     }
   }
-  // `detached` groups the child (setsid); Node's `SpawnSyncOptions` type omits
-  // it even though `spawnSync` honours it at runtime, so the object is asserted.
   const res = spawnSync("/bin/sh", args, {
     detached: true,
     stdio: ["pipe", outFd, errFd],
@@ -1939,8 +1893,6 @@ function spawnProbeBounded(
   } as SpawnSyncOptions);
   const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
   return {
-    // A failed Node spawn reports pid 0, and `kill(-0)` would address the
-    // CALLER's own group: only a real child pid names the probe's group.
     pid: typeof res.pid === "number" && res.pid > 1 ? res.pid : null,
     exitCode: res.status,
     timedOut,
@@ -1948,8 +1900,6 @@ function spawnProbeBounded(
   };
 }
 
-/** How `runProbeInOwnGroup` runs one command. `kill`, `tmpRoot` and
- *  `openOutput` are test seams. */
 export interface ProbeRunOptions {
   input: string;
   env: NodeJS.ProcessEnv;
@@ -1958,32 +1908,6 @@ export interface ProbeRunOptions {
   openOutput?: (path: string) => number;
 }
 
-/**
- * flair#2385 — run a hook command in its OWN process group, then clean that group up.
- *
- * `spawnSync`'s `timeout` signals only the direct `/bin/sh`, so a descendant the
- * command started (an `npx`/`npm exec` helper, say) kept running after
- * `flair hook status` returned, with the caller's environment. So the shell is
- * spawned `detached`, which gives it a fresh process group whose id is its pid,
- * and once it has exited — on its own or after the timeout's SIGTERM — the
- * probe calls endProbeProcessGroup, which signals the group while its pin is
- * present (SIGTERM, then SIGKILL after a short grace) and then waits, bounded,
- * for it to disappear. When that cannot be confirmed, the outcome carries
- * `cleanupError`, which both classifiers report instead of the command's own
- * result. A descendant that moved itself into another process group or session
- * is not signalled.
- *
- * stdout/stderr go to temp FILES, not pipes: under Node a descendant that
- * inherits the write end of a pipe keeps `spawnSync` blocked on it until the
- * timeout fires even after the shell has exited, stalling the normal path.
- * The files are not size-limited while the command runs; the probe reads back
- * at most HOOK_PROBE_MAX_OUTPUT_BYTES of each and sets `outputOverflow` when a
- * file holds more. The temp directory's removal runs in a `finally`.
- *
- * On Windows the probe calls `spawnSync("/bin/sh", ...)` directly, as it did
- * before flair#2385, with no process-group handling; where `/bin/sh` cannot be
- * started there, the outcome is a spawn error.
- */
 export function runProbeInOwnGroup(command: string, timeoutMs: number, opts: ProbeRunOptions): HookProbeOutcome {
   const { input, env } = opts;
   if (process.platform === "win32") {
@@ -2001,8 +1925,6 @@ export function runProbeInOwnGroup(command: string, timeoutMs: number, opts: Pro
     fds.push(errFd);
     const pinPath = join(dir, "pin");
     const spawned = spawnProbeBounded(command, timeoutMs, input, env, outFd, errFd, pinPath);
-    // Clean up the group on the timeout path AND after a normal exit: the shell
-    // exiting does not mean the command it started has.
     const cleanupError = spawned.pid === null ? null : endProbeProcessGroup(spawned.pid, readPinPid(pinPath), opts.kill);
     const out = readCappedOutput(outFd);
     const err = readCappedOutput(errFd);
@@ -2020,21 +1942,15 @@ export function runProbeInOwnGroup(command: string, timeoutMs: number, opts: Pro
       try {
         closeSync(fd);
       } catch {
-        // Closing is best effort; directory removal is attempted either way.
       }
     }
     try {
       rmSync(dir, { recursive: true, force: true });
     } catch {
-      // A failed removal must not turn a probe outcome into a throw.
     }
   }
 }
 
-/** `/bin/sh -c` is not a guess: it is exactly how Claude Code runs a
- *  `type: "command"` hook (spawn with `shell: true`, $SHELL never consulted).
- *  Probing through any other shell would answer a question the user never
- *  asked. */
 const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) =>
   runProbeInOwnGroup(command, timeoutMs, {
     input: "",

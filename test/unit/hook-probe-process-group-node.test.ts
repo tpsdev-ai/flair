@@ -1,20 +1,11 @@
+/** Non-Windows test cases. */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/**
- * flair#2385 — the hook-status probe's process-group handling, run under real
- * Node. The CLI runs under Node, where the probe uses `node:child_process`
- * `spawnSync`; under `bun test` it uses `Bun.spawnSync` instead (Bun's
- * `node:child_process` shim does not honour `detached`). So these cases bundle
- * src/doctor-client.ts for Node, run the probe in a `node` child, and check the
- * pids the command RECORDED — never a pattern.
- */
-
 const SRC = join(import.meta.dirname, "..", "..", "src", "doctor-client.ts");
-// Above the probe's own deadline plus its bounded cleanup waits.
 const NODE_CHILD_TIMEOUT_MS = 20_000;
 const CASE_BUDGET_MS = 30_000;
 
@@ -57,25 +48,21 @@ afterAll(() => {
 });
 
 afterEach(() => {
-  // Only the pids a case recorded, never a pattern. Under the fix these are gone.
   for (const dir of recordDirs.splice(0)) {
     for (const name of ["pgid", "child"]) {
       let pid = 0;
       try {
         pid = Number(readFileSync(join(dir, name), "utf-8").trim());
       } catch {
-        // No recorded pid.
       }
       if (!Number.isInteger(pid) || pid <= 1) continue;
       try {
         process.kill(-pid, "SIGKILL");
       } catch {
-        // Not a live group.
       }
       try {
         process.kill(pid, "SIGKILL");
       } catch {
-        // Not a live pid.
       }
     }
     rmSync(dir, { recursive: true, force: true });
@@ -104,7 +91,6 @@ function runUnderNode(mode: string): { result: NodeProbeResult; recDir: string }
   const line = (r.stdout ?? "").split("\n").find((l) => l.startsWith("RESULT=")) ?? "";
   expect(line.startsWith("RESULT=")).toBe(true);
   const result = JSON.parse(line.slice("RESULT=".length)) as NodeProbeResult;
-  // The probe really ran under Node, not Bun.
   expect(result.bun).toBe(false);
   expect(result.node.length).toBeGreaterThan(0);
   return { result, recDir };
