@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectDeps,
   collectNonExactDeps,
+  collectUnsupportedDeps,
   collectUnsupportedOverrides,
 } from "../../scripts/lib/check-dep-ages-collect.mjs";
 
@@ -514,6 +515,123 @@ describe("CLI — a dependency range is classified, not fetched as an exact vers
       registry.stop();
     }
   }, 30_000);
+});
+
+describe("CLI — a refused dependency form fails the gate before any fetch", () => {
+  const refusedForms: Array<[string, string]> = [
+    ["build metadata", "1.0.0+build"],
+    ["a v prefix", "v1.0.0"],
+    ["an = prefix", "=1.0.0"],
+    ["a dist-tag", "latest"],
+  ];
+  for (const field of ["dependencies", "optionalDependencies"]) {
+    for (const [label, spec] of refusedForms) {
+      it(`exits 2 naming the package, spec and manifest for ${label} in ${field}`, async () => {
+        const root = writeManifestRepo(join(scratch, `dep-refused-${field}-${label.replace(/\W+/g, "-")}`), {
+          name: "dep-ages-refused-fixture",
+          version: "0.0.0",
+          [field]: { [FIXTURE_DEP]: spec },
+        });
+        const registry = freshRegistry();
+        try {
+          const { exitCode, output } = await runGate(CLI_SCRIPT, {
+            FLAIR_CHECK_DEP_AGES_ROOT: root,
+            FLAIR_NPM_REGISTRY: registry.url,
+          });
+          expect(exitCode).toBe(2);
+          expect(output).toContain(`package.json ${field} ${FIXTURE_DEP} "${spec}"`);
+          expect(registry.requests).toEqual([]);
+        } finally {
+          registry.stop();
+        }
+      }, 30_000);
+    }
+  }
+
+  it("checks an npm: alias with an exact target by the target, as overrides do", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-alias-exact"), {
+      name: "dep-ages-alias-fixture",
+      version: "0.0.0",
+      dependencies: { "some-alias": `npm:${FIXTURE_DEP}@${FIXTURE_VERSION}` },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(registry.requests).toEqual([`/${FIXTURE_DEP}`]);
+      expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
+      expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("prints an npm: alias with a range target as not age-checked", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-alias-range"), {
+      name: "dep-ages-alias-fixture",
+      version: "0.0.0",
+      dependencies: { "some-alias": `npm:${FIXTURE_DEP}@^1.0.0` },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain(`some-alias "npm:${FIXTURE_DEP}@^1.0.0"`);
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(0);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("exits 2 for an npm: alias whose target is a refused form", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-alias-refused"), {
+      name: "dep-ages-alias-fixture",
+      version: "0.0.0",
+      dependencies: { "some-alias": `npm:${FIXTURE_DEP}@latest` },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(exitCode).toBe(2);
+      expect(output).toContain(`some-alias "npm:${FIXTURE_DEP}@latest"`);
+      expect(registry.requests).toEqual([]);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("keeps a workspace: entry exempt", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-workspace-protocol"), {
+      name: "dep-ages-ws-fixture",
+      version: "0.0.0",
+      dependencies: { "some-internal": "workspace:*" },
+    });
+    const { exitCode, output } = await runGate(CLI_SCRIPT, { FLAIR_CHECK_DEP_AGES_ROOT: root });
+    expect(exitCode).toBe(0);
+    expect(output).toContain("No external pinned production deps to check.");
+  });
+});
+
+describe("collectUnsupportedDeps", () => {
+  it("names the manifest, field, package, spec and reason", () => {
+    expect(collectUnsupportedDeps([
+      { pkg: { dependencies: { "some-pin": "latest", ok: "1.0.0" } }, path: "packages/foo/package.json" },
+    ])).toEqual([{
+      declaredIn: "packages/foo/package.json",
+      field: "dependencies",
+      name: "some-pin",
+      spec: "latest",
+      reason: '"latest" is not an exact version, a semver range or an npm: alias of one',
+    }]);
+  });
 });
 
 describe("CLI — override forms", () => {

@@ -72,6 +72,22 @@ export function collectNonExactDeps(
   pkgs: Array<{ pkg: Record<string, unknown>; path: string }>,
 ): NonExactDep[];
 
+export interface UnsupportedDep {
+  declaredIn: string;
+  field: "dependencies" | "optionalDependencies";
+  name: string;
+  spec: string;
+  reason: string;
+}
+
+/**
+ * The dependencies and optionalDependencies entries in a form this gate does
+ * not support. The CLI refuses to run while any exist.
+ */
+export function collectUnsupportedDeps(
+  pkgs: Array<{ pkg: Record<string, unknown>; path: string }>,
+): UnsupportedDep[];
+
 /**
  * The override rules in a form this gate does not support. The CLI refuses to
  * run while any exist.

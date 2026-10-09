@@ -16,7 +16,9 @@
  *   skipped), so they install just like any other dep and represent the same
  *   supply-chain risk. An entry is classified by the same classifier the
  *   override grammar uses (classifyRegistrySpec): an exact version is
- *   age-checked, a range such as `1.x` is not.
+ *   age-checked, a range such as `1.x` is not, a form the classifier refuses
+ *   fails the gate (collectUnsupportedDeps), and an `npm:` alias is checked
+ *   against its target.
  * - `overrides`: exact declarations are age-checked, including conditional
  *   rules; the gate reads declarations, not installed versions. An `npm:`
  *   alias is checked against its target. Nested override objects are read too.
@@ -126,6 +128,12 @@ function classifyOverrideValue(name, spec) {
   return classifyRegistrySpec(name, spec);
 }
 
+/** Classify a `dependencies` / `optionalDependencies` specifier; there "" and "*" are ranges. */
+function classifyDependencySpec(name, spec) {
+  if (spec === "" || spec === "*") return { kind: "range", name, spec };
+  return classifyOverrideValue(name, spec);
+}
+
 const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const describeType = (v) => (v === null ? "null" : Array.isArray(v) ? "an array" : `a ${typeof v}`);
 
@@ -204,15 +212,9 @@ function formatOverridePath(path) {
 export function collectDeps(pkgs, keepCurrent) {
   const toCheck = new Map(); // key: "name@version", value: { name, version, declaredIn[] }
 
-  function record(name, spec, declaredIn) {
+  function record(name, version, declaredIn) {
     if (name.startsWith("@tpsdev-ai/")) return; // workspace-internal — exempt
     if (keepCurrent.has(name)) return; // explicitly kept-current — exempt
-    if (isNonRegistrySpecifier(spec)) return;
-    // Only check exact-pinned. This gate reads manifests, not the lockfile;
-    // the version a range resolves to is outside its scope.
-    const classified = classifyRegistrySpec(name, spec);
-    if (classified.kind !== "exact") return;
-    const version = classified.version;
     const key = `${name}@${version}`;
     if (!toCheck.has(key)) {
       toCheck.set(key, { name, version, declaredIn: [] });
@@ -224,7 +226,9 @@ export function collectDeps(pkgs, keepCurrent) {
   function recordDeps(deps, declaredIn) {
     for (const [name, spec] of Object.entries(deps)) {
       if (typeof spec !== "string") continue;
-      record(name, spec, declaredIn);
+      // Only exact versions are age-checked; the gate reads manifests, not the lockfile.
+      const classified = classifyDependencySpec(name, spec);
+      if (classified.kind === "exact") record(classified.name, classified.version, declaredIn);
     }
   }
 
@@ -261,8 +265,7 @@ export function collectNonExactDeps(pkgs) {
   function recordDeps(deps, declaredIn) {
     for (const [name, spec] of Object.entries(deps)) {
       if (typeof spec !== "string") continue;
-      if (isNonRegistrySpecifier(spec)) continue;
-      if (classifyRegistrySpec(name, spec).kind === "range") add(name, spec, declaredIn);
+      if (classifyDependencySpec(name, spec).kind === "range") add(name, spec, declaredIn);
     }
   }
   for (const { pkg, path } of pkgs) {
@@ -290,6 +293,36 @@ export function collectUnsupportedOverrides(pkgs) {
     for (const rule of classifyOverrides(pkg.overrides)) {
       if (rule.kind === "refused") {
         unsupported.push({ declaredIn: path, at: formatOverridePath(rule.path), reason: rule.reason });
+      }
+    }
+  }
+  return unsupported;
+}
+
+/**
+ * The dependencies and optionalDependencies entries in a form this gate does
+ * not support. The CLI refuses to run while any exist.
+ *
+ * @param pkgs — package objects with paths
+ * @returns Array<{ declaredIn, field, name, spec, reason }>
+ */
+export function collectUnsupportedDeps(pkgs) {
+  const unsupported = [];
+  for (const { pkg, path } of pkgs) {
+    for (const field of ["dependencies", "optionalDependencies"]) {
+      const deps = pkg[field];
+      if (deps === undefined) continue;
+      if (!isPlainObject(deps)) {
+        unsupported.push({ declaredIn: path, field, name: field, spec: "", reason: `it must be an object, not ${describeType(deps)}` });
+        continue;
+      }
+      for (const [name, spec] of Object.entries(deps)) {
+        if (typeof spec !== "string") {
+          unsupported.push({ declaredIn: path, field, name, spec: String(spec), reason: `the specifier must be a string, not ${describeType(spec)}` });
+          continue;
+        }
+        const classified = classifyDependencySpec(name, spec);
+        if (classified.kind === "refused") unsupported.push({ declaredIn: path, field, name, spec, reason: classified.reason });
       }
     }
   }

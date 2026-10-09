@@ -31,7 +31,7 @@
  *   1 — at least one dep too fresh
  *   2 — registry fetch failure (treated as fail, not warn — better safe), a
  *       REFUSED CI run (the fixture-root override present together with `--ci`),
- *       an unexpected argument, an unsupported `overrides` form, or an invalid
+ *       an unexpected argument, an unsupported dependency or `overrides` form, or an invalid
  *       or expired exemption allowlist entry
  */
 
@@ -41,6 +41,7 @@ import { fileURLToPath } from "node:url";
 import {
   collectDeps,
   collectNonExactDeps,
+  collectUnsupportedDeps,
   collectUnsupportedOverrides,
 } from "./lib/check-dep-ages-collect.mjs";
 
@@ -217,6 +218,16 @@ async function main() {
     } catch (err) {
       throw new Error(`Cannot read or parse ${p}: ${err?.message ?? err}`);
     }
+  }
+
+  const unsupportedDeps = collectUnsupportedDeps(allPkgs);
+  if (unsupportedDeps.length > 0) {
+    console.error("Unsupported dependency entries:");
+    console.error("");
+    for (const u of unsupportedDeps) {
+      console.error(`    ${u.declaredIn} ${u.field} ${u.name} "${u.spec}": ${u.reason}`);
+    }
+    process.exit(2);
   }
 
   const unsupportedOverrides = collectUnsupportedOverrides(allPkgs);
