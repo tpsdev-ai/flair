@@ -4,12 +4,12 @@
     "(scripts/check-dep-ages.mjs, run by the `Check production dep bake time` step in",
     ".github/workflows/test.yml). Policy narrative: docs/supply-chain-policy.md.",
     "",
-    "An entry lets one exact-pinned version — in `dependencies`, `optionalDependencies`",
+    "An entry lets one otherwise checked exact-pinned version — in `dependencies`, `optionalDependencies`",
     "or `overrides` — stay on a release published less than FLAIR_DEP_MIN_AGE_DAYS ago.",
     "The author supplies a GHSA-formatted id; review verifies the version fixes it.",
     "Every entry carries a hard expiry. An",
-    "expired entry FAILS the gate before any registry request; removing it lets the pin",
-    "be age-checked as usual. Re-read the reason before re-dating; removing the entry",
+    "expired entry FAILS the gate before any registry request; removing it lets an",
+    "otherwise checked pin be age-checked. Re-read the reason before re-dating; removing the entry",
     "once the version has aged past the window is the normal outcome."
   ],
   "entries": [

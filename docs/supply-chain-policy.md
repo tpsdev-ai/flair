@@ -40,11 +40,11 @@ Override per-run via `FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3"` env (addit
 
 A security patch can be newer than the bake window, and pinning it is the right move. The gate accepts an explicit, dated exemption in `.github/dep-age-allowlist.json`: one entry per checked exact-pinned `package` and `version` (in `dependencies`, `optionalDependencies` or `overrides`), with a GHSA-formatted id (`ghsa`), `added`, `expires` and a `reason`. Review verifies that the version fixes the advisory.
 
-- An entry exempts its pin only while unexpired; `expires` is the first day it no longer applies.
-- An **expired** entry fails the gate before any registry request; removing it lets the pin be age-checked as usual. Re-read the `reason` before re-dating; removing the entry once the version has aged past the window is the normal outcome.
+- An entry exempts an otherwise checked pin only while unexpired; `expires` is the first day it no longer applies.
+- An **expired** entry fails the gate before any registry request; removing it lets an otherwise checked pin be age-checked. Re-read the `reason` before re-dating; removing the entry once the version has aged past the window is the normal outcome.
 - A fresh checked pin with no matching entry fails; keep-current pins are skipped. A malformed entry also fails.
 
-`FLAIR_DEP_MIN_AGE_DAYS` remains a threshold control: it moves the bar for every pin at once and leaves no record. A per-pin exemption belongs in this allowlist.
+`FLAIR_DEP_MIN_AGE_DAYS` remains a threshold control: it moves the bar for every checked pin at once and leaves no record. A per-pin exemption belongs in this allowlist.
 
 ### 2. Exact-version pinning for production deps
 
@@ -205,7 +205,7 @@ Add `packageRules` only for your own exceptions. The preset carries no `@tpsdev-
 
 ## Exceptions and incident response
 
-- **Exempt a known-good fresh security pin:** add a dated entry to `.github/dep-age-allowlist.json` naming the advisory (§1b). It is reviewed on the PR and expires on its own. Don't bypass silently.
+- **Exempt an otherwise checked fresh security pin:** add a dated entry to `.github/dep-age-allowlist.json` naming the advisory (§1b). It is reviewed on the PR and expires on its own. Don't bypass silently.
 - **Confirmed upstream compromise affecting Flair:** rotate any affected credential, revert the offending dep version, ship a patch release, file a public advisory at `github.com/tpsdev-ai/flair/security/advisories`. Notify Nathan immediately; don't act unilaterally.
 - **Suspected (not confirmed) compromise:** open an issue with the evidence; treat it as P0 in our backlog until disproven.
 
