@@ -194,7 +194,7 @@ describe("vendor-pinned npm-install nodes", () => {
     });
   });
 
-  function runFixtureGate(nodes: string[], installedVersion = "5.11.3") {
+  function runFixtureGate(nodes: string[], installedVersion = "5.11.3", adk = false) {
     const root = mkdtempSync(join(tmpdir(), "flair-audit-gate-"));
     try {
       mkdirSync(join(root, "scripts"));
@@ -210,12 +210,14 @@ describe("vendor-pinned npm-install nodes", () => {
       writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
         policy: { maxLifetimeDaysBySeverity: { moderate: 180 } },
-        entries: [{
+        entries: [adk ? {
+          ...ALLOWLIST.entries.find((entry: { package: string }) => entry.package === "uuid"),
+        } : {
           ghsa: "GHSA-w2qp-rph6-63g4",
           package: "fastify",
           severity: "moderate",
           class: "vendor-pinned",
-          sources: ["npm-install", "npm-install-adk"],
+          sources: ["npm-install"],
           approvedBy: "fixture",
           introducedBy: "harper -> fastify",
           reason: "Fixture pin in harper's shrinkwrap.",
@@ -225,10 +227,27 @@ describe("vendor-pinned npm-install nodes", () => {
         }],
       }));
       writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
-      const report = { vulnerabilities: { fastify: { nodes, via: [{
-        url: "https://github.com/advisories/GHSA-w2qp-rph6-63g4", severity: "moderate", range: "<5.12.1",
+      const chain = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"];
+      let parent = root;
+      for (const [i, pkg] of chain.entries()) {
+        parent = join(parent, "node_modules", pkg);
+        mkdirSync(parent, { recursive: true });
+        writeFileSync(join(parent, "package.json"), JSON.stringify({
+          name: pkg, version: "9.0.1", dependencies: i + 1 < chain.length ? { [chain[i + 1]!]: "*" } : {},
+        }));
+      }
+      const report = { vulnerabilities: { [adk ? "uuid" : "fastify"]: { nodes, via: [{
+        url: `https://github.com/advisories/${adk ? "GHSA-w5hq-g745-h8pq" : "GHSA-w2qp-rph6-63g4"}`,
+        severity: "moderate", range: adk ? "<11.1.1" : "<5.12.1",
       }] } } };
-      writeFileSync(join(root, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(report)}'\n`);
+      const empty = JSON.stringify({ vulnerabilities: {} });
+      mkdirSync(join(root, "adk-prefix"));
+      writeFileSync(join(root, "bin/npm"), `#!/bin/sh
+case "$PWD" in
+  */adk-prefix) printf '%s\\n' '${empty}' ;;
+  *) printf '%s\\n' '${JSON.stringify(report)}' ;;
+esac
+`);
       chmodSync(join(root, "bin/bun"), 0o755);
       chmodSync(join(root, "bin/npm"), 0o755);
       writeFileSync(join(root, "offline.mjs"), "globalThis.fetch = async () => { throw new Error('fixture offline'); };\n");
@@ -237,7 +256,7 @@ describe("vendor-pinned npm-install nodes", () => {
         return [name, statSync(path).isFile() ? readFileSync(path).toString("base64") : "<dir>"];
       });
       const before = snapshot();
-      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), "--npm-install-prefix", root, "--adk-npm-install-prefix", root], {
+      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), "--npm-install-prefix", adk ? join(root, "adk-prefix") : root, "--adk-npm-install-prefix", adk ? root : join(root, "adk-prefix")], {
         encoding: "utf8",
         timeout: 10_000,
         env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-10-01" },
@@ -247,6 +266,33 @@ describe("vendor-pinned npm-install nodes", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }
+
+  const adkUuidNode = "node_modules/@tpsdev-ai/adk-flair/node_modules/@google/adk/node_modules/@google-cloud/vertexai/node_modules/google-auth-library/node_modules/gaxios/node_modules/uuid";
+
+  it("passes an ADK-source uuid advisory at the named chain", () => {
+    const { res, wrote } = runFixtureGate([adkUuidNode], "5.11.3", true);
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+    expect(wrote).toBe(false);
+  }, 12_000);
+
+  it("blocks an ADK-source uuid advisory outside the named chain", () => {
+    const outside = "node_modules/other/node_modules/uuid";
+    const { res, wrote } = runFixtureGate([outside], "5.11.3", true);
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(1);
+    expect(res.stdout).toContain(outside);
+    expect(res.stdout).toContain("outside the dependency chain");
+    expect(res.stdout).not.toContain("PASS —");
+    expect(wrote).toBe(false);
+  }, 12_000);
+
+  it("blocks an ADK-source uuid advisory with a path outside the named chain", () => {
+    const { res } = runFixtureGate([adkUuidNode, "node_modules/uuid"], "5.11.3", true);
+    expect(res.status).toBe(1);
+    expect(res.stdout).toContain("outside the dependency chain");
+  }, 12_000);
 
   it("passes the gate for a harper-only node", () => {
     const { res, wrote } = runFixtureGate([harperNode]);

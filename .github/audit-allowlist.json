@@ -527,7 +527,7 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "@tpsdev-ai/adk-flair -> @google/adk -> @google-cloud/vertexai -> google-auth-library -> gaxios -> uuid",
-      "reason": "Resolved inside @google/adk's own tree, which we do not control: @google/adk 2.2.1 depends on @google-cloud/vertexai ^1.12.0, whose google-auth-library ^9 and gaxios both pin uuid ^9.0.1. uuid 9.0.1 is in this advisory's affected range (<11.1.1). A direct dependency or override in @tpsdev-ai/adk-flair cannot reach it (npm resolves the nested copy under gaxios), and the ADK consumer install confirms the vulnerable copy is still present. flair's adapter does not import uuid. Retired when @google/adk's tree resolves uuid outside the affected range.",
+      "reason": "Resolved inside @google/adk's own tree, which we do not control: @google/adk 2.2.1 depends on @google-cloud/vertexai ^1.12.0, which requires google-auth-library ^9; google-auth-library requires gaxios, and gaxios requires uuid ^9.0.1. uuid 9.0.1 is in this advisory's affected range (<11.1.1). A direct dependency or override in @tpsdev-ai/adk-flair cannot reach it (npm resolves the nested copy under gaxios), and the ADK consumer install confirms the vulnerable copy is still present. flair's adapter does not import uuid. Retired when @google/adk's tree resolves uuid outside the affected range.",
       "added": "2026-10-09",
       "expires": "2026-11-02",
       "removeWhen": "a @google/adk release's dependency tree resolves uuid >= 11.1.1 (its @google-cloud/vertexai -> google-auth-library -> gaxios edge moves off uuid 9.x), or the ADK consumer install no longer reports this advisory"

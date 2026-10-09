@@ -55,9 +55,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWLIST_PATH = join(REPO_ROOT, ".github", "audit-allowlist.json");
@@ -608,6 +608,42 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
   return problems;
 }
 
+function adkVendorPinnedNodeProblems(adv, npmPrefix, entry) {
+  if (!Array.isArray(adv.nodes) || adv.nodes.length === 0) {
+    return [`${adv.ghsa} (${adv.package}): npm audit reported no nodes.`];
+  }
+  try {
+    const chain = entry.introducedBy.split(" -> ");
+    if (chain[0] !== "@tpsdev-ai/adk-flair" || chain[1] !== "@google/adk" ||
+        chain.at(-1) !== adv.package ||
+        !chain.every((pkg) => /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(pkg))) {
+      throw new Error("invalid ADK dependency chain");
+    }
+    const prefix = resolve(npmPrefix);
+    let parent = prefix;
+    let manifest;
+    for (const pkg of chain) {
+      if (manifest && !Object.hasOwn(manifest.dependencies ?? {}, pkg)) {
+        throw new Error(`${manifest.name} does not depend on ${pkg}`);
+      }
+      let search = parent;
+      while (!existsSync(join(search, "node_modules", pkg, "package.json"))) {
+        if (search === prefix) throw new Error(`cannot resolve ${pkg}`);
+        search = dirname(search);
+      }
+      parent = join(search, "node_modules", pkg);
+      manifest = JSON.parse(readFileSync(join(parent, "package.json"), "utf8"));
+      if (manifest.name !== pkg) throw new Error(`package name mismatch for ${pkg}`);
+    }
+    const expected = relative(prefix, parent).split("\\").join("/");
+    return adv.nodes.filter((node) => node !== expected).map((node) =>
+      `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside the dependency chain ${entry.introducedBy} (resolved node ${expected}).`,
+    );
+  } catch (e) {
+    return [`${adv.ghsa} (${adv.package}): cannot verify ADK dependency chain: ${e.message}.`];
+  }
+}
+
 async function latestPublishedVersion(pkg) {
   const url = registryUrlFor(pkg);
   const res = await fetch(url, { headers: { accept: "application/json" } });
@@ -744,8 +780,10 @@ async function main() {
       continue;
     }
 
-    if (entry.class === "vendor-pinned" && adv.source === "npm-install") {
-      const nodeProblems = vendorPinnedNodeProblems(adv, npmPrefix);
+    if (entry.class === "vendor-pinned" && (adv.source === "npm-install" || adv.source === "npm-install-adk")) {
+      const nodeProblems = adv.source === "npm-install-adk"
+        ? adkVendorPinnedNodeProblems(adv, adkPrefix, entry)
+        : vendorPinnedNodeProblems(adv, npmPrefix);
       if (nodeProblems.length) {
         for (const problem of nodeProblems) fail(problem);
         blocked.push(adv);
