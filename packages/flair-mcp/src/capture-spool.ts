@@ -46,13 +46,10 @@ export const CAPTURE_FLUSH_COOLDOWN_MS = 1000;
 /** The largest hook payload read from stdin; a larger one is not captured. */
 export const CAPTURE_STDIN_MAX_BYTES = 1 * 1024 * 1024;
 
-/** How long a hook waits for the per-agent lock before it captures nothing. */
+/** Default append-lock wait for Stop, PostToolUse and flush snapshot/rewrite. */
 export const CAPTURE_LOCK_WAIT_MS = 200;
 
-/** How long a failed-tool hook waits for the per-agent lock before it gives up
- *  recording its pending error. A live holder releases the lock synchronously,
- *  so waiting longer here keeps a contended error instead of dropping it
- *  (flair#2395); the spool's own CAPTURE_LOCK_WAIT_MS is unchanged. */
+/** Failed-tool append lock wait; refusal if the lock remains busy. */
 export const CAPTURE_PENDING_LOCK_WAIT_MS = 2000;
 
 export const CAPTURE_LOCK_STALE_MS = 5000;
@@ -119,13 +116,18 @@ interface LockAcquireState { stuckTakeover: boolean; warn: (message: string) => 
 const LOCK_BUSY: unique symbol = Symbol("capture-lock-busy");
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
-/** Run `fn` holding the per-agent lock (an exclusively created file), or
- *  return LOCK_BUSY when it is not free within CAPTURE_LOCK_WAIT_MS. */
-function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }, waitMs: number = CAPTURE_LOCK_WAIT_MS): T | typeof LOCK_BUSY {
+/** Run `fn` holding the per-agent lock, or return LOCK_BUSY after `waitMs`. */
+function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }, waitMs: number = CAPTURE_LOCK_WAIT_MS, firstAttemptPath?: string): T | typeof LOCK_BUSY {
   ensureCaptureDir(dir);
   const deadline = Date.now() + waitMs;
+  let firstAttempt = true;
   for (;;) {
     const held = acquireSpoolLock(dir, agentId, console.warn, lockPath(dir, agentId), CAPTURE_LOCK_STALE_MS, false, 0, state);
+    if (firstAttempt && firstAttemptPath) {
+      // Test-only handshake, enabled by FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT_FILE; production leaves it unset.
+      try { writeFileSync(firstAttemptPath, "attempted"); } catch {}
+    }
+    firstAttempt = false;
     if (held) {
       try {
         return fn();
@@ -138,13 +140,14 @@ function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: Lo
   }
 }
 
-/** `fn` under the lock; "refused" when the lock is busy or `fn` throws. */
-function underLock<T extends string>(dir: string, agentId: string, fn: () => T, waitMs: number = CAPTURE_LOCK_WAIT_MS): T | "refused" {
+type LockRefusal = { reason: "lock_busy" } | { reason: "write_failed"; code: string };
+
+function underLock<T extends string>(dir: string, agentId: string, fn: () => T, waitMs: number = CAPTURE_LOCK_WAIT_MS, firstAttemptPath?: string): T | LockRefusal {
   try {
-    const result = withCaptureLock(dir, agentId, fn, undefined, waitMs);
-    return result === LOCK_BUSY ? "refused" : result;
-  } catch {
-    return "refused";
+    const result = withCaptureLock(dir, agentId, fn, undefined, waitMs, firstAttemptPath);
+    return result === LOCK_BUSY ? { reason: "lock_busy" } : result;
+  } catch (error) {
+    return { reason: "write_failed", code: (error as NodeJS.ErrnoException)?.code ?? "UNKNOWN" };
   }
 }
 
@@ -223,7 +226,8 @@ function trimRecords(records: CaptureSpoolRecord[]): CaptureSpoolRecord[] {
  * staged. Returns "appended", "deduplicated" or "refused".
  */
 export function appendRecord(dir: string, agentId: string, candidate: CaptureCandidate): "appended" | "deduplicated" | "refused" {
-  return underLock(dir, agentId, () => appendRecordLocked(dir, agentId, candidate));
+  const result = underLock(dir, agentId, () => appendRecordLocked(dir, agentId, candidate));
+  return typeof result === "string" ? result : "refused";
 }
 
 function appendRecordLocked(dir: string, agentId: string, candidate: CaptureCandidate): "appended" | "deduplicated" {
@@ -313,12 +317,12 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
     const result = underLock(dir, agentId, () => {
       writePendingLocked(dir, agentId, [...readPending(dir, agentId), error]);
       return "error-recorded" as const;
-    }, CAPTURE_PENDING_LOCK_WAIT_MS);
-    if (result === "refused") {
-      // Surface a refused pending error rather than dropping it (flair#2395).
-      (deps.warn ?? console.warn)(
-        `capture: a failed call was not recorded; the append lock stayed busy for ${CAPTURE_PENDING_LOCK_WAIT_MS} ms`,
-      );
+    }, CAPTURE_PENDING_LOCK_WAIT_MS, env.FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT_FILE);
+    if (typeof result !== "string") {
+      (deps.warn ?? console.warn)(result.reason === "lock_busy"
+        ? `capture: a failed call was not recorded; append lock busy for ${CAPTURE_PENDING_LOCK_WAIT_MS} ms`
+        : `capture: could not write pending error: ${result.code}`);
+      return { captured: false, reason: "refused" };
     }
     return { captured: false, reason: result };
   }
@@ -337,7 +341,7 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
       return appended;
     });
     if (result === "appended") deps.kickFlush?.(agentId, dir);
-    return { captured: result === "appended" || result === "deduplicated", reason: result };
+    return { captured: result === "appended" || result === "deduplicated", reason: typeof result === "string" ? result : "refused" };
   }
 
   return { captured: false, reason: "not-capturable" };

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,8 +25,8 @@ function childEnv(): NodeJS.ProcessEnv {
   return { HOME: home, PATH: process.env.PATH, FLAIR_CAPTURE_DIR: dir, FLAIR_AGENT_ID: "agent-a" };
 }
 
-function run(payload: unknown): Promise<{ status: number | null; signal: string | null; stdout: string; stderr: string }> {
-  const child = spawn(process.execPath, [ENTRY], { env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+function run(payload: unknown, env: NodeJS.ProcessEnv = childEnv()): Promise<{ status: number | null; signal: string | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, [ENTRY], { env, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (d) => (stdout += d));
@@ -114,27 +114,63 @@ describe("capture entry point (spawned)", () => {
   });
 
   test("a failure hook keeps its pending error when the append lock is held past the spool wait", async () => {
-    // Hold the per-agent append lock as a live owner, then release it while the
-    // hook is still waiting: the hook must keep the error rather than refuse
-    // after CAPTURE_LOCK_WAIT_MS (flair#2395).
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const lock = lockPath(dir, "agent-a");
     writeFileSync(lock, JSON.stringify({ pid: process.pid, nonce: "held-for-2395" }), { flag: "wx", mode: 0o600 });
-    const pending = run(failure("bun test foo"));
+    const marker = join(home, "first-lock-attempt");
+    const pending = run(failure("bun test foo"), { ...childEnv(), FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT_FILE: marker });
     try {
+      const deadline = Date.now() + CHILD_DEADLINE_MS;
+      while (!existsSync(marker) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(existsSync(marker)).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, CAPTURE_LOCK_WAIT_MS + 400));
       unlinkSync(lock);
       const res = await pending;
       expect(res.status).toBe(0);
-      // The error is kept, not refused.
       expect(pendingCommands()).toEqual(["bun test foo"]);
-      // No refusal, so nothing is reported on stderr.
       expect(res.stderr).toBe("");
     } finally {
-      // The hook acquires and releases the same lock path once it proceeds.
       try { unlinkSync(lock); } catch { /* already released */ }
     }
   }, 20_000);
+
+  test("a held append lock reports a busy refusal on stderr", async () => {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath(dir, "agent-a"), JSON.stringify({ pid: process.pid, nonce: "held" }), { flag: "wx", mode: 0o600 });
+    const res = await run(failure("bun test foo"));
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("");
+    expect(res.stderr).toContain("append lock busy for 2000 ms");
+    expect(res.stderr).not.toContain("could not write pending error");
+    expect(pendingCommands()).toEqual([]);
+  });
+
+  test("an unwritable spool parent reports the filesystem error on stderr", async () => {
+    const parent = join(home, ".flair");
+    mkdirSync(parent, { mode: 0o500 });
+    try {
+      const res = await run(failure("bun test foo"));
+      expect(res.status).toBe(0);
+      expect(res.stdout).toBe("");
+      expect(res.stderr).toContain("could not write pending error: EACCES");
+      expect(res.stderr).not.toContain("lock busy");
+      expect(pendingCommands()).toEqual([]);
+    } finally {
+      chmodSync(parent, 0o700);
+    }
+  });
+
+  test("a pending-file write failure after acquisition reports its error on stderr", async () => {
+    mkdirSync(pendingPath(dir, "agent-a"), { recursive: true });
+    const res = await run(failure("bun test foo"));
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("");
+    expect(res.stderr).toContain("could not write pending error: EISDIR");
+    expect(res.stderr).not.toContain("lock busy");
+    expect(existsSync(lockPath(dir, "agent-a"))).toBe(false);
+  });
 
   test("a malformed payload exits 0 and writes nothing", async () => {
     const child = spawn(process.execPath, [ENTRY], { env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
