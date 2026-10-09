@@ -22,8 +22,6 @@ const POLL_MS = 20;
  * Valid names keep their pause behaviour; malformed names throw
  * `InvalidPausePointError` before the fault-injection gate.
  *
- * One point per owned transaction that writes from a row it read.
- *
  * flair#2355 — a non-admin owner-scoped delete. Each delete has a `-pre` point
  * (after the pre-existing ownership read, before the delete's transactional
  * re-read or staging) and an in-transaction point (between that transaction's

@@ -1,5 +1,5 @@
 /**
- * txn-pause-point.test.ts — flair#2307: the test-only pause inside an owned
+ * txn-pause-point.test.ts — flair#2307: the test-only pause before or inside an owned
  * transaction (resources/txn-pause-point.ts), claims an arm file and releases
  * on `go` or on its limit.
  * flair#2382 removes the shared union-list conflict; valid names keep their

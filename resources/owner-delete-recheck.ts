@@ -90,7 +90,7 @@ export async function deleteOwnedRow(ctx: unknown, spec: OwnerDeleteSpec): Promi
     if (stored[spec.ownerField] !== spec.callerId) {
       return { kind: "refused", response: ownerChangedRefusal(spec.tableName) } as OwnerDeleteOutcome;
     }
-    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // Test-only: valid names are inert unless fault injection is enabled and armed.
     const pause = txnPausePoint(spec.point);
     if (pause) await pause;
     // Confirmation read: the committed row in an explicit fresh context (see
