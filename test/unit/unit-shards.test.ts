@@ -12,30 +12,40 @@ const ALL = listUnitFiles();
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
+// Bun's runner extensions and the `.test` suffix; the fixture also plants the
+// other three suffixes, so discovery exercises every suffix and extension the
+// shared predicate accepts (flair#2288).
+const EXTENSIONS = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
+const DIRS = ["test", "test/unit", "test/unit/nested"];
+const SUFFIX_FILES = ["test/unit/nested/sample.spec.ts", "test/unit/nested/sample_test.ts", "test/unit/nested/sample_spec.ts"];
+
 function fixtureRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "flair-shard-fixture-"));
   fixtures.push(root);
   mkdirSync(join(root, "scripts/ci"), { recursive: true });
   mkdirSync(join(root, "test/unit/nested"), { recursive: true });
-  for (const extension of ["js", "jsx", "ts", "tsx"]) {
-    for (const dir of ["test", "test/unit", "test/unit/nested"]) {
+  for (const extension of EXTENSIONS) {
+    for (const dir of DIRS) {
       writeFileSync(join(root, dir, `sample.test.${extension}`), "");
     }
   }
-  writeFileSync(join(root, "test/unit/ignored.spec.ts"), "");
+  for (const file of SUFFIX_FILES) writeFileSync(join(root, file), "");
+  writeFileSync(join(root, "test/unit/not-a-test.ts"), "");
   cpSync(join(ROOT, "scripts/ci/test-files.mjs"), join(root, "scripts/ci/test-files.mjs"));
   cpSync(join(ROOT, "scripts/ci/unit-shards.mjs"), join(root, "scripts/ci/unit-shards.mjs"));
   return root;
 }
+
+// An independent enumeration (shell find) filtered by Bun's documented test
+// filename patterns, checked against the module's own discovery (flair#2288).
+const BUN_TEST_NAME = /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/i;
 
 function findFiles(): string[] {
   const r = spawnSync("bash", ["-c", "{ find test/unit -type f; find test -maxdepth 1 -type f; } | LC_ALL=C sort"], {
     cwd: ROOT, encoding: "utf8", timeout: 15_000,
   });
   if (r.status !== 0) throw new Error(`find failed: ${r.stderr}`);
-  return r.stdout.split("\n").filter(file =>
-    [".test.js", ".test.jsx", ".test.ts", ".test.tsx"].some(suffix => file.endsWith(suffix)),
-  ).sort();
+  return r.stdout.split("\n").filter(file => BUN_TEST_NAME.test(file)).sort();
 }
 
 describe("unit-shards — discovery", () => {
@@ -44,11 +54,12 @@ describe("unit-shards — discovery", () => {
     expect(ALL.length).toBeGreaterThan(0);
   });
 
-  test("includes all runner extensions at both root boundaries", () => {
+  test("includes every runner suffix and extension at both root boundaries", () => {
     const root = fixtureRoot();
-    const expected = ["js", "jsx", "ts", "tsx"].flatMap(extension =>
-      ["test", "test/unit", "test/unit/nested"].map(dir => `${dir}/sample.test.${extension}`),
-    ).sort();
+    const expected = [
+      ...EXTENSIONS.flatMap(extension => DIRS.map(dir => `${dir}/sample.test.${extension}`)),
+      ...SUFFIX_FILES,
+    ].sort();
     expect(listUnitFiles(root)).toEqual(expected);
     const result = spawnSync("node", [join(root, "scripts/ci/unit-shards.mjs"), "--verify", "--of", "1"], {
       encoding: "utf8", timeout: 20_000,
@@ -67,7 +78,7 @@ describe("unit-shards — discovery", () => {
         } else if (defect === "missing") {
           rmSync(join(root, dir), { recursive: true });
         } else {
-          for (const extension of ["js", "jsx", "ts", "tsx"]) {
+          for (const extension of EXTENSIONS) {
             rmSync(join(root, dir, `sample.test.${extension}`));
           }
         }

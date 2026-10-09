@@ -14,7 +14,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { testFiles } from "./test-files.mjs";
+import { isUnitTestFile, testFiles } from "./test-files.mjs";
 import { SHARDS, assignShards, listUnitFiles } from "./unit-shards.mjs";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -190,17 +190,16 @@ export function listLaneFiles(root = ROOT) {
   return found.sort();
 }
 
-/** Recognized JS/TS and Python test filenames. */
-const JS_TEST_FILE = /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/;
+/** Recognized Python test filenames. JS/TS names use the shared isUnitTestFile. */
 const NON_JS_TEST_FILE = /^(?:test_.*|.*_test)\.py$/;
 
 /** Matching regular files; skips node_modules, dot entries and symlinks. */
-function matchingFiles(dir, pattern, found = []) {
+function matchingFiles(dir, match, found = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
     const file = join(dir, entry.name);
-    if (entry.isDirectory()) matchingFiles(file, pattern, found);
-    else if (entry.isFile() && pattern.test(entry.name)) found.push(file);
+    if (entry.isDirectory()) matchingFiles(file, match, found);
+    else if (entry.isFile() && match(entry.name)) found.push(file);
   }
   return found;
 }
@@ -217,8 +216,8 @@ export function discoveredTestPackages(root = ROOT) {
     if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
     if (!entry.isDirectory()) continue;
     const dir = join(base, entry.name);
-    if (matchingFiles(dir, JS_TEST_FILE).length) jsTestPackages.push(entry.name);
-    else if (matchingFiles(dir, NON_JS_TEST_FILE).length) nonJsTestPackages.push(entry.name);
+    if (matchingFiles(dir, isUnitTestFile).length) jsTestPackages.push(entry.name);
+    else if (matchingFiles(dir, name => NON_JS_TEST_FILE.test(name)).length) nonJsTestPackages.push(entry.name);
   }
   return { jsTestPackages: jsTestPackages.sort(), nonJsTestPackages: nonJsTestPackages.sort() };
 }
@@ -246,7 +245,7 @@ function bunDirectoryFiles(dir) {
     if (entry.isDirectory()) {
       return entry.name.startsWith(".") || entry.name === "node_modules" ? [] : bunDirectoryFiles(file);
     }
-    return /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/.test(entry.name) ? [file] : [];
+    return isUnitTestFile(entry.name) ? [file] : [];
   });
 }
 
