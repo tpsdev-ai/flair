@@ -34,6 +34,7 @@ import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { fetchErrorLabel, redactUrl } from "./federation.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { isPrincipalDeactivated } from "../lib/principal-status.js";
 import {
   linkPrincipalMapping,
@@ -265,6 +266,14 @@ export function register(program: Command): void {
     .option("--keys-dir <dir>", "Directory for Ed25519 keys")
     .option("--ops-port <port>", "Harper operations API port")
     .action(async (id: string, opts) => {
+      // flair#2359 — the ONE shared agent-ID rule, before any key file is
+      // written or any insert is attempted. The upsert below writes the row
+      // through the operations API, so the Agent resource's own guard never
+      // runs on it.
+      if (!isValidAgentId(id)) {
+        console.error(`Error: ${invalidAgentIdMessage(id)}`);
+        process.exit(1);
+      }
       const opsPort = resolveOpsPort(opts);
       const keysDir: string = opts.keysDir ?? defaultKeysDir();
       const adminUser = resolveAdminUser(opts.adminUser);

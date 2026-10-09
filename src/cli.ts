@@ -72,6 +72,7 @@ import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpec
 import { harperPortValue } from "./lib/harper-port-value.js";
 import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import { encodeRecordId } from "./lib/record-id-path.js";
+import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -3505,6 +3506,12 @@ export async function seedAgentViaOpsApi(
    */
   occupiedListener?: OperationsPortAttribution,
 ): Promise<void> {
+  // flair#2359 — the ONE agent-ID rule, before the operations-API insert. This
+  // is the write path for `flair agent add`, `flair import` and `flair init`,
+  // so a caller-supplied id is refused here by name before any HTTP call.
+  if (!isValidAgentId(agentId)) {
+    throw new Error(invalidAgentIdMessage(agentId));
+  }
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;

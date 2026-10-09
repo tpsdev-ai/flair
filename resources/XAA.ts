@@ -5,6 +5,7 @@ import { DEFAULT_HTTP_PORT } from "./a2a-url.js";
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
 import { claimIdJagJti, idJagReplayDeps, ReplayStoreUnavailable, reportReplayStoreGapsAtBoot, type ReplayStoreBootStore } from "./replay-store.js";
 
 /**
@@ -203,6 +204,10 @@ async function resolveOrCreatePrincipal(
   }
 
   const principalId = `usr_${idpSubject.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 20)}_${randomBytes(4).toString("hex")}`;
+  // flair#2359 — the shared agent-ID rule. The id above is built to conform,
+  // but the rule is enforced on the value that is actually written, so a future
+  // change to this construction cannot store an id AgentSeed would refuse.
+  if (!isValidAgentId(principalId)) throw new Error(invalidAgentIdMessage(principalId));
   const now = nowISO();
 
   // Create principal (via Agent table). flair#1965 r2: a raw Agent create —
