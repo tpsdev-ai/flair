@@ -69,6 +69,8 @@ add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Admin re-embed re-PUT of an existing local row — re-stamps current / preserves, never external, through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Promotion status stamp: re-writes the existing local row through the shared write-back helper (flair#2354).");
+add("promotion-stamp", ["writer:table.put#1"], "ECHO",
+  "Promotion status stamp in the manual promotion's own write transaction: get-then-put re-writes the row it staged.");
 add("MemoryArchive", ["writer:Memory.put#1"], "ECHO", "Existing row through Memory.put().");
 add("migrations/graph-heal", ["writer:table.put#1"], "ECHO",
   "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");

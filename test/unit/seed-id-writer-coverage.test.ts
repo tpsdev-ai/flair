@@ -78,6 +78,8 @@ add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource po
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields, through the shared helper (flair#2354).");
 add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id, via the shared write-back helper (flair#2354).");
+add("promotion-stamp", ["writer:table.put#1"],
+  "SERVER: stamps, in the manual promotion's own write transaction, the row it staged through Memory.put under a server-generated id.");
 add("migrations/embedding-stamp", [
   "writer:table.put#1",
 ], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address.");

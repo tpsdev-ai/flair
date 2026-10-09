@@ -99,6 +99,8 @@ add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
   "usageCount increment (targeted get-then-put) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
+add("promotion-stamp", ["writer:table.put#1"],
+  "Promotion status stamp in the manual promotion's own write transaction — non-skill.");
 add("migrations/graph-heal", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.put#1"],

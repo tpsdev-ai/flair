@@ -56,7 +56,7 @@ export class PromoteMemoryCandidate extends Resource {
       derivedFrom: candidate.sourceMemoryIds ?? [], createdAt: decidedAt,
     }, ctx);
     if (written instanceof Response && !written.ok) return written;
-    await stampMemoryPromotionIsolated(memoryId, reviewerId, decidedAt);
+    await stampMemoryPromotionIsolated(memoryId, reviewerId, decidedAt, undefined, ctx);
     await (databases as any).flair.MemoryCandidate.put({
       ...candidate, status: "promoted", target: "memory", reviewerId,
       reviewRationale: data.rationale, decidedAt,
