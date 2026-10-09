@@ -18,6 +18,7 @@
  * Each test spawns its own subprocess via Bun.spawn so HOME isolation is real
  * (same harness convention as harper-config-port.test.ts).
  */
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -108,9 +109,10 @@ describe("flair#917 — uninstall refuses to kill a PID that is not this instanc
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         `const srv = createServer((_req, res) => { res.writeHead(200); res.end('foreign'); });`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script, portFile], { stdout: "ignore", stderr: "ignore" });
@@ -236,9 +238,10 @@ describe("flair#862 — probePort rejects non-200 responses; discoverPortFromPid
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         `const srv = createServer((_req, res) => { res.writeHead(404); res.end('not found'); });`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script, portFile], { stdout: "ignore", stderr: "ignore" });
@@ -339,9 +342,10 @@ describe("flair#915 — the default install attribution gap is closed", () => {
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         `const srv = createServer((_req, res) => { res.writeHead(200); res.end('foreign'); });`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script, portFile], { stdout: "ignore", stderr: "ignore" });
@@ -456,9 +460,10 @@ describe("flair#819 — uninstall reads Harper's config instead of defaulting to
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         `const srv = createServer((_req, res) => { res.writeHead(200); res.end('foreign'); });`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script, portFile], { stdout: "ignore", stderr: "ignore" });

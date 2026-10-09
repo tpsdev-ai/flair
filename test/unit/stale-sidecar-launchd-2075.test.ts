@@ -1,4 +1,5 @@
 /** Launchd stop verifies exit before attempting confirmed-dead sidecar cleanup. */
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,6 +40,7 @@ describe("launchd stop exit verification", () => {
     const fixture = join(home, "handler.cjs");
     writeFileSync(fixture, `
 const fs = require('node:fs');
+${atomicSignalWriterSource}
 const path = require('node:path');
 const env = require(path.join(process.env.HARPER_TEST_ROOT, 'utility/environment/environmentManager.js'));
 const run = require(path.join(process.env.HARPER_TEST_ROOT, 'bin/run.js'));
@@ -46,7 +48,7 @@ env.setProperty('ROOTPATH', process.env.ROOTPATH);
 run.addExitListeners();
 const exit = process.exit.bind(process);
 process.exit = () => {
-  fs.writeFileSync(process.env.REMOVED, String(!fs.existsSync(process.env.PIDFILE)));
+  publishSignal(process.env.REMOVED, String(!fs.existsSync(process.env.PIDFILE)));
   ${mode === "delayed" ? "setTimeout(() => exit(0), 350);" : ""}
 };
 fs.writeFileSync(process.env.PIDFILE, String(process.pid));

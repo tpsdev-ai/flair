@@ -17,6 +17,7 @@
 // this worktree, `ROOTPATH` = the data dir — exactly the evidence the existing
 // self-heal requires (#1478). HOME is a throwaway dir; nothing touches the real
 // launchctl/systemctl or any real Flair data dir.
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
@@ -122,14 +123,15 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         `const body = process.env.DECOY_BODY ?? "";`,
         `const portFile = process.env.DECOY_PORT_FILE;`,
         `const srv = createServer((_req, res) => {`,
         `  res.writeHead(200, { "content-type": "application/json" });`,
         `  res.end(body);`,
         `});`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(portFile, String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(portFile, String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script], {

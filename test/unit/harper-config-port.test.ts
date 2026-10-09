@@ -39,6 +39,7 @@
 // path is macOS-only, but the port path is the ONLY path on Linux (where CI
 // runs) and the defect is in resolution, which is shared. The exception is
 // noted where it sits, and it is gated on the harness, not on the behaviour.
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -221,13 +222,11 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync, renameSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         // flair#1478: probeHealth requires Flair's public /Health shape, not a bare 200.
         `const srv = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"ok":true,"version":"0.53.0","buildCommit":null,"searchReady":true}'); });`,
-        // Write the port ATOMICALLY (temp + rename): the reader waits on this
-        // file, so a plain writeFileSync let it read the file between create
-        // and write and parse the port as 0 (flair#2130).
-        `srv.listen(0, "127.0.0.1", () => { const t = process.argv[2] + ".tmp"; writeFileSync(t, String(srv.address().port)); renameSync(t, process.argv[2]); });`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script, portFile], { stdout: "ignore", stderr: "ignore" });
@@ -878,14 +877,15 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
       // product code; tests should not carry it either.
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         `const body = process.env.DECOY_BODY ?? "";`,
         `const portFile = process.env.DECOY_PORT_FILE;`,
         `const srv = createServer((req, res) => {`,
         `  res.writeHead(200, { "content-type": "application/json" });`,
         `  res.end(body);`,
         `});`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(portFile, String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(portFile, String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script], {

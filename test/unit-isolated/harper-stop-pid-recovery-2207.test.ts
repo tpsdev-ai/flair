@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -30,12 +31,13 @@ test("start attempts a replacement after Harper's SIGTERM handler removes the pi
   const harperRoot = resolve(import.meta.dir, "../../node_modules/harper/dist");
   writeFileSync(script, `
 const fs = require('node:fs');
+${atomicSignalWriterSource}
 const path = require('node:path');
 const env = require(path.join(process.env.HARPER_TEST_ROOT, 'utility/environment/environmentManager.js'));
 const run = require(path.join(process.env.HARPER_TEST_ROOT, 'bin/run.js'));
 env.setProperty('ROOTPATH', process.env.ROOTPATH);
 run.addExitListeners();
-process.exit = () => fs.writeFileSync(process.env.REMOVED, String(!fs.existsSync(process.env.PIDFILE)));
+process.exit = () => publishSignal(process.env.REMOVED, String(!fs.existsSync(process.env.PIDFILE)));
 fs.writeFileSync(process.env.PIDFILE, String(process.pid));
 fs.writeFileSync(process.env.READY, 'ready');
 setInterval(() => {}, 1000);
