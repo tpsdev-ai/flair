@@ -91,9 +91,14 @@ class BaseMemory {
   static async get(id: any) {
     return memoryStore.get(id) ?? null;
   }
-  static async put(content: any) {
+  static async put(content: any, ctx?: any) {
     const rec = { ...content };
-    memoryStore.set(content.id, rec);
+    // A put made through a transaction's context is staged and applied when
+    // that transaction commits (see the `transaction` stand-in below), so a
+    // read outside the transaction does not see it before then.
+    const staged = ctx?.transaction?.open === 1 ? ctx.transaction.staged : undefined;
+    if (Array.isArray(staged)) staged.push(rec);
+    else memoryStore.set(content.id, rec);
     return rec;
   }
   static async post(content: any) {
