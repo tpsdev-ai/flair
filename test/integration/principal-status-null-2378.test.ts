@@ -25,6 +25,8 @@ import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
 const sfx = Date.now().toString(36);
+const externalHarper = process.env.HARPER_HTTP_URL !== undefined;
+if (externalHarper) console.log("principal-status-null-2378: skipped; HARPER_HTTP_URL is set; requires locally spawned Harper");
 
 interface Principal { id: string; publicKey: string; secretKey: Uint8Array }
 
@@ -128,7 +130,7 @@ const EXPECTED: Array<[Principal, string]> = [
   [deactivated, "deactivated"],
 ];
 
-describe("flair#2378 — show/list report status the way auth reads it", () => {
+describe.skipIf(externalHarper)("flair#2378 — show/list report status the way auth reads it", () => {
   beforeAll(async () => {
     ensureCliBuild();
     scratch = mkdtempSync(join(tmpdir(), "flair-2378-home-"));
