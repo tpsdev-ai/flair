@@ -62,7 +62,14 @@ const env = require(path.join(process.env.HARPER_TEST_ROOT, 'utility/environment
 const run = require(path.join(process.env.HARPER_TEST_ROOT, 'bin/run.js'));
 env.setProperty('ROOTPATH', process.env.ROOTPATH);
 run.addExitListeners();
-process.exit = () => fs.writeFileSync(process.env.REMOVED, String(!fs.existsSync(process.env.PIDFILE)));
+// Publish the completion signal atomically: write a temp file, then rename
+// it into place. A bare writeFileSync truncates then writes, so a reader that
+// polls for the file's existence can observe it while still empty (flair#2397);
+// the rename makes "the file exists" mean "its contents are complete".
+process.exit = () => {
+  fs.writeFileSync(process.env.REMOVED + '.tmp', String(!fs.existsSync(process.env.PIDFILE)));
+  fs.renameSync(process.env.REMOVED + '.tmp', process.env.REMOVED);
+};
 process.stdout.write('ready\n');
 setInterval(() => {}, 1000);
 ` : String.raw`process.on('SIGTERM', () => {}); process.stdout.write('ready\n'); setInterval(() => {}, 1000);`);
