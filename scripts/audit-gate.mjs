@@ -81,7 +81,7 @@ const REQUIRED_ENTRY_FIELDS = [
 // (`bun audit`); `npm-install` is the installed-tree observation (`npm audit
 // --omit=dev --json` on the packed-and-installed prefix). An allowlist entry
 // declares which of these it expects to see its advisory in.
-const VALID_SOURCES = new Set(["bun", "npm-install"]);
+const VALID_SOURCES = new Set(["bun", "npm-install", "npm-install-adk"]);
 
 const VALID_CLASSES = new Set([
   // No patched version exists anywhere yet. Nothing to do but wait upstream.
@@ -400,8 +400,13 @@ export function runNpmAudit(prefix) {
  * harper (`node_modules/harper/node_modules/<pkg>`). The vendor-pinned check
  * below examines every npm-audit-reported node; one harper node cannot cover
  * a hoisted copy reported by npm audit.
+ *
+ * `source` labels which installed tree this report came from. The root tarball
+ * observation is the default `"npm-install"`; the published ADK package's own
+ * consumer install passes `"npm-install-adk"` so an entry can name the tree it
+ * covers (flair#2398).
  */
-export function flattenNpmAdvisories(npmJson) {
+export function flattenNpmAdvisories(npmJson, source = "npm-install") {
   const out = [];
   const vulns = npmJson?.vulnerabilities ?? {};
   for (const [pkg, v] of Object.entries(vulns)) {
@@ -426,7 +431,7 @@ export function flattenNpmAdvisories(npmJson) {
             .filter((node) => typeof node === "string" && Object.hasOwn(npmJson?.packages ?? {}, node))
             .map((node) => [node, npmJson.packages[node]?.version ?? null]),
         ),
-        source: "npm-install",
+        source,
       });
     }
   }
@@ -640,12 +645,30 @@ async function main() {
     process.exit(2);
   }
 
+  // --adk-npm-install-prefix <dir>: the consumer install of the published ADK
+  // package, observed the same way as the root tarball. MANDATORY for the same
+  // reason --npm-install-prefix is: a check that can be skipped is not a check.
+  // npm overrides in a package do not apply to its consumers, so the root
+  // tarball's clean tree says nothing about what a consumer of @tpsdev-ai/adk-flair
+  // resolves; an install of that tarball is what shows it (flair#2398).
+  const adkPrefixIdx = process.argv.indexOf("--adk-npm-install-prefix");
+  const adkPrefix = adkPrefixIdx !== -1 ? process.argv[adkPrefixIdx + 1] : null;
+  if (!adkPrefix) {
+    console.error(
+      "DEPENDENCY AUDIT GATE: missing --adk-npm-install-prefix <dir> — the published ADK package's consumer-install observation is mandatory; the gate refuses to run without it.",
+    );
+    process.exit(2);
+  }
+
   let allowlist;
   let advisories;
   try {
     allowlist = loadAllowlist();
     advisories = flattenAdvisories(runBunAudit());
     advisories = advisories.concat(flattenNpmAdvisories(runNpmAudit(npmPrefix)));
+    advisories = advisories.concat(
+      flattenNpmAdvisories(runNpmAudit(adkPrefix), "npm-install-adk"),
+    );
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
     console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");

@@ -326,7 +326,7 @@ async function gateCase(
     const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url, ...lockfiles });
     const run = await runProcess(
       process.execPath,
-      [join(f.root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", f.prefix],
+      [join(f.root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", f.prefix, "--adk-npm-install-prefix", f.prefix],
       f.root,
       f.env,
       GATE_TIMEOUT_MS,
@@ -397,7 +397,10 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
       expect(run.timedOut).toBe(false);
       expect(run.status).toBe(1);
       expect(run.stderr).not.toContain("FAILED TO RUN");
-      expect(run.stdout).toContain("advisories reported: 2 (2 high)");
+      // bun's report, the root-tarball npm report, and the ADK consumer-install
+      // npm report each reach the fixture registry and see the same advisory, so
+      // the gate counts three (flair#2398 added the third observation).
+      expect(run.stdout).toContain("advisories reported: 3 (3 high)");
       expect(run.stdout).toContain(`HIGH ${GHSA} in ${DEP} (<1.0.1) is NOT allowlisted`);
       expect(run.stdout).not.toContain(PASS_MARKER);
       expect(bunRequests).toContain(BULK_REQUEST);

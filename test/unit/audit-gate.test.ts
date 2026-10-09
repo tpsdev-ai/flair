@@ -82,6 +82,20 @@ describe("the gate refuses to run bun-only", () => {
     expect(res.stderr).toContain("--npm-install-prefix");
     expect(res.stderr).toContain("npm-install observation");
   }, 6_000);
+
+  it("exits non-zero when the ADK consumer observation is absent (flair#2398)", () => {
+    // The published ADK package is a separate consumer artifact; npm overrides
+    // in a package do not reach its consumers, so the root tree alone is not the
+    // observation. A gate that can skip this check is not checking it.
+    const res = spawnSync(
+      "node",
+      [join(REPO_ROOT, "scripts", "audit-gate.mjs"), "--npm-install-prefix", REPO_ROOT],
+      { encoding: "utf8", timeout: 5_000 },
+    );
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("--adk-npm-install-prefix");
+    expect(res.stderr).toContain("consumer-install observation");
+  }, 6_000);
 });
 
 // ─── Vendor-pinned entries cover their npm-audit-reported nodes ──────────────
@@ -201,7 +215,7 @@ describe("vendor-pinned npm-install nodes", () => {
           package: "fastify",
           severity: "moderate",
           class: "vendor-pinned",
-          sources: ["npm-install"],
+          sources: ["npm-install", "npm-install-adk"],
           approvedBy: "fixture",
           introducedBy: "harper -> fastify",
           reason: "Fixture pin in harper's shrinkwrap.",
@@ -223,7 +237,7 @@ describe("vendor-pinned npm-install nodes", () => {
         return [name, statSync(path).isFile() ? readFileSync(path).toString("base64") : "<dir>"];
       });
       const before = snapshot();
-      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), "--npm-install-prefix", root], {
+      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), "--npm-install-prefix", root, "--adk-npm-install-prefix", root], {
         encoding: "utf8",
         timeout: 10_000,
         env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-10-01" },
@@ -342,6 +356,20 @@ describe("the committed allowlist", () => {
     expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("unknown class");
   });
 
+  it("accepts the ADK consumer observation as a source and rejects an unknown one (flair#2398)", () => {
+    const ok = structuredClone(ALLOWLIST);
+    ok.entries[0].sources = ["npm-install-adk"];
+    expect(validateAllowlist(ok, new Date("2026-07-27"))).toEqual([]);
+    const bad = structuredClone(ALLOWLIST);
+    bad.entries[0].sources = ["somewhere-else"];
+    expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("unknown source");
+  });
+
+  it("carries the ADK consumer-install observation (uuid, flair#2398)", () => {
+    const adk = ALLOWLIST.entries.filter((e) => e.sources.includes("npm-install-adk"));
+    expect(adk.map((e) => e.ghsa)).toEqual(["GHSA-w5hq-g745-h8pq"]);
+  });
+
   it("marks harper-pinned npm advisories as npm-install-only (FIXED-FOR-BUN-ONLY)", () => {
     // These are the advisories the npm-install observation surfaces that `bun
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
@@ -434,6 +462,19 @@ describe("flattenNpmAdvisories", () => {
     expect(flat[0].package).toBe("fastify");
     expect(flat[0].source).toBe("npm-install");
     expect(flat[0].nodes).toContain("node_modules/harper/node_modules/fastify");
+  });
+
+  it("labels the ADK consumer observation with its own source (flair#2398)", () => {
+    const node = "node_modules/gaxios/node_modules/uuid";
+    const flat = flattenNpmAdvisories({
+      vulnerabilities: {
+        uuid: { nodes: [node], via: [{
+          url: "https://github.com/advisories/GHSA-w5hq-g745-h8pq", severity: "moderate", range: "<11.1.1",
+        }] },
+      },
+    }, "npm-install-adk");
+    expect(flat).toHaveLength(1);
+    expect(flat[0].source).toBe("npm-install-adk");
   });
 
   it("returns [] for a clean tree", () => {
@@ -686,7 +727,7 @@ describe("the gate fails closed on a refused stage answer, stand-in tools (flair
       chmodSync(join(root, "bin/npm"), 0o755);
       return spawnSync(
         process.execPath,
-        [join(root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", root],
+        [join(root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", root, "--adk-npm-install-prefix", root],
         {
           encoding: "utf8",
           timeout: 10_000,
