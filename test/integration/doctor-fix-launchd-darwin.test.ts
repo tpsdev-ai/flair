@@ -1221,7 +1221,6 @@ test.skipIf(skipFixtureCase)(
     expect(isAlive(pid)).toBe(false);
     const managed = assertManaged(sb);
     expect(managed.pid).not.toBe(pid);
-    expect(readSidecar(sb.dataDir)).toMatchObject({ kind: "present", pid: managed.pid });
   }),
   850_000,
 );

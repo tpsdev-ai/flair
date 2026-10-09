@@ -180,6 +180,39 @@ fi
     }
   }, 20_000);
 
+  test.each([false, true])("launchd cleanup precedes replacement and preserves a different live pid (changed: %s)", async (changed) => {
+    const { pid, port } = await arrangeLiveInstance();
+    const agentsDir = join(home, "Library", "LaunchAgents");
+    mkdirSync(agentsDir, { recursive: true });
+    const plistPath = launchdPlistPath(launchdLabel(dataDir), agentsDir);
+    writeFileSync(plistPath, "<plist/>");
+    const sidecarPath = join(dataDir, "flair-daemon.json");
+    const replacementSidecar = JSON.stringify({ pid: process.pid, startTimeMs: started, port, flairVersion: "0.0.0" });
+    const events: string[] = [];
+    const probe = mock((waitedPid: number) => {
+      expect(waitedPid).toBe(pid);
+      events.push("gone");
+      if (changed) writeFileSync(sidecarPath, replacementSidecar);
+      return { kind: "gone" as const };
+    });
+    await restartFlair(port, dataDir, {
+      launchctl: {
+        list: () => ({ code: 0, stdout: `"PID" = ${pid};` }),
+        unload: () => { events.push("unload"); },
+      },
+      waitForExit: (waitedPid) => waitForProcessExit(waitedPid, 0, probe),
+      startReplacement: async () => {
+        events.push("start");
+        if (changed) expect(readFileSync(sidecarPath, "utf8")).toBe(replacementSidecar);
+        else expect(existsSync(sidecarPath)).toBe(false);
+        writeFileSync(sidecarPath, replacementSidecar);
+      },
+    });
+    expect(events).toEqual(["unload", "gone", "start"]);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(replacementSidecar);
+  }, 20_000);
+
   test("launchd wait failure retains its pid and remedy after Harper removes the pidfile", async () => {
     const { pid, port } = await arrangeLiveInstance(true);
     arrangeLaunchd(pid);
