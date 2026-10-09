@@ -31,8 +31,8 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  *                  model ID and a locally computed vector.
  *   DELEGATED    — embedding handling belongs to Memory.post()/put().
  *   ECHO         — preserves an EXISTING row's embeddingModel.
- *   UNLATCHED    — a raw put that can carry a caller-supplied stamp without
- *                  noteWriteStamp (no writer on this tree; see below).
+ *   UNLATCHED    — a write that can carry a caller-supplied stamp without
+ *                  noteWriteStamp.
  *   NON_EMBED    — writes no embeddingModel (starter and feed rows), or a partial
  *                  update/patch/delete that never touches the stamp.
  *   OTHER_TABLE  — writes on other tables or in-memory maps, included by
@@ -91,8 +91,11 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "EC
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "Dedup repair (flair#2358): read-modify-write re-writes the stored row's own stamp — only its expiresAt changes.");
 
-// ── UNLATCHED: none. The feed refuses a body embedding or embeddingModel
-// (flair#2354), so its ingest is NON_EMBED and its skill successor ECHO. ──
+// ── UNLATCHED: writes a stamp without tripping the latch ──
+// The feed refuses a body embedding or embeddingModel (flair#2354), so its
+// ingest is NON_EMBED and its skill successor ECHO.
+add("Memory", ["writer:super.patch#1"], "UNLATCHED",
+  "Memory.patch(): an ordinary PATCH stores a body's embedding and embeddingModel without noteWriteStamp; when redaction (flair#2407) discards them, it stores a locally computed vector and getModelId(), or null for both when the engine returns no vector.");
 
 // ── NON_EMBED: writes no stamp, or a partial update/patch/delete ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
@@ -110,8 +113,8 @@ add("MemoryMaintenance", ["writer:table.delete#1"], "OTHER_TABLE",
   "MemoryHostSource pointer cascade (A1') — not the Memory table, never an embeddingModel.");
 add("MemoryPurge", ["writer:memory.delete#1"], "NON_EMBED",
   "Physical removal — a delete; never writes embeddingModel.");
-add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
-  "derivedFrom/lastReflected patch, patch(), and delete() — never write embeddingModel.");
+add("Memory", ["writer:patchRecord#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
+  "derivedFrom/lastReflected patch and delete() — never write embeddingModel.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
