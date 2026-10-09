@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import * as childProcess from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -39,12 +40,13 @@ test("start refuses a surviving Harper handler and reaches replacement spawn aft
   const script = join(home, "harper-handler.cjs");
   writeFileSync(script, `
 const fs = require('node:fs');
+${atomicSignalWriterSource}
 const path = require('node:path');
 const env = require(path.join(process.env.HARPER_TEST_ROOT, 'utility/environment/environmentManager.js'));
 const run = require(path.join(process.env.HARPER_TEST_ROOT, 'bin/run.js'));
 env.setProperty('ROOTPATH', process.env.ROOTPATH);
 run.addExitListeners();
-process.exit = () => fs.writeFileSync(process.env.REMOVED, 'removed');
+process.exit = () => publishSignal(process.env.REMOVED, 'removed');
 fs.writeFileSync(process.env.PIDFILE, String(process.pid));
 fs.writeFileSync(process.env.READY, 'ready');
 setInterval(() => {}, 1000);

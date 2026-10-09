@@ -903,6 +903,8 @@ export type HookDeliveryProbe = (command: string) => {
   stderr?: string;
   timedOut?: boolean;
   spawnError?: string | null;
+  cleanupError?: string | null;
+  outputOverflow?: boolean;
 };
 
 export interface HookStatusOptions {
@@ -926,7 +928,15 @@ export function classifyHookDelivery(outcome: {
   stderr?: string;
   timedOut?: boolean;
   spawnError?: string | null;
+  cleanupError?: string | null;
+  outputOverflow?: boolean;
 }): HookDeliveryVerdict {
+  if (outcome.cleanupError) {
+    return { delivered: false, reason: `not delivered: probe could not confirm the command's process group ended (${outcome.cleanupError})` };
+  }
+  if (outcome.outputOverflow) {
+    return { delivered: false, reason: "not delivered: probe output exceeded its size limit" };
+  }
   if (outcome.timedOut) {
     return { delivered: false, reason: "not delivered: probe timed out" };
   }
