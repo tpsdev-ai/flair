@@ -28,6 +28,7 @@ import {
 } from "../../scripts/ci/lane-shards.mjs";
 import { effectiveMatrix, shardValues, verifyWorkflowMatrix } from "../../scripts/ci/check-lane-matrix.mjs";
 import { parseUnitLaneArgs } from "../../scripts/test-unit.ts";
+import { checkGate, gateMutations, parseWorkflows, type Gate } from "../helpers/workflow-gate";
 
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -410,11 +411,29 @@ function workflowMatrix(text: string): Matrix {
   return doc.jobs["test-unit"].strategy.matrix;
 }
 
+// The lane coverage gate has to actually gate: a substring match over the
+// workflow file passes on a step that is disabled or moved out of the required
+// job (flair#2289).
+const LANE_GATE: Gate = {
+  requiredCheck: "Unit Tests",
+  step: "Verify lane shard coverage",
+  script: "scripts/ci/lane-shards.mjs",
+  flag: "--verify",
+};
+
 describe("lane-shards — the workflow runs it", () => {
   const workflow = readFileSync(join(ROOT, ".github", "workflows", "test.yml"), "utf8");
+  const workflowDir = join(ROOT, ".github", "workflows");
 
-  test("CI runs the lane coverage gate", () => {
-    expect(workflow).toContain("node scripts/ci/lane-shards.mjs --verify");
+  test("the lane coverage gate is an enabled step of the required unit job", () => {
+    expect(() => checkGate(parseWorkflows(workflowDir), LANE_GATE)).not.toThrow();
+  });
+
+  test("a renamed, disabled, continued, relocated or under-argumented lane gate is refused", () => {
+    const workflows = parseWorkflows(workflowDir);
+    for (const [label, build] of gateMutations(workflows, LANE_GATE)) {
+      expect(() => checkGate(build(), LANE_GATE), label).toThrow();
+    }
   });
 
   test("the workflow matrix contains every required shard index", () => {

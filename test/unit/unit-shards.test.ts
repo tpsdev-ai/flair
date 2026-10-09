@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { load as loadYaml } from "js-yaml";
 import {
   ROOT, SHARDS, assignShards, coverageReport, listUnitFiles, shardFiles, verifyShards,
 } from "../../scripts/ci/unit-shards.mjs";
 import { unitPlan } from "../../scripts/test-unit.ts";
+import { checkGate, gateMutations, parseWorkflows, type Gate } from "../helpers/workflow-gate";
 
 const ALL = listUnitFiles();
 const fixtures: string[] = [];
@@ -220,115 +220,26 @@ describe("unit-shards — CLI", () => {
 
 });
 
-// The coverage gate has to actually gate. A substring match over the workflow file
-// passes on a step that is disabled or moved out of the required job. Read the
-// parsed job instead: the gate has to be an enabled step, named as such and passing
-// the enforcing flag, of a job the required "Unit Tests" check depends on
+// The coverage gate has to actually gate: a substring match over the workflow
+// file passes on a step that is disabled or moved out of the required job
 // (flair#2289).
 const WORKFLOW_DIR = join(ROOT, ".github", "workflows");
-/** The branch-protection context for unit tests; its `needs` are the unit jobs. */
-const REQUIRED_UNIT_CHECK = "Unit Tests";
-/** The step that runs the root-unit shard coverage gate, and how it enforces. */
-const GATE_STEP = "Verify root unit shard coverage";
-const GATE_SCRIPT = "scripts/ci/unit-shards.mjs";
-const GATE_FLAG = "--verify";
-
-type WorkflowStep = { name?: unknown; run?: unknown; if?: unknown; "continue-on-error"?: unknown };
-type WorkflowJob = { name?: unknown; needs?: unknown; if?: unknown; steps?: WorkflowStep[] };
-type WorkflowDoc = { jobs?: Record<string, WorkflowJob> };
-
-function parseWorkflows(): WorkflowDoc[] {
-  return readdirSync(WORKFLOW_DIR)
-    .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
-    .sort()
-    .map((f) => loadYaml(readFileSync(join(WORKFLOW_DIR, f), "utf8")) as WorkflowDoc);
-}
-
-/** Job ids the required unit check depends on, transitively, including itself. */
-function requiredUnitJobs(...docs: WorkflowDoc[]): Set<string> {
-  const jobs: Record<string, WorkflowJob> = {};
-  for (const doc of docs) Object.assign(jobs, doc.jobs ?? {});
-  const seen = new Set<string>();
-  const stack = Object.entries(jobs).filter(([, job]) => job.name === REQUIRED_UNIT_CHECK).map(([id]) => id);
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const needs = jobs[id]?.needs;
-    for (const dep of Array.isArray(needs) ? needs : needs ? [needs] : []) stack.push(String(dep));
-  }
-  return seen;
-}
-
-/** Whether a step/job `if` is a literal false. */
-function neverRuns(condition: unknown): boolean {
-  if (condition === false || condition === 0) return true;
-  if (typeof condition !== "string") return false;
-  const expr = condition.replace(/[${}\s]/g, "").toLowerCase();
-  return expr === "false" || expr === "0";
-}
-
-/** Throws unless the gate step is enabled, enforcing and in a job the required unit check depends on. */
-function checkCoverageGate(...docs: WorkflowDoc[]): void {
-  const required = requiredUnitJobs(...docs);
-  const gates = docs.flatMap((doc) =>
-    Object.entries(doc.jobs ?? {}).flatMap(([id, job]) =>
-      (job.steps ?? []).filter((step) => step.name === GATE_STEP).map((step) => ({ id, job, step })),
-    ),
-  );
-  if (gates.length === 0) throw new Error(`no step is named "${GATE_STEP}"`);
-  const gated = gates.filter(({ id }) => required.has(id));
-  if (gated.length === 0) throw new Error(`"${GATE_STEP}" runs in no job the required "${REQUIRED_UNIT_CHECK}" check depends on`);
-  for (const { id, job, step } of gated) {
-    if (neverRuns(step.if)) throw new Error(`"${GATE_STEP}" is disabled by its if`);
-    if (step["continue-on-error"] ?? false) throw new Error(`"${GATE_STEP}" has continue-on-error`);
-    const args = String(step.run ?? "").trim().split(/\s+/).filter(Boolean);
-    if (!args.includes(GATE_SCRIPT)) throw new Error(`"${GATE_STEP}" does not run ${GATE_SCRIPT}`);
-    if (!args.includes(GATE_FLAG)) throw new Error(`"${GATE_STEP}" does not pass ${GATE_FLAG}`);
-    if (neverRuns(job.if)) throw new Error(`the job "${id}" holding "${GATE_STEP}" is disabled by its if`);
-  }
-}
-
-/** The committed workflow with one mutation applied to a text copy. */
-function mutateWorkflow(edit: (text: string) => string): WorkflowDoc {
-  const before = readFileSync(join(WORKFLOW_DIR, "test.yml"), "utf8");
-  const after = edit(before);
-  if (after === before) throw new Error("the mutation changed nothing");
-  return loadYaml(after) as WorkflowDoc;
-}
+const UNIT_GATE: Gate = {
+  requiredCheck: "Unit Tests",
+  step: "Verify root unit shard coverage",
+  script: "scripts/ci/unit-shards.mjs",
+  flag: "--verify",
+};
 
 describe("the root-unit shard coverage gate is an enabled step of the required unit job", () => {
   test("the committed workflow satisfies the gate's required shape", () => {
-    expect(() => checkCoverageGate(...parseWorkflows())).not.toThrow();
+    expect(() => checkGate(parseWorkflows(WORKFLOW_DIR), UNIT_GATE)).not.toThrow();
   });
 
   test("a renamed, disabled, continued, relocated or under-argumented gate is refused", () => {
-    const cases: [string, () => WorkflowDoc][] = [
-      ["rename the step", () => mutateWorkflow((t) => t.replace(`name: ${GATE_STEP}`, "name: Verify coverage"))],
-      ["continue on error", () => mutateWorkflow((t) => t.replace(
-        `        run: node ${GATE_SCRIPT} ${GATE_FLAG}\n`,
-        `        run: node ${GATE_SCRIPT} ${GATE_FLAG}\n        continue-on-error: true\n`,
-      ))],
-      ["if: false", () => mutateWorkflow((t) => t.replace(
-        `      - name: ${GATE_STEP}\n`,
-        `      - name: ${GATE_STEP}\n        if: false\n`,
-      ))],
-      ["drop the enforcing flag", () => mutateWorkflow((t) => t.replace(
-        `        run: node ${GATE_SCRIPT} ${GATE_FLAG}\n`,
-        `        run: node ${GATE_SCRIPT}\n`,
-      ))],
-      ["move to a job the check does not require", () => {
-        const doc = loadYaml(readFileSync(join(WORKFLOW_DIR, "test.yml"), "utf8")) as WorkflowDoc;
-        const from = doc.jobs?.["test-unit"];
-        const to = doc.jobs?.["doclint"];
-        const at = (from?.steps ?? []).findIndex((step) => step.name === GATE_STEP);
-        if (!from?.steps || !to || at < 0) throw new Error("fixture drift: gate step or doclint job not found");
-        to.steps = [...(to.steps ?? []), ...from.steps.splice(at, 1)];
-        return doc;
-      }],
-    ];
-    for (const [label, build] of cases) {
-      expect(() => checkCoverageGate(build()), label).toThrow();
+    const workflows = parseWorkflows(WORKFLOW_DIR);
+    for (const [label, build] of gateMutations(workflows, UNIT_GATE)) {
+      expect(() => checkGate(build(), UNIT_GATE), label).toThrow();
     }
   });
 });
