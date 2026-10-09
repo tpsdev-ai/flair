@@ -305,12 +305,7 @@ program
           }
         }
         await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
-        // flair#2055/#2391: once the process is CONFIRMED gone, drop the identity
-        // sidecar — a leftover naming the stopped pid is what makes a later
-        // instance under another supervisor refuse. The pid the wait confirmed
-        // is passed in so the cleanup does not read its liveness again (a
-        // re-read can land after the child is reaped and report it alive); a
-        // fresh O_NOFOLLOW read that still names that pid still gates the unlink.
+        // Use the PID the exit probe observed gone for best-effort cleanup.
         removeStaleSidecarIfConfirmedDead(dataDir, pid);
         const after = await probeHealth(port);
         if (after.kind === "refused") {
@@ -321,9 +316,6 @@ program
         return;
       }
       case "NOT_RUNNING":
-        // A sidecar left naming a pid that is CONFIRMED gone is a leftover too
-        // (flair#2055); clearing it here keeps a repeat stop from carrying the
-        // refusal forward.
         removeStaleSidecarIfConfirmedDead(dataDir);
         console.log("Flair is not running.");
         return;

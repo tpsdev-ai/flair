@@ -10,7 +10,7 @@ mock.module("../../src/lib/process-start-time.js", () => ({
   readProcessStartTimeMs: () => started,
   readProcessStartSecondMs: () => started,
 }));
-const { launchdLabel, launchdPlistPath, probePidLiveness, program, restartFlair } = await import("../../src/cli.ts");
+const { launchdLabel, launchdPlistPath, probePidLiveness, program, restartFlair, waitForProcessExit } = await import("../../src/cli.ts");
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
 const savedHome = process.env.HOME;
 const savedPath = process.env.PATH;
@@ -146,6 +146,38 @@ fi
       },
     })).resolves.toBeUndefined();
     expect(replacementStarted).toBe(true);
+  }, 20_000);
+
+  test.each(["gone", "alive"] as const)("restart launchd cleanup when the exit probe reports %s", async (kind) => {
+    const { pid, port } = await arrangeLiveInstance();
+    const agentsDir = join(home, "Library", "LaunchAgents");
+    mkdirSync(agentsDir, { recursive: true });
+    const plistPath = launchdPlistPath(launchdLabel(dataDir), agentsDir);
+    writeFileSync(plistPath, "<plist/>");
+    const unload = mock((_path: string) => {});
+    const probe = mock((waitedPid: number) => {
+      expect(waitedPid).toBe(pid);
+      return { kind };
+    });
+    const startReplacement = mock(async () => {
+      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(false);
+    });
+    const result = await restartFlair(port, dataDir, {
+      launchctl: { list: () => ({ code: 0, stdout: `"PID" = ${pid};` }), unload },
+      waitForExit: (waitedPid) => waitForProcessExit(waitedPid, 0, probe),
+      startReplacement,
+    }).then(() => null, (err: unknown) => err);
+    expect(unload).toHaveBeenCalledWith(plistPath);
+    expect(probe).toHaveBeenCalled();
+    expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(kind === "alive");
+    if (kind === "gone") {
+      expect(result).toBeNull();
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(startReplacement).toHaveBeenCalledTimes(1);
+    } else {
+      expect(result).toBeInstanceOf(Error);
+      expect(startReplacement).not.toHaveBeenCalled();
+    }
   }, 20_000);
 
   test("launchd wait failure retains its pid and remedy after Harper removes the pidfile", async () => {

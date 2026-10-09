@@ -5507,41 +5507,9 @@ function writeDaemonSidecar(dataDir: string, pid: number, port: number, startTim
 }
 
 /**
- * Remove the identity sidecar left behind by a stop (flair#2055, flair#2391).
- *
- * A sidecar that still names a pid which is CONFIRMED gone is a leftover, and
- * leaving it makes a later instance under a DIFFERENT supervisor refuse
- * ("its identity could not be verified").
- *
- * The pid's liveness is taken from `confirmedGonePid` when it names the pid the
- * sidecar names: a caller that has already WAITED for that pid to exit — the
- * stop paths run `waitForProcessExit` first — has confirmed it gone, and this
- * cleanup must not read it again (flair#2391). A second read races the reaper:
- * `kill(pid, 0)` succeeds on a process that is being reaped, and if the
- * `/proc/<pid>/stat` read that follows then fails with ESRCH the probe reports
- * `alive` (its fail-safe mapping of an unreadable state), the gate below skips
- * the unlink, and `flair stop` returns with the sidecar still naming the pid it
- * just confirmed gone. With no confirmation (the NOT_RUNNING legs, where a
- * liveness read is the only evidence) `probe` is consulted instead.
- *
- * A FRESH O_NOFOLLOW read taken just before the unlink must still name that
- * pid. A sidecar another supervisor rewrote in between names a different pid
- * and is left alone; a symlinked or malformed one reads as `unreadable` and is
- * not removed either, because the re-read never followed the link.
- *
- * There is no lock: the only loser of the read/unlink window is a start that
- * rewrote the sidecar in the gap — a live daemon left with no sidecar, which a
- * later port-based stop or restart can RECOVER by self-heal once the live
- * process supplies the required pidfile and health evidence
- * (shouldAdoptMissingSidecar adopts the identity from the live process; see the
- * recovery test). `flair status` does not re-adopt. A lock would buy
- * nothing here and add a crash-recovery hazard, so the design relies on the
- * self-heal instead. A writer OUTSIDE flair could substitute a symlink after
- * the final read; that is out of scope (same as any other path flair re-reads
- * by name). Best-effort: a failure to unlink is reported, never fatal.
- *
- * `probe` is injectable so the confirmation-vs-read decision is unit-testable
- * without a reap race.
+ * Best-effort removal of a sidecar naming a PID the probe observed gone.
+ * A matching confirmedGonePid skips another liveness probe; null probes it.
+ * A fresh O_NOFOLLOW read must still name that PID. Non-ENOENT unlink errors are logged.
  */
 export function removeStaleSidecarIfConfirmedDead(
   dataDir: string,
@@ -5553,8 +5521,7 @@ export function removeStaleSidecarIfConfirmedDead(
   const observedPid = observed.pid;
   const observedPidLiveness: PidLiveness =
     confirmedGonePid !== null && confirmedGonePid === observedPid ? { kind: "gone" } : probe(observedPid);
-  // Re-read: only the sidecar that still names the confirmed-dead pid is ours
-  // to remove (a sidecar rewritten in the gap is left alone).
+  // A re-read naming a different PID is left alone.
   const fresh = readSidecar(dataDir);
   if (!shouldRemoveSidecarAfterStop({ observedPid, observedPidLiveness, sidecar: fresh })) return;
   const sidecarPath = join(dataDir, "flair-daemon.json");
@@ -7950,6 +7917,10 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
 
 /** The restart flow's exit wait for the old process (flair#2365); injectable for tests. */
 type ExitWait = (pid: number, timeoutMs: number) => Promise<void>;
+type StopFlairDeps = {
+  waitForExit?: ExitWait;
+  launchctl?: { list: LaunchctlLister; unload: (plistPath: string) => void };
+};
 
 type StopExitOutcome = { pid: number | null; exited: boolean };
 
@@ -7980,7 +7951,7 @@ type StopExitOutcome = { pid: number | null; exited: boolean };
 async function stopFlairProcess(
   port: number,
   dataDir: string,
-  opts: { waitForExit?: ExitWait } = {},
+  opts: StopFlairDeps = {},
 ): Promise<StopExitOutcome> {
   const waitForExit = opts.waitForExit ?? waitForProcessExit;
   let launchdExitFailure: { pid: number; exited: false } | null = null;
@@ -8036,12 +8007,15 @@ async function stopFlairProcess(
             plistPath,
             instancePid: oldPid,
             plistExists: existsSync,
-            list: realLaunchctlLister,
+            list: opts.launchctl?.list ?? realLaunchctlLister,
           })
           : null;
         // unload stops the job AND prevents KeepAlive from respawning it.
         // launchctl stop alone is insufficient for a KeepAlive job (flair#874).
-        try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch {}
+        try {
+          if (opts.launchctl) opts.launchctl.unload(plistPath);
+          else execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
+        } catch {}
         if (managed && isDetached(managed)) {
           throw new Error(
             `launchd is not running this instance — ${managed.detail}`
@@ -8054,6 +8028,7 @@ async function stopFlairProcess(
             throw err;
           }
         }
+        removeStaleSidecarIfConfirmedDead(dataDir, oldPid);
         return { pid: oldPid ?? null, exited: true };
       } catch (err: any) {
         console.error(`launchd stop failed, falling back to port-based stop: ${err.message}`);
@@ -8084,18 +8059,13 @@ async function stopFlairProcess(
       // the old process hasn't released it yet.
       let exited = true;
       try { await waitForExit(pid, STARTUP_TIMEOUT_MS); } catch { exited = false; /* best-effort — the restart leg refuses instead (flair#2365) */ }
-      // flair#2055/#2391: drop the identity sidecar once the process is
-      // CONFIRMED gone, using the pid the wait confirmed — a survivor (or an
-      // unconfirmed exit) removes nothing (the pid is passed as null). Gated on
-      // a fresh O_NOFOLLOW read that still names the pid it named before (a
-      // sidecar another supervisor rewrote in between is left alone).
+      // Use the PID the exit probe observed gone; null makes cleanup probe
+      // the sidecar's PID. A re-read naming a different PID is left alone.
       removeStaleSidecarIfConfirmedDead(dataDir, exited ? pid : null);
       return fallbackOutcome({ pid, exited });
     }
     case "NOT_RUNNING": {
-      // Idempotent no-op for the process — but a sidecar left naming a pid that
-      // is CONFIRMED gone is a leftover too (flair#2055), and removing it here
-      // keeps a repeat stop from carrying the refusal forward.
+      // Probe the sidecar's PID before best-effort removal.
       removeStaleSidecarIfConfirmedDead(dataDir);
       return fallbackOutcome({ pid: null, exited: true });
     }
@@ -8289,13 +8259,7 @@ function refuseReplacementAfterExitTimeout(outcome: StopExitOutcome, detail?: st
   );
 }
 
-/**
- * Injection seams for the restart flow (flair#2365): the stop leg's exit wait,
- * and the replacement start a test observes was not reached. Both default to
- * the real legs.
- */
-type RestartFlairDeps = {
-  waitForExit?: ExitWait;
+type RestartFlairDeps = StopFlairDeps & {
   startReplacement?: (port: number, dataDir: string) => Promise<void>;
 };
 
@@ -8320,7 +8284,7 @@ export async function restartFlair(port: number, dataDir: string, deps: RestartF
   const stopForRestart = async (): Promise<void> => {
     let outcome: StopExitOutcome;
     try {
-      outcome = await stopFlairProcess(port, dataDir, { waitForExit: deps.waitForExit });
+      outcome = await stopFlairProcess(port, dataDir, deps);
     } catch (err) {
       if (err instanceof StopExitWaitError) refuseReplacementAfterExitTimeout(err.outcome, err.detail);
       throw err;

@@ -1,20 +1,3 @@
-/**
- * daemon-sidecar-cleanup-2055.test.ts — flair#2055, the stop-time cleanup.
- *
- * The cleanup opens the sidecar with O_NOFOLLOW, re-reads it, and unlinks it
- * only while it still names the pid it first observed as CONFIRMED gone. These
- * tests drive the REAL cleanup exported from `src/cli.ts` against a real
- * filesystem: a symlinked sidecar is neither followed nor removed, a
- * confirmed-dead pid's sidecar is removed, a live pid's is kept.
- *
- * Everything is HOME-isolated (a scratch data dir under the OS temp dir). The
- * lock that briefly serialised this with the writers was removed: the only
- * loser of the read/unlink window is a start that rewrote the sidecar in it,
- * and a live daemon left with no sidecar can be re-adopted by a later
- * port-based stop or restart once the live process supplies the required
- * pidfile and health evidence (see the recovery test in
- * stale-sidecar-2055.test.ts). `flair status` does not re-adopt.
- */
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -73,19 +56,9 @@ describe("flair#2055 — the cleanup removes only a confirmed-dead sidecar", () 
   });
 });
 
-/**
- * flair#2391 — the stop-time cleanup must not read the confirmed-gone pid's
- * liveness a second time. `kill(pid, 0)` succeeds on a process that is being
- * reaped, and if the `/proc/<pid>/stat` read that follows then fails with ESRCH
- * the probe reports `alive`; the stop then returns with the sidecar still
- * naming the pid it just confirmed gone. These drive the cleanup with the
- * caller's confirmation and an injected probe standing in for that race.
- */
 describe("flair#2391 — a confirmed-gone pid is not read again", () => {
   test("the sidecar is dropped even when a fresh liveness read would report the pid alive", () => {
     const dataDir = fixture();
-    // A pid a liveness read reports ALIVE — the shape the re-read takes after a
-    // reaped child. The caller already confirmed this pid exited.
     writeSidecarJson(dataDir, process.pid);
     removeStaleSidecarIfConfirmedDead(dataDir, process.pid, () => ({ kind: "alive" as const }));
     expect(existsSync(sidecarPath(dataDir))).toBe(false);
