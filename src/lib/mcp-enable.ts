@@ -148,6 +148,7 @@ import { randomBytes } from "node:crypto";
 import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
 import { writeConfirmed } from "./instance-identity-row.js";
+import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
 import { defaultReadProcessCmdline, defaultReadProcessCwd } from "./upgrade-exec-path.js";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
@@ -1341,6 +1342,13 @@ export async function provisionIdpIdentityMapping(
   const now = (deps.now ?? (() => new Date().toISOString()))();
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
 
+  // flair#2359 — the ONE shared agent-ID rule, before any read or write. The
+  // principal Agent below is inserted through the operations API, so the Agent
+  // resource's own guard never runs on it.
+  if (!isValidAgentId(params.principal)) {
+    throw new Error(`Identity mapping: ${invalidAgentIdMessage(params.principal)}`);
+  }
+
   // Ensure the principal Agent exists.
   const agentQuery = mappingReadQuery("Agent", { id: params.principal });
   const findRes = await fetchImpl(opsUrl, {
@@ -2400,6 +2408,7 @@ export async function captureBootDiscriminator(
 // ─── Orchestration ────────────────────────────────────────────────────────────
 
 export type EnableStepName =
+  | "principal-id-check"
   | "local-origin-check"
   | "target-shape-check"
   | "issuer-origin-check"
@@ -2563,6 +2572,17 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const idpProvider = params.idpProvider ?? "github";
   const principal = params.principal ?? "self";
   const principalKind = params.principalKind ?? "human";
+
+  // flair#2359 — the resolved principal becomes the id of the Agent row the
+  // identity-mapping step writes, so it must satisfy the shared agent-ID rule
+  // before the dry run reports success and before any secrets are staged or
+  // pushed.
+  if (!isValidAgentId(principal)) {
+    currentStep = "principal-id-check";
+    const message = `principal: ${invalidAgentIdMessage(principal)} Nothing was changed.`;
+    push(false, message);
+    return { ok: false, dryRun, refused: { reason: "invalid", message }, steps, failedStep: "principal-id-check" };
+  }
 
   const fabricTarget = isFabricTarget(params.instance, params.fabric);
 

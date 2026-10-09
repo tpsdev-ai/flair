@@ -72,6 +72,7 @@ import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpec
 import { harperPortValue } from "./lib/harper-port-value.js";
 import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import { encodeRecordId } from "./lib/record-id-path.js";
+import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -3505,6 +3506,12 @@ export async function seedAgentViaOpsApi(
    */
   occupiedListener?: OperationsPortAttribution,
 ): Promise<void> {
+  // flair#2359 — the ONE agent-ID rule, before the operations-API insert. This
+  // is the write path for `flair agent add`, `flair import` and `flair init`,
+  // so a caller-supplied id is refused here by name before any HTTP call.
+  if (!isValidAgentId(agentId)) {
+    throw new Error(invalidAgentIdMessage(agentId));
+  }
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
@@ -5507,39 +5514,21 @@ function writeDaemonSidecar(dataDir: string, pid: number, port: number, startTim
 }
 
 /**
- * Remove the identity sidecar left behind by a stop (flair#2055).
- *
- * A sidecar that still names a pid which is CONFIRMED gone is a leftover, and
- * leaving it makes a later instance under a DIFFERENT supervisor refuse
- * ("its identity could not be verified"). The removal is gated twice:
- *
- *   1. the pid the sidecar names must be CONFIRMED gone (ESRCH) — `unknown` or
- *      EPERM liveness removes nothing; and
- *   2. a FRESH O_NOFOLLOW read taken just before the unlink must still name
- *      that pid. A sidecar another supervisor rewrote in between names a
- *      different pid and is left alone; a symlinked or malformed one reads as
- *      `unreadable` and is not removed either, because the re-read never
- *      followed the link.
- *
- * There is no lock: the re-read narrows the window to the gap between the read
- * and the unlink, and the only loser of that race is a start that rewrote the
- * sidecar in the gap — a live daemon left with no sidecar, which a later
- * port-based stop or restart can RECOVER by self-heal once the live process
- * supplies the required pidfile and health evidence (shouldAdoptMissingSidecar
- * adopts the identity from the live process; see the recovery test). `flair
- * status` does not re-adopt. A lock would buy
- * nothing here and add a crash-recovery hazard, so the design relies on the
- * self-heal instead. A writer OUTSIDE flair could substitute a symlink after
- * the final read; that is out of scope (same as any other path flair re-reads
- * by name). Best-effort: a failure to unlink is reported, never fatal.
+ * Best-effort removal of a sidecar naming a PID the probe observed gone.
+ * A matching confirmedGonePid skips another liveness probe; null probes it.
+ * A fresh O_NOFOLLOW read must still name that PID. Non-ENOENT unlink errors are logged.
  */
-export function removeStaleSidecarIfConfirmedDead(dataDir: string): void {
+export function removeStaleSidecarIfConfirmedDead(
+  dataDir: string,
+  confirmedGonePid: number | null = null,
+  probe: (pid: number) => PidLiveness = probePidLiveness,
+): void {
   const observed = readSidecar(dataDir);
   if (observed.kind !== "present") return;
   const observedPid = observed.pid;
-  const observedPidLiveness = probePidLiveness(observedPid);
-  // Re-read: only the sidecar that still names the confirmed-dead pid is ours
-  // to remove (a sidecar rewritten in the gap is left alone).
+  const observedPidLiveness: PidLiveness =
+    confirmedGonePid !== null && confirmedGonePid === observedPid ? { kind: "gone" } : probe(observedPid);
+  // A re-read naming a different PID is left alone.
   const fresh = readSidecar(dataDir);
   if (!shouldRemoveSidecarAfterStop({ observedPid, observedPidLiveness, sidecar: fresh })) return;
   const sidecarPath = join(dataDir, "flair-daemon.json");
@@ -7935,6 +7924,10 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
 
 /** The restart flow's exit wait for the old process (flair#2365); injectable for tests. */
 type ExitWait = (pid: number, timeoutMs: number) => Promise<void>;
+type StopFlairDeps = {
+  waitForExit?: ExitWait;
+  launchctl?: { list: LaunchctlLister; unload: (plistPath: string) => void };
+};
 
 type StopExitOutcome = { pid: number | null; exited: boolean };
 
@@ -7965,7 +7958,7 @@ type StopExitOutcome = { pid: number | null; exited: boolean };
 async function stopFlairProcess(
   port: number,
   dataDir: string,
-  opts: { waitForExit?: ExitWait } = {},
+  opts: StopFlairDeps = {},
 ): Promise<StopExitOutcome> {
   const waitForExit = opts.waitForExit ?? waitForProcessExit;
   let launchdExitFailure: { pid: number; exited: false } | null = null;
@@ -8021,12 +8014,15 @@ async function stopFlairProcess(
             plistPath,
             instancePid: oldPid,
             plistExists: existsSync,
-            list: realLaunchctlLister,
+            list: opts.launchctl?.list ?? realLaunchctlLister,
           })
           : null;
         // unload stops the job AND prevents KeepAlive from respawning it.
         // launchctl stop alone is insufficient for a KeepAlive job (flair#874).
-        try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch {}
+        try {
+          if (opts.launchctl) opts.launchctl.unload(plistPath);
+          else execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
+        } catch {}
         if (managed && isDetached(managed)) {
           throw new Error(
             `launchd is not running this instance — ${managed.detail}`
@@ -8039,6 +8035,7 @@ async function stopFlairProcess(
             throw err;
           }
         }
+        removeStaleSidecarIfConfirmedDead(dataDir, oldPid);
         return { pid: oldPid ?? null, exited: true };
       } catch (err: any) {
         console.error(`launchd stop failed, falling back to port-based stop: ${err.message}`);
@@ -8069,18 +8066,13 @@ async function stopFlairProcess(
       // the old process hasn't released it yet.
       let exited = true;
       try { await waitForExit(pid, STARTUP_TIMEOUT_MS); } catch { exited = false; /* best-effort — the restart leg refuses instead (flair#2365) */ }
-      // flair#2055: once the process is CONFIRMED gone, drop the identity
-      // sidecar. Gated on a fresh O_NOFOLLOW read that still names the pid it
-      // named before (a sidecar another supervisor rewrote in between is left
-      // alone); a process that survived the wait (or whose liveness is unknown)
-      // removes nothing.
-      removeStaleSidecarIfConfirmedDead(dataDir);
+      // Use the PID the exit probe observed gone; null makes cleanup probe
+      // the sidecar's PID. A re-read naming a different PID is left alone.
+      removeStaleSidecarIfConfirmedDead(dataDir, exited ? pid : null);
       return fallbackOutcome({ pid, exited });
     }
     case "NOT_RUNNING": {
-      // Idempotent no-op for the process — but a sidecar left naming a pid that
-      // is CONFIRMED gone is a leftover too (flair#2055), and removing it here
-      // keeps a repeat stop from carrying the refusal forward.
+      // Probe the sidecar's PID before best-effort removal.
       removeStaleSidecarIfConfirmedDead(dataDir);
       return fallbackOutcome({ pid: null, exited: true });
     }
@@ -8274,13 +8266,7 @@ function refuseReplacementAfterExitTimeout(outcome: StopExitOutcome, detail?: st
   );
 }
 
-/**
- * Injection seams for the restart flow (flair#2365): the stop leg's exit wait,
- * and the replacement start a test observes was not reached. Both default to
- * the real legs.
- */
-type RestartFlairDeps = {
-  waitForExit?: ExitWait;
+type RestartFlairDeps = StopFlairDeps & {
   startReplacement?: (port: number, dataDir: string) => Promise<void>;
 };
 
@@ -8305,7 +8291,7 @@ export async function restartFlair(port: number, dataDir: string, deps: RestartF
   const stopForRestart = async (): Promise<void> => {
     let outcome: StopExitOutcome;
     try {
-      outcome = await stopFlairProcess(port, dataDir, { waitForExit: deps.waitForExit });
+      outcome = await stopFlairProcess(port, dataDir, deps);
     } catch (err) {
       if (err instanceof StopExitWaitError) refuseReplacementAfterExitTimeout(err.outcome, err.detail);
       throw err;

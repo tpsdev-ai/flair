@@ -1,1 +1,0 @@
-- **`flair restart` refuses replacement after a failed stop exit wait unless the waited PID is subsequently confirmed gone (#2365).**

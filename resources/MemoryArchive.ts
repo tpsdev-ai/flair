@@ -37,17 +37,19 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-/** Unwrap a Harper Response (has .json() + .status) into a plain object, else pass through. */
-async function unwrap(value: any): Promise<any> {
+/**
+ * A refusal or failure from Memory.get()/Memory.put() is a Harper `Response`
+ * (it carries `.status` + `.json`); a successful read/write is a plain record.
+ * Return the Response as-is so the endpoint answers with THAT HTTP status and
+ * its named error, and pass a record through unchanged.
+ * Returning an unwrapped write refusal would serialize it as HTTP 200;
+ * unwrapping a read refusal would replace it with the generic 404 below.
+ */
+function asResponse(value: any): Response | null {
   if (value && typeof value === "object" && typeof value.json === "function" && "status" in value) {
-    try {
-      const body = await value.json();
-      return { ...body, status: value.status };
-    } catch {
-      return { error: "request failed", status: value.status };
-    }
+    return value as Response;
   }
-  return value;
+  return null;
 }
 
 export class MemoryArchive extends Resource {
@@ -71,7 +73,9 @@ export class MemoryArchive extends Resource {
     // Read the existing record — Memory.get()'s read-scope gate applies (own +
     // org-non-private only). A non-readable id returns a 404 Response.
     const existing = await Memory.get(id, ctx);
-    const basis = await unwrap(existing);
+    const readRefusal = asResponse(existing);
+    if (readRefusal) return readRefusal;
+    const basis = existing;
     if (!basis || typeof basis !== "object" || !basis.id) {
       return json(404, { error: "memory not found" });
     }
@@ -90,7 +94,9 @@ export class MemoryArchive extends Resource {
     // refused (409); a non-readable row returns 404. Changes after the re-read
     // are not checked.
     return await withOwnedTransaction(ctx, async (c) => {
-      const reread = await unwrap(await Memory.get(id, c));
+      const reread = await Memory.get(id, c);
+      const rereadRefusal = asResponse(reread);
+      if (rereadRefusal) return rereadRefusal;
       if (!reread || typeof reread !== "object" || !reread.id) {
         return json(404, { error: "memory not found" });
       }
@@ -124,7 +130,9 @@ export class MemoryArchive extends Resource {
       // Write back — Memory.put()'s ownership gate applies (stampAttribution), so
       // a non-admin caller cannot flip another agent's memory (403).
       const result = await Memory.put(merged, c);
-      return unwrap(result);
+      const writeRefusal = asResponse(result);
+      if (writeRefusal) return writeRefusal;
+      return result;
     });
   }
 }

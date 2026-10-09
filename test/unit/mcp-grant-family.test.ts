@@ -143,6 +143,32 @@ describe("grantMcpClient — happy path", () => {
     expect(calls).toHaveLength(0);
     expect(existsSync(manifestPath)).toBe(false);
   });
+
+  test("rejects a name starting with '_' before any I/O (MCP client naming policy)", async () => {
+    const { fetchImpl, calls } = mockOpsFetch();
+    await expect(
+      grantMcpClient(
+        { name: "_underscore", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/must start with a letter or digit/);
+    expect(calls).toHaveLength(0);
+    expect(existsSync(keysDir)).toBe(false);
+    expect(existsSync(manifestPath)).toBe(false);
+  });
+
+  test("rejects a name starting with '-' before any I/O (MCP client naming policy)", async () => {
+    const { fetchImpl, calls } = mockOpsFetch();
+    await expect(
+      grantMcpClient(
+        { name: "-dash", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/must start with a letter or digit/);
+    expect(calls).toHaveLength(0);
+    expect(existsSync(keysDir)).toBe(false);
+    expect(existsSync(manifestPath)).toBe(false);
+  });
 });
 
 // ─── grant: duplicate-name rejection ────────────────────────────────────────

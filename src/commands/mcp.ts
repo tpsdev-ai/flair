@@ -51,6 +51,7 @@ import {
   type SecretsMechanism,
 } from "../lib/mcp-enable.js";
 import { resolveHome } from "../lib/home.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 
 export type McpCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -229,8 +230,6 @@ export class McpClientNotFoundError extends Error {
   }
 }
 
-const MCP_CLIENT_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-
 export interface McpGrantParams {
   name: string;
   keysDir: string;
@@ -265,10 +264,13 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   const now = deps.now ?? (() => new Date().toISOString());
   const generateKeyPair = deps.generateKeyPair ?? (() => nacl.sign.keyPair());
 
-  if (!MCP_CLIENT_NAME_PATTERN.test(name)) {
+  if (!isValidAgentId(name)) {
+    throw new Error(`Invalid machine client name '${name}' — ${invalidAgentIdMessage(name)}.`);
+  }
+  // MCP client naming policy also requires a leading letter or digit.
+  if (!/^[a-zA-Z0-9]/.test(name)) {
     throw new Error(
-      `Invalid machine client name '${name}' — must be 1-64 chars, start alphanumeric, ` +
-        `and contain only letters, digits, '_', '-' (it becomes an Agent id, a key filename, and a URL path segment).`,
+      `Invalid machine client name '${name}' — MCP client naming policy: must start with a letter or digit.`,
     );
   }
 

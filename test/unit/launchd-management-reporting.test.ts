@@ -53,6 +53,7 @@
 // those cases as skipped (`test.skipIf(!isDarwin)`, flair#1012); the
 // darwin-gated unit-test lane is what executes them. The pure tests are
 // deliberately platform-independent so the decision logic is gated everywhere.
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, cpSync } from "node:fs";
 import { join } from "node:path";
@@ -652,10 +653,11 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         // flair#1478: probeHealth requires Flair's public /Health shape, not a bare 200.
         `const srv = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"ok":true,"version":"0.53.0","buildCommit":null,"searchReady":true}'); });`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
     // cwd + ROOTPATH so a pidfile-backed fallback stop can bind the stub as
