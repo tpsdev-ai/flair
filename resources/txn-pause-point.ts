@@ -18,11 +18,9 @@ const POLL_MS = 20;
 
 /**
  * The shape of a pause-point name: lowercase words joined by single hyphens
- * (flair#2382). A pause point is named by its call site, and there is no
- * central list of them. `txnPausePoint` refuses a name that does not match
- * with `InvalidPausePointError` at call time; test/unit/txn-pause-point.test.ts
- * scans resources/ and src/ for the names in use and fails on a malformed or
- * duplicate one.
+ * (flair#2382). Removing the shared union list removes that merge conflict.
+ * Valid names keep their pause behaviour; malformed names throw
+ * `InvalidPausePointError` before the fault-injection gate.
  *
  * One point per owned transaction that writes from a row it read.
  *
