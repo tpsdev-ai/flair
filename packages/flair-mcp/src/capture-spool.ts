@@ -117,15 +117,14 @@ const LOCK_BUSY: unique symbol = Symbol("capture-lock-busy");
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
 /** Run `fn` holding the per-agent lock, or return LOCK_BUSY after `waitMs`. */
-function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }, waitMs: number = CAPTURE_LOCK_WAIT_MS, firstAttemptPath?: string): T | typeof LOCK_BUSY {
+function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: LockAcquireState = { stuckTakeover: false, warn: console.warn }, waitMs: number = CAPTURE_LOCK_WAIT_MS, markFirstAttempt = false): T | typeof LOCK_BUSY {
   ensureCaptureDir(dir);
   const deadline = Date.now() + waitMs;
   let firstAttempt = true;
   for (;;) {
     const held = acquireSpoolLock(dir, agentId, console.warn, lockPath(dir, agentId), CAPTURE_LOCK_STALE_MS, false, 0, state);
-    if (firstAttempt && firstAttemptPath) {
-      // Test-only handshake, enabled by FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT_FILE; production leaves it unset.
-      try { writeFileSync(firstAttemptPath, "attempted"); } catch {}
+    if (firstAttempt && markFirstAttempt) {
+      try { writeFileSync(join(dir, ".first-lock-attempt"), "attempted", { flag: "wx", mode: 0o600 }); } catch {}
     }
     firstAttempt = false;
     if (held) {
@@ -142,9 +141,9 @@ function withCaptureLock<T>(dir: string, agentId: string, fn: () => T, state: Lo
 
 type LockRefusal = { reason: "lock_busy" } | { reason: "write_failed"; code: string };
 
-function underLock<T extends string>(dir: string, agentId: string, fn: () => T, waitMs: number = CAPTURE_LOCK_WAIT_MS, firstAttemptPath?: string): T | LockRefusal {
+function underLock<T extends string>(dir: string, agentId: string, fn: () => T, waitMs: number = CAPTURE_LOCK_WAIT_MS, markFirstAttempt = false): T | LockRefusal {
   try {
-    const result = withCaptureLock(dir, agentId, fn, undefined, waitMs, firstAttemptPath);
+    const result = withCaptureLock(dir, agentId, fn, undefined, waitMs, markFirstAttempt);
     return result === LOCK_BUSY ? { reason: "lock_busy" } : result;
   } catch (error) {
     return { reason: "write_failed", code: (error as NodeJS.ErrnoException)?.code ?? "UNKNOWN" };
@@ -317,7 +316,7 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
     const result = underLock(dir, agentId, () => {
       writePendingLocked(dir, agentId, [...readPending(dir, agentId), error]);
       return "error-recorded" as const;
-    }, CAPTURE_PENDING_LOCK_WAIT_MS, env.FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT_FILE);
+    }, CAPTURE_PENDING_LOCK_WAIT_MS, env.FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT === "1");
     if (typeof result !== "string") {
       (deps.warn ?? console.warn)(result.reason === "lock_busy"
         ? `capture: a failed call was not recorded; append lock busy for ${CAPTURE_PENDING_LOCK_WAIT_MS} ms`

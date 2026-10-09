@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -22,6 +23,7 @@ import {
 import { captureInstallRoot } from "../../src/lib/capture-runtime.ts";
 import { flairCliVersion } from "../../src/lib/mcp-spec.ts";
 import { createCaptureRuntime } from "../helpers/capture-runtime.ts";
+import { lockPath, pendingPath } from "../../packages/flair-mcp/src/capture-spool.ts";
 
 const RUNTIME: ActionRecallRuntime = { bunPath: process.execPath, artifactPath: "" };
 
@@ -46,6 +48,49 @@ const install = (over: Record<string, unknown> = {}) =>
   installCaptureHooks({ homeDir: home, harness: "claude-code", agentId: "me", flairUrl: "http://localhost:19926", runtime: RUNTIME, ...over });
 
 describe("flair hook install --capture", () => {
+  for (const refusal of ["lock-busy", "write-failed"] as const) {
+    it(`the installed command reports ${refusal} on stderr with empty stdout and exit 0`, () => {
+      expect(install().ok).toBe(true);
+      const config = settings();
+      for (const event of ["PostToolUseFailure", "PostToolUse", "Stop"] as const) {
+        config.hooks[event][0].hooks[0].command = config.hooks[event][0].hooks[0].command.replace(" >/dev/null || true'", " >/dev/null 2>/dev/null || true'");
+      }
+      writeFileSync(hookSettingsPath(home, "claude-code"), JSON.stringify(config));
+      const repaired = install();
+      expect(repaired.ok).toBe(true);
+      const command = settings().hooks.PostToolUseFailure[0].hooks[0].command as string;
+      const dir = join(home, ".flair", "capture");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (refusal === "lock-busy") {
+        writeFileSync(lockPath(dir, "me"), JSON.stringify({ pid: process.pid, nonce: "held" }), { flag: "wx", mode: 0o600 });
+      } else {
+        mkdirSync(pendingPath(dir, "me"));
+      }
+      const result = spawnSync("sh", ["-c", command], {
+        env: { HOME: home, PATH: process.env.PATH, FLAIR_CAPTURE_DIR: dir },
+        input: JSON.stringify({
+          hook_event_name: "PostToolUseFailure",
+          tool_name: "Bash",
+          tool_input: { command: "bun test foo" },
+          error: "Exit code 1\nError: boom",
+        }),
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(refusal === "lock-busy"
+        ? "capture: a failed call was not recorded; append lock busy for 2000 ms"
+        : "capture: could not write pending error: EISDIR");
+      for (const event of ["PostToolUseFailure", "PostToolUse", "Stop"] as const) {
+        expect(repaired.actions?.[event]).toBe("update");
+        expect(settings().hooks[event]).toHaveLength(1);
+      }
+    }, 20_000);
+  }
+
   it("dry-run leaves settings unchanged and provisions nothing", () => {
     const path = hookSettingsPath(home, "claude-code");
     const result = install({ dryRun: true });

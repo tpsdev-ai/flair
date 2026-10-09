@@ -117,8 +117,8 @@ describe("capture entry point (spawned)", () => {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const lock = lockPath(dir, "agent-a");
     writeFileSync(lock, JSON.stringify({ pid: process.pid, nonce: "held-for-2395" }), { flag: "wx", mode: 0o600 });
-    const marker = join(home, "first-lock-attempt");
-    const pending = run(failure("bun test foo"), { ...childEnv(), FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT_FILE: marker });
+    const marker = join(dir, ".first-lock-attempt");
+    const pending = run(failure("bun test foo"), { ...childEnv(), FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT: "1" });
     try {
       const deadline = Date.now() + CHILD_DEADLINE_MS;
       while (!existsSync(marker) && Date.now() < deadline) {

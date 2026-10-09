@@ -413,9 +413,7 @@ export function isFlairContinuityCommand(command: string): boolean {
 //
 // Runs the provisioned absolute runtime + artifact paths (same Flair-owned
 // provisioning as the action-recall hook). One binary serves all three events; the
-// payload's hook_event_name tells it which fired. Unlike the SessionStart and
-// action-recall hooks it emits NOTHING to the harness, so the wrapper discards
-// both streams and absorbs failure (`>/dev/null 2>/dev/null || true`).
+// payload's hook_event_name tells it which fired.
 
 /** Matches this substring unless npx is bounded by whitespace or string edges; a match does not prove ownership. */
 export const CAPTURE_HOOK_MARKER = "capture-hook.js";
@@ -475,10 +473,16 @@ export function buildCaptureHookCommand(
   const parts = [`FLAIR_AGENT_ID=${agentId}`];
   if (flairUrl) parts.push(`FLAIR_URL=${flairUrl}`);
   if (flushSpec) parts.push(`FLAIR_CAPTURE_FLUSH_SPEC=${flushSpec}`);
-  return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null 2>/dev/null || true'`;
+  return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null || true'`;
 }
 
-const recognizeCaptureCommand = installerCommandRecognizer(buildCaptureHookCommand, CAPTURE_HOOK_MARKER, true);
+const recognizeCurrentCaptureCommand = installerCommandRecognizer(buildCaptureHookCommand, CAPTURE_HOOK_MARKER, true);
+const recognizeLegacyCaptureCommand = installerCommandRecognizer(
+  (...args) => buildCaptureHookCommand(...args).replace(" >/dev/null || true'", " >/dev/null 2>/dev/null || true'"),
+  CAPTURE_HOOK_MARKER,
+  true,
+);
+const recognizeCaptureCommand = (command: unknown) => recognizeCurrentCaptureCommand(command) ?? recognizeLegacyCaptureCommand(command);
 
 export function isFlairCaptureCommand(command: string): boolean {
   return recognizeCaptureCommand(command) !== null;
