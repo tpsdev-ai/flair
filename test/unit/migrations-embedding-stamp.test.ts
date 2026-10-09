@@ -7,7 +7,7 @@
  * row pending (never falsely marks it done) when regen fails.
  *
  * The real loopback-HTTP regen mechanism itself (resources/migrations/
- * embedding-stamp.ts's `regenViaHttpPut`, which is what actually reaches
+ * embedding-stamp.ts's `regenViaHttpPatch`, which is what actually reaches
  * resources/Memory.ts's regen branch against real Harper — see that file's
  * module doc for why an in-process `databases.flair.Memory.put()` call
  * cannot do this) is exercised for real in

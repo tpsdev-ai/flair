@@ -132,7 +132,7 @@ for (const c of CASES) {
 // ─── embedding-stamp's credentialed self-call target must stay loopback ──────
 
 describe("resources/migrations/embedding-stamp.ts — loopback self-call target", () => {
-  // `regenViaHttpPut` sends `Authorization: Basic admin:<password>` to this
+  // `regenViaHttpPatch` sends `Authorization: Basic admin:<password>` to this
   // URL, so it must never be FLAIR_PUBLIC_URL (a remote / reverse-proxied
   // origin). Regression test for the credential leak: RED on the pre-change
   // tree, where resolveSelfBaseUrl returned FLAIR_PUBLIC_URL.

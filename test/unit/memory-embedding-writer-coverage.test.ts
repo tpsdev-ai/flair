@@ -71,6 +71,7 @@ add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "usageCount bump: get-then-put re-writes the existing row's own stamp.");
 add("MemoryReindex", ["writer:Memory.put#1"], "ECHO",
   "Admin re-embed re-PUT of an existing local row — re-stamps current / preserves, never external.");
+add("MemoryArchive", ["writer:Memory.put#1"], "ECHO", "Existing row through Memory.put().");
 add("promotion-stamp", ["writer:table.put#1"], "ECHO",
   "Promotion status stamp: get-then-put re-writes the existing local row.");
 add("migrations/graph-heal", ["writer:table.put#1"], "ECHO",
