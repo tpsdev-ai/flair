@@ -45,33 +45,47 @@ const RAW_WRITE_RE = new RegExp(
 );
 
 /**
- * The synced table a write-back call's first argument names: a literal
- * `.flair.<Table>` in the argument, or in the initializer of a same-file
- * variable the argument names (every binding of that name must agree). Any
- * other argument resolves to "?", and such a site needs its own reviewed
- * policy entry, so an unreviewed one fails the gate (flair#2354).
+ * The synced table a write-back call's first argument names, resolved only
+ * when unambiguous: a direct `<expr>.flair.<Table>` member, or an identifier
+ * whose ONLY binding in the file is a `const` initialised with exactly such a
+ * member. Anything else (a conditional, a logical or call expression, a
+ * parameter, a `let`/`var`, more than one binding) resolves to "?", and such a
+ * site needs its own reviewed policy entry, so an unreviewed one fails the
+ * gate (flair#2354).
  */
 function writeBackTable(call: ts.CallExpression): string {
-  const tableIn = (text: string) => text.match(new RegExp(`\\.flair\\??\\.(${SYNCED_TABLES.join("|")})\\b`))?.[1];
+  const unwrap = (node: ts.Expression): ts.Expression => {
+    let current = node;
+    while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isNonNullExpression(current) ||
+      ts.isTypeAssertionExpression(current) || ts.isSatisfiesExpression(current)) current = current.expression;
+    return current;
+  };
+  /** The table of a direct `<expr>.flair.<Table>` member, else undefined. */
+  const directTable = (node: ts.Expression): string | undefined => {
+    const expr = unwrap(node);
+    if (!ts.isPropertyAccessExpression(expr) || !(SYNCED_TABLES as readonly string[]).includes(expr.name.text)) return undefined;
+    const owner = unwrap(expr.expression);
+    return ts.isPropertyAccessExpression(owner) && owner.name.text === "flair" ? expr.name.text : undefined;
+  };
   const arg = call.arguments[0];
   if (!arg) return "?";
-  const direct = tableIn(arg.getText());
+  const direct = directTable(arg);
   if (direct) return direct;
-  let expr: ts.Expression = arg;
-  while (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isNonNullExpression(expr)) expr = expr.expression;
+  const expr = unwrap(arg);
   if (!ts.isIdentifier(expr)) return "?";
-  const name = expr.text;
-  const tables = new Set<string | undefined>();
+  const bindings: ts.Node[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
-      tables.add(node.initializer ? tableIn(node.initializer.getText()) : undefined);
-    }
-    if (ts.isParameter(node) && ts.isIdentifier(node.name) && node.name.text === name) tables.add(undefined);
+    if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) &&
+        ts.isIdentifier(node.name) && node.name.text === expr.text) bindings.push(node);
     ts.forEachChild(node, visit);
   };
   visit(call.getSourceFile());
-  const [only] = [...tables];
-  return tables.size === 1 && only ? only : "?";
+  if (bindings.length !== 1) return "?";
+  const [binding] = bindings;
+  if (!ts.isVariableDeclaration(binding) || !binding.initializer) return "?";
+  const list = binding.parent;
+  if (!ts.isVariableDeclarationList(list) || !(list.flags & ts.NodeFlags.Const)) return "?";
+  return directTable(binding.initializer) ?? "?";
 }
 
 type Disposition = "stamped-create" | "update-only" | "resource-internal";
@@ -198,6 +212,26 @@ test("an aliased write-back call and one whose table is passed through a variabl
   ].join("\n");
   expect([...enumerateRawWriteSites(unresolved, "resources/__unresolved__.ts").keys()]).toEqual(["resources/__unresolved__.ts|?|write-back"]);
   expect(POLICY["resources/__unresolved__.ts|?|write-back"]).toBeUndefined();
+});
+
+test("a conditional table argument or initializer is unresolved, never a table it may not use (flair#2354)", () => {
+  const conditionalArgument = [
+    'import { writeBackCommittedRow } from "./write-back.js";',
+    "async function leak(flag, id) {",
+    '  await writeBackCommittedRow(flag ? (databases as any).flair.Memory : (databases as any).flair.Agent, id, (row) => ({ write: row }), { label: "fixture" });',
+    "}",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(conditionalArgument, "resources/__conditional_argument__.ts").keys()])
+    .toEqual(["resources/__conditional_argument__.ts|?|write-back"]);
+  const conditionalInitializer = [
+    'import { writeBackCommittedRow } from "./write-back.js";',
+    "const target = process.env.FLAG ? (databases as any).flair.Memory : (databases as any).flair.Agent;",
+    "async function leak(id) {",
+    '  await writeBackCommittedRow(target, id, (row) => ({ write: row }), { label: "fixture" });',
+    "}",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(conditionalInitializer, "resources/__conditional_initializer__.ts").keys()])
+    .toEqual(["resources/__conditional_initializer__.ts|?|write-back"]);
 });
 
 test("every raw synced-table write site under resources/ has a reviewed policy entry with the expected count", () => {
