@@ -3,17 +3,15 @@
  *
  * `Memory.patch()`'s re-embed branch (a PATCH whose body is `{"embedding":
  * null, "embeddingModel": null}` — `flair reembed` and direct PATCH requests)
- * reads the stored row, computes the embedding outside
- * the write, then writes. This file pins that the write is built from the row
- * re-read inside the transaction that writes, and re-checks the owner and the
- * text, so a change committed while the embedding was computed is neither lost
- * nor stamped with a vector for text the row no longer carries.
+ * pauses after the initial read and before embedding begins. These cases
+ * commit a competing edit during that pause and check the re-embed response
+ * and stored row.
  *
  * The spawned Harper carries the test-only pause (resources/txn-pause-point.ts,
  * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set in
  * this process's environment while this file starts its Harper, then restored).
  * Each case arms it, starts the re-embed PATCH, waits until it is paused between
- * its read and its write, commits a competing write against the same row, then
+ * the initial read and embedding, commits a competing write against the same row, then
  * releases it.
  *
  * Throwaway HOME + data dir, ephemeral ports.
@@ -114,7 +112,7 @@ async function seedRow(id: string, agentId: string, extra: Record<string, unknow
 
 /**
  * Arm the pause, start the re-embed PATCH, and once it is paused between its
- * read and its write run `compete`, then release it. Returns the PATCH's
+ * initial read and embedding run `compete`, then release it. Returns the PATCH's
  * response and how the pause ended.
  */
 async function withPausedReembed(id: string, agent: TestAgent, compete: () => Promise<unknown>): Promise<{ response: Response; released: string }> {
@@ -179,7 +177,7 @@ afterAll(async () => {
 });
 
 describe("flair#2390 — a re-embed PATCH writes from the row it re-reads (real Harper)", () => {
-  it("(1) a field committed while the PATCH was paused survives, alongside the re-embed", async () => {
+  it("(1) a field edited before embedding begins survives the re-embed", async () => {
     const id = "mre-case-1";
     await seedRow(id, owner.id, { source: "original-source" });
     const { response, released } = await withPausedReembed(id, owner, async () => {
@@ -193,7 +191,7 @@ describe("flair#2390 — a re-embed PATCH writes from the row it re-reads (real 
     expect(row.content).toBe(ORIGINAL);
   }, 120_000);
 
-  it("(2) a content change while the PATCH awaits the embedding is not stamped with the superseded text", async () => {
+  it("(2) content edited before embedding begins is used for the stored vector", async () => {
     const id = "mre-case-2";
     await seedRow(id, owner.id);
     const { response, released } = await withPausedReembed(id, owner, async () => {
@@ -210,7 +208,7 @@ describe("flair#2390 — a re-embed PATCH writes from the row it re-reads (real 
     expect(cosine(row.embedding, editedVector)).toBeGreaterThan(cosine(row.embedding, originalVector)); // never the superseded text
   }, 120_000);
 
-  it("(3) an owner change mid-PATCH is refused and the row is unchanged", async () => {
+  it("(3) an owner change before embedding begins persists and the PATCH makes no re-embed write", async () => {
     const id = "mre-case-3";
     await seedRow(id, owner.id);
     const { response, released } = await withPausedReembed(id, owner, async () => {
