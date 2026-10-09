@@ -44,7 +44,7 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "wri
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
-  "Re-embed request (flair#2296, re-read flair#2390): writes embedding, embeddingModel and updatedAt only, no skill content.");
+  "Re-embed request (flair#2296, re-read flair#2390): intentionally changes only embedding, embeddingModel and updatedAt; puts the whole re-read row.");
 
 // ── REJECTING skill-writer sinks (400 skill_write_path) ──
 add("Memory", ["writer:super.patch#1"],

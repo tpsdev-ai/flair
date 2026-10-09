@@ -62,7 +62,7 @@ add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT —
 // re-reads the row and re-stamps it through the raw table handle in its own
 // transaction. It stamps getModelId() (the current local space), so it is ECHO.
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
-  "Memory.patch() re-embed request (flair#2296, re-read flair#2390) — locally computed vector/current model; noteWriteStamp.");
+  "Memory.patch() re-embed request (flair#2296, re-read flair#2390): intentionally changes only embedding, embeddingModel and updatedAt; puts the whole re-read row; noteWriteStamp.");
 
 // ── ECHO: re-writes an EXISTING local row's own stamp (no new space) ──
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",

@@ -1118,6 +1118,9 @@ async function reembedStoredRow(
       return Response.json({ error: "reembed_no_text", message: "the stored row has no text to embed" }, { status: 422 });
     }
     if (outcome.kind === "recompute") {
+      if (attempt === REEMBED_WRITE_ATTEMPTS) {
+        return Response.json({ error: "reembed_row_changed", message: "the stored text changed during each re-embed attempt; retry" }, { status: 409 });
+      }
       textToEmbed = outcome.text;
       const recomputed = await getEmbedding(textToEmbed, "document");
       if (!isUsableEmbeddingVector(recomputed)) {
@@ -1774,10 +1777,8 @@ export class Memory extends (databases as any).flair.Memory {
     const resolvedStored = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedStored.denial) return resolvedStored.denial;
     const existingForSkill = resolvedStored.row;
-    // flair#2296: a re-embed request (`flair reembed`). The vector is computed
-    // from the stored row, and the re-embed writes embedding, embeddingModel and
-    // updatedAt, so no other stored field is rewritten. It changes no skill
-    // content, so the skill refusal below does not apply to it.
+    // flair#2296: re-embed intentionally changes only embedding, embeddingModel
+    // and updatedAt; the whole re-read row is submitted to put.
     // flair#2390: the vector is computed OUTSIDE the write. The write itself
     // re-reads the committed row inside its own transaction (reembedStoredRow),
     // builds the record from that row, and re-checks the owner and the text, so

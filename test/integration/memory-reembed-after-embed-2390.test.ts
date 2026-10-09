@@ -2,8 +2,8 @@
  * memory-reembed-after-embed-2390.test.ts — flair#2390, real Harper.
  *
  * `Memory.patch()`'s re-embed branch (a PATCH whose body is `{"embedding":
- * null, "embeddingModel": null}` — `flair reembed`, and the embedding-stamp
- * migration since #2373) reads the stored row, computes the embedding outside
+ * null, "embeddingModel": null}` — `flair reembed` and direct PATCH requests)
+ * reads the stored row, computes the embedding outside
  * the write, then writes. This file pins that the write is built from the row
  * re-read inside the transaction that writes, and re-checks the owner and the
  * text, so a change committed while the embedding was computed is neither lost
