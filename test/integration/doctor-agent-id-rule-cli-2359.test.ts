@@ -13,15 +13,16 @@
  * get wrong on a real instance:
  *   1. a stored id below the former `createdAt > "1970-01-01"` cutoff is
  *      reported, and the finding moves the summary count;
- *   2. an Agent-ID check that could NOT run — no admin credential, or a failed
- *      roster read — is a counted issue, not a clean result.
+ *   2. an Agent-ID check that could NOT run — no admin credential, a failed
+ *      roster read, or an admin-pass file the credential resolver refuses — is
+ *      a counted issue, not a clean result.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js must exist
  * (`bun run build && bun run build:cli`).
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
@@ -147,5 +148,38 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     const noCred = await runDoctor("");
     expect(noCred.stdout).toContain("no admin credentials");
     expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 1);
+  }, 120_000);
+
+  test("an unsafe or empty admin-pass file: doctor completes and counts the unrun check with the resolver's reason", async () => {
+    // The reference: no admin credential at all, which the test above proves
+    // is one counted issue over the clean baseline.
+    const noCred = await runDoctor("");
+    expect(noCred.stdout).toContain("no admin credentials");
+    const unrunCount = issueCount(noCred.stdout);
+
+    const flairDir = join(cliHome, ".flair");
+    const passFile = join(flairDir, "admin-pass");
+    await mkdir(flairDir, { recursive: true });
+    const cases = [
+      // The right password, in a file group/other can read: the resolver refuses it.
+      { label: "group/other-readable", content: `${ADMIN_PASS}\n`, mode: 0o644, reason: "permissions 644 are too open" },
+      { label: "empty", content: "", mode: 0o600, reason: "file is empty or contains only whitespace" },
+    ];
+    try {
+      for (const c of cases) {
+        await writeFile(passFile, c.content, "utf-8");
+        await chmod(passFile, c.mode);
+        // FLAIR_ADMIN_PASS empty, so the resolver falls through to the file.
+        const r = await runDoctor("");
+        expect(r.code, `${c.label}: doctor did not complete\n${r.stdout}\n${r.stderr}`).toBe(1);
+        expect(r.stdout, `${c.label}: the unrun check was not reported`).toContain("the admin credential could not be resolved (");
+        expect(r.stdout, `${c.label}: the resolver's reason was not reported`).toContain(c.reason);
+        expect(r.stdout).toContain("so the agent-id check did not run");
+        expect(r.stdout).not.toContain("No stored agent id is outside");
+        expect(issueCount(r.stdout), `${c.label}: the unrun check was not counted`).toBe(unrunCount);
+      }
+    } finally {
+      await rm(passFile, { force: true });
+    }
   }, 120_000);
 });

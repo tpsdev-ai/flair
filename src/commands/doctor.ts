@@ -2005,7 +2005,13 @@ program
       console.log(`\n  ${render.wrap(render.c.bold, "Agent IDs")}`);
       let roster: Array<{ id?: unknown }> | null = null;
       let rosterReadAttempted = false;
-      const agentListAdminPass = resolveLocalAdminPass(undefined);
+      let agentListAdminPass: string | undefined;
+      let agentListCredIssue: string | null = null;
+      try {
+        agentListAdminPass = resolveLocalAdminPass(undefined);
+      } catch (err: unknown) {
+        agentListCredIssue = err instanceof Error ? err.message : String(err);
+      }
       if (agentListAdminPass) {
         rosterReadAttempted = true;
         const auth = Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64");
@@ -2021,9 +2027,11 @@ program
         // for an Agent-ID check that did not happen.
         issues++;
         console.log(
-          rosterReadAttempted
-            ? `  ${render.icons.warn} Could not read the stored Agent roster, so the agent-id check did not run.`
-            : `  ${render.icons.warn} Skipped: no admin credentials to read the stored Agent roster, so the agent-id check did not run.`,
+          agentListCredIssue
+            ? `  ${render.icons.warn} Skipped: the admin credential could not be resolved (${agentListCredIssue}), so the agent-id check did not run.`
+            : rosterReadAttempted
+              ? `  ${render.icons.warn} Could not read the stored Agent roster, so the agent-id check did not run.`
+              : `  ${render.icons.warn} Skipped: no admin credentials to read the stored Agent roster, so the agent-id check did not run.`,
         );
       } else {
         const finding = describeAgentIdRuleFinding(roster);

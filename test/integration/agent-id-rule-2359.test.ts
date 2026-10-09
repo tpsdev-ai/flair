@@ -163,6 +163,36 @@ describe("flair#2359 — the Agent REST write paths refuse an out-of-rule id on 
   });
 });
 
+describe("flair#2359 — a valid URL id with a conflicting out-of-rule body id: the rule checks the URL id", () => {
+  const sfx = Date.now().toString(36);
+
+  // PUT and PATCH: the rule passes the valid URL id, then the URL/body id
+  // mismatch refuses the write, so neither id gets a row.
+  for (const method of ["PUT", "PATCH"] as const) {
+    test(`${method} /Agent/<valid> with an out-of-rule body id answers id_target_mismatch and stores no row`, async () => {
+      const urlId = `url-${method.toLowerCase()}-${sfx}`;
+      const bodyId = `body.${method.toLowerCase()}.${sfx}`; // a dot is not in the rule
+      const r = await send(method, `/Agent/${urlId}`, { id: bodyId, name: "Conflict", publicKey: "body-public-key" });
+      expect(r.status, r.raw).toBe(400);
+      expect(JSON.parse(r.raw).error, r.raw).toBe("id_target_mismatch");
+      expect(await rowIn("Agent", bodyId), "a row was stored under the body id").toBeNull();
+      expect(await rowIn("Agent", urlId), "the refused write stored a row under the URL id").toBeNull();
+    });
+  }
+
+  // POST to a record URL: the rule passes the valid URL id, then Harper answers
+  // 405; neither id gets a row.
+  test("POST /Agent/<valid> with an out-of-rule body id is not answered invalid_agent_id and stores no row", async () => {
+    const urlId = `url-post-${sfx}`;
+    const bodyId = `body.post.${sfx}`; // a dot is not in the rule
+    const r = await send("POST", `/Agent/${urlId}`, { id: bodyId, name: "Conflict", role: "agent", publicKey: "body-public-key" });
+    expect(r.status, r.raw).toBe(405);
+    expect(r.raw).not.toContain("invalid_agent_id");
+    expect(await rowIn("Agent", bodyId), "a row was stored under the body id").toBeNull();
+    expect(await rowIn("Agent", urlId), "the refused write stored a row under the URL id").toBeNull();
+  });
+});
+
 describe("flair#2359 — the doctor roster read reports a stored id outside the rule", () => {
   test("a stored Agent row whose createdAt is below the old filter is still reported", async () => {
     const seeded = "outside.filter.bad"; // a dot is not in the rule

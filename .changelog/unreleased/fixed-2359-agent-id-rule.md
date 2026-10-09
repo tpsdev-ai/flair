@@ -6,5 +6,6 @@
   merge refuse an id outside the rule rather than store it; the resource,
   `AgentSeed` and the federation merge answer the named error
   `invalid_agent_id`. `flair doctor` reports stored agent ids outside the rule
-  when it can read the Agent roster, and counts a check that could not run as an
-  issue; it rewrites nothing.
+  when it can read the Agent roster, and counts a check that could not run (no
+  admin credential, an admin-pass file the credential resolver refuses, or a
+  failed roster read) as an issue; it rewrites nothing.

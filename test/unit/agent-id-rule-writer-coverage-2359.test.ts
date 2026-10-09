@@ -2,12 +2,13 @@
  * agent-id-rule-writer-coverage-2359.test.ts — flair#2359.
  *
  * The one agent-ID rule is only as good as the set of paths that apply it. This
- * test enumerates the files that can create an Agent row — the resource raw
- * table idiom (`(databases as any).flair.Agent.put(`), the two structural
- * resource writers the idiom cannot see (resources/Agent.ts's REST methods go
- * through `super`; resources/Federation.ts's merge resolves the table through a
- * variable), and the CLI's ops-API write literal in src/ — and requires each to
- * reference the shared guard from src/lib/agent-id-rule.ts.
+ * test enumerates the files that use the direct Agent writer idioms it checks —
+ * the resource raw table idiom (`(databases as any).flair.Agent.put(`), the two
+ * structural resource writers the idiom cannot see (resources/Agent.ts's REST
+ * methods go through `super`; resources/Federation.ts's merge resolves the table
+ * through a variable), and the CLI's ops-API write literal in src/ — and requires
+ * each to reference the shared guard from src/lib/agent-id-rule.ts. A caller that
+ * creates an Agent through the REST API (`flair restore`) is not enumerated.
  *
  * The `flair agent add` CLI path is exercised behaviourally by
  * test/unit-isolated/agent-add-invalid-id-2359.test.ts; the shared CLI insert
@@ -55,7 +56,7 @@ test("the detector finds both write idioms (self-proof: synthetic writers are de
   expect(stripComments(ops).match(OPS_AGENT_WRITE_RE)).not.toBeNull();
 });
 
-test("the files that write an Agent row reference the shared agent-ID rule", () => {
+test("the files using a checked direct Agent writer idiom reference the shared agent-ID rule", () => {
   // Structural writers the literal idioms cannot see.
   const structural = ["resources/Agent.ts", "resources/Federation.ts"];
   const files = [...new Set([...agentWriterFiles("resources"), ...agentWriterFiles("src"), ...structural])].sort();

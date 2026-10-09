@@ -3,8 +3,9 @@
  * server (resources/).
  *
  * An agent ID is the key of an Agent row and is used in URLs, shell hooks and
- * federation payloads, so the paths that create an Agent must accept the same
- * ids. Before this module the rule lived inline in
+ * federation payloads, so Flair's paths that create an Agent reject ids outside
+ * this rule (`flair mcp grant` also applies a narrower naming policy: a leading
+ * letter or digit). Before this module the rule lived inline in
  * resources/AgentSeed.ts only: the Agent resource's REST writes,
  * `flair agent add` and the federation merge each accepted an id AgentSeed
  * would have refused, and the JIT-principal writers (XAA / MCP) built an id
