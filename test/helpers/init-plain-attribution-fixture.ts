@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tempDir } from "./temp-dir.ts";
@@ -37,8 +37,12 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT, authenticate
   if (["own", "own-stopped", "own-stopped-real-free", "own-launchd", "foreign-launchd"].includes(scenario)) {
     const dataDir = join(home, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
+    // Pin the modes a PID-file proof requires: ownedInitPidfilePid rejects a
+    // data dir or hdb.pid with group/other write bits, and default create modes
+    // inherit the umask (0002 yields 0775/0664).
+    chmodSync(dataDir, 0o700);
     writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
-    writeFileSync(join(dataDir, "hdb.pid"), String(OWN_PID));
+    writeFileSync(join(dataDir, "hdb.pid"), String(OWN_PID), { mode: 0o600 });
   }
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),

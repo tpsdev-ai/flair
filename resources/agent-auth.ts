@@ -20,6 +20,7 @@ import { databases } from "harper";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { ADMIN_ROLE, agentRecordIsAdmin } from "./agent-admin.js";
+import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -44,17 +45,11 @@ export const FLAIR_AGENT_USERNAME = "flair-agent";
 // Do not read this as "deactivation now works" — it works for NEW auth only.
 
 /**
- * Single shared predicate: is this principal deactivated?
- *
- * Called from BOTH verify paths (Ed25519 and Basic/agent-auth) so the
- * deactivation check cannot drift.  A nonexistent agent is not "deactivated" —
- * it will fail on other checks (missing publicKey, unknown user, etc.).
+ * Single shared predicate: re-exported from src/lib/principal-status.ts, which
+ * holds the rule. Called from BOTH verify paths (Ed25519 and Basic/agent-auth)
+ * and the human-readable `principal show`/`list` output (flair#2378).
  */
-export function isPrincipalDeactivated(agent: { status?: unknown } | null | undefined): boolean {
-  if (agent == null) return false;
-  if (agent.status === undefined) return false;
-  return agent.status !== "active";
-}
+export { isPrincipalDeactivated };
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
 // WINDOW_MS and importEd25519Key live in ./ed25519-auth.ts, and the replay

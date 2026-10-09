@@ -23,9 +23,12 @@
  * `jsResource: files: dist/resources/*.js` (named export → export name).
  */
 
-import { Resource } from "harper";
+import { Resource, databases } from "harper";
+import { isDeepStrictEqual } from "node:util";
 import { Memory } from "./Memory.js";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { withOwnedTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -68,41 +71,60 @@ export class MemoryArchive extends Resource {
     // Read the existing record — Memory.get()'s read-scope gate applies (own +
     // org-non-private only). A non-readable id returns a 404 Response.
     const existing = await Memory.get(id, ctx);
-    const record = await unwrap(existing);
-    if (!record || typeof record !== "object" || !record.id) {
+    const basis = await unwrap(existing);
+    if (!basis || typeof basis !== "object" || !basis.id) {
       return json(404, { error: "memory not found" });
     }
+    const persistedBasis = await (databases as any).flair.Memory.get(id, ctx);
+    if (!persistedBasis) return json(404, { error: "memory not found" });
 
     const archived = action === "basement";
-    const merged: Record<string, unknown> = {
-      ...record,
-      archived,
-      updatedAt: new Date().toISOString(),
-    };
-    if (archived) {
-      // archivedBy is set by the caller (Memory.put() stamps archivedAt when
-      // archived===true). The content is unchanged, so the existing embedding
-      // stays valid — do NOT clear it (clearing would force a needless re-embed
-      // and, if the embedding engine is unavailable, silently drop the vector).
-      merged.archivedBy = auth.agentId;
-    } else {
-      delete merged.archivedAt;
-      delete merged.archivedBy;
-    }
 
-    // flair#1940 A3 (item 9): the record we read was PROJECTED — for the author
-    // it carries the canonical pointer with the URL query/fragment STRIPPED,
-    // and for a non-author it may read "withheld". Writing any of that back
-    // would replace the stored pointer (losing the full URL) or store a bogus
-    // value, and would re-derive the scope. Omit every pointer field from the
-    // write-back so the stored pointer row, its full URL and its scope stand.
-    delete merged.hostSource;
-    delete merged.hostSourceScope;
-    delete merged.hostSourceVisibility;
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    const beforeReread = txnPausePoint("memory-archive-pre");
+    if (beforeReread) await beforeReread;
 
-    // Write back — Memory.put()'s ownership gate applies (stampAttribution), so
-    // a non-admin caller cannot flip another agent's memory (403).
-    const result = await Memory.put(merged, ctx);
-    return unwrap(result);
+    // flair#2275: re-read the row INSIDE a transaction this call OWNS and build
+    // the write from THAT read — never from the basis above, which another
+    // writer may have changed before the write. Unequal persisted rows are
+    // refused (409); a non-readable row returns 404. Changes after the re-read
+    // are not checked.
+    return await withOwnedTransaction(ctx, async (c) => {
+      const reread = await unwrap(await Memory.get(id, c));
+      if (!reread || typeof reread !== "object" || !reread.id) {
+        return json(404, { error: "memory not found" });
+      }
+      const persistedReread = await (databases as any).flair.Memory.get(id, c);
+      if (!persistedReread) return json(404, { error: "memory not found" });
+      if (!isDeepStrictEqual(persistedReread, persistedBasis)) {
+        return json(409, { error: "memory_changed" });
+      }
+      const merged: Record<string, unknown> = {
+        ...reread,
+        archived,
+        updatedAt: new Date().toISOString(),
+      };
+      if (archived) {
+        // archivedBy is set by the caller (Memory.put() stamps archivedAt when
+        // archived===true). The content is unchanged, so the existing embedding
+        // stays valid — do NOT clear it (clearing would force a needless re-embed
+        // and, if the embedding engine is unavailable, silently drop the vector).
+        merged.archivedBy = auth.agentId;
+      } else {
+        delete merged.archivedAt;
+        delete merged.archivedBy;
+      }
+
+      // flair#1940 A3 (item 9): omit every pointer field from the write-back so
+      // the stored pointer row, its full URL and its scope stand.
+      delete merged.hostSource;
+      delete merged.hostSourceScope;
+      delete merged.hostSourceVisibility;
+
+      // Write back — Memory.put()'s ownership gate applies (stampAttribution), so
+      // a non-admin caller cannot flip another agent's memory (403).
+      const result = await Memory.put(merged, c);
+      return unwrap(result);
+    });
   }
 }

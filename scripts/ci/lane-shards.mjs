@@ -12,7 +12,7 @@
 //   Every command refuses an argument it does not take, with exit status 2.
 
 import { readdirSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { testFiles } from "./test-files.mjs";
 import { SHARDS, assignShards, listUnitFiles } from "./unit-shards.mjs";
@@ -49,6 +49,9 @@ export const WORKSPACE_PACKAGES = [
   "adk-flair-js",
   "cursor-wake-runner",
 ];
+
+/** Packages with recognized Python test filenames omitted from the Bun plan. */
+export const NON_JS_TEST_PACKAGES = ["adk-flair", "hermes-flair"];
 
 /**
  * @param {string} [root]
@@ -173,13 +176,7 @@ export function shardSteps(index, of = LANE_SHARDS, steps = unitPlan()) {
   return assignLaneShards(steps, of)[index - 1];
 }
 
-/**
- * Every test file the lane runs, discovered from disk — independently of the
- * step plan, so a file dropped from the assignment (or from the plan) is
- * reported missing instead of silently shrinking the corpus. It must match the
- * union of `unitPlan()`'s step files on a clean tree; lane-shards.test.ts
- * pins that.
- */
+/** Files matching `.test.[jt]s` or `.test.[jt]sx` in the planned directories. */
 export function listLaneFiles(root = ROOT) {
   const found = [
     ...testFiles(join(root, "test"), false),
@@ -191,6 +188,52 @@ export function listLaneFiles(root = ROOT) {
     found.push(...testFiles(join(root, "packages", pkg, dir), true));
   }
   return found.sort();
+}
+
+/** Recognized JS/TS and Python test filenames. */
+const JS_TEST_FILE = /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/;
+const NON_JS_TEST_FILE = /^(?:test_.*|.*_test)\.py$/;
+
+/** Matching regular files; skips node_modules, dot entries and symlinks. */
+function matchingFiles(dir, pattern, found = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    const file = join(dir, entry.name);
+    if (entry.isDirectory()) matchingFiles(file, pattern, found);
+    else if (entry.isFile() && pattern.test(entry.name)) found.push(file);
+  }
+  return found;
+}
+
+/**
+ * Package names with recognized JS/TS or Python test filenames.
+ * Other languages and omitted files inside planned packages are deferred.
+ */
+export function discoveredTestPackages(root = ROOT) {
+  const base = join(root, "packages");
+  const jsTestPackages = [];
+  const nonJsTestPackages = [];
+  for (const entry of readdirSync(base, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    if (!entry.isDirectory()) continue;
+    const dir = join(base, entry.name);
+    if (matchingFiles(dir, JS_TEST_FILE).length) jsTestPackages.push(entry.name);
+    else if (matchingFiles(dir, NON_JS_TEST_FILE).length) nonJsTestPackages.push(entry.name);
+  }
+  return { jsTestPackages: jsTestPackages.sort(), nonJsTestPackages: nonJsTestPackages.sort() };
+}
+
+/** The `packages/*` names whose test files the plan's steps carry. */
+export function plannedTestPackages(steps, root = ROOT) {
+  const base = join(root, "packages");
+  const names = new Set();
+  for (const step of shardedSteps(steps)) {
+    for (const file of step.files) {
+      const rel = relative(base, file);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) names.add(rel.split(sep)[0]);
+    }
+  }
+  return [...names].sort();
 }
 
 export function laneShardPlans(steps, of = LANE_SHARDS) {
@@ -237,7 +280,7 @@ export function commandFiles(step) {
   return files;
 }
 
-export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
+export function laneCoverage(steps, shards, allFiles = listLaneFiles(), root = ROOT) {
   const corpusSteps = new Set(shardedSteps(steps).map(step => step.name));
   const setup = new Set(sharedSteps(steps).map(step => step.name));
   const corpusFiles = new Set(allFiles);
@@ -289,6 +332,8 @@ export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
       }
     }
   }
+  const discovered = discoveredTestPackages(root);
+  const planned = new Set(plannedTestPackages(steps, root));
   return {
     totalSteps: corpusSteps.size,
     coveredSteps: seenSteps.size,
@@ -304,12 +349,14 @@ export function laneCoverage(steps, shards, allFiles = listLaneFiles()) {
     invalidTestSteps: [...invalidTestSteps],
     fileMismatches: [...fileMismatches.values()],
     invalidCommands: [...invalidCommands],
+    missingTestPackages: discovered.jsTestPackages.filter(name => !planned.has(name)),
+    unlistedTestPackages: discovered.nonJsTestPackages.filter(name => !NON_JS_TEST_PACKAGES.includes(name)),
     empty: shards.flatMap((shard, index) => (shard.some(isShardedStep) ? [] : [index + 1])),
   };
 }
 
-export function verifyLaneShards(of = LANE_SHARDS, steps = unitPlan(), allFiles = listLaneFiles()) {
-  return laneCoverage(steps, laneShardPlans(steps, of), allFiles);
+export function verifyLaneShards(of = LANE_SHARDS, steps = unitPlan(), allFiles = listLaneFiles(), root = ROOT) {
+  return laneCoverage(steps, laneShardPlans(steps, of), allFiles, root);
 }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -361,7 +408,8 @@ if (isEntryPoint) {
       }
       const res = verifyLaneShards(of);
       const bad = res.missingSteps.length || res.duplicatedSteps.length || res.unknownSteps.length ||
-        res.missingFiles.length || res.duplicatedFiles.length || res.unknownFiles.length || res.empty.length || res.invalidSharedSteps.length || res.invalidTestSteps.length || res.fileMismatches.length;
+        res.missingFiles.length || res.duplicatedFiles.length || res.unknownFiles.length || res.empty.length || res.invalidSharedSteps.length || res.invalidTestSteps.length || res.fileMismatches.length ||
+        res.missingTestPackages.length || res.unlistedTestPackages.length;
       process.stdout.write(
         `lane shards of ${of}: ${res.coveredSteps}/${res.totalSteps} steps and ` +
           `${res.coveredFiles}/${res.totalFiles} files covered, ` +
@@ -375,6 +423,8 @@ if (isEntryPoint) {
         }
         if (res.invalidSharedSteps.length) process.stderr.write(`setup not once in every shard: ${res.invalidSharedSteps.join(", ")}\n`);
         if (res.invalidTestSteps.length) process.stderr.write(`partitioned steps must only run tests: ${res.invalidTestSteps.join(", ")}\n`);
+        if (res.missingTestPackages.length) process.stderr.write(`packages with tests missing from the plan: ${res.missingTestPackages.join(", ")}\n`);
+        if (res.unlistedTestPackages.length) process.stderr.write(`packages with non-JS tests not in the allowlist: ${res.unlistedTestPackages.join(", ")}\n`);
         if (res.empty.length) process.stderr.write(`empty shards: ${res.empty.join(", ")}\n`);
         if (res.missingSteps.length) process.stderr.write(`missing steps: ${res.missingSteps.join(", ")}\n`);
         if (res.missingFiles.length) process.stderr.write(`missing files: ${res.missingFiles.join(", ")}\n`);

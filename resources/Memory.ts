@@ -6,6 +6,7 @@ import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.j
 import { guardAuthorityFields } from "./authority-field-guard.js";
 import { isForbiddenOwnerMutation } from "./record-owner-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { ownerChangedRefusal } from "./owner-delete-recheck.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, keepStoredOriginator, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { isEmbeddingSpaceUniform, noteWriteStamp } from "./embedding-space-guard.js";
@@ -26,7 +27,7 @@ import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
-import { assertValidDurability } from "./memory-durability.js";
+import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
@@ -1011,6 +1012,28 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
     agentId: String(record.agentId),
     head: (shared) => resolveSkillHead(subjectId, String(record.id), shared),
     plan: async (head, shared) => {
+      // flair#2355: for a non-admin caller, re-read the COMMITTED rows before
+      // the close. The delete is refused, and nothing is closed, when the
+      // addressed row is present with an owner other than the caller (409
+      // `owner_changed`), when the head this delete closes (a stale id resolves
+      // a different row as the head) is absent (409 `skill_head_missing`), or
+      // when the head's owner differs from the owner this transaction read and
+      // authorizeSkillOwners checks below (409 `owner_changed`).
+      if (auth.kind === "agent" && !auth.isAdmin) {
+        const pause = txnPausePoint("memory-skill-delete");
+        if (pause) await pause;
+        const confirmed = await (databases as any).flair.Memory.get(String(record.id), {});
+        if (confirmed && isForbiddenOwnerMutation(confirmed, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+          return ownerChangedRefusal("Memory");
+        }
+        if (head) {
+          const confirmedHead = await (databases as any).flair.Memory.get(String(head.id), {});
+          if (!confirmedHead) return skillWriteConflict("skill_head_missing");
+          if (confirmedHead[RECORD_TYPES.Memory.ownerField] !== head[RECORD_TYPES.Memory.ownerField]) {
+            return ownerChangedRefusal("Memory");
+          }
+        }
+      }
       const stale = await validateSkillSnapshots(record, null, String(record.id), shared);
       if (stale) return stale;
       const denied = await authorizeSkillOwners(ctx, auth, [record, head], shared);
@@ -1408,10 +1431,8 @@ export class Memory extends (databases as any).flair.Memory {
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
 
-    if (content.durability === "ephemeral" && !content.expiresAt) {
-      const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
-      content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
-    }
+    const expiryError = stampEphemeralExpiry(content);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
 
     // Content safety scan — covers content + summary (defense-in-depth for
     // agent-set summaries).
@@ -1735,6 +1756,8 @@ export class Memory extends (databases as any).flair.Memory {
     // The receiver-side federation bookkeeping keeps its stored value (a patch
     // merges); a client body value is dropped.
     dropClientFederationBookkeeping(content);
+    const expiryError = stampEphemeralExpiry(content, existingForSkill);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
     return super.patch(content, query);
   }
 
@@ -1891,8 +1914,7 @@ export class Memory extends (databases as any).flair.Memory {
     // ── flair#1238: refuse an unrecognised durability (mirrors post()) ──
     // put() is the other HTTP-reachable write path (fresh create via CLI, and
     // the update/patch path). Same guard as post(): a present-but-unknown
-    // durability is refused with 400; absent is accepted (no default stamped
-    // here — put() leaves durability untouched for updates).
+    // durability is refused with 400; absent is accepted.
     {
       const durabilityError = assertValidDurability(content.durability);
       if (durabilityError) {
@@ -1980,29 +2002,8 @@ export class Memory extends (databases as any).flair.Memory {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
 
-    // ── flair#1257 slice 3: stamp the ephemeral TTL on the PUT path too ──────
-    // post() has stamped expiresAt for ephemeral rows since the tier shipped,
-    // but put() — the verb the continuity capture hook actually writes with
-    // (`PUT /Memory/<id>`, packages/flair-mcp/src/continuity-capture-hook.ts)
-    // — never did. MemoryMaintenance's reap keys on expiresAt (expired =
-    // expiresAt < now), so hook-written journal rows carried NO expiry and
-    // the tier's load-bearing 24h containment bound (the exposure window the
-    // #1257 rulings cite) silently never engaged on the real write path.
-    // Effective durability = the write's, else the pre-existing row's (same
-    // resolution the visibility guard above uses). A pre-existing expiry is
-    // carried forward, never re-stamped — an update must not extend the
-    // exposure window; an explicit caller-provided expiresAt always wins.
-    {
-      const effectiveDurability = content.durability ?? preExisting?.durability;
-      if (effectiveDurability === "ephemeral" && !content.expiresAt) {
-        if (preExisting?.expiresAt) {
-          content.expiresAt = preExisting.expiresAt;
-        } else {
-          const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
-          content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
-        }
-      }
-    }
+    const expiryError = stampEphemeralExpiry(content, preExisting);
+    if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
 
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
@@ -2220,6 +2221,11 @@ export class Memory extends (databases as any).flair.Memory {
     const reservedSeed = [id, (this as any).getId?.(), ...writeTargetIds(this, id && typeof id === "object" ? id : undefined)]
       .some((candidate) => isReservedSeedId("Memory", candidate));
     if (!reservedSeed && rowIsSkill(record)) {
+      // flair#2355: hold the row still before the version writer's transaction
+      // opens, so a competing owner change can commit first and be seen by the
+      // confirmation read inside.
+      const beforeSkillDelete = txnPausePoint("memory-skill-delete-pre");
+      if (beforeSkillDelete) await beforeSkillDelete;
       return await writeSkillDelete({ ctx, auth, record });
     }
     // Durability controls retention, not the owner's authority to delete.
@@ -2235,14 +2241,34 @@ export class Memory extends (databases as any).flair.Memory {
     const deletionActor = auth.kind === "agent" ? auth.agentId : null;
     const deletionSourceClass: "agent" | "admin" | "internal" =
       auth.kind === "internal" ? "internal" : auth.isAdmin ? "admin" : "agent";
+    // flair#2355: hold the row still before the delete stages, so a competing
+    // owner change can commit first and be seen by the re-read inside. This
+    // ordinary delete runs through withSharedWriteTransaction, which JOINS a
+    // request-owned transaction when one exists and creates one otherwise.
+    const beforeDelete = txnPausePoint("memory-delete-pre");
+    if (beforeDelete) await beforeDelete;
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
       const deletedId = typeof id === "string" ? id : record?.id;
       if (typeof deletedId !== "string" || !deletedId) return false;
       const stored = await (databases as any).flair.Memory.get(deletedId, c);
       if (!stored) return false;
-      if (auth.kind === "agent" && !auth.isAdmin &&
-          isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
-        return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
+      const nonAdmin = auth.kind === "agent" && !auth.isAdmin;
+      if (nonAdmin && isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+        // The caller passed the owner check at the pre-read above, so a
+        // mismatch here is a change committed since — refuse it, do not delete.
+        return ownerChangedRefusal("Memory");
+      }
+      if (nonAdmin) {
+        // Test-only: the transaction pauses between its ownership read and its
+        // delete.
+        const pause = txnPausePoint("memory-delete");
+        if (pause) await pause;
+        // Confirmation read of the COMMITTED row in an explicit fresh context
+        // (never contextless — see resources/owner-delete-recheck.ts's header).
+        const confirmed = await (databases as any).flair.Memory.get(deletedId, {});
+        if (confirmed && isForbiddenOwnerMutation(confirmed, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+          return ownerChangedRefusal("Memory");
+        }
       }
       const d = await (databases as any).flair.Memory.delete(deletedId, c);
       if (d !== true) throw new Error("Memory row delete was not confirmed");

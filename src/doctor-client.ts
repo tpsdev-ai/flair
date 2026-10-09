@@ -20,8 +20,9 @@
 // "not present", never a thrown error — doctor must never crash or hang on a
 // broken client config.
 
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync, type SpawnSyncOptions } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
 import { AGENT_ID_RULE, isValidAgentId } from "./lib/agent-id-rule.js";
@@ -252,9 +253,14 @@ export function buildActionRecallHookCommand(
   return String.raw`sh -c 'out=$(${invocation} 2>/dev/null) && [ -n "$out" ] && [ "${"$"}{#out}" -le 4096 ] && printf %s "$out" || true'`;
 }
 
-/** Match the artifact marker in commands without npx. */
+const recognizeActionRecallCommand = installerCommandRecognizer(buildActionRecallHookCommand, ACTION_RECALL_HOOK_MARKER);
+
 export function isFlairActionRecallCommand(command: string): boolean {
-  return typeof command === "string" && command.includes(ACTION_RECALL_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
+  return recognizeActionRecallCommand(command) !== null;
+}
+
+export function parseActionRecallCommand(command: string): CaptureCommandParts | null {
+  return recognizeActionRecallCommand(command);
 }
 
 /**
@@ -474,8 +480,10 @@ export function buildCaptureHookCommand(
   return `sh -c '${parts.join(" ")} ${bunPath} ${artifactPath} >/dev/null 2>/dev/null || true'`;
 }
 
+const recognizeCaptureCommand = installerCommandRecognizer(buildCaptureHookCommand, CAPTURE_HOOK_MARKER, true);
+
 export function isFlairCaptureCommand(command: string): boolean {
-  return typeof command === "string" && command.includes(CAPTURE_HOOK_MARKER) && !/(?:^|\s)npx(?:\s|$)/.test(command);
+  return recognizeCaptureCommand(command) !== null;
 }
 
 /** The bun/artifact/agent/url/spec a wired capture command carries, or null. */
@@ -488,12 +496,62 @@ export interface CaptureCommandParts {
 }
 
 export function parseCaptureCommand(command: string): CaptureCommandParts | null {
-  if (typeof command !== "string") return null;
-  const match = /^sh -c 'FLAIR_AGENT_ID=(\S+)(?: FLAIR_URL=(\S+))?(?: FLAIR_CAPTURE_FLUSH_SPEC=(\S+))? (\S+) (\S+) >\/dev\/null 2>\/dev\/null \|\| true'$/.exec(command);
-  if (!match) return null;
-  const [, agentId, flairUrl, flushSpec, bunPath, artifactPath] = match;
-  if (!agentId || !bunPath || !artifactPath) return null;
-  return { bunPath, artifactPath, agentId, ...(flairUrl ? { flairUrl } : {}), ...(flushSpec ? { flushSpec } : {}) };
+  return recognizeCaptureCommand(command);
+}
+
+function installerCommandRecognizer(
+  builder: (bunPath: string, artifactPath: string, agentId: string, flairUrl?: string, flushSpec?: string) => string,
+  marker: string,
+  withFlushSpec = false,
+): (command: unknown) => CaptureCommandParts | null {
+  const tokens = {
+    bunPath: "MATCH_BUN_PATH",
+    artifactPath: "MATCH_ARTIFACT_PATH",
+    agentId: "MATCH_AGENT_ID",
+    flairUrl: "MATCH_FLAIR_URL",
+    flushSpec: "@MATCH_FLUSH_PACKAGE@MATCH_FLUSH_VERSION",
+  };
+  const forms: Array<Array<{ literal: string } | { name: keyof CaptureCommandParts; prefix: string; suffix: string }>> = [];
+  for (const url of [undefined, tokens.flairUrl]) {
+    for (const spec of withFlushSpec ? [undefined, tokens.flushSpec] : [undefined]) {
+      forms.push(builder(tokens.bunPath, tokens.artifactPath, tokens.agentId, url, spec).split(" ").map((part) => {
+        for (const name of Object.keys(tokens) as Array<keyof typeof tokens>) {
+          const token = tokens[name];
+          const offset = part.indexOf(token);
+          if (offset !== -1) return { name, prefix: part.slice(0, offset), suffix: part.slice(offset + token.length) };
+        }
+        return { literal: part };
+      }));
+    }
+  }
+  return (command) => {
+    if (typeof command !== "string") return null;
+    const commandTokens = command.split(" ");
+    for (const form of forms) {
+      if (commandTokens.length !== form.length) continue;
+      const parts: Partial<CaptureCommandParts> = {};
+      const matches = form.every((part, index) => {
+        const value = commandTokens[index]!;
+        if ("literal" in part) return value === part.literal;
+        if (!value.startsWith(part.prefix) || !value.endsWith(part.suffix)) return false;
+        const captured = value.slice(part.prefix.length, value.length - part.suffix.length);
+        if (!captured) return false;
+        parts[part.name] = captured;
+        return true;
+      });
+      if (!matches || parts.artifactPath?.split("/").at(-1) !== marker) continue;
+      const { bunPath, artifactPath, agentId, flairUrl, flushSpec } = parts;
+      if (!bunPath || !artifactPath || !agentId) continue;
+      try {
+        if (command === builder(bunPath, artifactPath, agentId, flairUrl, flushSpec)) {
+          return { bunPath, artifactPath, agentId, ...(flairUrl ? { flairUrl } : {}), ...(flushSpec ? { flushSpec } : {}) };
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  };
 }
 
 /** The two hook events continuity registers under. */
@@ -1651,6 +1709,8 @@ export interface HookProbeOutcome {
   timedOut: boolean;
   /** Set when the probe process could not be started at all. */
   spawnError: string | null;
+  cleanupError?: string | null;
+  outputOverflow?: boolean;
 }
 
 export type HookExecutionState = "runs" | "broken" | "unknown";
@@ -1680,15 +1740,221 @@ export function evidenceLine(s: string, max = 200): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
-const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) => {
-  // `/bin/sh -c` is not a guess: it is exactly how Claude Code runs a
-  // `type: "command"` hook (spawn with `shell: true`, $SHELL never consulted).
-  // Probing through any other shell would answer a question the user never
-  // asked.
-  const res = spawnSync("/bin/sh", ["-c", command], {
-    input: "",
-    encoding: "utf-8",
+const PROBE_GROUP_TERM_GRACE_MS = 200;
+const PROBE_GROUP_KILL_GRACE_MS = 2_000;
+
+const PROBE_PIN_MARGIN_S = 60;
+
+export const HOOK_PROBE_MAX_OUTPUT_BYTES = 1024 * 1024;
+
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+}
+
+function sleepUntil(deadline: number): void {
+  for (let now = performance.now(); now < deadline; now = performance.now()) sleepMs(Math.min(5, deadline - now));
+}
+
+export type ProbeSignalSender = (pid: number, signal: NodeJS.Signals | 0) => void;
+const sendSignal: ProbeSignalSender = (pid, signal) => {
+  process.kill(pid, signal);
+};
+
+function signalTargetPresent(target: number, kill: ProbeSignalSender): boolean {
+  try {
+    kill(target, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+export function endProbeProcessGroup(
+  pgid: number,
+  pinPid: number | null,
+  kill: ProbeSignalSender = sendSignal,
+): string | null {
+  const groupGone = (): boolean => !signalTargetPresent(-pgid, kill);
+  const pinned = (): boolean => pinPid !== null && signalTargetPresent(pinPid, kill);
+  const unconfirmed = (reason: string): string | null => (groupGone() ? null : reason);
+  let signalError = "";
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    try {
+      kill(-pgid, signal);
+    } catch (err) {
+      signalError = `; ${signal} failed: ${(err as NodeJS.ErrnoException).code ?? String(err)}`;
+    }
+  };
+  if (!pinned()) return unconfirmed("its pin process was not present, so the group was not signalled");
+  signalGroup("SIGTERM");
+  sleepUntil(performance.now() + PROBE_GROUP_TERM_GRACE_MS);
+  if (!pinned()) return unconfirmed(`its pin process exited before SIGKILL, so SIGKILL was not sent${signalError}`);
+  signalGroup("SIGKILL");
+  const deadline = performance.now() + PROBE_GROUP_KILL_GRACE_MS;
+  while (!groupGone() && performance.now() < deadline) sleepMs(5);
+  return unconfirmed(`the group was still present ${PROBE_GROUP_KILL_GRACE_MS} ms after SIGKILL${signalError}`);
+}
+
+function readPinPid(path: string): number | null {
+  let fd = -1;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(32);
+    const text = buf.toString("utf-8", 0, readSync(fd, buf, 0, buf.length, 0));
+    if (!/^[1-9][0-9]{0,9}$/.test(text)) return null;
+    const pid = Number(text);
+    return pid > 1 && pid <= 0x7fffffff ? pid : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
+}
+
+function readCappedOutput(fd: number): { text: string; overflow: boolean } {
+  const buf = Buffer.alloc(HOOK_PROBE_MAX_OUTPUT_BYTES + 1);
+  let total = 0;
+  while (total < buf.length) {
+    const n = readSync(fd, buf, total, buf.length - total, total);
+    if (n === 0) break;
+    total += n;
+  }
+  return {
+    text: buf.toString("utf-8", 0, Math.min(total, HOOK_PROBE_MAX_OUTPUT_BYTES)),
+    overflow: total > HOOK_PROBE_MAX_OUTPUT_BYTES,
+  };
+}
+
+interface BunSyncSubprocess {
+  pid: number;
+  exitCode: number | null;
+  signalCode: string | null;
+  exitedDueToTimeout: boolean;
+}
+interface BunRuntime {
+  spawnSync(
+    command: string[],
+    options: {
+      detached: boolean;
+      stdin: Uint8Array;
+      stdout: number;
+      stderr: number;
+      timeout: number;
+      killSignal: string;
+      env: NodeJS.ProcessEnv;
+    },
+  ): BunSyncSubprocess;
+}
+const bunRuntime = (globalThis as { Bun?: BunRuntime }).Bun;
+
+interface ProbeSpawn {
+  pid: number | null;
+  exitCode: number | null;
+  timedOut: boolean;
+  spawnError: string | null;
+}
+
+const PROBE_WRAPPER =
+  `( ( trap '' HUP INT QUIT TERM; PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
+  `printf '%s' "$!" >"$1" ); exec /bin/sh -c "$3"`;
+
+function spawnProbeBounded(
+  command: string,
+  timeoutMs: number,
+  input: string,
+  env: NodeJS.ProcessEnv,
+  outFd: number,
+  errFd: number,
+  pinPath: string,
+): ProbeSpawn {
+  const pinSeconds = String(Math.ceil(timeoutMs / 1000) + PROBE_PIN_MARGIN_S);
+  const args = ["-c", PROBE_WRAPPER, "flair-hook-probe", pinPath, pinSeconds, command];
+  if (bunRuntime) {
+    try {
+      const r = bunRuntime.spawnSync(["/bin/sh", ...args], {
+        detached: true,
+        stdin: Buffer.from(input),
+        stdout: outFd,
+        stderr: errFd,
+        timeout: timeoutMs,
+        killSignal: "SIGTERM",
+        env,
+      });
+      return { pid: r.pid, exitCode: r.exitCode, timedOut: r.exitedDueToTimeout === true, spawnError: null };
+    } catch (err: unknown) {
+      return { pid: null, exitCode: null, timedOut: false, spawnError: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  const res = spawnSync("/bin/sh", args, {
+    detached: true,
+    stdio: ["pipe", outFd, errFd],
+    input,
     timeout: timeoutMs,
+    env,
+  } as SpawnSyncOptions);
+  const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
+  return {
+    pid: typeof res.pid === "number" && res.pid > 1 ? res.pid : null,
+    exitCode: res.status,
+    timedOut,
+    spawnError: res.error && !timedOut ? res.error.message : null,
+  };
+}
+
+export interface ProbeRunOptions {
+  input: string;
+  env: NodeJS.ProcessEnv;
+  kill?: ProbeSignalSender;
+  tmpRoot?: string;
+  openOutput?: (path: string) => number;
+}
+
+export function runProbeInOwnGroup(command: string, timeoutMs: number, opts: ProbeRunOptions): HookProbeOutcome {
+  const { input, env } = opts;
+  if (process.platform === "win32") {
+    const res = spawnSync("/bin/sh", ["-c", command], { input, encoding: "utf-8", timeout: timeoutMs, env });
+    const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
+    return { exitCode: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "", timedOut, spawnError: res.error && !timedOut ? res.error.message : null };
+  }
+  const openOutput = opts.openOutput ?? ((path: string) => openSync(path, "w+"));
+  const dir = mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "flair-hook-probe-"));
+  const fds: number[] = [];
+  try {
+    const outFd = openOutput(join(dir, "stdout"));
+    fds.push(outFd);
+    const errFd = openOutput(join(dir, "stderr"));
+    fds.push(errFd);
+    const pinPath = join(dir, "pin");
+    const spawned = spawnProbeBounded(command, timeoutMs, input, env, outFd, errFd, pinPath);
+    const cleanupError = spawned.pid === null ? null : endProbeProcessGroup(spawned.pid, readPinPid(pinPath), opts.kill);
+    const out = readCappedOutput(outFd);
+    const err = readCappedOutput(errFd);
+    return {
+      exitCode: spawned.exitCode,
+      stdout: out.text,
+      stderr: err.text,
+      timedOut: spawned.timedOut,
+      spawnError: spawned.spawnError,
+      cleanupError,
+      outputOverflow: out.overflow || err.overflow,
+    };
+  } finally {
+    for (const fd of fds) {
+      try {
+        closeSync(fd);
+      } catch {
+      }
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+
+const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) =>
+  runProbeInOwnGroup(command, timeoutMs, {
+    input: "",
     env: {
       ...process.env,
       // Tell a #1007-or-later adapter to answer without side effects.
@@ -1699,15 +1965,6 @@ const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) => {
       FLAIR_PRESENCE_TIMEOUT_MS: "500",
     },
   });
-  const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
-  return {
-    exitCode: res.status,
-    stdout: res.stdout ?? "",
-    stderr: res.stderr ?? "",
-    timedOut,
-    spawnError: res.error && !timedOut ? res.error.message : null,
-  };
-};
 
 /**
  * Delivery probe (flair#1734): run the registered command so we can classify
@@ -1719,11 +1976,9 @@ export function probeSessionStartHookDelivery(
   opts: { timeoutMs?: number; runner?: HookProbeRunner } = {},
 ): HookProbeOutcome {
   const timeoutMs = opts.timeoutMs ?? 8_000;
-  const runner = opts.runner ?? ((cmd, ms) => {
-    const res = spawnSync("/bin/sh", ["-c", cmd], {
+  const runner = opts.runner ?? ((cmd, ms) =>
+    runProbeInOwnGroup(cmd, ms, {
       input: "{}",
-      encoding: "utf-8",
-      timeout: ms,
       env: {
         ...process.env,
         FLAIR_HOOK_PROBE: "0",
@@ -1731,16 +1986,7 @@ export function probeSessionStartHookDelivery(
         FLAIR_HOOK_TIMEOUT_MS: "4000",
         FLAIR_PRESENCE_TIMEOUT_MS: "1",
       },
-    });
-    const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
-    return {
-      exitCode: res.status,
-      stdout: res.stdout ?? "",
-      stderr: res.stderr ?? "",
-      timedOut,
-      spawnError: res.error && !timedOut ? res.error.message : null,
-    };
-  });
+    }));
   try {
     return runner(command, timeoutMs);
   } catch (err: unknown) {
@@ -1771,6 +2017,12 @@ export function probeSessionStartHookCommand(
 /** Pure: probe outcome -> verdict. See the section doc for why "exit 0, no
  *  output" is a definite failure rather than an ambiguous one. */
 export function classifyHookProbe(outcome: HookProbeOutcome): HookProbeVerdict {
+  if (outcome.cleanupError) {
+    return { execution: "unknown", detail: `could not confirm the command's process group ended (${outcome.cleanupError})` };
+  }
+  if (outcome.outputOverflow) {
+    return { execution: "unknown", detail: `the command's output exceeded the probe's ${HOOK_PROBE_MAX_OUTPUT_BYTES}-byte limit` };
+  }
   if (outcome.timedOut) {
     return { execution: "unknown", detail: "the command did not answer in time" };
   }

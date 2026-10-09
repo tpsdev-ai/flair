@@ -9,6 +9,7 @@
 import { Command } from "commander";
 import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
+import { readTargetMcpRedirectFinding } from "../lib/mcp-oauth-env.js";
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, describeAgentIdRuleFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
@@ -869,12 +870,11 @@ program
       // READs it for drift detection, but describePublicUrlFinding never names
       // it as the fix (flair#1313 — wiped on every upgrade).
       const componentEnvPath = join(flairPackageDir(), COMPONENT_ENV_FILENAME);
-      let componentEnvValue: string | null = null;
+      let componentEnvText: string | null = null;
       try {
-        if (existsSync(componentEnvPath)) {
-          componentEnvValue = readEnvValue(readFileSync(componentEnvPath, "utf-8"), PUBLIC_URL_KEY);
-        }
+        if (existsSync(componentEnvPath)) componentEnvText = readFileSync(componentEnvPath, "utf-8");
       } catch { /* unreadable → treat as absent */ }
+      const componentEnvValue = readEnvValue(componentEnvText, PUBLIC_URL_KEY);
 
       const finding = describePublicUrlFinding({
         advertisedIssuer,
@@ -891,6 +891,21 @@ program
         if (finding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
         if (finding.isIssue) issues++;
       }
+
+      const mcpRedirectFinding = await readTargetMcpRedirectFinding(() =>
+        api("GET", "/HealthDetail", undefined, {
+          baseUrl,
+          keysDir: defaultKeysDir(),
+          ...(opts.agent ? { agentId: opts.agent, agentIdSource: "flag" } : {}),
+        }),
+      );
+      if (mcpRedirectFinding) {
+        console.log(`  ${mcpRedirectFinding.isIssue ? render.icons.error : render.icons.warn} ${mcpRedirectFinding.message}`);
+        if (mcpRedirectFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${mcpRedirectFinding.fixHint}`);
+        if (mcpRedirectFinding.isIssue) issues++;
+      }
+    } else {
+      console.log(`  ${render.icons.warn} MCP OAuth redirect: cannot verify target configuration`);
     }
 
     // 4. Embeddings check — REAL semantic round-trip (only if Harper is responding).
