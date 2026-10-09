@@ -89,11 +89,11 @@ function expandReplacement(replacement: string, args: any[]): string {
 }
 
 /**
- * The same redaction as `redactSecrets`, plus the number of individual
- * credential values replaced (flair#2407). The server's explicit-Memory write
- * paths use this so the write response can report how many values were redacted.
- * `count` is 0 exactly when the text is unchanged — the two share one pattern
- * list, so no caller can see a different result from the two.
+ * The same redaction as `redactSecrets`, plus the number of matched values
+ * whose replacement differs from the matched text (flair#2407). A match that
+ * is already in redacted form (e.g. `API_KEY=[redacted]`) is left as it is and
+ * not counted. The server's explicit-Memory write paths use this so the write
+ * response can report how many values were replaced.
  */
 export function redactSecretsWithCount(text: string): { text: string; count: number } {
   let out = text;
@@ -101,15 +101,16 @@ export function redactSecretsWithCount(text: string): { text: string; count: num
   for (const pattern of AUTHORIZATION_PATTERNS) {
     out = out.replace(pattern, (whole: string, head: string, value: string) => {
       const v = value.trim();
-      if (v === "" || v === REDACTED) return whole;
-      count += 1;
-      return `${head} ${REDACTED}`;
+      const replaced = v === "" || v === REDACTED ? whole : `${head} ${REDACTED}`;
+      if (replaced !== whole) count += 1;
+      return replaced;
     });
   }
   for (const [pattern, replacement] of SECRET_PATTERNS) {
     out = out.replace(pattern, (...args: any[]) => {
-      count += 1;
-      return replacement === REDACTED ? REDACTED : expandReplacement(replacement, args);
+      const replaced = replacement === REDACTED ? REDACTED : expandReplacement(replacement, args);
+      if (replaced !== args[0]) count += 1;
+      return replaced;
     });
   }
   return { text: out, count };

@@ -1,6 +1,6 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
-import { isAgentAuthoredWrite, redactMemoryWrite } from "./memory-redaction.js";
+import { isOperatorSeedPut, redactMemoryWrite } from "./memory-redaction.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -561,7 +561,7 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
 function withRedactedValues(result: any, redactedValues: number, id?: any): any {
   if (redactedValues <= 0 || result instanceof Response) return result;
   const base = result && typeof result === "object" && !Array.isArray(result) ? result : {};
-  return { id: base.id ?? id, ...base, written: true, redactedValues };
+  return { id: base.id ?? id, written: true, ...base, redactedValues };
 }
 
 /** Build the final write response: always `written: true`, always includes
@@ -601,8 +601,8 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
     response.matchedId = dedupMatch.matchedId;
     response.matchConfidence = { cosine: dedupMatch.cosine, lexical: dedupMatch.lexical };
   }
-  // flair#2407: report how many credential values the server redacted, so the
-  // writer learns its text was changed. Absent when nothing was redacted.
+  // flair#2407: report how many credential values the server replaced, so the
+  // writer learns its text was changed. Absent when nothing was replaced.
   if (redactedValues > 0) response.redactedValues = redactedValues;
   return response;
 }
@@ -1317,10 +1317,9 @@ export class Memory extends (databases as any).flair.Memory {
       content.id = postUrlTargetId;
     }
     const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
-    // flair#2407 (agent-authored writes): redact credential-shaped text before
-    // the dedup gate, its embedding input and the stored embedding are computed
-    // from `content`.
-    const redactedValues = isAgentAuthoredWrite(auth) ? redactMemoryWrite(content) : 0;
+    // flair#2407: redact credential-shaped text before the dedup gate, its
+    // embedding input and the stored embedding are computed from `content`.
+    const redactedValues = redactMemoryWrite(content).count;
     canonicalizeSupersedes(content);
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
@@ -1639,9 +1638,10 @@ export class Memory extends (databases as any).flair.Memory {
       if (stale) return stale;
     }
     stripClientVersionPassthrough(content);
-    // flair#2407 (agent-authored writes): redact credential-shaped text on a
-    // PATCH too, before the body is merged into the stored row.
-    const redactedValues = isAgentAuthoredWrite(await resolveAgentAuth((this as any).getContext?.())) ? redactMemoryWrite(content) : 0;
+    // flair#2407: redact credential-shaped text on a PATCH too, before the body
+    // is merged into the stored row.
+    const redaction = redactMemoryWrite(content);
+    const redactedValues = redaction.count;
     // flair#1960 r2: capture the (undeclared) authorship-claim inputs BEFORE the
     // undeclared-attribute strip removes them, so a semantic PATCH re-stamps
     // provenance with the SAME claims a post()/put() would record from this body
@@ -1781,6 +1781,16 @@ export class Memory extends (databases as any).flair.Memory {
     dropClientFederationBookkeeping(content);
     const expiryError = stampEphemeralExpiry(content, existingForSkill);
     if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
+    if (redaction.embeddingDiscarded) {
+      // flair#2407: the body's vector was removed because redaction changed
+      // its source text; store one computed from the patched row's text
+      // instead (null when the engine returns none).
+      const embedText = skillEmbedText({ ...(existingForSkill ?? {}), ...content });
+      const vec = typeof embedText === "string" && embedText.length > 0 ? await getEmbedding(embedText, "document") : null;
+      const computed = Array.isArray(vec) && vec.length > 0;
+      content.embedding = computed ? vec : null;
+      content.embeddingModel = computed ? getModelId() : null;
+    }
     return withRedactedValues(await super.patch(content, query), redactedValues, content?.id ?? (this as any).getId?.());
   }
 
@@ -1913,9 +1923,12 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
-    // flair#2407 (agent-authored writes): redact credential-shaped text before
-    // the dedup gate / the embedding, and before the row is persisted.
-    const redactedValues = isAgentAuthoredWrite(auth) ? redactMemoryWrite(content) : 0;
+    // flair#2407: redact credential-shaped text before the dedup gate / the
+    // embedding, and before the row is persisted, except for the shipped-skill
+    // seed's Basic PUT of its reserved id (resources/memory-redaction.ts).
+    const redactedValues = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content))
+      ? 0
+      : redactMemoryWrite(content).count;
 
     const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedExisting.denial) return resolvedExisting.denial;

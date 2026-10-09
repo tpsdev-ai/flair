@@ -1,16 +1,14 @@
 /**
  * memory-write-redaction-2407.test.ts — server-side credential redaction on
- * explicit Memory writes (flair#2407).
+ * Memory writes (flair#2407).
  *
- * An explicit memory write (MCP `memory_store` / `memory_update`, `flair memory
- * add`, or a direct authenticated POST/PUT/PATCH to Memory) used to be stored
- * verbatim. The server now applies the SAME redactor the automatic-capture path
- * uses (packages/flair-mcp/src/secret-redaction.ts) to the free-text fields of
- * every write, and reports how many values it replaced.
- *
- * This file drives the REAL resources/Memory.ts write paths against a mocked
- * harper (same technique as memory-integrity.test.ts). It owns its harper +
- * embeddings mock in its own process (test/unit-isolated/).
+ * Calls resources/Memory.ts post/put/patch and resources/MemoryFeed.ts post
+ * directly against a mocked harper (same technique as
+ * memory-integrity.test.ts), with the credential shapes the shared redactor
+ * recognizes (packages/flair-mcp/src/secret-redaction.ts) in `content` and
+ * `summary`. The real-Harper counterpart is
+ * test/integration/memory-write-redaction-2407.test.ts. This file owns its
+ * harper + embeddings mock in its own process (test/unit-isolated/).
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
@@ -196,9 +194,9 @@ mock.module("harper", () => ({
 const { Memory } = await import("../../resources/Memory.ts");
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
-const { mergeRecord } = await import("../../resources/Federation.ts");
-const { reconstructRecordVerifyBody } = await import("../../resources/federation-classify.ts");
-const { stripInboundMemoryRow } = await import("../../resources/memory-declared-attributes.ts");
+const { isOperatorSeedPut, redactMemoryWrite } = await import("../../resources/memory-redaction.ts");
+const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
+const { redactSecrets, redactSecretsWithCount } = await import("../../packages/flair-mcp/src/secret-redaction.ts");
 
 function makeMemory(ctxRequest: any) {
   const r: any = new (Memory as any)();
@@ -224,7 +222,7 @@ const REDACTED = "[redacted]";
 const AGENT = "agent-a";
 
 describe("flair#2407 — Memory write paths redact credential-shaped text", () => {
-  it("memory_store (Memory.post) stores the redacted content and reports the count", async () => {
+  it("Memory.post stores the redacted content and reports the count", async () => {
     const m = makeMemory(agentCtx(AGENT));
     const original = `deploy note: use token ${GITHUB_TOKEN} when calling the CI API`;
     const res: any = await m.post({ agentId: AGENT, content: original });
@@ -245,7 +243,7 @@ describe("flair#2407 — Memory write paths redact credential-shaped text", () =
     expect(embedInputs).not.toContain(original);
   });
 
-  it("memory_update (Memory.put, create) stores the redacted content and reports the count", async () => {
+  it("Memory.put (create) stores the redacted content and reports the count", async () => {
     const m = makeMemory(agentCtx(AGENT));
     const original = `aws credentials for the backup job are ${AWS_KEY} rotate weekly`;
     const res: any = await m.put({ agentId: AGENT, content: original });
@@ -316,30 +314,6 @@ describe("flair#2407 seam 3 — a write with nothing credential-shaped is stored
   });
 });
 
-describe("flair#2407 seam 2 — a federated record is not rewritten by the server-side redactor", () => {
-  it("the sync-in apply path stores the originator's content verbatim, so its signature still verifies", async () => {
-    const credentialShaped = `synced memory: the peer's token is ${GITHUB_TOKEN} and it must not be rewritten here`;
-    const record: any = {
-      table: "Memory",
-      id: "m-fed",
-      data: { id: "m-fed", agentId: AGENT, content: credentialShaped },
-      updatedAt: new Date().toISOString(),
-      originatorInstanceId: "inst-remote",
-    };
-    const verifyBodyBefore = reconstructRecordVerifyBody(record, "inst-remote");
-
-    // Mirror resources/Federation.ts's per-record apply: merge → the inbound
-    // whitelist → the RAW table handle. No Memory resource writer runs.
-    const merged = mergeRecord(null, record);
-    stripInboundMemoryRow(merged);
-    await (databasesMock.flair.Memory as any).put(merged);
-
-    const stored = await (BaseMemory as any).get("m-fed");
-    expect(stored.content).toBe(credentialShaped); // NOT redacted — it was redacted at its origin
-    expect(reconstructRecordVerifyBody({ ...record, data: stored }, "inst-remote")).toEqual(verifyBodyBefore);
-  });
-});
-
 const FEED_REDACTED = "[redacted]";
 describe("flair#2407 — the feed-ingest route (POST /FeedMemories) redacts too", () => {
   it("stores the redacted content, hashes the redacted text, and reports the count", async () => {
@@ -358,18 +332,125 @@ describe("flair#2407 — the feed-ingest route (POST /FeedMemories) redacts too"
   });
 });
 
-const OPERATOR_CTX = { tpsAgent: "admin", tpsAgentIsAdmin: true };
-describe("flair#2407 — an operator/admin write is not agent-authored and stays byte-faithful", () => {
-  it("stores prose the agent path would redact verbatim, with no count", async () => {
-    // This text trips the redactor (the `Basic ` scheme word). The operator's
-    // shipped-skill seed holds the same shape and is verified by comparing the
-    // stored text to the source, so it must round-trip unchanged.
-    const m = makeMemory(OPERATOR_CTX);
-    const original = "A Basic administrator need not have an Agent row, and an Agent record is not a reachability promise.";
-    const res: any = await m.post({ agentId: "admin", content: original });
+const BASIC_PROSE = "A Basic administrator need not have an Agent row, and an Agent record is not a reachability promise.";
+describe("flair#2407 — the redaction exemption", () => {
+  it("an admin agent key (Ed25519, admin role) is redacted", async () => {
+    const m = makeMemory({ ...agentCtx("admin-agent", true), headers: new Headers({ authorization: "TPS-Ed25519 admin-agent:1:n:s" }) });
+    const res: any = await m.post({ agentId: "admin-agent", content: BASIC_PROSE });
 
     const stored = await (BaseMemory as any).get(res.id);
-    expect(stored.content).toBe(original);
-    expect(res.redactedValues).toBeUndefined();
+    expect(stored.content).toBe(redactSecrets(BASIC_PROSE));
+    expect(stored.content).not.toBe(BASIC_PROSE);
+    expect(res.redactedValues).toBe(1);
+  });
+
+  it("isOperatorSeedPut: true for a Basic administrator naming the reserved seed id; false for other ids or credentials", () => {
+    const basic = { request: { tpsAgent: "admin", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic ok" }) } };
+    const ed25519 = { request: { tpsAgent: "admin", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "TPS-Ed25519 a:1:n:s" }) } };
+    const oauth = { request: { tpsAgent: "admin", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Bearer t" }) } };
+    const admin = { kind: "agent" as const, agentId: "admin", isAdmin: true };
+    expect(isOperatorSeedPut(basic, admin, [SEED_SKILL_ROW_ID, SEED_SKILL_ROW_ID])).toBe(true);
+    expect(isOperatorSeedPut(basic, admin, [SEED_SKILL_ROW_ID, undefined])).toBe(true);
+    expect(isOperatorSeedPut(basic, admin, ["other-id"])).toBe(false);
+    expect(isOperatorSeedPut(basic, admin, [SEED_SKILL_ROW_ID, "other-id"])).toBe(false);
+    expect(isOperatorSeedPut(basic, admin, [undefined, null])).toBe(false);
+    expect(isOperatorSeedPut(ed25519, admin, [SEED_SKILL_ROW_ID])).toBe(false);
+    expect(isOperatorSeedPut(oauth, admin, [SEED_SKILL_ROW_ID])).toBe(false);
+    expect(isOperatorSeedPut({ __flairInternal: true }, { kind: "internal" }, [SEED_SKILL_ROW_ID])).toBe(false);
+  });
+});
+
+describe("flair#2407 — the count covers only values the redactor changed", () => {
+  it("an already-redacted value is unchanged and counts 0", () => {
+    expect(redactSecretsWithCount("API_KEY=[redacted]")).toEqual({ text: "API_KEY=[redacted]", count: 0 });
+    const body: any = { content: "API_KEY=[redacted] and Authorization: [redacted]" };
+    expect(redactMemoryWrite(body)).toEqual({ count: 0, embeddingDiscarded: false });
+    expect(body.content).toBe("API_KEY=[redacted] and Authorization: [redacted]");
+  });
+
+  it("Memory.post counts only the values it changed", async () => {
+    const m = makeMemory(agentCtx(AGENT));
+    const unchanged: any = await m.post({ agentId: AGENT, content: "the CI job reads API_KEY=[redacted] from its environment" });
+    expect(unchanged.redactedValues).toBeUndefined();
+    const mixed: any = await m.post({ agentId: AGENT, content: `the CI job reads API_KEY=[redacted] and ${GITHUB_TOKEN} from its environment` });
+    expect(mixed.redactedValues).toBe(1);
+    expect((await (BaseMemory as any).get(mixed.id)).content).toBe(`the CI job reads API_KEY=[redacted] and ${REDACTED} from its environment`);
+  });
+});
+
+describe("flair#2407 — a supplied embedding is replaced when redaction changes its source text", () => {
+  const SUPPLIED = [0, 0, 0, 1];
+  it("Memory.post discards the supplied vector and stores the one computed from the redacted text", async () => {
+    const m = makeMemory(agentCtx(AGENT));
+    const res: any = await m.post({ agentId: AGENT, content: `ship it with ${GITHUB_TOKEN} today`, embedding: SUPPLIED, embeddingModel: "client-model" });
+
+    const stored = await (BaseMemory as any).get(res.id);
+    expect(stored.embedding).toEqual(FAKE_EMBEDDING);
+    expect(stored.embeddingModel).toBe("mock-embedding-model");
+    expect(embedInputs).toContain(`ship it with ${REDACTED} today`);
+    expect(embedInputs.some((text) => text.includes(GITHUB_TOKEN))).toBe(false);
+  });
+
+  it("Memory.put discards the supplied vector and stores the one computed from the redacted text", async () => {
+    const m = makeMemory(agentCtx(AGENT));
+    const res: any = await m.put({ agentId: AGENT, content: `ship it with ${AWS_KEY} today`, embedding: SUPPLIED, embeddingModel: "client-model" });
+
+    const stored = await (BaseMemory as any).get(res.id);
+    expect(stored.embedding).toEqual(FAKE_EMBEDDING);
+    expect(stored.embeddingModel).toBe("mock-embedding-model");
+    expect(embedInputs).toContain(`ship it with ${REDACTED} today`);
+    expect(embedInputs.some((text) => text.includes(AWS_KEY))).toBe(false);
+  });
+
+  it("Memory.patch discards the supplied vector and stores the one computed from the redacted text", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: AGENT, content: "old", archived: false, createdAt: new Date().toISOString() });
+    const m: any = makeMemory(agentCtx(AGENT));
+    m._targetId = "mem-1";
+    await m.patch({ content: `rotate: ${GITHUB_TOKEN}`, embedding: SUPPLIED, embeddingModel: "client-model" });
+
+    const stored = await (BaseMemory as any).get("mem-1");
+    expect(stored.embedding).toEqual(FAKE_EMBEDDING);
+    expect(stored.embeddingModel).toBe("mock-embedding-model");
+    expect(embedInputs).toEqual([`rotate: ${REDACTED}`]);
+  });
+
+  it("redactMemoryWrite removes a supplied vector when it changes `trigger`, and keeps it when it changes only `summary`", () => {
+    const triggerBody: any = { content: "plain", trigger: `when the token=${GITHUB_TOKEN} expires`, embedding: SUPPLIED, embeddingModel: "client-model" };
+    expect(redactMemoryWrite(triggerBody)).toEqual({ count: 1, embeddingDiscarded: true });
+    expect("embedding" in triggerBody || "embeddingModel" in triggerBody).toBe(false);
+    const summaryBody: any = { content: "plain", summary: `uses ${SLACK_TOKEN}`, embedding: SUPPLIED, embeddingModel: "client-model" };
+    expect(redactMemoryWrite(summaryBody)).toEqual({ count: 1, embeddingDiscarded: false });
+    expect(summaryBody.embedding).toEqual(SUPPLIED);
+  });
+
+  it("a supplied vector is kept when redaction changes nothing, or changes only `summary`", async () => {
+    const m = makeMemory(agentCtx(AGENT));
+    const clean: any = await m.post({ agentId: AGENT, content: "a plain note about the deploy job", embedding: SUPPLIED, embeddingModel: "client-model" });
+    const summaryOnly: any = await m.post({
+      agentId: AGENT, content: "another plain note about the deploy job", summary: `uses ${SLACK_TOKEN}`, embedding: SUPPLIED, embeddingModel: "client-model",
+    });
+
+    for (const id of [clean.id, summaryOnly.id]) {
+      const stored = await (BaseMemory as any).get(id);
+      expect(stored.embedding).toEqual(SUPPLIED);
+      expect(stored.embeddingModel).toBe("client-model");
+    }
+    expect(summaryOnly.redactedValues).toBe(1);
+  });
+});
+
+describe("flair#2407 — a deduplicated feed write reports the count in its response only", () => {
+  it("the second identical feed write returns the stored row plus the count; the stored row has no count", async () => {
+    const f: any = new (FeedMemories as any)();
+    f.getContext = () => ({ request: agentCtx(AGENT) });
+    const original = `feed memory carrying ${GITHUB_TOKEN} twice`;
+    const first: any = await f.post({ agentId: AGENT, content: original, durability: "permanent" });
+    const second: any = await f.post({ agentId: AGENT, content: original, durability: "permanent" });
+
+    const { redactedValues, ...rest } = second;
+    expect(redactedValues).toBe(1);
+    expect(rest).toEqual(memoryStore.get(first.id));
+    expect(memoryStore.size).toBe(1);
+    expect("redactedValues" in memoryStore.get(first.id)).toBe(false);
   });
 });

@@ -15,7 +15,7 @@ import { extractPointerInputs } from "./memory-host-source.js";
 import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
-import { isAgentAuthoredWrite, redactMemoryWrite } from "./memory-redaction.js";
+import { redactMemoryWrite } from "./memory-redaction.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
@@ -92,14 +92,13 @@ export class FeedMemories extends Resource {
       }
     }
 
+    // flair#2407: this raw-table ingest is a Memory write too; redact
+    // credential-shaped text before the skill body is prepared, before the
+    // content hash is computed from it and before the row is stored.
+    const redactedValues = redactMemoryWrite(content).count;
     const preparedSkill = await prepareSkillBody(content, existingRecord);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
-    // flair#2407 (agent-authored writes): this raw-table ingest is an
-    // agent-authored Memory write too; redact credential-shaped text in the
-    // free-text fields before the content hash is computed from it and before
-    // the row is stored.
-    const redactedValues = isAgentAuthoredWrite(auth) ? redactMemoryWrite(content) : 0;
     const agentId = content.agentId;
     const body = String(content?.content ?? "");
     if (!agentId || !body) {
@@ -234,9 +233,7 @@ export class FeedMemories extends Resource {
       const written = captured.row;
       if (captured.closed) noteMemoryDelete(String(captured.closed.id));
       if (written) noteMemoryUpsert(written);
-      const skillResult: any = written ?? { id: successorId, written: true, durability: "persistent" };
-      if (redactedValues > 0) skillResult.redactedValues = redactedValues;
-      return skillResult;
+      return withRedactedValues(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues);
     }
 
     const now = new Date().toISOString();
@@ -245,9 +242,9 @@ export class FeedMemories extends Resource {
     const existing = await findExistingMemoryByContentHash((databases as any).flair.Memory.search(), agentId, contentHash);
     if (existing) {
       if (existing.durability === "ephemeral" && existing.expiresAt == null) {
-        return repairDeduplicatedExpiry(ctx, existing);
+        return withRedactedValues(await repairDeduplicatedExpiry(ctx, existing), redactedValues);
       }
-      return existing;
+      return withRedactedValues(existing, redactedValues);
     }
 
     const record = {
@@ -320,10 +317,7 @@ export class FeedMemories extends Resource {
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);
-    // flair#2407: report the redaction count on the write response (the stored
-    // row is already written; this field is response-only).
-    if (redactedValues > 0) (record as Record<string, any>).redactedValues = redactedValues;
-    return record;
+    return withRedactedValues(record, redactedValues);
   }
 
   // Subscription admission: verified agents, admins and trusted internal
@@ -528,6 +522,16 @@ function feedDedupTargetChanged(id: string): Response {
 function isDedupMatch(row: any, match: any): boolean {
   return row != null && typeof row === "object" && String(row.id) === String(match.id) &&
     row.agentId === match.agentId && row.contentHash === match.contentHash;
+}
+
+/**
+ * flair#2407: a response-only copy of a feed result carrying the redaction
+ * count. The stored row is not modified. A Response, a non-object result or a
+ * zero count is returned unchanged.
+ */
+function withRedactedValues(result: any, redactedValues: number): any {
+  if (redactedValues <= 0 || result instanceof Response || !result || typeof result !== "object") return result;
+  return { ...result, redactedValues };
 }
 
 /**
