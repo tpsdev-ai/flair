@@ -163,8 +163,11 @@ describe("flair#2385 — the hook-status probe's process-group cleanup", () => {
       };
       const delivered = JSON.stringify({ hookSpecificOutput: { additionalContext: "context" } });
 
+      // Ignoring TERM in the command's own shell, before the fork, makes the
+      // backgrounded child inherit the disposition instead of racing the
+      // probe's post-exit SIGTERM to run its own `trap`.
       const outcome = runProbeInOwnGroup(
-        `(trap '' TERM; exec sleep 60) & ${RECORD_PGID}; ${RECORD_CHILD}; printf '%s' '${delivered}'`,
+        `trap '' TERM; (exec sleep 60) & ${RECORD_PGID}; ${RECORD_CHILD}; printf '%s' '${delivered}'`,
         8_000,
         { input: "{}", env: process.env, kill: dropKill },
       );
