@@ -461,7 +461,7 @@ describe("capture spool", () => {
     expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("refused");
     const warnings: string[] = [];
     expect(runCapture(failedBash("bun test foo"), { env: env(), dir, warn: (message) => warnings.push(message) }).reason).toBe("refused");
-    // A refused pending error is surfaced, never dropped silently (flair#2395).
+    // A refused pending error is surfaced, not dropped silently (flair#2395).
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("not recorded");
     expect(existsSync(spoolPath(dir, "agent-a"))).toBe(false);

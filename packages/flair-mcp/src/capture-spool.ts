@@ -315,7 +315,7 @@ export function runCapture(rawInput: string, deps: CaptureDeps = {}): CaptureOut
       return "error-recorded" as const;
     }, CAPTURE_PENDING_LOCK_WAIT_MS);
     if (result === "refused") {
-      // Never drop a pending error silently (flair#2395).
+      // Surface a refused pending error rather than dropping it (flair#2395).
       (deps.warn ?? console.warn)(
         `capture: a failed call was not recorded; the append lock stayed busy for ${CAPTURE_PENDING_LOCK_WAIT_MS} ms`,
       );
