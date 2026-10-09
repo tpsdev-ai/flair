@@ -15,6 +15,7 @@ import { extractPointerInputs } from "./memory-host-source.js";
 import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
+import { isAgentAuthoredWrite, redactMemoryWrite } from "./memory-redaction.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
@@ -94,6 +95,11 @@ export class FeedMemories extends Resource {
     const preparedSkill = await prepareSkillBody(content, existingRecord);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    // flair#2407 (agent-authored writes): this raw-table ingest is an
+    // agent-authored Memory write too; redact credential-shaped text in the
+    // free-text fields before the content hash is computed from it and before
+    // the row is stored.
+    const redactedValues = isAgentAuthoredWrite(auth) ? redactMemoryWrite(content) : 0;
     const agentId = content.agentId;
     const body = String(content?.content ?? "");
     if (!agentId || !body) {
@@ -228,7 +234,9 @@ export class FeedMemories extends Resource {
       const written = captured.row;
       if (captured.closed) noteMemoryDelete(String(captured.closed.id));
       if (written) noteMemoryUpsert(written);
-      return written ?? { id: successorId, written: true, durability: "persistent" };
+      const skillResult: any = written ?? { id: successorId, written: true, durability: "persistent" };
+      if (redactedValues > 0) skillResult.redactedValues = redactedValues;
+      return skillResult;
     }
 
     const now = new Date().toISOString();
@@ -312,6 +320,9 @@ export class FeedMemories extends Resource {
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);
+    // flair#2407: report the redaction count on the write response (the stored
+    // row is already written; this field is response-only).
+    if (redactedValues > 0) (record as Record<string, any>).redactedValues = redactedValues;
     return record;
   }
 

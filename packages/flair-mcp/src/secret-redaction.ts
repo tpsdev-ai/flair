@@ -76,13 +76,41 @@ export const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 
 /** Replace every recognized credential shape in `text` with REDACTED. */
 export function redactSecrets(text: string): string {
+  return redactSecretsWithCount(text).text;
+}
+
+/**
+ * Expand a `$1`-style replacement against a `String.replace` callback's
+ * arguments (match, p1, p2, ...). The SECRET_PATTERNS replacements use only
+ * `$1`/`$2`, so this reproduces their string-replacement form exactly.
+ */
+function expandReplacement(replacement: string, args: any[]): string {
+  return replacement.replace(/\$(\d)/g, (_whole, digit: string) => String(args[Number(digit)] ?? ""));
+}
+
+/**
+ * The same redaction as `redactSecrets`, plus the number of individual
+ * credential values replaced (flair#2407). The server's explicit-Memory write
+ * paths use this so the write response can report how many values were redacted.
+ * `count` is 0 exactly when the text is unchanged — the two share one pattern
+ * list, so no caller can see a different result from the two.
+ */
+export function redactSecretsWithCount(text: string): { text: string; count: number } {
   let out = text;
+  let count = 0;
   for (const pattern of AUTHORIZATION_PATTERNS) {
     out = out.replace(pattern, (whole: string, head: string, value: string) => {
       const v = value.trim();
-      return v === "" || v === REDACTED ? whole : `${head} ${REDACTED}`;
+      if (v === "" || v === REDACTED) return whole;
+      count += 1;
+      return `${head} ${REDACTED}`;
     });
   }
-  for (const [pattern, replacement] of SECRET_PATTERNS) out = out.replace(pattern, replacement);
-  return out;
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    out = out.replace(pattern, (...args: any[]) => {
+      count += 1;
+      return replacement === REDACTED ? REDACTED : expandReplacement(replacement, args);
+    });
+  }
+  return { text: out, count };
 }
