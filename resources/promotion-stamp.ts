@@ -2,6 +2,7 @@ import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { writeBackCommittedRow } from "./write-back.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { isJoinableTransaction } from "./request-transaction.js";
 
 // Called only after the promotion workflow has authorized and written a Memory
@@ -28,7 +29,7 @@ export async function stampMemoryPromotion(id: string, reviewerId: string, decid
     table,
     id,
     (stored) => ({ write: stamp(stored) }),
-    { ctx: enumerationContext, label: "promotion-stamp", pausePre: "promotion-stamp-pre", pausePoint: "promotion-stamp", matchFields: ["content"] },
+    { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content"] },
   );
   if ("write" in outcome) noteMemoryUpsert(outcome.write);
 }

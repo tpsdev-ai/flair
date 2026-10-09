@@ -345,7 +345,7 @@ export class FeedMemories extends Resource {
         }
         return { write: written };
       },
-      { ctx, label: "MemoryFeed.ingest", pausePre: "feed-ingest-pre", pausePoint: "feed-ingest", expectedRow: existingRecord },
+      { ctx, label: "MemoryFeed.ingest", pausePre: () => txnPausePoint("feed-ingest-pre"), pausePoint: () => txnPausePoint("feed-ingest"), expectedRow: existingRecord },
     );
     if (refusal) return refusal;
     if ("skip" in outcome) return feedDedupTargetChanged(record.id);

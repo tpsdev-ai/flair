@@ -1,0 +1,1 @@
+- **Identity mapping honors the caller’s operations target, refuses noncanonical target origins before requests, and redacts target diagnostics.** (Closes #2102)

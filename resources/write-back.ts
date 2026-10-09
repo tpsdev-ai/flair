@@ -1,6 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
 import { withOwnedTransaction } from "./request-transaction.js";
-import { txnPausePoint, type TxnPausePoint } from "./txn-pause-point.js";
 
 /** The narrow surface the helper needs of a Harper table: a primary-key read
  *  that accepts a context, and a full-record write that accepts one. */
@@ -8,6 +7,9 @@ export interface WriteBackTable {
   get(id: string, ctx?: any): Promise<any>;
   put(row: any, ctx?: any): Promise<any>;
 }
+
+/** A call site's test-only pause: its own `txnPausePoint("<name>")` call. */
+export type WriteBackPause = () => Promise<void> | undefined;
 
 /** What the `plan` callback decides for the row it was handed. */
 export type WriteBackPlan =
@@ -26,11 +28,13 @@ export interface WriteBackOptions {
   matches?: (row: any) => boolean;
   matchFields?: string[];
   /** Test-only pause BEFORE this call's owned transaction opens — the
-   *  interleaving where the other writer's transaction opens first. */
-  pausePre?: TxnPausePoint;
+   *  interleaving where the other writer's transaction opens first. The call
+   *  site names its point: `() => txnPausePoint("<name>")` (flair#2382). */
+  pausePre?: WriteBackPause;
   /** Test-only pause between the in-transaction read/build and the write —
-   *  the interleaving where this write's transaction opens first. */
-  pausePoint?: TxnPausePoint;
+   *  the interleaving where this write's transaction opens first. Named at
+   *  the call site, like `pausePre`. */
+  pausePoint?: WriteBackPause;
 }
 
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
@@ -68,7 +72,7 @@ export async function writeBackCommittedRow(
     row.instanceToken === basis.instanceToken && row.contentHash === basis.contentHash && row.createdAt === basis.createdAt &&
     (opts.matchFields ?? []).every((field) => isDeepStrictEqual(row[field], basis[field]));
   if (opts.pausePre) {
-    const pre = txnPausePoint(opts.pausePre);
+    const pre = opts.pausePre();
     if (pre) await pre;
   }
   for (let attempt = 1; ; attempt++) {
@@ -81,7 +85,7 @@ export async function writeBackCommittedRow(
         if (!sameTarget(row)) throw new WriteBackConflictError(opts.label, id, attempt);
         // Test-only: inert unless the fault-injection opt-in is armed.
         if (opts.pausePoint) {
-          const pause = txnPausePoint(opts.pausePoint);
+          const pause = opts.pausePoint();
           if (pause) await pause;
         }
         await table.put(decision.write, c);

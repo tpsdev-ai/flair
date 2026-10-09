@@ -55,9 +55,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWLIST_PATH = join(REPO_ROOT, ".github", "audit-allowlist.json");
@@ -81,7 +81,7 @@ const REQUIRED_ENTRY_FIELDS = [
 // (`bun audit`); `npm-install` is the installed-tree observation (`npm audit
 // --omit=dev --json` on the packed-and-installed prefix). An allowlist entry
 // declares which of these it expects to see its advisory in.
-const VALID_SOURCES = new Set(["bun", "npm-install"]);
+const VALID_SOURCES = new Set(["bun", "npm-install", "npm-install-adk"]);
 
 const VALID_CLASSES = new Set([
   // No patched version exists anywhere yet. Nothing to do but wait upstream.
@@ -400,8 +400,13 @@ export function runNpmAudit(prefix) {
  * harper (`node_modules/harper/node_modules/<pkg>`). The vendor-pinned check
  * below examines every npm-audit-reported node; one harper node cannot cover
  * a hoisted copy reported by npm audit.
+ *
+ * `source` labels which installed tree this report came from. The root tarball
+ * observation is the default `"npm-install"`; the published ADK package's own
+ * consumer install passes `"npm-install-adk"` so an entry can name the tree it
+ * covers (flair#2398).
  */
-export function flattenNpmAdvisories(npmJson) {
+export function flattenNpmAdvisories(npmJson, source = "npm-install") {
   const out = [];
   const vulns = npmJson?.vulnerabilities ?? {};
   for (const [pkg, v] of Object.entries(vulns)) {
@@ -426,7 +431,7 @@ export function flattenNpmAdvisories(npmJson) {
             .filter((node) => typeof node === "string" && Object.hasOwn(npmJson?.packages ?? {}, node))
             .map((node) => [node, npmJson.packages[node]?.version ?? null]),
         ),
-        source: "npm-install",
+        source,
       });
     }
   }
@@ -603,6 +608,63 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
   return problems;
 }
 
+function adkVendorPinnedNodeProblems(adv, npmPrefix, entry) {
+  if (!Array.isArray(adv.nodes) || adv.nodes.length === 0) {
+    return [`${adv.ghsa} (${adv.package}): npm audit reported no nodes.`];
+  }
+  try {
+    const chain = entry.introducedBy.split(" -> ");
+    if (chain[0] !== "@tpsdev-ai/adk-flair" || chain[1] !== "@google/adk" ||
+        chain.at(-1) !== adv.package ||
+        !chain.every((pkg) => /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(pkg))) {
+      throw new Error("invalid ADK dependency chain");
+    }
+    const prefix = resolve(npmPrefix);
+    let parent = prefix;
+    let manifest;
+    for (const pkg of chain) {
+      if (manifest && !Object.hasOwn(manifest.dependencies ?? {}, pkg)) {
+        throw new Error(`${manifest.name} does not depend on ${pkg}`);
+      }
+      let search = parent;
+      while (!existsSync(join(search, "node_modules", pkg, "package.json"))) {
+        if (search === prefix) throw new Error(`cannot resolve ${pkg}`);
+        search = dirname(search);
+      }
+      parent = join(search, "node_modules", pkg);
+      manifest = JSON.parse(readFileSync(join(parent, "package.json"), "utf8"));
+      if (manifest.name !== pkg) throw new Error(`package name mismatch for ${pkg}`);
+    }
+    const expected = relative(prefix, parent).split("\\").join("/");
+    return adv.nodes.flatMap((node) => {
+      if (node !== expected) {
+        return [`${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} is outside the dependency chain ${entry.introducedBy} (resolved node ${expected}).`];
+      }
+      try {
+        const installed = JSON.parse(readFileSync(join(prefix, node, "package.json"), "utf8"))?.version;
+        const reported = adv.nodeVersions?.[node];
+        if (typeof entry.version !== "string" || !entry.version.trim()) {
+          throw new Error("missing or invalid allowlist version");
+        }
+        if (typeof installed !== "string" || !installed.trim()) {
+          throw new Error("missing or invalid installed version");
+        }
+        if (installed !== entry.version) {
+          throw new Error(`installed version ${installed} differs from allowlist version ${entry.version}`);
+        }
+        if (reported !== undefined && reported !== installed) {
+          throw new Error(`audit version ${JSON.stringify(reported)} conflicts with installed version ${installed}`);
+        }
+        return [];
+      } catch (e) {
+        return [`${adv.ghsa} (${adv.package}): cannot verify ADK node ${JSON.stringify(node)} version: ${e.message}.`];
+      }
+    });
+  } catch (e) {
+    return [`${adv.ghsa} (${adv.package}): cannot verify ADK dependency chain: ${e.message}.`];
+  }
+}
+
 async function latestPublishedVersion(pkg) {
   const url = registryUrlFor(pkg);
   const res = await fetch(url, { headers: { accept: "application/json" } });
@@ -640,12 +702,30 @@ async function main() {
     process.exit(2);
   }
 
+  // --adk-npm-install-prefix <dir>: the consumer install of the published ADK
+  // package, observed the same way as the root tarball. MANDATORY for the same
+  // reason --npm-install-prefix is: a check that can be skipped is not a check.
+  // npm overrides in a package do not apply to its consumers, so the root
+  // tarball's clean tree says nothing about what a consumer of @tpsdev-ai/adk-flair
+  // resolves; an install of that tarball is what shows it (flair#2398).
+  const adkPrefixIdx = process.argv.indexOf("--adk-npm-install-prefix");
+  const adkPrefix = adkPrefixIdx !== -1 ? process.argv[adkPrefixIdx + 1] : null;
+  if (!adkPrefix) {
+    console.error(
+      "DEPENDENCY AUDIT GATE: missing --adk-npm-install-prefix <dir> — the published ADK package's consumer-install observation is mandatory; the gate refuses to run without it.",
+    );
+    process.exit(2);
+  }
+
   let allowlist;
   let advisories;
   try {
     allowlist = loadAllowlist();
     advisories = flattenAdvisories(runBunAudit());
     advisories = advisories.concat(flattenNpmAdvisories(runNpmAudit(npmPrefix)));
+    advisories = advisories.concat(
+      flattenNpmAdvisories(runNpmAudit(adkPrefix), "npm-install-adk"),
+    );
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
     console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");
@@ -721,8 +801,10 @@ async function main() {
       continue;
     }
 
-    if (entry.class === "vendor-pinned" && adv.source === "npm-install") {
-      const nodeProblems = vendorPinnedNodeProblems(adv, npmPrefix);
+    if (entry.class === "vendor-pinned" && (adv.source === "npm-install" || adv.source === "npm-install-adk")) {
+      const nodeProblems = adv.source === "npm-install-adk"
+        ? adkVendorPinnedNodeProblems(adv, adkPrefix, entry)
+        : vendorPinnedNodeProblems(adv, npmPrefix);
       if (nodeProblems.length) {
         for (const problem of nodeProblems) fail(problem);
         blocked.push(adv);

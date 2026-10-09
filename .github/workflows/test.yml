@@ -1963,7 +1963,22 @@ jobs:
           cd "$PREFIX"
           npm init -y > /dev/null
           npm install --ignore-scripts --omit=dev "$GITHUB_WORKSPACE/$TGZ"
-          bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain --npm-install-prefix "$PREFIX"
+          # flair#2398 — @tpsdev-ai/adk-flair is a separately published consumer
+          # artifact. npm overrides in a package do not apply to its consumers,
+          # so a clean root tarball says nothing about what a consumer of the ADK
+          # package resolves. Pack and install that tarball too and audit its
+          # installed tree, the same observation the root tarball gets.
+          (cd "$GITHUB_WORKSPACE/packages/adk-flair-js" && bun run build)
+          ADK_TGZ=$(cd "$GITHUB_WORKSPACE/packages/adk-flair-js" && npm pack --silent)
+          ADK_PREFIX=$(mktemp -d)
+          (
+            cd "$ADK_PREFIX"
+            npm init -y > /dev/null
+            npm install --ignore-scripts --omit=dev "$GITHUB_WORKSPACE/packages/adk-flair-js/$ADK_TGZ"
+          )
+          bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain \
+            --npm-install-prefix "$PREFIX" \
+            --adk-npm-install-prefix "$ADK_PREFIX"
 
   sast-semgrep:
     name: Semgrep SAST

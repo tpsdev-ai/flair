@@ -1,0 +1,1 @@
+- **Fix hook-status probe cleanup outside Windows** (flair#2385).

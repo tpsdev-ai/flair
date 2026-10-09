@@ -752,7 +752,7 @@ async function markDerivedSourcesReflected(content: any): Promise<void> {
         const reflectPatch = { lastReflected: now };
         stripUndeclaredMemoryAttributes(reflectPatch);
         await patchRecord((databases as any).flair.Memory, sourceId, reflectPatch, {
-          pausePre: "last-reflected-pre", pausePoint: "last-reflected", expectedRow: src,
+          pausePre: () => txnPausePoint("last-reflected-pre"), pausePoint: () => txnPausePoint("last-reflected"), expectedRow: src,
         }).catch(() => {});
       }
     } catch {}

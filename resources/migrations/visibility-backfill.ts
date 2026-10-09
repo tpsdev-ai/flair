@@ -136,6 +136,7 @@
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
+import { txnPausePoint } from "../txn-pause-point.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export type BackfilledVisibility = "private" | "shared";
@@ -251,7 +252,7 @@ export function createVisibilityBackfillMigration(
             stripUndeclaredMemoryAttributes(backfillRow);
             return { write: backfillRow };
           },
-          { label: "visibility-backfill", pausePre: "visibility-backfill-pre", pausePoint: "visibility-backfill", expectedRow: row },
+          { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), expectedRow: row },
         );
         if ("write" in outcome) touchedIds.push(id);
       }

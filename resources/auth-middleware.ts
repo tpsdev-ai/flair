@@ -1,7 +1,8 @@
 import { writeBackCommittedRow } from "./write-back.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
-import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
+import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } from "./record-owner-guard.js";
@@ -187,7 +188,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
         if (!embedding) return { skip: true };
         return { write: { ...record, embedding } };
       },
-      { label: "backfillEmbedding", pausePre: "backfill-embedding-pre", pausePoint: "backfill-embedding" },
+      { label: "backfillEmbedding", pausePre: () => txnPausePoint("backfill-embedding-pre"), pausePoint: () => txnPausePoint("backfill-embedding") },
     );
     if ("write" in outcome) console.log(`[auto-embed] ${memoryId}: ${(outcome.write.embedding as number[]).length}d`);
   } catch (err: any) {
@@ -196,6 +197,23 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
 }
 
 // ─── HTTP middleware ──────────────────────────────────────────────────────────
+
+/**
+ * Refuse a credentialed Basic-auth request whose Agent row could not be READ:
+ * log the named error and return it. A read that FAILED is never an absent
+ * principal (flair#2403); the same rule resources/AgentSeed.ts applies as
+ * `agent_lookup_failed`.
+ */
+function credentialedLookupRefusal(username: string, error: unknown): Response {
+  console.error(
+    "auth-middleware: the credentialed principal lookup failed, so the request was refused",
+    { username, error },
+  );
+  return new Response(JSON.stringify({
+    error: AGENT_LOOKUP_FAILED,
+    message: "the principal record could not be read, so the request was refused",
+  }), { status: 500, headers: { "content-type": "application/json" } });
+}
 
 // Flair's clients use exactly these HTTP methods. Harper routes other methods
 // to resource handlers as well; refusing them here, before any other branch of
@@ -321,8 +339,9 @@ server.http(async (request: any, nextLayer: any) => {
     // Deactivation guard — same predicate as the Ed25519 path.
     // A deactivated principal must not receive a tpsAgent annotation, even
     // when Harper's ambient auth already verified the credential.
-    const agentRecord = await (databases as any).flair.Agent.get(username).catch(() => null);
-    if (!isPrincipalDeactivated(agentRecord)) {
+    const read = await readCredentialedPrincipal(username);
+    if (!read.ok) return credentialedLookupRefusal(username, read.error);
+    if (!isPrincipalDeactivated(read.agent)) {
       request.tpsAgent = username;
       request.tpsAgentIsAdmin = true;
       try {
@@ -355,8 +374,9 @@ server.http(async (request: any, nextLayer: any) => {
       const adminPass = getAdminPass();
       if (adminPass !== null && user === "admin" && pass === adminPass) {
         // Deactivation guard — same predicate, called before tpsAgent is stamped.
-        const agentRecord = await (databases as any).flair.Agent.get("admin").catch(() => null);
-        if (!isPrincipalDeactivated(agentRecord)) {
+        const read = await readCredentialedPrincipal("admin");
+        if (!read.ok) return credentialedLookupRefusal("admin", read.error);
+        if (!isPrincipalDeactivated(read.agent)) {
           // Mark as verified and set Harper user directly
           (request as any)._tpsAuthVerified = true;
           try {
@@ -379,8 +399,9 @@ server.http(async (request: any, nextLayer: any) => {
 
       if (harperUser?.role?.permission?.super_user === true) {
         // Deactivation guard — same predicate, called before tpsAgent is stamped.
-        const agentRecord = await (databases as any).flair.Agent.get(user).catch(() => null);
-        if (!isPrincipalDeactivated(agentRecord)) {
+        const read = await readCredentialedPrincipal(user);
+        if (!read.ok) return credentialedLookupRefusal(user, read.error);
+        if (!isPrincipalDeactivated(read.agent)) {
           (request as any)._tpsAuthVerified = true;
           request.user = harperUser;
           request.headers.set("x-tps-agent", user);
@@ -406,8 +427,9 @@ server.http(async (request: any, nextLayer: any) => {
           pairUser?.active === true
         ) {
           // Deactivation guard — same predicate, called before tpsAgent is stamped.
-          const agentRecord = await (databases as any).flair.Agent.get(user).catch(() => null);
-          if (!isPrincipalDeactivated(agentRecord)) {
+          const read = await readCredentialedPrincipal(user);
+          if (!read.ok) return credentialedLookupRefusal(user, read.error);
+          if (!isPrincipalDeactivated(read.agent)) {
             (request as any)._tpsAuthVerified = true;
             request.user = pairUser;
             request.headers.set("x-tps-agent", user);

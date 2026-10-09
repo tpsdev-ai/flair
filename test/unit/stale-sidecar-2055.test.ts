@@ -17,6 +17,7 @@
 // this worktree, `ROOTPATH` = the data dir — exactly the evidence the existing
 // self-heal requires (#1478). HOME is a throwaway dir; nothing touches the real
 // launchctl/systemctl or any real Flair data dir.
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
@@ -77,10 +78,24 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
   function pidAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
-      return true;
     } catch {
       return false;
     }
+    // Signal 0 says the pid EXISTS, which is not the same as running: an exited
+    // child whose parent has not reaped it is a zombie (state `Z`) that still
+    // answers it. Flair's own liveness probe reports a zombie as gone
+    // (flair#2313), so this oracle must too, or a stopped child reads as still
+    // running (flair#2391). A read that finds the pid already gone is gone too.
+    if (process.platform === "linux") {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+        const close = stat.lastIndexOf(")");
+        if (close >= 0 && stat.slice(close + 1).trim().startsWith("Z")) return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** A pid that is CONFIRMED gone: spawn, record it, and wait until `kill(pid, 0)` says ESRCH. */
@@ -122,14 +137,15 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         `const body = process.env.DECOY_BODY ?? "";`,
         `const portFile = process.env.DECOY_PORT_FILE;`,
         `const srv = createServer((_req, res) => {`,
         `  res.writeHead(200, { "content-type": "application/json" });`,
         `  res.end(body);`,
         `});`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(portFile, String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(portFile, String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script], {

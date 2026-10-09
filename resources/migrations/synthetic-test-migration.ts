@@ -30,6 +30,7 @@
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
+import { txnPausePoint } from "../txn-pause-point.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
@@ -110,7 +111,7 @@ export function createSyntheticTestMigration(
             stripUndeclaredMemoryAttributes(synthRow);
             return { write: synthRow };
           },
-          { label: "synthetic-test-migration", pausePre: "synthetic-test-pre", pausePoint: "synthetic-test", expectedRow: row },
+          { label: "synthetic-test-migration", pausePre: () => txnPausePoint("synthetic-test-pre"), pausePoint: () => txnPausePoint("synthetic-test"), expectedRow: row },
         );
         if ("write" in outcome) touchedIds.push(id);
       }

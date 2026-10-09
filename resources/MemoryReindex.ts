@@ -29,6 +29,7 @@
 import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
 import { writeBackCommittedRow } from "./write-back.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { buildReindexRow } from "./Memory.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
@@ -153,7 +154,7 @@ export class MemoryReindex extends Resource {
               if (!("row" in built)) throw new Error(`${built.error}: ${built.message}`);
               return { write: built.row };
             },
-            { ctx, label: "MemoryReindex", pausePre: "reindex-put-pre", pausePoint: "reindex-put", expectedRow: selectedRows.get(id) },
+            { ctx, label: "MemoryReindex", pausePre: () => txnPausePoint("reindex-put-pre"), pausePoint: () => txnPausePoint("reindex-put"), expectedRow: selectedRows.get(id) },
           );
           if ("skip" in outcome) { stats.errors++; continue; }
           stats.reindexed++;

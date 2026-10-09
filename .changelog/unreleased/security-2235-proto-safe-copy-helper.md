@@ -1,0 +1,1 @@
+- **Selected untrusted-record copies preserve special own keys as data; federation peers refuse affected signatures they cannot verify (flair#2235).**

@@ -54,6 +54,7 @@ import { homedir } from "node:os";
 import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { isAdmin, allowVerified } from "./agent-auth.js";
 import { patchRecordSilent } from "./table-helpers.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import {
   buildReflectionPrompt,
   buildExecutePrompt,
@@ -348,7 +349,7 @@ export class ReflectMemories extends Resource {
             const reflectPatch = { lastReflected: now };
             stripUndeclaredMemoryAttributes(reflectPatch);
             patchRecordSilent((databases as any).flair.Memory, memory.id, reflectPatch, {
-              pausePre: "reflect-sources-pre", pausePoint: "reflect-sources", expectedRow: memory,
+              pausePre: () => txnPausePoint("reflect-sources-pre"), pausePoint: () => txnPausePoint("reflect-sources"), expectedRow: memory,
               matches: (row) => row != null && GATHER_SELECT.every((key) => isDeepStrictEqual(row[key], memory[key])),
             });
           }
