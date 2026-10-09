@@ -1748,7 +1748,7 @@ export function evidenceLine(s: string, max = 200): string {
 const PROBE_GROUP_TERM_GRACE_MS = 200;
 const PROBE_GROUP_KILL_GRACE_MS = 2_000;
 
-/** How many seconds the group's pin outlives the probe's own timeout. */
+/** Seconds added to the timeout rounded up to whole seconds for the group's pin. */
 const PROBE_PIN_MARGIN_S = 60;
 
 /** The most the probe reads back of each output stream: Node `spawnSync`'s
@@ -1838,7 +1838,7 @@ function readPinPid(path: string): number | null {
   }
 }
 
-/** Read at most HOOK_PROBE_MAX_OUTPUT_BYTES of an output file through its open
+/** Return at most HOOK_PROBE_MAX_OUTPUT_BYTES of an output file through its open
  *  descriptor; `overflow` when the file holds more. */
 function readCappedOutput(fd: number): { text: string; overflow: boolean } {
   const buf = Buffer.alloc(HOOK_PROBE_MAX_OUTPUT_BYTES + 1);
@@ -1880,7 +1880,7 @@ interface BunRuntime {
 }
 const bunRuntime = (globalThis as { Bun?: BunRuntime }).Bun;
 
-/** The normalized result of the bounded spawn, before the group is ended. */
+/** The normalized spawn result, before the group is ended. */
 interface ProbeSpawn {
   pid: number | null;
   exitCode: number | null;
@@ -1899,8 +1899,8 @@ const PROBE_WRAPPER =
   `( ( trap '' HUP INT QUIT TERM; PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
   `printf '%s' "$!" >"$1" ); exec /bin/sh -c "$3"`;
 
-/** Spawn the wrapper into its own process group, bounded by `timeoutMs`, with
- *  stdout/stderr written to the two file descriptors. */
+/** Spawn the wrapper into its own process group with stdout/stderr written to
+ *  the two file descriptors. `timeoutMs` sets when to signal the shell, not a deadline for its exit. */
 function spawnProbeBounded(
   command: string,
   timeoutMs: number,
@@ -2020,7 +2020,7 @@ export function runProbeInOwnGroup(command: string, timeoutMs: number, opts: Pro
       try {
         closeSync(fd);
       } catch {
-        // Closing is best effort; the directory is removed either way.
+        // Closing is best effort; directory removal is attempted either way.
       }
     }
     try {
