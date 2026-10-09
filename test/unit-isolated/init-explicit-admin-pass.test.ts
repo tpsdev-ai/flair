@@ -65,7 +65,10 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
     ${options.probeFailure === undefined ? '' : `
     const dataDir = ${JSON.stringify(dataDir)};
     const { writeFileSync } = await import("node:fs");
-    writeFileSync(dataDir + "/hdb.pid", String(process.pid));
+    // Pin the mode a PID-file proof requires: ownedInitPidfilePid rejects a
+    // hdb.pid with group/other write bits, and the default create mode inherits
+    // the umask (0002 yields 0664).
+    writeFileSync(dataDir + "/hdb.pid", String(process.pid), { mode: 0o600 });
     const tcpPath = ${JSON.stringify(new URL("../../src/lib/init-tcp-probe.ts", import.meta.url).href)};
     const tcp = await import(tcpPath);
     mockSocketLimit.module(tcpPath, () => ({ ...tcp, localPortState: async port => port === 9 ? "listening" : "free" }));
