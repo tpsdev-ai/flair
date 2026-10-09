@@ -39,10 +39,10 @@ export async function stampMemoryPromotion(id: string, reviewerId: string, decid
  * Auto-promotion uses this non-fatal wrapper; manual promotion calls
  * stampMemoryPromotion directly, so a stamp failure fails that request. */
 export async function stampMemoryPromotionIsolated(
-  id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, stagedContext?: any,
+  id: string, reviewerId: string, decidedAt: string, enumerationContext?: any,
 ): Promise<boolean> {
   try {
-    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, stagedContext);
+    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext);
     return true;
   } catch (err: any) {
     console.warn(`stampMemoryPromotion failed for ${id}: ${err?.message ?? err}`);

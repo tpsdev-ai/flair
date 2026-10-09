@@ -1832,10 +1832,11 @@ export class Memory extends (databases as any).flair.Memory {
     if (contentSuffixDenial) return contentSuffixDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
-    // Reindex migration bypass: admin-only escape hatch used by the
-    // MemoryReindex admin endpoint to re-PUT declared and named retained fields
-    // (no updatedAt bump, no embedding regen, no safety rescan) so Harper
-    // repopulates secondary indices. Other undeclared fields are stripped and
+    // Reindex bypass: an admin-only escape hatch that re-PUTs declared and named
+    // retained fields (no updatedAt bump, no embedding regen, no safety rescan)
+    // so Harper repopulates secondary indices. The row is built by
+    // buildReindexRow, the path this branch shares with the MemoryReindex admin
+    // endpoint's write-back. Other undeclared fields are stripped and
     // an absent incarnation token is generated. Because this skips safety and
     // auditability, it must be gated to admins. Internal calls (no auth
     // context) pass through, matching the pattern used in delete().
