@@ -1,1 +1,0 @@
-- **Non-admin owner-scoped deletes recheck ownership before committing and refuse a detected change.**

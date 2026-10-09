@@ -18,6 +18,562 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.60.0] - 2026-10-09
+
+### Added
+
+- **`flair keys prune` and `flair doctor` report node-shaped orphan candidates without removing them.**
+  Candidates are absent from the ops Instance and Agent tables after the sole ops
+  Instance id matches the HTTP target's `HealthDetail.federation.instance.id`.
+  An unavailable identity match or unreadable rows leave files unidentified.
+  Node-shaped seeds stay in place even with `--apply`; removal requires per-file ownership proof (#2200).
+  Minting attempts to record a sidecar; sidecar-write failure leaves them report-only.
+  Doctor's advisory names no removal command (flair#1925).
+
+- `flair hook install --action-recall` copies a version-matched Claude Code Bash recall hook to Flair-owned storage.
+  SessionStart caches own lessons with `metadata.flairActionRecall` triggers. Install probes the copied command;
+  status probes a detected entry, while absence is informational. Uninstall removes the provisioned runtime.
+  Invalid client response caps are rejected (flair#2067).
+
+- **`flair hook install --capture` wires Claude Code PostToolUseFailure, PostToolUse and Stop hooks that stage command follow-ups and cue-matching sentences as candidate memories (flair#2068).**
+
+  The hook may redact a candidate and append it to a bounded, private spool under
+  `~/.flair/capture/`. Network writes run in a detached flush; a candidate may
+  wait or be evicted before a write. Install probes the provisioned copy; status
+  probes the artifact path named in settings.
+  Partial or stale capture status exits nonzero with `--capture`.
+
+  > **Heads-up:** the hook is copied to `~/.flair/hooks/capture/<version>-<hash>/`
+  > at install time. Re-run the installation after upgrading `@tpsdev-ai/flair`
+  > so the copy matches the running version.
+
+- **The MCP client-assertion signer can use the issuer audience (RFC 7523bis), behind a switch.** The default is
+  today's shape — `aud` = the token-endpoint URL, header `typ: "JWT"` — and
+  `FLAIR_MCP_CLIENT_ASSERTION_AUDIENCE=issuer` (or `flair mcp token --assertion-audience issuer`) signs `aud` = the
+  issuer from the authorization server's metadata document with `typ: "client-authentication+jwt"`.
+
+  `--issuer` supplies the authorization server origin (falling back to `FLAIR_MCP_ISSUER`/`FLAIR_PUBLIC_URL`); the
+  signer fetches its `/.well-known/oauth-authorization-server` document and reads `issuer` there, never from the
+  token-endpoint URL. An unreadable document or issuer without an absolute HTTP URL free of query and fragment is
+  refused with a message naming the switch and metadata URL. An unset or empty switch keeps the token-endpoint
+  assertion; a later PR will change the default after a compatible verifier release.
+
+- **`flair principal disable` and `enable` accept `--instance` (or `FLAIR_URL`) for a remote principal (#2114).** They derive the target's operations API as `flair mcp enable` does and share its explicit-instance precedence and explicit-remote-password rules, but not all target rules: the principal commands accept an explicit loopback instance, while `mcp enable` refuses local origins. Redirects and unconfirmed updates refuse; success requires the named row's requested status on read-back. Requests have a timeout; diagnostics omit URL userinfo and query values, print only `<unparseable URL>` for an unparseable target, and omit response bodies. With neither `--instance` nor `FLAIR_URL`, the local path uses `127.0.0.1`; its port precedence is a valid explicit `--ops-port`, `FLAIR_OPS_PORT`, local config, then one less than the resolved HTTP port. An invalid explicit `--ops-port` is refused rather than falling through.
+
+- **`flair principal link` maps one IdP login to a principal; `unlink` revokes a mapping; `links` lists current mappings.**
+  `flair principal link <principal> --idp-subject <login>` refuses a missing principal by name, reports a
+  subject already mapped to that principal without writing, and refuses a subject mapped to a different principal
+  unless `--replace` moves it. More than one active principal mapped to the subject is refused before writing.
+  `flair principal unlink <principal> --idp-subject <login>` defaults to provider `github`; pass
+  `--idp-provider <name>` for a different provider. Unlink reports success only after confirmed updates and no resolvable subject mapping on readback.
+
+- **Retained skill payloads, `_reindex`, the seed lineage and org skill
+  references now honour slice 2's history rules.**
+
+  The transactional skill writer gains a per-step fault hook that is empty
+  unless a test-only fixture outside the package installs it, so the real-Harper
+  suite can prove a failure at the successor write, predecessor close, pointer
+  write or version append rolls the whole write back.
+
+  > **Heads-up:** an update that tightens a skill to private now also revokes
+  > read access to its predecessor's retained payload through Memory GET/search
+  > and the Feed replay, not only through the version read.
+
+  A closed skill row with no recorded version is no longer returned to non-admin readers through GET, search or feed.
+
+- **InstructionVersion reads now authorize skill subjects under Memory's owner/non-private rule.**
+  A skill version is readable only when the reader may read both the version's stored
+  visibility and the subject's current visibility — the head's live Memory row, or its
+  tombstone after a logical delete. Ordinary readers require matching subjects, a live
+  skill row owned by the head's owner, or a delete head with null memoryId; authority
+  references require nonempty owners and private/shared visibility. Unknown subject
+  types deny; admin/internal keep unfiltered skill reads.
+
+- **Transactional skill versions for Memory and FeedMemories.**
+
+  Updates require one live head and reject stale targets. PUT/feed archive
+  transitions are refused. Cross-owner agent writes require a write grant;
+  successors retain the subject owner.
+
+  Unreserved skill deletes close the retained payload and append a tombstone.
+  Reserved seed writes and unchanged-payload embedding regeneration keep their
+  physical IDs. Reserved-seed deletes, `_reindex`, and the administrator
+  operations API do not append skill versions.
+
+- **Single-row Soul resource writes append history; Soul collection deletes are refused.**
+  `PUT` preserves `createdAt`. `InstructionVersion` REST writes are refused;
+  verified agents can read Soul history. The administrator operations API is an unaudited exception.
+
+- **Team directory lists active agents with published tps-mail contacts.**
+  Integration resource writes require an operator source for publication, withdrawal,
+  removal of a published entry and deletes by collection or query target; they freeze a
+  published entry's agentId, platform and email until withdrawal and stamp publication time.
+  Bootstrap carries a fixed directory hint (flair#2141).
+
+- **Flair seeds an org-wide `using-flair` skill (flair#2141).** Normal local and remote `flair init` ensure a fixed-id, shared, persistent Memory skill and its org assignment as the Basic administrator. Re-initializing an already-installed default local instance with `flair init --skip-start` defers the seed to a later `flair start` that has the admin credential (`FLAIR_ADMIN_PASS` or the admin-pass file): without one, a `flair start` that verifies its server exits 0, warns, and leaves the seed pending, and a completed seed clears the pending marker. Bootstrap offers the assignment to an active agent if it wins same-name conflict resolution, the agent has not opted out, and it fits the budget.
+
+  Writes to the reserved Memory id, including supersede, require an authenticated Basic administrator or a deliberate internal call; federation skips that id. Server bookkeeping may update selected fields. Seeding checks both rows before writing: it refuses failed reads, ambiguous operator identity, another owner, a row without persistent shared live-skill shape, or a mismatched assignment. On a preflight refusal during `flair init`, it writes neither seed row and `flair init` exits non-zero with a remedy. It reads written rows back before reporting success. Re-runs replace text only if its noncurrent hash is added to the shipped list, preserve other edited text, and leave current rows in place.
+
+  The skill covers memory durability, provenance, recall, identity, and finding teammates through Agent and available Presence records.
+
+- **`flair integrity check` alerts on unexplained loss of checkpointed durable Memory IDs or their nonempty tokens (Closes #2213).**
+
+  The default version-2 checkpoint is `~/.flair/integrity-checkpoint.json` (mode 0600, written
+  atomically); `--checkpoint` selects another path, which must stay outside Harper data.
+  It holds per-tier counts and Memory ids (durability and `instanceToken`). A durable-tier (`permanent` /
+  `persistent`) ID missing or present with a changed or missing previously nonempty `instanceToken`, without new history matching its nonempty checkpointed token,
+  is an unexplained loss. On an alert, the whole checkpoint advances only with `--accept` and no reported
+  replacement lacking a token; otherwise no checkpoint is written, even with other losses. Confirmed physical deletions of durable Memory rows through `Memory.delete` record history in the delete transaction.
+  Scans prune absorbed and untracked history after writing the checkpoint; non-durable deletes, including maintenance expiry, record none.
+  Tier changes are reported even for replacements. Corpus and checkpoint read failures, exact-count mismatches, and a before/after exact-count difference around either search report UNKNOWN without advancing the checkpoint.
+  Retention failures report UNKNOWN after checkpoint advancement, with `checkpointWritten: true`.
+  Version-1 checkpoints report UNKNOWN.
+  A row created and lost entirely between scans is not observed.
+
+- Check declared direct root override keys matching workspace dependencies,
+  devDependencies or optionalDependencies in CI and staged manifests in pre-commit.
+  Accept exact semvers, exact npm: alias targets and workspace: specifiers.
+  Workspace packages' own ranges and peerDependencies are out of scope (flair#2301).
+
+- **Bridge plugin tests exercise the published Node CLI shim and Bun.**
+  An offline local npm fixture records import and export option records. (Closes #2308)
+
+### Changed
+
+- **Updates `harper` from 5.2.8 to 5.3.1.** Removes 14 dependency-audit allowlist entries, with packed-install audit-gate evidence for each retirement; flair's RocksDB admin-user reader now accepts 5.3's generation-suffixed `hdb_user/@<uuid>` primary store.
+
+  - `fastify`: `GHSA-w2qp-rph6-63g4`, `GHSA-3m5p-2c4r-xxw2`, `GHSA-hwr6-493r-vm6h`, `GHSA-9q9j-q6p8-xq58`, `GHSA-p68q-wchp-6fh7`, `GHSA-667r-xxjv-c9mm`, `GHSA-4mh8-r7rc-xpvc`.
+  - `joi`: `GHSA-gg4h-3hg2-grpc`, `GHSA-6w3j-5fw6-r9vr`, `GHSA-6h2x-m376-mqjq`, `GHSA-wr44-6hxh-3jwq`.
+  - `moment`: `GHSA-4p3w-j4w9-5jqw`.
+  - `fast-uri`: `GHSA-5jgf-p345-68v8`, `GHSA-fph4-wmhf-6fwf`.
+
+  > **Heads-up:** A data directory upgraded to Harper 5.3 must not be served
+  > by an older flair. The only full rollback is restoring the pre-upgrade physical
+  > data-directory snapshot (`flair snapshot restore <path>`). `flair backup`/`restore`
+  > logically exports/imports only Agent, Memory and Soul rows through a running
+  > server; it can transfer those rows into a fresh compatible instance.
+
+- **Shard the shared unit lane across CI jobs.** Each shard keeps the lane's per-step limits.
+
+- **Team directory entries include a nullable `homeInstanceId`; `Integration.patch` answers 404 for an absent row.**
+  The `team_directory` entry contract now requires `homeInstanceId`, and the
+  documented `Peer.status` CLI vocabulary is pinned to the federation schema.
+  An `Integration.patch` addressed at a row that is not there returns
+  `NOT_FOUND` instead of reaching the base table — deliberate and fail-closed
+  (flair#2322).
+
+- **Test pause points no longer share a union list.** This removes conflicts on that list. A unit test checks direct literal calls
+  and `deleteOwnedRow`'s `point` properties for malformed or duplicate names and rejects unresolved arguments.
+  Valid names keep their pause behaviour; malformed names throw `InvalidPausePointError` before the fault-injection gate.
+
+- Updates `@harperfast/oauth` from 2.5.0 to 2.9.0, which can admit an interactive Client ID Metadata Document client that authenticates with `private_key_jwt`: that needs the client's host in `mcp.clientIdMetadataDocuments.allowedHosts` and, unless the headless `client_credentials` grant is enabled, `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled: true` (the shipped `config.yaml` lists `claude.ai` and `claude.com` and leaves `privateKeyJwt` off). Client assertions presented at the token endpoint are verified or refused. 2.8.1 skips a provider with no credentials before validating its `redirectUri` (HarperFast/oauth#259), and the shipped `config.yaml`'s `github` provider block gains a whole-token `OAUTH_GITHUB_REDIRECT_URI` reference; `flair mcp enable` stages it as the issuer origin plus `/oauth`. 2.9.0 derives the ID-token issuer for Auth0 with `domain`, Okta with `domain` (and `authServer` for a custom authorization server), and Azure with a tenant-GUID `tenantId`. Background discovery is scheduled only for configurations with `jwksUri`, no usable issuer, an HTTPS `authorizationUrl`, and non-Azure JWKS endpoints. At static provider initialization, other non-Azure JWKS configurations without a usable issuer are refused; unpinned Azure aliases remain issuerless. Providers resolved dynamically through `onResolveProvider` are not subject to that check.
+
+### Fixed
+
+- **CLI record paths encode IDs as one path segment (#1970).** CLI record reads and writes for Memory, Relationship, Soul, Agent, OrgEvent, WorkspaceState, IdpConfig, MemoryCandidate and FederationPeers use `src/lib/record-id-path.ts` to send each ID as one encoded path segment. An ID exactly `.` or `..` is refused before a request. Signed CLI requests now build the final URL first, sign its pathname and query (including any base URL path prefix), and fetch that URL. `flair export` checks each record's required fields before writing an output file; only a definite Agent 404 is reported as "not found".
+
+- **Launchd stop verifies the recorded process exited before attempting stale-sidecar cleanup (#2075).** Unreadable PID, unload failure or unconfirmed exit fails the stop without cleanup. The restart test uses a short scratch path; command tests cover NOT_RUNNING cleanup.
+
+- **`flair-session-start` and `flair-continuity-capture` start from a path that contains a space, or from a symlinked bin, on Node before 22.18.**
+  Those hooks, and a direct run of the MCP server module, decided they were
+  the process entry by comparing the module URL to `argv[1]` as strings when
+  `import.meta.main` was absent. A space is `%20` in the URL, and on macOS and
+  Linux an npm bin is a symlink, so the process exited without running. They
+  now compare the two paths after resolving symlinks. The same check is what
+  `flair-prompt-recall` and `flair-precompact` already used.
+
+  (Closes #2083)
+
+- **`flair init` validates the launchd plist it writes when there is no legacy job to migrate (Closes #2085).**
+
+  When rollback succeeds after a validation failure — including a lint that
+  throws — prior bytes and mode are restored, or a plist init created is
+  removed. Existing plist symlinks, including dangling links, are refused
+  before writing. A failed restore is reported and init exits 1.
+
+- **`flair bridge import` now declares `--user`, `--base-url` and `--api-key-file`.** The mem0 bridge's old hint named flags the command did not accept. Mem0 now accepts a user id and an HTTP(S) base URL, and reads the API key from `MEM0_API_KEY` or a `--api-key-file` whose group/world permissions are clear. The key is never an argv value. YAML imports refuse `--api-key-file`.
+
+  > **Heads-up:** set `MEM0_API_KEY` or pass `--api-key-file <path>` (no group/world permissions; `chmod 600` recommended). An explicitly empty or invalid `--base-url` is refused before a request, and API failures do not print response bodies or pagination URLs.
+
+- **`flair agent list`/`rotate-key` warnings give a history-safe `FLAIR_ADMIN_PASS` remedy, and `flair deploy`'s next step names `agent add --target` (#2123, #2124).** The inline-password warning used to suggest `--admin-pass-from`, which no command declares; it now tells operators to use `FLAIR_ADMIN_PASS` without typing its value into a recorded shell line (for example, by reading it from the admin-pass file). `flair deploy`'s next-steps example used to print `flair agent add --remote`; it now prints `flair agent add my-agent --target '<url>' --admin-pass-file /path/to/admin-password`, with the URL safely single-quoted (including embedded-quote escaping) and instructions to save the Fabric admin password in an owner-only file. The `agent add --target` help now states the HTTPS default-port ops mapping. The exemption entries for both messages are removed from the message-flags check, so it covers them.
+
+- **`flair principal disable` and `enable` refuse an id with no row by name before writing.**
+  The command reads the principal first and exits non-zero with `no principal
+  <id>` when the row is absent, so no update is sent for a missing id. A read
+  that fails or returns an unreadable body is refused as unverified, not as
+  absent. After a confirmed update the command prints the status read back, and
+  refuses when the read-back does not show the requested status.
+
+- **The release workflow's stage-shell test cases run on macOS when GNU find (`gfind`) is on `PATH`.** When it is not on `PATH`, those cases fail with a message naming `brew install findutils`.
+
+  (Closes #2136)
+
+- **Unit lane runs under a short, canonical temp root on macOS (#2137).** On darwin the lane gives every step a `TMPDIR` under a fresh `/private/tmp` root and points its temp-dir leak guard at that root, keeping a scratch HOME's `flair init` operations-socket path within its length limit. The ingest-throughput and longmemeval artifact tests' scratch outputs now use the cleanup-managed temp-dir helper.
+
+- **Downgrade refusal is conditional (flair#1047).**
+
+  With a readable, nonempty stamp and a known installed Harper version, an older guarded Flair refuses before Harper opens the store if the stamp is newer or the versions cannot be compared.
+
+- **POST /MemoryPurge confirms pointer-row removal through its own transaction, so a purge on Harper 5.3 no longer returns a false 500.**
+
+  A table read with no transaction of its own resolves the request's operation
+  transaction and reads that transaction's read snapshot. A purge pins that
+  snapshot before it deletes the pointer rows, so the confirmation read still
+  saw a pointer row that was already gone and answered
+  `memory_purge_pointer_cleanup_failed`. The confirmation now reads through a
+  transaction the purge owns and observes the committed delete.
+
+- **Use a consistent Linux process start second while boot time is unchanged and the host tick rate is known.** The serving-process resolver compares sidecar timestamps against `/proc` start ticks and boot time, avoiding occasional false disagreement from separately sampled uptime and wall-clock time. If `getconf CLK_TCK` cannot provide a valid rate, the start time remains unknown and the sidecar cannot confirm PID-file identity.
+
+- **`flair mcp enable` supports custom-domain Fabric targets with `--fabric`.** (Closes #2189)
+  Remote Fabric enable does not restart the instance.
+
+- **`flair mcp enable` stops before the restart when its local configuration update fails, exits non-zero, and says to fix the reported cause and re-run.** Previously the standalone flow continued past the failed update and could reach the restart. (flair#2193)
+
+- The shipped `config.yaml` leaves `mcp.signingKeyPem` unpinned. `flair mcp enable` does not generate a signing-key file or stage `FLAIR_MCP_SIGNING_KEY_PEM`. An install that wants a fixed key adds the `signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}` line and stages the variable.
+
+- **Local `flair init --skip-start` installs Harper without starting it.**
+  With free ports and an empty local data directory, init installs and configures
+  Harper; the default instance queues the `using-flair` seed for `flair start`.
+  An installed, stopped local instance is not reinstalled or started.
+  Without `--agent`, unattributed HTTP or operations listeners are refused.
+  With `--agent` / `--agent-id`, local keys and client configuration are written;
+  registration is deferred until init runs without `--skip-start`.
+
+- **`flair doctor --fix` reports a direct Harper process not observed to exit during launchd adoption (Closes #2205).** Exit, health and final listener checks share one stop deadline.
+
+- **Durability docs now state what each tier does and does not guarantee (flair#2217).** `permanent` had been described as "retained until explicitly deleted", which over-promised: the code gives it no special flush, fsync, backup or replica acknowledgement, and an explicit delete or a store failure ends a row at any tier. The documented Memory surfaces use a shared per-tier statement; the contract checks rendered MCP durability descriptions, CLI help and the Python ADK docstring.
+
+- **The unit lane's whole-lane time budget rises from 510 s to 780 s.** The old budget sat at the upper edge of the
+  measured lane length (401–510 s) and was exhausted on busy runners, killing whichever late step was running; every
+  measured lane fits inside 780 s. A lane that still runs past 780 s is stopped the same way, and per-step limits
+  still kill a hung step fast and name it.
+
+- **Restore verifies a restored Memory or Soul row's preserved content, not only its ID and owner.** A
+  row whose preserved content still differs after PUT fails, naming the row and field. Closes #2226.
+
+- **`flair status`: the expired-`validTo` warning is grouped by agent** (#2231).
+  The warning names at most five agents, counts remaining named agents, and
+  reports rows with no agent id separately.
+  It marks an installed nightly scheduler whose plist or service names each agent.
+  Linux installation requires both timer and service; orphans report their path.
+  Scheduler file read failures report unknown with the path and error code.
+  The active-state probe reports not active when systemctl cannot reach a user
+  session bus, and unknown when the probe command cannot run or does not
+  complete in time.
+  The breakdown is included in `flair status --json` when expired rows exist.
+
+- **Shard the root unit step by file.** Each shard keeps the step limit.
+
+- **Skill creates at `/Memory/<id>` use that id when the body id is absent or null; the feed refuses reserved seed ids.**
+
+  Updates retain the lineage and follow the existing successor or reserved-id
+  rules. The locked stale check compares the addressed row. PUT refuses a body
+  `id` that differs from the URL id.
+
+  After authentication, the feed's reserved-id check refuses a URL id, body id, or `supersedes`
+  naming the seed id, with a 403 naming `flair init` as its writer; the seed
+  writes that row through `PUT /Memory/<id>`.
+
+- **Action-recall and learning-capture installation preserve shared group matchers when moving recognized commands into dedicated groups.**
+
+- **Local upgrade can stage a missing GitHub OAuth redirect from configured MCP issuer and credentials.** Local `flair init` also stages it. The boot guard disables a credentialed GitHub provider when its redirect is missing. Doctor reads authenticated target readiness. Fabric `--target` migration is outside this change.
+
+- **`flair principal disable` and `enable` treat a principal with no stored `status` as active.**
+  Such a principal (created through an agent seed, or by a seed written before the
+  field existed) can be disabled and re-enabled: disabling refuses its protected
+  authenticated requests, and re-enabling restores access. Human-readable
+  `flair principal list` and `show` output reports the missing status as active (flair#2272).
+
+- **Reading instruction-version history applies the read scope before Harper pages and projects.** A `limit`/`offset` page and a `select`/single-property read now operate on the readable rows only: paging returns the caller's readable rows and counts no unreadable row, and a projected read returns a row its owner and an admin may read instead of a 404 or an empty collection. (Closes #2273)
+
+- **Memory maintenance acts on the row it re-reads, not the scan-time copy
+  (Closes #2275).**
+
+- Successful Soul PUT/PATCH identity changes close the old history window; occupied destinations return `409 soul_subject_occupied`. IDs written by the new encoder distinguish colon-bearing pairs; a collision with a legacy version ID is refused with a rollback rather than merged.
+
+- **Refused migration-directory links now report their configured path, resolved target when available, and remedy.** When no candidate is usable, the boot log and `/HealthDetail` report the failure (flair#2277); `flair doctor` does so with a verified agent and a reachable instance. Full paths appear in the operator log, admin `/HealthDetail` responses and admin `flair doctor` output.
+
+  > **Heads-up:** for a link to a directory, only after verifying that the target is dedicated to this Flair instance and safe to relocate, stop Flair, remove the link, move its target to the configured path and start Flair. If ownership is uncertain, leave the target in place: for a linked data directory, set `FLAIR_MIGRATION_DATA_DIR` to the real directory path instead of the link and restart; for a linked `.migrations` child, configure a different data directory with an unlinked `.migrations` child. For a dangling link or a link to a file, replace the link with a writable directory.
+
+- **A stub Harper started by the launchd-2040 test now exits once the test process that started it is gone.**
+  A tool timeout, Ctrl-C or a CI step timeout kills the test runner, so the file's
+  `afterEach` does not run. The stub watches a pid the test owns and carries a fixed
+  maximum lifetime, so it no longer survives as an orphan after its tree is deleted
+  (flair#2281).
+
+- **Failed adoption after a confirmed process exit attempts restoration and reports its outcome.**
+  Restoration re-checks the port and attempts a direct restart only when the health probe reports connection refusal.
+  No restart is attempted when exit was not confirmed before the stop deadline (flair#2284).
+
+- **Unit-file discovery and the lane coverage gate share one predicate for the names Bun's runner discovers (#2288).**
+  Discovery previously accepted only `.test.[jt]sx?`. Both now accept the
+  `.test`/`_test`/`.spec`/`_spec` suffixes with Bun's eight extensions (`js`,
+  `jsx`, `ts`, `tsx`, `mjs`, `cjs`, `mts`, `cts`), so a unit test named
+  `foo_test.ts` or `foo.test.mjs` is planned and checked instead of skipped.
+
+- **`flair agent remove` and `flair memory hygiene --apply` use the physical purge path for skill-tagged Memory rows (Closes #2290).**
+
+  Both commands use `POST /MemoryPurge` for physical deletion,
+  which accepts Basic admin credentials and refuses agent keys, admin agent keys included.
+  It targets each named row and, for a skill-tagged row, every row in that skill's lineage,
+  including superseded versions. The row deletes and, for
+  permanent or persistent rows, their deletion-history records share one transaction, and a
+  failed history write aborts it. After the commit the path reads each row again. A row still
+  stored fails the command and keeps its pointer row. History cleanup is attempted and
+  checked after commit; unconfirmed cleanup returns 500 `memory_purge_history_cleanup_unconfirmed`.
+  Pointer rows are deleted only for rows the read finds gone. Each of
+  these cleanup deletes is checked by a read after its commit, and one that fails or is not
+  confirmed fails the command. Either command fails when the response does not list every
+  requested id as removed, and `agent remove` stops before deleting anything when its Memory
+  scan fails or returns an unexpected response. The user-facing `DELETE /Memory/<id>` route
+  is unchanged. An accepted DELETE of a non-reserved skill closes its head; the reserved
+  `using-flair` seed is physically deleted.
+
+- **`flair init` re-pins a stale SessionStart hook, and `flair hook status` reports it.**
+  Both read the stale-pin finding `flair doctor` uses, which now takes the pin from the
+  pinned span named by the hook's command.
+  `flair hook status` reports a command naming a pin behind the installed CLI in red
+  and exits 1. When `flair init` wires Claude Code or Codex, it re-pins that client's
+  behind hook through the guarded re-pin helper, except under `--skip-hook`, or when the
+  helper holds the pin or its write fails. A settings file with more than one hook
+  command carrying `flair-session-start`, or a command that names a `flair-mcp` pin and
+  has two or more `npx -y -p` spans or no matching span, is held: `flair init`
+  leaves it as is and reports it, and `flair hook status` reports it.
+
+- **The bridge docs say plugin `import` options are a null-prototype record (flair#2293).** Since #2257 the options passed to a code plugin's `import` have no prototype, so inherited methods such as `hasOwnProperty` are absent; the docs now recommend `Object.hasOwn(opts, key)`.
+
+- **`flair reembed` changes only `embedding`, `embeddingModel` and `updatedAt`; other stored fields are kept (#2296).**
+  It sends `PATCH /Memory/<id>` with
+  `{"embedding": null, "embeddingModel": null}`; the server embeds the stored
+  row and writes those three fields.
+
+- **An operator's collection DELETE on Integration now removes the matched
+  rows.** Integration now awaits its search, selects primary keys, and deletes
+  those keys. Harper's native collection-delete loop cannot consume a
+  Promise-returning search override when a resource delegates to that loop;
+  Integration previously did so and returned 500. Async search overrides exist
+  on Asset, Credential, InstructionVersion, Integration, Memory, MemoryCandidate,
+  MemoryGrant, MemoryHostSource, MemoryUsage, Message, Relationship, and
+  WorkspaceState. InstructionVersion and MemoryHostSource refuse DELETE;
+  Memory has its own deletion path. A runtime principal's collection DELETE
+  stays refused.
+
+- **The process liveness probe reports an exited-but-unreaped process (a zombie) as exited.**
+  A state that remains unreadable after retries is treated as alive.
+
+- **The Node CLI loads npm bridge plugins from their entry files.**
+  The loader refuses entries outside the package directory. (Closes #2315)
+
+- **The capture flush bounds its asynchronous setup and each write with one deadline (flair#2321).**
+
+  Flushes use a separate lock. A capture during network writes is spooled; append-lock contention can refuse it after the bounded wait.
+  The final spool rewrite is synchronous.
+  A spool record whose agent
+  id is not the installed agent's is not flushed. The 10 ms p95 hot-path budget in
+  `scripts/capture-latency.mjs` is a manual measurement: no CI lane runs it.
+
+- **`flair reembed` refuses before its first write when the server does not advertise the re-embed PATCH.**
+
+  The command reads the server's advertised capabilities from `GET /Health`
+  before the first write. If the token is absent, the command stops with
+  what it found and the remedy —
+  restart or upgrade the server, then re-run `flair reembed`.
+  A failed or unparseable `/Health` read is also refused.
+
+- **The unit lane checks wholly omitted packages with recognized test filenames and missing matrix shard indices.**
+  The matrix check runs in the unsharded doclint job. Package discovery recognizes
+  JS/TS and Python test filename patterns; other languages and omitted files
+  inside planned packages are deferred.
+
+- **`flair start` can recover an UNKNOWN state with an exited recorded owner (Refs #2350).** Recovery requires the data-directory guard to pass, owner records readable without following symlinks, confirmed PID exit, and a refused TCP connection; start rechecks the selected PID before spawning. UNKNOWN refusals suggest `flair doctor` for diagnosis.
+
+- **`flair agent remove` fails when the agent's Soul rows cannot be confirmed gone, instead of reporting a completed removal (Closes #2351).**
+
+- **Direct-process restarts probe through the stop deadline and refuse replacement after an unconfirmed stop.**
+
+- **One agent-ID rule now guards the paths that create an Agent (#2359).**
+  The rule `AgentSeed` enforced (`^[a-zA-Z0-9_-]{1,64}$`) now lives in one shared
+  helper imported by both the CLI and the server. `flair agent add`,
+  `flair principal add`, `flair mcp grant`, `flair mcp enable`,
+  the Agent resource's REST writes, `AgentSeed` and the federation
+  merge refuse an id outside the rule rather than store it; the resource,
+  `AgentSeed` and the federation merge answer the named error
+  `invalid_agent_id`. `flair doctor` reports stored agent ids outside the rule
+  when it can read the Agent roster, and counts a check that could not run (no
+  admin credential, an admin-pass file the credential resolver refuses, or a
+  failed roster read) as an issue; it rewrites nothing.
+
+- **A Soul PATCH checks raw changes visible at its confirmation read.**
+  A different or absent subject at confirmation is refused with
+  `soul_patch_row_changed` (409); exhausted retries return `soul_patch_conflict`
+  (409). A refused PATCH leaves the row and version history unchanged by that
+  PATCH. Changes between confirmation and commit can still be overwritten:
+  Harper has no compare-and-set.
+
+- **Human-readable `flair principal show` and `principal list` output reports a principal's `status` the way the auth gate reads it (flair#2378).**
+  An explicit `null` is deactivated and an absent `status` is active. Both human-readable
+  outputs call the gate's `isPrincipalDeactivated`; `list` reads the raw row, because a
+  projected `status` comes back `null` for both an absent and an explicit-null
+  column.
+
+- **The hook-status probe ignores HUP/INT/QUIT/TERM in its group pin before forking it, so the probe's own SIGTERM cannot kill the pin.**
+  The pin keeps the command's process-group id in use so cleanup can signal the
+  group: SIGTERM, then SIGKILL after a bounded grace. A group that outlives
+  SIGKILL is still reported as a named cleanup failure (flair#2385).
+
+- **Stop paths attempt sidecar cleanup using the PID their exit probe observed gone.**
+  Direct and launchd stop legs, including restart and upgrade's snapshot stop,
+  pass that PID to cleanup instead of probing it again. Removal is best effort; unlink
+  errors other than a missing file are logged (flair#2391).
+
+- **A failed-tool append waits up to 2 seconds for the capture lock.**
+  If the lock remains busy, the append refuses. The installed hook suppresses
+  stdout, reports lock contention and pending-write errors on stderr, and exits 0
+  (flair#2395).
+
+- **The listed test fixtures publish content-read signals through a shared helper using a temp file and rename (#2397).**
+  `test/unit-isolated/restart-refuses-after-timeout-2365.test.ts`, `test/unit-isolated/start-unknown-owner-2350.test.ts`, `test/unit-isolated/harper-stop-pid-recovery-2207.test.ts`, `test/unit/stale-sidecar-launchd-2075.test.ts`, `test/unit/port-not-identity.test.ts`, `test/unit/snapshot-datadir-instance-targeting.test.ts`, `test/unit/launchd-management-reporting.test.ts`, `test/unit/harper-config-port.test.ts`, `test/unit/stale-sidecar-2055.test.ts`.
+
+- **The isolated init admin-credential fixtures explicitly set the PID-file and open-mode saved-password permissions after creation.**
+  The fixture wrote its PID file with the default create mode, so on a host whose
+  umask left it group-writable init's own-PID-file proof refused it, and the cases
+  failed their attribution step instead of reaching the supplied-credential code
+  they assert on. The fixture now pins the PID file to 0600 and the open-mode
+  saved-password fixture to 0644 (flair#2412).
+
+- **REM nightly: a missing generative backend alone no longer fails the run** (#924, #1503).
+  The no-backend skip requires the exact structured no-backend error and HTTP 503. In-flight `rem_aborted`
+  pauses and idle ADK distillation are skips; preflight pause remains `paused` with no skips.
+  Summaries print skips and errors; errors set exit 1. Agent-identity dedup failure remains #809.
+
+  `Last distilled` is the newest distillation from a completed cycle with no errors or skips,
+  observed in the server-local log tail; remote CLI logs are local to the CLI and are not
+  observed there. Status shows zero pending
+  beside it. Empty gathers, malformed responses and failed cycles do not stamp `distilledAt`.
+  Maintenance counts are labelled (`Archived`: validTo-expired + old sessions;
+  `Expired`: ephemeral rows past `expiresAt`).
+
+- **The action-recall deadline tests allow more setup time (#2303).** `packages/flair-mcp/test/action-recall-blockers.test.ts` gives the publication-deadline cases a 2 s budget and stalls `sync` for that budget, instead of a 50 ms budget that could expire before the stalled `sync` was reached on a loaded runner. Both cases require the stalled sync to be reached, the refresh to fail with `timeout`, and no usable binding; the generation-stage case also requires an empty generation directory.
+
+- **One `v*` release tag now starts the adk-flair PyPI workflow alongside npm staging.**
+  The version must match `pyproject.toml`; `adk-flair-v*` and manual dispatch remain available.
+  Closes #2206.
+
+  > **Heads-up:** Add `v*` to the `adk-flair-publish` environment's deployment tag policy, keeping `adk-flair-v*` and the required reviewer.
+
+- **`flair backup` rejects failed or non-array reads, missing, blank, non-string or duplicate IDs, and mismatched Memory or Soul ownership before publishing an archive.** Closes #2214.
+
+- **Unfiltered `flair backup` includes Memory/Soul rows whose owner has no Agent row and checks received totals against exact whole-table storage counts.** Closes #2228.
+
+  Count or ID mismatches, unreadable rows and invalid owner IDs refuse publication;
+  orphan-owner refusals report the row count. Filtered backups check selected owners.
+  `--port` pairs with its derived ops port unless an ops target overrides it.
+  HTTP failure messages omit response bodies.
+
+  > **Heads-up:** Concurrent deletes can cause a count mismatch; pause writers and maintenance, then retry the backup.
+
+- **Feed-written ephemeral memories without an explicit expiry now get the tier TTL.**
+  This includes an existing ephemeral row without an expiry when a feed write deduplicates onto it.
+  Ordinary Memory PUT/PATCH handle tier transitions; AgentSeed stamps ephemeral expiry.
+  Federation stamps missing ephemeral expiry on the receiver clock when the incoming row wins last-write-wins
+  and refuses malformed or out-of-bound ephemeral dates (flair#2274).
+
+- **The feed replay test polls after expiring a successor (#2316).** `feed-read-scope.test.ts` retries 200 reads for a 404 with a 5 s deadline covering sleeps, requests and body consumption; expiry fails and other statuses return immediately. The observed post-upsert 200 may reflect cross-thread read visibility; the mechanism and duration have not been measured.
+
+- **Fix hook-status probe cleanup outside Windows** (flair#2385).
+
+- **`POST /MemoryArchive` answers a refused basement or restore with the refusal's own HTTP status and named error, not HTTP 200.**
+  A caller the underlying `Memory.put` refuses (403) — or any other non-2xx — now sees that status and the error it names; a successful basement/restore keeps its success response.
+
+- **Restore fails on write errors or unconfirmed archived IDs.** Closes #2215.
+
+### Security
+
+- **flair-client adds an asynchronous, size-bounded key loader; continuity capture redacts additional credential formats (#2086).**
+
+- **For npm-install vendor-pinned findings, the audit gate verifies locations and installed versions and refuses unverifiable evidence.**
+
+- **Identity mapping honors the caller’s operations target, refuses noncanonical target origins before requests, and redacts target diagnostics.** (Closes #2102)
+
+- **OAuth authorization codes and refresh tokens are single-use across workers of one instance (flair#2145).**
+  If the replay store cannot confirm use, token issuance is refused; boot reports store-configuration gaps.
+
+- **`flair mcp enable` refuses noncanonical targets before writes.**
+
+- **`flair mcp enable` requires public discovery metadata to advertise the exact MCP token endpoint and refuses a mismatch.**
+
+- **Memory, Feed, and bridge writes enforce the reserved content-property ID restriction.**
+
+- **Init and doctor detect persisted Harper 5 admin users in RocksDB (Closes #2210).**
+  Fresh local init saves a supplied admin credential.
+
+- **Principal link, unlink, and provisioning re-read validated mapping state before writes and refuse detected changes (flair#2222).**
+  Retry after a refusal.
+
+- **The migration probe does not create candidate directories and rejects symlinked candidate or migration-state paths when probed (flair#2232).**
+
+  > **Heads-up:** a usable `~/.flair/data` wins ahead of `ROOTPATH` regardless of which instance runs; an absent or unusable default loses.
+  > Set `FLAIR_MIGRATION_DATA_DIR` to separate custom migration state.
+
+- **Selected untrusted-record copies preserve special own keys as data; federation peers refuse affected signatures they cannot verify (flair#2235).**
+
+- **Plain local `flair init` refuses listeners without matching PID-file or spawned-child socket evidence before sending an admin credential.**
+
+- **Without `--reset-admin-pass`, init verifies supplied administrator credentials before replacing an existing pass file (Closes #2271).**
+  Stopped existing installs refuse credentials they cannot verify.
+
+- **The dependency audit gate checks each audit stage's output, exit status and stderr (flair#2278).** Missing reports and detected audit-tool failures fail the gate; reported advisories still pass through the existing allowlist checks.
+
+- **`flair keys prune` leaves the key active when its path checks detect a nonregular ownership sidecar.**
+
+- **Memory POST and ordinary PUT validate the shape of supplied `supersedes` references and canonicalize them (flair#2307).**
+  Federation skips affected legacy IDs; the embedding migration handles those rows from their current text.
+
+- **Integration mutations retry when a stored row changes during validation; an explicit POST ID already in use is refused.**
+
+- **Non-admin owner-scoped deletes recheck ownership before committing and refuse a detected change.**
+
+- **A Basic-auth Agent lookup that fails refuses the request instead of admitting it.**
+  A credentialed Basic request whose Agent row cannot be read — a read error, not an
+  absent row — is refused with the named `agent_lookup_failed` error. A read that
+  succeeds decides as before (flair#2403).
+
+- **`@tpsdev-ai/adk-flair` now requires Google ADK 2.x, a compatibility change.**
+
+  A clean npm install of the published tarball with `@google/adk ^2.0.0` and
+  `@google/genai ^2.9.0` resolved no mariadb. The `Dependency Audit` job now
+  packs, installs and audits the ADK tarball.
+
+- **`@tpsdev-ai/flair-mcp` now depends on `@modelcontextprotocol/sdk` 1.31.0, outside the affected range of GHSA-6qxp-vccf-f47h (>=1.12.0 <1.31.0).** The
+  advisory concerns the SDK's OAuth client; flair-mcp imports only the SDK's server, stdio transport
+  and type modules. A root `overrides` entry moves the SDK copies that other workspace dependencies
+  pull in to the same release.
+
+- **The workspace lockfile resolves handlebars 4.7.10, outside the vulnerable range of GHSA-8r5x-fm3f-whwj, GHSA-p8wg-vrv2-v86f and GHSA-xw65-4hp5-5hc7 (>=4.0.0 <=4.7.9).** A root
+  `overrides` entry pins it. Installs of the published `@tpsdev-ai/flair` package do not
+  include handlebars.
+
+- **The workspace lockfile resolves http-cache-semantics 4.3.0, outside the vulnerable range of GHSA-ch52-4w7c-c8xp (<=4.2.0).** A root
+  `overrides` entry sets the floor, and the advisory's dated audit-allowlist
+  entry is removed. Installs of the published `@tpsdev-ai/flair` package do not
+  include http-cache-semantics.
+
+- **mariadb resolves to 3.5.4 in this repository's workspace install.** The root override moves from `~3.4.7` to `3.5.4`, the first release patched for GHSA-cx2f-j9fh-8g68, which clears the Dependency Audit finding on main. Installs of the separately published ADK package are not changed by this override.
+
+- **The n8n nodes support Ed25519 signing with Agent Private Key; the admin password is deprecated (flair#1942).**
+
+  With Agent Private Key selected, requests sign as the credential's Agent ID.
+  Ordinary agents read their own and other agents' non-private memories.
+  The deprecated Admin Password path uses Harper administrator Basic
+  authentication only with an empty Agent Private Key, and warns on each node execution.
+
+  > **Heads-up:** base64-encode the raw key file from `flair agent add <agent-id>`
+  > (`base64 < ~/.flair/keys/<agent-id>.key`) for Agent Private Key.
+
+- **The workspace lockfile resolves proxy-addr 2.0.8, outside the vulnerable range of GHSA-jqcg-44mw-7w3h (>=1.1.0 <2.0.8).** A root
+  `overrides` entry sets the floor.
+
 ## [0.59.0] - 2026-10-02
 
 ### Added
