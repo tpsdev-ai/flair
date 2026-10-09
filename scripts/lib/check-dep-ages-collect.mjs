@@ -48,8 +48,10 @@ function isNonRegistrySpecifier(spec) {
 //   package itself and whose other keys override its dependencies (nested);
 // - an object without a "." key overrides the package with its key's selector
 //   ("*" when there is none, which overrides nothing).
-// A value is classified the way npm-package-arg classifies a registry spec: an
-// exact version, a range, or something else. classifyOverrides refuses, with a
+// A value is classified into a supported subset of npm registry specs: an exact
+// version, a range, or something else. Some spellings npm accepts as versions
+// ("v1.0.0", build metadata) are deliberately not treated as exact here, so the
+// gate refuses them rather than guessing. classifyOverrides refuses, with a
 // reason, every rule it cannot classify as exact, range, exempt or none.
 // test/unit/check-dep-ages-npm-conformance.test.ts checks this against a
 // recording of npm's own parser.
@@ -57,7 +59,7 @@ function isNonRegistrySpecifier(spec) {
 /** A canonical exact version: MAJOR.MINOR.PATCH with an optional prerelease. */
 const EXACT_VERSION_RE =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
-/** semver's LOOSE version pattern ("v1.0.0", "=1.0.0", "1.0.0+build"). */
+/** A conservative regex for common loose version spellings ("v1.0.0", "=1.0.0", "1.0.0+build"); not a full copy of semver's loose grammar. */
 const LOOSE_VERSION_RE =
   /^[v=\s]*\d+\.\d+\.\d+(?:-?[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const XR = "(?:\\d+|[xX*])";
