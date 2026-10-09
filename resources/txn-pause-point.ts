@@ -16,20 +16,26 @@ export const TEST_PAUSE_DIR_ENV = "FLAIR_TEST_PAUSE_DIR";
 export const PAUSE_LIMIT_MS = 20_000;
 const POLL_MS = 20;
 
-/** One point per owned transaction that writes from a row it read.
- *
- * flair#2355 — a non-admin owner-scoped delete. Each delete has a `-pre` point
- * (after the pre-existing ownership read, before the delete's transactional
- * re-read or staging) and an in-transaction point (between that transaction's
- * ownership re-read and its delete), so both interleavings of a concurrent
- * owner change can be exercised. The write transaction is one the delete
- * owns, except Memory's ordinary delete: withSharedWriteTransaction JOINS a
- * request-owned transaction when one exists and creates one otherwise.
- */
 export type TxnPausePoint =
   | "supersede-close"
   | "embedding-stamp-content-suffix"
   | "integration-row-write"
+  // flair#2275 — MemoryMaintenance. Each action has a `-pre` point (after the
+  // scan read, before the owned transaction opens) and an in-transaction point
+  // (between that transaction's re-read and its act), so both interleavings of
+  // a concurrent writer can be exercised.
+  | "maintenance-expiry-pre"
+  | "maintenance-expiry"
+  | "maintenance-archive-pre"
+  | "maintenance-archive"
+  | "maintenance-orphan-pre"
+  | "maintenance-orphan"
+  // flair#2275 — MemoryArchive: after its first read of the row, before the
+  // owned transaction that re-reads it opens.
+  | "memory-archive-pre"
+  // flair#2275 — embedding-stamp migration: after it reads a stale row, before
+  // its re-embed request.
+  | "embedding-stamp-regen-pre"
   | "memory-delete-pre"
   | "memory-delete"
   | "memory-skill-delete-pre"
