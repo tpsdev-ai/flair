@@ -2,19 +2,9 @@
 /**
  * check-dep-ages.mjs — supply-chain bake-time gate.
  *
- * Fails CI if any production dep declared in any workspace package was
- * published to the npm registry less than MIN_AGE_DAYS ago. Defends against
- * the "compromised package not yet detected" window — Mini Shai-Hulud
- * (Intercom npm Apr 30 2026), Ruby/Go sleeper packages (May 1), NuGet
- * typosquats (May 6), all in the past two weeks.
- *
  * The checked fields are `dependencies`, `optionalDependencies` and
  * `overrides` (root and every workspace package.json). The gate checks exact
  * override declarations, including conditional rules, not installed versions.
- *
- * A known-good fresh SECURITY pin is exempted by a DATED entry naming the
- * advisory, in .github/dep-age-allowlist.json; an expired entry fails the
- * gate. Policy narrative: docs/supply-chain-policy.md.
  *
  * THIS SCRIPT IS THE CLI ENTRY POINT. It imports the pure gate logic from
  * scripts/lib/check-dep-ages-collect.mjs and always runs the gate.
@@ -45,7 +35,7 @@
  *       or expired exemption allowlist entry
  */
 
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -77,9 +67,9 @@ function readPkg(path) {
 //
 // A security fix can need a version younger than the bake window (a patch
 // release pinned through `overrides`, say). Those are enumerated with a hard
-// expiry in .github/dep-age-allowlist.json — one dated entry per pin, each
-// naming the advisory it fixes. An expired entry fails the gate: re-read the
-// reason before re-dating, or remove the entry.
+// expiry in .github/dep-age-allowlist.json.
+// An expired entry fails the gate: re-read the reason before re-dating, or
+// remove the entry.
 const ALLOWLIST_REL = join(".github", "dep-age-allowlist.json");
 const GHSA_RE = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -217,9 +207,15 @@ async function main() {
   for (const entry of readdirSync(packagesDir)) {
     const p = join(packagesDir, entry, "package.json");
     try {
+      lstatSync(p);
+    } catch (err) {
+      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") continue;
+      throw new Error(`Cannot inspect ${p}: ${err?.message ?? err}`);
+    }
+    try {
       allPkgs.push({ pkg: readPkg(p), path: `packages/${entry}/package.json` });
-    } catch {
-      // not a directory with a package.json — skip
+    } catch (err) {
+      throw new Error(`Cannot read or parse ${p}: ${err?.message ?? err}`);
     }
   }
 

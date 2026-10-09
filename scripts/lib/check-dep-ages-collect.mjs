@@ -131,7 +131,7 @@ const describeType = (v) => (v === null ? "null" : Array.isArray(v) ? "an array"
  * Classify every rule in one manifest's `overrides` value, nested rules
  * included. Each rule is { path, kind, ... } where `path` is the list of keys
  * from the top of `overrides` and `kind` is one of:
- * - "exact": `name`@`version` installs (an alias reports its target);
+ * - "exact": declares an exact target (an alias reports its target);
  * - "range": `name` is overridden with the range `spec`;
  * - "exempt": `spec` names no registry version (workspace:, file:, link:, git+, github:);
  * - "none": the rule overrides nothing (a "*" or "" value);

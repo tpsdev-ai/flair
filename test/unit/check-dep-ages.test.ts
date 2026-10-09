@@ -490,6 +490,31 @@ describe("CLI — override forms", () => {
     }
   }, 30_000);
 
+  it("exits 2 for a malformed workspace manifest before fetching", async () => {
+    const root = writeFixtureRepo(join(scratch, "malformed-workspace"));
+    mkdirSync(join(root, "packages", "broken"), { recursive: true });
+    writeFileSync(join(root, "packages", "broken", "package.json"), "{broken");
+    const recorder = join(root, "fetch-recorder.mjs");
+    writeFileSync(recorder, 'globalThis.fetch = async () => { process.stderr.write("REGISTRY_FETCH\\n"); throw new Error("fetch called"); };');
+    const { exitCode, output } = await runGate(CLI_SCRIPT, {
+      FLAIR_CHECK_DEP_AGES_ROOT: root,
+      NODE_OPTIONS: `--import=${pathToFileURL(recorder).href}`,
+    });
+    expect(exitCode).toBe(2);
+    expect(output).toContain("packages/broken/package.json");
+    expect(output).toContain("Cannot read or parse");
+    expect(output).toMatch(/packages\/broken\/package\.json: .+/);
+    expect(output).not.toContain("REGISTRY_FETCH");
+  });
+
+  it("skips a workspace directory with no package.json", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "workspace-no-manifest"), {});
+    mkdirSync(join(root, "packages", "no-manifest"), { recursive: true });
+    const { exitCode, output } = await runGate(CLI_SCRIPT, { FLAIR_CHECK_DEP_AGES_ROOT: root });
+    expect(exitCode).toBe(0);
+    expect(output).toContain("No external pinned production deps to check");
+  });
+
   it("reports a digit-leading range and does not age-check it", async () => {
     const root = writeOverrideFixtureRepo(join(scratch, "override-digit-range"), { [FIXTURE_DEP]: "1.x" });
     const registry = freshRegistry();
