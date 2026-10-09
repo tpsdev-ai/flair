@@ -1,0 +1,1 @@
+- **The dependency audit gate checks each audit stage's output, exit status and stderr (flair#2278).** An audit stage without a valid report now fails the gate; reported advisories still pass through the existing allowlist checks.

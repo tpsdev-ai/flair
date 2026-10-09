@@ -1,1 +1,0 @@
-- `flair mcp enable` no longer generates a signing-key file or stages `FLAIR_MCP_SIGNING_KEY_PEM` (nothing read it once the pin left the shipped block). Pinning stays a manual choice: add the line to the deployed config and stage a valid PEM on every node.

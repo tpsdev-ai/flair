@@ -1,5 +1,4 @@
 - **Memory POST/PUT/PATCH/DELETE refuse an id ending in `.content`.**
-  Harper reads `.content` after the first dot in a by-id path as a property selector.
   Memory POST/PUT/PATCH/DELETE and FeedMemories POST refuse it with
   `memory_id_content_suffix`; the bridge importer refuses it before the write.
 

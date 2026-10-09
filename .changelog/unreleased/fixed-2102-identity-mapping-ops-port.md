@@ -1,6 +1,5 @@
 - **`provisionIdpIdentityMapping` sends its ops calls to the port the caller names; the hosted ops port is applied only to `hostedOrigin`.**
-  A URL string in `opsPortOrUrl` is used with its own host and port. It used to
-  be read as a served origin and sent to the hosted ops port on that host. A
+  A URL string in `opsPortOrUrl` is used with its own host and port. A
   string target must exactly equal its parsed HTTP(S) origin or that origin plus
   `/`, with no credentials, non-root path, query or fragment. A target outside these
   forms is refused before any request; its error names the target field and
