@@ -228,6 +228,19 @@ const WORKFLOW_DIR = join(ROOT, ".github", "workflows");
 const REQUIRED_UNIT_CHECK = "Unit Tests";
 const GATE_STEP = "Verify root unit shard coverage";
 const GATE_COMMAND = "node scripts/ci/unit-shards.mjs --verify";
+const ADAPTER_RUN = [
+  'echo "test-unit matrix result: ${{ needs.test-unit.result }}"',
+  'echo "test-darwin-gated result: ${{ needs.test-darwin-gated.result }}"',
+  'if [ "${{ needs.test-unit.result }}" != "success" ]; then',
+  'echo "::error::One or more Unit Tests Node-version legs did not succeed"',
+  "exit 1",
+  "fi",
+  'if [ "${{ needs.test-darwin-gated.result }}" != "success" ]; then',
+  'echo "::error::Darwin-gated unit tests did not succeed (flair#1012)"',
+  "exit 1",
+  "fi",
+].join(" ");
+const normalise = (text: string) => text.trim().replace(/\s+/g, " ");
 
 type WorkflowStep = { name?: unknown; run?: unknown; if?: unknown; "continue-on-error"?: unknown };
 type WorkflowJob = { name?: unknown; needs?: unknown; if?: unknown; "continue-on-error"?: unknown; steps?: WorkflowStep[] };
@@ -281,6 +294,33 @@ function checkCoverageGate(docs: WorkflowDoc[]): void {
     if ("if" in job) throw new Error(`the job "${id}" holding "${GATE_STEP}" has if; it must be absent`);
     if ("continue-on-error" in job) throw new Error(`the job "${id}" holding "${GATE_STEP}" has continue-on-error; it must be absent`);
   }
+  for (const doc of docs) {
+    for (const [id, job] of Object.entries(doc.jobs ?? {})) {
+      if (job.name !== REQUIRED_UNIT_CHECK) continue;
+      const label = `the required "${REQUIRED_UNIT_CHECK}" job "${id}"`;
+      if ("continue-on-error" in job) throw new Error(`${label} has continue-on-error; it must be absent`);
+      if (!("if" in job) || normalise(String(job.if).replace(/^\s*\$\{\{(.*)\}\}\s*$/s, "$1")) !== "always()") {
+        throw new Error(`${label} must have if: always()`);
+      }
+      const steps = job.steps ?? [];
+      if (steps.length !== 1) throw new Error(`${label} must have exactly one step`);
+      const [step] = steps;
+      if ("continue-on-error" in step) throw new Error(`${label} has a step with continue-on-error; it must be absent`);
+      if ("if" in step) throw new Error(`${label} has a step with if; it must be absent`);
+      if (typeof step.run !== "string" || normalise(step.run) !== ADAPTER_RUN) {
+        throw new Error(`${label} must run the canonical adapter script`);
+      }
+    }
+  }
+}
+
+function mutateAdapter(edit: (job: WorkflowJob, step: WorkflowStep) => void): WorkflowDoc[] {
+  const doc = loadYaml(readFileSync(join(WORKFLOW_DIR, "test.yml"), "utf8")) as WorkflowDoc;
+  const job = doc.jobs?.["test-unit-gate"];
+  const step = job?.steps?.[0];
+  if (!job || !step) throw new Error("fixture drift: test-unit-gate job or step not found");
+  edit(job, step);
+  return [doc];
 }
 
 function mutateWorkflow(edit: (doc: WorkflowDoc, job: WorkflowJob, step: WorkflowStep) => void): WorkflowDoc[] {
@@ -308,7 +348,15 @@ describe("root-unit shard coverage gate workflow shape", () => {
   const jobIfError = `the job "test-unit" holding "${GATE_STEP}" has if; it must be absent`;
   const jobContinueError = `the job "test-unit" holding "${GATE_STEP}" has continue-on-error; it must be absent`;
   const dependencyError = `"${GATE_STEP}" runs in no job the required "${REQUIRED_UNIT_CHECK}" check depends on in the same workflow`;
+  const adapter = `the required "${REQUIRED_UNIT_CHECK}" job "test-unit-gate"`;
   const cases: [string, () => WorkflowDoc[], string][] = [
+    ["adapter step continue-on-error", () => mutateAdapter((_job, step) => { step["continue-on-error"] = true; }), `${adapter} has a step with continue-on-error; it must be absent`],
+    ["adapter job continue-on-error", () => mutateAdapter((job) => { job["continue-on-error"] = true; }), `${adapter} has continue-on-error; it must be absent`],
+    ["adapter job if: false", () => mutateAdapter((job) => { job.if = false; }), `${adapter} must have if: always()`],
+    ["adapter job without if: always()", () => mutateAdapter((job) => { delete job.if; }), `${adapter} must have if: always()`],
+    ["adapter step if: false", () => mutateAdapter((_job, step) => { step.if = false; }), `${adapter} has a step with if; it must be absent`],
+    ["adapter emptied run", () => mutateAdapter((_job, step) => { step.run = ""; }), `${adapter} must run the canonical adapter script`],
+    ["adapter altered run", () => mutateAdapter((_job, step) => { step.run = String(step.run).replace("exit 1", "exit 0"); }), `${adapter} must run the canonical adapter script`],
     ["rename the step", () => mutateWorkflow((_doc, _job, step) => { step.name = "Verify coverage"; }), `no step is named "${GATE_STEP}"`],
     ["drop --verify", () => mutateWorkflow((_doc, _job, step) => { step.run = "node scripts/ci/unit-shards.mjs"; }), runError],
     ...[
