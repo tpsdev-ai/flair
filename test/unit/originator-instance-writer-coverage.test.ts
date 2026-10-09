@@ -12,9 +12,10 @@
  * detect a NEW raw writer (and, per review, stayed green even when a stamp call
  * was removed from a file that had another stamp call). This version ENUMERATES
  * the raw write sites instead: it scans resources/ for the raw synced-table
- * write idiom — a literal `.flair.<Table>.<verb>(` call, or a
- * `writeBackCommittedRow(` call whose table is passed literally — groups the
- * sites by (file, table, verb), and
+ * write idiom — a literal `.flair.<Table>.<verb>(` call, or a call of the
+ * shared write-back helper under any alias, keyed by the table its first
+ * argument names (see writeBackTable) — groups the sites by (file, table,
+ * verb), and
  * requires a REVIEWED policy entry with an expected count for every one. A new
  * site — a new file, a new table/verb in a known file, or an extra call in a
  * known file — has no policy entry (or the wrong count) and fails the lane.
@@ -31,6 +32,8 @@
 import { expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import ts from "typescript";
+import { writerHelperCalls } from "../helpers/raw-table-writers";
 
 const SYNCED_TABLES = ["Memory", "Soul", "Agent", "Relationship"] as const;
 const WRITE_VERBS = ["put", "post", "patch", "delete"] as const;
@@ -42,15 +45,34 @@ const RAW_WRITE_RE = new RegExp(
 );
 
 /**
- * A synced-table write routed through the shared write-back helper (flair#2354),
- * whose table is passed literally at the call (`writeBackCommittedRow(\n
- * (databases as any).flair.Memory, ...`). Keyed as `<file>|<table>|write-back`
- * and classified like any other raw synced-table writer.
+ * The synced table a write-back call's first argument names: a literal
+ * `.flair.<Table>` in the argument, or in the initializer of a same-file
+ * variable the argument names (every binding of that name must agree). Any
+ * other argument resolves to "?", and such a site needs its own reviewed
+ * policy entry, so an unreviewed one fails the gate (flair#2354).
  */
-const WRITE_BACK_RE = new RegExp(
-  `writeBackCommittedRow\\s*\\([^;]{0,240}?\\.flair\\.(${SYNCED_TABLES.join("|")})\\b`,
-  "g",
-);
+function writeBackTable(call: ts.CallExpression): string {
+  const tableIn = (text: string) => text.match(new RegExp(`\\.flair\\??\\.(${SYNCED_TABLES.join("|")})\\b`))?.[1];
+  const arg = call.arguments[0];
+  if (!arg) return "?";
+  const direct = tableIn(arg.getText());
+  if (direct) return direct;
+  let expr: ts.Expression = arg;
+  while (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isNonNullExpression(expr)) expr = expr.expression;
+  if (!ts.isIdentifier(expr)) return "?";
+  const name = expr.text;
+  const tables = new Set<string | undefined>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
+      tables.add(node.initializer ? tableIn(node.initializer.getText()) : undefined);
+    }
+    if (ts.isParameter(node) && ts.isIdentifier(node.name) && node.name.text === name) tables.add(undefined);
+    ts.forEachChild(node, visit);
+  };
+  visit(call.getSourceFile());
+  const [only] = [...tables];
+  return tables.size === 1 && only ? only : "?";
+}
 
 type Disposition = "stamped-create" | "update-only" | "resource-internal";
 
@@ -72,6 +94,12 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/mcp-handler.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "JIT OAuth principal raw Agent create" },
   "resources/MemoryFeed.ts|Memory|write-back": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update, through the shared write-back helper (flair#2354); its plan applies applyOriginatorInstanceId" },
   "resources/auth-middleware.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "embedding backfill on an EXISTING row, through the shared write-back helper (flair#2354)" },
+  "resources/MemoryReindex.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "admin reindex re-PUT of an EXISTING row; buildReindexRow keeps the stored originatorInstanceId (flair#2354)" },
+  "resources/promotion-stamp.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "auto-promotion verdict stamp on the row its Memory write produced (flair#2354)" },
+  // Write-back calls whose table argument is not resolvable here ("?").
+  "resources/table-helpers.ts|?|write-back": { count: 1, disposition: "update-only", note: "patchRecord: merges a patch into an EXISTING row of the table its caller passes; it throws when the row is absent" },
+  "resources/migrations/visibility-backfill.ts|?|write-back": { count: 1, disposition: "update-only", note: "boot migration re-PUT of EXISTING rows of its injected table" },
+  "resources/migrations/synthetic-test-migration.ts|?|write-back": { count: 1, disposition: "update-only", note: "test-only boot migration re-PUT of EXISTING rows of its injected table" },
   "resources/MemoryFeed.ts|Memory|put": [
     { count: 1, disposition: "update-only", note: "dedup expiry repair of an EXISTING row (flair#2358)" },
   ],
@@ -120,9 +148,11 @@ function enumerateRawWriteSites(src: string, file: string): Map<string, number> 
     const key = `${file}|${match[1]}|${match[2]}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  const wb = new RegExp(WRITE_BACK_RE.source, "g");
-  for (const match of code.matchAll(wb)) {
-    const key = `${file}|${match[1]}|write-back`;
+  // Calls of the shared write-back helper under any import or local alias
+  // (writerHelperCalls throws on a reference it cannot follow to a call).
+  for (const call of writerHelperCalls(file, src)) {
+    if (call.helper !== "writeBackCommittedRow") continue;
+    const key = `${file}|${writeBackTable(call.call)}|write-back`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
@@ -142,6 +172,32 @@ test("the detector finds a raw write site (self-proof: a synthetic unstamped wri
   const synthetic = `async function leak(id) {\n  await (databases as any).flair.Relationship.put({ id });\n}\n`;
   const found = enumerateRawWriteSites(synthetic, "resources/__synthetic__.ts");
   expect([...found.keys()]).toEqual(["resources/__synthetic__.ts|Relationship|put"]);
+});
+
+test("an aliased write-back call and one whose table is passed through a variable are enumerated (flair#2354)", () => {
+  const aliased = [
+    'import { writeBackCommittedRow as wb } from "./write-back.js";',
+    "async function leak(id) {",
+    '  await wb((databases as any).flair.Soul, id, (row) => ({ write: row }), { label: "fixture" });',
+    "}",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(aliased, "resources/__aliased__.ts").keys()]).toEqual(["resources/__aliased__.ts|Soul|write-back"]);
+  const variable = [
+    'import { writeBackCommittedRow } from "./write-back.js";',
+    "const target = (databases as any).flair.Agent;",
+    "async function leak(id) {",
+    '  await writeBackCommittedRow(target, id, (row) => ({ write: row }), { label: "fixture" });',
+    "}",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(variable, "resources/__variable__.ts").keys()]).toEqual(["resources/__variable__.ts|Agent|write-back"]);
+  const unresolved = [
+    'import { writeBackCommittedRow } from "./write-back.js";',
+    "async function leak(table, id) {",
+    '  await writeBackCommittedRow(table, id, (row) => ({ write: row }), { label: "fixture" });',
+    "}",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(unresolved, "resources/__unresolved__.ts").keys()]).toEqual(["resources/__unresolved__.ts|?|write-back"]);
+  expect(POLICY["resources/__unresolved__.ts|?|write-back"]).toBeUndefined();
 });
 
 test("every raw synced-table write site under resources/ has a reviewed policy entry with the expected count", () => {

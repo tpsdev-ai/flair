@@ -37,6 +37,18 @@ export interface WriteBackOptions {
   pausePoint?: WriteBackPause;
 }
 
+/** The fields of `expectedRow` (or of the helper's own first read) it compares
+ *  with the row read inside its transaction, besides `matchFields`. */
+export const WRITE_BACK_IDENTITY_FIELDS = ["id", "agentId", "instanceToken", "contentHash", "createdAt"] as const;
+
+/** Only the identity fields of `row`: an `expectedRow` for a caller that
+ *  selects many rows before writing each back, so it need not hold them whole. */
+export function writeBackIdentity(row: Record<string, any>): Record<string, unknown> {
+  const identity: Record<string, unknown> = {};
+  for (const field of WRITE_BACK_IDENTITY_FIELDS) identity[field] = row[field];
+  return identity;
+}
+
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
 export const WRITE_BACK_ATTEMPTS = 3;
 

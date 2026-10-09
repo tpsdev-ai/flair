@@ -1064,6 +1064,15 @@ describe("flair#2307: a supersede authorizes, stores and closes one target", () 
     });
   }
 
+  it("a derivedFrom entry naming the row's own id is refused with a named 400 before any write (flair#2354)", async () => {
+    const before = [...memoryStore.keys()].sort();
+    const res: any = await makeMemory(agentCtx("agent-1")).post({ id: "self-derived", agentId: "agent-1", content: SUCCESSOR, derivedFrom: ["self-derived"] });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+    expect((await (res as Response).json()).error).toBe("derived_from_self");
+    expect([...memoryStore.keys()].sort()).toEqual(before);
+  });
+
   it("an accepted write with derivedFrom stamps lastReflected on its source rows", async () => {
     memoryStore.set("src-1", { id: "src-1", agentId: "agent-1", content: "Source row the new one derives from, long enough." });
     memoryStore.set("sup-ok", { id: "sup-ok", agentId: "agent-1", content: "Own row, long enough for the gate." });

@@ -17,7 +17,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isDeepStrictEqual } from "node:util";
-import { WRITE_BACK_ATTEMPTS, WriteBackConflictError, writeBackCommittedRow } from "../../resources/write-back";
+import { WRITE_BACK_ATTEMPTS, WRITE_BACK_IDENTITY_FIELDS, WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "../../resources/write-back";
 
 type Row = { id: string } & Record<string, unknown>;
 
@@ -174,4 +174,29 @@ test("refuses a changed decision field on retry", async () => {
     { label: "promotion", matchFields: ["content"] })).rejects.toThrow(WriteBackConflictError);
   expect(commits).toHaveLength(0);
   expect(store.get("m1")?.content).toBe("unreviewed");
+});
+
+describe("writeBackIdentity — the expectedRow a selecting caller retains (flair#2354)", () => {
+  const full: Row = {
+    id: "m1", agentId: "agent-a", instanceToken: "t1", contentHash: "h1", createdAt: "2026-01-01T00:00:00.000Z",
+    content: "x", embedding: [0.1, 0.2], embeddingModel: "model-a",
+  };
+
+  test("keeps only the identity fields, never the embedding", () => {
+    const identity = writeBackIdentity(full);
+    expect(Object.keys(identity).sort()).toEqual([...WRITE_BACK_IDENTITY_FIELDS].sort());
+    expect(identity).not.toHaveProperty("embedding");
+  });
+
+  test("is enough for the helper: an unchanged row is written, a replaced one is refused", async () => {
+    const clean = stagedTable([full]);
+    const outcome = await writeBackCommittedRow(clean.table, "m1", (row: Row) => ({ write: { ...row, content: "y" } }),
+      { label: "identity", expectedRow: writeBackIdentity(full) });
+    expect("write" in outcome).toBe(true);
+    expect(clean.store.get("m1")?.content).toBe("y");
+    const replaced = stagedTable([{ ...full, instanceToken: "t2" }]);
+    await expect(writeBackCommittedRow(replaced.table, "m1", (row: Row) => ({ write: row }),
+      { label: "identity", expectedRow: writeBackIdentity(full) })).rejects.toBeInstanceOf(WriteBackConflictError);
+    expect(replaced.store.get("m1")?.instanceToken).toBe("t2");
+  });
 });

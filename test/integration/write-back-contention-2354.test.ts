@@ -185,7 +185,9 @@ describe("flair#2354 — the feed ingest write-back under a concurrent change (r
         () => authSend(harper, feedAgent, "POST", "/FeedMemories", { id, agentId: feedAgent.id, content: `feed v2 ${point}`, visibility: "shared" }),
         () => updateRow(harper, { id, instanceToken: TOKEN2 }),
       );
-      expect(response.status, (await response.clone().text()).slice(0, 300)).toBeGreaterThanOrEqual(400);
+      const text = await response.clone().text();
+      expect(response.status, text.slice(0, 300)).toBe(409);
+      expect(JSON.parse(text).error, "a replaced target is the retryable feed_target_changed").toBe("feed_target_changed");
       expect(released, "the feed ingest was not paused and released by this test").toBe("go");
       expect(paused).toBe(true);
       const row = await readRow(harper, id);
@@ -299,6 +301,19 @@ describe("flair#2354 — the embedding backfill after a Memory write (real Harpe
       expect(row?.subject, "the PATCH that triggered the backfill is kept").toBe("backfill-subject");
     }, 180_000);
   }
+});
+
+describe("flair#2354 — a self-referential derivedFrom (real Harper)", () => {
+  it("POST /Memory refuses a derivedFrom entry equal to the row's own id with a named 400 and writes nothing", async () => {
+    const id = "wbc-self-derived";
+    const response = await authSend(harper, reflectAgent, "POST", "/Memory", {
+      id, agentId: reflectAgent.id, content: "a memory that names itself as its source", derivedFrom: [id],
+    });
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(text).error).toBe("derived_from_self");
+    expect(await readRow(harper, id)).toBeNull();
+  }, 60_000);
 });
 
 describe("flair#2354 — the last-reflected patch write-back under a concurrent change (real Harper)", () => {
@@ -466,7 +481,11 @@ for (const point of ["feed-ingest-pre", "feed-ingest"]) {
         () => updateRow(harper, { id, [field]: "replacement" }));
       expect(paused).toBe(true);
       expect(released).toBe("go");
-      expect(response.status).toBeGreaterThanOrEqual(400);
+      const text = await response.clone().text();
+      // A changed owner is refused by the plan's owner check (403); a changed
+      // contentHash fails the write-back's target check (409).
+      expect(response.status, text.slice(0, 300)).toBe(field === "agentId" ? 403 : 409);
+      if (field === "contentHash") expect(JSON.parse(text).error).toBe("feed_target_changed");
       const row = await readRow(harper, id);
       expect(row?.[field]).toBe("replacement");
       expect(row?.content).toBe("original");

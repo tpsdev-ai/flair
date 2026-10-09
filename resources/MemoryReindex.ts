@@ -29,7 +29,7 @@
 
 import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
-import { writeBackCommittedRow } from "./write-back.js";
+import { writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { buildReindexRow } from "./Memory.js";
 
@@ -96,7 +96,9 @@ export class MemoryReindex extends Resource {
       if (!record.id || !record.agentId) continue;
       primaryByAgent.set(record.agentId, (primaryByAgent.get(record.agentId) ?? 0) + 1);
       recordsToReindex.push(record.id);
-      selectedRows.set(record.id, record);
+      // Only the identity fields the write-back compares (never the
+      // embedding): the full row is re-read inside each owned write.
+      selectedRows.set(record.id, writeBackIdentity(record));
     }
     stats.scanned = recordsToReindex.length;
 

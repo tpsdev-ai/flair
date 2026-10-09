@@ -1571,6 +1571,15 @@ export class Memory extends (databases as any).flair.Memory {
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
 
+    // A new row cannot be its own derivedFrom source (flair#2354).
+    if (content.id != null && Array.isArray(content.derivedFrom) &&
+        content.derivedFrom.some((sourceId: unknown) => String(sourceId) === String(content.id))) {
+      return Response.json({
+        error: "derived_from_self",
+        message: "derivedFrom may not include the id of the memory being written",
+      }, { status: 400 });
+    }
+
     const expiryError = stampEphemeralExpiry(content);
     if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
 
