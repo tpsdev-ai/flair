@@ -1,0 +1,1 @@
+- **mariadb resolves to 3.5.4 in this repository's workspace install.** The root override moves from `~3.4.7` to `3.5.4`, the first release patched for GHSA-cx2f-j9fh-8g68, which clears the Dependency Audit finding on main. Installs of the separately published ADK package are not changed by this override.
