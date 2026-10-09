@@ -1,6 +1,6 @@
 // principal-status-null-2378.test.ts — flair#2378.
 //
-// `flair principal show` and `principal list` must report a principal's
+// The human-readable `flair principal show` and `principal list` outputs report a principal's
 // `status` the way the auth gate reads it: an explicit `null` is deactivated,
 // an absent key is active. Both readers must survive the REAL wire, which is
 // where this seam lives — a `get_attributes` projection on the operations API

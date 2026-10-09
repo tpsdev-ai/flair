@@ -47,8 +47,7 @@ export const FLAIR_AGENT_USERNAME = "flair-agent";
 /**
  * Single shared predicate: re-exported from src/lib/principal-status.ts, which
  * holds the rule. Called from BOTH verify paths (Ed25519 and Basic/agent-auth)
- * AND by the `principal show`/`list` reporters, so the deactivation verdict
- * cannot drift between the gate and what an operator is shown (flair#2378).
+ * and the human-readable `principal show`/`list` output (flair#2378).
  */
 export { isPrincipalDeactivated };
 

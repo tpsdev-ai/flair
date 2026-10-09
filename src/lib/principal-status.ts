@@ -4,12 +4,10 @@
  *
  * `Agent.status` is a principal's lifecycle state. The auth path decides it
  * here: a principal is deactivated when `status` is present and is not exactly
- * "active". An ABSENT (undefined) `status` means active, and a null/undefined
- * principal is not deactivated — such a request fails later on a missing
- * public key or an unknown user, not on this check.
+ * "active". An ABSENT (undefined) `status` means active.
  *
- * `flair principal show` and `principal list` report the same verdict via THIS
- * function, and read the principal as stored — `show` over REST, `list` from an
+ * The human-readable `flair principal show` and `principal list` outputs call
+ * this function and read the principal as stored — `show` over REST, `list` from an
  * unprojected row — so an absent `status` (active) stays distinct from an
  * explicit `null`, which the gate treats as deactivated.
  *
