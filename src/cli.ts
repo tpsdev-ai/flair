@@ -6250,8 +6250,9 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
  * The writer uses an atomic temp+rename and mode 0600; pidfile and sidecar
  * reads use O_NOFOLLOW.
  *
- * A health failure rethrows the original error so the caller's existing
- * fallback still runs; the other unconfirmed cases return `recorded: false`.
+ * A throwing waitForHealth call rethrows its original error so the caller's
+ * existing fallback still runs; a failed Flair fingerprint and the other
+ * unconfirmed cases return `recorded: false`.
  */
 export async function recordManagedStartSidecar(
   dataDir: string,

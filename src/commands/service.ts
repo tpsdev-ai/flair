@@ -480,7 +480,9 @@ program
               console.log(`✅ Flair started (launchd-managed: ${recorded.detail})`);
               return;
             }
-            // flair#2040: healthy, but not proven to be launchd's process: no
+            // flair#2040: the initial reachability wait passed, but the managed
+            // process was not confirmed (the second probe may have reported a
+            // foreign, refused or unreachable listener) and is not proven to be launchd's process: no
             // launchd check mark, and no claim about what happens at the next
             // reboot either.
             const managed = observeLaunchdManagement(dataDir, port);
