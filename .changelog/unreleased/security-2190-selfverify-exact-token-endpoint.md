@@ -1,0 +1,1 @@
+- **`flair mcp enable` requires public discovery metadata to advertise the exact MCP token endpoint and refuses a mismatch.**

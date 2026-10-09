@@ -126,9 +126,7 @@ jobs:
         # npm latest was 0.46.0). Unpinning is the policy.
         run: node scripts/check-plugin-mcp-unpinned.mjs
       - name: "Check production dep bake time (≥7 days)"
-        # Supply-chain bake-time guard. Fails if any external pinned production
-        # dep was published <7 days ago — catches the "compromise published,
-        # not yet detected" window. See docs/supply-chain-policy.md.
+        # Supply-chain bake-time guard. See docs/supply-chain-policy.md.
         # Tunable via FLAIR_DEP_MIN_AGE_DAYS env. Workspace-internal deps exempt.
         # --ci marks THIS invocation as the gate: it refuses to run if
         # FLAIR_CHECK_DEP_AGES_ROOT is set (that variable is for the tests,
@@ -1963,7 +1961,22 @@ jobs:
           cd "$PREFIX"
           npm init -y > /dev/null
           npm install --ignore-scripts --omit=dev "$GITHUB_WORKSPACE/$TGZ"
-          bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain --npm-install-prefix "$PREFIX"
+          # flair#2398 — @tpsdev-ai/adk-flair is a separately published consumer
+          # artifact. npm overrides in a package do not apply to its consumers,
+          # so a clean root tarball says nothing about what a consumer of the ADK
+          # package resolves. Pack and install that tarball too and audit its
+          # installed tree, the same observation the root tarball gets.
+          (cd "$GITHUB_WORKSPACE/packages/adk-flair-js" && bun run build)
+          ADK_TGZ=$(cd "$GITHUB_WORKSPACE/packages/adk-flair-js" && npm pack --silent)
+          ADK_PREFIX=$(mktemp -d)
+          (
+            cd "$ADK_PREFIX"
+            npm init -y > /dev/null
+            npm install --ignore-scripts --omit=dev "$GITHUB_WORKSPACE/packages/adk-flair-js/$ADK_TGZ"
+          )
+          bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain \
+            --npm-install-prefix "$PREFIX" \
+            --adk-npm-install-prefix "$ADK_PREFIX"
 
   sast-semgrep:
     name: Semgrep SAST

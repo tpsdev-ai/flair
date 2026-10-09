@@ -19,7 +19,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectDeps,
   collectNonExactDeps,
@@ -60,6 +60,14 @@ describe("collectDeps", () => {
 
   /* dependencies */
   describe("dependencies", () => {
+    it("does not collect a digit-leading range like 1.x as an exact pin", () => {
+      // The same classifier the override grammar uses reads `1.x` as a range,
+      // so it is never fetched as the exact version `1.x`.
+      expect(collectDeps(pkgsDeps({"some-pkg":"1.x"},"packages/foo/package.json"), keepCurrent).size).toBe(0);
+    });
+    it("does not collect a range like ^1 as an exact pin", () => {
+      expect(collectDeps(pkgsDeps({"some-pkg":"^1"},"packages/foo/package.json"), keepCurrent).size).toBe(0);
+    });
     it("collects an exact dependencies pin", () => {
       const result = collectDeps(pkgsDeps({"some-pkg":"1.2.3"},"packages/foo/package.json"), keepCurrent);
       expect(result.size).toBe(1);
@@ -67,14 +75,6 @@ describe("collectDeps", () => {
         name: "some-pkg", version: "1.2.3",
         declaredIn: ["packages/foo/package.json"],
        });
-     });
-    it("does not collect a digit-leading range like 1.x as an exact pin", () => {
-      // The same classifier the override grammar uses reads `1.x` as a range,
-      // so it is never fetched as the exact version `1.x`.
-      expect(collectDeps(pkgsDeps({"some-pkg":"1.x"},"packages/foo/package.json"), keepCurrent).size).toBe(0);
-     });
-    it("does not collect a range like ^1 as an exact pin", () => {
-      expect(collectDeps(pkgsDeps({"some-pkg":"^1"},"packages/foo/package.json"), keepCurrent).size).toBe(0);
      });
    });
 
@@ -447,6 +447,22 @@ describe("CLI — a pin through overrides and the dated exemption", () => {
     }
   }, 30_000);
 
+  it("names the exemption applied on the exit-0 success line", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-exempt-named"), { [FIXTURE_DEP]: FIXTURE_VERSION });
+    writeAllowlist(root, [exemption("2026-01-01", "2099-01-01")]);
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain(`1 exemption(s) applied: ${FIXTURE_DEP}@${FIXTURE_VERSION}.`);
+      expect(exitCode).toBe(0);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
   it("exits 2 on an expired exemption, before fetching", async () => {
     const root = writeOverrideFixtureRepo(join(scratch, "override-expired"), { [FIXTURE_DEP]: FIXTURE_VERSION });
     writeAllowlist(root, [exemption("2020-01-01", "2020-01-02")]);
@@ -474,18 +490,25 @@ describe("CLI — a pin through overrides and the dated exemption", () => {
     expect(output).toContain("No external pinned production deps to check.");
     expect(exitCode).toBe(0);
   }, 30_000);
+});
 
-  it("names the exemption applied on the exit-0 success line", async () => {
-    const root = writeOverrideFixtureRepo(join(scratch, "override-exempt-named"), { [FIXTURE_DEP]: FIXTURE_VERSION });
-    writeAllowlist(root, [exemption("2026-01-01", "2099-01-01")]);
+describe("CLI — a dependency range is classified, not fetched as an exact version", () => {
+  it("reports a digit-leading range like 1.x and never fetches it", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-range"), {
+      name: "dep-ages-range-fixture",
+      version: "0.0.0",
+      dependencies: { [FIXTURE_DEP]: "1.x" },
+    });
     const registry = freshRegistry();
     try {
       const { exitCode, output } = await runGate(CLI_SCRIPT, {
         FLAIR_CHECK_DEP_AGES_ROOT: root,
         FLAIR_NPM_REGISTRY: registry.url,
       });
-      // A pass that relied on an exemption says which pin it exempted.
-      expect(output).toContain(`1 exemption(s) applied: ${FIXTURE_DEP}@${FIXTURE_VERSION}.`);
+      expect(output).toContain("Not age-checked (ranges):");
+      expect(output).toContain(`${FIXTURE_DEP} "1.x"`);
+      expect(output).toContain("No external pinned production deps to check.");
+      expect(registry.requests).toEqual([]); // never fetched as the exact version "1.x"
       expect(exitCode).toBe(0);
     } finally {
       registry.stop();
@@ -538,6 +561,31 @@ describe("CLI — override forms", () => {
     }
   }, 30_000);
 
+  it("exits 2 for a malformed workspace manifest before fetching", async () => {
+    const root = writeFixtureRepo(join(scratch, "malformed-workspace"));
+    mkdirSync(join(root, "packages", "broken"), { recursive: true });
+    writeFileSync(join(root, "packages", "broken", "package.json"), "{broken");
+    const recorder = join(root, "fetch-recorder.mjs");
+    writeFileSync(recorder, 'globalThis.fetch = async () => { process.stderr.write("REGISTRY_FETCH\\n"); throw new Error("fetch called"); };');
+    const { exitCode, output } = await runGate(CLI_SCRIPT, {
+      FLAIR_CHECK_DEP_AGES_ROOT: root,
+      NODE_OPTIONS: `--import=${pathToFileURL(recorder).href}`,
+    });
+    expect(exitCode).toBe(2);
+    expect(output).toContain("packages/broken/package.json");
+    expect(output).toContain("Cannot read or parse");
+    expect(output).toMatch(/packages\/broken\/package\.json: .+/);
+    expect(output).not.toContain("REGISTRY_FETCH");
+  });
+
+  it("skips a workspace directory with no package.json", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "workspace-no-manifest"), {});
+    mkdirSync(join(root, "packages", "no-manifest"), { recursive: true });
+    const { exitCode, output } = await runGate(CLI_SCRIPT, { FLAIR_CHECK_DEP_AGES_ROOT: root });
+    expect(exitCode).toBe(0);
+    expect(output).toContain("No external pinned production deps to check");
+  });
+
   it("reports a digit-leading range and does not age-check it", async () => {
     const root = writeOverrideFixtureRepo(join(scratch, "override-digit-range"), { [FIXTURE_DEP]: "1.x" });
     const registry = freshRegistry();
@@ -575,67 +623,42 @@ describe("CLI — override forms", () => {
   }, 30_000);
 });
 
-describe("CLI — a dependency range is classified, not fetched as an exact version", () => {
-  it("reports a digit-leading range like 1.x and never fetches it", async () => {
-    const root = writeManifestRepo(join(scratch, "dep-range"), {
-      name: "dep-ages-range-fixture",
-      version: "0.0.0",
-      dependencies: { [FIXTURE_DEP]: "1.x" },
-    });
-    const registry = freshRegistry();
-    try {
+describe("CLI — malformed exemption metadata", () => {
+  const cases: [string, Record<string, unknown>, string][] = [
+    ["missing ghsa", { ghsa: undefined }, '"ghsa" must name at least one GHSA advisory id'],
+    ["empty ghsa", { ghsa: "" }, '"ghsa" must name at least one GHSA advisory id'],
+    ["empty ghsa array", { ghsa: [] }, '"ghsa" must name at least one GHSA advisory id'],
+    ["non-GHSA-shaped ghsa", { ghsa: "CVE-2026-1234" }, '"ghsa" must name at least one GHSA advisory id'],
+    ["empty reason", { reason: "" }, '"reason" must be a non-empty string'],
+    ["whitespace reason", { reason: " \t " }, '"reason" must be a non-empty string'],
+    ["missing reason", { reason: undefined }, '"reason" must be a non-empty string'],
+    ["empty package", { package: "" }, '"package" must be a non-empty string'],
+    ["missing package", { package: undefined }, '"package" must be a non-empty string'],
+    ["empty version", { version: "" }, '"version" must be a non-empty string'],
+    ["missing version", { version: undefined }, '"version" must be a non-empty string'],
+  ];
+
+  for (const [label, fields, diagnostic] of cases) {
+    it(`exits 2 for ${label}, naming the field, before fetching`, async () => {
+      const root = writeOverrideFixtureRepo(join(scratch, `metadata-${label}`), { [FIXTURE_DEP]: FIXTURE_VERSION });
+      writeAllowlist(root, [{ ...exemption("2026-01-01", "2099-01-01"), ...fields }]);
+      const recorder = join(root, "fetch-recorder.mjs");
+      writeFileSync(recorder, `globalThis.fetch = async () => {
+        process.stderr.write("REGISTRY_FETCH\\n");
+        return Response.json({ time: { "${FIXTURE_VERSION}": new Date().toISOString() } });
+      };`);
       const { exitCode, output } = await runGate(CLI_SCRIPT, {
         FLAIR_CHECK_DEP_AGES_ROOT: root,
-        FLAIR_NPM_REGISTRY: registry.url,
+        FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
+        NODE_OPTIONS: `--import=${pathToFileURL(recorder).href}`,
       });
-      expect(output).toContain("Not age-checked (ranges):");
-      expect(output).toContain(`${FIXTURE_DEP} "1.x"`);
-      expect(output).toContain("No external pinned production deps to check.");
-      expect(registry.requests).toEqual([]); // never fetched as the exact version "1.x"
-      expect(exitCode).toBe(0);
-    } finally {
-      registry.stop();
-    }
-  }, 30_000);
-});
-
-describe("CLI fail-closed exit — a workspace manifest the gate cannot read or parse", () => {
-  it("exits 2, naming a workspace manifest with malformed JSON", async () => {
-    const root = writeManifestRepo(join(scratch, "workspace-bad-json"), { name: "dep-ages-fixture", version: "0.0.0" });
-    mkdirSync(join(root, "packages", "ws-a"), { recursive: true });
-    writeFileSync(join(root, "packages", "ws-a", "package.json"), "{ not json");
-    const { exitCode, output } = await runGate(CLI_SCRIPT, {
-      FLAIR_CHECK_DEP_AGES_ROOT: root,
-      FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
-    });
-    expect(output).toContain("packages/ws-a/package.json");
-    expect(output).toContain("is not valid JSON");
-    expect(exitCode).toBe(2);
-  }, 30_000);
-
-  it("exits 2, naming a workspace manifest it cannot read", async () => {
-    const root = writeManifestRepo(join(scratch, "workspace-unreadable"), { name: "dep-ages-fixture", version: "0.0.0" });
-    // A directory where package.json is expected: readFileSync fails with EISDIR.
-    mkdirSync(join(root, "packages", "ws-b", "package.json"), { recursive: true });
-    const { exitCode, output } = await runGate(CLI_SCRIPT, {
-      FLAIR_CHECK_DEP_AGES_ROOT: root,
-      FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
-    });
-    expect(output).toContain("cannot read packages/ws-b/package.json");
-    expect(exitCode).toBe(2);
-  }, 30_000);
-
-  it("exits 2, naming the root manifest when it cannot be parsed", async () => {
-    const root = join(scratch, "root-bad-json");
-    mkdirSync(join(root, "packages"), { recursive: true });
-    writeFileSync(join(root, "package.json"), "{ not json");
-    const { exitCode, output } = await runGate(CLI_SCRIPT, {
-      FLAIR_CHECK_DEP_AGES_ROOT: root,
-      FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
-    });
-    expect(output).toContain("package.json is not valid JSON");
-    expect(exitCode).toBe(2);
-  }, 30_000);
+      expect(output).toContain("dep-age-allowlist.json entries[0]");
+      expect(output).toContain(diagnostic);
+      expect(output).not.toContain("Exempted fresh pins");
+      expect(output).not.toContain("REGISTRY_FETCH");
+      expect(exitCode).toBe(2);
+    }, 30_000);
+  }
 });
 
 describe("CLI — a malformed exemption date fails the gate", () => {

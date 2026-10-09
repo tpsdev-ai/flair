@@ -47,13 +47,12 @@ export function classifyOverrides(overrides: unknown): OverrideRule[];
  *
  * Exemptions: `@tpsdev-ai/*`, keep-current list, `workspace:`, `file:`/`link:`,
  * `git+`/`github:`. A `dependencies` / `optionalDependencies` entry is
- * classified by the same version classifier the override grammar uses; only
- * an exact version is age-checked (a range is reported by collectNonExactDeps).
+ * classified by the same classifier the override grammar uses; only an exact
+ * version is age-checked.
  *
  * `peerDependencies` are NOT checked: peers are resolved from a range by the
  * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed. `devDependencies` are NOT checked:
- * they do not ship in our tarballs.
+ * describe what actually gets installed.
  *
  * @param pkgs — package objects with paths
  * @param keepCurrent — the keep-current allow-list
@@ -66,9 +65,8 @@ export function collectDeps(
 
 /**
  * The `dependencies`, `optionalDependencies` and `overrides` entries the
- * bake-time gate does not age-check because they are ranges (nested override
- * rules included). The CLI prints them; the gate does not fail on them. One
- * line per (name, spec, declaredIn).
+ * bake-time gate does not age-check because they are ranges. The CLI prints
+ * them; the gate does not fail on them.
  */
 export function collectNonExactDeps(
   pkgs: Array<{ pkg: Record<string, unknown>; path: string }>,

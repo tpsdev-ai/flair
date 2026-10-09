@@ -79,6 +79,7 @@ const PACKUMENT = {
 type Answer =
   | "clean" // 200, `{}`
   | "advisory" // 200, one advisory for DEP
+  | "uuid"
   | "http-500" // 500
   | "malformed" // 200, a body that is not JSON
   | "not-an-advisory-map"; // 200, a JSON object that lists no advisories
@@ -102,6 +103,11 @@ function respond(answer: Answer, url: string, res: ServerResponse): void {
         return send(res, 200, "{}");
       case "advisory":
         return send(res, 200, JSON.stringify(ADVISORY_ANSWER));
+      case "uuid":
+        return send(res, 200, JSON.stringify({ uuid: [{
+          ...ADVISORY_ANSWER[DEP][0], url: "https://github.com/advisories/GHSA-w5hq-g745-h8pq",
+          severity: "moderate", vulnerable_versions: "<11.1.1",
+        }] }));
       case "http-500":
         return send(res, 500, "registry fixture: internal error", "text/plain");
       case "malformed":
@@ -111,6 +117,14 @@ function respond(answer: Answer, url: string, res: ServerResponse): void {
     }
   }
   if (url === `/${DEP}`) return send(res, 200, JSON.stringify(PACKUMENT));
+  if (url === "/uuid") return send(res, 200, JSON.stringify({
+    name: "uuid", "dist-tags": { latest: "11.1.1" },
+    versions: {
+      "9.0.1": { name: "uuid", version: "9.0.1" },
+      "9.0.2": { name: "uuid", version: "9.0.2" },
+      "11.1.1": { name: "uuid", version: "11.1.1" },
+    },
+  }));
   send(res, 404, "{}");
 }
 
@@ -326,7 +340,7 @@ async function gateCase(
     const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url, ...lockfiles });
     const run = await runProcess(
       process.execPath,
-      [join(f.root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", f.prefix],
+      [join(f.root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", f.prefix, "--adk-npm-install-prefix", f.prefix],
       f.root,
       f.env,
       GATE_TIMEOUT_MS,
@@ -397,7 +411,10 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
       expect(run.timedOut).toBe(false);
       expect(run.status).toBe(1);
       expect(run.stderr).not.toContain("FAILED TO RUN");
-      expect(run.stdout).toContain("advisories reported: 2 (2 high)");
+      // bun's report, the root-tarball npm report, and the ADK consumer-install
+      // npm report each reach the fixture registry and see the same advisory, so
+      // the gate counts three (flair#2398 added the third observation).
+      expect(run.stdout).toContain("advisories reported: 3 (3 high)");
       expect(run.stdout).toContain(`HIGH ${GHSA} in ${DEP} (<1.0.1) is NOT allowlisted`);
       expect(run.stdout).not.toContain(PASS_MARKER);
       expect(bunRequests).toContain(BULK_REQUEST);
@@ -433,6 +450,70 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
       },
       CASE_BUDGET_MS,
     );
+  }
+});
+
+describe("ADK uuid paths from real npm audit", () => {
+  for (const { outside, version, title } of [
+    { outside: false, version: "9.0.1", title: "allows the named uuid chain at the allowlist version" },
+    { outside: true, version: "9.0.1", title: "blocks the additional uuid path" },
+    { outside: false, version: "9.0.2", title: "blocks a different installed uuid version" },
+  ]) {
+    it(title, async () => {
+      const bunRegistry = await startRegistry("clean");
+      const npmRegistry = await startRegistry("uuid");
+      try {
+        const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url });
+        const adkPrefix = join(f.root, "adk-prefix");
+        const chain = ["@tpsdev-ai/adk-flair", "@google/adk", "@google-cloud/vertexai", "google-auth-library", "gaxios", "uuid"];
+        const manifest = { name: "adk-consumer", version: "1.0.0", dependencies: {
+          "@tpsdev-ai/adk-flair": "1.0.0", ...(outside ? { uuid: "9.0.1" } : {}),
+        } };
+        const packages: Record<string, object> = { "": manifest };
+        let node = "";
+        for (const [i, pkg] of chain.entries()) {
+          node += `${node ? "/" : ""}node_modules/${pkg}`;
+          const row = { name: pkg, version: pkg === "uuid" ? version : "1.0.0",
+            dependencies: i + 1 < chain.length ? { [chain[i + 1]!]: "*" } : {},
+          };
+          packages[node] = row;
+          mkdirSync(join(adkPrefix, node), { recursive: true });
+          writeFileSync(join(adkPrefix, node, "package.json"), JSON.stringify(row));
+        }
+        if (outside) {
+          packages["node_modules/uuid"] = { name: "uuid", version: "9.0.1" };
+          mkdirSync(join(adkPrefix, "node_modules/uuid"), { recursive: true });
+          writeFileSync(join(adkPrefix, "node_modules/uuid/package.json"), JSON.stringify(packages["node_modules/uuid"]));
+        }
+        writeFileSync(join(adkPrefix, "package.json"), JSON.stringify(manifest));
+        writeFileSync(join(adkPrefix, "package-lock.json"), JSON.stringify({
+          ...manifest, lockfileVersion: 3, requires: true, packages,
+        }));
+        const allowlist = JSON.parse(readFileSync(join(REPO_ROOT, ".github/audit-allowlist.json"), "utf8"));
+        writeFileSync(join(f.root, ".github/audit-allowlist.json"), JSON.stringify({
+          policy: ALLOWLIST_POLICY, entries: allowlist.entries.filter((entry: { package: string }) => entry.package === "uuid"),
+        }));
+        const run = await runProcess(process.execPath, [
+          join(f.root, "scripts/audit-gate.mjs"), "--npm-install-prefix", f.prefix,
+          "--adk-npm-install-prefix", adkPrefix,
+        ], f.root, f.env, GATE_TIMEOUT_MS);
+        expect(run.timedOut).toBe(false);
+        expect(run.stderr).not.toContain("FAILED TO RUN");
+        expect(run.status).toBe(outside || version !== "9.0.1" ? 1 : 0);
+        expect(npmRegistry.requests).toContain(BULK_REQUEST);
+        if (outside) {
+          expect(run.stdout).toContain('node "node_modules/uuid" is outside the dependency chain');
+          expect(run.stdout).not.toContain(PASS_MARKER);
+        } else if (version !== "9.0.1") {
+          expect(run.stdout).toContain(`installed version ${version} differs from allowlist version 9.0.1`);
+          expect(run.stdout).not.toContain(PASS_MARKER);
+        } else {
+          expect(run.stdout).toContain(PASS_MARKER);
+        }
+      } finally {
+        await Promise.all([bunRegistry.close(), npmRegistry.close()]);
+      }
+    }, CASE_BUDGET_MS);
   }
 });
 

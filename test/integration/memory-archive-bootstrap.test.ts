@@ -251,4 +251,46 @@ describe("flair#1472 Deliverable A — archived is real end-to-end", () => {
     const rec: any = await getRes.json();
     expect(rec.archived, "cross-agent basement must not mutate the target memory").not.toBe(true);
   }, 60_000);
+
+  // ── flair#2377: a refused put answers with its own status, never 200 ────────
+  test("f. a put the ownership gate refuses answers 403 with the named error on basement and restore; the stored row is unchanged", async () => {
+    // A memory `other` can READ (durability:permanent → organization-visible)
+    // but does not own: the read gate passes, the ownership gate refuses.
+    const SHARED = `${owner.id}-shared-refused`;
+    const seed = await putMemory(harper, owner, SHARED, {
+      agentId: owner.id,
+      content: "archive-2377 marker: a shared reference the second agent may read but not archive.",
+      durability: "permanent",
+    });
+    expect(seed.status, `seed ${SHARED} → ${seed.status}`).toBe(200);
+    const beforeRefusal: any = await (await getMemory(harper, owner, SHARED)).json();
+
+    // Refused basement — the endpoint must carry Memory.put's 403, not answer 200.
+    const refusedBasement = await archive(harper, other, SHARED, "basement");
+    const refusedBasementBody: any = await refusedBasement.json();
+    expect(refusedBasement.status, `refused basement → ${refusedBasement.status}: ${JSON.stringify(refusedBasementBody)}`).toBe(403);
+    expect(String(refusedBasementBody.error), `refused basement body must name the error: ${JSON.stringify(refusedBasementBody)}`).toContain("forbidden");
+
+    const afterRefusedBasement: any = await (await getMemory(harper, owner, SHARED)).json();
+    expect(afterRefusedBasement, "a refused basement must not rewrite the row").toEqual(beforeRefusal);
+
+    // A successful basement keeps its success status.
+    const okBasement = await archive(harper, owner, SHARED, "basement");
+    expect(okBasement.status, `owner basement → ${okBasement.status}`).toBe(200);
+    const beforeRefusedRestore: any = await (await getMemory(harper, owner, SHARED)).json();
+    expect(beforeRefusedRestore.archived, "owner basement must set archived").toBe(true);
+
+    // Refused restore — the same gate, the same status, on the restore action.
+    const refusedRestore = await archive(harper, other, SHARED, "restore");
+    const refusedRestoreBody: any = await refusedRestore.json();
+    expect(refusedRestore.status, `refused restore → ${refusedRestore.status}: ${JSON.stringify(refusedRestoreBody)}`).toBe(403);
+    expect(String(refusedRestoreBody.error), `refused restore body must name the error: ${JSON.stringify(refusedRestoreBody)}`).toContain("forbidden");
+
+    const afterRefusedRestore: any = await (await getMemory(harper, owner, SHARED)).json();
+    expect(afterRefusedRestore, "a refused restore must not rewrite the row").toEqual(beforeRefusedRestore);
+
+    // A successful restore keeps its success status.
+    const okRestore = await archive(harper, owner, SHARED, "restore");
+    expect(okRestore.status, `owner restore → ${okRestore.status}`).toBe(200);
+  }, 60_000);
 });

@@ -1,1 +1,1 @@
-- **The restart wait caps sleeps at the remaining time and probes once after the last wake (#2357).** Timer overshoot still permits that final probe; no probe follows it.
+- **Direct-process restarts probe through the stop deadline and refuse replacement after an unconfirmed stop.**

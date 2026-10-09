@@ -4,11 +4,12 @@
     "(scripts/check-dep-ages.mjs, run by the `Check production dep bake time` step in",
     ".github/workflows/test.yml). Policy narrative: docs/supply-chain-policy.md.",
     "",
-    "An entry lets one exact-pinned version — in `dependencies`, `optionalDependencies`",
+    "An entry lets one otherwise checked exact-pinned version — in `dependencies`, `optionalDependencies`",
     "or `overrides` — stay on a release published less than FLAIR_DEP_MIN_AGE_DAYS ago.",
-    "Every entry names the advisory it is a fix for and carries a hard expiry. An",
-    "expired entry FAILS the gate before any registry request; removing it lets the pin",
-    "be age-checked as usual. Re-read the reason before re-dating; removing the entry",
+    "The author supplies a GHSA-formatted id; review verifies the version fixes it.",
+    "Every entry carries a hard expiry. An",
+    "expired entry FAILS the gate before any registry request; removing it lets an",
+    "otherwise checked pin be age-checked. Re-read the reason before re-dating; removing the entry",
     "once the version has aged past the window is the normal outcome."
   ],
   "entries": [
@@ -21,7 +22,7 @@
         "GHSA-xw65-4hp5-5hc7"
       ],
       "added": "2026-10-08",
-      "expires": "2026-10-13",
+      "expires": "2026-10-14",
       "reason": "4.7.10 is the first patched release for all three advisories (affected >=4.0.0 <=4.7.9). A root `overrides` entry pins the @langchain/classic copy — a development and peer dependency of @tpsdev-ai/n8n-nodes-flair — to it. The pin clears the 7-day bake window on 2026-10-12."
     }
   ]

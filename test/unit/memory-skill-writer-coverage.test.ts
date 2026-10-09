@@ -22,8 +22,8 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  * classification for each. The classification is the policy — every sink that
  * can carry a skill-tagged row is declared GATED (SkillScan + forced
  * durability), REJECTING (400 skill_write_path), or SKIPPING
- * (skill_not_federated); every other sink is declared non-skill (writes
- * non-skill rows, a different table, or is a read-only alias). A new
+ * (skill_not_federated), or preserves existing content and tags; other sinks
+ * write non-skill rows, a different table, or are read-only aliases. A new
  * unclassified writer fails the build — the "unscanned skill-writer" tripwire.
  */
 
@@ -33,21 +33,16 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
-add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#2"],
+add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
+add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#3"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the raw put (flair#1542).");
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"],
-  "Dedup expiry repair (flair#2358): re-writes the row read in its transaction with expiresAt set; content and tags stay as stored.");
-add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
-  "Memory post/put and FeedMemories scan the merged successor body before calling this writer; delete only closes the stored head.");
-add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
-  "Read-only alias (resolveSkillHead searches the live skill head).");
-add("Memory", ["writer:super.patch#1"],
-  "Re-embed request (flair#2296): writes embedding, embeddingModel and updatedAt only, no skill content.");
+add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],
+  "Memory post/put and FeedMemories scan the merged successor body before calling this writer.");
 
 // ── REJECTING skill-writer sinks (400 skill_write_path) ──
-add("Memory", ["writer:super.patch#2"],
+add("Memory", ["writer:super.patch#1"],
   "Skill-writer: REJECTS skill-tagged patches (400 skill_write_path) — patch() routes past put()'s gate (flair#1542).");
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: REJECTS skill-tagged starter memories (400 skill_write_path) — admin-only seed bypasses the gate (flair#1542).");
@@ -56,11 +51,18 @@ add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
 add("Federation", ["writer:table.put#1"],
   "Skill-writer: SKIPS skill-tagged rows (skill_not_federated) — skills are local, never synced (flair#1542).");
 
-// ── Non-skill writers inside Memory.ts ──
+// ── Existing-row writes preserving content and tags ──
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"],
+  "Dedup expiry repair (flair#2358): re-writes the row read in its transaction with expiresAt set; content and tags stay as stored.");
+add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"],
+  "Skill predecessor close: preserves stored content and tags.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
+  "Re-embed request: puts the re-read row with new embedding, embeddingModel and updatedAt; preserves stored content and tags.");
 add("Memory", ["writer:super.put#1"],
-  "Admin-only _reindex re-PUT (reindex_admin_only gate) — re-embeds an existing record byte-for-byte, preserves existing content/tags, not a new skill write.");
+  "Admin-only _reindex re-PUT (reindex_admin_only gate) — preserves existing content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
+// ── Bookkeeping, removal and read-only aliases inside Memory.ts ──
 add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
@@ -82,7 +84,7 @@ add("MemoryPurge", ["alias-source:(databases as any).flair?.Memory#1"],
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:Memory.put#1"],
-  "Admin-only re-embed re-PUT (reindex_admin_only gate) — preserves existing content, not a new skill write.");
+  "Admin-only reindex re-PUT through _reindex — preserves existing content and tags.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
   "writer:this.cache.delete#1",
@@ -98,8 +100,6 @@ add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
   "usageCount increment (targeted get-then-put) — non-skill.");
 add("promotion-stamp", ["writer:table.put#1"],
   "Promotion status stamp — non-skill.");
-add("migrations/graph-heal", ["writer:table.put#1"],
-  "Migration backfill — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.put#1"],
   "Content-suffix migration embeds skillEmbedText(row), staging embedding/embeddingModel; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"],
@@ -108,6 +108,7 @@ add("migrations/visibility-backfill", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
 
 // ── Other tables (conservative sink enumeration false-positives) ──
+add("migrations/graph-heal", ["writer:table.put#1"], "Graph-heal OrgEvent ledger.");
 add("AgentSeed", ["writer:(databases as any).flair.Agent.put#1", "writer:(databases as any).flair.Soul.put#1"],
   "Other tables in the provisioning module, included by conservative sink enumeration.");
 add("Federation", ["writer:(databases as any).flair.Instance.put#1", "writer:(databases as any).flair.PairingToken.put#1", "writer:(databases as any).flair.Peer.put#1", "writer:(databases as any).flair.Peer.put#2", "writer:(databases as any).flair.Peer.put#3", "writer:(databases as any).flair.SyncLog.put#1"],
@@ -118,6 +119,8 @@ add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"],
   "Other table (MemoryUsage), included by conservative sink enumeration.");
 
 // ── Read-only aliases (no write through these handles) ──
+add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
+  "Read-only alias (resolveSkillHead searches the live skill head).");
 add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only admin alias.");
 add("Federation", ["alias-source:(databases as any).flair.Memory#1"],

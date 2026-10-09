@@ -9,12 +9,15 @@
 import { Command } from "commander";
 import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
-import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
+import { readTargetMcpRedirectFinding } from "../lib/mcp-oauth-env.js";
+import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, describeAgentIdRuleFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
+import { readAgentRoster } from "../lib/agent-roster.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -867,12 +870,11 @@ program
       // READs it for drift detection, but describePublicUrlFinding never names
       // it as the fix (flair#1313 — wiped on every upgrade).
       const componentEnvPath = join(flairPackageDir(), COMPONENT_ENV_FILENAME);
-      let componentEnvValue: string | null = null;
+      let componentEnvText: string | null = null;
       try {
-        if (existsSync(componentEnvPath)) {
-          componentEnvValue = readEnvValue(readFileSync(componentEnvPath, "utf-8"), PUBLIC_URL_KEY);
-        }
+        if (existsSync(componentEnvPath)) componentEnvText = readFileSync(componentEnvPath, "utf-8");
       } catch { /* unreadable → treat as absent */ }
+      const componentEnvValue = readEnvValue(componentEnvText, PUBLIC_URL_KEY);
 
       const finding = describePublicUrlFinding({
         advertisedIssuer,
@@ -889,6 +891,21 @@ program
         if (finding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
         if (finding.isIssue) issues++;
       }
+
+      const mcpRedirectFinding = await readTargetMcpRedirectFinding(() =>
+        api("GET", "/HealthDetail", undefined, {
+          baseUrl,
+          keysDir: defaultKeysDir(),
+          ...(opts.agent ? { agentId: opts.agent, agentIdSource: "flag" } : {}),
+        }),
+      );
+      if (mcpRedirectFinding) {
+        console.log(`  ${mcpRedirectFinding.isIssue ? render.icons.error : render.icons.warn} ${mcpRedirectFinding.message}`);
+        if (mcpRedirectFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${mcpRedirectFinding.fixHint}`);
+        if (mcpRedirectFinding.isIssue) issues++;
+      }
+    } else {
+      console.log(`  ${render.icons.warn} MCP OAuth redirect: cannot verify target configuration`);
     }
 
     // 4. Embeddings check — REAL semantic round-trip (only if Harper is responding).
@@ -1978,6 +1995,52 @@ program
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
           const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(presenceUrl), keyPath) };
           await fetchAndRenderFleetPresence(headers, true, "      ");
+        }
+      }
+    }
+
+    // 8b. Agent ID rule (flair#2359) — report a stored Agent id outside
+    // the shared agent-ID rule. Read-only: nothing is rewritten.
+    if (harperResponding) {
+      console.log(`\n  ${render.wrap(render.c.bold, "Agent IDs")}`);
+      let roster: Array<{ id?: unknown }> | null = null;
+      let rosterReadAttempted = false;
+      let agentListAdminPass: string | undefined;
+      let agentListCredIssue: string | null = null;
+      try {
+        agentListAdminPass = resolveLocalAdminPass(undefined);
+      } catch (err: unknown) {
+        agentListCredIssue = err instanceof Error ? err.message : String(err);
+      }
+      if (agentListAdminPass) {
+        rosterReadAttempted = true;
+        const auth = Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64");
+        roster = await readAgentRoster({
+          opsUrl: `http://127.0.0.1:${resolveOpsPort(opts)}/`,
+          authHeader: `Basic ${auth}`,
+          timeoutMs: 5000,
+        });
+      }
+      if (roster === null) {
+        // A check that could not run is not a clean result: it counts as an
+        // issue, so the summary and exit status never report "No issues found"
+        // for an Agent-ID check that did not happen.
+        issues++;
+        console.log(
+          agentListCredIssue
+            ? `  ${render.icons.warn} Skipped: the admin credential could not be resolved (${agentListCredIssue}), so the agent-id check did not run.`
+            : rosterReadAttempted
+              ? `  ${render.icons.warn} Could not read the stored Agent roster, so the agent-id check did not run.`
+              : `  ${render.icons.warn} Skipped: no admin credentials to read the stored Agent roster, so the agent-id check did not run.`,
+        );
+      } else {
+        const finding = describeAgentIdRuleFinding(roster);
+        if (!finding) {
+          console.log(`  ${render.icons.ok} No stored agent id is outside ${AGENT_ID_RULE}.`);
+        } else {
+          issues++;
+          console.log(`  ${render.icons.warn} ${finding.message}`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
         }
       }
     }

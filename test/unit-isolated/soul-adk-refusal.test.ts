@@ -30,6 +30,10 @@ const InstructionVersionBase = {
 };
 
 class BaseSoul {
+  static async get(id: string) { return new BaseSoul().get(id); }
+  static async put(content: any, ctx: any) {
+    ctx.transaction.soulWrites.push(() => soulStore.set(content.id, { ...content }));
+  }
   // Real Harper binds the resource to the URL target (`getId()`); this double
   // models the bound id on the instance as `.id` (the same shape the other
   // Soul/Memory/Agent doubles use). resources/originator-instance.ts's
@@ -103,12 +107,12 @@ beforeEach(() => {
   (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
     const context = ctx && typeof ctx === "object" ? ctx : {};
     if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
-    const txn: any = { open: 1, saveCommits: false };
+    const txn: any = { open: 1, saveCommits: false, soulWrites: [] };
     context.transaction = txn;
     let result: any;
     try { result = cb(txn); } catch (e) { txn.open = 0; throw e; }
     if (result && typeof result.then === "function") {
-      return result.then((v: any) => { txn.open = 0; return v; }, (e: any) => { txn.open = 0; throw e; });
+      return result.then((v: any) => { txn.open = 0; for (const write of txn.soulWrites) write(); return v; }, (e: any) => { txn.open = 0; throw e; });
     }
     txn.open = 0;
     return result;

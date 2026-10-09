@@ -1059,6 +1059,85 @@ function isReembedPatch(content: any): boolean {
   return Object.keys(content).every((key) => key === "id" || key === "embedding" || key === "embeddingModel");
 }
 
+/** A vector the re-embed may stamp: a non-empty array of finite numbers. */
+function isUsableEmbeddingVector(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length > 0 &&
+    value.every((n) => typeof n === "number" && Number.isFinite(n));
+}
+
+/** Attempts of a re-embed before it gives up on a row whose text keeps changing. */
+const REEMBED_WRITE_ATTEMPTS = 3;
+
+/**
+ * flair#2390: write the re-embed of Memory row `id`.
+ *
+ * `preRead` is the row as the caller first read it and `vector` the embedding
+ * computed from its text, outside this call. This re-reads the committed row
+ * inside the transaction that writes (the static table handle, with the
+ * attempt's owned context), so the write is built from the row as stored at
+ * that read, not from the pre-await read: a field another writer committed
+ * while the vector was computed is kept, and the caller's authorization is
+ * re-checked against the row's CURRENT owner.
+ *
+ * If the stored text is no longer the text the vector was computed from, this
+ * recomputes from the stored text rather than stamping a vector for text the row
+ * no longer carries (at most REEMBED_WRITE_ATTEMPTS times). If the text keeps
+ * changing across the REEMBED_WRITE_ATTEMPTS attempts, it returns
+ * reembed_row_changed (409) and writes nothing. A row that vanished, a row with
+ * no text, or a caller no longer authorized for the row is refused the same way
+ * the first read refused it.
+ */
+async function reembedStoredRow(
+  id: string,
+  preRead: Record<string, any>,
+  vector: number[],
+  auth: AgentAuthVerdict,
+  ctx: any,
+): Promise<Response> {
+  let textToEmbed = skillEmbedText(preRead);
+  let embedding = vector;
+  for (let attempt = 1; attempt <= REEMBED_WRITE_ATTEMPTS; attempt++) {
+    const outcome = await withOwnedTransaction(ctx, async (owned) => {
+      const stored = await (databases as any).flair.Memory.get(id, owned);
+      if (!stored) return { kind: "not_found" as const };
+      if (auth.kind === "agent" && !auth.isAdmin &&
+          isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+        return { kind: "forbidden" as const };
+      }
+      const storedText = skillEmbedText(stored);
+      if (typeof storedText !== "string" || storedText.length === 0) return { kind: "no_text" as const };
+      if (storedText !== textToEmbed) return { kind: "recompute" as const, text: storedText };
+      const model = getModelId();
+      const updatedAt = new Date().toISOString();
+      await (databases as any).flair.Memory.put({ ...stored, embedding, embeddingModel: model, updatedAt }, owned);
+      return { kind: "written" as const, model, updatedAt };
+    });
+    if (outcome.kind === "not_found") return NOT_FOUND();
+    if (outcome.kind === "forbidden") return FORBIDDEN("forbidden: cannot write memory owned by another agent");
+    if (outcome.kind === "no_text") {
+      return Response.json({ error: "reembed_no_text", message: "the stored row has no text to embed" }, { status: 422 });
+    }
+    if (outcome.kind === "recompute") {
+      if (attempt === REEMBED_WRITE_ATTEMPTS) {
+        return Response.json({ error: "reembed_row_changed", message: "the stored text changed during each re-embed attempt; retry" }, { status: 409 });
+      }
+      textToEmbed = outcome.text;
+      const recomputed = await getEmbedding(textToEmbed, "document");
+      if (!isUsableEmbeddingVector(recomputed)) {
+        return Response.json({ error: "embedding_unavailable", message: "the embedding engine returned no vector; the stored row is unchanged, retry" }, { status: 503 });
+      }
+      embedding = recomputed;
+      continue;
+    }
+    noteWriteStamp(outcome.model);
+    return Response.json({ id, embeddingModel: outcome.model, updatedAt: outcome.updatedAt });
+  }
+  return new Response(
+    JSON.stringify({ error: "reembed_row_changed", message: "the stored text changed during each re-embed attempt; retry" }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  );
+}
+
 export class Memory extends (databases as any).flair.Memory {
   /**
    * Self-authorize now that the global gate is non-rejecting. Closes the P0
@@ -1698,10 +1777,13 @@ export class Memory extends (databases as any).flair.Memory {
     const resolvedStored = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedStored.denial) return resolvedStored.denial;
     const existingForSkill = resolvedStored.row;
-    // flair#2296: a re-embed request (`flair reembed`). The vector is computed
-    // from the stored row, and the PATCH writes embedding, embeddingModel and
-    // updatedAt, so no other stored field is rewritten. It changes no skill
-    // content, so the skill refusal below does not apply to it.
+    // flair#2296: re-embed intentionally changes only embedding, embeddingModel
+    // and updatedAt; the whole re-read row is submitted to put.
+    // flair#2390: the vector is computed OUTSIDE the write. The write itself
+    // re-reads the committed row inside its own transaction (reembedStoredRow),
+    // builds the record from that row, and re-checks the owner and the text, so
+    // an edit committed while the vector was computed is kept, and the vector
+    // written is the one for the text of the re-read row.
     if (reembedRequest) {
       if (!existingForSkill) return NOT_FOUND();
       const auth = await resolveAgentAuth((this as any).getContext?.());
@@ -1713,14 +1795,14 @@ export class Memory extends (databases as any).flair.Memory {
       if (typeof embedText !== "string" || embedText.length === 0) {
         return Response.json({ error: "reembed_no_text", message: "the stored row has no text to embed" }, { status: 422 });
       }
+      // Test-only: inert unless the fault-injection env opt-in is set and armed.
+      const pause = txnPausePoint("memory-reembed");
+      if (pause) await pause;
       const embedding = await getEmbedding(embedText, "document");
-      if (!embedding || embedding.length === 0 || !embedding.every((value) => typeof value === "number" && Number.isFinite(value))) {
+      if (!isUsableEmbeddingVector(embedding)) {
         return Response.json({ error: "embedding_unavailable", message: "the embedding engine returned no vector; the stored row is unchanged, retry" }, { status: 503 });
       }
-      const fields = { id: existingForSkill.id, embedding, embeddingModel: getModelId(), updatedAt: new Date().toISOString() };
-      await super.patch(fields, query);
-      noteWriteStamp(fields.embeddingModel);
-      return Response.json({ id: fields.id, embeddingModel: fields.embeddingModel, updatedAt: fields.updatedAt });
+      return reembedStoredRow(String(existingForSkill.id), existingForSkill, embedding, auth, (this as any).getContext?.());
     }
     const skillDenial = rejectSkillWritePath(content) ?? rejectSkillWritePath(existingForSkill);
     if (skillDenial) return skillDenial;

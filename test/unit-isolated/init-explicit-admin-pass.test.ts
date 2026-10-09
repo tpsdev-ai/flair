@@ -64,8 +64,9 @@ function runInit(home: string, dataDir: string, source: typeof sources[number], 
     `}
     ${options.probeFailure === undefined ? '' : `
     const dataDir = ${JSON.stringify(dataDir)};
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(dataDir + "/hdb.pid", String(process.pid));
+    const { chmodSync, writeFileSync } = await import("node:fs");
+    writeFileSync(dataDir + "/hdb.pid", String(process.pid), { mode: 0o600 });
+    chmodSync(dataDir + "/hdb.pid", 0o600);
     const tcpPath = ${JSON.stringify(new URL("../../src/lib/init-tcp-probe.ts", import.meta.url).href)};
     const tcp = await import(tcpPath);
     mockSocketLimit.module(tcpPath, () => ({ ...tcp, localPortState: async port => port === 9 ? "listening" : "free" }));
@@ -160,6 +161,7 @@ describe("fresh init persists explicit admin credentials", () => {
       mkdirSync(join(home, ".flair"));
       const target = posture === "symlink" ? join(home, "target") : passPath;
       writeFileSync(target, password + "\n", { mode: posture === "open-mode" ? 0o644 : 0o600 });
+      if (posture === "open-mode") chmodSync(target, 0o644);
       if (posture === "symlink") symlinkSync(target, passPath);
       const result = runInit(home, dataDir, "inline", "linux", posture === "foreign-owner");
       expect(result.status, result.stdout + result.stderr).toBe(1);

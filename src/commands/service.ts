@@ -12,7 +12,7 @@ import { seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { reconcilePendingSkillSeed, skillSeedPendingPath } from "../lib/skill-seed-pending.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
 import { decideStartOnUnknown, probePortListening } from "../lib/stop-start-recovery.js";
-import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, verifyLaunchdManagement } from "../lib/launchd-management.js";
+import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import {
   LaunchdValidationRefusal,
   loadabilityAllowsAttempt,
@@ -44,6 +44,7 @@ export type ServiceCli = {
   observeLaunchdManagement: (...args: any[]) => any;
   probeHealth: (...args: any[]) => any;
   readyOpsSocketPosture: (...args: any[]) => any;
+  recordManagedStartSidecar: (...args: any[]) => any;
   resolveHarperBin: (...args: any[]) => any;
   resolveHttpBindHost: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
@@ -189,6 +190,10 @@ function waitForHealth(...args: any[]): any {
   return cli.waitForHealth(...args);
 }
 
+function recordManagedStartSidecar(...args: any[]): any {
+  return cli.recordManagedStartSidecar(...args);
+}
+
 function waitForProcessExit(...args: any[]): any {
   return cli.waitForProcessExit(...args);
 }
@@ -265,7 +270,7 @@ program
           execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
           // Verify the captured pid exited before attempting confirmed-dead cleanup.
           await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
-          removeStaleSidecarIfConfirmedDead(dataDir);
+          removeStaleSidecarIfConfirmedDead(dataDir, pid);
           console.log("✅ Flair stopped (launchd service unloaded)");
           return;
         } catch (err) {
@@ -305,12 +310,8 @@ program
           }
         }
         await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
-        // flair#2055: once the process is CONFIRMED gone, drop the identity
-        // sidecar — a leftover naming the stopped pid is what makes a later
-        // instance under another supervisor refuse. Gated on a fresh
-        // O_NOFOLLOW read that still names the pid it named before; unknown
-        // liveness removes nothing.
-        removeStaleSidecarIfConfirmedDead(dataDir);
+        // Use the PID the exit probe observed gone for best-effort cleanup.
+        removeStaleSidecarIfConfirmedDead(dataDir, pid);
         const after = await probeHealth(port);
         if (after.kind === "refused") {
           console.log(`✅ Flair stopped (${label}, pid ${pid})`);
@@ -320,9 +321,6 @@ program
         return;
       }
       case "NOT_RUNNING":
-        // A sidecar left naming a pid that is CONFIRMED gone is a leftover too
-        // (flair#2055); clearing it here keeps a repeat stop from carrying the
-        // refusal forward.
         removeStaleSidecarIfConfirmedDead(dataDir);
         console.log("Flair is not running.");
         return;
@@ -465,25 +463,29 @@ program
             // Targeted at gui/<uid> — the domain the preflight probed (flair#2040).
             await recheckRecovery();
             const { label, migrated } = ensureLaunchdServiceLoaded(dataDir, (cmd: string) => execSync(cmd, { stdio: "pipe" }));
-            await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+            // flair#2411: wait for health and record the identity sidecar naming
+            // the pid launchd reports, only once that pid is confirmed to be the
+            // one serving this instance. An unconfirmed pid writes nothing and
+            // names the check that failed.
+            const recorded = await recordManagedStartSidecar(dataDir, port, label, {
+              adminPass: process.env.HDB_ADMIN_PASSWORD ?? "",
+            });
             readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
             stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
-            // flair#2040: the launchd check mark only after VERIFYING that
-            // launchd's pid IS the identified serving pid — a healthy port is
-            // not proof that launchd started what answers it, and an
-            // unidentified serving process is not proof either.
-            const managed = observeLaunchdManagement(dataDir, port);
-            const verdict = verifyLaunchdManagement(managed);
-            if (verdict.verified) {
+            if (recorded.recorded) {
               await seedAfterStart(dataDir, port);
-              // The migration's check mark too only after the strict verifier
-              // passed: moving a plist is not launchd running this instance.
+              // The migration's check mark too only after the identity was confirmed:
+              // moving a plist is not launchd running this instance.
               if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
-              console.log(`✅ Flair started (launchd-managed: ${verdict.detail})`);
+              console.log(`✅ Flair started (launchd-managed: ${recorded.detail})`);
               return;
             }
-            // Healthy, but not proven to be launchd's process: no launchd check
-            // mark, and no claim about what happens at the next reboot either.
+            // flair#2040: the initial reachability wait passed, but the managed
+            // process was not confirmed (the second probe may have reported a
+            // foreign, refused or unreachable listener) and is not proven to be launchd's process: no
+            // launchd check mark, and no claim about what happens at the next
+            // reboot either.
+            const managed = observeLaunchdManagement(dataDir, port);
             console.error(`⚠️  Flair is running on port ${port}, but it is NOT verified as launchd-managed: ${managed.detail}`);
             if (migrated) console.error(`   The launchd service was moved off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label}.`);
             if (managed.remedy?.length) console.error(`   Fix: ${managed.remedy.join(" && ")}`);

@@ -50,6 +50,7 @@ import {
 import type { Dirent, Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   assessLaunchdManagement,
@@ -826,10 +827,10 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
 }
 
 /** A production-shaped flair#1454 sidecar for the fixture's direct spawn. */
-function writeDirectSidecar(sb: Sandbox, pid: number): void {
+function writeDirectSidecar(sb: Sandbox, pid: number, startTimeMs = Date.now()): void {
   const sidecar = {
     pid,
-    startTimeMs: Date.now(),
+    startTimeMs,
     port: sb.httpPort,
     flairVersion: "test",
   };
@@ -1184,4 +1185,81 @@ test.skipIf(skipFixtureCase)(
     expect(existsSync(join(sb.dataDir, "flair-daemon.json"))).toBe(false);
   }),
   750_000,
+);
+
+
+test.skipIf(skipFixtureCase)(
+  "restart with an injected startReplacement removes the old sidecar before replacement",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    const pid = instancePid(sb.dataDir, sb.httpPort);
+    expect(pid).not.toBeNull();
+    if (pid === null) throw new Error("managed Harper PID is unreadable");
+    writeDirectSidecar(sb, pid);
+    const script = `
+      import { existsSync } from "node:fs";
+      import { join } from "node:path";
+      import { program, restartFlair } from ${JSON.stringify(pathToFileURL(CLI_JS).href)};
+      await restartFlair(${sb.httpPort}, ${JSON.stringify(sb.dataDir)}, {
+        startReplacement: async () => {
+          if (existsSync(join(${JSON.stringify(sb.dataDir)}, "flair-daemon.json"))) {
+            throw new Error("old sidecar remains before replacement start");
+          }
+          await program.parseAsync(["node", "flair", "start", "--port", ${JSON.stringify(String(sb.httpPort))}]);
+        },
+      });
+    `;
+    const result = spawnSync(nodeBin(), ["--input-type=module", "-e", script], {
+      cwd: REPO_ROOT,
+      env: doctorEnv(sb.tmpHome),
+      encoding: "utf8",
+      timeout: 180_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(isAlive(pid)).toBe(false);
+    const managed = assertManaged(sb);
+    expect(managed.pid).not.toBe(pid);
+    // flair#2411: the launchd-managed replacement start records a sidecar
+    // naming the pid it started.
+    expect(readSidecar(sb.dataDir)).toMatchObject({ kind: "present", pid: managed.pid, port: sb.httpPort });
+  }),
+  850_000,
+);
+
+
+test.skipIf(skipFixtureCase)(
+  "restart through startFlairProcess writes a sidecar verified against the replacement process",
+  diagnosed(async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    const oldPid = instancePid(sb.dataDir, sb.httpPort);
+    expect(oldPid).not.toBeNull();
+    if (oldPid === null) throw new Error("managed Harper PID is unreadable");
+    const oldStartTimeMs = readProcessStartTimeMs(oldPid);
+    if (oldStartTimeMs === null) throw new Error("managed Harper start time is unreadable");
+    writeDirectSidecar(sb, oldPid, oldStartTimeMs);
+    const script = `
+      import { restartFlair } from ${JSON.stringify(pathToFileURL(CLI_JS).href)};
+      await restartFlair(${sb.httpPort}, ${JSON.stringify(sb.dataDir)});
+    `;
+    const result = spawnSync(nodeBin(), ["--input-type=module", "-e", script], {
+      cwd: REPO_ROOT,
+      env: doctorEnv(sb.tmpHome),
+      encoding: "utf8",
+      timeout: 180_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(isAlive(oldPid)).toBe(false);
+    const managed = assertManaged(sb);
+    expect(managed.pid).not.toBe(oldPid);
+    expect(verifyIdentity({
+      pidfilePid: readPidFile(sb.dataDir),
+      sidecar: readSidecar(sb.dataDir),
+      readStartTime: readProcessStartTimeMs,
+    })).toEqual({ kind: "verified", pid: managed.pid });
+  }),
+  850_000,
 );

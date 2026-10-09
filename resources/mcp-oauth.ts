@@ -6,11 +6,9 @@
  * urlPath subroute — its OWN dispatch chain, so flair's default auth-middleware
  * never runs for /mcp and can't clobber the Bearer challenge.
  *
- * ── Default-OFF (byte-identical when off) ───────────────────────────────────
- * The route is registered ONLY when `FLAIR_MCP_OAUTH` is truthy. When off, this
- * module does NOTHING at load — no `server.http` call, no `@harperfast/oauth`
- * import, no config injection. flair's default auth chain and prod behavior are
- * unchanged. This is the no-op contract the flag guarantees.
+ * With MCP disabled, registration does not mount `/mcp`. At load, the guard
+ * clears GitHub credentials when both are present and the redirect is missing,
+ * regardless of the flag (unless `FLAIR_MCP_NO_AUTOSTART` is set).
  *
  * The `@harperfast/oauth` authorization-server config itself (providers, mcp.*,
  * DCR gating) lives in `config.yaml` under the `@harperfast/oauth` key, but is
@@ -20,6 +18,11 @@
 
 import * as harper from "harper";
 import { mcpOAuthEnabled, mcpAuthConfig } from "./mcp-oauth-flag.js";
+// flair#2270: run the degraded-start guard BEFORE the @harperfast/oauth
+// component resolves its config. Imported for its module-load side effect (this
+// module is itself loaded during jsResource boot, ahead of the component);
+// `mcpOAuthDegraded()` is read below to report the state by variable name.
+import { mcpOAuthDegraded } from "./mcp-oauth-env-guard.js";
 import { checkMcpRateLimit } from "./rate-limit.js";
 import { MULTI_WORKER_GUARD_HTTP_NAME } from "./multi-worker-guard.js";
 
@@ -207,6 +210,19 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
       // "1" the /mcp route registers and every request 401s against a
       // component that never mounted its AS.
       reason: "Set FLAIR_MCP_OAUTH=true (and an issuer) to serve MCP over HTTP.",
+    });
+  }
+
+  // flair#2270: the install is enabled but a required OAuth variable is
+  // missing, so the auth server cannot serve this surface. Do NOT mount a
+  // guarded /mcp that could only fail closed against a provider that is not
+  // there — report MCP auth unavailable, by variable name.
+  const degraded = mcpOAuthDegraded();
+  if (degraded.degraded) {
+    return decide({
+      mounted: false,
+      status: "MCP auth unavailable",
+      reason: `${degraded.reason}. Set it (or re-run: flair mcp enable), then restart.`,
     });
   }
 

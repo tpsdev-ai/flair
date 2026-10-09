@@ -16,7 +16,11 @@ export const TEST_PAUSE_DIR_ENV = "FLAIR_TEST_PAUSE_DIR";
 export const PAUSE_LIMIT_MS = 20_000;
 const POLL_MS = 20;
 
-/** One point per owned transaction that writes from a row it read.
+/**
+ * The shape of a pause-point name: lowercase words joined by single hyphens
+ * (flair#2382). Removing the shared union list removes that merge conflict.
+ * Valid names keep their pause behaviour; malformed names throw
+ * `InvalidPausePointError` before the fault-injection gate.
  *
  * flair#2355 — a non-admin owner-scoped delete. Each delete has a `-pre` point
  * (after the pre-existing ownership read, before the delete's transactional
@@ -26,25 +30,15 @@ const POLL_MS = 20;
  * owns, except Memory's ordinary delete: withSharedWriteTransaction JOINS a
  * request-owned transaction when one exists and creates one otherwise.
  */
-export type TxnPausePoint =
-  | "supersede-close"
-  | "embedding-stamp-content-suffix"
-  | "integration-row-write"
-  | "memory-delete-pre"
-  | "memory-delete"
-  | "memory-skill-delete-pre"
-  | "memory-skill-delete"
-  | "credential-delete-pre"
-  | "credential-delete"
-  | "grant-delete-pre"
-  | "grant-delete"
-  | "workspace-delete-pre"
-  | "workspace-delete"
-  | "candidate-delete-pre"
-  | "candidate-delete"
-  | "relationship-delete-pre"
-  | "relationship-delete"
-  | "feed-dedup-repair";
+export const PAUSE_POINT_PATTERN = /^[a-z]+(?:-[a-z]+)*$/;
+
+/** The named error a pause-point name that does not match `PAUSE_POINT_PATTERN` is refused with (flair#2382). */
+export class InvalidPausePointError extends Error {
+  constructor(point: string) {
+    super(`invalid pause point name: ${JSON.stringify(point)}`);
+    this.name = "InvalidPausePointError";
+  }
+}
 
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -59,10 +53,11 @@ function logRefusal(): void {
 }
 
 export function txnPausePoint(
-  point: TxnPausePoint,
+  point: string,
   env: NodeJS.ProcessEnv = process.env,
   limitMs: number = PAUSE_LIMIT_MS,
 ): Promise<void> | undefined {
+  if (!PAUSE_POINT_PATTERN.test(point)) throw new InvalidPausePointError(point);
   if (env[TEST_FAULT_INJECTION_ENV] !== "1") return undefined;
   let armFd: number | undefined;
   let pausedFd: number | undefined;

@@ -1,0 +1,1 @@
+- **flair-client adds an asynchronous, size-bounded key loader; continuity capture redacts additional credential formats (#2086).**

@@ -4,21 +4,18 @@
  * scripts/lib/check-dep-ages-collect.mjs) checked against npm's own reading of
  * the same inputs.
  *
- * npm's reading is a VENDORED RECORDING, not a live call: this repo has no npm
- * dependency, so test/fixtures/dep-ages-npm-overrides/record.cjs ran npm's own
- * OverrideSet (@npmcli/arborist) and npm-package-arg over every case and saved
- * the result in npm-overrides.json, with the versions it used. The test is
- * offline and hermetic.
- *
  * For every rule npm derives, the gate must either refuse it (or an enclosing
  * rule), or agree with npm: a rule npm reads as an exact version is classified
  * exact under the same name and version; a range is not classified exact; a
- * rule that overrides nothing pins nothing. The gate may not add a rule npm
- * does not derive.
+ * rule that overrides nothing pins nothing. The gate may add no non-refused
+ * rule npm does not derive.
  */
 
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { classifyOverrides, type OverrideRule } from "../../scripts/lib/check-dep-ages-collect.mjs";
 
 interface NpmParsed {
@@ -44,6 +41,22 @@ interface ConformanceCase {
 const FIXTURE = JSON.parse(
   readFileSync(new URL("../fixtures/dep-ages-npm-overrides/npm-overrides.json", import.meta.url), "utf8"),
 ) as { recordedWith: Record<string, string>; cases: ConformanceCase[] };
+
+function locateInstalledNpm(): { modules?: string; reason?: string } {
+  try {
+    const root = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+    const modules = join(root, "npm", "node_modules");
+    for (const path of ["@npmcli/arborist/lib/override-set.js", "npm-package-arg", "semver"]) {
+      if (!existsSync(join(modules, path))) return { reason: `installed npm parser missing ${join(modules, path)}` };
+    }
+    return { modules };
+  } catch (err) {
+    return { reason: `cannot locate installed npm parser via npm root -g: ${err instanceof Error ? err.message : err}` };
+  }
+}
+
+const LIVE_NPM = locateInstalledNpm();
+if (!LIVE_NPM.modules && !process.env.CI) console.warn(`Skipping live npm parser check: ${LIVE_NPM.reason}`);
 
 const pathKey = (path: string[]) => JSON.stringify(path);
 
@@ -139,6 +152,20 @@ function summarize(rule: OverrideRule): string {
 }
 
 describe("override classification conforms to npm's recorded reading", () => {
+  (LIVE_NPM.modules || process.env.CI ? it : it.skip)("committed recording matches the installed npm parser case by case", () => {
+    if (!LIVE_NPM.modules) throw new Error(LIVE_NPM.reason);
+    const recorder = new URL("../fixtures/dep-ages-npm-overrides/record.cjs", import.meta.url);
+    let live: typeof FIXTURE;
+    try {
+      live = JSON.parse(execFileSync("node", [fileURLToPath(recorder), LIVE_NPM.modules, "--stdout"], { encoding: "utf8" }));
+    } catch (err) {
+      throw new Error(`installed npm parser failed: ${err instanceof Error ? err.message : err}`);
+    }
+    expect(live.cases.map((c) => c.name)).toEqual(FIXTURE.cases.map((c) => c.name));
+    for (const [index, recorded] of FIXTURE.cases.entries()) {
+      expect(live.cases[index].npm).toEqual(recorded.npm);
+    }
+  });
   it("the recording names the npm modules it came from and covers every expected case", () => {
     for (const pkg of ["npm", "@npmcli/arborist", "npm-package-arg", "semver"]) {
       expect(FIXTURE.recordedWith[pkg]).toMatch(/^\d+\.\d+\.\d+/);
@@ -174,7 +201,7 @@ describe("override classification conforms to npm's recorded reading", () => {
           expect(mine.version).toBe(rule.parsed.version!);
         }
       }
-      // The gate reads no rule npm does not derive.
+      // The gate reads no non-refused rule npm does not derive.
       const npmPaths = new Set(npmRules.map((r) => pathKey(r.path)));
       for (const r of ours) {
         if (r.kind !== "refused") expect(npmPaths.has(pathKey(r.path))).toBe(true);

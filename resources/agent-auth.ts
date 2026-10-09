@@ -20,6 +20,7 @@ import { databases } from "harper";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { ADMIN_ROLE, agentRecordIsAdmin } from "./agent-admin.js";
+import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -44,16 +45,31 @@ export const FLAIR_AGENT_USERNAME = "flair-agent";
 // Do not read this as "deactivation now works" — it works for NEW auth only.
 
 /**
- * Single shared predicate: is this principal deactivated?
- *
- * Called from BOTH verify paths (Ed25519 and Basic/agent-auth) so the
- * deactivation check cannot drift.  A nonexistent agent is not "deactivated" —
- * it will fail on other checks (missing publicKey, unknown user, etc.).
+ * Single shared predicate: re-exported from src/lib/principal-status.ts, which
+ * holds the rule. Called from BOTH verify paths (Ed25519 and Basic/agent-auth)
+ * and the human-readable `principal show`/`list` output (flair#2378).
  */
-export function isPrincipalDeactivated(agent: { status?: unknown } | null | undefined): boolean {
-  if (agent == null) return false;
-  if (agent.status === undefined) return false;
-  return agent.status !== "active";
+export { isPrincipalDeactivated };
+
+/** Named refusal when a credentialed Basic-auth path cannot READ the Agent row. */
+export const AGENT_LOOKUP_FAILED = "agent_lookup_failed";
+
+/**
+ * Read the Agent row for a credentialed Basic-auth caller, distinguishing a read
+ * that SUCCEEDED and found no such row (`{ ok: true, agent: null }`) from a read
+ * that FAILED (`{ ok: false }`). A failed read is never an absent principal: the
+ * caller refuses with a named error rather than admitting a caller it could not
+ * check. The same rule resources/AgentSeed.ts and resources/originator-instance.ts
+ * apply to their own reads.
+ */
+export async function readCredentialedPrincipal(
+  agentId: string,
+): Promise<{ ok: true; agent: any | null } | { ok: false; error: unknown }> {
+  try {
+    return { ok: true, agent: (await (databases as any).flair.Agent.get(agentId)) ?? null };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
@@ -193,7 +209,8 @@ export async function verifyAgentRequest(request: any): Promise<AgentAuth | null
 export type AgentAuthVerdict =
   | { kind: "internal" }                                  // no HTTP request → trusted in-process call
   | { kind: "agent"; agentId: string; isAdmin: boolean }  // valid TPS-Ed25519 signature
-  | { kind: "anonymous" };                                // request present, no valid agent → DENY
+  | { kind: "anonymous"; error?: string };                // request present, no valid agent → DENY
+                                                          // (`error` names a refused unreadable lookup)
 
 /**
  * Three-way auth verdict for a resource — the safe replacement for the old
@@ -350,6 +367,19 @@ function noteInternalVerdict(context: any): void {
   console.error(INTERNAL_BY_OMISSION_WARNING + "\n" + stack);
 }
 
+/**
+ * Refuse a credentialed Basic-auth caller whose Agent row could not be read:
+ * log the named error and return the deny verdict. A read that FAILED is never
+ * an absent principal and never admits (flair#2403).
+ */
+function refuseUnreadablePrincipal(agentId: string, error: unknown): AgentAuthVerdict {
+  console.error(
+    "agent-auth: the credentialed principal lookup failed, so the request was refused",
+    { agentId, error },
+  );
+  return { kind: "anonymous", error: AGENT_LOOKUP_FAILED };
+}
+
 export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> {
   const c = context?.request ?? context;
   if (!c) {
@@ -378,14 +408,16 @@ export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> 
   const user = context?.user ?? c.user;
   if (credentialed && user?.role?.permission?.super_user === true) {
     const agentId = String(user.username ?? "admin");
-    const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
-    if (isPrincipalDeactivated(agent)) return { kind: "anonymous" };
+    const read = await readCredentialedPrincipal(agentId);
+    if (!read.ok) return refuseUnreadablePrincipal(agentId, read.error);
+    if (isPrincipalDeactivated(read.agent)) return { kind: "anonymous" };
     return { kind: "agent", agentId, isAdmin: true };
   }
   if (credentialed && user?.username && user.username !== FLAIR_AGENT_USERNAME) {
     const agentId = String(user.username);
-    const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
-    if (isPrincipalDeactivated(agent)) return { kind: "anonymous" };
+    const read = await readCredentialedPrincipal(agentId);
+    if (!read.ok) return refuseUnreadablePrincipal(agentId, read.error);
+    if (isPrincipalDeactivated(read.agent)) return { kind: "anonymous" };
     return { kind: "agent", agentId, isAdmin: false };
   }
 

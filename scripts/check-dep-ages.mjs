@@ -2,20 +2,9 @@
 /**
  * check-dep-ages.mjs — supply-chain bake-time gate.
  *
- * Fails CI if any production dep declared in any workspace package was
- * published to the npm registry less than MIN_AGE_DAYS ago. Defends against
- * the "compromised package not yet detected" window — Mini Shai-Hulud
- * (Intercom npm Apr 30 2026), Ruby/Go sleeper packages (May 1), NuGet
- * typosquats (May 6), all in the past two weeks.
- *
  * The checked fields are `dependencies`, `optionalDependencies` and
- * `overrides` (root and every workspace package.json). An `overrides` entry
- * pins the version a transitive dep resolves to, so it can put a fresh
- * version in the tree without appearing in any `dependencies`.
- *
- * A known-good fresh SECURITY pin is exempted by a DATED entry naming the
- * advisory, in .github/dep-age-allowlist.json; an expired entry fails the
- * gate. Policy narrative: docs/supply-chain-policy.md.
+ * `overrides` (root and every workspace package.json). The gate checks exact
+ * override declarations, including conditional rules, not installed versions.
  *
  * THIS SCRIPT IS THE CLI ENTRY POINT. It imports the pure gate logic from
  * scripts/lib/check-dep-ages-collect.mjs and always runs the gate.
@@ -42,12 +31,11 @@
  *   1 — at least one dep too fresh
  *   2 — registry fetch failure (treated as fail, not warn — better safe), a
  *       REFUSED CI run (the fixture-root override present together with `--ci`),
- *       an unexpected argument, an unsupported `overrides` form, a manifest
- *       that cannot be read or parsed, or an invalid or expired exemption
- *       allowlist entry
+ *       an unexpected argument, an unsupported `overrides` form, or an invalid
+ *       or expired exemption allowlist entry
  */
 
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -71,34 +59,17 @@ if (ARGS.length > 0 && !IS_CI_GATE) {
 const REPO_ROOT = process.env.FLAIR_CHECK_DEP_AGES_ROOT ??
   join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/**
- * Read and parse a manifest. `label` names it in every error. A missing file
- * returns null (the caller decides whether it was required); any other read or
- * parse failure throws, naming the file — a manifest the gate cannot read is
- * never silently treated as absent.
- */
-function readManifest(path, label) {
-  let text;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (err) {
-    if (err?.code === "ENOENT") return null;
-    throw new Error(`cannot read ${label}: ${err?.message ?? err}`);
-  }
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    throw new Error(`${label} is not valid JSON: ${err?.message ?? err}`);
-  }
+function readPkg(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
 }
 
 // ── Dated exemption allowlist ──────────────────────────────────────────────
 //
 // A security fix can need a version younger than the bake window (a patch
 // release pinned through `overrides`, say). Those are enumerated with a hard
-// expiry in .github/dep-age-allowlist.json — one dated entry per pin, each
-// naming the advisory it fixes. An expired entry fails the gate: re-read the
-// reason before re-dating, or remove the entry.
+// expiry in .github/dep-age-allowlist.json.
+// An expired entry fails the gate: re-read the reason before re-dating, or
+// remove the entry.
 const ALLOWLIST_REL = join(".github", "dep-age-allowlist.json");
 const GHSA_RE = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -227,29 +198,25 @@ async function main() {
     ...(process.env.FLAIR_DEP_KEEP_CURRENT ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   ]);
 
-  // Build the set of (name, version) pairs to check. Every manifest the gate
-  // reads is named in any error: a workspace manifest it cannot read or parse
-  // fails the gate rather than being skipped.
+  // Build the set of (name, version) pairs to check
   const allPkgs = [];
-  const rootManifest = readManifest(join(REPO_ROOT, "package.json"), "package.json");
-  if (rootManifest === null) {
-    throw new Error("cannot read package.json: no such file");
-  }
-  allPkgs.push({ pkg: rootManifest, path: "package.json" });
+  allPkgs.push({ pkg: readPkg(join(REPO_ROOT, "package.json")), path: "package.json" });
 
   const packagesDir = join(REPO_ROOT, "packages");
   const { readdirSync } = await import("node:fs");
-  let workspaceEntries = [];
-  try {
-    workspaceEntries = readdirSync(packagesDir, { withFileTypes: true });
-  } catch (err) {
-    if (err?.code !== "ENOENT") throw new Error(`cannot read ${packagesDir}: ${err?.message ?? err}`);
-  }
-  for (const entry of workspaceEntries) {
-    const label = `packages/${entry.name}/package.json`;
-    const manifest = readManifest(join(packagesDir, entry.name, "package.json"), label);
-    // A workspace without a package.json is not a manifest — skip it.
-    if (manifest !== null) allPkgs.push({ pkg: manifest, path: label });
+  for (const entry of readdirSync(packagesDir)) {
+    const p = join(packagesDir, entry, "package.json");
+    try {
+      lstatSync(p);
+    } catch (err) {
+      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") continue;
+      throw new Error(`Cannot inspect ${p}: ${err?.message ?? err}`);
+    }
+    try {
+      allPkgs.push({ pkg: readPkg(p), path: `packages/${entry}/package.json` });
+    } catch (err) {
+      throw new Error(`Cannot read or parse ${p}: ${err?.message ?? err}`);
+    }
   }
 
   const unsupportedOverrides = collectUnsupportedOverrides(allPkgs);

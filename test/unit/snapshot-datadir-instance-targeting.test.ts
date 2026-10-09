@@ -40,6 +40,7 @@
 // are what actually execute them. The port-attribution test below is
 // deliberately platform-independent: it is both the Linux face of this bug
 // and the one that catches the regression everywhere.
+import { atomicSignalWriterSource } from "../helpers/atomic-signal-source.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -178,10 +179,11 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
       script,
       [
         `import { createServer } from "node:http";`,
-        `import { writeFileSync } from "node:fs";`,
+        `import * as fs from "node:fs";`,
+        atomicSignalWriterSource,
         // flair#1478: probeHealth requires Flair's public /Health shape, not a bare 200.
         `const srv = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"ok":true,"version":"0.53.0","buildCommit":null,"searchReady":true}'); });`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => publishSignal(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script, portFile], { stdout: "ignore", stderr: "ignore" });

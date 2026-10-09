@@ -1,1 +1,1 @@
-- **Vendor-pinned audit exceptions now validate npm-audit-reported node paths.** The gate rejects any reported path outside Harper. When all reported paths are under Harper, it compares each installed version and any audit-reported version with Harper's shrinkwrap pin. Empty node lists, unreadable required metadata, and version mismatches block the gate; errors name a node when one was reported.
+- **For npm-install vendor-pinned findings, the audit gate verifies locations and installed versions and refuses unverifiable evidence.**

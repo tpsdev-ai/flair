@@ -14,23 +14,19 @@
  * - `dependencies` / `optionalDependencies`: npm and bun install
  *   optionalDependencies by default (a failed install is non-fatal, not
  *   skipped), so they install just like any other dep and represent the same
- *   supply-chain risk. An entry is classified by the same version classifier
- *   the override grammar uses (classifyRegistrySpec): an exact version is
- *   age-checked, a range such as `1.x` is reported and not fetched as an exact
- *   version (see collectNonExactDeps).
- * - `overrides`: an entry here pins the version a transitive dep resolves to,
- *   so a fresh version can enter the tree without appearing in any
- *   `dependencies`. An `npm:` alias pins its target package; the alias TARGET
- *   is what installs, so it is the version age-checked. Nested override
- *   objects are read too (see classifyOverrides).
+ *   supply-chain risk. An entry is classified by the same classifier the
+ *   override grammar uses (classifyRegistrySpec): an exact version is
+ *   age-checked, a range such as `1.x` is not.
+ * - `overrides`: exact declarations are age-checked, including conditional
+ *   rules; the gate reads declarations, not installed versions. An `npm:`
+ *   alias is checked against its target. Nested override objects are read too.
  *
  * Exemptions, in all three fields: `@tpsdev-ai/*`, the keep-current list,
  * `workspace:`, `file:`/`link:`, `git+`/`github:`.
  *
  * `peerDependencies` are NOT checked: peers are resolved from a range by the
  * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed. `devDependencies` are NOT checked:
- * they do not ship in our tarballs.
+ * describe what actually gets installed.
  */
 
 /** Specifiers that name no registry version, so there is no publish date to check. */
@@ -52,8 +48,10 @@ function isNonRegistrySpecifier(spec) {
 //   package itself and whose other keys override its dependencies (nested);
 // - an object without a "." key overrides the package with its key's selector
 //   ("*" when there is none, which overrides nothing).
-// A value is classified the way npm-package-arg classifies a registry spec: an
-// exact version, a range, or something else. classifyOverrides refuses, with a
+// A value is classified into a supported subset of npm registry specs: an exact
+// version, a range, or something else. Some spellings npm accepts as versions
+// ("v1.0.0", build metadata) are deliberately not treated as exact here, so the
+// gate refuses them rather than guessing. classifyOverrides refuses, with a
 // reason, every rule it cannot classify as exact, range, exempt or none.
 // test/unit/check-dep-ages-npm-conformance.test.ts checks this against a
 // recording of npm's own parser.
@@ -61,7 +59,7 @@ function isNonRegistrySpecifier(spec) {
 /** A canonical exact version: MAJOR.MINOR.PATCH with an optional prerelease. */
 const EXACT_VERSION_RE =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
-/** semver's LOOSE version pattern ("v1.0.0", "=1.0.0", "1.0.0+build"). */
+/** A conservative regex for common loose version spellings ("v1.0.0", "=1.0.0", "1.0.0+build"); not a full copy of semver's loose grammar. */
 const LOOSE_VERSION_RE =
   /^[v=\s]*\d+\.\d+\.\d+(?:-?[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const XR = "(?:\\d+|[xX*])";
@@ -86,11 +84,7 @@ function isRange(spec) {
 
 const refused = (reason) => ({ kind: "refused", reason });
 
-/**
- * Classify a registry specifier: exact, range, or refused. One classifier for
- * both the override grammar and the `dependencies` / `optionalDependencies`
- * fields, so a specifier reads the same wherever it appears.
- */
+/** Classify a registry specifier: exact, range, or refused. */
 function classifyRegistrySpec(name, spec) {
   if (EXACT_VERSION_RE.test(spec)) return { kind: "exact", name, version: spec };
   if (LOOSE_VERSION_RE.test(spec)) {
@@ -139,7 +133,7 @@ const describeType = (v) => (v === null ? "null" : Array.isArray(v) ? "an array"
  * Classify every rule in one manifest's `overrides` value, nested rules
  * included. Each rule is { path, kind, ... } where `path` is the list of keys
  * from the top of `overrides` and `kind` is one of:
- * - "exact": `name`@`version` installs (an alias reports its target);
+ * - "exact": declares an exact target (an alias reports its target);
  * - "range": `name` is overridden with the range `spec`;
  * - "exempt": `spec` names no registry version (workspace:, file:, link:, git+, github:);
  * - "none": the rule overrides nothing (a "*" or "" value);
@@ -197,13 +191,11 @@ function formatOverridePath(path) {
  *
  * Exemptions: `@tpsdev-ai/*`, keep-current list, `workspace:`, `file:`/`link:`,
  * `git+`/`github:`. A `dependencies` / `optionalDependencies` entry is
- * classified by classifyRegistrySpec; only an exact version is age-checked (a
- * range is reported by collectNonExactDeps).
+ * classified by classifyRegistrySpec; only an exact version is age-checked.
  *
  * `peerDependencies` are NOT checked: peers are resolved from a range by the
  * consumer's install, so an exact-pin check of our declaration does not
- * describe what actually gets installed. `devDependencies` are NOT checked:
- * they do not ship in our tarballs.
+ * describe what actually gets installed.
  *
  * @param pkgs — package objects with paths
  * @param keepCurrent — the keep-current allow-list
@@ -215,12 +207,9 @@ export function collectDeps(pkgs, keepCurrent) {
   function record(name, spec, declaredIn) {
     if (name.startsWith("@tpsdev-ai/")) return; // workspace-internal — exempt
     if (keepCurrent.has(name)) return; // explicitly kept-current — exempt
-    if (isNonRegistrySpecifier(spec)) return; // names no registry version — exempt
-    // Only exact-pinned entries are age-checked. Classify the specifier with
-    // the same classifier the override grammar uses: this gate reads
-    // manifests, not the lockfile, so the version a range resolves to is
-    // outside its scope — a range such as "1.x" is reported (see
-    // collectNonExactDeps), never fetched as an exact version.
+    if (isNonRegistrySpecifier(spec)) return;
+    // Only check exact-pinned. This gate reads manifests, not the lockfile;
+    // the version a range resolves to is outside its scope.
     const classified = classifyRegistrySpec(name, spec);
     if (classified.kind !== "exact") return;
     const version = classified.version;
@@ -254,10 +243,8 @@ export function collectDeps(pkgs, keepCurrent) {
 
 /**
  * The `dependencies`, `optionalDependencies` and `overrides` entries the
- * bake-time gate does not age-check because they are ranges (nested override
- * rules included). The CLI prints them; the gate does not fail on them. One
- * line per (name, spec, declaredIn): a range declared in both `dependencies`
- * and `overrides` of one manifest is listed once.
+ * bake-time gate does not age-check because they are ranges. The CLI prints
+ * them; the gate does not fail on them. One line per (name, spec, declaredIn).
  *
  * @param pkgs — package objects with paths
  * @returns Array<{ name, spec, declaredIn }>

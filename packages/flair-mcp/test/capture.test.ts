@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -45,6 +45,37 @@ afterEach(() => {
 const SECRET = `ghp_${"a".repeat(24)}`;
 const BEARER = "Authorization: Bearer abcdefghijklmnopqrstuvwx123";
 const env = () => ({ FLAIR_AGENT_ID: "agent-a", FLAIR_CAPTURE_DIR: dir });
+
+for (const kind of ["file", "symlink"] as const) {
+  test(`the first-attempt marker preserves an existing ${kind}`, () => {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const marker = join(dir, ".first-lock-attempt");
+    const target = join(home, "marker-target");
+    writeFileSync(target, "keep-target", { mode: 0o600 });
+    if (kind === "file") writeFileSync(marker, "keep-marker", { mode: 0o600 });
+    else symlinkSync(target, marker);
+    expect(runCapture(failedBash("bun test foo"), {
+      env: { ...env(), FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT: "1", FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT_FILE: target },
+      dir,
+    }).reason).toBe("error-recorded");
+    expect(readFileSync(target, "utf8")).toBe("keep-target");
+    expect(lstatSync(marker).isSymbolicLink()).toBe(kind === "symlink");
+    if (kind === "file") expect(readFileSync(marker, "utf8")).toBe("keep-marker");
+    else expect(readlinkSync(marker)).toBe(target);
+  });
+}
+
+test("the first-attempt switch creates a private marker inside the capture directory", () => {
+  const target = join(home, "marker-target");
+  expect(runCapture(failedBash("bun test foo"), {
+    env: { ...env(), FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT: "1", FLAIR_CAPTURE_TEST_FIRST_LOCK_ATTEMPT_FILE: target },
+    dir,
+  }).reason).toBe("error-recorded");
+  const marker = join(dir, ".first-lock-attempt");
+  expect(readFileSync(marker, "utf8")).toBe("attempted");
+  expect(statSync(marker).mode & 0o777).toBe(0o600);
+  expect(existsSync(target)).toBe(false);
+});
 
 for (const [timing, recordCount] of [["between writes", 2], ["after the last write", 1]] as const) {
   test(`lock loss ${timing} returns write-failed and retains the spool`, async () => {
@@ -459,7 +490,10 @@ describe("capture spool", () => {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(lockPath(dir, "agent-a"), "held");
     expect(runCapture(stop("Decision: prefer host-a."), { env: env(), dir }).reason).toBe("refused");
-    expect(runCapture(failedBash("bun test foo"), { env: env(), dir }).reason).toBe("refused");
+    const warnings: string[] = [];
+    expect(runCapture(failedBash("bun test foo"), { env: env(), dir, warn: (message) => warnings.push(message) }).reason).toBe("refused");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("not recorded");
     expect(existsSync(spoolPath(dir, "agent-a"))).toBe(false);
     expect(existsSync(pendingPath(dir, "agent-a"))).toBe(false);
     const old = new Date(Date.now() - 60_000);

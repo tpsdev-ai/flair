@@ -81,5 +81,9 @@ fixture.recordedWith = {
   semver: version("semver"),
 };
 for (const c of fixture.cases) c.npm = record(c.overrides);
-writeFileSync(fixturePath, `${JSON.stringify(fixture, null, 2)}\n`);
-console.log(`recorded ${fixture.cases.length} cases with npm ${fixture.recordedWith.npm}`);
+if (process.argv[3] === "--stdout") {
+  process.stdout.write(JSON.stringify(fixture));
+} else {
+  writeFileSync(fixturePath, `${JSON.stringify(fixture, null, 2)}\n`);
+  console.log(`recorded ${fixture.cases.length} cases with npm ${fixture.recordedWith.npm}`);
+}
