@@ -57,7 +57,7 @@ add("Federation", ["writer:table.put#1"], "LATCH",
 // shared request context so a direct/internal caller is atomic (A1'' 0a).
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
-add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — preserves the stored stamp; noteWriteStamp (slice 1).");
+add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
 // ── LOCAL: replaces a stored stamp with the current local model ID ──
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "LOCAL",
   "Memory.patch() re-embed: puts the re-read row with a locally computed vector, getModelId() and updatedAt; noteWriteStamp.");
