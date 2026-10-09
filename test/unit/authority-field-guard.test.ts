@@ -82,6 +82,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/Federation.ts", via: "alias-source", needle: "put(mergedData)", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
+  { file: "resources/Memory.ts", via: "direct-put", needle: "embedding, embeddingModel: model, updatedAt }, owned)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
   { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivedRow, c", kind: "echo" },
