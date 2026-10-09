@@ -13,8 +13,8 @@
  * For every rule npm derives, the gate must either refuse it (or an enclosing
  * rule), or agree with npm: a rule npm reads as an exact version is classified
  * exact under the same name and version; a range is not classified exact; a
- * rule that overrides nothing pins nothing. The gate may not add a rule npm
- * does not derive.
+ * rule that overrides nothing pins nothing. The gate may add no non-refused
+ * rule npm does not derive.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -174,7 +174,7 @@ describe("override classification conforms to npm's recorded reading", () => {
           expect(mine.version).toBe(rule.parsed.version!);
         }
       }
-      // The gate reads no rule npm does not derive.
+      // The gate reads no non-refused rule npm does not derive.
       const npmPaths = new Set(npmRules.map((r) => pathKey(r.path)));
       for (const r of ours) {
         if (r.kind !== "refused") expect(npmPaths.has(pathKey(r.path))).toBe(true);

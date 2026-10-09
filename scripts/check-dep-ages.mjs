@@ -9,9 +9,8 @@
  * typosquats (May 6), all in the past two weeks.
  *
  * The checked fields are `dependencies`, `optionalDependencies` and
- * `overrides` (root and every workspace package.json). An `overrides` entry
- * pins the version a transitive dep resolves to, so it can put a fresh
- * version in the tree without appearing in any `dependencies`.
+ * `overrides` (root and every workspace package.json). The gate checks exact
+ * override declarations, including conditional rules, not installed versions.
  *
  * A known-good fresh SECURITY pin is exempted by a DATED entry naming the
  * advisory, in .github/dep-age-allowlist.json; an expired entry fails the

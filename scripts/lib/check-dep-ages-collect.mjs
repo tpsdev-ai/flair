@@ -15,11 +15,9 @@
  *   optionalDependencies by default (a failed install is non-fatal, not
  *   skipped), so they install just like any other dep and represent the same
  *   supply-chain risk.
- * - `overrides`: an entry here pins the version a transitive dep resolves to,
- *   so a fresh version can enter the tree without appearing in any
- *   `dependencies`. An `npm:` alias pins its target package; the alias TARGET
- *   is what installs, so it is the version age-checked. Nested override
- *   objects are read too (see classifyOverrides).
+ * - `overrides`: exact declarations are age-checked, including conditional
+ *   rules; the gate reads declarations, not installed versions. An `npm:`
+ *   alias is checked against its target. Nested override objects are read too.
  *
  * Exemptions, in all three fields: `@tpsdev-ai/*`, the keep-current list,
  * `workspace:`, `file:`/`link:`, `git+`/`github:`, and ranges (in
