@@ -1,0 +1,3796 @@
+{
+  "host": {
+    "hostname": "cursor",
+    "platform": "linux",
+    "release": "6.12.94+",
+    "arch": "x64",
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor",
+    "totalMem": 16791945216,
+    "freeMemAtStart": 4287094784,
+    "harperNode": "v22.22.2",
+    "runner": "/home/ubuntu/.bun/bin/bun v24.3.0",
+    "harper": "5.2.8",
+    "gitSha": "e4c8aeaec5f342b974bc682a6f4e45ac14f770d5",
+    "threads": 1,
+    "seed": 2047
+  },
+  "profile": {
+    "tokenSource": "test/bench/corpus-profiler/profiles/corpus-v2.json",
+    "scopeSource": "test/bench/corpus-profiler/profiles/live-flint-2026-07.json",
+    "tokenMean": 26.322709163346612,
+    "tokenStdev": 2.9043832789553963,
+    "tokenMin": 19,
+    "tokenMax": 33,
+    "zipfSlope": -0.6903414125045878,
+    "vocabTokens": 6607,
+    "vocabTypes": 2809,
+    "heapsBeta": 0.5,
+    "scopeWeights": [
+      898,
+      64,
+      46,
+      41,
+      21,
+      4,
+      4,
+      2
+    ]
+  },
+  "sizes": [
+    {
+      "n": 1000,
+      "logPath": "/tmp/bm25-spike-1000.log",
+      "health": {
+        "ok": true,
+        "tables": [
+          "SpikeBase",
+          "SpikeTerms",
+          "SpikeAlt",
+          "SpikeScopeStat",
+          "SpikeTermDf"
+        ],
+        "databases": [
+          "spike"
+        ]
+      },
+      "baseline": {
+        "arm": "baseline",
+        "n": 1000,
+        "seed": 2047,
+        "V": 5607,
+        "dominantScope": "a0",
+        "wallMs": 202.710411,
+        "docsPerSec": 4933.145737640481,
+        "put": {
+          "n": 1000,
+          "min": 0.120877,
+          "p50": 0.138976,
+          "p95": 0.349612,
+          "p99": 0.717852,
+          "max": 11.049459,
+          "mean": 0.18550979599999998
+        },
+        "tokenize": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null,
+          "mean": null
+        },
+        "putPlusTokenize": {
+          "n": 1000,
+          "min": 0.120877,
+          "p50": 0.138976,
+          "p95": 0.349612,
+          "p99": 0.717852,
+          "max": 11.049459,
+          "mean": 0.18550979599999998
+        },
+        "docLen": {
+          "n": 1000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.384
+        },
+        "uniqueTerms": {
+          "n": 1000,
+          "min": 17,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 25.903
+        },
+        "contentBytes": 133658,
+        "tfBytes": 0,
+        "termEntries": 0,
+        "meanIndexEntriesPerPut": 0,
+        "contentAgreesWithBaseline": null,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 823
+          },
+          {
+            "id": "a1",
+            "count": 70
+          },
+          {
+            "id": "a2",
+            "count": 44
+          },
+          {
+            "id": "a3",
+            "count": 31
+          },
+          {
+            "id": "a4",
+            "count": 22
+          },
+          {
+            "id": "a6",
+            "count": 8
+          },
+          {
+            "id": "a7",
+            "count": 1
+          },
+          {
+            "id": "a5",
+            "count": 1
+          }
+        ]
+      },
+      "terms": {
+        "arm": "terms",
+        "n": 1000,
+        "seed": 2047,
+        "V": 5607,
+        "dominantScope": "a0",
+        "wallMs": 460.613029,
+        "docsPerSec": 2171.0197867633483,
+        "put": {
+          "n": 1000,
+          "min": 0.231536,
+          "p50": 0.38467,
+          "p95": 0.715657,
+          "p99": 0.958925,
+          "max": 2.756107,
+          "mean": 0.4280423720000002
+        },
+        "tokenize": {
+          "n": 1000,
+          "min": 0.004485,
+          "p50": 0.006905,
+          "p95": 0.009801,
+          "p99": 0.012076,
+          "max": 0.03791,
+          "mean": 0.007234926000000003
+        },
+        "putPlusTokenize": {
+          "n": 1000,
+          "min": 0.23624199999999998,
+          "p50": 0.39259900000000003,
+          "p95": 0.7236589999999999,
+          "p99": 0.9673700000000001,
+          "max": 2.765136,
+          "mean": 0.4352772979999998
+        },
+        "docLen": {
+          "n": 1000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.384
+        },
+        "uniqueTerms": {
+          "n": 1000,
+          "min": 17,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 25.903
+        },
+        "contentBytes": 133658,
+        "tfBytes": 183785,
+        "termEntries": 25903,
+        "meanIndexEntriesPerPut": 25.903,
+        "contentAgreesWithBaseline": true,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 823
+          },
+          {
+            "id": "a1",
+            "count": 70
+          },
+          {
+            "id": "a2",
+            "count": 44
+          },
+          {
+            "id": "a3",
+            "count": 31
+          },
+          {
+            "id": "a4",
+            "count": 22
+          },
+          {
+            "id": "a6",
+            "count": 8
+          },
+          {
+            "id": "a7",
+            "count": 1
+          },
+          {
+            "id": "a5",
+            "count": 1
+          }
+        ]
+      },
+      "termsNoAgg": {
+        "arm": "terms-noagg",
+        "n": 1000,
+        "seed": 2047,
+        "V": 5607,
+        "dominantScope": "a0",
+        "wallMs": 240.331916,
+        "docsPerSec": 4160.912194450279,
+        "put": {
+          "n": 1000,
+          "min": 0.143529,
+          "p50": 0.185938,
+          "p95": 0.325971,
+          "p99": 0.649949,
+          "max": 2.254962,
+          "mean": 0.21278925699999987
+        },
+        "tokenize": {
+          "n": 1000,
+          "min": 0.00347,
+          "p50": 0.005059,
+          "p95": 0.007483,
+          "p99": 0.012057,
+          "max": 0.056315,
+          "mean": 0.005442264999999994
+        },
+        "putPlusTokenize": {
+          "n": 1000,
+          "min": 0.147222,
+          "p50": 0.191154,
+          "p95": 0.331057,
+          "p99": 0.655368,
+          "max": 2.2603299999999997,
+          "mean": 0.2182315220000003
+        },
+        "docLen": {
+          "n": 1000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.384
+        },
+        "uniqueTerms": {
+          "n": 1000,
+          "min": 17,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 25.903
+        },
+        "contentBytes": 133658,
+        "tfBytes": 183785,
+        "termEntries": 25903,
+        "meanIndexEntriesPerPut": 25.903,
+        "contentAgreesWithBaseline": null,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 823
+          },
+          {
+            "id": "a1",
+            "count": 70
+          },
+          {
+            "id": "a2",
+            "count": 44
+          },
+          {
+            "id": "a3",
+            "count": 31
+          },
+          {
+            "id": "a4",
+            "count": 22
+          },
+          {
+            "id": "a6",
+            "count": 8
+          },
+          {
+            "id": "a7",
+            "count": 1
+          },
+          {
+            "id": "a5",
+            "count": 1
+          }
+        ]
+      },
+      "termsDf": {
+        "arm": "terms-df",
+        "n": 1000,
+        "seed": 2047,
+        "V": 5607,
+        "dominantScope": "a0",
+        "wallMs": 2104.023095,
+        "docsPerSec": 475.27995409194875,
+        "put": {
+          "n": 1000,
+          "min": 1.257291,
+          "p50": 2.007638,
+          "p95": 2.663953,
+          "p99": 3.144747,
+          "max": 8.516173,
+          "mean": 2.0657904180000006
+        },
+        "tokenize": {
+          "n": 1000,
+          "min": 0.006171,
+          "p50": 0.008031,
+          "p95": 0.009979,
+          "p99": 0.011647,
+          "max": 0.019575,
+          "mean": 0.008189511999999994
+        },
+        "putPlusTokenize": {
+          "n": 1000,
+          "min": 1.264486,
+          "p50": 2.0162430000000002,
+          "p95": 2.6713769999999997,
+          "p99": 3.153909,
+          "max": 8.526106,
+          "mean": 2.0739799299999975
+        },
+        "docLen": {
+          "n": 1000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.384
+        },
+        "uniqueTerms": {
+          "n": 1000,
+          "min": 17,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 25.903
+        },
+        "contentBytes": 133658,
+        "tfBytes": 183785,
+        "termEntries": 25903,
+        "meanIndexEntriesPerPut": 25.903,
+        "contentAgreesWithBaseline": null,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 823
+          },
+          {
+            "id": "a1",
+            "count": 70
+          },
+          {
+            "id": "a2",
+            "count": 44
+          },
+          {
+            "id": "a3",
+            "count": 31
+          },
+          {
+            "id": "a4",
+            "count": 22
+          },
+          {
+            "id": "a6",
+            "count": 8
+          },
+          {
+            "id": "a7",
+            "count": 1
+          },
+          {
+            "id": "a5",
+            "count": 1
+          }
+        ]
+      },
+      "coldBuild": {
+        "scanned": 1000,
+        "coldBuildMs": 35.468965,
+        "oracleBuildMs": 28.261698,
+        "indexSize": 1000,
+        "postings": 25903,
+        "terms": 5137
+      },
+      "measure": {
+        "n": 1000,
+        "V": 5607,
+        "dominantScope": "a0",
+        "reps": 20,
+        "warmup": 2,
+        "limit": 50,
+        "coldBuildMs": 35.468965,
+        "oracleBuildMs": 28.261698,
+        "scanned": 1000,
+        "memory": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "n": 20,
+            "min": 0.189156,
+            "p50": 0.222351,
+            "p95": 0.686874,
+            "p99": 1.345779,
+            "max": 1.345779,
+            "mean": 0.3594860000000001
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t112",
+            "n": 20,
+            "min": 0.011054,
+            "p50": 0.011339,
+            "p95": 0.011826,
+            "p99": 0.012304,
+            "max": 0.012304,
+            "mean": 0.0114059
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "n": 20,
+            "min": 0.313607,
+            "p50": 0.324518,
+            "p95": 0.369967,
+            "p99": 0.73624,
+            "max": 0.73624,
+            "mean": 0.35172515000000004
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t112 t280 t561",
+            "n": 20,
+            "min": 0.01885,
+            "p50": 0.01932,
+            "p95": 0.022316,
+            "p99": 0.051332,
+            "max": 0.051332,
+            "mean": 0.0211566
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "n": 20,
+            "min": 0.222617,
+            "p50": 0.237504,
+            "p95": 0.447996,
+            "p99": 0.680961,
+            "max": 0.680961,
+            "mean": 0.2843581
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t112 t224 t336 t449 t561 t841 t1121 t1682",
+            "n": 20,
+            "min": 0.018224,
+            "p50": 0.018797,
+            "p95": 0.019342,
+            "p99": 0.020436,
+            "max": 0.020436,
+            "mean": 0.018883450000000003
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "n": 20,
+            "min": 0.109378,
+            "p50": 0.113517,
+            "p95": 0.119832,
+            "p99": 0.123139,
+            "max": 0.123139,
+            "mean": 0.11449780000000001
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t112",
+            "n": 20,
+            "min": 0.006605,
+            "p50": 0.006723,
+            "p95": 0.007179,
+            "p99": 0.007208,
+            "max": 0.007208,
+            "mean": 0.006804449999999999
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "n": 20,
+            "min": 0.183634,
+            "p50": 0.187705,
+            "p95": 0.204095,
+            "p99": 0.204558,
+            "max": 0.204558,
+            "mean": 0.1906142
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t112 t280 t561",
+            "n": 20,
+            "min": 0.010771,
+            "p50": 0.013613,
+            "p95": 0.02539,
+            "p99": 0.209638,
+            "max": 0.209638,
+            "mean": 0.02383845
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "n": 20,
+            "min": 0.241705,
+            "p50": 0.246614,
+            "p95": 0.267866,
+            "p99": 0.452771,
+            "max": 0.452771,
+            "mean": 0.25896825000000007
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t112 t224 t336 t449 t561 t841 t1121 t1682",
+            "n": 20,
+            "min": 0.019668,
+            "p50": 0.020274,
+            "p95": 0.02466,
+            "p99": 0.035056,
+            "max": 0.035056,
+            "mean": 0.021313549999999997
+          }
+        ],
+        "harperHybrid": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 2.388631,
+            "p50": 3.0471,
+            "p95": 4.533604,
+            "p99": 4.995629,
+            "max": 4.995629,
+            "mean": 3.22535945
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t112",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 0.412419,
+            "p50": 0.420249,
+            "p95": 0.449043,
+            "p99": 0.485013,
+            "max": 0.485013,
+            "mean": 0.4280102500000001
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 4.412064,
+            "p50": 4.981738,
+            "p95": 5.756172,
+            "p99": 6.298204,
+            "max": 6.298204,
+            "mean": 5.0621628
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t112 t280 t561",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 1.085097,
+            "p50": 1.10489,
+            "p95": 1.250639,
+            "p99": 1.811466,
+            "max": 1.811466,
+            "mean": 1.15329205
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 8.842836,
+            "p50": 9.516988,
+            "p95": 10.50994,
+            "p99": 10.779039,
+            "max": 10.779039,
+            "mean": 9.66604415
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t112 t224 t336 t449 t561 t841 t1121 t1682",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 2.811841,
+            "p50": 2.961263,
+            "p95": 3.783248,
+            "p99": 4.003344,
+            "max": 4.003344,
+            "mean": 3.0342110999999994
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 1.741198,
+            "p50": 1.820079,
+            "p95": 2.181242,
+            "p99": 2.645946,
+            "max": 2.645946,
+            "mean": 1.9102073999999998
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t112",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 0.275625,
+            "p50": 0.310477,
+            "p95": 0.408241,
+            "p99": 1.210892,
+            "max": 1.210892,
+            "mean": 0.3589876
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 3.727724,
+            "p50": 3.847228,
+            "p95": 4.437034,
+            "p99": 4.842897,
+            "max": 4.842897,
+            "mean": 4.057013799999999
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t112 t280 t561",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 0.749269,
+            "p50": 0.823149,
+            "p95": 0.927778,
+            "p99": 0.951675,
+            "max": 0.951675,
+            "mean": 0.8357180999999999
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 6.401577,
+            "p50": 7.085861,
+            "p95": 7.417967,
+            "p99": 7.420223,
+            "max": 7.420223,
+            "mean": 6.976429399999999
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t112 t224 t336 t449 t561 t841 t1121 t1682",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 20,
+            "min": 1.93198,
+            "p50": 2.046819,
+            "p95": 2.614653,
+            "p99": 2.760615,
+            "max": 2.760615,
+            "mean": 2.09890375
+          }
+        ],
+        "harperScopeScan": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 5.158777,
+            "p50": 6.248582,
+            "p95": 6.871642,
+            "p99": 6.871642,
+            "max": 6.871642,
+            "mean": 6.093000333333333
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t112",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 3.128703,
+            "p50": 3.343147,
+            "p95": 3.727499,
+            "p99": 3.727499,
+            "max": 3.727499,
+            "mean": 3.3997829999999998
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 12.329699,
+            "p50": 12.352651,
+            "p95": 12.582467,
+            "p99": 12.582467,
+            "max": 12.582467,
+            "mean": 12.421605666666666
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t112 t224 t336 t449 t561 t841 t1121 t1682",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 5.689235,
+            "p50": 5.837348,
+            "p95": 6.32278,
+            "p99": 6.32278,
+            "max": 6.32278,
+            "mean": 5.9497876666666665
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 6.294663,
+            "p50": 6.549666,
+            "p95": 7.635096,
+            "p99": 7.635096,
+            "max": 7.635096,
+            "mean": 6.826474999999999
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t112",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 2.91612,
+            "p50": 3.075896,
+            "p95": 3.880469,
+            "p99": 3.880469,
+            "max": 3.880469,
+            "mean": 3.2908283333333332
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 9.687617,
+            "p50": 9.758304,
+            "p95": 10.118513,
+            "p99": 10.118513,
+            "max": 10.118513,
+            "mean": 9.854811333333332
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t112 t224 t336 t449 t561 t841 t1121 t1682",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 4.658147,
+            "p50": 4.708291,
+            "p95": 5.056876,
+            "p99": 5.056876,
+            "max": 5.056876,
+            "mean": 4.807771333333332
+          }
+        ],
+        "plans": [
+          {
+            "query": "t1",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 445
+            }
+          },
+          {
+            "query": "t1 t3 t8",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 445
+            }
+          },
+          {
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 445
+            }
+          },
+          {
+            "query": "t1",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 445
+            }
+          },
+          {
+            "query": "t1 t3 t8",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 445
+            }
+          },
+          {
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 445
+            }
+          }
+        ],
+        "globalDfCount": {
+          "dist": {
+            "n": 20,
+            "min": 0.062196,
+            "p50": 0.06321,
+            "p95": 0.069966,
+            "p99": 0.076309,
+            "max": 0.076309,
+            "mean": 0.06418005
+          },
+          "value": 445,
+          "indexKeys": [
+            "agentId",
+            "archived",
+            "terms"
+          ]
+        },
+        "scopeAggregatePointRead": {
+          "n": 20,
+          "min": 0.016557,
+          "p50": 0.018121,
+          "p95": 0.037151,
+          "p99": 0.103249,
+          "max": 0.103249,
+          "mean": 0.0270288
+        },
+        "equivalence": [
+          {
+            "label": "head/1/single",
+            "match": true,
+            "expectedN": 823,
+            "gotN": 823,
+            "expectedAvgdl": 26.314702308626973,
+            "gotAvgdl": 26.314702308626973,
+            "expectedDf": [
+              364
+            ],
+            "gotDf": [
+              364
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/1/single",
+            "match": true,
+            "expectedN": 823,
+            "gotN": 823,
+            "expectedAvgdl": 26.314702308626973,
+            "gotAvgdl": 26.314702308626973,
+            "expectedDf": [
+              16
+            ],
+            "gotDf": [
+              16
+            ],
+            "compared": 16,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/3/single",
+            "match": true,
+            "expectedN": 823,
+            "gotN": 823,
+            "expectedAvgdl": 26.314702308626973,
+            "gotAvgdl": 26.314702308626973,
+            "expectedDf": [
+              364,
+              207,
+              125
+            ],
+            "gotDf": [
+              364,
+              207,
+              125
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/3/single",
+            "match": true,
+            "expectedN": 823,
+            "gotN": 823,
+            "expectedAvgdl": 26.314702308626973,
+            "gotAvgdl": 26.314702308626973,
+            "expectedDf": [
+              16,
+              9,
+              6
+            ],
+            "gotDf": [
+              16,
+              9,
+              6
+            ],
+            "compared": 30,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/8/single",
+            "match": true,
+            "expectedN": 823,
+            "gotN": 823,
+            "expectedAvgdl": 26.314702308626973,
+            "gotAvgdl": 26.314702308626973,
+            "expectedDf": [
+              364,
+              242,
+              168,
+              125,
+              62,
+              54,
+              27,
+              17
+            ],
+            "gotDf": [
+              364,
+              242,
+              168,
+              125,
+              62,
+              54,
+              27,
+              17
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/8/single",
+            "match": true,
+            "expectedN": 823,
+            "gotN": 823,
+            "expectedAvgdl": 26.314702308626973,
+            "gotAvgdl": 26.314702308626973,
+            "expectedDf": [
+              16,
+              15,
+              10,
+              12,
+              6,
+              1,
+              4,
+              1
+            ],
+            "gotDf": [
+              16,
+              15,
+              10,
+              12,
+              6,
+              1,
+              4,
+              1
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/1/broad",
+            "match": true,
+            "expectedN": 1000,
+            "gotN": 1000,
+            "expectedAvgdl": 26.384,
+            "gotAvgdl": 26.384,
+            "expectedDf": [
+              445
+            ],
+            "gotDf": [
+              445
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/1/broad",
+            "match": true,
+            "expectedN": 1000,
+            "gotN": 1000,
+            "expectedAvgdl": 26.384,
+            "gotAvgdl": 26.384,
+            "expectedDf": [
+              22
+            ],
+            "gotDf": [
+              22
+            ],
+            "compared": 22,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/3/broad",
+            "match": true,
+            "expectedN": 1000,
+            "gotN": 1000,
+            "expectedAvgdl": 26.384,
+            "gotAvgdl": 26.384,
+            "expectedDf": [
+              445,
+              248,
+              146
+            ],
+            "gotDf": [
+              445,
+              248,
+              146
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/3/broad",
+            "match": true,
+            "expectedN": 1000,
+            "gotN": 1000,
+            "expectedAvgdl": 26.384,
+            "gotAvgdl": 26.384,
+            "expectedDf": [
+              22,
+              11,
+              9
+            ],
+            "gotDf": [
+              22,
+              11,
+              9
+            ],
+            "compared": 41,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/8/broad",
+            "match": true,
+            "expectedN": 1000,
+            "gotN": 1000,
+            "expectedAvgdl": 26.384,
+            "gotAvgdl": 26.384,
+            "expectedDf": [
+              445,
+              296,
+              211,
+              146,
+              78,
+              61,
+              33,
+              20
+            ],
+            "gotDf": [
+              445,
+              296,
+              211,
+              146,
+              78,
+              61,
+              33,
+              20
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/8/broad",
+            "match": true,
+            "expectedN": 1000,
+            "gotN": 1000,
+            "expectedAvgdl": 26.384,
+            "gotAvgdl": 26.384,
+            "expectedDf": [
+              22,
+              17,
+              14,
+              15,
+              9,
+              1,
+              4,
+              1
+            ],
+            "gotDf": [
+              22,
+              17,
+              14,
+              15,
+              9,
+              1,
+              4,
+              1
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          }
+        ]
+      },
+      "dfProbe": {
+        "skipped": false,
+        "globalDf": 445,
+        "pointReads": {
+          "n": 20,
+          "min": 0.014098,
+          "p50": 0.015246,
+          "p95": 0.02473,
+          "p99": 0.049449,
+          "max": 0.049449,
+          "mean": 0.0175251
+        }
+      },
+      "disk": {
+        "emptyBytes": 2087978,
+        "afterBaseline": 2278863,
+        "afterTerms": 2900812,
+        "baselineFootprint": 190885,
+        "secondTableFootprint": 621949,
+        "estimatedSameRowGrowth": 431064,
+        "contentBytes": 133658,
+        "tfBytes": 183785,
+        "termEntries": 25903
+      },
+      "equivalence": {
+        "total": 12,
+        "matched": 12,
+        "idMatched": 12,
+        "failures": []
+      }
+    },
+    {
+      "n": 10000,
+      "logPath": "/tmp/bm25-spike-10000.log",
+      "health": {
+        "ok": true,
+        "tables": [
+          "SpikeBase",
+          "SpikeTerms",
+          "SpikeAlt",
+          "SpikeScopeStat",
+          "SpikeTermDf"
+        ],
+        "databases": [
+          "spike"
+        ]
+      },
+      "baseline": {
+        "arm": "baseline",
+        "n": 10000,
+        "seed": 2047,
+        "V": 17730,
+        "dominantScope": "a0",
+        "wallMs": 1067.24388,
+        "docsPerSec": 9369.929579732048,
+        "put": {
+          "n": 10000,
+          "min": 0.060715,
+          "p50": 0.070648,
+          "p95": 0.14611,
+          "p99": 0.385075,
+          "max": 11.957639,
+          "mean": 0.09346204370000007
+        },
+        "tokenize": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null,
+          "mean": null
+        },
+        "putPlusTokenize": {
+          "n": 10000,
+          "min": 0.060715,
+          "p50": 0.070648,
+          "p95": 0.14611,
+          "p99": 0.385075,
+          "max": 11.957639,
+          "mean": 0.09346204370000007
+        },
+        "docLen": {
+          "n": 10000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.3333
+        },
+        "uniqueTerms": {
+          "n": 10000,
+          "min": 18,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.0916
+        },
+        "contentBytes": 1453860,
+        "tfBytes": 0,
+        "termEntries": 0,
+        "meanIndexEntriesPerPut": 0,
+        "contentAgreesWithBaseline": null,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 8368
+          },
+          {
+            "id": "a1",
+            "count": 602
+          },
+          {
+            "id": "a2",
+            "count": 382
+          },
+          {
+            "id": "a3",
+            "count": 347
+          },
+          {
+            "id": "a4",
+            "count": 196
+          },
+          {
+            "id": "a6",
+            "count": 42
+          },
+          {
+            "id": "a5",
+            "count": 41
+          },
+          {
+            "id": "a7",
+            "count": 22
+          }
+        ]
+      },
+      "terms": {
+        "arm": "terms",
+        "n": 10000,
+        "seed": 2047,
+        "V": 17730,
+        "dominantScope": "a0",
+        "wallMs": 3356.604587,
+        "docsPerSec": 2979.2010768052974,
+        "put": {
+          "n": 10000,
+          "min": 0.217731,
+          "p50": 0.277218,
+          "p95": 0.514007,
+          "p99": 0.770958,
+          "max": 5.403267,
+          "mean": 0.3080938652999981
+        },
+        "tokenize": {
+          "n": 10000,
+          "min": 0.003366,
+          "p50": 0.004928,
+          "p95": 0.007076,
+          "p99": 0.008765,
+          "max": 0.051266,
+          "mean": 0.0051850623999999965
+        },
+        "putPlusTokenize": {
+          "n": 10000,
+          "min": 0.221261,
+          "p50": 0.282182,
+          "p95": 0.520932,
+          "p99": 0.777695,
+          "max": 5.411277999999999,
+          "mean": 0.3132789277000003
+        },
+        "docLen": {
+          "n": 10000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.3333
+        },
+        "uniqueTerms": {
+          "n": 10000,
+          "min": 18,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.0916
+        },
+        "contentBytes": 1453860,
+        "tfBytes": 1967145,
+        "termEntries": 260916,
+        "meanIndexEntriesPerPut": 26.0916,
+        "contentAgreesWithBaseline": true,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 8368
+          },
+          {
+            "id": "a1",
+            "count": 602
+          },
+          {
+            "id": "a2",
+            "count": 382
+          },
+          {
+            "id": "a3",
+            "count": 347
+          },
+          {
+            "id": "a4",
+            "count": 196
+          },
+          {
+            "id": "a6",
+            "count": 42
+          },
+          {
+            "id": "a5",
+            "count": 41
+          },
+          {
+            "id": "a7",
+            "count": 22
+          }
+        ]
+      },
+      "termsNoAgg": {
+        "arm": "terms-noagg",
+        "n": 10000,
+        "seed": 2047,
+        "V": 17730,
+        "dominantScope": "a0",
+        "wallMs": 2176.885853,
+        "docsPerSec": 4593.718125467554,
+        "put": {
+          "n": 10000,
+          "min": 0.13705,
+          "p50": 0.177879,
+          "p95": 0.232561,
+          "p99": 0.540901,
+          "max": 2.035356,
+          "mean": 0.19047126459999916
+        },
+        "tokenize": {
+          "n": 10000,
+          "min": 0.003253,
+          "p50": 0.004743,
+          "p95": 0.006156,
+          "p99": 0.008721,
+          "max": 0.055657,
+          "mean": 0.00489525829999998
+        },
+        "putPlusTokenize": {
+          "n": 10000,
+          "min": 0.140303,
+          "p50": 0.18269500000000002,
+          "p95": 0.238515,
+          "p99": 0.5490339999999999,
+          "max": 2.040807,
+          "mean": 0.19536652290000037
+        },
+        "docLen": {
+          "n": 10000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.3333
+        },
+        "uniqueTerms": {
+          "n": 10000,
+          "min": 18,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.0916
+        },
+        "contentBytes": 1453860,
+        "tfBytes": 1967145,
+        "termEntries": 260916,
+        "meanIndexEntriesPerPut": 26.0916,
+        "contentAgreesWithBaseline": null,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 8368
+          },
+          {
+            "id": "a1",
+            "count": 602
+          },
+          {
+            "id": "a2",
+            "count": 382
+          },
+          {
+            "id": "a3",
+            "count": 347
+          },
+          {
+            "id": "a4",
+            "count": 196
+          },
+          {
+            "id": "a6",
+            "count": 42
+          },
+          {
+            "id": "a5",
+            "count": 41
+          },
+          {
+            "id": "a7",
+            "count": 22
+          }
+        ]
+      },
+      "termsDf": {
+        "arm": "terms-df",
+        "n": 10000,
+        "seed": 2047,
+        "V": 17730,
+        "dominantScope": "a0",
+        "wallMs": 23012.113894,
+        "docsPerSec": 434.55373313649915,
+        "put": {
+          "n": 10000,
+          "min": 1.373798,
+          "p50": 2.199468,
+          "p95": 2.863575,
+          "p99": 3.361254,
+          "max": 17.756484,
+          "mean": 2.2601144281999903
+        },
+        "tokenize": {
+          "n": 10000,
+          "min": 0.005837,
+          "p50": 0.008171,
+          "p95": 0.009846,
+          "p99": 0.011528,
+          "max": 0.026196,
+          "mean": 0.008318005299999999
+        },
+        "putPlusTokenize": {
+          "n": 10000,
+          "min": 1.3806450000000001,
+          "p50": 2.207728,
+          "p95": 2.871905,
+          "p99": 3.369889,
+          "max": 17.766037,
+          "mean": 2.2684324335000063
+        },
+        "docLen": {
+          "n": 10000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.3333
+        },
+        "uniqueTerms": {
+          "n": 10000,
+          "min": 18,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.0916
+        },
+        "contentBytes": 1453860,
+        "tfBytes": 1967145,
+        "termEntries": 260916,
+        "meanIndexEntriesPerPut": 26.0916,
+        "contentAgreesWithBaseline": null,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 8368
+          },
+          {
+            "id": "a1",
+            "count": 602
+          },
+          {
+            "id": "a2",
+            "count": 382
+          },
+          {
+            "id": "a3",
+            "count": 347
+          },
+          {
+            "id": "a4",
+            "count": 196
+          },
+          {
+            "id": "a6",
+            "count": 42
+          },
+          {
+            "id": "a5",
+            "count": 41
+          },
+          {
+            "id": "a7",
+            "count": 22
+          }
+        ]
+      },
+      "coldBuild": {
+        "scanned": 10000,
+        "coldBuildMs": 246.586259,
+        "oracleBuildMs": 193.58381,
+        "indexSize": 10000,
+        "postings": 260916,
+        "terms": 17697
+      },
+      "measure": {
+        "n": 10000,
+        "V": 17730,
+        "dominantScope": "a0",
+        "reps": 12,
+        "warmup": 2,
+        "limit": 50,
+        "coldBuildMs": 246.586259,
+        "oracleBuildMs": 193.58381,
+        "scanned": 10000,
+        "memory": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "n": 12,
+            "min": 1.278722,
+            "p50": 1.616693,
+            "p95": 2.249306,
+            "p99": 2.249306,
+            "max": 2.249306,
+            "mean": 1.7402275833333334
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t355",
+            "n": 12,
+            "min": 0.015878,
+            "p50": 0.016177,
+            "p95": 0.019889,
+            "p99": 0.019889,
+            "max": 0.019889,
+            "mean": 0.016723083333333333
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "n": 12,
+            "min": 2.260354,
+            "p50": 2.308541,
+            "p95": 3.0178,
+            "p99": 3.0178,
+            "max": 3.0178,
+            "mean": 2.4489507500000003
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t355 t887 t1773",
+            "n": 12,
+            "min": 0.028424,
+            "p50": 0.028943,
+            "p95": 0.032426,
+            "p99": 0.032426,
+            "max": 0.032426,
+            "mean": 0.02955291666666667
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "n": 12,
+            "min": 3.053624,
+            "p50": 3.115354,
+            "p95": 4.538717,
+            "p99": 4.538717,
+            "max": 4.538717,
+            "mean": 3.3909122499999995
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t355 t709 t1064 t1418 t1773 t2660 t3546 t5319",
+            "n": 12,
+            "min": 0.051904,
+            "p50": 0.055741,
+            "p95": 0.497847,
+            "p99": 0.497847,
+            "max": 0.497847,
+            "mean": 0.10245691666666666
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "n": 12,
+            "min": 1.233805,
+            "p50": 1.255415,
+            "p95": 1.618963,
+            "p99": 1.618963,
+            "max": 1.618963,
+            "mean": 1.3446935
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t355",
+            "n": 12,
+            "min": 0.016451,
+            "p50": 0.016776,
+            "p95": 0.022448,
+            "p99": 0.022448,
+            "max": 0.022448,
+            "mean": 0.018146083333333334
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "n": 12,
+            "min": 2.183434,
+            "p50": 2.216171,
+            "p95": 3.165364,
+            "p99": 3.165364,
+            "max": 3.165364,
+            "mean": 2.390094916666667
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t355 t887 t1773",
+            "n": 12,
+            "min": 0.028719,
+            "p50": 0.029434,
+            "p95": 0.381753,
+            "p99": 0.381753,
+            "max": 0.381753,
+            "mean": 0.05890366666666667
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "n": 12,
+            "min": 2.968934,
+            "p50": 3.16541,
+            "p95": 3.999793,
+            "p99": 3.999793,
+            "max": 3.999793,
+            "mean": 3.395676416666667
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t355 t709 t1064 t1418 t1773 t2660 t3546 t5319",
+            "n": 12,
+            "min": 0.057647,
+            "p50": 0.059792,
+            "p95": 0.703194,
+            "p99": 0.703194,
+            "max": 0.703194,
+            "mean": 0.118497
+          }
+        ],
+        "harperHybrid": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 20.585658,
+            "p50": 21.443375,
+            "p95": 26.727765,
+            "p99": 26.727765,
+            "max": 26.727765,
+            "mean": 21.97495958333333
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t355",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 2.76614,
+            "p50": 2.909404,
+            "p95": 8.505742,
+            "p99": 8.505742,
+            "max": 8.505742,
+            "mean": 3.40068875
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 35.747146,
+            "p50": 36.055197,
+            "p95": 37.468614,
+            "p99": 37.468614,
+            "max": 37.468614,
+            "mean": 36.26425799999999
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t355 t887 t1773",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 8.027864,
+            "p50": 8.186374,
+            "p95": 8.3819,
+            "p99": 8.3819,
+            "max": 8.3819,
+            "mean": 8.179927916666665
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 67.992795,
+            "p50": 70.254451,
+            "p95": 72.340687,
+            "p99": 72.340687,
+            "max": 72.340687,
+            "mean": 70.35629891666666
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t355 t709 t1064 t1418 t1773 t2660 t3546 t5319",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 21.180889,
+            "p50": 21.395257,
+            "p95": 22.565024,
+            "p99": 22.565024,
+            "max": 22.565024,
+            "mean": 21.504268416666672
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 13.877065,
+            "p50": 14.494328,
+            "p95": 15.929409,
+            "p99": 15.929409,
+            "max": 15.929409,
+            "mean": 14.512856416666665
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t355",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 1.609326,
+            "p50": 1.679561,
+            "p95": 1.850124,
+            "p99": 1.850124,
+            "max": 1.850124,
+            "mean": 1.6993634166666667
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 27.856991,
+            "p50": 28.402939,
+            "p95": 29.085508,
+            "p99": 29.085508,
+            "max": 29.085508,
+            "mean": 28.46176741666667
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t355 t887 t1773",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 4.707209,
+            "p50": 4.857025,
+            "p95": 5.613765,
+            "p99": 5.613765,
+            "max": 5.613765,
+            "mean": 4.885961583333334
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 48.778647,
+            "p50": 49.260542,
+            "p95": 50.059822,
+            "p99": 50.059822,
+            "max": 50.059822,
+            "mean": 49.33014158333333
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t355 t709 t1064 t1418 t1773 t2660 t3546 t5319",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 12,
+            "min": 12.249751,
+            "p50": 12.354849,
+            "p95": 13.562178,
+            "p99": 13.562178,
+            "max": 13.562178,
+            "mean": 12.485290083333332
+          }
+        ],
+        "harperScopeScan": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 46.954275,
+            "p50": 50.084417,
+            "p95": 87.166918,
+            "p99": 87.166918,
+            "max": 87.166918,
+            "mean": 61.401869999999995
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t355",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 29.15867,
+            "p50": 29.273366,
+            "p95": 29.371283,
+            "p99": 29.371283,
+            "max": 29.371283,
+            "mean": 29.267772999999995
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 93.803302,
+            "p50": 95.813379,
+            "p95": 96.193977,
+            "p99": 96.193977,
+            "max": 96.193977,
+            "mean": 95.27021933333333
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t355 t709 t1064 t1418 t1773 t2660 t3546 t5319",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 48.072987,
+            "p50": 48.274978,
+            "p95": 48.513872,
+            "p99": 48.513872,
+            "max": 48.513872,
+            "mean": 48.28727899999999
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 41.987991,
+            "p50": 42.021449,
+            "p95": 52.690478,
+            "p99": 52.690478,
+            "max": 52.690478,
+            "mean": 45.566639333333335
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t355",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 29.230266,
+            "p50": 29.264488,
+            "p95": 29.392676,
+            "p99": 29.392676,
+            "max": 29.392676,
+            "mean": 29.29581
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 77.435379,
+            "p50": 77.514939,
+            "p95": 77.585477,
+            "p99": 77.585477,
+            "max": 77.585477,
+            "mean": 77.51193166666665
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t355 t709 t1064 t1418 t1773 t2660 t3546 t5319",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 39.659708,
+            "p50": 39.741002,
+            "p95": 39.873498,
+            "p99": 39.873498,
+            "max": 39.873498,
+            "mean": 39.75806933333333
+          }
+        ],
+        "plans": [
+          {
+            "query": "t1",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 3401
+            }
+          },
+          {
+            "query": "t1 t3 t8",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 3401
+            }
+          },
+          {
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 3401
+            }
+          },
+          {
+            "query": "t1",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 3401
+            }
+          },
+          {
+            "query": "t1 t3 t8",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 3401
+            }
+          },
+          {
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 3401
+            }
+          }
+        ],
+        "globalDfCount": {
+          "dist": {
+            "n": 20,
+            "min": 0.433552,
+            "p50": 0.451678,
+            "p95": 0.457394,
+            "p99": 0.458794,
+            "max": 0.458794,
+            "mean": 0.44992204999999996
+          },
+          "value": 3401,
+          "indexKeys": [
+            "agentId",
+            "archived",
+            "terms"
+          ]
+        },
+        "scopeAggregatePointRead": {
+          "n": 20,
+          "min": 0.021422,
+          "p50": 0.022178,
+          "p95": 0.029061,
+          "p99": 0.156053,
+          "max": 0.156053,
+          "mean": 0.029727700000000003
+        },
+        "equivalence": [
+          {
+            "label": "head/1/single",
+            "match": true,
+            "expectedN": 8368,
+            "gotN": 8368,
+            "expectedAvgdl": 26.319909177820268,
+            "gotAvgdl": 26.319909177820268,
+            "expectedDf": [
+              2840
+            ],
+            "gotDf": [
+              2840
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/1/single",
+            "match": true,
+            "expectedN": 8368,
+            "gotN": 8368,
+            "expectedAvgdl": 26.319909177820268,
+            "gotAvgdl": 26.319909177820268,
+            "expectedDf": [
+              58
+            ],
+            "gotDf": [
+              58
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/3/single",
+            "match": true,
+            "expectedN": 8368,
+            "gotN": 8368,
+            "expectedAvgdl": 26.319909177820268,
+            "gotAvgdl": 26.319909177820268,
+            "expectedDf": [
+              2840,
+              1449,
+              763
+            ],
+            "gotDf": [
+              2840,
+              1449,
+              763
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/3/single",
+            "match": true,
+            "expectedN": 8368,
+            "gotN": 8368,
+            "expectedAvgdl": 26.319909177820268,
+            "gotAvgdl": 26.319909177820268,
+            "expectedDf": [
+              58,
+              27,
+              21
+            ],
+            "gotDf": [
+              58,
+              27,
+              21
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/8/single",
+            "match": true,
+            "expectedN": 8368,
+            "gotN": 8368,
+            "expectedAvgdl": 26.319909177820268,
+            "gotAvgdl": 26.319909177820268,
+            "expectedDf": [
+              2840,
+              1858,
+              1201,
+              763,
+              492,
+              313,
+              201,
+              124
+            ],
+            "gotDf": [
+              2840,
+              1858,
+              1201,
+              763,
+              492,
+              313,
+              201,
+              124
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/8/single",
+            "match": true,
+            "expectedN": 8368,
+            "gotN": 8368,
+            "expectedAvgdl": 26.319909177820268,
+            "gotAvgdl": 26.319909177820268,
+            "expectedDf": [
+              58,
+              35,
+              29,
+              20,
+              21,
+              14,
+              13,
+              8
+            ],
+            "gotDf": [
+              58,
+              35,
+              29,
+              20,
+              21,
+              14,
+              13,
+              8
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/1/broad",
+            "match": true,
+            "expectedN": 10000,
+            "gotN": 10000,
+            "expectedAvgdl": 26.3333,
+            "gotAvgdl": 26.3333,
+            "expectedDf": [
+              3401
+            ],
+            "gotDf": [
+              3401
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/1/broad",
+            "match": true,
+            "expectedN": 10000,
+            "gotN": 10000,
+            "expectedAvgdl": 26.3333,
+            "gotAvgdl": 26.3333,
+            "expectedDf": [
+              71
+            ],
+            "gotDf": [
+              71
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/3/broad",
+            "match": true,
+            "expectedN": 10000,
+            "gotN": 10000,
+            "expectedAvgdl": 26.3333,
+            "gotAvgdl": 26.3333,
+            "expectedDf": [
+              3401,
+              1727,
+              919
+            ],
+            "gotDf": [
+              3401,
+              1727,
+              919
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/3/broad",
+            "match": true,
+            "expectedN": 10000,
+            "gotN": 10000,
+            "expectedAvgdl": 26.3333,
+            "gotAvgdl": 26.3333,
+            "expectedDf": [
+              71,
+              29,
+              31
+            ],
+            "gotDf": [
+              71,
+              29,
+              31
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/8/broad",
+            "match": true,
+            "expectedN": 10000,
+            "gotN": 10000,
+            "expectedAvgdl": 26.3333,
+            "gotAvgdl": 26.3333,
+            "expectedDf": [
+              3401,
+              2213,
+              1430,
+              919,
+              595,
+              371,
+              242,
+              148
+            ],
+            "gotDf": [
+              3401,
+              2213,
+              1430,
+              919,
+              595,
+              371,
+              242,
+              148
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/8/broad",
+            "match": true,
+            "expectedN": 10000,
+            "gotN": 10000,
+            "expectedAvgdl": 26.3333,
+            "gotAvgdl": 26.3333,
+            "expectedDf": [
+              71,
+              44,
+              34,
+              26,
+              31,
+              17,
+              15,
+              9
+            ],
+            "gotDf": [
+              71,
+              44,
+              34,
+              26,
+              31,
+              17,
+              15,
+              9
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          }
+        ]
+      },
+      "dfProbe": {
+        "skipped": false,
+        "globalDf": 3401,
+        "pointReads": {
+          "n": 20,
+          "min": 0.014102,
+          "p50": 0.015518,
+          "p95": 0.026612,
+          "p99": 0.054055,
+          "max": 0.054055,
+          "mean": 0.01817195
+        }
+      },
+      "disk": {
+        "emptyBytes": 2087919,
+        "afterBaseline": 4113033,
+        "afterTerms": 10735559,
+        "baselineFootprint": 2025114,
+        "secondTableFootprint": 6622526,
+        "estimatedSameRowGrowth": 4597412,
+        "contentBytes": 1453860,
+        "tfBytes": 1967145,
+        "termEntries": 260916
+      },
+      "equivalence": {
+        "total": 12,
+        "matched": 12,
+        "idMatched": 12,
+        "failures": []
+      }
+    },
+    {
+      "n": 100000,
+      "logPath": "/tmp/bm25-spike-100000.log",
+      "health": {
+        "ok": true,
+        "tables": [
+          "SpikeBase",
+          "SpikeTerms",
+          "SpikeAlt",
+          "SpikeScopeStat",
+          "SpikeTermDf"
+        ],
+        "databases": [
+          "spike"
+        ]
+      },
+      "baseline": {
+        "arm": "baseline",
+        "n": 100000,
+        "seed": 2047,
+        "V": 56068,
+        "dominantScope": "a0",
+        "wallMs": 9027.186911,
+        "docsPerSec": 11077.648107423793,
+        "put": {
+          "n": 100000,
+          "min": 0.053027,
+          "p50": 0.068285,
+          "p95": 0.098595,
+          "p99": 0.293258,
+          "max": 12.596526,
+          "mean": 0.0774270457199993
+        },
+        "tokenize": {
+          "n": 0,
+          "min": null,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null,
+          "mean": null
+        },
+        "putPlusTokenize": {
+          "n": 100000,
+          "min": 0.053027,
+          "p50": 0.068285,
+          "p95": 0.098595,
+          "p99": 0.293258,
+          "max": 12.596526,
+          "mean": 0.0774270457199993
+        },
+        "docLen": {
+          "n": 100000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.31682
+        },
+        "uniqueTerms": {
+          "n": 100000,
+          "min": 17,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.19653
+        },
+        "contentBytes": 15694799,
+        "tfBytes": 0,
+        "termEntries": 0,
+        "meanIndexEntriesPerPut": 0,
+        "contentAgreesWithBaseline": null,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 83129
+          },
+          {
+            "id": "a1",
+            "count": 5841
+          },
+          {
+            "id": "a2",
+            "count": 4300
+          },
+          {
+            "id": "a3",
+            "count": 3823
+          },
+          {
+            "id": "a4",
+            "count": 1968
+          },
+          {
+            "id": "a5",
+            "count": 397
+          },
+          {
+            "id": "a6",
+            "count": 349
+          },
+          {
+            "id": "a7",
+            "count": 193
+          }
+        ]
+      },
+      "terms": {
+        "arm": "terms",
+        "n": 100000,
+        "seed": 2047,
+        "V": 56068,
+        "dominantScope": "a0",
+        "wallMs": 37313.371683,
+        "docsPerSec": 2680.0043922474065,
+        "put": {
+          "n": 100000,
+          "min": 0.233672,
+          "p50": 0.317047,
+          "p95": 0.491002,
+          "p99": 0.962081,
+          "max": 15.95139,
+          "mean": 0.34424983231000283
+        },
+        "tokenize": {
+          "n": 100000,
+          "min": 0.003509,
+          "p50": 0.005123,
+          "p95": 0.007014,
+          "p99": 0.009186,
+          "max": 0.065216,
+          "mean": 0.005326233059999995
+        },
+        "putPlusTokenize": {
+          "n": 100000,
+          "min": 0.237805,
+          "p50": 0.322299,
+          "p95": 0.498383,
+          "p99": 0.9698629999999999,
+          "max": 15.958185,
+          "mean": 0.3495760653700016
+        },
+        "docLen": {
+          "n": 100000,
+          "min": 19,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.31682
+        },
+        "uniqueTerms": {
+          "n": 100000,
+          "min": 17,
+          "p50": 26,
+          "p95": 31,
+          "p99": 33,
+          "max": 33,
+          "mean": 26.19653
+        },
+        "contentBytes": 15694799,
+        "tfBytes": 20891459,
+        "termEntries": 2619653,
+        "meanIndexEntriesPerPut": 26.19653,
+        "contentAgreesWithBaseline": true,
+        "scopes": [
+          {
+            "id": "a0",
+            "count": 83129
+          },
+          {
+            "id": "a1",
+            "count": 5841
+          },
+          {
+            "id": "a2",
+            "count": 4300
+          },
+          {
+            "id": "a3",
+            "count": 3823
+          },
+          {
+            "id": "a4",
+            "count": 1968
+          },
+          {
+            "id": "a5",
+            "count": 397
+          },
+          {
+            "id": "a6",
+            "count": 349
+          },
+          {
+            "id": "a7",
+            "count": 193
+          }
+        ]
+      },
+      "termsNoAgg": null,
+      "termsDf": null,
+      "coldBuild": {
+        "scanned": 100000,
+        "coldBuildMs": 2648.466402,
+        "oracleBuildMs": 2256.068823,
+        "indexSize": 100000,
+        "postings": 2619653,
+        "terms": 56068
+      },
+      "measure": {
+        "n": 100000,
+        "V": 56068,
+        "dominantScope": "a0",
+        "reps": 8,
+        "warmup": 2,
+        "limit": 50,
+        "coldBuildMs": 2648.466402,
+        "oracleBuildMs": 2256.068823,
+        "scanned": 100000,
+        "memory": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "n": 8,
+            "min": 13.327777,
+            "p50": 14.746527,
+            "p95": 24.851903,
+            "p99": 24.851903,
+            "max": 24.851903,
+            "mean": 16.40295025
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1121",
+            "n": 8,
+            "min": 0.073626,
+            "p50": 0.085501,
+            "p95": 0.251224,
+            "p99": 0.251224,
+            "max": 0.251224,
+            "mean": 0.107232625
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "n": 8,
+            "min": 22.8035,
+            "p50": 24.363086,
+            "p95": 26.193586,
+            "p99": 26.193586,
+            "max": 26.193586,
+            "mean": 24.43884475
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1121 t2803 t5607",
+            "n": 8,
+            "min": 0.119344,
+            "p50": 0.122634,
+            "p95": 0.140325,
+            "p99": 0.140325,
+            "max": 0.140325,
+            "mean": 0.12853737499999998
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "n": 8,
+            "min": 39.071453,
+            "p50": 40.753453,
+            "p95": 46.630287,
+            "p99": 46.630287,
+            "max": 46.630287,
+            "mean": 41.363553
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1121 t2243 t3364 t4485 t5607 t8410 t11214 t16820",
+            "n": 8,
+            "min": 0.285386,
+            "p50": 0.290444,
+            "p95": 0.307036,
+            "p99": 0.307036,
+            "max": 0.307036,
+            "mean": 0.29470687500000003
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "n": 8,
+            "min": 13.304535,
+            "p50": 13.798637,
+            "p95": 16.775532,
+            "p99": 16.775532,
+            "max": 16.775532,
+            "mean": 14.302984749999998
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1121",
+            "n": 8,
+            "min": 0.049237,
+            "p50": 0.050666,
+            "p95": 0.072211,
+            "p99": 0.072211,
+            "max": 0.072211,
+            "mean": 0.054056875000000004
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "n": 8,
+            "min": 23.374425,
+            "p50": 25.199424,
+            "p95": 43.386249,
+            "p99": 43.386249,
+            "max": 43.386249,
+            "mean": 27.216981
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1121 t2803 t5607",
+            "n": 8,
+            "min": 0.120294,
+            "p50": 0.129358,
+            "p95": 0.152197,
+            "p99": 0.152197,
+            "max": 0.152197,
+            "mean": 0.130932875
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "n": 8,
+            "min": 35.102961,
+            "p50": 37.355505,
+            "p95": 42.912696,
+            "p99": 42.912696,
+            "max": 42.912696,
+            "mean": 37.98603324999999
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1121 t2243 t3364 t4485 t5607 t8410 t11214 t16820",
+            "n": 8,
+            "min": 0.267998,
+            "p50": 0.283331,
+            "p95": 1.394629,
+            "p99": 1.394629,
+            "max": 1.394629,
+            "mean": 0.42594537499999996
+          }
+        ],
+        "harperHybrid": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 141.882914,
+            "p50": 144.003864,
+            "p95": 153.294806,
+            "p99": 153.294806,
+            "max": 153.294806,
+            "mean": 145.903859375
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1121",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 28.513771,
+            "p50": 28.677549,
+            "p95": 29.489885,
+            "p99": 29.489885,
+            "max": 29.489885,
+            "mean": 28.768889125
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 303.861434,
+            "p50": 317.366622,
+            "p95": 330.059537,
+            "p99": 330.059537,
+            "max": 330.059537,
+            "mean": 318.9922675
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1121 t2803 t5607",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 84.1103,
+            "p50": 84.780761,
+            "p95": 86.143655,
+            "p99": 86.143655,
+            "max": 86.143655,
+            "mean": 84.826495125
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 584.411296,
+            "p50": 609.623105,
+            "p95": 639.25019,
+            "p99": 639.25019,
+            "max": 639.25019,
+            "mean": 610.3577535000001
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1121 t2243 t3364 t4485 t5607 t8410 t11214 t16820",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 225.028767,
+            "p50": 226.113848,
+            "p95": 244.947297,
+            "p99": 244.947297,
+            "max": 244.947297,
+            "mean": 230.061316375
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 138.905685,
+            "p50": 145.436298,
+            "p95": 151.512128,
+            "p99": 151.512128,
+            "max": 151.512128,
+            "mean": 146.75558975
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1121",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 15.728672,
+            "p50": 15.837711,
+            "p95": 16.625834,
+            "p99": 16.625834,
+            "max": 16.625834,
+            "mean": 15.945184875
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1 t3 t8",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 291.294034,
+            "p50": 298.76546,
+            "p95": 319.503942,
+            "p99": 319.503942,
+            "max": 319.503942,
+            "mean": 304.53051049999993
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 3,
+            "terms": 3,
+            "query": "t1121 t2803 t5607",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 46.412102,
+            "p50": 46.672759,
+            "p95": 47.482215,
+            "p99": 47.482215,
+            "max": 47.482215,
+            "mean": 46.789627499999995
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 506.350069,
+            "p50": 522.494533,
+            "p95": 588.069262,
+            "p99": 588.069262,
+            "max": 588.069262,
+            "mean": 532.3181836250001
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1121 t2243 t3364 t4485 t5607 t8410 t11214 t16820",
+            "stats": "maintained-N-avgdl + df-from-postings",
+            "n": 8,
+            "min": 122.82631,
+            "p50": 123.789794,
+            "p95": 128.607507,
+            "p99": 128.607507,
+            "max": 128.607507,
+            "mean": 124.59032725
+          }
+        ],
+        "harperScopeScan": [
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 596.395476,
+            "p50": 608.92621,
+            "p95": 1054.640859,
+            "p99": 1054.640859,
+            "max": 1054.640859,
+            "mean": 753.3208483333334
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1121",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 442.560564,
+            "p50": 452.863187,
+            "p95": 468.684992,
+            "p99": 468.684992,
+            "max": 468.684992,
+            "mean": 454.70291433333335
+          },
+          {
+            "scope": "single",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 1025.98771,
+            "p50": 1034.742301,
+            "p95": 1048.888733,
+            "p99": 1048.888733,
+            "max": 1048.888733,
+            "mean": 1036.5395813333334
+          },
+          {
+            "scope": "single",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1121 t2243 t3364 t4485 t5607 t8410 t11214 t16820",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 653.945157,
+            "p50": 660.673127,
+            "p95": 756.538699,
+            "p99": 756.538699,
+            "max": 756.538699,
+            "mean": 690.3856609999999
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 703.646297,
+            "p50": 723.733514,
+            "p95": 818.60141,
+            "p99": 818.60141,
+            "max": 818.60141,
+            "mean": 748.660407
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 1,
+            "terms": 1,
+            "query": "t1121",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 497.772965,
+            "p50": 503.956271,
+            "p95": 533.84767,
+            "p99": 533.84767,
+            "max": 533.84767,
+            "mean": 511.85896866666667
+          },
+          {
+            "scope": "broad",
+            "band": "head",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 1005.711005,
+            "p50": 1094.427234,
+            "p95": 1100.784656,
+            "p99": 1100.784656,
+            "max": 1100.784656,
+            "mean": 1066.9742983333333
+          },
+          {
+            "scope": "broad",
+            "band": "mid",
+            "requestedTerms": 8,
+            "terms": 8,
+            "query": "t1121 t2243 t3364 t4485 t5607 t8410 t11214 t16820",
+            "stats": "scan-scope-for-N-avgdl + df-from-postings",
+            "n": 3,
+            "min": 574.31171,
+            "p50": 598.732405,
+            "p95": 600.837773,
+            "p99": 600.837773,
+            "max": 600.837773,
+            "mean": 591.2939626666666
+          }
+        ],
+        "plans": [
+          {
+            "query": "t1",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 24906
+            }
+          },
+          {
+            "query": "t1 t3 t8",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 24906
+            }
+          },
+          {
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "scope": "a0",
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 24906
+            }
+          },
+          {
+            "query": "t1",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 24906
+            }
+          },
+          {
+            "query": "t1 t3 t8",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 24906
+            }
+          },
+          {
+            "query": "t1 t2 t4 t8 t16 t32 t64 t128",
+            "scope": null,
+            "lead": {
+              "attribute": "terms",
+              "comparator": "equals",
+              "value": "t1",
+              "estimated_count": 24906
+            }
+          }
+        ],
+        "globalDfCount": {
+          "dist": {
+            "n": 20,
+            "min": 3.771727,
+            "p50": 3.810942,
+            "p95": 3.89712,
+            "p99": 3.927758,
+            "max": 3.927758,
+            "mean": 3.8308132499999994
+          },
+          "value": 24906,
+          "indexKeys": [
+            "agentId",
+            "archived",
+            "terms"
+          ]
+        },
+        "scopeAggregatePointRead": {
+          "n": 20,
+          "min": 0.017605,
+          "p50": 0.020147,
+          "p95": 0.05127,
+          "p99": 0.231656,
+          "max": 0.231656,
+          "mean": 0.034361199999999995
+        },
+        "equivalence": [
+          {
+            "label": "head/1/single",
+            "match": true,
+            "expectedN": 83129,
+            "gotN": 83129,
+            "expectedAvgdl": 26.31831250225553,
+            "gotAvgdl": 26.31831250225553,
+            "expectedDf": [
+              20715
+            ],
+            "gotDf": [
+              20715
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/1/single",
+            "match": true,
+            "expectedN": 83129,
+            "gotN": 83129,
+            "expectedAvgdl": 26.31831250225553,
+            "gotAvgdl": 26.31831250225553,
+            "expectedDf": [
+              163
+            ],
+            "gotDf": [
+              163
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/3/single",
+            "match": true,
+            "expectedN": 83129,
+            "gotN": 83129,
+            "expectedAvgdl": 26.31831250225553,
+            "gotAvgdl": 26.31831250225553,
+            "expectedDf": [
+              20715,
+              10181,
+              5458
+            ],
+            "gotDf": [
+              20715,
+              10181,
+              5458
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/3/single",
+            "match": true,
+            "expectedN": 83129,
+            "gotN": 83129,
+            "expectedAvgdl": 26.31831250225553,
+            "gotAvgdl": 26.31831250225553,
+            "expectedDf": [
+              163,
+              98,
+              60
+            ],
+            "gotDf": [
+              163,
+              98,
+              60
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/8/single",
+            "match": true,
+            "expectedN": 83129,
+            "gotN": 83129,
+            "expectedAvgdl": 26.31831250225553,
+            "gotAvgdl": 26.31831250225553,
+            "expectedDf": [
+              20715,
+              13224,
+              8624,
+              5458,
+              3501,
+              2073,
+              1397,
+              841
+            ],
+            "gotDf": [
+              20715,
+              13224,
+              8624,
+              5458,
+              3501,
+              2073,
+              1397,
+              841
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/8/single",
+            "match": true,
+            "expectedN": 83129,
+            "gotN": 83129,
+            "expectedAvgdl": 26.31831250225553,
+            "gotAvgdl": 26.31831250225553,
+            "expectedDf": [
+              163,
+              111,
+              62,
+              75,
+              60,
+              53,
+              39,
+              19
+            ],
+            "gotDf": [
+              163,
+              111,
+              62,
+              75,
+              60,
+              53,
+              39,
+              19
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/1/broad",
+            "match": true,
+            "expectedN": 100000,
+            "gotN": 100000,
+            "expectedAvgdl": 26.31682,
+            "gotAvgdl": 26.31682,
+            "expectedDf": [
+              24906
+            ],
+            "gotDf": [
+              24906
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/1/broad",
+            "match": true,
+            "expectedN": 100000,
+            "gotN": 100000,
+            "expectedAvgdl": 26.31682,
+            "gotAvgdl": 26.31682,
+            "expectedDf": [
+              203
+            ],
+            "gotDf": [
+              203
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/3/broad",
+            "match": true,
+            "expectedN": 100000,
+            "gotN": 100000,
+            "expectedAvgdl": 26.31682,
+            "gotAvgdl": 26.31682,
+            "expectedDf": [
+              24906,
+              12359,
+              6597
+            ],
+            "gotDf": [
+              24906,
+              12359,
+              6597
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/3/broad",
+            "match": true,
+            "expectedN": 100000,
+            "gotN": 100000,
+            "expectedAvgdl": 26.31682,
+            "gotAvgdl": 26.31682,
+            "expectedDf": [
+              203,
+              116,
+              72
+            ],
+            "gotDf": [
+              203,
+              116,
+              72
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "head/8/broad",
+            "match": true,
+            "expectedN": 100000,
+            "gotN": 100000,
+            "expectedAvgdl": 26.31682,
+            "gotAvgdl": 26.31682,
+            "expectedDf": [
+              24906,
+              15983,
+              10359,
+              6597,
+              4238,
+              2482,
+              1673,
+              1002
+            ],
+            "gotDf": [
+              24906,
+              15983,
+              10359,
+              6597,
+              4238,
+              2482,
+              1673,
+              1002
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          },
+          {
+            "label": "mid/8/broad",
+            "match": true,
+            "expectedN": 100000,
+            "gotN": 100000,
+            "expectedAvgdl": 26.31682,
+            "gotAvgdl": 26.31682,
+            "expectedDf": [
+              203,
+              142,
+              77,
+              88,
+              72,
+              65,
+              48,
+              25
+            ],
+            "gotDf": [
+              203,
+              142,
+              77,
+              88,
+              72,
+              65,
+              48,
+              25
+            ],
+            "compared": 50,
+            "mismatches": 0,
+            "diffs": [],
+            "memoryIndexIdMatch": true
+          }
+        ]
+      },
+      "dfProbe": null,
+      "disk": {
+        "emptyBytes": 2088397,
+        "afterBaseline": 34547274,
+        "afterTerms": 171551161,
+        "baselineFootprint": 32458877,
+        "secondTableFootprint": 137003887,
+        "estimatedSameRowGrowth": 104545010,
+        "contentBytes": 15694799,
+        "tfBytes": 20891459,
+        "termEntries": 2619653
+      },
+      "equivalence": {
+        "total": 12,
+        "matched": 12,
+        "idMatched": 12,
+        "failures": []
+      }
+    }
+  ],
+  "decision": {
+    "recommendation": "do-not-adopt",
+    "gates": [
+      {
+        "id": "ingest-throughput",
+        "pass": false,
+        "detail": "terms docs/s 2680 vs baseline 11078 (75.8% regression, gate 20%)"
+      },
+      {
+        "id": "ingest-p95",
+        "pass": false,
+        "detail": "terms put+tokenize p95 0.50ms vs baseline put p95 0.10ms (5.05×, gate 1.2×)"
+      },
+      {
+        "id": "query-single-head-1",
+        "pass": false,
+        "detail": "single head 1-term p95 153ms vs memory 24.9ms (6.17×)"
+      },
+      {
+        "id": "query-single-mid-1",
+        "pass": false,
+        "detail": "single mid 1-term p95 29.5ms vs memory 0.25ms (117×)"
+      },
+      {
+        "id": "query-single-head-3",
+        "pass": false,
+        "detail": "single head 3-term p95 330ms vs memory 26.2ms (12.6×)"
+      },
+      {
+        "id": "query-single-mid-3",
+        "pass": false,
+        "detail": "single mid 3-term p95 86.1ms vs memory 0.14ms (614×)"
+      },
+      {
+        "id": "query-single-head-8",
+        "pass": false,
+        "detail": "single head 8-term p95 639ms vs memory 46.6ms (13.7×)"
+      },
+      {
+        "id": "query-single-mid-8",
+        "pass": false,
+        "detail": "single mid 8-term p95 245ms vs memory 0.31ms (798×)"
+      },
+      {
+        "id": "query-broad-head-1",
+        "pass": false,
+        "detail": "broad head 1-term p95 152ms vs memory 16.8ms (9.03×)"
+      },
+      {
+        "id": "query-broad-mid-1",
+        "pass": false,
+        "detail": "broad mid 1-term p95 16.6ms vs memory 0.07ms (230×)"
+      },
+      {
+        "id": "query-broad-head-3",
+        "pass": false,
+        "detail": "broad head 3-term p95 320ms vs memory 43.4ms (7.36×)"
+      },
+      {
+        "id": "query-broad-mid-3",
+        "pass": false,
+        "detail": "broad mid 3-term p95 47.5ms vs memory 0.15ms (312×)"
+      },
+      {
+        "id": "query-broad-head-8",
+        "pass": false,
+        "detail": "broad head 8-term p95 588ms vs memory 42.9ms (13.7×)"
+      },
+      {
+        "id": "query-broad-mid-8",
+        "pass": false,
+        "detail": "broad mid 8-term p95 129ms vs memory 1.39ms (92.2×)"
+      }
+    ],
+    "notes": [
+      "Ingest gate uses wall-clock docs/s and p95 of (Harper put + tokenize) versus today's put of the same row without a terms index. Tokenize is inside the indexed arm because the attribute cannot be written without it; it is also reported separately.",
+      "Query gate uses warmed p95. Head queries include the most frequent term. Mid queries sit off the head. Single scope is the dominant agent share from the live profile. Broad scope is the whole corpus.",
+      "Stats on the decision query are maintained per-scope N and sum(dl), plus df taken from the posting list the scorer has to read anyway."
+    ]
+  }
+}
