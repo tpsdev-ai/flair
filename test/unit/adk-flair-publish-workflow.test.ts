@@ -18,14 +18,19 @@ import { tempDir } from "../helpers/temp-dir.ts";
  * leak guard. `maintenance.auto=false` keeps git from spawning that command;
  * `gc.auto=0` disables the gc task behind it.
  */
-function noAutomaticMaintenance(): NodeJS.ProcessEnv {
+function noAutomaticMaintenance(inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const raw = inherited.GIT_CONFIG_COUNT;
+  if (raw !== undefined && raw !== "" && !/^\d+$/.test(raw)) {
+    throw new Error(`GIT_CONFIG_COUNT is not a non-negative integer: ${JSON.stringify(raw)}`);
+  }
+  const n = raw ? Number(raw) : 0;
   return {
-    ...process.env,
-    GIT_CONFIG_COUNT: "2",
-    GIT_CONFIG_KEY_0: "maintenance.auto",
-    GIT_CONFIG_VALUE_0: "false",
-    GIT_CONFIG_KEY_1: "gc.auto",
-    GIT_CONFIG_VALUE_1: "0",
+    ...inherited,
+    GIT_CONFIG_COUNT: String(n + 2),
+    [`GIT_CONFIG_KEY_${n}`]: "maintenance.auto",
+    [`GIT_CONFIG_VALUE_${n}`]: "false",
+    [`GIT_CONFIG_KEY_${n + 1}`]: "gc.auto",
+    [`GIT_CONFIG_VALUE_${n + 1}`]: "0",
   };
 }
 
@@ -103,6 +108,31 @@ describe("adk-flair publishing", () => {
     for (const step of job.steps) {
       expect(step.if).toBeUndefined();
       expect(step["continue-on-error"]).toBeUndefined();
+    }
+  });
+
+  test("git maintenance settings are appended after inherited GIT_CONFIG pairs", () => {
+    const empty = noAutomaticMaintenance({});
+    expect(empty).toEqual({
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "maintenance.auto", GIT_CONFIG_VALUE_0: "false",
+      GIT_CONFIG_KEY_1: "gc.auto", GIT_CONFIG_VALUE_1: "0",
+    });
+    expect(noAutomaticMaintenance({ GIT_CONFIG_COUNT: "0" })).toEqual(empty);
+    expect(noAutomaticMaintenance({ GIT_CONFIG_COUNT: "" })).toEqual(empty);
+    const inherited = {
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "user.name", GIT_CONFIG_VALUE_0: "Inherited",
+      GIT_CONFIG_KEY_1: "core.editor", GIT_CONFIG_VALUE_1: "true",
+    };
+    expect(noAutomaticMaintenance(inherited)).toEqual({
+      ...inherited,
+      GIT_CONFIG_COUNT: "4",
+      GIT_CONFIG_KEY_2: "maintenance.auto", GIT_CONFIG_VALUE_2: "false",
+      GIT_CONFIG_KEY_3: "gc.auto", GIT_CONFIG_VALUE_3: "0",
+    });
+    for (const bad of ["two", "-1", "1.5", " 2"]) {
+      expect(() => noAutomaticMaintenance({ GIT_CONFIG_COUNT: bad })).toThrow("GIT_CONFIG_COUNT is not a non-negative integer");
     }
   });
 
