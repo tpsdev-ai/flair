@@ -4,17 +4,21 @@
  * the watermark.
  *
  * Ack happens AFTER handoff and AFTER the receipt, and only through the last
- * successful event. A failed launch or a failed receipt write does not advance
- * the cursor — the event stays queued (at-least-once). Redelivery of an
- * already-launched event hits Cursor 409 and is treated as success, then the
- * receipt is retried and the event acked — no second launch.
+ * successful event. A failed launch, or a receipt write that failed for a
+ * transient or configuration reason, does not advance the cursor — the event
+ * stays queued (at-least-once). Redelivery of an already-launched event hits
+ * Cursor 409 and is treated as success, then the receipt is retried and the
+ * event acked — no second launch. A receipt the server PERMANENTLY refuses
+ * (400/409/413/422) is not retried: the launch is real and the receipt is
+ * provenance, not control, so the event is acked without it and the refusal is
+ * reported as `receiptRefused`.
  */
 
 import { wakeAgentId } from "./agent-id.js";
 import type { CatchupPort } from "./catchup.js";
 import type { CursorAgentClient, LaunchResult } from "./cursor-api.js";
 import { classifyDispatch, type DirectedDispatch } from "./dispatch.js";
-import { buildLaunchReceipt, type ReceiptStore } from "./receipt.js";
+import { buildLaunchReceipt, permanentReceiptRefusal, type ReceiptRefusal, type ReceiptStore } from "./receipt.js";
 
 export interface WakeItem {
   eventId: string;
@@ -24,8 +28,13 @@ export interface WakeItem {
   cursorAgentId?: string;
   url?: string;
   reason?: string;
-  /** flair#1944 — the launch receipt this handoff recorded. */
-  receipt?: "written" | "unchanged" | "failed";
+  /** flair#1944 — the launch receipt this handoff recorded ("refused": the server permanently refused it; acked without it). */
+  receipt?: "written" | "unchanged" | "failed" | "refused";
+}
+
+/** flair#1944 — a launch receipt the server permanently refused; the event was acked without it. */
+export interface WakeReceiptRefusal extends ReceiptRefusal {
+  eventId: string;
 }
 
 export interface WakeResult {
@@ -35,8 +44,10 @@ export interface WakeResult {
   skipped: number;
   acked: string | null;
   blocked: string | null;
-  /** flair#1944 — set when a launch receipt could not be written; the watermark is not advanced past it. */
+  /** flair#1944 — set when a launch receipt could not be written for a transient or configuration reason; the watermark is not advanced past it. */
   receiptFailed: string | null;
+  /** flair#1944 — receipts the server permanently refused (status + error code only); each event was acked without its receipt. */
+  receiptRefused: WakeReceiptRefusal[];
   items: WakeItem[];
 }
 
@@ -46,7 +57,7 @@ export interface WakeDeps {
   cursor: CursorAgentClient;
   /** flair#1944 — where launch receipts are recorded. Omitted: no receipt is written. */
   receipts?: ReceiptStore;
-  /** One line for a receipt that omits a value the server's grammar would refuse. */
+  /** One line for a receipt that omits a value the server's grammar would refuse, and one for a receipt the server refused. */
   log?: (line: string) => void;
   /** When true, classify only — no Cursor create, no receipt, no watermark ack. */
   dryRun?: boolean;
@@ -54,7 +65,17 @@ export interface WakeDeps {
 }
 
 function emptyResult(): WakeResult {
-  return { drained: 0, launched: 0, reused: 0, skipped: 0, acked: null, blocked: null, receiptFailed: null, items: [] };
+  return {
+    drained: 0,
+    launched: 0,
+    reused: 0,
+    skipped: 0,
+    acked: null,
+    blocked: null,
+    receiptFailed: null,
+    receiptRefused: [],
+    items: [],
+  };
 }
 
 function recordLaunch(result: WakeResult, dispatch: DirectedDispatch, launch: LaunchResult): void {
@@ -76,28 +97,44 @@ function recordLaunch(result: WakeResult, dispatch: DirectedDispatch, launch: La
  *
  * A receipt already present under the stable id is LEFT UNCHANGED — a replay
  * that reuses the agent (409) carries no url, and the stored receipt stands.
- * A read or write failure surfaces as `"failed"` (the caller keeps the
- * watermark back), never a thrown crash.
+ * A write the server PERMANENTLY refuses (permanentReceiptRefusal) surfaces as
+ * `"refused"` with its status and error code; the caller acks past it. Any
+ * other read or write failure surfaces as `"failed"` (the caller keeps the
+ * watermark back and the next cycle retries). Never a thrown crash.
  */
 async function recordLaunchReceipt(
   deps: WakeDeps,
   dispatch: DirectedDispatch,
   launch: LaunchResult,
-): Promise<{ status: "written" | "unchanged" | "failed" | "none"; error?: string }> {
+): Promise<
+  | { status: "written" | "unchanged" | "none" }
+  | { status: "failed"; error: string }
+  | { status: "refused"; refusal: ReceiptRefusal }
+> {
   const store = deps.receipts;
   if (!store) return { status: "none" };
   const { receipt, omittedUrl, omittedSource } = buildLaunchReceipt(dispatch.id, launch);
   if (omittedSource) {
-    deps.log?.(`cursor-wake: receipt for ${dispatch.id} omits its host source: the Cursor agent id is not valid under the host-source id grammar`);
+    deps.log?.(`cursor-wake: receipt for ${dispatch.id} omits its host source: the server's host-source grammar would refuse the Cursor agent id`);
   } else if (omittedUrl) {
-    deps.log?.(`cursor-wake: receipt for ${dispatch.id} omits the agent url: it is not an https url the host-source grammar accepts`);
+    deps.log?.(`cursor-wake: receipt for ${dispatch.id} omits the agent url: the server's host-source grammar would refuse it`);
   }
+  const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+  let present: boolean;
   try {
-    if (await store.has(receipt.id)) return { status: "unchanged" };
+    present = await store.has(receipt.id);
+  } catch (err) {
+    // An unknown read never licenses a write, and is retried next cycle.
+    return { status: "failed", error: message(err) };
+  }
+  if (present) return { status: "unchanged" };
+  try {
     await store.write(receipt);
     return { status: "written" };
   } catch (err) {
-    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+    const refusal = permanentReceiptRefusal(err);
+    if (refusal) return { status: "refused", refusal };
+    return { status: "failed", error: message(err) };
   }
 }
 
@@ -151,14 +188,24 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
         recordLaunch(result, dispatch, launch);
 
         // flair#1944: after a handoff (never on dry-run), record ONE sourced
-        // launch receipt BEFORE the ack. If the receipt write fails the event
-        // is not acked, so the next cycle replays (Cursor 409 -> "already") and
-        // retries the receipt. This is a named outcome, not a thrown crash.
+        // launch receipt BEFORE the ack. A transient or configuration failure
+        // does not ack, so the next cycle replays (Cursor 409 -> "already") and
+        // retries the receipt. A PERMANENT refusal would refuse every replay
+        // the same way and hold this agent's feed forever, so it is reported
+        // and the event acked: the launch is real, the receipt is provenance.
+        // Both are named outcomes, not a thrown crash.
         if (launch.outcome === "created" || launch.outcome === "already") {
           const receipt = await recordLaunchReceipt(deps, dispatch, launch);
           if (receipt.status !== "none") result.items[result.items.length - 1].receipt = receipt.status;
+          if (receipt.status === "refused") {
+            const { status, code } = receipt.refusal;
+            result.receiptRefused.push({ eventId: dispatch.id, status, code });
+            deps.log?.(
+              `cursor-wake: receipt for ${dispatch.id} refused by the server (HTTP ${status}${code ? ` ${code}` : ""}); the event is acked without it — the launch stands`,
+            );
+          }
           if (receipt.status === "failed") {
-            result.receiptFailed = `receipt not recorded for ${dispatch.id}: ${receipt.error ?? "unknown error"}`;
+            result.receiptFailed = `receipt not recorded for ${dispatch.id}: ${receipt.error}`;
             if (!deps.dryRun && lastAckable) await deps.catchup.ack(lastAckable);
             result.acked = deps.dryRun ? null : lastAckable;
             return result;

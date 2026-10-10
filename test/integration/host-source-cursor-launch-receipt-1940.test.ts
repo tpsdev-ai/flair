@@ -9,8 +9,12 @@
  * writing to a REAL Harper: the receipt reads back with its stable id,
  * deterministic content and the `hostSource` the server validated and stored;
  * a replay leaves the url-bearing receipt unchanged and writes no second one;
- * a server refusal of the write is a named outcome and does NOT advance the
- * watermark; a dry-run records nothing.
+ * a url the server's grammar would refuse (http, empty userinfo) is omitted
+ * with one log line and the receipt still lands; a receipt the server
+ * PERMANENTLY refuses (a real 400) is acked and reported as `receiptRefused`
+ * without holding later dispatches; a refusal from an identity the server does
+ * not know (a real 401) is `receiptFailed` and does NOT advance the watermark;
+ * a dry-run records nothing.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
@@ -19,7 +23,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
-import { FlairClient } from "../../packages/flair-client/src/client";
+import { FlairClient, FlairError } from "../../packages/flair-client/src/client";
 import {
   createMemoryReceiptStore,
   launchReceiptId,
@@ -183,15 +187,25 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     expect(listed.length, "the replay must not add a second receipt").toBe(1);
   }, 120_000);
 
-  test("a server refusal of the receipt write is a named outcome and does not ack", async () => {
+  test("a write from an identity the server does not know (HTTP 401) is receiptFailed, retried, and does not ack", async () => {
     const agent = mkAgent(`agent-c-${randomUUID()}`);
     // Registered client for the idempotency READ; an UNREGISTERED identity whose
-    // write the server refuses (403) simulates the store failing at the write.
+    // write the server refuses simulates the store failing at the write. That
+    // refusal is about the credential, not the receipt — a configuration fault
+    // the next cycle retries — so the watermark must stay put.
     const reader = await clientFor(agent);
     const refused = await clientFor(mkAgent(`agent-z-${randomUUID()}`), false);
+    let seen: unknown;
     const store: ReceiptStore = {
       has: createMemoryReceiptStore(reader).has,
-      write: createMemoryReceiptStore(refused).write,
+      write: async (receipt) => {
+        try {
+          await createMemoryReceiptStore(refused).write(receipt);
+        } catch (err) {
+          seen = err;
+          throw err;
+        }
+      },
     };
     const event = dispatchEvent(agent.id);
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
@@ -203,12 +217,107 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
       receipts: store,
     });
 
+    expect(seen, "the server's refusal reaches the runner as a FlairError").toBeInstanceOf(FlairError);
+    expect((seen as FlairError).status, "an unknown signing identity is refused as unauthenticated").toBe(401);
     expect(result.receiptFailed, "a refused receipt write must be a named outcome").toContain(String(event.id));
+    expect(result.receiptRefused, "401 is not a permanent refusal of the receipt").toEqual([]);
     expect(result.items[0]?.receipt).toBe("failed");
     expect(result.acked).toBeNull();
     expect(acks, "the watermark must not advance past an unrecorded receipt").toEqual([]);
     const got = await reader.memory.get(launchReceiptId(String(event.id)));
     expect(got, "nothing was written, so there is no receipt").toBeNull();
+  }, 120_000);
+
+  for (const [name, url] of [
+    ["an http url", "http://cursor.example/x"],
+    ["an https url with EMPTY userinfo", "https://@cursor.example/x"],
+  ] as const) {
+    test(`a created launch whose url is ${name} records the receipt without the url, and logs one line`, async () => {
+      const agent = mkAgent(`agent-e-${randomUUID()}`);
+      const client = await clientFor(agent);
+      const event = dispatchEvent(agent.id);
+      const cursorAgentId = `bc-${randomUUID()}`;
+      const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
+      const lines: string[] = [];
+
+      const result = await runWakeCycle({
+        agentId: agent.id,
+        catchup: port,
+        cursor: cursorReturning({ outcome: "created", cursorAgentId, url }),
+        receipts: createMemoryReceiptStore(client),
+        log: (line) => lines.push(line),
+      });
+
+      expect(result.receiptFailed, "omitting the url must not cost the receipt").toBeNull();
+      expect(result.receiptRefused).toEqual([]);
+      expect(result.items[0]?.receipt).toBe("written");
+      expect(result.acked).toBe("p1");
+      expect(acks).toEqual(["p1"]);
+      const got = await client.memory.get(launchReceiptId(String(event.id)));
+      expect(got?.hostSource, "the server stored the source with no url").toEqual({ v: 1, host: "cursor", kind: "launch", id: cursorAgentId });
+      expect(lines, "exactly one log line names the omitted url").toHaveLength(1);
+      expect(lines[0]).toContain(String(event.id));
+      expect(lines[0]).toContain("url");
+    }, 120_000);
+  }
+
+  test("a receipt the server permanently refuses (HTTP 400) is acked as receiptRefused, and later dispatches still launch and record", async () => {
+    const agent = mkAgent(`agent-f-${randomUUID()}`);
+    const client = await clientFor(agent);
+    const production = createMemoryReceiptStore(client);
+    const refusedEvent = dispatchEvent(agent.id, { position: "p1" });
+    const nextEvent = dispatchEvent(agent.id, { position: "p2" });
+    const refusedId = launchReceiptId(String(refusedEvent.id));
+    // The first receipt goes to the REAL server through the production client
+    // with a host/kind pair outside the server's closed set — standing in for a
+    // server whose grammar is stricter than the runner's mirror, the case where
+    // every replay would be refused the same way. The 400 is the server's own.
+    let seen: unknown;
+    const store: ReceiptStore = {
+      has: production.has,
+      write: async (receipt) => {
+        if (receipt.id !== refusedId) return production.write(receipt);
+        try {
+          await client.memory.write(receipt.content, {
+            id: receipt.id,
+            hostSource: { ...receipt.hostSource!, kind: "run" } as never,
+          });
+        } catch (err) {
+          seen = err;
+          throw err;
+        }
+      },
+    };
+    const launched: string[] = [];
+    const cursorAgentId = `bc-${randomUUID()}`;
+    const lines: string[] = [];
+    const { port, acks } = catchupWith([{ events: [refusedEvent, nextEvent], hasMore: false }]);
+
+    const result = await runWakeCycle({
+      agentId: agent.id,
+      catchup: port,
+      cursor: {
+        create: async (input) => {
+          launched.push(input.dispatch.id);
+          return { outcome: "created", cursorAgentId };
+        },
+      },
+      receipts: store,
+      log: (line) => lines.push(line),
+    });
+
+    expect((seen as FlairError).status, "the server refused the receipt as a bad request").toBe(400);
+    expect(result.receiptFailed).toBeNull();
+    expect(result.receiptRefused).toEqual([{ eventId: String(refusedEvent.id), status: 400, code: "invalid_host_source" }]);
+    expect(result.items.map((item) => item.receipt)).toEqual(["refused", "written"]);
+    expect(launched, "the later dispatch still launched").toEqual([String(refusedEvent.id), String(nextEvent.id)]);
+    expect(result.acked, "the refusal does not hold the watermark").toBe("p2");
+    expect(acks).toEqual(["p2"]);
+    expect(lines, "one log line for the refusal").toHaveLength(1);
+    expect(lines[0]).toContain("400 invalid_host_source");
+    expect(await client.memory.get(refusedId), "the refused receipt was not stored").toBeNull();
+    const next = await client.memory.get(launchReceiptId(String(nextEvent.id)));
+    expect(next?.hostSource).toEqual({ v: 1, host: "cursor", kind: "launch", id: cursorAgentId });
   }, 120_000);
 
   test("a dry-run records no receipt and acks nothing", async () => {

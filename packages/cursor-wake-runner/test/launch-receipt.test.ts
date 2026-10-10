@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { FlairError } from "@tpsdev-ai/flair-client";
 import {
   buildLaunchReceipt,
   cursorLaunchHostSource,
   isAcceptableHostSourceUrl,
   launchReceiptId,
+  permanentReceiptRefusal,
   runWakeCycle,
   wakeAgentId,
   type CatchupPage,
@@ -38,17 +40,28 @@ interface Stored {
 /** A receipt store that records every call into the shared `order` log. */
 function fakeStore(
   order: string[],
-  opts: { failWrite?: boolean; failRead?: boolean } = {},
+  opts: {
+    failWrite?: boolean;
+    failRead?: boolean;
+    /** Thrown by write() for the receipt ids it names (all ids when `writeErrorFor` is omitted). */
+    writeError?: unknown;
+    writeErrorFor?: string[];
+    readError?: unknown;
+  } = {},
 ): { store: ReceiptStore; records: Map<string, Stored> } {
   const records = new Map<string, Stored>();
   const store: ReceiptStore = {
     has: async (id) => {
       order.push(`has:${id}`);
+      if (opts.readError !== undefined) throw opts.readError;
       if (opts.failRead) throw new Error("store read unavailable");
       return records.has(id);
     },
     write: async (receipt) => {
       order.push(`write:${receipt.id}`);
+      if (opts.writeError !== undefined && (!opts.writeErrorFor || opts.writeErrorFor.includes(receipt.id))) {
+        throw opts.writeError;
+      }
       if (opts.failWrite) throw new Error("server refused the receipt");
       records.set(receipt.id, { content: receipt.content, hostSource: receipt.hostSource });
     },
@@ -224,5 +237,131 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
     expect(records.size).toBe(0);
     expect(acks).toEqual([]);
     expect(calls).toHaveLength(0);
+  });
+});
+
+/** The error flair-client throws for a non-2xx response: status + (at most 500 chars of) body. */
+function serverError(status: number, body: string): FlairError {
+  return new FlairError("PUT", "/Memory/x", status, body.slice(0, 500));
+}
+
+/** A refusal body that echoes a submitted value — the echo must never reach the result or the log. */
+const ECHOING_400 = JSON.stringify({
+  error: "invalid_host_source",
+  message: 'hostSource.id "ECHOED-SUBMITTED-VALUE" does not match the id grammar',
+});
+
+describe("permanentReceiptRefusal — which receipt write failures are permanent (flair#1944)", () => {
+  test("400, 409, 413 and 422 are permanent, with the status and the named error code", () => {
+    for (const status of [400, 409, 413, 422]) {
+      expect(permanentReceiptRefusal(serverError(status, ECHOING_400))).toEqual({ status, code: "invalid_host_source" });
+    }
+  });
+
+  test("a network error, a timeout, 401, 403, 404, 408, 429 and any 5xx are not", () => {
+    expect(permanentReceiptRefusal(new TypeError("fetch failed"))).toBeNull();
+    expect(permanentReceiptRefusal(new DOMException("The operation timed out.", "TimeoutError"))).toBeNull();
+    expect(permanentReceiptRefusal(new Error("server refused the receipt"))).toBeNull();
+    expect(permanentReceiptRefusal(undefined)).toBeNull();
+    for (const status of [401, 403, 404, 408, 429, 500, 502, 503, 504]) {
+      expect(permanentReceiptRefusal(serverError(status, ECHOING_400)), `HTTP ${status}`).toBeNull();
+    }
+  });
+
+  test("the code is only a named token: free text, non-JSON and a missing error read as null", () => {
+    expect(permanentReceiptRefusal(serverError(400, JSON.stringify({ error: "supersedes must be a string (memory ID)" })))?.code).toBeNull();
+    expect(permanentReceiptRefusal(serverError(400, "Bad Request"))?.code).toBeNull();
+    expect(permanentReceiptRefusal(serverError(400, ""))?.code).toBeNull();
+    expect(permanentReceiptRefusal(serverError(400, JSON.stringify({ message: "no code" })))?.code).toBeNull();
+  });
+
+  test("a body FlairError truncated at 500 characters still yields its leading code", () => {
+    const long = JSON.stringify({ error: "content_safety_violation", message: "x".repeat(800) });
+    const err = serverError(400, long);
+    expect(err.body.length).toBe(500);
+    expect(permanentReceiptRefusal(err)).toEqual({ status: 400, code: "content_safety_violation" });
+  });
+});
+
+describe("runWakeCycle — a receipt the server permanently refuses (flair#1944)", () => {
+  test("a 400 is acked, reported as receiptRefused with status + code only, and logged once", async () => {
+    const order: string[] = [];
+    const { store, records } = fakeStore(order, { writeError: serverError(400, ECHOING_400) });
+    const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
+    const lines: string[] = [];
+    const result = await runWakeCycle({
+      agentId: CREW,
+      catchup: port,
+      cursor: client,
+      receipts: store,
+      log: (line) => lines.push(line),
+    });
+    expect(result.receiptFailed).toBeNull();
+    expect(result.receiptRefused).toEqual([{ eventId: "evt-1", status: 400, code: "invalid_host_source" }]);
+    expect(result.items[0].receipt).toBe("refused");
+    expect(result.acked).toBe("p1");
+    expect(acks).toEqual(["p1"]);
+    expect(records.size).toBe(0);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("evt-1");
+    expect(lines[0]).toContain("400 invalid_host_source");
+    expect(JSON.stringify(result)).not.toContain("ECHOED-SUBMITTED-VALUE");
+    expect(lines[0]).not.toContain("ECHOED-SUBMITTED-VALUE");
+  });
+
+  test("a refusal does not hold the feed: the next dispatch in the cycle still launches and records its receipt", async () => {
+    const order: string[] = [];
+    const first = dispatchEvent({ id: "evt-1", position: "p1" });
+    const second = dispatchEvent({ id: "evt-2", position: "p2" });
+    const { store, records } = fakeStore(order, {
+      writeError: serverError(422, JSON.stringify({ error: "reembed_no_text" })),
+      writeErrorFor: [launchReceiptId("evt-1")],
+    });
+    const { port, acks } = catchupWith(order, [{ events: [first, second], hasMore: false }]);
+    const { client, calls } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: store });
+    expect(calls.map((c) => c.dispatch.id)).toEqual(["evt-1", "evt-2"]);
+    expect(result.items.map((i) => i.receipt)).toEqual(["refused", "written"]);
+    expect(result.receiptRefused).toEqual([{ eventId: "evt-1", status: 422, code: "reembed_no_text" }]);
+    expect(records.has(launchReceiptId("evt-2"))).toBe(true);
+    expect(result.acked).toBe("p2");
+    expect(acks).toEqual(["p2"]);
+  });
+
+  test("a transient or configuration failure (401, 403, 408, 429, 5xx, network) is still receiptFailed and not acked", async () => {
+    const errors: unknown[] = [
+      serverError(401, JSON.stringify({ error: "unauthorized" })),
+      serverError(403, JSON.stringify({ error: "forbidden" })),
+      serverError(408, ""),
+      serverError(429, ""),
+      serverError(500, ""),
+      serverError(503, ""),
+      new TypeError("fetch failed"),
+    ];
+    for (const writeError of errors) {
+      const order: string[] = [];
+      const { store } = fakeStore(order, { writeError });
+      const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+      const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
+      const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: store });
+      expect(result.receiptFailed, String(writeError)).toContain("evt-1");
+      expect(result.receiptRefused).toEqual([]);
+      expect(result.items[0].receipt).toBe("failed");
+      expect(acks).toEqual([]);
+    }
+  });
+
+  test("a failed READ is never a refusal, whatever its status: no write, no ack", async () => {
+    const order: string[] = [];
+    const { store, records } = fakeStore(order, { readError: serverError(400, ECHOING_400) });
+    const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: store });
+    expect(result.receiptFailed).toContain("evt-1");
+    expect(result.receiptRefused).toEqual([]);
+    expect(order.some((entry) => entry.startsWith("write:"))).toBe(false);
+    expect(records.size).toBe(0);
+    expect(acks).toEqual([]);
   });
 });

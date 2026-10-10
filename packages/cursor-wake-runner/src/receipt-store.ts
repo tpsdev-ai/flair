@@ -4,7 +4,10 @@
  * flair#1944: the receipt is a normal memory written as the runner's own agent.
  * `has` reads the record first; `memory.get` resolves to null ONLY on a 404 and
  * throws on any other failure, so an unreadable store can never read as "no
- * receipt" and license a write (flair#2446's unverified-citation rule).
+ * receipt" and license a write (flair#2446's unverified-citation rule). A
+ * refused `write` throws the client's FlairError, whose HTTP `status` and
+ * `body` the runner reads to tell a permanent refusal from a retryable failure
+ * (receipt.ts, permanentReceiptRefusal).
  */
 
 import type { FlairClient } from "@tpsdev-ai/flair-client";

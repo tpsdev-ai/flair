@@ -22,6 +22,9 @@ function printResult(result: WakeResult): void {
   if (result.acked) lines.push(`acked: ${result.acked}`);
   if (result.blocked) lines.push(`blocked: ${result.blocked}`);
   if (result.receiptFailed) lines.push(`receipt failed: ${result.receiptFailed}`);
+  for (const refused of result.receiptRefused) {
+    lines.push(`receipt refused: ${refused.eventId} (HTTP ${refused.status}${refused.code ? ` ${refused.code}` : ""}; acked without it)`);
+  }
   for (const item of result.items) {
     const cursor = item.cursorAgentId ? ` ${item.cursorAgentId}` : "";
     const url = item.url ? ` ${item.url}` : "";
