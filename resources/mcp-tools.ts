@@ -1224,7 +1224,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_search: {
         impl: memorySearch,
     contract: {
-      summary: "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding. A hit whose record has a bound host-source pointer carries `hostSource`: the pointer object for a reader allowed to see it, or the literal \"withheld\" for one who may read the record but not the pointer. hostSource is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship.",
+      summary: "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding. A hit whose record has a bound host-source pointer carries `hostSource`: the pointer object for a reader allowed to see it, or the literal \"withheld\" for one who may read the record but not the pointer. hostSource is the writer's unverified claim about an external source, stored with the writer's authenticated agent id; Flair does not verify it.",
       requiredFields: ["results"],
       fieldTypes: { results: "array" },
       invariants: {

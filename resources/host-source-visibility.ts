@@ -128,8 +128,8 @@ export function pointerOutcomeFor(
  *  output (A1' item 1). A supported write strips them before persist; a RAW
  *  writer can leave one on the row, so the named non-admin reads (Memory.get,
  *  Memory.search, SemanticSearch) strip them. Bootstrap projects through the
- *  pointer helper too, so its inline fields are dropped as well; it never
- *  returns a raw row. */
+ *  pointer helper too, so its inline fields are dropped as well, except where
+ *  its `?? m` fallback uses the row as read. */
 const INLINE_POINTER_FIELDS = ["hostSource", "hostSourceScope", "hostSourceVisibility"] as const;
 
 /** Return `record` with every inline pointer-input field removed. Returns the

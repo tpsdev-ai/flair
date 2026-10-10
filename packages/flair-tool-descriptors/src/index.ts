@@ -140,7 +140,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "query"
       ]
     },
-    "outputShape": "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding. A hit whose record has a bound host-source pointer carries `hostSource`: the pointer object for a reader allowed to see it, or the literal \"withheld\" for one who may read the record but not the pointer. hostSource is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship.",
+    "outputShape": "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding. A hit whose record has a bound host-source pointer carries `hostSource`: the pointer object for a reader allowed to see it, or the literal \"withheld\" for one who may read the record but not the pointer. hostSource is the writer's unverified claim about an external source, stored with the writer's authenticated agent id; Flair does not verify it.",
     "annotations": {
       "readOnlyHint": true
     },
@@ -152,7 +152,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "memory_store",
-    "description": "Save information to persistent memory. Use for lessons, decisions, preferences, facts. Attributed to your authenticated agent. hostSource is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship.",
+    "description": "Save information to persistent memory. Use for lessons, decisions, preferences, facts. Attributed to your authenticated agent. hostSource is the writer's unverified claim about an external source, stored with the writer's authenticated agent id; Flair does not verify it.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -209,7 +209,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         },
         "hostSource": {
           "type": "object",
-          "description": "Optional host-object pointer: the host object this memory is claimed to come from, as { v: 1, host, kind, id, url? } (host/kind from a closed set, e.g. openclaw/run; id matches a fixed grammar; url https-only). Validated server-side by the same validator as the REST write — an invalid pointer is refused, never coerced. hostSource is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship."
+          "description": "Optional host-object pointer: the host object this memory is claimed to come from, as { v: 1, host, kind, id, url? } (host/kind from a closed set, e.g. openclaw/run; id matches a fixed grammar; url https-only). Validated server-side by the same validator as the REST write — an invalid pointer is refused, never coerced. hostSource is the writer's unverified claim about an external source, stored with the writer's authenticated agent id; Flair does not verify it."
         },
         "hostSourceScope": {
           "type": "string",

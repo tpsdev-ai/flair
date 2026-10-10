@@ -294,20 +294,14 @@ const MAX_CANDIDATE_POOL = 100;
 // record's own agentId differs from the bootstrapping agent), so
 // `m._source !== agentId` is the "is this a teammate's finding" check; own
 // memories never carry `_source` at all.
-function formatMemory(m: any, agentId?: string): string {
-  // flair#1940 A1' item 5 / A6 (slice 2b): the caller passes the record AFTER
-  // the gated pointer join (resources/memory-host-source.ts's
-  // projectRowsThroughPointers) when it has run, so `m.hostSource` is the
-  // validated pointer OBJECT, `"withheld"`, or absent. The citation renders
-  // only what that join returned — never the raw stored string, and never a
-  // value the reader could not see. A record with no pointer is unchanged.
+export function formatMemory(m: any, agentId?: string): string {
+  // flair#1940 A6: when the gated pointer join ran, `m.hostSource` is its output.
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
   const chain = m.supersedes ? " [supersedes earlier decision]" : "";
   const attribution = m._source && m._source !== agentId ? `[via ${m._source}] ` : "";
   const citation = formatHostSourceCitation(m.hostSource);
-  const source = citation ? `${citation} ` : "";
-  const base = `${tag} ${attribution}${m.content}${date}${chain} ${source}`.trimEnd();
+  const base = `${tag} ${attribution}${m.content}${date}${chain}${citation ? ` ${citation}` : ""}`;
 
   // Wrap flagged memories in safety delimiters — composes with attribution
   // above (attribution is baked into `base` before wrapping, so a flagged

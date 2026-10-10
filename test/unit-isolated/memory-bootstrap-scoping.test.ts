@@ -186,7 +186,7 @@ class ResourceBase {}
 
 mock.module("harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
 
-const { BootstrapMemories } = await import("../../resources/MemoryBootstrap.ts");
+const { BootstrapMemories, formatMemory } = await import("../../resources/MemoryBootstrap.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 const { estimateTokens } = await import("../../resources/token-estimate.ts");
 
@@ -1438,5 +1438,17 @@ describe("org skillRef to a later physical version", () => {
     const denied: any = await bootstrap();
     expect(denied.skills).toEqual([]);
     expect(denied.skillDiagnostics.map((d: any) => d.decision)).toEqual(["unresolved"]);
+  });
+});
+
+describe("formatMemory bytes", () => {
+  it("an unsourced item with no createdAt or supersedes keeps trailing content whitespace", () => {
+    // Literal copied from origin/main formatMemory output for this input.
+    expect(formatMemory({ content: "body  \n\t " })).toBe("\u{1F4DD} body  \n\t ");
+  });
+
+  it("a sourced item appends one space and the citation", () => {
+    const hostSource = { v: 1, host: "openclaw", kind: "run", id: "run-123456789abc" };
+    expect(formatMemory({ content: "body", hostSource })).toBe("\u{1F4DD} body [via openclaw/run run-1234 (unverified)]");
   });
 });
