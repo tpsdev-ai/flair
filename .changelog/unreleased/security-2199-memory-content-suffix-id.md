@@ -1,1 +1,0 @@
-- **Memory, Feed, and bridge writes enforce the reserved content-property ID restriction.**

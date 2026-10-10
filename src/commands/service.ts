@@ -12,7 +12,7 @@ import { seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { reconcilePendingSkillSeed, skillSeedPendingPath } from "../lib/skill-seed-pending.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
 import { decideStartOnUnknown, probePortListening } from "../lib/stop-start-recovery.js";
-import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
+import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, renderManagedStartUnconfirmed, type ManagedStartConfirmation } from "../lib/launchd-management.js";
 import {
   LaunchdValidationRefusal,
   loadabilityAllowsAttempt,
@@ -96,6 +96,27 @@ export function restartTreeReport(a: TreeAssessment | null): { ok: boolean; line
     };
   }
   return { ok: true, lines: [`   ${formatServingTreeLine(a)}`] };
+}
+
+/**
+ * flair#2422: the warning lines `flair start` prints for an unconfirmed
+ * launchd-managed start. Forwards the sidecar outcome's confirmation and
+ * detail, and the launchd observer's detail and remedy, to the renderer.
+ */
+export function managedStartUnconfirmedLines(input: {
+  port: number;
+  recorded: { confirmation: ManagedStartConfirmation; detail: string };
+  managed: { detail: string; remedy?: string[] };
+  moved?: string;
+}): string[] {
+  return renderManagedStartUnconfirmed({
+    port: input.port,
+    confirmation: input.recorded.confirmation,
+    detail: input.recorded.detail,
+    moved: input.moved,
+    launchdDetail: input.managed.detail,
+    remedy: input.managed.remedy,
+  });
 }
 
 function closedDirectSpawnEnv(...args: any[]): any {
@@ -480,15 +501,22 @@ program
               console.log(`✅ Flair started (launchd-managed: ${recorded.detail})`);
               return;
             }
-            // flair#2040: the initial reachability wait passed, but the managed
-            // process was not confirmed (the second probe may have reported a
-            // foreign, refused or unreachable listener) and is not proven to be launchd's process: no
-            // launchd check mark, and no claim about what happens at the next
-            // reboot either.
+            // flair#2040/#2422: the managed process was not confirmed. No launchd
+            // check mark, and no claim about what happens at the next reboot. The
+            // warning reports what the confirmation probe saw on the port; it says
+            // Flair is running for the Flair-shaped answer, and names the probe's
+            // other results instead.
             const managed = observeLaunchdManagement(dataDir, port);
-            console.error(`⚠️  Flair is running on port ${port}, but it is NOT verified as launchd-managed: ${managed.detail}`);
-            if (migrated) console.error(`   The launchd service was moved off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label}.`);
-            if (managed.remedy?.length) console.error(`   Fix: ${managed.remedy.join(" && ")}`);
+            for (const line of managedStartUnconfirmedLines({
+              port,
+              recorded,
+              managed,
+              moved: migrated
+                ? `The launchd service was moved off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label}.`
+                : undefined,
+            })) {
+              console.error(line);
+            }
             if (existsSync(skillSeedPendingPath(dataDir))) {
               console.error("❌ Flair started, but its identity is unverified; the using-flair skill seed remains pending. Run 'flair doctor' before retrying.");
               process.exit(1);

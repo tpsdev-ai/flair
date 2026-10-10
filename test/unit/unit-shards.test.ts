@@ -8,6 +8,7 @@ import {
 } from "../../scripts/ci/unit-shards.mjs";
 import { unitPlan } from "../../scripts/test-unit.ts";
 import { testFilesUnder } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
+import { checkCoverageGate, gateCases, parseWorkflows, respacedGate, type Gate } from "../helpers/workflow-gate";
 
 const ALL = listUnitFiles();
 const fixtures: string[] = [];
@@ -221,7 +222,27 @@ describe("unit-shards — CLI", () => {
     });
   }
 
-  test("CI runs the coverage gate", () => {
-    expect(readFileSync(join(ROOT, ".github/workflows/test.yml"), "utf8")).toContain("node scripts/ci/unit-shards.mjs --verify");
+});
+
+const WORKFLOW_DIR = join(ROOT, ".github", "workflows");
+const UNIT_GATE: Gate = {
+  step: "Verify root unit shard coverage",
+  command: "node scripts/ci/unit-shards.mjs --verify",
+};
+
+describe("root-unit shard coverage gate workflow shape", () => {
+  test("the committed workflows satisfy the checker", () => {
+    expect(() => checkCoverageGate(parseWorkflows(WORKFLOW_DIR), UNIT_GATE)).not.toThrow();
   });
+
+  test("the canonical command accepts normalised whitespace", () => {
+    expect(() => checkCoverageGate(respacedGate(WORKFLOW_DIR, UNIT_GATE), UNIT_GATE)).not.toThrow();
+  });
+
+  for (const [label, build, error] of gateCases(WORKFLOW_DIR, UNIT_GATE)) {
+    test(`refuses ${label}`, () => {
+      const mutated = build();
+      expect(() => checkCoverageGate(mutated, UNIT_GATE)).toThrow(error);
+    });
+  }
 });

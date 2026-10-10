@@ -28,6 +28,7 @@ import {
 } from "../../scripts/ci/lane-shards.mjs";
 import { effectiveMatrix, shardValues, verifyWorkflowMatrix } from "../../scripts/ci/check-lane-matrix.mjs";
 import { parseUnitLaneArgs } from "../../scripts/test-unit.ts";
+import { checkCoverageGate, gateCases, parseWorkflows, respacedGate, type Gate } from "../helpers/workflow-gate";
 
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -410,12 +411,29 @@ function workflowMatrix(text: string): Matrix {
   return doc.jobs["test-unit"].strategy.matrix;
 }
 
+const LANE_GATE: Gate = {
+  step: "Verify lane shard coverage",
+  command: "node scripts/ci/lane-shards.mjs --verify --of 2",
+};
+
 describe("lane-shards — the workflow runs it", () => {
   const workflow = readFileSync(join(ROOT, ".github", "workflows", "test.yml"), "utf8");
+  const workflowDir = join(ROOT, ".github", "workflows");
 
-  test("CI runs the lane coverage gate", () => {
-    expect(workflow).toContain("node scripts/ci/lane-shards.mjs --verify");
+  test("the committed workflows satisfy the checker", () => {
+    expect(() => checkCoverageGate(parseWorkflows(workflowDir), LANE_GATE)).not.toThrow();
   });
+
+  test("the canonical command accepts normalised whitespace", () => {
+    expect(() => checkCoverageGate(respacedGate(workflowDir, LANE_GATE), LANE_GATE)).not.toThrow();
+  });
+
+  for (const [label, build, error] of gateCases(workflowDir, LANE_GATE)) {
+    test(`refuses ${label}`, () => {
+      const mutated = build();
+      expect(() => checkCoverageGate(mutated, LANE_GATE)).toThrow(error);
+    });
+  }
 
   test("the workflow matrix contains every required shard index", () => {
     expect(workflow).toMatch(/run: bun run test:unit --keep-going --shard \$\{\{ matrix\.shard \}\} --of 2/);

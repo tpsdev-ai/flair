@@ -31,7 +31,7 @@
  *   1 — at least one dep too fresh
  *   2 — registry fetch failure (treated as fail, not warn — better safe), a
  *       REFUSED CI run (the fixture-root override present together with `--ci`),
- *       an unexpected argument, an unsupported `overrides` form, or an invalid
+ *       an unexpected argument, an unsupported dependency or `overrides` form, or an invalid
  *       or expired exemption allowlist entry
  */
 
@@ -40,7 +40,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   collectDeps,
-  collectNonExactOverrides,
+  collectNonExactDeps,
+  collectUnsupportedDeps,
   collectUnsupportedOverrides,
 } from "./lib/check-dep-ages-collect.mjs";
 
@@ -219,6 +220,16 @@ async function main() {
     }
   }
 
+  const unsupportedDeps = collectUnsupportedDeps(allPkgs);
+  if (unsupportedDeps.length > 0) {
+    console.error("Unsupported dependency entries:");
+    console.error("");
+    for (const u of unsupportedDeps) {
+      console.error(`    ${u.declaredIn} ${u.field} ${u.name} "${u.spec}": ${u.reason}`);
+    }
+    process.exit(2);
+  }
+
   const unsupportedOverrides = collectUnsupportedOverrides(allPkgs);
   if (unsupportedOverrides.length > 0) {
     console.error("Unsupported `overrides` entries:");
@@ -230,7 +241,7 @@ async function main() {
   }
 
   const toCheck = collectDeps(allPkgs, KEEP_CURRENT);
-  const nonExactOverrides = collectNonExactOverrides(allPkgs);
+  const nonExact = collectNonExactDeps(allPkgs);
 
   const allowlist = readAllowlist(REPO_ROOT);
   if (allowlist.expired.length > 0) {
@@ -244,9 +255,9 @@ async function main() {
     process.exit(2);
   }
 
-  if (nonExactOverrides.length > 0) {
-    console.log("Not age-checked (override ranges):");
-    for (const o of nonExactOverrides) {
+  if (nonExact.length > 0) {
+    console.log("Not age-checked (ranges):");
+    for (const o of nonExact) {
       console.log(`    ${o.name} "${o.spec}" (declared in ${o.declaredIn})`);
     }
     console.log("");
@@ -422,8 +433,12 @@ async function main() {
       `All ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old.`,
     );
   } else {
+    const names = exempted
+      .map((f) => `${f.name}@${f.version}`)
+      .sort()
+      .join(", ");
     console.log(
-      `${toCheck.size - exempted.length} of ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old; ${exempted.length} exemption(s) listed above.`,
+      `${toCheck.size - exempted.length} of ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old; ${exempted.length} exemption(s) applied: ${names}.`,
     );
   }
 }

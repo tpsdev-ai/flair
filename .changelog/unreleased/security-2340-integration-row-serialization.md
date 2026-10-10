@@ -1,1 +1,0 @@
-- **Integration mutations retry when a stored row changes during validation; an explicit POST ID already in use is refused.**

@@ -164,6 +164,7 @@ import {
   LAUNCHCTL_QUERY_TIMEOUT_MS,
   type LaunchctlLister,
   type LaunchdManagement,
+  type ManagedStartConfirmation,
 } from "./lib/launchd-management.js";
 import {
   classifyPlist,
@@ -6259,7 +6260,9 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
  *
  * A throwing waitForHealth call rethrows its original error so the caller's
  * existing fallback still runs; a failed Flair fingerprint and the other
- * unconfirmed cases return `recorded: false`.
+ * unconfirmed cases return `recorded: false`. Each unconfirmed return also
+ * names what the confirmation probe saw in `confirmation`, so the caller's
+ * warning can report it (flair#2422).
  */
 export async function recordManagedStartSidecar(
   dataDir: string,
@@ -6277,7 +6280,7 @@ export async function recordManagedStartSidecar(
     write?: (dataDir: string, pid: number, port: number, startTimeMs: number) => void;
     warn?: (line: string) => void;
   } = {},
-): Promise<{ recorded: true; pid: number; detail: string } | { recorded: false; detail: string }> {
+): Promise<{ recorded: true; pid: number; detail: string } | { recorded: false; confirmation: ManagedStartConfirmation; detail: string }> {
   const warn = deps.warn ?? ((line: string) => console.error(line));
   const timeoutMs = deps.timeoutMs ?? STARTUP_TIMEOUT_MS;
   try {
@@ -6291,22 +6294,25 @@ export async function recordManagedStartSidecar(
     warn(`⚠️  the instance for launchd job ${label} did not answer health within ${timeoutMs}ms, so its identity sidecar was not written (${err?.message ?? err})`);
     throw err;
   }
+  // flair#2422: read launchd's job state, then probe health BEFORE branching on
+  // that read. The probe is the confirmation's second look at the port, and its
+  // result is what an unconfirmed start's warning reports.
   const job = readLaunchctlJobState(label, deps.list ?? realLaunchctlLister);
-  if (!job.registered) {
-    const detail = `could not read launchd job ${label}, so its identity sidecar was not written`;
-    warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
-  }
-  if (job.pid === null) {
-    const detail = `launchd did not report a running pid for job ${label}, so its identity sidecar was not written`;
-    warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
-  }
   const health = await (deps.probeHealth ?? probeHealth)(port);
   if (health.kind !== "ok") {
     const detail = `the instance for launchd job ${label} did not return Flair health (${health.kind}), so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
+    return { recorded: false, confirmation: health.kind, detail };
+  }
+  if (!job.registered) {
+    const detail = `could not read launchd job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, confirmation: "flair", detail };
+  }
+  if (job.pid === null) {
+    const detail = `launchd did not report a running pid for job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, confirmation: "flair", detail };
   }
   const serving = (deps.servingPid ?? ((_dataDir, httpPort) => {
     const listeners = resolveListenerPids(httpPort);
@@ -6315,35 +6321,35 @@ export async function recordManagedStartSidecar(
   if (serving === null) {
     const detail = `launchd job ${label} runs as process ${job.pid}, but the process serving this instance could not be identified, so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
+    return { recorded: false, confirmation: "flair", detail };
   }
   if (serving !== job.pid) {
     const detail = `the process answering on port ${port} is ${serving}, not launchd's process ${job.pid} for job ${label}, so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
+    return { recorded: false, confirmation: "flair", detail };
   }
   const again = readLaunchctlJobState(label, deps.list ?? realLaunchctlLister);
   if (!again.registered) {
     const detail = `could not re-read launchd job ${label}, so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
+    return { recorded: false, confirmation: "flair", detail };
   }
   if (again.pid !== job.pid) {
     const detail = `launchd job ${label} changed pid during health confirmation, so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
+    return { recorded: false, confirmation: "flair", detail };
   }
   const pidfile = readPidfile(dataDir);
   if (pidfile.kind !== "present" || pidfile.pid !== job.pid) {
     const detail = `hdb.pid does not confirm launchd job ${label}'s process ${job.pid}, so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
+    return { recorded: false, confirmation: "flair", detail };
   }
   const startTimeMs = (deps.readStartTime ?? readProcessStartTimeMs)(job.pid);
   if (startTimeMs === null) {
     const detail = `could not read the start time of launchd job ${label}'s process ${job.pid}, so its identity sidecar was not written`;
     warn(`⚠️  ${detail}`);
-    return { recorded: false, detail };
+    return { recorded: false, confirmation: "flair", detail };
   }
   (deps.write ?? writeDaemonSidecar)(dataDir, job.pid, port, startTimeMs);
   return { recorded: true, pid: job.pid, detail: `launchd job ${label} is running as process ${job.pid}` };
