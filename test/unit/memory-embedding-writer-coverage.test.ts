@@ -51,16 +51,14 @@ const add = (file: string, sites: string[], policy: Policy, reason: string) => {
 
 // ── LATCH: raw put that can land an externally-sourced foreign stamp ──
 add("Federation", ["writer:writeBackCommittedRow#1"], "LATCH",
-  "Federation sync-in LWW merge (applyMergedRecordToTable) — a remote-win copies the REMOTE embeddingModel; must trip the latch via noteWriteStamp.");
-add("Federation", ["writer:table.put#1"], "LATCH",
-  "Federation sync-in merge of every OTHER synced table (flair#2441 keeps the Memory merge on the write-back above); classified LATCH conservatively — the resolved handle is dynamic, and noteFederationMergedMemory runs after it (a no-op for a non-Memory table).");
+  "Federation sync-in LWW merge (applyMergedRecordToTable), every synced table (flair#2450) — a remote-win copies the REMOTE embeddingModel; must trip the latch via noteWriteStamp.");
 
 // ── GATED: Memory.ts's own post()/put()/patch() write path (calls noteWriteStamp) ──
 // The writes go through the base TABLE (`databases.flair.Memory`) with the
 // shared request context so a direct/internal caller is atomic (A1'' 0a).
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
-add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
-add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#4"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
+add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() _reindex re-PUT — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
 // flair#2425 — an ordinary PATCH merges the body (including a caller-supplied
 // embedding/embeddingModel) into the row; it now calls noteWriteStamp too.
 add("Memory", ["writer:super.patch#1"], "GATED",

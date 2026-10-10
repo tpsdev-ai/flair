@@ -203,11 +203,11 @@ export function mergeRecord(local: Record<string, any> | null, remote: SyncRecor
  * `noteWriteStamp` no-ops for a current/bare stamp (a self-originated or
  * same-space sync) and for a non-Memory table (no `embeddingModel`), so only a
  * genuinely foreign Memory sync trips it. Kept as a note-ONLY helper — the
- * merge's row write stays INLINE at the call site (a Memory merge through the
- * shared write-back helper, write-back.ts, flair#2441; every other table's
- * merge through `table.put(mergedData)`), so the raw-writer coverage gates
+ * merge's row write stays INLINE at the call site (every synced table's merge
+ * through the shared write-back helper, write-back.ts, flair#2441/flair#2450),
+ * so the raw-writer coverage gates
  * (authority-field-guard.test.ts / memory-embedding-writer-coverage.test.ts)
- * still enumerate the Memory writer — while the trip decision itself is
+ * still enumerate the writer — while the trip decision itself is
  * unit-testable without standing up the full signed sync-in path (see
  * test/unit-isolated/embedding-space-guard-federation.test.ts).
  */
@@ -835,19 +835,6 @@ export class FederationSync extends Resource {
           continue;
         }
 
-        // ── flair#2108: skip an inbound Agent record whose `status` differs
-        // from an existing local principal's stored value, whether or not it
-        // would win the last-write-wins merge below. The federation path
-        // carries no verified administrator authority for that principal (the
-        // batch is signed, and a record signature may also be present; neither
-        // is an admin claim). The whole record is skipped rather than merged
-        // with a pinned status, so the merge stays atomic and the other fields
-        // in the record do not land either.
-        if (inboundChangesExistingPrincipalStatus(record, local)) {
-          recordSkip("agent_status_not_federated");
-          continue;
-        }
-
         const incoming = { ...record.data };
         if (record.table === "Memory") {
           // Ephemeral peer expiry must be a valid UTC ISO date from the Unix
@@ -907,31 +894,6 @@ export class FederationSync extends Resource {
           continue;
         }
 
-        // Absorbing-state guard for the Message table (flair#1521 §12 P0-3).
-        // Generic newer-wins LWW would let a deadline-sweep `failed` (or any
-        // other state) written on a peer overwrite a locally-CONSUMED message,
-        // telling the sender "failed" about a message the recipient actually
-        // consumed — the exact inversion Relay exists to kill. `consumed` is
-        // absorbing: reconcileState pins it regardless of updatedAt. The guard
-        // lives HERE, in the raw-put apply path, because sync-in bypasses the
-        // Message resource's methods (Federation.ts uses table.put directly).
-        if (record.table === "Message") {
-          const reconciled = reconcileState(local?.state, mergedData.state);
-          mergedData.state = reconciled;
-          // P1-3 (flair#1521): reconcile the SATELLITE lifecycle fields too, not
-          // just `state`. Generic LWW keeps the incoming (newer) record's
-          // failureReason/consumedAt, so a locally-CONSUMED row could end up
-          // `consumed` while carrying a remote `failureReason: "deadline"` — the
-          // sender-visible "failed" about a message the recipient actually
-          // consumed, the exact inversion the absorbing rule exists to kill. A
-          // consumed row NEVER has a failureReason; keep the consumed row's own
-          // consumedAt (local's when local was the consumer).
-          if (reconciled === "consumed") {
-            mergedData.failureReason = null;
-            mergedData.consumedAt = local?.consumedAt ?? mergedData.consumedAt ?? null;
-          }
-        }
-
         mergedData._originatorInstanceId = decision.originator;
         mergedData._syncedFrom = instanceId;
         mergedData._syncedAt = new Date().toISOString();
@@ -963,41 +925,76 @@ export class FederationSync extends Resource {
               : randomUUID();
         }
 
-        if (record.table === "Memory") {
-          // flair#2441: a Memory merge is a full-row write-back of the row it
-          // read (`local`), through the shared helper: the row is re-read inside
-          // a transaction this call OWNS, the merge is confirmed to still be
-          // over that row, and the COMMITTED row is re-read before commit. A row
-          // deleted or purged since the read is not re-created (it stays gone),
-          // and a same-id replace is refused, never overwritten by the stale
-          // merge. Only the Memory table: every other synced table keeps the
-          // plain write below.
-          try {
-            await writeBackCommittedRow(
-              table,
-              record.id,
-              () => ({ write: mergedData }),
-              {
-                label: "FederationSync",
-                expectedRow: local,
-                attempts: 1,
-                pausePre: () => txnPausePoint("federation-merge-pre"),
-                pausePoint: () => txnPausePoint("federation-merge"),
-              },
-            );
-          } catch (err) {
-            // The target row was superseded (deleted, purged, or replaced with
-            // a new token) between the merge's read and its write, or changed
-            // after the write was staged (one attempt, no retry): nothing was
-            // written, and the record is skipped by name.
-            if (err instanceof WriteBackConflictError) {
-              recordSkip("merge_target_changed");
-              continue;
-            }
-            throw err;
+        // flair#2441 / flair#2450: EVERY synced table's merge is a full-row
+        // write-back of the row it read (`local`), through the shared helper:
+        // the row is re-read inside a transaction this call OWNS, the merge is
+        // confirmed to still be over that row, and the COMMITTED row is re-read
+        // before commit (one attempt, no retry). A row deleted or purged since
+        // the read is not re-created (it stays gone), and a same-id replace is
+        // refused, never overwritten by the stale merge — the record is skipped
+        // by name (merge_target_changed). The plan reads the CONFIRMED row the
+        // helper hands it (the in-transaction re-read), never the pre-helper
+        // read: the Agent status guard (flair#2108) and the Message
+        // consumed-state reconcile (flair#1521 §12 P0-3) both key on it.
+        let outcome: any;
+        try {
+          outcome = await writeBackCommittedRow(
+            table,
+            record.id,
+            (row) => {
+              // flair#2108: an inbound Agent record whose `status` differs from
+              // the CONFIRMED local principal's stored value is skipped WHOLE,
+              // whether or not it would win the last-write-wins merge — the
+              // federation path carries no verified administrator authority for
+              // that principal (the batch is signed, and a record signature may
+              // also be present; neither is an admin claim), so a second field
+              // in the record does not land either.
+              if (record.table === "Agent" && inboundChangesExistingPrincipalStatus(record, row)) {
+                return { skip: true };
+              }
+              // Absorbing-state guard for the Message table (flair#1521 §12
+              // P0-3). Generic newer-wins LWW would let a deadline-sweep `failed`
+              // (or any other state) written on a peer overwrite a locally-
+              // CONSUMED message, telling the sender "failed" about a message the
+              // recipient actually consumed — the exact inversion Relay exists to
+              // kill. `consumed` is absorbing: reconcileState pins it regardless
+              // of updatedAt, against the CONFIRMED row's state. P1-3: reconcile
+              // the SATELLITE lifecycle fields too, not just `state`, so a
+              // consumed row keeps its own consumedAt and never carries a remote
+              // failureReason.
+              if (record.table === "Message") {
+                const reconciled = reconcileState(row?.state, mergedData.state);
+                mergedData.state = reconciled;
+                if (reconciled === "consumed") {
+                  mergedData.failureReason = null;
+                  mergedData.consumedAt = row?.consumedAt ?? mergedData.consumedAt ?? null;
+                }
+              }
+              return { write: mergedData };
+            },
+            {
+              label: "FederationSync",
+              expectedRow: local,
+              attempts: 1,
+              pausePre: () => txnPausePoint("federation-merge-pre"),
+              pausePoint: () => txnPausePoint("federation-merge"),
+            },
+          );
+        } catch (err) {
+          // The target row was superseded (deleted, purged, or replaced with a
+          // new token) between the merge's read and its write, or changed after
+          // the write was staged (one attempt, no retry): nothing was written,
+          // and the record is skipped by name.
+          if (err instanceof WriteBackConflictError) {
+            recordSkip("merge_target_changed");
+            continue;
           }
-        } else {
-          await table.put(mergedData);
+          throw err;
+        }
+        // The plan's only skip is the Agent status guard above.
+        if ("skip" in outcome) {
+          recordSkip("agent_status_not_federated");
+          continue;
         }
         // embedding-space-guard slice 1: a federation-merged Memory can carry a
         // FOREIGN embeddingModel (LWW remote-win) — trip the guard's latch so

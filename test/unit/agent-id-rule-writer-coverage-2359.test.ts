@@ -99,8 +99,8 @@ test("each resource Agent write path runs the guard before it writes", () => {
   const federation = readFileSync("resources/Federation.ts", "utf8");
   const skip = federation.indexOf("recordSkip(AGENT_ID_ERROR)");
   expect(skip).toBeGreaterThan(-1);
-  // flair#2441: an Agent row's merge is the plain put (only Memory goes through the write-back).
-  expect(federation.indexOf("await table.put(mergedData)", skip)).toBeGreaterThan(skip);
+  // flair#2450: every synced table's merge, Agent included, is the write-back helper.
+  expect(federation.indexOf("await writeBackCommittedRow(", skip)).toBeGreaterThan(skip);
 });
 
 test("seedAgentViaOpsApi refuses an out-of-rule id before any HTTP call", async () => {

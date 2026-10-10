@@ -1990,14 +1990,58 @@ export class Memory extends (databases as any).flair.Memory {
       // resources/originator-instance.ts's resolveStoredRow.
       const resolvedReindex = await resolveStoredRow(this, "Memory", content, () => super.get());
       if (resolvedReindex.denial) return resolvedReindex.denial;
-      const built = buildReindexRow(content, resolvedReindex.row);
+      const reindexExisting = resolvedReindex.row;
+      const built = buildReindexRow(content, reindexExisting);
       if (!("row" in built)) {
         return new Response(
           JSON.stringify({ error: built.error, message: built.message }),
           { status: built.status, headers: { "content-type": "application/json" } },
         );
       }
-      const reindexed = await super.put(content);
+      const reindexRow = built.row;
+      // The URL-bound target id is the row this re-PUT lands on; stamp it when
+      // the body omits it (the same carry the ordinary put path performs).
+      const reindexTargetId = (this as any).getId?.();
+      if (reindexRow && typeof reindexRow === "object" && reindexRow.id == null &&
+        (typeof reindexTargetId === "string" || typeof reindexTargetId === "number")) {
+        reindexRow.id = reindexTargetId;
+      }
+      // flair#2450: the re-PUT writes over the row read as `reindexExisting`.
+      // Inside the write's transaction, confirm the COMMITTED row is still that
+      // one — before the row is staged, and again before the commit
+      // (confirmCommittedRow: the transaction is aborted and the staged row
+      // discarded). A delete, a purge or a same-id replace since the read is
+      // answered with the named 409 stored_row_changed, so a reindex never
+      // re-creates or overwrites the row it read. Both reads use an explicit
+      // fresh context, never a contextless one (see resources/write-back.ts).
+      const reindexJoinsRequestTxn = isJoinableTransaction(ctx);
+      const beforeReindex = txnPausePoint("memory-reindex-pre");
+      if (beforeReindex) await beforeReindex;
+      let reindexed: any;
+      try {
+        reindexed = await withSharedWriteTransaction(ctx, async (c) => {
+          const confirmPause = txnPausePoint("memory-reindex");
+          if (confirmPause) await confirmPause;
+          const confirmed = await (databases as any).flair.Memory.get(reindexExisting!.id, {});
+          if (!confirmed || !sameStoredRow(confirmed, reindexExisting)) return storedRowChangedRefusal("Memory");
+          const r: any = await (databases as any).flair.Memory.put(reindexRow, c);
+          // Test-only: holds the staged re-PUT before its commit, so a delete, a
+          // purge or a same-id replace can commit in that window.
+          const stagedPause = txnPausePoint("memory-reindex-staged");
+          if (stagedPause) await stagedPause;
+          try {
+            await confirmCommittedRow((databases as any).flair.Memory, reindexExisting!.id, (committed) => sameStoredRow(committed, reindexExisting));
+          } catch (err) {
+            if (err instanceof CommittedRowChanged && reindexJoinsRequestTxn) abortRequestTransaction(c);
+            throw err;
+          }
+          return r;
+        });
+      } catch (err) {
+        if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
+        throw err;
+      }
+      if (reindexed instanceof Response) return reindexed;
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
       return reindexed;

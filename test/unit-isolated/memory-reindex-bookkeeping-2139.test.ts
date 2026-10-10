@@ -22,10 +22,24 @@ class BaseMemory {
   static async get(id: any) {
     return memoryStore.get(typeof id === "string" ? id : id?.id) ?? null;
   }
-  static async put(content: any) { memoryStore.set(content.id, { ...content }); return undefined; }
   // Harper PUT semantics: the stored row IS the content (full replacement).
-  async put(content: any) {
-    memoryStore.set(content.id, { ...content });
+  // With a transaction context (the shared-write scope Memory.put's `_reindex`
+  // re-PUT runs in), the write is STAGED on that transaction and lands only on
+  // commit — so a committed-row confirmation read BEFORE the commit (a fresh
+  // context, flair#2441/flair#2450) sees the PRE-write committed row, exactly as
+  // the real Harper fresh-context read does. Without this, the fake would let
+  // the confirmation read the writer's OWN staged row and misjudge a legitimate
+  // re-PUT whose declared fields changed.
+  static async put(content: any, ctx?: any) {
+    const txn = ctx?.transaction;
+    if (txn && txn.open === 1) txn.staged.set(content.id, { ...content });
+    else memoryStore.set(content.id, { ...content });
+    return undefined;
+  }
+  async put(content: any, ctx?: any) {
+    const txn = ctx?.transaction;
+    if (txn && txn.open === 1) txn.staged.set(content.id, { ...content });
+    else memoryStore.set(content.id, { ...content });
   }
   search() {
     async function* gen() { for (const r of memoryStore.values()) yield r; }
@@ -51,10 +65,19 @@ const { Memory } = await import("../../resources/Memory.ts");
 
 (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
   if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
-  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  const txn: any = {
+    open: 1, saveCommits: false, staged: new Map<string, any>(),
+    abort() { this.open = 0; },
+    commit() { this.open = 0; for (const [id, row] of this.staged) memoryStore.set(id, row); },
+  };
   const c = ctx && typeof ctx === "object" ? ctx : {};
   c.transaction = txn;
-  return cb(txn);
+  // Harper commits (or aborts) the owned transaction when the callback settles;
+  // the staged writes land only then.
+  return Promise.resolve(cb(txn)).then(
+    (r) => { txn.commit(); return r; },
+    (e) => { txn.abort(); throw e; },
+  );
 };
 
 const PAST = "2020-01-01T00:00:00.000Z";
