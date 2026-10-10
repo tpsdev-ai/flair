@@ -140,7 +140,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "query"
       ]
     },
-    "outputShape": "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding.",
+    "outputShape": "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding. A hit whose record has a bound host-source pointer carries `hostSource`: the pointer object for a reader allowed to see it, or the literal \"withheld\" for one who may read the record but not the pointer. hostSource is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship.",
     "annotations": {
       "readOnlyHint": true
     },
@@ -152,7 +152,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "memory_store",
-    "description": "Save information to persistent memory. Use for lessons, decisions, preferences, facts. Attributed to your authenticated agent.",
+    "description": "Save information to persistent memory. Use for lessons, decisions, preferences, facts. Attributed to your authenticated agent. hostSource is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -206,13 +206,33 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
             "type": "string"
           },
           "description": "IDs of memories that informed this write (citation-on-write). Credited via the same deduped usage ledger as record_usage. Optional."
+        },
+        "hostSource": {
+          "type": "object",
+          "description": "Optional host-object pointer: the host object this memory is claimed to come from, as { v: 1, host, kind, id, url? } (host/kind from a closed set, e.g. openclaw/run; id matches a fixed grammar; url https-only). Validated server-side by the same validator as the REST write — an invalid pointer is refused, never coerced. hostSource is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship."
+        },
+        "hostSourceScope": {
+          "type": "string",
+          "enum": [
+            "record"
+          ],
+          "description": "Opt the hostSource pointer into the record's own read scope. Omit for author-only (the pointer is then visible only to the writing agent). Any wider scope is refused."
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Optional originating-session id, stored on the record. Omit to leave it unset."
         }
       },
       "required": [
         "content"
       ]
     },
-    "outputShape": "Write echo { id, written:true, deduplicated } — the new id + confirmation. No internal embedding fields; round-trips via memory_get."
+    "outputShape": "Write echo { id, written:true, deduplicated } — the new id + confirmation. No internal embedding fields; round-trips via memory_get.",
+    "stdioOmitProperties": [
+      "hostSource",
+      "hostSourceScope",
+      "sessionId"
+    ]
   },
   {
     "name": "skill_store",

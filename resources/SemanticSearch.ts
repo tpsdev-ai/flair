@@ -310,12 +310,18 @@ export class SemanticSearch extends Resource {
       // flair#1940 A3: the gated pointer join also needs `instanceToken`, which
       // DEFAULT_SELECT already carries (see semantic-retrieval-core.ts), so both
       // the default and this widened projection hand the join what it binds on.
-      select: (includeTrust || includeMetadata || includeTrigger)
-        ? [...DEFAULT_SELECT,
-           ...(includeTrust ? ["provenance"] : []),
-           ...(includeMetadata ? ["metadata"] : []),
-           ...(includeTrigger ? ["trigger"] : [])]
-        : undefined,
+      // flair#1940 slice 2b: `provenance` is added unconditionally, so the
+      // semantic-search result carries it like the by-id and list reads. This
+      // widens the SELECT with a stored field only; it never attaches the trust
+      // block or `_semSimilarity` — includeTrust/abstain stay opt-in.
+      // flair#1332: `metadata` (ADK custom_metadata store-and-return) stays
+      // opt-in via `includeMetadata`; flair#1546: `trigger` via `includeTrigger`.
+      select: [
+        ...DEFAULT_SELECT,
+        "provenance",
+        ...(includeMetadata ? ["metadata"] : []),
+        ...(includeTrigger ? ["trigger"] : []),
+      ],
       // flair#744 slice 2 + confidence-band refinement: attach the absolute
       // per-result cosine confidence when the caller opts into abstention OR
       // the trust block — abstention reads the best of it for its verdict, and

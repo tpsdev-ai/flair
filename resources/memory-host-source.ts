@@ -173,9 +173,8 @@ export async function storedPointerIds(ids: readonly string[], context?: unknown
 
 /**
  * flair#1940 A1-iv item 2 — the ONE reader helper. `Memory.get()`,
- * `Memory.search()` and `SemanticSearch` render pointers through the pointer
- * helper. Other Memory projections, bootstrap included, do not render pointers
- * in this slice. It fetches the pointer rows for the WHOLE result set in ONE
+ * `Memory.search()`, `SemanticSearch` and bootstrap render pointers through the
+ * pointer helper. It fetches the pointer rows for the WHOLE result set in ONE
  * batched query and applies the join, so no reader can forget the join and no
  * module needs to touch the MemoryHostSource table itself. `readerAgentId` is
  * the non-admin reader; an admin/operator read is the named exception (see

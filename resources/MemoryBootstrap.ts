@@ -23,6 +23,8 @@ import {
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
 import { retrievalMode } from "./bm25.js";
 import { buildTrustBlock } from "./trust-block.js";
+import { projectRowsThroughPointers } from "./memory-host-source.js";
+import { formatHostSourceCitation } from "./host-source-citation.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 import { estimateTokens } from "./token-estimate.js";
 import { initialPosition, ORG_EVENT_STREAM } from "./agent-read-position-lib.js";
@@ -293,15 +295,19 @@ const MAX_CANDIDATE_POOL = 100;
 // `m._source !== agentId` is the "is this a teammate's finding" check; own
 // memories never carry `_source` at all.
 function formatMemory(m: any, agentId?: string): string {
-  // flair#1940 A1' item 5: bootstrap does NOT render pointers in this slice.
-  // The pointer lives in MemoryHostSource and is joined only into Memory.get/
-  // search/SemanticSearch results; the bootstrap citation (A6) arrives in slice
-  // 4. So this surface leaves the record unchanged.
+  // flair#1940 A1' item 5 / A6 (slice 2b): the caller passes the record AFTER
+  // the gated pointer join (resources/memory-host-source.ts's
+  // projectRowsThroughPointers) when it has run, so `m.hostSource` is the
+  // validated pointer OBJECT, `"withheld"`, or absent. The citation renders
+  // only what that join returned — never the raw stored string, and never a
+  // value the reader could not see. A record with no pointer is unchanged.
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
   const chain = m.supersedes ? " [supersedes earlier decision]" : "";
   const attribution = m._source && m._source !== agentId ? `[via ${m._source}] ` : "";
-  const base = `${tag} ${attribution}${m.content}${date}${chain}`;
+  const citation = formatHostSourceCitation(m.hostSource);
+  const source = citation ? `${citation} ` : "";
+  const base = `${tag} ${attribution}${m.content}${date}${chain} ${source}`.trimEnd();
 
   // Wrap flagged memories in safety delimiters — composes with attribution
   // above (attribution is baked into `base` before wrapping, so a flagged
@@ -545,6 +551,25 @@ export class BootstrapMemories extends Resource {
     //     `tokenEstimate` on each path.
     const contentCost = (structured: unknown, proseLine: string): number =>
       includeContext ? estimateTokens(proseLine) : estimateTokens(JSON.stringify(structured));
+
+    // flair#1940 A3/A6 (slice 2b) — the gated pointer join for the prose surface.
+    // A non-admin caller sees a bound pointer only through the join: their OWN
+    // records render their pointer, a teammate's author-only pointer renders
+    // `"withheld"` (A3), and everything else is unchanged. An admin/operator
+    // bootstrap stays unfiltered and takes no join — the same exception the
+    // named read surfaces take. ONE batched pointer query per row set, never
+    // one per row. The join's binding fields (`agentId`, `instanceToken`,
+    // `visibility`, `archived`) are in the projected rows the caller passes in.
+    const hostSourceReader: string | undefined =
+      authenticatedAgent && !callerIsAdmin ? authenticatedAgent : undefined;
+    const pointerRenders = async (rows: readonly any[]): Promise<Map<string, any>> => {
+      const map = new Map<string, any>();
+      if (!hostSourceReader || rows.length === 0) return map;
+      for (const row of await projectRowsThroughPointers(rows, hostSourceReader)) {
+        if (row && typeof row.id === "string") map.set(row.id, row);
+      }
+      return map;
+    };
 
     // --- 1. Soul records (budgeted — prioritized by key importance) ---
     // Soul is who you are, but we still need to respect token budgets.
@@ -799,9 +824,13 @@ export class BootstrapMemories extends Resource {
     // #1201 — `updatedAt` is projected on BOTH paths (not just the trust path):
     // the structured `memories`/`predicted` containers carry it so a consumer
     // can compute freshness, and the trust block's ageDays keys off it.
+    // flair#1940 A3 (slice 2b): `instanceToken` is projected on BOTH branches so
+    // the gated pointer join can bind a pointer to the row's current
+    // incarnation; it is a join input only (leanMemory/formatMemory never emit
+    // it), so the response bytes are unchanged.
     const OWN_SELECT = includeTrust
-      ? ["id", "agentId", "content", "durability", "createdAt", "updatedAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags", "provenance", "usageCount", "validFrom"]
-      : ["id", "agentId", "content", "durability", "createdAt", "updatedAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags"];
+      ? ["id", "agentId", "content", "durability", "createdAt", "updatedAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags", "instanceToken", "provenance", "usageCount", "validFrom"]
+      : ["id", "agentId", "content", "durability", "createdAt", "updatedAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags", "instanceToken"];
 
     // flair#744 slice 1 — the Memory records that became visible lines in the
     // memory-bearing sections (permanent/recent/predicted/relevant/teammate),
@@ -873,8 +902,9 @@ export class BootstrapMemories extends Resource {
     const permanentSupersededIds = new Set<string>();
     for (const m of permanentRows) if (m.supersedes) permanentSupersededIds.add(m.supersedes);
     const permanent = permanentRows.filter((m) => !permanentSupersededIds.has(m.id));
+    const permanentPtr = await pointerRenders(permanent);
     const admitPermanent = (m: any) => {
-      const line = formatMemory(m, agentId);
+      const line = formatMemory(permanentPtr.get(m.id) ?? m, agentId);
       const struct = leanMemory(m, "permanent");
       // #1199 (0.44.11) — charge what SHIPS (structured on the /mcp path, prose
       // on the REST path); see contentCost. #1207 stays honored: on the prose
@@ -952,8 +982,9 @@ export class BootstrapMemories extends Resource {
     // Budget: up to 40% of remaining for recent
     const recentBudget = Math.floor(tokenBudget * 0.4);
     let recentSpent = 0;
+    const recentPtr = await pointerRenders(recent);
     for (const m of recent) {
-      const line = formatMemory(m, agentId);
+      const line = formatMemory(recentPtr.get(m.id) ?? m, agentId);
       const struct = leanMemory(m, "recent");
       const cost = contentCost(struct, line); // #1199 (0.44.11) — charge what ships; see contentCost
       // flair#1199 trust-admission — charge the trust block's real serialized
@@ -1003,8 +1034,9 @@ export class BootstrapMemories extends Resource {
 
       const predictedBudget = Math.floor(tokenBudget * 0.3);
       let predictedSpent = 0;
+      const predictedPtr = await pointerRenders(subjectMemories);
       for (const m of subjectMemories) {
-        const line = formatMemory(m, agentId);
+        const line = formatMemory(predictedPtr.get(m.id) ?? m, agentId);
         const struct = leanMemory(m, "predicted");
         const cost = contentCost(struct, line); // #1199 (0.44.11) — charge what ships; see contentCost
         // flair#1199 trust-admission — charge the trust block's real serialized
@@ -1194,6 +1226,7 @@ export class BootstrapMemories extends Resource {
         const scored = candidates
           .filter((m: any) => !includedIds.has(m.id))
           .map((m: any) => ({ memory: m, score: m._score }));
+        const retrievedPtr = await pointerRenders(scored.map((s: any) => s.memory));
 
         // flair#681: the collision block's semantic surface — one candidate
         // per teammate (`scored` is sorted best-first by the fused retrieval
@@ -1220,7 +1253,7 @@ export class BootstrapMemories extends Resource {
         // budget regardless of which section they land in, so neither
         // section double-spends.
         for (const { memory: m } of scored) {
-          const line = formatMemory(m, agentId);
+          const line = formatMemory(retrievedPtr.get(m.id) ?? m, agentId);
           // flair#1199 (0.44.11) — build the STRUCTURED container object BEFORE
           // the budget check so the finding is charged the cost of what actually
           // ships (structured on the /mcp path), not its cheaper prose line. A
