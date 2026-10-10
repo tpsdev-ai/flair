@@ -26,7 +26,7 @@ import {
 } from "./instance-identity-row.js";
 import { isValidAgentId } from "./agent-id-rule.js";
 
-/** The operator command that back-fills the home on rows it can prove are local. */
+/** The operator command that back-fills the home on home-less rows that carry no federation-sync provenance. */
 export const AGENT_HOME_STAMP_COMMAND = "flair agent stamp-home";
 
 /** The remedy line doctor prints: the dry run is the bare command; only --apply writes. */

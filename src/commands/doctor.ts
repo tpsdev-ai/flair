@@ -2046,9 +2046,8 @@ program
       }
 
       // 8c. Agent homes (flair#2433) — report every stored Agent row with no
-      // home instance (`originatorInstanceId`). The row IS the record the CLI's
-      // ops-API creation paths wrote before this fix, so doctor names the remedy
-      // that back-fills it. Read-only: nothing is rewritten here.
+      // home instance (`originatorInstanceId`) and name the remedy that
+      // back-fills it. Read-only: nothing is rewritten here.
       console.log(`\n  ${render.wrap(render.c.bold, "Agent homes")}`);
       const homeOpsUrl = `http://127.0.0.1:${resolveOpsPort(opts)}/`;
       const homeEndpoint = agentHomeEndpoint(homeOpsUrl, resolveAdminUser(), agentListAdminPass);

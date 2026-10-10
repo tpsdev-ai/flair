@@ -2867,8 +2867,7 @@ export interface AgentHomeFinding {
   /** Every Agent row whose `originatorInstanceId` is null/absent, sorted. */
   homeLessIds: string[];
   /**
-   * The home-less rows the remedy may stamp: no sync provenance, so this
-   * instance's own writes are the only source the row can have come from.
+   * The home-less rows that carry no federation-sync provenance; the remedy may stamp them.
    */
   stampableIds: string[];
   /** The home-less rows that arrived through a federation merge — listed, never stamped. */

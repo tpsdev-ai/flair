@@ -4,8 +4,8 @@
  * Every path that locally creates an Agent row stamps the creating instance's
  * own federation id (`originatorInstanceId`) as the new row's home, the home is
  * immutable after create, `flair doctor` reports a home-less row, and the named
- * remedy (`flair agent stamp-home`) stamps a provably local row while LISTING —
- * never stamping — one that arrived through federation.
+ * remedy (`flair agent stamp-home`) stamps a home-less row with no federation-sync
+ * provenance while LISTING — never stamping — one that carries it.
  *
  * The id a create stamps is the one the shared rule resolves from the REAL
  * `flair.Instance` table (src/lib/instance-identity-row.ts). This file seeds
@@ -218,9 +218,9 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect((await rowIn("Agent", id))?.originatorInstanceId, "PATCH changed the stored home").toBe(LOCAL_ID);
   }, 30_000);
 
-  test("the remedy stamps a provably local home-less row and lists a sync-originated one", async () => {
-    // A provably local home-less row: written through the ops API with no home
-    // and no federation provenance.
+  test("the remedy stamps a home-less row with no federation-sync provenance and lists a sync-originated one", async () => {
+    // A home-less row written through the ops API with no home and no
+    // federation provenance.
     const localId = `local-nohome-${sfx}`;
     await ops({
       operation: "insert",
@@ -230,7 +230,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
 
     // A sync-originated home-less row: landed through the REAL federation merge
     // (a signed batch from a paired peer), so it carries `_syncedFrom` /
-    // `_originatorInstanceId` and nothing about it is local.
+    // `_originatorInstanceId`.
     const syncId = `synced-nohome-${sfx}`;
     const hub = nacl.sign.keyPair();
     await ops({
