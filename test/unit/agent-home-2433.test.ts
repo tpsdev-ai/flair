@@ -23,6 +23,7 @@ import {
   readStoredAgentHome,
   resolveTargetInstanceId,
   runAgentHomeStamp,
+  stampLeftoverLines,
 } from "../../src/lib/agent-home.js";
 import { describeAgentHomeFinding } from "../../src/doctor-client.js";
 import { INSTANCE_ROW_PRUNE_REMEDY } from "../../src/lib/instance-identity-row.js";
@@ -108,6 +109,18 @@ describe("runAgentHomeStamp — sync provenance is checked at write time", () =>
     expect(result.stamped).toEqual(["still-local"]);
     expect(result.skipped).toEqual(["late-sync"]);
     expect(rows["late-sync"].originatorInstanceId ?? null).toBeNull();
+  });
+
+  test("a row that vanishes between the plan and its write is vanished, not skipped", async () => {
+    const rows: Record<string, Record<string, unknown>> = { gone: { id: "gone" }, "still-local": { id: "still-local" } };
+    const { fetchImpl, writes } = stampFake(rows, () => { delete rows.gone; });
+    const result = await runAgentHomeStamp({ ...base, fetchImpl });
+    expect(writes).toEqual(["still-local"]);
+    expect(result.vanished).toEqual(["gone"]);
+    expect(result.skipped).toEqual([]);
+    const lines = stampLeftoverLines(result);
+    expect(lines).toEqual(["     skipped (no longer present): gone"]);
+    expect(lines.join("\n")).not.toContain("sync-originated");
   });
 
   test("a row whose provenance cannot be re-read is not written", async () => {

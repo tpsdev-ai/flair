@@ -38,6 +38,7 @@ import {
   agentHomeEndpoint,
   resolveTargetInstanceId,
   runAgentHomeStamp,
+  stampLeftoverLines,
 } from "../lib/agent-home.js";
 import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
 
@@ -884,7 +885,7 @@ export function register(program: Command): void {
         );
         return;
       }
-      for (const id of result.skipped) console.log(`     list only (sync-originated): ${id}`);
+      for (const line of stampLeftoverLines(result)) console.log(line);
       console.log(`${render.icons.ok} Stamped the home instance on ${result.stamped.length} row(s).`);
     });
 }

@@ -304,6 +304,16 @@ export interface AgentHomeStampResult {
   stamped: string[];
   /** The planned ids left unwritten because the row, re-read just before its write, carried sync provenance. */
   skipped: string[];
+  /** The planned ids whose row was gone when re-read just before its write. */
+  vanished: string[];
+}
+
+/** The lines `flair agent stamp-home --apply` prints for the rows it left unwritten. */
+export function stampLeftoverLines(result: Pick<AgentHomeStampResult, "skipped" | "vanished">): string[] {
+  return [
+    ...result.skipped.map((id) => `     list only (sync-originated): ${id}`),
+    ...result.vanished.map((id) => `     skipped (no longer present): ${id}`),
+  ];
 }
 
 /** One Agent row in full (null when absent, "unreadable" when the read failed). */
@@ -354,14 +364,15 @@ export async function runAgentHomeStamp(args: {
     fetchImpl: args.fetchImpl,
     timeoutMs: args.timeoutMs,
   });
-  if (rows === null) return { ok: false, reason: "roster-unreadable", plan: empty, stamped: [], skipped: [] };
+  if (rows === null) return { ok: false, reason: "roster-unreadable", plan: empty, stamped: [], skipped: [], vanished: [] };
   const plan = planAgentHomeStamps(rows, args.localInstanceId);
-  if (!args.apply) return { ok: true, plan, stamped: [], skipped: [] };
-  if (args.localInstanceId === null) return { ok: false, reason: "no-canonical-id", plan, stamped: [], skipped: [] };
+  if (!args.apply) return { ok: true, plan, stamped: [], skipped: [], vanished: [] };
+  if (args.localInstanceId === null) return { ok: false, reason: "no-canonical-id", plan, stamped: [], skipped: [], vanished: [] };
   const fetchImpl = args.fetchImpl ?? fetch;
   const timeoutMs = args.timeoutMs ?? 10_000;
   const stamped: string[] = [];
   const skipped: string[] = [];
+  const vanished: string[] = [];
   for (const id of plan.stampable) {
     // The shared agent-ID rule owns an id outside it — the doctor's Agent-ID
     // check reports such a row. A home stamp is not the place to rewrite it.
@@ -370,7 +381,11 @@ export async function runAgentHomeStamp(args: {
     if (current === "unreadable") {
       throw new Error(`Could not re-read agent '${id}' before stamping it; no change was made to it.`);
     }
-    if (current === null || isSyncOriginatedAgentRow(current)) {
+    if (current === null) {
+      vanished.push(id);
+      continue;
+    }
+    if (isSyncOriginatedAgentRow(current)) {
       skipped.push(id);
       continue;
     }
@@ -396,5 +411,5 @@ export async function runAgentHomeStamp(args: {
     }
     stamped.push(id);
   }
-  return { ok: true, plan, stamped, skipped };
+  return { ok: true, plan, stamped, skipped, vanished };
 }
