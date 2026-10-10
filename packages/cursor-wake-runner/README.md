@@ -41,6 +41,21 @@ With an Ed25519 key, `FLAIR_AGENT_ID` is the signing identity and the feed reque
 | `CURSOR_ENV_NAME` | no | Named Cursor environment (exclusive with repo) |
 | `CURSOR_AUTO_CREATE_PR` | no | `true` to open a PR when the run completes |
 
+## Launch receipt
+
+After a dispatch is handed to a Cursor Cloud Agent ("created" or "already"),
+the runner records ONE memory as its own agent: a stable id derived from the
+OrgEvent id, content naming only the dispatch id and the Cursor agent id, and a
+`hostSource` `{ host: "cursor", kind: "launch", id: <Cursor agent id>, url? }`
+(the id and url Cursor returned). A receipt already present under that id is
+left unchanged, so a replay that reuses the agent (409) retries the receipt
+without rewriting the stored one. The write precedes the watermark ack, so a
+failed write leaves the event queued and the next cycle retries it. A
+`hostSource` value the server's grammar would refuse is omitted with one log
+line, and the receipt still lands. `hostSource` is the writer's claim, not
+verified host authorship. Covered by
+`test/integration/host-source-cursor-launch-receipt-1940.test.ts`.
+
 ## Wake trigger
 
 Pick one. All of them invoke this same process — that is what makes launch idempotent.
