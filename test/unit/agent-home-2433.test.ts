@@ -222,6 +222,16 @@ describe("planAgentHomeWrite — the home is immutable after create", () => {
     if (!plan.refuse) expect(plan.stamp).toBe(false);
   });
 
+  test("a stored home with no resolved next home proceeds without writing a home", () => {
+    expect(planAgentHomeWrite({ state: "found", home: "inst-stored" }, null, "a")).toEqual({ refuse: false, stamp: false, home: null });
+  });
+
+  test("a stored home and a different non-null next home is REFUSED with the named error", () => {
+    const plan = planAgentHomeWrite({ state: "found", home: "inst-x" }, "inst-y", "a");
+    expect(plan.refuse).toBe(true);
+    if (plan.refuse) expect(plan.message).toContain(AGENT_HOME_IMMUTABLE_ERROR);
+  });
+
   test("a stored home that differs is REFUSED with the named error", () => {
     const plan = planAgentHomeWrite({ state: "found", home: "inst-other" }, "inst-local", "a");
     expect(plan.refuse).toBe(true);

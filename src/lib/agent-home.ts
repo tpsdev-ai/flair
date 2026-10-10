@@ -273,7 +273,8 @@ export type AgentHomeWritePlan =
  * row that already carries this id (`existing`) and the home this instance would
  * stamp (`home`, from resolveTargetInstanceId). PURE.
  *
- * Refuses — with a named error — when the write would CHANGE a stored home, and
+ * Refuses — with a named error — when a non-null `home` differs from the stored
+ * one (a null `home` cannot change it, since no home is written over a found row), and
  * when the stored row could not be read (an unreadable read is not "no home").
  * Otherwise `stamp` is true only for an absent row (a create); over a found row
  * the write must omit the home so the stored value, null or not, stands.
@@ -289,7 +290,7 @@ export function planAgentHomeWrite(
       message: `could not read agent '${id}' before writing it (${existing.reason}); no change was made.`,
     };
   }
-  if (existing.state === "found" && existing.home !== null && existing.home !== home) {
+  if (existing.state === "found" && existing.home !== null && home !== null && existing.home !== home) {
     return { refuse: true, message: agentHomeChangeRefusal(id, existing.home, home) };
   }
   return { refuse: false, stamp: existing.state === "absent", home };
