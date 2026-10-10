@@ -26,8 +26,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:f
 import * as realFs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
+// flair#1940 seam: the REAL server validator, from the repo source (the way the
+// flair-mcp tests reach `resources/`), so the plugin's pre-write id check is
+// tested against the code that decides, not against a second copy of its regex.
+import { validateHostSource } from "../../../resources/host-source.ts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 
 /** The one file the A1 regression test plants under a root-owned directory. */
@@ -149,7 +153,7 @@ function createMockApi(opts: {
 
 // ── network stub ─────────────────────────────────────────────────────────────
 
-interface Call { url: string; method: string; authorization: string | null; signal: AbortSignal | null }
+interface Call { url: string; method: string; authorization: string | null; signal: AbortSignal | null; body: unknown }
 
 function installFetchStub(
   handler?: (call: Call) => { status?: number; body?: unknown },
@@ -158,11 +162,16 @@ function installFetchStub(
   const calls: Call[] = [];
   globalThis.fetch = (async (url: string, init: any = {}) => {
     const headers = (init.headers ?? {}) as Record<string, string>;
+    let parsedBody: unknown = null;
+    if (typeof init.body === "string") {
+      try { parsedBody = JSON.parse(init.body); } catch { parsedBody = init.body; }
+    }
     const call: Call = {
       url: String(url),
       method: init.method ?? "GET",
       authorization: headers["Authorization"] ?? null,
       signal: (init.signal as AbortSignal | undefined) ?? null,
+      body: parsedBody,
     };
     calls.push(call);
     const out = handler ? handler(call) : {};
@@ -1114,6 +1123,187 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     }
   });
 
+  test("hostSource decision: a grammar-valid run id becomes the pointer; an invalid one is null", async () => {
+    const { captureHostSource } = await loadModule();
+    expect(captureHostSource("1a2b3c4d-0000-4000-8000-000000000000")).toEqual({ host: "openclaw", kind: "run", id: "1a2b3c4d-0000-4000-8000-000000000000" });
+    expect(captureHostSource("run-1a2b3c4d")).toEqual({ host: "openclaw", kind: "run", id: "run-1a2b3c4d" });
+    for (const bad of ["", "bad run id", "a".repeat(257), "run\u0007"]) {
+      expect(captureHostSource(bad)).toBeNull();
+    }
+  });
+
+  test("session id decision: the event session id, else the context session id, else none", async () => {
+    const { sessionIdForCapture } = await loadModule();
+    expect(sessionIdForCapture({ sessionId: "e" }, { sessionId: "c" })).toBe("e");
+    expect(sessionIdForCapture({ sessionId: "e" }, {})).toBe("e");
+    expect(sessionIdForCapture({}, { sessionId: "c" })).toBe("c");
+    expect(sessionIdForCapture({}, { sessionKey: "k" })).toBeNull();
+    expect(sessionIdForCapture({}, {})).toBeNull();
+  });
+
+  test("a hook context with both sessionKey and sessionId: the write carries the sessionId", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", assistantTexts: ["remember this: both session fields are on the context"] },
+      { agentId: "A", sessionKey: "agent:A:slot", sessionId: "sess-ctx" } as any,
+    );
+    const body = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url))[0].body as any;
+    expect(body.sessionId).toBe("sess-ctx");
+  });
+
+  test("a hook context with only sessionKey: the write has no sessionId field", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", assistantTexts: ["remember this: only the session key is present"] },
+      { agentId: "A", sessionKey: "agent:A:slot" } as any,
+    );
+    const body = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url))[0].body as any;
+    expect("sessionId" in body).toBe(false);
+  });
+
+  test("D15: the capture write carries hostSource {openclaw, run, <runId>} and the session id", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", sessionId: "sess-9", assistantTexts: ["remember this: the capture body carries its source"] },
+      { agentId: "A" },
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one capture write
+    const body = memPuts[0].body as any;
+    expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-1a2b3c4d" }); // assertion: the run id is the source
+    expect(body.sessionId).toBe("sess-9"); // assertion: the host session id is carried
+  });
+
+  test("D15: a run id outside the id grammar captures with no source, and one log line", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "bad run id", assistantTexts: ["remember this: the capture target is the bad run id case"] },
+      { agentId: "A" },
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: the capture still lands
+    expect((memPuts[0].body as any).hostSource).toBeUndefined(); // assertion: no source was attached
+    expect(api._warnText()).toContain("omitted its host source"); // assertion: one line names why
+  });
+
+  test("D15: the memory_store tool's write carries no source", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    await store.execute("1", { text: "remember this: a manual write carries no source" });
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one manual write
+    expect((memPuts[0].body as any).hostSource).toBeUndefined(); // assertion: no source on a non-capture write
+  });
+
+  test("D15: one out-of-grammar run id across two captures logs EXACTLY one line, and the line carries no captured text", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    const warnLines = (): string[] => (api.logger!.warn as any).mock.calls.map((c: any[]) => String(c[0]));
+    // Registration warns on its own (prompt policy withheld); count only what the captures add.
+    const before = warnLines().length;
+    const runId = "run ]bad\nid";
+    await api._fire("llm_output", { runId, assistantTexts: ["remember this: the first capture marker is LOGTEXT-ONE"] }, { agentId: "A" });
+    await api._fire("llm_output", { runId, assistantTexts: ["remember this: the second capture marker is LOGTEXT-TWO"] }, { agentId: "A" });
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(2); // assertion: both captures land
+    for (const p of memPuts) expect((p.body as any).hostSource).toBeUndefined(); // assertion: neither carries a source
+    const warns = warnLines().slice(before);
+    expect(warns.length).toBe(1); // assertion: ONE warn line across both captures, not one per capture
+    expect(warns[0]).toContain("omitted its host source"); // assertion: it is the omitted-source line
+    for (const leaked of ["LOGTEXT-ONE", "LOGTEXT-TWO", "remember this", "capture marker", runId, "]bad"]) {
+      expect(warns[0]).not.toContain(leaked); // assertion: no captured text and no raw run id in the line
+    }
+  });
+
+  test("flair#1940: an agent_end capture write carries hostSource {openclaw, run, <runId>} and the EVENT's sessionId", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "agent_end",
+      {
+        runId: "run-ae-1a2b",
+        sessionId: "sess-event-ae",
+        success: true,
+        messages: [{ role: "user", content: "remember this: the agent_end capture carries its source" }],
+      },
+      { agentId: "A", sessionId: "sess-ctx-ae", sessionKey: "agent:A:slot" } as any,
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one capture write
+    const body = memPuts[0].body as any;
+    expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-ae-1a2b" }); // assertion: the run id is the source
+    expect(body.sessionId).toBe("sess-event-ae"); // assertion: the event's sessionId wins over ctx's and over sessionKey
+  });
+
+  test("flair#1940: an llm_input capture write carries hostSource {openclaw, run, <runId>} and the EVENT's sessionId", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_input",
+      { runId: "run-li-3c4d", sessionId: "sess-event-li", provider: "p", model: "m", prompt: "remember this: the llm_input capture carries its source" },
+      { agentId: "A", sessionId: "sess-ctx-li", sessionKey: "agent:A:slot" } as any,
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one capture write
+    const body = memPuts[0].body as any;
+    expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-li-3c4d" }); // assertion: the run id is the source
+    expect(body.sessionId).toBe("sess-event-li"); // assertion: the event's sessionId wins over ctx's and over sessionKey
+  });
+
   test("D5: a block-shaped agent_end message is captured (mixed blocks contribute nothing)", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
@@ -1205,6 +1395,91 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     expect(res.details.written).toBe(true);
     expect(res.details.supersedeClosed).toBe(false);
     expect(res.details.errors.length).toBe(1);
+  });
+});
+
+// ── flair#1940 seam — the plugin's run-id check vs the server's validator ────
+
+/** The server's verdict on the pointer an OpenClaw capture would claim for `id`. */
+const serverAccepts = (id: string): boolean => validateHostSource({ v: 1, host: "openclaw", kind: "run", id }).ok;
+
+describe("flair#1940 seam — the plugin's run-id check agrees with the server validator", () => {
+  // [run id, label, the SERVER's verdict]. The server column is asserted too, so
+  // the table cannot pass vacuously (two checks that both accept everything).
+  const CASES: Array<[string, string, boolean]> = [
+    ["1a2b3c4d-0000-4000-8000-000000000000", "a uuid", true],
+    [randomUUID(), "a typical OpenClaw run id (crypto.randomUUID)", true],
+    ["inject-msg_01HZXK2", "an inject-<messageId> run id", true],
+    ["cron:job-7:0123456789abcdef", "a <sourceKey>:<sha16> run id", true],
+    ["run-1a2b3c4d", "a prefixed run id", true],
+    ["a", "one character (lower bound)", true],
+    ["a".repeat(256), "256 characters (upper bound)", true],
+    ["Az09._:/@#-", "every punctuation class the grammar allows", true],
+    ["", "empty", false],
+    ["a".repeat(257), "257 characters", false],
+    ["bad run id", "spaces", false],
+    ["run]1", "']'", false],
+    ["run[1", "'['", false],
+    ["run\n1", "newline", false],
+    ["run\r\n1", "CRLF", false],
+    ["run\t1", "tab", false],
+    ["run\u0000", "NUL", false],
+    ["run\u0007", "BEL", false],
+    ["run\u0085", "NEL (C1 control)", false],
+    ["run\u202E1", "RLO bidi override", false],
+    ["run\u200E1", "LRM bidi mark", false],
+    ["run\"1", "double quote", false],
+    ["run\\1", "backslash", false],
+    ["run%201", "percent", false],
+    ["run+1", "plus", false],
+    ["caf\u00E9", "non-ASCII, NFC (precomposed e-acute)", false],
+    ["cafe\u0301", "non-ASCII, NFD (e + combining acute)", false],
+    ["\u212Bngstrom", "U+212B ANGSTROM SIGN (NFC -> A-ring, still non-ASCII)", false],
+    ["\uFF32un", "fullwidth R (an NFKC fold only; NFC leaves it)", false],
+    ["run-\u{1F600}", "astral emoji", false],
+    ["run-\uD800", "lone surrogate", false],
+    // NFC maps U+212A KELVIN SIGN to ASCII "K": the server normalises BEFORE its
+    // grammar check, so it ACCEPTS these (and stores the "K" form).
+    ["run-\u212A", "U+212A KELVIN SIGN (NFC -> ASCII K)", true],
+    ["a".repeat(255) + "\u212A", "255 chars + KELVIN SIGN (256 after NFC)", true],
+  ];
+
+  test("named inputs: the server's verdict is the expected one, and the plugin's matches it", async () => {
+    const { captureHostSource } = await loadModule();
+    const wrongServer: string[] = [];
+    const disagree: string[] = [];
+    for (const [id, label, expected] of CASES) {
+      const server = serverAccepts(id);
+      if (server !== expected) wrongServer.push(label);
+      const pluginAccepts = captureHostSource(id) !== null;
+      if (pluginAccepts !== server) disagree.push(`${label}: plugin ${pluginAccepts ? "accepts" : "refuses"}, server ${server ? "accepts" : "refuses"}`);
+    }
+    expect(wrongServer).toEqual([]); // assertion: the table pins the server's real verdicts
+    expect(disagree).toEqual([]); // assertion: the plugin decides every input the way the server does
+  });
+
+  test("every code point (U+0000..U+10FFFF, lone surrogates included) inside a run id: one verdict", async () => {
+    const { captureHostSource } = await loadModule();
+    const disagree: string[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      // fromCharCode for the surrogate range yields the lone code unit.
+      const c = cp >= 0xd800 && cp <= 0xdfff ? String.fromCharCode(cp) : String.fromCodePoint(cp);
+      const id = `run-${c}-1`;
+      if ((captureHostSource(id) !== null) !== serverAccepts(id)) disagree.push(`U+${cp.toString(16).toUpperCase().padStart(4, "0")}`);
+    }
+    expect(disagree).toEqual([]); // assertion: no code point splits the plugin from the server
+  });
+
+  test("an accepted run id: the pointer the client writes ({v:1, ...}) is one the server accepts, with the run id verbatim", async () => {
+    const { captureHostSource } = await loadModule();
+    for (const [id, label, expected] of CASES) {
+      if (!expected) continue;
+      const pointer = captureHostSource(id);
+      expect(pointer, label).toEqual({ host: "openclaw", kind: "run", id }); // assertion: the id is the run id verbatim
+      const r = validateHostSource({ v: 1, ...pointer });
+      expect(r.ok, label).toBe(true); // assertion: the exact written pointer passes the server
+      if (r.ok) expect(r.value.id, label).toBe(id.normalize("NFC")); // assertion: the server stores the NFC form
+    }
   });
 });
 
