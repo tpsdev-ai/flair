@@ -72,9 +72,10 @@ The server validates the pointer (a closed `host`/`kind` set, an `id` grammar,
 an https `url`) and refuses an invalid one with a named error. It stores the
 pointer on its own and joins it back into `get()`, `search()` and `list()`
 results for a reader allowed to see it: those results carry `hostSource` (or the
-string `"withheld"`), `sessionId` and `provenance`, and `search()` also carries
-the record's `author`. The pointer is author-only unless the write opts it into
-the record's own read scope with `hostSourceScope: "record"`.
+string `"withheld"`) and `sessionId`; `get()` and `list()` also carry
+`provenance`, and `search()` also carries the record's `author`. The pointer is
+author-only unless the write opts it into the record's own read scope with
+`hostSourceScope: "record"`.
 
 A `hostSource` is the **writer's claim**, made by a write signed with the
 writer's Flair identity; it is **not** verified host authorship.
