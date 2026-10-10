@@ -277,6 +277,14 @@ test("an admin agent cannot reembed another agent's skill", async () => {
 function feed(ctx = operator): any {
   const resource: any = new FeedMemories();
   resource.getContext = () => ctx;
+  // A feed write refuses a body embedding stamp (flair#2354), and skill()
+  // carries one, so the feed body is sent without it.
+  const post = resource.post.bind(resource);
+  resource.post = (body: any) => {
+    if (!body || typeof body !== "object") return post(body);
+    const { embedding: _embedding, embeddingModel: _embeddingModel, ...rest } = body;
+    return post(rest);
+  };
   return resource;
 }
 

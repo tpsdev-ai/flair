@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { AUTHORITY_FIELDS, guardAuthorityFields, stripAuthorityFields } from "../../resources/authority-field-guard";
+import { writerHelperCalls } from "../helpers/raw-table-writers";
 
 describe("workflow authority guard", () => {
   test("each verdict field rejects creation, replacement and clearing", async () => {
@@ -66,7 +67,7 @@ describe("workflow authority guard", () => {
 const RESOURCES_DIR = join(import.meta.dir, "..", "..", "resources");
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
-type WriterVia = "direct-put" | "direct-update" | "patchRecord" | "alias-source";
+type WriterVia = "direct-put" | "direct-update" | "patchRecord" | "alias-source" | "write-back";
 type WriterKind = "strip" | "federation-merge" | "trusted-stamp" | "echo" | "seed" | "single-field" | "admin-restate";
 
 interface RawMemoryWriter {
@@ -77,10 +78,11 @@ interface RawMemoryWriter {
 }
 
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
-  { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(record)", kind: "strip" },
+  { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
   { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(row, c)", kind: "echo" },
   { file: "resources/Federation.ts", via: "alias-source", needle: "put(mergedData)", kind: "federation-merge" },
-  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row)", kind: "trusted-stamp" },
+  { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
+  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "embedding, embeddingModel: model, updatedAt }, owned)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },
@@ -88,11 +90,12 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivedRow, c", kind: "echo" },
   { file: "resources/usage-recording.ts", via: "direct-put", needle: "put(usageRow)", kind: "echo" },
   { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
-  { file: "resources/auth-middleware.ts", via: "patchRecord", needle: "embedPatch", kind: "single-field" },
+  { file: "resources/auth-middleware.ts", via: "write-back", needle: 'label: "backfillEmbedding"', kind: "single-field" },
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
-  { file: "resources/migrations/visibility-backfill.ts", via: "alias-source", needle: "put(backfillRow)", kind: "echo" },
-  { file: "resources/migrations/synthetic-test-migration.ts", via: "alias-source", needle: "put(synthRow)", kind: "echo" },
-  { file: "resources/MemoryReindex.ts", via: "alias-source", needle: "_reindex: true", kind: "admin-restate" },
+  { file: "resources/table-helpers.ts", via: "write-back", needle: 'label: opts.label ?? "patchRecord"', kind: "single-field" },
+  { file: "resources/migrations/visibility-backfill.ts", via: "write-back", needle: 'label: "visibility-backfill"', kind: "echo" },
+  { file: "resources/migrations/synthetic-test-migration.ts", via: "write-back", needle: 'label: "synthetic-test-migration"', kind: "echo" },
+  { file: "resources/MemoryReindex.ts", via: "write-back", needle: "_reindex: true", kind: "admin-restate" },
   // Memory guards submitted authority fields; FeedMemories also strips successor stamps.
   { file: "resources/skill-version-write.ts", via: "direct-put", needle: "put(successor, shared)", kind: "trusted-stamp" },
   { file: "resources/skill-version-write.ts", via: "direct-put", needle: "put(closed, shared)", kind: "echo" },
@@ -165,7 +168,7 @@ function aliasBindsMemory(name: string, lines: string[], writeIdx: number, gette
   return false;
 }
 
-function enumerateRawMemoryWriters(): RawMemoryWriter[] {
+function enumerateRawMemoryWriters(extra: { file: string; text: string }[] = []): RawMemoryWriter[] {
   const writers: RawMemoryWriter[] = [];
   const seen = new Set<string>();
   const add = (w: RawMemoryWriter) => {
@@ -174,13 +177,26 @@ function enumerateRawMemoryWriters(): RawMemoryWriter[] {
     seen.add(key);
     writers.push(w);
   };
-  for (const full of walkTs(RESOURCES_DIR)) {
-    const file = relative(REPO_ROOT, full).replaceAll("\\", "/");
-    const raw = readFileSync(full, "utf8");
+  const sources = [
+    ...walkTs(RESOURCES_DIR).map((full) => ({ file: relative(REPO_ROOT, full).replaceAll("\\", "/"), text: readFileSync(full, "utf8") })),
+    ...extra,
+  ];
+  for (const { file, text: raw } of sources) {
     const stripped = stripComments(raw);
     const rawLines = raw.split("\n");
     const lines = stripped.split("\n");
     const getters = memoryGetterNames(stripped);
+    // flair#2354: every call of the shared write-back helper is a raw writer
+    // keyed at the CALL SITE, however its table argument is expressed and
+    // under whatever import or local alias it is called; a helper reference
+    // the scan cannot follow to a call throws (writerHelperCalls). A new call
+    // with no classification below fails the gate. An aliased patchRecord
+    // call is added the same way when it names the Memory table.
+    for (const call of writerHelperCalls(file, raw)) {
+      const excerpt = call.call.getText().replace(/\s+/g, " ");
+      if (call.helper === "writeBackCommittedRow") add({ file, line: call.line, via: "write-back", excerpt });
+      else if (call.callee !== call.helper && /\.flair\.Memory\b/.test(excerpt)) add({ file, line: call.line, via: "patchRecord", excerpt });
+    }
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (/\.flair\.Memory\.put\s*\(/.test(line)) {
@@ -214,7 +230,7 @@ describe("raw flair.Memory handle coverage", () => {
 
   test("the enumerator finds writers — a silent zero would make this gate vacuous", () => {
     expect(writers.length).toBeGreaterThan(5);
-    expect(writers.some((w) => w.file === "resources/MemoryFeed.ts" && w.via === "direct-put")).toBe(true);
+    expect(writers.some((w) => w.file === "resources/MemoryFeed.ts" && w.via === "write-back")).toBe(true);
     expect(writers.some((w) => w.file === "resources/Federation.ts" && w.via === "alias-source" && w.excerpt.includes("mergedData"))).toBe(true);
   });
 
@@ -275,5 +291,40 @@ describe("raw flair.Memory handle coverage", () => {
 
   test("graph-heal OrgEvent ledger put is not a Memory writer", () => {
     expect(writers.some((w) => w.file.includes("migrations/graph-heal"))).toBe(false);
+  });
+});
+
+describe("the raw Memory writer inventory follows writer-helper aliases (flair#2354)", () => {
+  const FIXTURE = "resources/zz-fixture-aliased-write-back.ts";
+  const fixture = (lines: string[]) => [{ file: FIXTURE, text: lines.join("\n") }];
+  const call = 'await wb((databases as any).flair.Memory, id, (row: any) => ({ write: { ...row } }), { label: "fixture-aliased" });';
+  const fixtureWriters = (lines: string[]) => enumerateRawMemoryWriters(fixture(lines)).filter((w) => w.file === FIXTURE);
+
+  test("an import-aliased write-back call is enumerated, unclassified", () => {
+    const found = fixtureWriters([
+      'import { databases } from "harper";',
+      'import { writeBackCommittedRow as wb } from "./write-back.js";',
+      "export async function fixture(id: string) {", `  ${call}`, "}",
+    ]);
+    expect(found.map((w) => w.via)).toEqual(["write-back"]);
+    expect(classify(found[0])).toEqual([]);
+  });
+
+  test("a local alias of the write-back helper is enumerated, unclassified", () => {
+    const found = fixtureWriters([
+      'import { databases } from "harper";',
+      'import { writeBackCommittedRow } from "./write-back.js";',
+      "const wb = writeBackCommittedRow;",
+      "export async function fixture(id: string) {", `  ${call}`, "}",
+    ]);
+    expect(found.map((w) => w.via)).toEqual(["write-back"]);
+    expect(classify(found[0])).toEqual([]);
+  });
+
+  test("a helper reference the scan cannot follow to a call fails the inventory", () => {
+    expect(() => enumerateRawMemoryWriters(fixture([
+      'import { writeBackCommittedRow } from "./write-back.js";',
+      "export const helpers = { run: writeBackCommittedRow };",
+    ]))).toThrow("unresolved writer-helper reference");
   });
 });

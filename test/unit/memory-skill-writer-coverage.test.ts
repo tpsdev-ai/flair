@@ -36,8 +36,6 @@ const add = (file: string, sites: string[], reason: string) => {
 add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#3"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
-  "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the raw put (flair#1542).");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer.");
 
@@ -52,7 +50,7 @@ add("Federation", ["writer:table.put#1"],
   "Skill-writer: SKIPS skill-tagged rows (skill_not_federated) — skills are local, never synced (flair#1542).");
 
 // ── Existing-row writes preserving content and tags ──
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"],
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Dedup expiry repair (flair#2358): re-writes the row read in its transaction with expiresAt set; content and tags stay as stored.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"],
   "Skill predecessor close: preserves stored content and tags.");
@@ -71,6 +69,8 @@ add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(
   "Read-only table alias (get/search) — no write through this handle.");
 
 // ── Non-skill writers in other modules ──
+add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+  "Non-skill feed write through the shared write-back helper (flair#2354); a skill-tagged feed write returns earlier through the skill version writer (FeedMemories.post's isSkillWrite branch).");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "Maintenance (archive/expiry) — non-skill.");
 add("MemoryMaintenance", ["writer:table.delete#1"],
@@ -83,8 +83,8 @@ add("MemoryPurge", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read handle (MemoryPurge reads each row and searches a skill lineage); its delete is the site classified above.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "lastReflected stamp — non-skill.");
-add("MemoryReindex", ["writer:Memory.put#1"],
-  "Admin-only reindex re-PUT through _reindex — preserves existing content and tags.");
+add("MemoryReindex", ["writer:writeBackCommittedRow#1"],
+  "Admin-only reindex re-PUT through the shared write-back helper (flair#2354): re-writes the row it reads, not a new skill write.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
   "writer:this.cache.delete#1",
@@ -94,18 +94,20 @@ add("hit-tracking", [
   "writer:table.put#1",
   "writer:table.delete#1",
 ], "MemoryHitStat ledger and in-memory maps — not a Memory/skill writer.");
-add("auth-middleware", ["writer:patchRecord#1"],
-  "Auth bookkeeping — non-skill.");
+add("auth-middleware", ["writer:writeBackCommittedRow#1"],
+  "Auth bookkeeping (embedding backfill) — non-skill, through the shared write-back helper (flair#2354).");
 add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
   "usageCount increment (targeted get-then-put) — non-skill.");
+add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
+  "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.put#1"],
-  "Promotion status stamp — non-skill.");
+  "Promotion status stamp in the manual promotion's own write transaction — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.put#1"],
   "Content-suffix migration embeds skillEmbedText(row), staging embedding/embeddingModel; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
-add("migrations/synthetic-test-migration", ["writer:table.put#1"],
-  "Migration backfill — non-skill.");
-add("migrations/visibility-backfill", ["writer:table.put#1"],
-  "Migration backfill — non-skill.");
+add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+  "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
+add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+  "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
 
 // ── Other tables (conservative sink enumeration false-positives) ──
 add("migrations/graph-heal", ["writer:table.put#1"], "Graph-heal OrgEvent ledger.");
@@ -142,10 +144,6 @@ add("migration-boot", ["alias-source:flair?.Memory#1"],
 add("migrations/embedding-stamp", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
   "Read-only migration adapter alias.");
 add("migrations/graph-heal", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
-  "Read-only migration adapter alias.");
-add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
-  "Read-only migration adapter alias.");
-add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
   "Read-only migration adapter alias.");
 add("embedding-space-guard", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
   "Read-only alias — the vector-space guard scans distinct embeddingModel stamps (search only); no write through this handle.");

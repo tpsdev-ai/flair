@@ -11,15 +11,25 @@
  *   import { patchRecord } from "./table-helpers.js";
  *   await patchRecord(tables.Memory, id, { lastReflected: now });
  */
+import { writeBackCommittedRow, type WriteBackOptions } from "./write-back.js";
+
+export type PatchRecordOptions = Partial<Pick<WriteBackOptions, "ctx" | "pausePre" | "pausePoint" | "label" | "attempts" | "expectedRow" | "matches">>;
 
 export async function patchRecord(
   table: any,
   id: string,
   patch: Record<string, unknown>,
+  opts: PatchRecordOptions = {},
 ): Promise<void> {
-  const existing = await table.get(id);
-  if (!existing) throw new Error(`Record ${id} not found`);
-  await table.put({ ...existing, ...patch });
+  await writeBackCommittedRow(
+    table,
+    id,
+    (existing) => {
+      if (!existing) throw new Error(`Record ${id} not found`);
+      return { write: { ...existing, ...patch } };
+    },
+    { ...opts, label: opts.label ?? "patchRecord" },
+  );
 }
 
 /**
@@ -31,8 +41,9 @@ export function patchRecordSilent(
   table: any,
   id: string,
   patch: Record<string, unknown>,
+  opts: PatchRecordOptions = {},
 ): void {
-  patchRecord(table, id, patch).catch(() => {});
+  patchRecord(table, id, patch, opts).catch(() => {});
 }
 
 // ── RULE ──────────────────────────────────────────────────────────────────────

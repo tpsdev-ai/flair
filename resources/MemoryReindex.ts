@@ -10,10 +10,11 @@
  *   Scans the Memory primary store (unfiltered, via the base table class) and
  *   compares per-agent primary counts against per-agent secondary-index counts
  *   (an equals lookup on agentId). Any agent whose secondary count is below
- *   its primary count has unindexed records. Re-PUT every record with the
- *   _reindex escape hatch: Memory.put() retains declared and named allowed
- *   fields, restores stored provenance and preserves an existing incarnation
- *   token (or generates an absent one). Other undeclared fields are stripped.
+ *   its primary count has unindexed records. Re-PUT every record with the row
+ *   built by buildReindexRow (the path Memory.put()'s _reindex branch also
+ *   uses): it retains declared and named allowed fields, restores stored
+ *   provenance and preserves an existing incarnation token (or generates an
+ *   absent one). Other undeclared fields are stripped.
  *   No updatedAt bump, embedding regeneration or safety rescan is performed.
  *
  * Why this exists: Harper's background runIndexing() pass populates secondary
@@ -28,6 +29,9 @@
 
 import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
+import { writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
+import { txnPausePoint } from "./txn-pause-point.js";
+import { buildReindexRow } from "./Memory.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
 
@@ -86,11 +90,15 @@ export class MemoryReindex extends Resource {
     // Pass 1: primary-store scan. Count records per agent.
     const primaryByAgent = new Map<string, number>();
     const recordsToReindex: string[] = [];
+    const selectedRows = new Map<string, any>();
     for await (const record of Memory.search()) {
       if (agentFilter && record.agentId !== agentFilter) continue;
       if (!record.id || !record.agentId) continue;
       primaryByAgent.set(record.agentId, (primaryByAgent.get(record.agentId) ?? 0) + 1);
       recordsToReindex.push(record.id);
+      // Only the identity fields the write-back compares (never the
+      // embedding): the full row is re-read inside each owned write.
+      selectedRows.set(record.id, writeBackIdentity(record));
     }
     stats.scanned = recordsToReindex.length;
 
@@ -128,7 +136,7 @@ export class MemoryReindex extends Resource {
       };
     }
 
-    // Pass 3: re-PUT every primary-store record with _reindex=true, retaining
+    // Pass 3: re-PUT every primary-store record through buildReindexRow, retaining
     // declared/named fields and stored provenance, stripping other undeclared
     // fields and generating an absent token. The re-PUT forces Harper to re-insert
     // into all secondary indices. Cheaper-than-sound variants (only re-PUT records
@@ -138,9 +146,20 @@ export class MemoryReindex extends Resource {
       const chunk = recordsToReindex.slice(i, i + batchSize);
       for (const id of chunk) {
         try {
-          const record = await Memory.get(id);
-          if (!record) { stats.errors++; continue; }
-          await Memory.put({ ...record, _reindex: true });
+          const outcome = await writeBackCommittedRow(
+            Memory,
+            id,
+            (record: any) => {
+              if (!record) return { skip: true };
+              // Built by the function Memory.put()'s `_reindex` branch uses,
+              // from this transaction's read.
+              const built = buildReindexRow({ ...record, _reindex: true }, record);
+              if (!("row" in built)) throw new Error(`${built.error}: ${built.message}`);
+              return { write: built.row };
+            },
+            { ctx, label: "MemoryReindex", pausePre: () => txnPausePoint("reindex-put-pre"), pausePoint: () => txnPausePoint("reindex-put"), expectedRow: selectedRows.get(id) },
+          );
+          if ("skip" in outcome) { stats.errors++; continue; }
           stats.reindexed++;
         } catch (err: any) {
           stats.errors++;

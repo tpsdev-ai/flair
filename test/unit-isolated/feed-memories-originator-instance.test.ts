@@ -16,11 +16,16 @@
  * memory-feed-authority-fields.test.ts), plus an Instance row so localInstanceId()
  * resolves a real id.
  */
-import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test";
+import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 
 const LOCAL_ID = "flair_local_test";
 let memoryStore: Map<string, any>;
 let instanceRow: any = null;
+
+// Model Harper's global transaction (the write-back helper reaches it there).
+const txn = installFakeHarperTransaction((id, row) => memoryStore.set(id, row));
+afterAll(() => txn.restore());
 
 function fromStore(): AsyncIterable<any> {
   async function* gen() {
@@ -34,6 +39,7 @@ const databasesMock = {
     Memory: {
       get: async (id: string) => memoryStore.get(id) ?? null,
       put: async (record: any) => {
+        if (txn.stage(record.id, { ...record })) return record;
         memoryStore.set(record.id, { ...record });
         return record;
       },

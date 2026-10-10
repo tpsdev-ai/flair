@@ -1,9 +1,11 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
+import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
 
 const ORIGINAL_TTL = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
 
 let memoryStore: Map<string, any>;
+let txn: ReturnType<typeof installFakeHarperTransaction>;
 
 const databasesMock = {
   flair: {
@@ -11,7 +13,7 @@ const databasesMock = {
       get: async (id: string) => memoryStore.get(id) ?? null,
       // Harper PUT semantics: the stored row IS the record (full replacement).
       put: async (record: any) => {
-        memoryStore.set(record.id, { ...record });
+        if (!txn.stage(record.id, { ...record })) memoryStore.set(record.id, { ...record });
         return record;
       },
       search: () => (async function* () { for (const r of memoryStore.values()) yield r; })(),
@@ -47,10 +49,12 @@ function sharedRuleExpiryMs(): number {
 
 beforeEach(() => {
   memoryStore = new Map();
+  txn = installFakeHarperTransaction((id, row) => memoryStore.set(id, row));
   // A distinctive TTL so a hardcoded 24h could not accidentally match.
   process.env.FLAIR_EPHEMERAL_TTL_HOURS = "6";
 });
 afterEach(() => {
+  txn.restore();
   if (ORIGINAL_TTL === undefined) delete process.env.FLAIR_EPHEMERAL_TTL_HOURS;
   else process.env.FLAIR_EPHEMERAL_TTL_HOURS = ORIGINAL_TTL;
 });

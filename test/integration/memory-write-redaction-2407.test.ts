@@ -302,17 +302,14 @@ describe("flair#2407 — a supplied embedding is replaced when redaction changes
     expectComputed(await readStored(id));
   }, 60_000);
 
-  it("POST /FeedMemories drops the supplied vector (the feed computes none)", async () => {
+  it("POST /FeedMemories refuses a supplied vector and stores nothing (flair#2354)", async () => {
     const id = `r2407-vec-feed-${randomUUID()}`;
     const res = await authFetch("POST", "/FeedMemories", {
       id, agentId: agent.id, content: `feed: ${CREDENTIAL_TEXT}`, durability: "permanent", embedding: supplied, embeddingModel: "client-model",
     });
-    expect(res.status).toBe(200);
-    expect((await res.json()).redactedValues).toBe(1);
-    const row = await readStored(id);
-    expect(row?.content).toBe(`feed: ${REDACTED_TEXT}`);
-    expect(row?.embedding ?? null).toBeNull();
-    expect(row?.embeddingModel ?? null).toBeNull();
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("feed_embedding_not_writable");
+    expect(await readStored(id)).toBeFalsy();
   }, 60_000);
 
   it("a POST /Memory that redaction leaves unchanged keeps its supplied vector", async () => {

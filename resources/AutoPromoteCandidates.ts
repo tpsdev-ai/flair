@@ -196,7 +196,13 @@ export class AutoPromoteCandidates extends Resource {
         continue;
       }
 
-      await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx);
+      // Harper hands memRow itself to Memory.put(), which stamps the written
+      // row's incarnation token onto it, so memRow names the row this write
+      // produced. The stamp is bound to that row: a different row at its first
+      // read is refused with nothing stamped.
+      await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, {
+        agentId: memRow.agentId, content: memRow.content, instanceToken: (memRow as any).instanceToken,
+      });
 
       // ── Mark the candidate promoted (commit point) ─────────────────────────
       // Ordered AFTER the Memory write, matching the human promote path: the

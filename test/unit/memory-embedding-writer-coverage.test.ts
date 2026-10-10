@@ -31,8 +31,9 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  *                  model ID and a locally computed vector.
  *   DELEGATED    — embedding handling belongs to Memory.post()/put().
  *   ECHO         — preserves an EXISTING row's embeddingModel.
- *   UNLATCHED    — the feed accepts a supplied stamp without noteWriteStamp.
- *   NON_EMBED    — writes no embeddingModel (starter rows), or a partial
+ *   UNLATCHED    — a write that can carry a caller-supplied stamp without
+ *                  noteWriteStamp.
+ *   NON_EMBED    — writes no embeddingModel (starter and feed rows), or a partial
  *                  update/patch/delete that never touches the stamp.
  *   OTHER_TABLE  — writes on other tables or in-memory maps, included by
  *                  rawTableWriteSites's conservative sink enumeration.
@@ -52,12 +53,16 @@ const add = (file: string, sites: string[], policy: Policy, reason: string) => {
 add("Federation", ["writer:table.put#1"], "LATCH",
   "Federation sync-in LWW merge (applyMergedRecordToTable) — a remote-win copies the REMOTE embeddingModel; must trip the latch via noteWriteStamp.");
 
-// ── GATED: Memory.ts's own post()/put() write path (calls noteWriteStamp) ──
+// ── GATED: Memory.ts's own post()/put()/patch() write path (calls noteWriteStamp) ──
 // The writes go through the base TABLE (`databases.flair.Memory`) with the
 // shared request context so a direct/internal caller is atomic (A1'' 0a).
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
+// flair#2425 — an ordinary PATCH merges the body (including a caller-supplied
+// embedding/embeddingModel) into the row; it now calls noteWriteStamp too.
+add("Memory", ["writer:super.patch#1"], "GATED",
+  "Memory.patch() ordinary write — a partial merge that can store a caller-supplied embedding stamp; calls noteWriteStamp (flair#2425).");
 // ── LOCAL: replaces a stored stamp with the current local model ID ──
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "LOCAL",
   "Memory.patch() re-embed: puts the re-read row with a locally computed vector, getModelId() and updatedAt; noteWriteStamp.");
@@ -72,29 +77,31 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "closeSupersededRecord: read-modify-write validTo close, re-writes the existing stamp.");
 add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "usageCount bump: get-then-put re-writes the existing row's own stamp.");
-add("MemoryReindex", ["writer:Memory.put#1"], "ECHO",
-  "Admin reindex re-PUT through Memory.put() with _reindex — preserves the stored stamp.");
+add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Admin reindex re-PUT of an existing local row through the shared write-back helper (flair#2354): echoes the stored embedding and embeddingModel; no re-embed.");
+add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Promotion status stamp: re-writes the existing local row through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.put#1"], "ECHO",
-  "Promotion status stamp: get-then-put re-writes the existing local row.");
-add("migrations/visibility-backfill", ["writer:table.put#1"], "ECHO",
-  "Boot migration re-PUT of existing rows (preserves stamp); the boot scan also runs.");
-add("migrations/synthetic-test-migration", ["writer:table.put#1"], "ECHO",
-  "Test-only migration backfill of existing rows.");
+  "Promotion status stamp in the manual promotion's own write transaction: get-then-put re-writes the row it staged.");
+add("migrations/visibility-backfill", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Boot migration re-PUT of existing rows through the shared write-back helper (flair#2354); the boot scan also runs.");
+add("migrations/synthetic-test-migration", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Test-only migration backfill of existing rows through the shared write-back helper (flair#2354).");
+add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
+  "Memory's skill caller computes or retains the stamp and calls noteWriteStamp; FeedMemories refuses a body embedding or embeddingModel (flair#2354), so its skill successor carries the stored row's stamp or none.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
   "flair#2139 S2 skill predecessor close: read-modify-write re-writes the existing row's own stamp.");
 
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "Dedup repair (flair#2358): read-modify-write re-writes the stored row's own stamp — only its expiresAt changes.");
 
-// ── UNLATCHED: accepts supplied stamps without tripping the latch ──
-add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "UNLATCHED",
-  "Memory's skill caller calls noteWriteStamp after writing; Feed's skill caller can carry a supplied embeddingModel without tripping the latch.");
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "UNLATCHED",
-  "Feed copies supplied embedding fields without computing embeddings or calling noteWriteStamp.");
-
 // ── NON_EMBED: writes no stamp, or a partial update/patch/delete ──
+// The feed refuses a body embedding or embeddingModel (flair#2354), so its
+// ingest is NON_EMBED and its skill successor ECHO.
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Admin-only starter memories — the record carries no embedding/embeddingModel.");
+add("MemoryFeed", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
+  "Feed rows through the shared write-back helper (flair#2354): POST /FeedMemories refuses a body embedding or embeddingModel (400 feed_embedding_not_writable), so the record carries neither.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");
 // flair#1940 A1-iv item 6: Memory.ts no longer touches the MemoryHostSource
@@ -106,8 +113,8 @@ add("MemoryMaintenance", ["writer:table.delete#1"], "OTHER_TABLE",
   "MemoryHostSource pointer cascade (A1') — not the Memory table, never an embeddingModel.");
 add("MemoryPurge", ["writer:memory.delete#1"], "NON_EMBED",
   "Physical removal — a delete; never writes embeddingModel.");
-add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
-  "derivedFrom/lastReflected patch, patch(), and delete() — never write embeddingModel.");
+add("Memory", ["writer:patchRecord#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
+  "derivedFrom/lastReflected patch and delete() — never write embeddingModel.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
@@ -118,7 +125,8 @@ add("hit-tracking", [
   "writer:table.put#1",
   "writer:table.delete#1",
 ], "OTHER_TABLE", "MemoryHitStat ledger and in-memory maps — not a Memory writer.");
-add("auth-middleware", ["writer:patchRecord#1"], "NON_EMBED", "Auth bookkeeping patch — non-embedding.");
+add("auth-middleware", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "Embedding backfill through the shared write-back helper (flair#2354): writes a locally computed embedding vector and echoes the row's stored embeddingModel.");
 
 // ── OTHER_TABLE: conservative sink-enumeration false-positives ──
 add("migrations/graph-heal", ["writer:table.put#1"], "OTHER_TABLE", "Graph-heal OrgEvent ledger.");
@@ -164,4 +172,20 @@ test("every LATCH/GATED writer's file trips the latch (calls noteWriteStamp) —
     `recall cosines a foreign vector = mixed-space garbage (embedding-space-guard slice 1).`,
   ).toEqual([]);
   expect(mustTrip.has("resources/Federation.ts")).toBe(true); // the hole this test exists to keep closed
+});
+
+test("an aliased write-back call is an enumerated writer, and an unfollowable helper reference fails (flair#2354)", () => {
+  const file = "resources/zz-fixture-aliased-write-back.ts";
+  const head = ['import { databases } from "harper";'];
+  const call = 'await wb((databases as any).flair.Memory, id, (row: any) => ({ write: { ...row } }), { label: "fixture-aliased" });';
+  for (const binding of ['import { writeBackCommittedRow as wb } from "./write-back.js";',
+    'import { writeBackCommittedRow } from "./write-back.js";\nconst wb = writeBackCommittedRow;']) {
+    const source = [...head, binding, "export async function fixture(id: string) {", `  ${call}`, "}"].join("\n");
+    const writers = rawTableWriteSites(file, source, "Memory").filter((site) => site.kind === "writer").map((site) => site.key);
+    expect(writers).toContain(`${file}:writer:wb#1`);
+    expect(classified.has(`${file}:writer:wb#1`)).toBe(false);
+  }
+  const escaping = [...head, 'import { writeBackCommittedRow } from "./write-back.js";',
+    "export const helpers = { run: writeBackCommittedRow, table: (databases as any).flair.Memory };"].join("\n");
+  expect(() => rawTableWriteSites(file, escaping, "Memory")).toThrow("unresolved writer-helper reference");
 });

@@ -412,7 +412,14 @@ type OrgSkillAssignment @table(database: "flair") {
 # commit; unconfirmed cleanup returns 500 memory_purge_history_cleanup_unconfirmed.
 # Non-durable deletes, including maintenance expiry, append no history.
 # No @export and no resource class: there is no direct route.
-type MemoryDeletionHistory @table(database: "flair") {
+#
+# `replicate: true` is declared explicitly to state the current setting:
+# a table in a replicated database replicates unless it opts out with
+# `replicate: false`, so an undeclared table already replicates. Declaring it
+# changes nothing about what replicates (measured on the installed Harper: a
+# `describe_table` of an undeclared table reports no `replicate` key, and the
+# replication decision is `Table.replicate !== false`).
+type MemoryDeletionHistory @table(database: "flair", replicate: true) {
   id: ID @primaryKey               # unique per deletion record (a memory id can be deleted and re-created)
   memoryId: String! @indexed
   memoryInstanceToken: String
