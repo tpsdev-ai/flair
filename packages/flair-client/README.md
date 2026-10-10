@@ -55,6 +55,33 @@ const recent = await flair.memory.list({ limit: 10 })
 await flair.memory.delete('my-agent-1234567890')
 ```
 
+## Attributing a memory to a host object
+
+`memory.write()` accepts an optional `hostSource` — a pointer to the host
+object the writer claims as the memory's source (a run, a launch, a turn):
+
+```ts
+await flair.memory.write('deploy procedure changed', {
+  hostSource: { host: 'openclaw', kind: 'run', id: 'run-1a2b3c4d' },
+  hostSourceScope: 'record',   // opt the pointer into the record's own read scope
+  sessionId: 'sess-42',
+})
+```
+
+The server validates the pointer (a closed `host`/`kind` set, an `id` grammar,
+an https `url`) and refuses an invalid one with a named error. It stores the
+pointer on its own and joins it back into `get()`, `search()` and `list()`
+results for a reader allowed to see it: those results carry `hostSource` (or the
+string `"withheld"`) and `sessionId`; `get()` and `list()` also carry
+`provenance`, and `search()` also carries the record's `author`. The pointer is
+author-only unless the write opts it into the record's own read scope with
+`hostSourceScope: "record"`.
+
+A `hostSource` is the **writer's claim**, made by a write signed with the
+writer's Flair identity; it is **not** verified host authorship. A `hostSource`
+written with admin Basic auth (not an agent's Ed25519 signature) is stored with
+no author and is never shown to any reader.
+
 ## Soul API
 
 Soul writes require operator credentials. `flair.soul.set(...)` signs with

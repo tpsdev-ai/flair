@@ -19,6 +19,7 @@ import type {
   MemoryType,
   Durability,
   Visibility,
+  HostSource,
   SoulEntry,
   SearchResult,
   BootstrapResult,
@@ -408,6 +409,20 @@ class MemoryApi {
     tags?: string[];
     subject?: string;
     metadata?: Record<string, unknown>;
+    /** flair#1940 — the host-object pointer this write CLAIMS as the memory's
+     *  source, e.g. `{ host: "openclaw", kind: "run", id: "<run id>" }`. The
+     *  server validates it (a closed `host`/`kind` set, the `id` grammar, an
+     *  https `url`) and refuses an invalid one with a named error; `write()`
+     *  sends `v: 1` only when the caller omits `v`. Forwarded only when
+     *  supplied, so a write without it is byte-identical to before. */
+    hostSource?: HostSource;
+    /** flair#1940 — opt the pointer into the record's own read scope. The
+     *  server accepts only `"record"`; omitted leaves the pointer author-only.
+     *  Forwarded only when supplied. */
+    hostSourceScope?: "record";
+    /** flair#1940 — the originating session id, recorded on the memory.
+     *  Forwarded only when supplied. */
+    sessionId?: string;
     /** Writer-controlled sharing intent. Omit to let the
      *  server apply its durability-keyed default (permanent/persistent →
      *  shared, standard/ephemeral → private) — only forwarded when the
@@ -449,6 +464,12 @@ class MemoryApi {
     // source of truth for the default, never duplicated here.
     if (opts.visibility !== undefined) record.visibility = opts.visibility;
     if (opts.metadata !== undefined) record.metadata = JSON.stringify(opts.metadata);
+    // flair#1940 — the host pointer, its write-time scope opt-in, and the
+    // session id, each forwarded only when supplied. `v: 1` is the default
+    // only when the caller omits `v`; nothing else is defaulted.
+    if (opts.hostSource !== undefined) record.hostSource = { v: 1, ...opts.hostSource };
+    if (opts.hostSourceScope !== undefined) record.hostSourceScope = opts.hostSourceScope;
+    if (opts.sessionId !== undefined) record.sessionId = opts.sessionId;
     // Passthrough hints — the server strips these before persisting; they are
     // never stored on the record itself.
     if (opts.dedup !== undefined) record.dedup = opts.dedup;
@@ -578,6 +599,12 @@ class MemoryApi {
         durability: r.durability ?? r.memory?.durability,
         tags: r.tags ?? r.memory?.tags,
         createdAt: r.createdAt ?? r.memory?.createdAt,
+        // flair#1940 — carry the author, the joined host pointer (or
+        // "withheld") and the session id through the projection.
+        author: r.agentId ?? r.memory?.agentId,
+        hostSource: r.hostSource ?? r.memory?.hostSource,
+        sessionId: r.sessionId ?? r.memory?.sessionId,
+        provenance: r.provenance ?? r.memory?.provenance,
       }))
       .filter((r) => r.score >= minScore);
   }

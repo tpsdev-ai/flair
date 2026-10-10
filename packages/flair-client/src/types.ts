@@ -27,6 +27,29 @@ export type MemoryType = "session" | "lesson" | "decision" | "preference" | "fac
  */
 export type Visibility = "private" | "shared";
 
+/**
+ * A host-object pointer (flair#1940): the host object the writer CLAIMS as a
+ * memory's source (a run, a launch, a turn). The value shape the server
+ * validates, stores and returns is versioned JSON `{ v: 1, host, kind, id, url? }`.
+ * `memory.write()` sends `v: 1` only when the caller omits `v`, so a writer may
+ * pass the pointer as `{ host, kind, id, url? }`.
+ *
+ * On a read, `hostSource` is either this object or the string `"withheld"` (the
+ * server withholds a pointer from a reader who may see the record but not the
+ * pointer). It is a writer's claim, not verified host authorship.
+ */
+export interface HostSource {
+  /** Pointer schema version. `write()` applies `1` when omitted. */
+  v?: 1;
+  /** Host the object lives on, from the server's closed set (e.g. "openclaw", "cursor", "codex"). */
+  host: string;
+  /** Object kind, from the server's closed set (e.g. "run", "launch", "turn"). */
+  kind: string;
+  id: string;
+  /** https URL of the host object, if any. */
+  url?: string;
+}
+
 /** A memory record. */
 export interface Memory {
   id: string;
@@ -37,6 +60,22 @@ export interface Memory {
   tags: string[];
   subject?: string;
   metadata?: string | null;
+  /**
+   * flair#1940 — the host-source pointer joined into this record for the
+   * reader, or the string `"withheld"` when the reader may read the record but
+   * not its pointer. Absent when the record carries no pointer a reader may
+   * know about. `agentId` is the record's author.
+   */
+  hostSource?: HostSource | "withheld";
+  /** flair#1940 — the originating session id, when the writer set one. */
+  sessionId?: string;
+  /**
+   * Server JSON `{ v, verified: { agentId, timestamp, receivedAt }, claimed? }`,
+   * same shape as {@link Relationship.provenance}. `verified.*` is server-derived;
+   * `claimed.*` is the caller's unverified claim. Absent on rows written before
+   * the field existed.
+   */
+  provenance?: string;
   /** Writer-controlled sharing intent. Absent on records written before this
    *  field existed — the server treats absence as "shared" (migration-
    *  invariant: an existing memory keeps reading to exactly whoever holds a
@@ -130,6 +169,14 @@ export interface SearchResult {
   durability?: Durability;
   tags?: string[];
   createdAt?: string;
+  /** flair#1940 — the record's author id (the server's `agentId`). */
+  author?: string;
+  /** flair#1940 — the joined host-source pointer, or `"withheld"`; see {@link Memory.hostSource}. */
+  hostSource?: HostSource | "withheld";
+  /** flair#1940 — the originating session id, when the writer set one. */
+  sessionId?: string;
+  /** Not returned by search() today: the server's default search projection omits provenance; read it via get()/list(). */
+  provenance?: string;
 }
 
 /** Bootstrap response — formatted context block. */
