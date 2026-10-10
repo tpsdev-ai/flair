@@ -32,6 +32,7 @@ import {
 } from "../lib/auth-resolve.js";
 import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
+import { agentHomeEndpoint, planAgentHomeWrite, readStoredAgentHome, resolveTargetInstanceId } from "../lib/agent-home.js";
 import { fetchErrorLabel, redactUrl } from "./federation.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
@@ -325,6 +326,21 @@ export function register(program: Command): void {
 
       // Insert via operations API with Principal fields
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+
+      // flair#2433 — the new row's home is THIS instance's federation id,
+      // resolved through the one shared rule. An upsert over an existing row
+      // must never CHANGE a home already stored: read it first and refuse a
+      // change with a named error (the home is immutable after create). A failed
+      // read is UNREADABLE, not "no home", and is refused the same way.
+      const homeEndpoint = agentHomeEndpoint(opsPort, adminUser, adminPass);
+      const home = await resolveTargetInstanceId(homeEndpoint);
+      const existingHome = await readStoredAgentHome({ opsUrl: `http://127.0.0.1:${opsPort}/`, authHeader: auth, id });
+      const homePlan = planAgentHomeWrite(existingHome, home, id);
+      if (homePlan.refuse) {
+        console.error(`Error: ${homePlan.message}`);
+        process.exit(1);
+      }
+
       const record = {
         id,
         name,
@@ -341,6 +357,7 @@ export function register(program: Command): void {
         role: isAdmin ? ADMIN_ROLE : "agent",
         admin: isAdmin,
         runtime: runtime ?? null,
+        originatorInstanceId: home,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };

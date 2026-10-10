@@ -127,6 +127,11 @@ function mappingStub(opts: {
         ? ("updateResult" in opts ? opts.updateResult : { update_hashes: records.map((r: any) => r.id), skipped_hashes: [] })
         : { message: "upserted" });
     }
+    if (body.operation === "sql") {
+      // flair#2433 — the create path resolves the instance's own id from the
+      // Instance table before it inserts the Agent row.
+      return Response.json([{ id: "inst-local-2433" }]);
+    }
     return Response.json({});
   }) as unknown as typeof fetch;
 
@@ -920,9 +925,9 @@ describe("flair#2222 — the pre-write re-validation bound", () => {
     const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: [] });
     const result = await provisionIdpIdentityMapping(provisionParams, { fetchImpl: st.fetchImpl });
     expect(result.principalCreated).toBe(true);
-    expect(st.calls.map(c => `${c.body.operation}:${c.body.table}`)).toEqual([
+    expect(st.calls.map(c => c.body.table ? `${c.body.operation}:${c.body.table}` : c.body.operation)).toEqual([
       "search_by_value:Agent", "search_by_conditions:Credential",
-      "search_by_value:Agent", "search_by_conditions:Credential", "insert:Agent",
+      "search_by_value:Agent", "search_by_conditions:Credential", "sql", "insert:Agent",
       "search_by_value:Agent", "search_by_conditions:Credential", "upsert:Credential",
       "search_by_conditions:Credential",
     ]);

@@ -73,6 +73,7 @@ import { harperPortValue } from "./lib/harper-port-value.js";
 import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import { encodeRecordId } from "./lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
+import { agentHomeEndpoint, resolveTargetInstanceId, stampAgentHome } from "./lib/agent-home.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -3506,6 +3507,14 @@ export async function seedAgentViaOpsApi(
    * is not assumed to be the process that rejected this request.
    */
   occupiedListener?: OperationsPortAttribution,
+  /**
+   * The target instance's own federation id, resolved by the caller through
+   * resources-equivalent rule in src/lib/agent-home.ts. When supplied (including
+   * an explicit null), the new Agent row carries it as its home
+   * (`originatorInstanceId`); the create ignores any other source. Omitted by
+   * callers that do not stamp, which leaves the field off the row.
+   */
+  homeInstanceId?: string | null,
 ): Promise<void> {
   // flair#2359 — the ONE agent-ID rule, before the operations-API insert. This
   // is the write path for `flair agent add`, `flair import` and `flair init`,
@@ -3525,23 +3534,29 @@ export async function seedAgentViaOpsApi(
   // and is invisible to roster/presence/Office-Space queries that filter on
   // status='active' or kind='agent' (#521). Mirror Agent.post() exactly here.
   const now = new Date().toISOString();
+  const record: Record<string, unknown> = {
+    id: agentId,
+    name: agentId,
+    type: "agent",
+    kind: "agent",
+    status: "active",
+    displayName: agentId,
+    admin: false,
+    defaultTrustTier: "unverified",
+    publicKey: pubKeyB64url,
+    createdAt: now,
+    updatedAt: now,
+  };
+  // flair#2433 — the new row's home is the creating instance's id. A create
+  // stamps it and ignores anything else; the caller passes the id it resolved
+  // through the one shared rule (src/lib/agent-home.ts). An omitted id leaves the
+  // field off (the pre-fix shape, for callers that do not stamp).
+  if (homeInstanceId !== undefined) stampAgentHome(record, homeInstanceId);
   const body = {
     operation: "insert",
     database: "flair",
     table: "Agent",
-    records: [{
-      id: agentId,
-      name: agentId,
-      type: "agent",
-      kind: "agent",
-      status: "active",
-      displayName: agentId,
-      admin: false,
-      defaultTrustTier: "unverified",
-      publicKey: pubKeyB64url,
-      createdAt: now,
-      updatedAt: now,
-    }],
+    records: [record],
   };
   await opsSeedInsertWithRetry({
     url,
@@ -3577,6 +3592,26 @@ export async function seedAgentViaOpsApi(
 // ops-insert body to the REST root, which Harper 405s as a collection POST to
 // /Agent (the Agent table resource has no POST handler). It was removed in the
 // #499 fix; do not reintroduce a REST-root insert path.
+
+/**
+ * Seed an agent through the ops API, stamping the TARGET instance's own
+ * federation id as the new row's home (flair#2433). The id is resolved through
+ * the one shared rule (src/lib/agent-home.ts, over the same
+ * src/lib/instance-identity-row.ts decision the server uses), so this path
+ * cannot disagree with the Agent resource's own stamp. A null id (no single
+ * Instance row) writes an explicit null — the defined local-origin state.
+ */
+export async function seedAgentWithLocalHome(
+  opsPortOrUrl: number | string,
+  agentId: string,
+  pubKeyB64url: string,
+  adminUser: string,
+  adminPass?: string,
+  occupiedListener?: OperationsPortAttribution,
+): Promise<void> {
+  const home = await resolveTargetInstanceId(agentHomeEndpoint(opsPortOrUrl, adminUser, adminPass));
+  await seedAgentViaOpsApi(opsPortOrUrl, agentId, pubKeyB64url, adminUser, adminPass, occupiedListener, home);
+}
 
 // ─── FederationInstance seed via ops API ──────────────────────────────────────
 //
@@ -4674,6 +4709,7 @@ bindInitCli({
   resolveTarget,
   runSoulWizard,
   seedAgentViaOpsApi,
+  seedAgentWithLocalHome,
   seedFederationInstanceViaOpsApi,
   readOccupiedListener,
   resolveInstanceServingPid,
@@ -4702,6 +4738,7 @@ bindAgentCli({
   resolveOpsPort,
   resolveEffectiveOpsUrl,
   seedAgentViaOpsApi,
+  seedAgentWithLocalHome,
   agentRecordIsAdmin,
 });
 registerAgent(program);
@@ -8817,6 +8854,7 @@ bindImportCli({
   resolveHttpPort,
   resolveOpsPort,
   seedAgentViaOpsApi,
+  seedAgentWithLocalHome,
 });
 registerImport(program);
 

@@ -10,13 +10,14 @@ import { Command } from "commander";
 import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
 import { readTargetMcpRedirectFinding } from "../lib/mcp-oauth-env.js";
-import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, describeAgentIdRuleFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
+import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, describeAgentHomeFinding, describeAgentIdRuleFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
+import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceId } from "../lib/agent-home.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
@@ -2041,6 +2042,34 @@ program
           issues++;
           console.log(`  ${render.icons.warn} ${finding.message}`);
           console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
+        }
+      }
+
+      // 8c. Agent homes (flair#2433) — report every stored Agent row with no
+      // home instance (`originatorInstanceId`). The row IS the record the CLI's
+      // ops-API creation paths wrote before this fix, so doctor names the remedy
+      // that back-fills it. Read-only: nothing is rewritten here.
+      console.log(`\n  ${render.wrap(render.c.bold, "Agent homes")}`);
+      const homeOpsUrl = `http://127.0.0.1:${resolveOpsPort(opts)}/`;
+      const homeEndpoint = agentHomeEndpoint(homeOpsUrl, resolveAdminUser(), agentListAdminPass);
+      const homeAuth = agentListAdminPass
+        ? `Basic ${Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64")}`
+        : null;
+      const homeRows = homeAuth
+        ? await readAgentHomeRows({ opsUrl: homeOpsUrl, authHeader: homeAuth, timeoutMs: 5000 })
+        : null;
+      if (homeRows === null) {
+        issues++;
+        console.log(`  ${render.icons.warn} Could not read the stored Agent roster, so the home-instance check did not run.`);
+      } else {
+        const localInstanceId = await resolveTargetInstanceId(homeEndpoint);
+        const homeFinding = describeAgentHomeFinding(homeRows, localInstanceId);
+        if (!homeFinding) {
+          console.log(`  ${render.icons.ok} Every stored agent row names a home instance.`);
+        } else {
+          issues++;
+          console.log(`  ${render.icons.warn} ${homeFinding.message}`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
         }
       }
     }

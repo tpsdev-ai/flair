@@ -78,6 +78,7 @@ export type InitCli = {
   resolveTarget: (...args: any[]) => any;
   runSoulWizard: (...args: any[]) => any;
   seedAgentViaOpsApi: (...args: any[]) => any;
+  seedAgentWithLocalHome: (...args: any[]) => any;
   seedFederationInstanceViaOpsApi: (...args: any[]) => any;
   readOccupiedListener: (port: number) => OccupiedHarperListener;
   resolveInstanceServingPid: (dataDir: string, port: number, deps: { findListeningPids: (port: number) => number[] }) => number | null;
@@ -243,6 +244,10 @@ function reconcileFederationInstanceViaOpsApi(...args: any[]): any {
 
 function seedAgentViaOpsApi(...args: any[]): any {
   return cli.seedAgentViaOpsApi(...args);
+}
+
+function seedAgentWithLocalHome(...args: any[]): any {
+  return cli.seedAgentWithLocalHome(...args);
 }
 
 function seedFederationInstanceViaOpsApi(...args: any[]): any {
@@ -478,7 +483,7 @@ program
 
           // Seed agent via remote ops API
           console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
-          await seedAgentViaOpsApi(opsUrl, agentId, pubKeyB64url, adminUser, flairAdminPass);
+          await seedAgentWithLocalHome(opsUrl, agentId, pubKeyB64url, adminUser, flairAdminPass);
           console.log(`Agent '${agentId}' registered on remote instance ✓`);
         } else {
           // No agentId -- generate throwaway keypair for FederationInstance row
@@ -1362,7 +1367,7 @@ program
         console.log(`Seeding agent '${agentId}' via operations API...`);
         const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
         await attributeBeforeCredential(opsPort, opsBindHost);
-        await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
+        await seedAgentWithLocalHome(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
         console.log(`Agent '${agentId}' registered ✓`);
 
         // Verify Ed25519 auth

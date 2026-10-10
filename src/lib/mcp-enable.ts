@@ -149,6 +149,7 @@ import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
 import { writeConfirmed } from "./instance-identity-row.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
+import { agentHomeEndpoint, resolveTargetInstanceId } from "./agent-home.js";
 import { defaultReadProcessCmdline, defaultReadProcessCwd } from "./upgrade-exec-path.js";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
@@ -1393,6 +1394,12 @@ export async function provisionIdpIdentityMapping(
 
   if (foundAgents.length === 0) {
     await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight);
+    // flair#2433 — the new principal Agent's home is THIS instance's federation
+    // id, resolved through the one shared rule. A create stamps it; a body value
+    // is never the source.
+    const principalHome = await resolveTargetInstanceId(
+      agentHomeEndpoint(opsUrl, params.adminUser, params.adminPass, fetchImpl),
+    );
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1411,6 +1418,7 @@ export async function provisionIdpIdentityMapping(
             publicKey: `idp:${params.idpProvider}:${params.idpSubject}`,
             admin: false,
             defaultTrustTier: "endorsed",
+            originatorInstanceId: principalHome,
             createdAt: now,
             updatedAt: now,
           },
