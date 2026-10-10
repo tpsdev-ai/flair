@@ -118,7 +118,14 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 /**
  * Arm `point`, start `run` (the maintenance pass), and once it is paused at that
  * point (inside its owned transaction, or before it opens for a `-pre` point)
- * run `compete` (the competing write), then release it.
+ * run `compete` (the competing write), wait until that write is committed, then
+ * release it.
+ *
+ * The competing write is an ops request, whose 200 can land before its commit
+ * (native-spawn deferred-txn / ops-wumd). Releasing maintenance into that window
+ * makes the outcome depend on timing: maintenance's confirmation read then races
+ * the competing commit. {@link awaitOpsWriteCommitted} holds the pause until the
+ * competing write — and so the row maintenance must see — is committed.
  * Returns the pass's result, the competing step's result and how the pause
  * ended.
  */
@@ -129,13 +136,38 @@ async function withPausedAction<T>(point: string, run: () => Promise<any>, compe
   const paused = await waitFor(join(pauseDir, `paused.${point}`), 15_000);
   let competed: T | undefined;
   try {
-    if (paused) competed = await compete();
+    if (paused) {
+      competed = await compete();
+      await awaitOpsWriteCommitted();
+    }
   } finally {
     writeFileSync(join(pauseDir, `go.${point}`), "");
   }
   const result = await pending;
   const released = paused ? readFileSync(join(pauseDir, `released.${point}`), "utf8") : "never paused";
   return { result, competed, released };
+}
+
+const COMMIT_PROBE_AGENT = "maintenance-commit-probe";
+/**
+ * Wait until a write issued AFTER the competing one is committed, read through
+ * the same ops path the assertions use ({@link readMemory}). Harper commits ops
+ * writes in request order, so waiting for this later write to become visible
+ * also waits out the competing write's commit. A bounded, condition-based wait
+ * — not a sleep — used instead of assuming the competing ops request's 200 means
+ * its commit is already durable.
+ */
+async function awaitOpsWriteCommitted(): Promise<void> {
+  const id = `mc-commit-${randomUUID()}`;
+  await insertMemory([{ id, agentId: COMMIT_PROBE_AGENT, content: "commit probe", contentHash: id, visibility: "private", durability: "permanent", createdAt: PAST, archived: false, instanceToken: randomUUID() }]);
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    if (await readMemory(id)) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`write issued after the competing one was not committed before the pause was released (${id} not visible)`);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
 }
 
 beforeAll(async () => {

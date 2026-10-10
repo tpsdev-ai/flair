@@ -26,6 +26,27 @@ async function op(body: Record<string, unknown>) {
 async function seed(table: string, records: Record<string, unknown>[]) {
   return op({ operation: "upsert", database: "flair", table, records });
 }
+/**
+ * Wait until a write issued AFTER the setup write is committed, read through
+ * the same ops path the assertions use. The setup writes are ops requests,
+ * whose 200 can land before their commit (native-spawn deferred-txn /
+ * ops-wumd): a PUT issued into that window is superseded by the setup write and
+ * its row write does not survive, while the PUT still answers 200. Harper
+ * commits ops writes in request order, so waiting for this later write to become
+ * visible also waits out the setup write's commit. A bounded, condition-based
+ * wait.
+ */
+async function awaitSeedCommitted(): Promise<void> {
+  const flushId = `authority-flush-${randomUUID()}`;
+  await op({ operation: "upsert", database: "flair", table: "Memory", records: [{ id: flushId, agentId: owner.id, content: "flush", durability: "persistent", createdAt: now }] });
+  const deadline = Date.now() + 5_000;
+  let row = await read(flushId);
+  while (row?.content !== "flush" && Date.now() < deadline) {
+    await Bun.sleep(10);
+    row = await read(flushId);
+  }
+  expect(row?.content, "setup write not committed before the PUT (deferred ops write not visible)").toBe("flush");
+}
 const read = async (id: string) => (await op({ operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"] }))[0];
 /** HTTP PUT/PATCH can 200 before ops search_by_id sees the commit (native-spawn
  *  deferred-txn / ops-wumd class). Poll the same ops read the assertions use;
@@ -88,6 +109,7 @@ describe("Memory authority fields over HTTP", () => {
   test("a content-changing write cannot keep an echoed approved verdict", async () => {
     // Own row — do not reuse "stamped" after the prior test's ops-blob PUT.
     await seed("Memory", [{ id: "stamped-echo", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
+    await awaitSeedCommitted();
     const existing = await read("stamped-echo");
     const put = await request(owner, "PUT", "/Memory/stamped-echo", {
       id: "stamped-echo", agentId: owner.id, content: "unreviewed claim under an echoed stamp",
@@ -99,6 +121,7 @@ describe("Memory authority fields over HTTP", () => {
     expect(afterPut.promotionStatus).toBeFalsy();
     expect(afterPut.promotedBy).toBeFalsy();
     await seed("Memory", [{ id: "stamped-patch", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
+    await awaitSeedCommitted();
     const patch = await request(owner, "PATCH", "/Memory/stamped-patch", { content: "patched unreviewed claim" });
     expect(patch.status, await patch.clone().text()).toBe(204);
     const afterPatch = await readUntil("stamped-patch", (row) => row?.content === "patched unreviewed claim");
