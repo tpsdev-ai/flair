@@ -579,8 +579,9 @@ export function shouldAdoptMissingSidecar(input: {
  * Whether the identity sidecar is stale — does it name a pid that is CONFIRMED
  * gone?
  *
- * Stale is a POSITIVE finding, never a default. Only `kill(pid, 0)` returning
- * ESRCH (`gone`) is stale; `eperm` (a live process owned by another user) and
+ * Stale is a POSITIVE finding, never a default. Only `gone` (ESRCH, or a zombie
+ * whose state read reports it) is stale; `eperm` (a live process owned by
+ * another user) and
  * every indeterminate answer — `null`, or a probe that failed with any other
  * errno (`unknown`) — are NOT stale. Unknown evidence never licenses an action,
  * so a non-stale sidecar stays evidence and the machine keeps refusing.
@@ -609,8 +610,9 @@ export function classifySidecarStaleness(
  * CONFIRMED gone AND a fresh O_NOFOLLOW read still names that same pid.
  *
  * `observedPid` is the pid the sidecar named when the stop was observed;
- * `observedPidLiveness` is that pid read AFTER the stop's wait — `gone` (ESRCH)
- * is the confirmation. A process that survived, one owned by another user
+ * `observedPidLiveness` is that pid read AFTER the stop's wait — `gone` (ESRCH,
+ * or a zombie whose state read reports it) is the confirmation. A process that
+ * survived, one owned by another user
  * (EPERM), or one whose liveness could not be read removes nothing.
  *
  * `sidecar` is a fresh O_NOFOLLOW read taken after the stop. A sidecar another
