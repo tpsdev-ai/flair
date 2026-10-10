@@ -3509,10 +3509,10 @@ export async function seedAgentViaOpsApi(
   occupiedListener?: OperationsPortAttribution,
   /**
    * The target instance's own federation id, resolved by the caller through
-   * resources-equivalent rule in src/lib/agent-home.ts. When supplied (including
-   * an explicit null), the new Agent row carries it as its home
-   * (`originatorInstanceId`); the create ignores any other source. Omitted by
-   * callers that do not stamp, which leaves the field off the row.
+   * the rule in src/lib/agent-home.ts. When supplied (including an explicit
+   * null), the new Agent row carries it as its home (`originatorInstanceId`),
+   * and the create ignores any other source. When omitted, the field is left
+   * off the row.
    */
   homeInstanceId?: string | null,
 ): Promise<void> {

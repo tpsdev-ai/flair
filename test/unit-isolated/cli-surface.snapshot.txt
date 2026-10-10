@@ -228,7 +228,7 @@ flair agent remove
       attr: force
 
 flair agent stamp-home
-  description: Back-fill the home instance (originatorInstanceId) on Agent rows this instance can account for
+  description: Back-fill the home instance (originatorInstanceId) on home-less Agent rows with no federation-sync provenance
   usage: [options]
   options:
     --port <port>
@@ -2933,7 +2933,8 @@ Commands:
   rotate-key [options] <id>  Rotate an agent's Ed25519 keypair
   remove [options] <id>      Remove an agent and all its data from Flair
   stamp-home [options]       Back-fill the home instance (originatorInstanceId)
-                             on Agent rows this instance can account for
+                             on home-less Agent rows with no federation-sync
+                             provenance
   help [command]             display help for command
 
 ----- flair agent add -----
@@ -3036,8 +3037,8 @@ Global Options:
 ----- flair agent stamp-home -----
 Usage: flair agent stamp-home [options]
 
-Back-fill the home instance (originatorInstanceId) on Agent rows this instance
-can account for
+Back-fill the home instance (originatorInstanceId) on home-less Agent rows with
+no federation-sync provenance
 
 Options:
   --port <port>             Harper HTTP port

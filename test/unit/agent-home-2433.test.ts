@@ -145,16 +145,18 @@ describe("describeAgentHomeFinding — what doctor prints", () => {
 });
 
 describe("planAgentHomeWrite — the home is immutable after create", () => {
-  test("a new id proceeds with the resolved home", () => {
-    expect(planAgentHomeWrite({ state: "absent" }, "inst-local", "a")).toEqual({ refuse: false, home: "inst-local" });
+  test("a new id proceeds and stamps the resolved home", () => {
+    expect(planAgentHomeWrite({ state: "absent" }, "inst-local", "a")).toEqual({ refuse: false, stamp: true, home: "inst-local" });
   });
 
-  test("a stored home equal to the next one proceeds", () => {
-    expect(planAgentHomeWrite({ state: "found", home: "inst-local" }, "inst-local", "a")).toEqual({ refuse: false, home: "inst-local" });
+  test("a stored home equal to the next one proceeds without writing a home", () => {
+    expect(planAgentHomeWrite({ state: "found", home: "inst-local" }, "inst-local", "a")).toEqual({ refuse: false, stamp: false, home: "inst-local" });
   });
 
-  test("a stored NULL home is filled (not a change)", () => {
-    expect(planAgentHomeWrite({ state: "found", home: null }, "inst-local", "a")).toEqual({ refuse: false, home: "inst-local" });
+  test("a stored NULL home is left untouched by principal add", () => {
+    const plan = planAgentHomeWrite({ state: "found", home: null }, "inst-local", "a");
+    expect(plan.refuse).toBe(false);
+    if (!plan.refuse) expect(plan.stamp).toBe(false);
   });
 
   test("a stored home that differs is REFUSED with the named error", () => {

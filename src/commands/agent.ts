@@ -808,7 +808,7 @@ export function register(program: Command): void {
 
   agent
     .command("stamp-home")
-    .description("Back-fill the home instance (originatorInstanceId) on Agent rows this instance can account for")
+    .description("Back-fill the home instance (originatorInstanceId) on home-less Agent rows with no federation-sync provenance")
     .option("--port <port>", "Harper HTTP port")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")

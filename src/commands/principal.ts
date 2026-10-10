@@ -327,11 +327,11 @@ export function register(program: Command): void {
       // Insert via operations API with Principal fields
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-      // flair#2433 — the new row's home is THIS instance's federation id,
+      // flair#2433 — a NEW row's home is THIS instance's federation id,
       // resolved through the one shared rule. An upsert over an existing row
-      // must never CHANGE a home already stored: read it first and refuse a
-      // change with a named error (the home is immutable after create). A failed
-      // read is UNREADABLE, not "no home", and is refused the same way.
+      // never writes a home: read it first and refuse a change with a named
+      // error (the home is immutable after create). A failed read is
+      // UNREADABLE, not "no home", and is refused the same way.
       const homeEndpoint = agentHomeEndpoint(opsPort, adminUser, adminPass);
       const home = await resolveTargetInstanceId(homeEndpoint);
       const existingHome = await readStoredAgentHome({ opsUrl: `http://127.0.0.1:${opsPort}/`, authHeader: auth, id });
@@ -341,7 +341,7 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      const record = {
+      const record: Record<string, unknown> = {
         id,
         name,
         displayName: name,
@@ -357,10 +357,12 @@ export function register(program: Command): void {
         role: isAdmin ? ADMIN_ROLE : "agent",
         admin: isAdmin,
         runtime: runtime ?? null,
-        originatorInstanceId: home,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
+      // Only a create stamps a home; over a found row the stored value stands.
+      const homeWrite = homePlan as Extract<typeof homePlan, { refuse: false }>;
+      if (homeWrite.stamp) record.originatorInstanceId = homeWrite.home;
 
       const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
         method: "POST",

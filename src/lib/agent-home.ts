@@ -6,8 +6,7 @@
  * instance that CREATED it. The Agent resource stamps it on every create
  * (resources/Agent.ts via resources/originator-instance.ts, reading
  * resources/instance-identity.ts's localInstanceId()). The Agent rows the CLI
- * creates go through Harper's operations API, which bypasses the resource, so
- * those paths stamp nothing today.
+ * creates go through Harper's operations API, which bypasses the resource.
  *
  * The rule is the SAME one the server applies, not a second copy of it: this
  * module resolves the target instance's own id through the shared decision
@@ -175,9 +174,8 @@ export interface AgentHomePlan {
 
 /**
  * Split the Agent roster into home-less rows and, of those, the ones the remedy
- * may stamp. A row with no home and no sync provenance is one this instance's
- * own write paths can account for; a row carrying sync provenance arrived through
- * federation and is listed only.
+ * may stamp: a home-less row with no sync provenance. A row carrying sync
+ * provenance arrived through federation and is listed only.
  *
  * PURE. `localInstanceId` is not used to decide the split — a null id only means
  * the remedy has nothing to write.
@@ -268,7 +266,7 @@ export async function readStoredAgentHome(args: {
 /** What a create-or-upsert Agent write may do, given the row already stored. */
 export type AgentHomeWritePlan =
   | { refuse: true; message: string }
-  | { refuse: false; home: string | null };
+  | { refuse: false; stamp: boolean; home: string | null };
 
 /**
  * Decide whether an ops-API Agent create/upsert may proceed, given the stored
@@ -276,8 +274,9 @@ export type AgentHomeWritePlan =
  * stamp (`home`, from resolveTargetInstanceId). PURE.
  *
  * Refuses — with a named error — when the write would CHANGE a stored home, and
- * when the stored row could not be read (an unreadable read is not "no home"). A
- * stored home equal to the next one, or no stored home at all, proceeds.
+ * when the stored row could not be read (an unreadable read is not "no home").
+ * Otherwise `stamp` is true only for an absent row (a create); over a found row
+ * the write must omit the home so the stored value, null or not, stands.
  */
 export function planAgentHomeWrite(
   existing: StoredAgentHomeRead,
@@ -293,7 +292,7 @@ export function planAgentHomeWrite(
   if (existing.state === "found" && existing.home !== null && existing.home !== home) {
     return { refuse: true, message: agentHomeChangeRefusal(id, existing.home, home) };
   }
-  return { refuse: false, home };
+  return { refuse: false, stamp: existing.state === "absent", home };
 }
 
 /** What `flair agent stamp-home` did (or would do). */
@@ -306,7 +305,7 @@ export interface AgentHomeStampResult {
 }
 
 /**
- * Back-fill the home on the Agent rows this instance can account for
+ * Back-fill the home on home-less Agent rows with no sync provenance
  * (flair#2433). Reads the roster, plans the stamps, and — with `apply` — writes
  * the local id on each stampable row and reads it back before counting it. A
  * sync-originated row (or one with no home at all to attribute) is never written.

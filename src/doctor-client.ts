@@ -2892,9 +2892,8 @@ export interface AgentHomeFinding {
  * The split is the remedy's contract: a row that carries sync provenance
  * (`_syncedFrom`/`_originatorInstanceId`, resources/Federation.ts's receiver
  * stamps) arrived through federation and is LISTED ONLY — stamping it would
- * forge its origin. A home-less row with no sync provenance is one this
- * instance's own write paths can account for, and `flair agent stamp-home
- * --apply` stamps the local id on it.
+ * forge its origin. `flair agent stamp-home --apply` stamps the local id on a
+ * home-less row that carries no federation-sync provenance.
  *
  * PURE — it reports; nothing is rewritten.
  */

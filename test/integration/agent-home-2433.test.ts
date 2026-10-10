@@ -121,6 +121,43 @@ function runDoctor(): Promise<{ code: number | null; stdout: string; stderr: str
   });
 }
 
+/** Run `flair principal add <id>` as a real subprocess, with an isolated HOME. */
+function runPrincipalAdd(id: string, opsPortArg: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const args = ["principal", "add", id, "--ops-port", opsPortArg, "--keys-dir", join(cliHome, "keys"), "--admin-pass", ADMIN_PASS];
+    const startedAt = Date.now();
+    const child = spawn(process.execPath, [CLI, ...args], {
+      env: { ...process.env, HOME: cliHome, FLAIR_TOKEN: "", NO_COLOR: "1" },
+      timeout: 30_000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+    child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (signal !== null) {
+        reject(new Error(childOverranDeadline("flair CLI", cliLeg(args), 30_000, { status: code, signal, stdout, stderr, elapsedMs: Date.now() - startedAt, timeoutSignal: "SIGTERM" })));
+        return;
+      }
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+/** A loopback port with nothing listening: bind an ephemeral port, then release it. */
+async function closedPort(): Promise<string> {
+  const { createServer } = await import("node:net");
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const port = (srv.address() as { port: number }).port;
+      srv.close(() => resolve(String(port)));
+    });
+  });
+}
+
 beforeAll(async () => {
   harper = await startHarper();
   assertOwnInstance(harper);
@@ -261,6 +298,50 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect(stamped.ok).toBe(true);
     const after = (await runDoctor()).stdout.match(/(\d+) issues? found/)?.[1] ?? "0";
     expect(after, "the home-less row counted toward doctor's issue total").toBe(before);
+  }, 60_000);
+});
+
+describe("flair#2433 — `flair principal add` over an existing row (real subprocess)", () => {
+  // Agent schema required fields (schemas/agent.graphql): name, publicKey, createdAt (id is the key).
+  test("a stored home that differs from the local id is refused and left as it was", async () => {
+    const id = `pa-other-home-${sfx}`;
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-pa-other-2433", originatorInstanceId: PEER_ID, createdAt: new Date().toISOString() }],
+    });
+    const r = await runPrincipalAdd(id, String(opsPort()));
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
+    expect(r.stderr).toContain("originator_instance_immutable");
+    const row = await rowIn("Agent", id);
+    expect(row.originatorInstanceId, "the stored home changed").toBe(PEER_ID);
+    expect(row.publicKey, "the refused write still changed the row").toBe("pk-pa-other-2433");
+  }, 60_000);
+
+  test("a home-less row carrying federation provenance stays home-less", async () => {
+    const id = `pa-synced-${sfx}`;
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-pa-synced-2433", _syncedFrom: PEER_ID, createdAt: new Date().toISOString() }],
+    });
+    const before = await rowIn("Agent", id);
+    expect(before._syncedFrom, "the seeded provenance was not stored").toBe(PEER_ID);
+    expect(before.originatorInstanceId ?? null).toBeNull();
+
+    const r = await runPrincipalAdd(id, String(opsPort()));
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(0);
+    const after = await rowIn("Agent", id);
+    expect(after.originatorInstanceId ?? null, "principal add attributed a home-less row to this instance").toBeNull();
+    expect(after._syncedFrom).toBe(PEER_ID);
+  }, 60_000);
+
+  test("an unreadable read refuses and writes nothing", async () => {
+    const id = `pa-unreadable-${sfx}`;
+    const r = await runPrincipalAdd(id, await closedPort());
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
+    expect(r.stderr).toContain(`could not read agent '${id}'`);
+    expect(await rowIn("Agent", id), "a row was written").toBeNull();
   }, 60_000);
 });
 
