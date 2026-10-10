@@ -27,7 +27,7 @@ import {
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
-import { sameStoredRow, storedRowChangedRefusal } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
@@ -2314,31 +2314,63 @@ export class Memory extends (databases as any).flair.Memory {
     // test/integration/host-source-atomicity-1940.test.ts (t2).
     // flair#2441: hold the row still before this write's transaction opens, so
     // a delete, a purge or a same-id replace can commit and be seen by the
-    // confirmation inside.
+    // confirmations inside.
     const beforePut = txnPausePoint("memory-put-pre");
     if (beforePut) await beforePut;
-    const putResult = await withSharedWriteTransaction(ctx, async (c) => {
-      // flair#2441: this put is over the row read as `preExisting` (which
-      // `stampInstanceToken` copied its incarnation token from). Confirm, in
-      // this write's own transaction, that the COMMITTED row is still that one:
-      // a delete or a purge since the read (the row is gone) and a same-id
-      // replace (a new token) are refused with a named 409 and nothing is written
-      // — an update write-back never re-creates the row it read. The read is an
-      // explicit fresh context, never contextless (see resources/write-back.ts).
-      const confirmPause = txnPausePoint("memory-put");
-      if (confirmPause) await confirmPause;
-      if (preExisting) {
-        const confirmed = await (databases as any).flair.Memory.get(preExisting.id, {});
-        if (!confirmed || !sameStoredRow(confirmed, preExisting)) return storedRowChangedRefusal("Memory");
-      }
-      const r: any = await (databases as any).flair.Memory.put(content, c);
-      if (pointer.row) {
-        pointer.row.memoryId = r?.id ?? content.id ?? "";
-        const persistDenial = await persistPointerRow(pointer.row, c);
-        if (persistDenial) return persistDenial;
-      }
-      return r;
-    });
+    // A request-owned transaction is not aborted by a throw out of the callback
+    // below (the request owns its commit); an owned one is (Harper's
+    // transaction() aborts it when its callback throws).
+    const joinsRequestTxn = isJoinableTransaction(ctx);
+    let putResult: any;
+    try {
+      putResult = await withSharedWriteTransaction(ctx, async (c) => {
+        // flair#2441: this put is over the row read as `preExisting` (which
+        // `stampInstanceToken` copied its incarnation token from). The write
+        // confirms, inside its own transaction, that the COMMITTED row is still
+        // that one (sameStoredRow): once before the row is staged (nothing is
+        // staged yet, so the refusal is returned) and once after, before the
+        // commit (confirmCommittedRow, the write-back helper's own
+        // confirmation: the transaction is aborted and the staged rows are
+        // discarded). A delete or a purge since the read (the row is gone) and a
+        // same-id replace (a new incarnation) are refused with the named 409
+        // stored_row_changed and nothing is written — an update never re-creates
+        // the row it read. Both reads are an explicit fresh context, never
+        // contextless (see resources/write-back.ts).
+        const confirmPause = txnPausePoint("memory-put");
+        if (confirmPause) await confirmPause;
+        if (preExisting) {
+          const confirmed = await (databases as any).flair.Memory.get(preExisting.id, {});
+          if (!confirmed || !sameStoredRow(confirmed, preExisting)) return storedRowChangedRefusal("Memory");
+        }
+        const r: any = await (databases as any).flair.Memory.put(content, c);
+        if (pointer.row) {
+          pointer.row.memoryId = r?.id ?? content.id ?? "";
+          const persistDenial = await persistPointerRow(pointer.row, c);
+          if (persistDenial) return persistDenial;
+        }
+        if (preExisting) {
+          // Measured over HTTP on Harper 5.3.1: a competitor committed after
+          // this write was staged keeps its row even without this re-check
+          // (Harper orders the staged write by this transaction's earlier
+          // timestamp); the re-check is what refuses the put by name instead
+          // of answering success for a write that did not land.
+          // Test-only: holds the staged write before its commit, so a delete, a
+          // purge or a same-id replace can commit in that window.
+          const stagedPause = txnPausePoint("memory-put-staged");
+          if (stagedPause) await stagedPause;
+          try {
+            await confirmCommittedRow((databases as any).flair.Memory, preExisting.id, (committed) => sameStoredRow(committed, preExisting));
+          } catch (err) {
+            if (err instanceof CommittedRowChanged && joinsRequestTxn) abortRequestTransaction(c);
+            throw err;
+          }
+        }
+        return r;
+      });
+    } catch (err) {
+      if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
+      throw err;
+    }
     if (putResult instanceof Response) return putResult;
     const result: any = putResult;
     // flair#1357 — read-your-write for the lexical leg (see post()).

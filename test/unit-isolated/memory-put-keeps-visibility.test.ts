@@ -16,6 +16,8 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
 }));
 
 let memoryStore: Map<string, any>;
+/** The open transaction's staged Memory writes (null outside a transaction). */
+let staged: Map<string, any> | null = null;
 
 class BaseMemory {
   async get(target?: any) {
@@ -27,7 +29,14 @@ class BaseMemory {
     if (key === "boom") throw new Error("storage unavailable");
     return memoryStore.get(key) ?? null;
   }
-  static async put(content: any) { memoryStore.set(content.id, { ...content }); return undefined; }
+  static async put(content: any) {
+    // flair#2441: inside an open transaction the write is STAGED (the store is
+    // the committed state until commit; an abort discards it), as in real
+    // Harper — Memory.put re-reads the committed row before its commit.
+    if (staged) { staged.set(content.id, { ...content }); return undefined; }
+    memoryStore.set(content.id, { ...content });
+    return undefined;
+  }
   static async delete(id: any) { memoryStore.delete(typeof id === "string" ? id : id?.id); return { ok: true }; }
   // Harper PUT semantics: the stored row IS the content (full replacement).
   async put(content: any) {
@@ -80,7 +89,13 @@ beforeEach(() => {
 // to run a write unwrapped. Provide it in this isolated mock.
 (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
   if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
-  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  const writes = new Map<string, any>();
+  const txn: any = {
+    open: 1, saveCommits: false,
+    abort() { this.open = 0; writes.clear(); staged = null; },
+    commit() { if (this.open === 1) for (const [id, row] of writes) memoryStore.set(id, row); this.open = 0; staged = null; },
+  };
+  staged = writes;
   const c = ctx && typeof ctx === "object" ? ctx : {};
   c.transaction = txn;
   let r: any;

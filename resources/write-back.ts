@@ -50,8 +50,9 @@ export const WRITE_BACK_IDENTITY_FIELDS = ["id", "agentId", "instanceToken", "co
  *
  * This is the identity check the write-back helper applies, exposed so a
  * writer that cannot hand its write to the helper (one that joins a
- * request-owned transaction, e.g. Memory.put) confirms the SAME facts before
- * it writes.
+ * request-owned transaction, e.g. Memory.put) confirms the SAME facts: before
+ * it stages its write, and against the committed row after (through
+ * {@link confirmCommittedRow}).
  */
 export function sameStoredRow(row: any, basis: any): boolean {
   return row == null ? basis == null : basis != null &&
@@ -61,8 +62,9 @@ export function sameStoredRow(row: any, basis: any): boolean {
 
 /**
  * The named 409 for a write refused because the row it read is no longer the
- * stored one: the row is gone (a delete or a purge committed) or its
- * incarnation token changed (a same-id replace committed). Nothing was written.
+ * stored one: the row is gone (a delete or a purge committed) or its identity
+ * changed (a same-id replace committed: a field {@link sameStoredRow} compares,
+ * such as the incarnation token, differs). Nothing was written.
  */
 export function storedRowChangedRefusal(tableName: string): Response {
   return new Response(
@@ -94,9 +96,43 @@ export class WriteBackConflictError extends Error {
   }
 }
 
-/** Aborts the write-back's owned transaction: the row changed after the
- *  transaction read it. Never escapes the helper. */
-class CommittedRowChanged extends Error {}
+/** Aborts the write's transaction: the COMMITTED row, re-read after the write
+ *  was staged, is no longer the one the write is over. Inside the helper it
+ *  never escapes (it is retried, then named by {@link WriteBackConflictError});
+ *  a writer that runs {@link confirmCommittedRow} itself (Memory.put) catches it
+ *  outside its transaction and answers with {@link storedRowChangedRefusal}. */
+export class CommittedRowChanged extends Error {
+  constructor() {
+    super("committed row changed after the write was staged");
+    this.name = "CommittedRowChanged";
+  }
+}
+
+/**
+ * The committed-row confirmation the write-back helper runs once its write is
+ * staged and before its transaction commits: re-read the COMMITTED row and
+ * throw {@link CommittedRowChanged} unless `same(committed)` holds. The
+ * transaction must then abort so the staged write is discarded: an owned
+ * transaction aborts when the throw leaves its callback; a caller that joined
+ * a request-owned transaction aborts it itself (Memory.put does).
+ *
+ * The read is an EXPLICIT fresh context, never contextless: a contextless read
+ * joins the caller's transaction and sees its old snapshot or its staged write.
+ * Harper has no compare-and-set on a table write, so a change committed after
+ * this read and before the commit is not seen by it.
+ *
+ * Exported so a writer that cannot hand its write to the helper (Memory.put,
+ * which joins a request-owned transaction) runs the same re-read, with its own
+ * predicate (the helper compares the whole row; Memory.put, sameStoredRow).
+ */
+export async function confirmCommittedRow(
+  table: Pick<WriteBackTable, "get">,
+  id: string,
+  same: (committed: any) => boolean,
+): Promise<void> {
+  const committed = await table.get(id, {});
+  if (!same(committed)) throw new CommittedRowChanged();
+}
 
 /** The shared helper's own signature — so a migration can inject a plain fake
  *  in unit tests (embedding-stamp's DI style) while production uses the real,
@@ -133,11 +169,7 @@ export async function writeBackCommittedRow(
           if (pause) await pause;
         }
         await table.put(decision.write, c);
-        // Confirmation read: the committed row in an EXPLICIT fresh context
-        // (never contextless — a contextless read joins this request's
-        // transaction and sees its old snapshot or its staged write).
-        const committed = await table.get(id, {});
-        if (!isDeepStrictEqual(committed, row)) throw new CommittedRowChanged();
+        await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
         return decision;
       });
     } catch (err) {

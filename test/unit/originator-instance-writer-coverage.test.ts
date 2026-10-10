@@ -22,9 +22,11 @@
  *
  * The literal idiom cannot see a writer that resolves the table handle through a
  * variable first (the federation merge builds `{ Memory: databases.flair.Memory,
- * ... }` and hands `table` to the shared write-back helper); such a site is
- * enumerated by the helper scan and resolves to the `?` table key instead (see
- * writeBackTable). Harper's administrator
+ * ... }` and hands `table` to the shared write-back helper for a Memory row, or
+ * calls `table.put(...)` for any other synced table); the helper site is
+ * enumerated by the helper scan and resolves to the `?` table key (see
+ * writeBackTable), and the plain put is listed as an explicit DYNAMIC exception
+ * below, asserted to still exist. Harper's administrator
  * ops API (`:9925`) is outside the repo and cannot be enumerated here.
  *
  * Verified by a mutation: appending an unstamped `(databases as any).flair.Soul.put(...)`
@@ -136,7 +138,13 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
  * the literal idiom above cannot see them. Each is an explicit exception to the
  * stamping rule (reviewed), and is asserted to still exist.
  */
-const DYNAMIC_RAW_WRITE_EXCEPTIONS: Array<{ file: string; marker: string; note: string }> = [];
+const DYNAMIC_RAW_WRITE_EXCEPTIONS: Array<{ file: string; marker: string; note: string }> = [
+  {
+    file: "resources/Federation.ts",
+    marker: "table.put(mergedData)",
+    note: "FederationSync.post merge of every non-Memory synced table — applies a verified, non-revoked peer's rows via a resolved table handle (a Memory merge is the write-back entry above, flair#2441)",
+  },
+];
 
 /** Directory scan (recursive), skipping test files. */
 function resourceSources(root = "resources"): string[] {

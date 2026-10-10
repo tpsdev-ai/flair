@@ -56,7 +56,7 @@
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withDetachedTxn } from "./table-helpers.js";
-import { writeBackCommittedRow } from "./write-back.js";
+import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import type { ReadScope, ScopableRecord } from "./memory-read-scope.js";
@@ -102,9 +102,14 @@ export type CanReadMemory = (record: ScopableRecord | null | undefined) => boole
  * read inside a transaction this call OWNS, the bump is built from THAT read,
  * and the committed row is re-read before commit. A row deleted or purged
  * between the read and the write is not bumped and NOT re-created (the plan
- * skips an absent row); a same-id replace is refused, never overwritten; a row
- * that keeps changing is a bounded retry. The earlier read only decides the
- * read-scope gate above; it never authorizes the count write on its own.
+ * skips an absent row). A same-id replace is refused, never overwritten: an
+ * identity change the in-transaction read already sees throws
+ * WriteBackConflictError at once (no retry). Only a change to the committed
+ * row found by the re-read after the bump is staged retries, from a fresh
+ * read, at most WRITE_BACK_ATTEMPTS attempts in all (then
+ * WriteBackConflictError). recordUsageBatch / recordCitations log either
+ * refusal with the reason `stored_row_changed`. The earlier read only decides
+ * the read-scope gate above; it never authorizes the count write on its own.
  *
  * Called by recordUsageBatch() (POST /RecordUsage, explicit usage feedback)
  * and by recordCitations() below (citation-on-write) — identical ledger
@@ -295,7 +300,14 @@ export async function recordCitations(
     } catch (err) {
       // Never let one bad id stop the batch — same no-op-on-error discipline
       // as RecordUsage.post()'s loop, log server-side only.
-      console.error("recordCitations: failed to credit (no-op)", { memoryId: id, err });
+      if (err instanceof WriteBackConflictError) {
+        // flair#2441: the stored row is no longer the one read (a same-id
+        // replace, or a change found on every attempt); the count bump was
+        // refused and nothing was written.
+        console.error("recordCitations: not credited, stored_row_changed (no-op)", { memoryId: id, reason: "stored_row_changed", err });
+      } else {
+        console.error("recordCitations: failed to credit (no-op)", { memoryId: id, err });
+      }
     }
   }
 }
@@ -346,7 +358,14 @@ export async function recordUsageBatch(
       // error leak existence information either — log server-side, collapse
       // to the same no-op the response already returns for every other
       // outcome.
-      console.error("RecordUsage.post: failed to record usage (treated as no-op)", { memoryId, err });
+      if (err instanceof WriteBackConflictError) {
+        // flair#2441: the stored row is no longer the one read (a same-id
+        // replace, or a change found on every attempt); the count bump was
+        // refused and nothing was written.
+        console.error("RecordUsage.post: not recorded, stored_row_changed (treated as no-op)", { memoryId, reason: "stored_row_changed", err });
+      } else {
+        console.error("RecordUsage.post: failed to record usage (treated as no-op)", { memoryId, err });
+      }
     }
   }
 }

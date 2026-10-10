@@ -6,13 +6,23 @@
  *
  *   - the usage-recording count bump (resources/usage-recording.ts),
  *   - the federation Memory merge (resources/Federation.ts),
- *   - Memory.put's own row write (resources/Memory.ts).
+ *   - Memory.put's ordinary row write (resources/Memory.ts; not the admin-only
+ *     `_reindex` re-PUT, which does not run this confirmation).
  *
  * Real Harper. Each writer's test-only pause point (resources/txn-pause-point.ts,
  * armed through FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR) holds the
  * writer between its read and its write while this test commits a competitor:
  *   - a DELETE, and a PURGE — the row stays gone; the writer does not re-create it;
  *   - a same-id REPLACE with a new token — the writer does not overwrite it.
+ * Memory.put is also held AFTER its write is staged and before its commit
+ * (`memory-put-staged`), and the same three competitors commit there: the
+ * competitor's row stands, and the committed-row re-check aborts the put and
+ * answers 409 stored_row_changed. Without the re-check the competitor's row
+ * still stands (Harper orders the staged put by its transaction's earlier
+ * timestamp), but the put answers 200 `written: true` for a write that did not
+ * land: the 409 assertion is the one that fails. A put that also carries a
+ * host-source pointer stages a pointer row no competitor versions, so that case
+ * shows the refused put's transaction is aborted: no pointer row is committed.
  * A control case per writer shows the ordinary path is unchanged.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -336,6 +346,109 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
     const row = await readRow(id);
     expect(row?.instanceToken, "the competing incarnation token is overwritten by the stale put").toBe(T2);
     expect(row?.content, "the competing content is overwritten").toBe("replaced");
+  }, 60_000);
+
+  // The window AFTER the row is staged and before the commit: the competitor
+  // commits while the put's write is staged; the committed-row re-check aborts
+  // the put's transaction and refuses it by name (see the file header for what
+  // each assertion discriminates).
+  it("a DELETE between the staged write and its commit is refused and the row stays deleted", async () => {
+    const id = `csr-put-staged-del-${Date.now()}`;
+    await seed(id, randomUUID());
+    const { response, released, paused } = await withPaused("memory-put-staged", () => put(id, "put v2"), () => deleteRow(id));
+    expect(paused, "Memory.put was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    // The competitor's row stands, and the put is refused by name, not answered with success.
+    expect(await readRow(id), "Memory.put re-created the deleted row").toBeNull();
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+  }, 60_000);
+
+  it("a PURGE between the staged write and its commit is refused and the row stays purged", async () => {
+    const id = `csr-put-staged-purge-${Date.now()}`;
+    await seed(id, randomUUID());
+    const { response, paused, released } = await withPaused("memory-put-staged", () => put(id, "put v2"), () => purgeRow(id));
+    expect(paused, "Memory.put was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    // The competitor's row stands, and the put is refused by name, not answered with success.
+    expect(await readRow(id), "Memory.put re-created the purged row").toBeNull();
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+  }, 60_000);
+
+  it("a same-id REPLACE between the staged write and its commit is refused and not overwritten", async () => {
+    const id = `csr-put-staged-rep-${Date.now()}`;
+    const T2 = randomUUID();
+    await seed(id, randomUUID());
+    const { response, paused, released } = await withPaused("memory-put-staged", () => put(id, "put v2"), async () => {
+      await updateRow({ id, instanceToken: T2, content: "replaced" });
+    });
+    expect(paused, "Memory.put was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    // The competitor's row stands, and the put is refused by name, not answered with success.
+    const row = await readRow(id);
+    expect(row?.instanceToken, "the competing incarnation token is overwritten by the stale put").toBe(T2);
+    expect(row?.content, "the competing content is overwritten").toBe("replaced");
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+  }, 60_000);
+
+  // The pointer row this put stages has no competing version, so Harper's
+  // timestamp ordering cannot hide it: it stays absent only if the refused put's
+  // transaction (the HTTP request's own, which the put joins) is aborted.
+  it("a DELETE between the staged write and its commit leaves no host-source pointer row", async () => {
+    const id = `csr-put-staged-ptr-${Date.now()}`;
+    await seed(id, randomUUID());
+    const pointer = { v: 1, host: "openclaw", kind: "run", id: "run-csr2441" };
+    const { response, paused, released } = await withPaused(
+      "memory-put-staged",
+      () => authSend(owner, "PUT", `/Memory/${id}`, { agentId: owner.id, content: "put v2", hostSource: pointer, hostSourceScope: "record" }),
+      () => deleteRow(id),
+    );
+    expect(paused, "Memory.put was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+    expect(await readRow(id), "Memory.put re-created the deleted row").toBeNull();
+    const pointers = await ops({
+      operation: "search_by_value", database: "flair", table: "MemoryHostSource",
+      search_attribute: "memoryId", search_type: "equals", search_value: id, get_attributes: ["*"],
+    });
+    expect(pointers, "the refused put's staged pointer row was committed").toEqual([]);
+  }, 60_000);
+
+  it("CONTROL: a held put with a host-source pointer and no competitor writes its pointer row", async () => {
+    const id = `csr-put-staged-ptr-ok-${Date.now()}`;
+    await seed(id, randomUUID());
+    const pointer = { v: 1, host: "openclaw", kind: "run", id: "run-csr2441" };
+    const { response, paused, released } = await withPaused(
+      "memory-put-staged",
+      () => authSend(owner, "PUT", `/Memory/${id}`, { agentId: owner.id, content: "put v2", hostSource: pointer, hostSourceScope: "record" }),
+      async () => {},
+    );
+    expect(paused, "Memory.put was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    expect(response.status, (await response.clone().text()).slice(0, 200)).toBeLessThan(300);
+    const pointers = await ops({
+      operation: "search_by_value", database: "flair", table: "MemoryHostSource",
+      search_attribute: "memoryId", search_type: "equals", search_value: id, get_attributes: ["*"],
+    });
+    expect(pointers.length, "the ordinary held put did not write its pointer row").toBe(1);
+  }, 60_000);
+
+  it("CONTROL: held at the staged write with no competitor, the put lands", async () => {
+    const id = `csr-put-staged-ok-${Date.now()}`;
+    await seed(id, randomUUID());
+    const { response, paused, released } = await withPaused("memory-put-staged", () => put(id, "put v2"), async () => {});
+    expect(paused, "Memory.put was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    expect(response.status, (await response.clone().text()).slice(0, 200)).toBeLessThan(300);
+    const row = await readRow(id);
+    expect(row?.content, "the held put did not land").toBe("put v2");
   }, 60_000);
 
   it("CONTROL: with no competitor the put lands", async () => {

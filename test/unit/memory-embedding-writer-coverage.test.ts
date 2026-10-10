@@ -52,6 +52,8 @@ const add = (file: string, sites: string[], policy: Policy, reason: string) => {
 // ── LATCH: raw put that can land an externally-sourced foreign stamp ──
 add("Federation", ["writer:writeBackCommittedRow#1"], "LATCH",
   "Federation sync-in LWW merge (applyMergedRecordToTable) — a remote-win copies the REMOTE embeddingModel; must trip the latch via noteWriteStamp.");
+add("Federation", ["writer:table.put#1"], "LATCH",
+  "Federation sync-in merge of every OTHER synced table (flair#2441 keeps the Memory merge on the write-back above); classified LATCH conservatively — the resolved handle is dynamic, and noteFederationMergedMemory runs after it (a no-op for a non-Memory table).");
 
 // ── GATED: Memory.ts's own post()/put()/patch() write path (calls noteWriteStamp) ──
 // The writes go through the base TABLE (`databases.flair.Memory`) with the

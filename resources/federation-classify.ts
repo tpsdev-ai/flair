@@ -69,10 +69,12 @@ export type SkipReason =
   // missing or is not the envelope's id, so the record is not applied.
   | "id_mismatch"
   | "invalid_expiry"
-  // Emitted by FederationSync.post for a record the merge could not apply
-  // because the row it read is no longer the stored one — a delete, a purge or
-  // a same-id replace with a new incarnation token committed between the read
-  // and the write. Nothing was written (flair#2441).
+  // Emitted by FederationSync.post for a Memory record the merge could not
+  // apply because the row it read is no longer the stored one — a delete, a
+  // purge or a same-id replace with a new incarnation token committed between
+  // the read and the write, or any change committed to the row after the merge
+  // staged its write. Nothing was written (flair#2441). Other synced tables do
+  // not run this confirmation and never emit it.
   | "merge_target_changed";
 
 /**

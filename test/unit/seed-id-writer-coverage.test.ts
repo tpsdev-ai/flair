@@ -50,6 +50,8 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "GUARDED: the dedup expiry repair (flair#2358) calls the decision on the id it writes before the raw put.");
 add("Federation", ["writer:writeBackCommittedRow#1"],
   "GUARDED: the merge skips a reserved id (seed_id_not_federated) before the write-back through the shared helper.");
+add("Federation", ["writer:table.put#1"],
+  "GUARDED: the merge of every other synced table (flair#2441 keeps Memory on the write-back) follows the same seed_id_not_federated skip.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
   "GUARDED: the transactional skill writer (flair#2139 S2) is reached only after Memory.post/put/delete or FeedMemories ran the reserved-id decision on the write's ids; the successor upsert and predecessor close ride the same transaction.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
@@ -109,6 +111,8 @@ add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"], "S
 for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#1"],
   ["Memory", "alias-source:(databases as any).flair.Memory#2"],
+  // flair#2441: Memory.put's committed-row re-check (confirmCommittedRow takes only `get`).
+  ["Memory", "alias-source:(databases as any).flair.Memory#3"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],
   ["Federation", "alias-source:(databases as any).flair.Memory#1"],
   ["MemoryReflect", "alias-source:(databases as any).flair.Memory#1"],
@@ -207,6 +211,7 @@ test("the listed entry paths run the decision, and its denial stops the path bef
   const skip = skipContinueEnd(federation, "seed_id_not_federated");
   expect(skip, "the seed skip does not stop the record").toBeGreaterThan(-1);
   expect(federation.indexOf("await writeBackCommittedRow(", skip)).toBeGreaterThan(skip);
+  expect(federation.indexOf("await table.put(mergedData)", skip)).toBeGreaterThan(skip);
 });
 
 test("the listed entry paths run the .content-suffix id decision on the ids it writes, and its denial stops the path before it writes", () => {

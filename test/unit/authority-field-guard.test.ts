@@ -80,7 +80,10 @@ interface RawMemoryWriter {
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
   { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
   { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(row, c)", kind: "echo" },
+  // flair#2441: a Memory merge runs through the write-back helper; every other
+  // synced table's merge stays the plain `table.put(mergedData)`.
   { file: "resources/Federation.ts", via: "write-back", needle: "mergedData", kind: "federation-merge" },
+  { file: "resources/Federation.ts", via: "alias-source", needle: "put(mergedData)", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
   { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
@@ -232,6 +235,7 @@ describe("raw flair.Memory handle coverage", () => {
     expect(writers.length).toBeGreaterThan(5);
     expect(writers.some((w) => w.file === "resources/MemoryFeed.ts" && w.via === "write-back")).toBe(true);
     expect(writers.some((w) => w.file === "resources/Federation.ts" && w.via === "write-back" && w.excerpt.includes("mergedData"))).toBe(true);
+    expect(writers.some((w) => w.file === "resources/Federation.ts" && w.via === "alias-source" && w.excerpt.includes("mergedData"))).toBe(true);
   });
 
   test("every raw Memory writer is classified; unclassified goes red", () => {
