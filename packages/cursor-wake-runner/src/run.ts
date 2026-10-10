@@ -74,10 +74,10 @@ function recordLaunch(result: WakeResult, dispatch: DirectedDispatch, launch: La
 /**
  * Record the launch receipt for a handed-off dispatch, idempotently.
  *
- * A receipt already present under the stable id is LEFT UNCHANGED: a replay
- * that reuses the agent (409) carries no url, and must never overwrite the
- * url-bearing receipt the first launch wrote. A read or write failure surfaces
- * as `"failed"` (the caller keeps the watermark back), never a thrown crash.
+ * A receipt already present under the stable id is LEFT UNCHANGED — a replay
+ * that reuses the agent (409) carries no url, and the stored receipt stands.
+ * A read or write failure surfaces as `"failed"` (the caller keeps the
+ * watermark back), never a thrown crash.
  */
 async function recordLaunchReceipt(
   deps: WakeDeps,
