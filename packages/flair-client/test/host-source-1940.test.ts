@@ -1,7 +1,7 @@
 import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
 
 // flair#1940 — the client carries a host source on writes and keeps the
-// author, host source, session and provenance on reads. Unit-level (mocked
+// author, host source and session on reads (provenance on get()/list()). Unit-level (mocked
 // fetch); the real-Harper round trip lives in
 // test/integration/host-source-client-roundtrip-1940.test.ts.
 
@@ -35,7 +35,7 @@ function lastBody(): Record<string, unknown> {
 }
 
 describe("flair#1940 — hostSource on a client write", () => {
-  test("write() forwards hostSource (version applied), hostSourceScope and sessionId when supplied", async () => {
+  test("write() forwards hostSource (v: 1 when v is omitted),hostSourceScope and sessionId when supplied", async () => {
     const client = new FlairClient({ agentId: "agent-a" });
     await client.memory.write("a sourced note", {
       hostSource: { host: "host-a", kind: "run", id: "run-1a2b3c4d" },
@@ -43,8 +43,7 @@ describe("flair#1940 — hostSource on a client write", () => {
       sessionId: "sess-1",
     });
     const body = lastBody();
-    // The caller supplied the pointer without `v`; write() applies the version,
-    // so the server receives the value it validates.
+    // The caller supplied the pointer without `v`, so write() sends `v: 1`.
     expect(body.hostSource).toEqual({ host: "host-a", kind: "run", id: "run-1a2b3c4d", v: 1 });
     expect(body.hostSourceScope).toBe("record");
     expect(body.sessionId).toBe("sess-1");
@@ -58,6 +57,14 @@ describe("flair#1940 — hostSource on a client write", () => {
     expect(lastBody().hostSource).toEqual({ v: 1, host: "host-a", kind: "run", id: "run-1a2b3c4d" });
   });
 
+  test("write() sends a caller-supplied v unchanged, including one the server refuses", async () => {
+    const client = new FlairClient({ agentId: "agent-a" });
+    await client.memory.write("a sourced note", {
+      hostSource: { v: 2 as any, host: "host-a", kind: "run", id: "run-1a2b3c4d" },
+    });
+    expect(lastBody().hostSource).toEqual({ v: 2, host: "host-a", kind: "run", id: "run-1a2b3c4d" });
+  });
+
   test("write() without hostSource/hostSourceScope/sessionId sends none of them", async () => {
     const client = new FlairClient({ agentId: "agent-a" });
     await client.memory.write("a plain note");
@@ -68,8 +75,8 @@ describe("flair#1940 — hostSource on a client write", () => {
   });
 });
 
-describe("flair#1940 — results carry author, hostSource, sessionId and provenance", () => {
-  test("search() keeps author, the joined hostSource, sessionId and provenance", async () => {
+describe("flair#1940 — results carry author, hostSource and sessionId", () => {
+  test("search() keeps author, the joined hostSource and sessionId, and maps provenance when present", async () => {
     mockFetch = mock(() =>
       Promise.resolve(
         new Response(

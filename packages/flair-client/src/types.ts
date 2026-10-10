@@ -31,8 +31,8 @@ export type Visibility = "private" | "shared";
  * A host-object pointer (flair#1940): the host object the writer CLAIMS as a
  * memory's source (a run, a launch, a turn). The value shape the server
  * validates, stores and returns is versioned JSON `{ v: 1, host, kind, id, url? }`.
- * `memory.write()` applies `v: 1` when the caller omits it, so a writer may pass
- * the pointer as `{ host, kind, id, url? }`.
+ * `memory.write()` sends `v: 1` only when the caller omits `v`, so a writer may
+ * pass the pointer as `{ host, kind, id, url? }`.
  *
  * On a read, `hostSource` is either this object or the string `"withheld"` (the
  * server withholds a pointer from a reader who may see the record but not the
@@ -175,7 +175,7 @@ export interface SearchResult {
   hostSource?: HostSource | "withheld";
   /** flair#1940 — the originating session id, when the writer set one. */
   sessionId?: string;
-  /** flair#1940 — the server-stamped provenance JSON; see {@link Memory.provenance}. */
+  /** Not returned by search() today: the server's default search projection omits provenance; read it via get()/list(). */
   provenance?: string;
 }
 

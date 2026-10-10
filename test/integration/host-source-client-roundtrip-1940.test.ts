@@ -87,15 +87,20 @@ describe("flair#1940 slice 2a — a host source through the production client (r
     const got = await clientA.memory.get(id);
     expect(got?.hostSource).toEqual(hostSource); // assertion: get() returns the pointer
     expect(got?.sessionId).toBe("sess-1"); // assertion: get() returns the session
+    expect(got?.provenance, "get() must return provenance").toBeTruthy(); // assertion: get() returns provenance
 
     const found = await clientA.memory.search("sourced note", { limit: 10 });
     const hit = found.find((r) => r.id === id);
     expect(hit, `search must return ${id}`).toBeTruthy(); // assertion: search found the row
     expect(hit?.hostSource).toEqual(hostSource); // assertion: search carries the pointer
     expect(hit?.author).toBe(a.id); // assertion: search carries the author
+    expect(hit?.sessionId).toBe("sess-1"); // assertion: search carries the session
 
     const listed = await clientA.memory.list({ limit: 100 });
-    expect(listed.find((m) => m.id === id)?.hostSource).toEqual(hostSource); // assertion: list carries the pointer
+    const row = listed.find((m) => m.id === id);
+    expect(row?.hostSource).toEqual(hostSource); // assertion: list carries the pointer
+    expect(row?.sessionId).toBe("sess-1"); // assertion: list carries the session
+    expect(row?.provenance, "list() must return provenance").toBeTruthy(); // assertion: list carries provenance
 
     const other = await clientB.memory.get(id);
     expect(other?.hostSource).toBe("withheld"); // assertion: a non-author reader gets the marker

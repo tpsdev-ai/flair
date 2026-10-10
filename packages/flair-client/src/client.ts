@@ -413,7 +413,7 @@ class MemoryApi {
      *  source, e.g. `{ host: "openclaw", kind: "run", id: "<run id>" }`. The
      *  server validates it (a closed `host`/`kind` set, the `id` grammar, an
      *  https `url`) and refuses an invalid one with a named error; `write()`
-     *  applies `v: 1` when the caller omits the version. Forwarded only when
+     *  sends `v: 1` only when the caller omits `v`. Forwarded only when
      *  supplied, so a write without it is byte-identical to before. */
     hostSource?: HostSource;
     /** flair#1940 — opt the pointer into the record's own read scope. The
@@ -465,9 +465,9 @@ class MemoryApi {
     if (opts.visibility !== undefined) record.visibility = opts.visibility;
     if (opts.metadata !== undefined) record.metadata = JSON.stringify(opts.metadata);
     // flair#1940 — the host pointer, its write-time scope opt-in, and the
-    // session id, each forwarded only when supplied. `v: 1` is applied here
-    // (the server validates the versioned value); nothing else is defaulted.
-    if (opts.hostSource !== undefined) record.hostSource = { ...opts.hostSource, v: 1 };
+    // session id, each forwarded only when supplied. `v: 1` is the default
+    // only when the caller omits `v`; nothing else is defaulted.
+    if (opts.hostSource !== undefined) record.hostSource = { v: 1, ...opts.hostSource };
     if (opts.hostSourceScope !== undefined) record.hostSourceScope = opts.hostSourceScope;
     if (opts.sessionId !== undefined) record.sessionId = opts.sessionId;
     // Passthrough hints — the server strips these before persisting; they are
@@ -600,7 +600,7 @@ class MemoryApi {
         tags: r.tags ?? r.memory?.tags,
         createdAt: r.createdAt ?? r.memory?.createdAt,
         // flair#1940 — carry the author, the joined host pointer (or
-        // "withheld"), the session id and provenance through the projection.
+        // "withheld") and the session id through the projection.
         author: r.agentId ?? r.memory?.agentId,
         hostSource: r.hostSource ?? r.memory?.hostSource,
         sessionId: r.sessionId ?? r.memory?.sessionId,
