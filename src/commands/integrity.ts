@@ -224,6 +224,7 @@ interface PrunePlan {
   cutoff?: string;
   planned: number;
   pruned: number;
+  prunedIsLowerBound?: true;
   more: boolean;
   checkpoints: string[];
   ids?: string[];
@@ -239,7 +240,7 @@ function renderPrunePlan(plan: PrunePlan): string {
   }
   if (plan.status === "failed") {
     return [
-      `Deletion-history retention: FAILED — ${plan.pruned} rows pruned before the failure.`,
+      `Deletion-history retention: FAILED — at least ${plan.pruned} rows pruned before the failure.`,
       `  reason: ${plan.reason}`,
       `  checkpoints: ${plan.checkpoints.join(", ")}`,
     ].join("\n");
@@ -294,7 +295,7 @@ async function planPruneHistory(opts: {
     return { status: "pruned", cutoff, planned: planned.length, pruned, more, checkpoints, ids: planned.map(row => row.id) };
   } catch (err) {
     if (!(err instanceof HistoryDeleteError)) throw err;
-    return { status: "failed", reason: err.message, cutoff, planned: planned.length, pruned: err.confirmed, more, checkpoints, ids: planned.slice(0, err.confirmed).map(row => row.id) };
+    return { status: "failed", reason: err.message, cutoff, planned: planned.length, pruned: err.confirmed, prunedIsLowerBound: true, more, checkpoints, ids: planned.slice(0, err.confirmed).map(row => row.id) };
   }
 }
 

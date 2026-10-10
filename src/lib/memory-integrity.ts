@@ -42,8 +42,9 @@ export interface IntegrityCheckpoint {
    * Bounds the next scan's deletion-history read: rows at or after
    * `watermark - DELETION_HISTORY_MARGIN_MS` are read, older rows are not.
    * Never later than `scannedAt`, and never later than the `at` of any
-   * history row this checkpoint still needs (so the oldest live watermark
-   * also bounds retention, while the delete-commit delay plus host clock skew stays under the 5-minute margin). Absent on a checkpoint written before this
+   * history row this checkpoint still needs (so the oldest named watermark
+   * also bounds retention, while the delete-commit delay plus host clock skew
+   * stays under the 5-minute margin). Absent on a checkpoint written before this
    * field existed, which reads as `unknown` — the scan falls back to a full
    * read, never "nothing new".
    */
@@ -87,7 +88,7 @@ export function deletionReadSince(
 }
 
 /**
- * The instant before which deletion history may be pruned: the OLDEST live
+ * The instant before which deletion history may be pruned: the OLDEST named
  * checkpoint watermark, minus the margin. Returns null when there are no
  * watermarks or any of them is absent or unparseable — the caller then prunes
  * nothing and names the reason.

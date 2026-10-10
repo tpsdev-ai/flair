@@ -254,13 +254,14 @@ test("prune-history: a failure after batch 1 reports the 256 confirmed rows as F
   expect(json.code).toBe(3);
   expect(json.plan.status).toBe("failed");
   expect(json.plan.pruned).toBe(256);
+  expect(json.plan.prunedIsLowerBound).toBe(true);
   expect(json.plan.reason).toContain("500");
   expect(json.deletes).toHaveLength(1);
   expect(json.deletes[0]).toHaveLength(256);
 
   const human = await prune({ checkpoints: [cp], deletions, extra: ["--apply", "--max", "300"], failDeleteCall: 1, human: true });
   expect(human.code).toBe(3);
-  expect(human.output).toContain("FAILED — 256 rows pruned before the failure");
+  expect(human.output).toContain("FAILED — at least 256 rows pruned before the failure");
   expect(human.output).not.toContain("nothing pruned");
 });
 
