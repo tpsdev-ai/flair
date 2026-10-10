@@ -73,15 +73,14 @@ function writeBackTable(call: ts.CallExpression): string {
   if (direct) return direct;
   const expr = unwrap(arg);
   if (!ts.isIdentifier(expr)) return "?";
-  const bindings: ts.Node[] = [];
-  const visit = (node: ts.Node): void => {
-    if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) &&
-        ts.isIdentifier(node.name) && node.name.text === expr.text) bindings.push(node);
-    ts.forEachChild(node, visit);
-  };
-  visit(call.getSourceFile());
-  if (bindings.length !== 1) return "?";
-  const [binding] = bindings;
+  const source = call.getSourceFile();
+  const options: ts.CompilerOptions = { noLib: true, noResolve: true, allowJs: true };
+  const host = ts.createCompilerHost(options);
+  host.getSourceFile = (name) => name === source.fileName ? source : undefined;
+  const checker = ts.createProgram([source.fileName], options, host).getTypeChecker();
+  const declarations = checker.getSymbolAtLocation(expr)?.declarations;
+  if (declarations?.length !== 1) return "?";
+  const [binding] = declarations;
   if (!ts.isVariableDeclaration(binding) || !binding.initializer) return "?";
   const list = binding.parent;
   if (!ts.isVariableDeclarationList(list) || !(list.flags & ts.NodeFlags.Const)) return "?";
@@ -232,6 +231,52 @@ test("a conditional table argument or initializer is unresolved, never a table i
   ].join("\n");
   expect([...enumerateRawWriteSites(conditionalInitializer, "resources/__conditional_initializer__.ts").keys()])
     .toEqual(["resources/__conditional_initializer__.ts|?|write-back"]);
+});
+
+test("a table argument classifies as a table only when it binds to the selected const (flair#2354)", () => {
+  const call = '  await writeBackCommittedRow(target, id, (row) => ({ write: row }), { label: "fixture" });';
+  const imported = [
+    'import { writeBackCommittedRow } from "./write-back.js";',
+    'import { target } from "./elsewhere.js";',
+    "function unrelated() {",
+    "  const target = (databases as any).flair.Memory;",
+    "  return target;",
+    "}",
+    "async function leak(id) {",
+    call,
+    "}",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(imported, "resources/__imported__.ts").keys()]).toEqual(["resources/__imported__.ts|?|write-back"]);
+  const otherScope = [
+    'import { writeBackCommittedRow } from "./write-back.js";',
+    "function unrelated() {",
+    "  const target = (databases as any).flair.Memory;",
+    "  return target;",
+    "}",
+    "async function leak(id, target) {",
+    call,
+    "}",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(otherScope, "resources/__scope__.ts").keys()]).toEqual(["resources/__scope__.ts|?|write-back"]);
+  const moduleScope = [
+    'import { writeBackCommittedRow } from "./write-back.js";',
+    'import { target } from "./elsewhere.js";',
+    "function unrelated() {",
+    "  const target = (databases as any).flair.Memory;",
+    "  return target;",
+    "}",
+    "await writeBackCommittedRow(target, 1, (row) => ({ write: row }), { label: \"fixture\" });",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(moduleScope, "resources/__module__.ts").keys()]).toEqual(["resources/__module__.ts|?|write-back"]);
+  const bound = [
+    'import { writeBackCommittedRow } from "./write-back.js";',
+    "async function leak(id) {",
+    "  const target = (databases as any).flair.Memory;",
+    call,
+    "}",
+    "function unrelated(target) { return target; }",
+  ].join("\n");
+  expect([...enumerateRawWriteSites(bound, "resources/__bound__.ts").keys()]).toEqual(["resources/__bound__.ts|Memory|write-back"]);
 });
 
 test("every raw synced-table write site under resources/ has a reviewed policy entry with the expected count", () => {
