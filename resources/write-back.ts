@@ -58,8 +58,7 @@ export const WRITE_BACK_IDENTITY_FIELDS = ["id", "agentId", "instanceToken", "co
  * Is `row` still the stored row `basis` describes? Compares the fields in
  * {@link WRITE_BACK_IDENTITY_FIELDS} — the row's id and agent, and the
  * server-stamped incarnation token, content hash and creation time. A `basis`
- * of `null` requires `row` to still be absent (a write-back never re-creates a
- * row a delete or a purge removed).
+ * of `null` requires `row` to still be absent.
  *
  * This is the identity check the write-back helper applies, exposed so a
  * writer that cannot hand its write to the helper (one that joins a

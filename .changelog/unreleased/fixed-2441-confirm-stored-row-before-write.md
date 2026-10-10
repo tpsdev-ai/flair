@@ -4,9 +4,7 @@
   ordinary `Memory.put` each read a Memory row and write it back carrying its
   server-stamped incarnation token. Each now re-reads the committed row inside
   the write and writes nothing when it is no longer the row it read, so a
-  delete, a purge or a same-id replace committed between the read and the write
-  is not undone or overwritten: the row stays gone, and a replaced row keeps its
-  new content and token.
+  delete, a purge or a same-id replace committed before that re-read is refused.
 
   `Memory.put` checks the committed row both before and after it stages the
   write, and refuses with 409 `stored_row_changed`. A federation sync skips the

@@ -2010,9 +2010,9 @@ export class Memory extends (databases as any).flair.Memory {
       // Inside the write's transaction, confirm the COMMITTED row is still that
       // one — before the row is staged, and again before the commit
       // (confirmCommittedRow: the transaction is aborted and the staged row
-      // discarded). A delete, a purge or a same-id replace since the read is
-      // answered with the named 409 stored_row_changed, so a reindex never
-      // re-creates or overwrites the row it read. Both reads use an explicit
+      // discarded). A missing row or an identity change seen by either read is
+      // refused with the named 409 stored_row_changed; a change committed after
+      // the final confirm read is not seen. Both reads use an explicit
       // fresh context, never a contextless one (see resources/write-back.ts).
       const reindexJoinsRequestTxn = isJoinableTransaction(ctx);
       const beforeReindex = txnPausePoint("memory-reindex-pre");
@@ -2376,9 +2376,9 @@ export class Memory extends (databases as any).flair.Memory {
         // commit (confirmCommittedRow, the write-back helper's own
         // confirmation: the transaction is aborted and the staged rows are
         // discarded). A delete or a purge since the read (the row is gone) and a
-        // same-id replace (a new incarnation) are refused with the named 409
-        // stored_row_changed and nothing is written — an update never re-creates
-        // the row it read. Both reads are an explicit fresh context, never
+        // same-id replace (a new incarnation) seen by either read are refused
+        // with the named 409 stored_row_changed; a change committed after the
+        // final confirm read is not seen. Both reads are an explicit fresh context, never
         // contextless (see resources/write-back.ts).
         const confirmPause = txnPausePoint("memory-put");
         if (confirmPause) await confirmPause;

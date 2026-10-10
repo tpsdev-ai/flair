@@ -929,10 +929,14 @@ export class FederationSync extends Resource {
         // write-back of the row it read (`local`), through the shared helper:
         // the row is re-read inside a transaction this call OWNS, the merge is
         // confirmed to still be over that row, and the COMMITTED row is re-read
-        // before commit (one attempt, no retry). A row deleted or purged since
-        // the read is not re-created (it stays gone), and a same-id replace is
-        // refused, never overwritten by the stale merge — the record is skipped
-        // by name (merge_target_changed). The plan reads the CONFIRMED row the
+        // before commit (one attempt, no retry). For Memory the merge confirms
+        // identity (instanceToken, contentHash, createdAt, agentId) and that the
+        // row is present; for every other synced table (wholeRow) it confirms
+        // the whole stored row against the row it merged from. A mismatch skips
+        // the record by name (merge_target_changed). Only a change committed
+        // BEFORE the final confirm read is seen: there is no compare-and-set, so
+        // a change committed after it and before commit is not (write-back.ts).
+        // The plan reads the CONFIRMED row the
         // helper hands it (the in-transaction re-read), never the pre-helper
         // read: the Agent status guard (flair#2108) and the Message
         // consumed-state reconcile (flair#1521 §12 P0-3) both key on it.
