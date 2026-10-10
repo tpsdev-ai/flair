@@ -26,6 +26,7 @@ function fixture() {
     if (table === "MemoryDeletionHistory" && race) { const run = race; race = undefined; run(); }
     const selected = table === "Memory" ? rows : [...deletions.values()];
     if (operation === "describe_table") return new Response(JSON.stringify({ record_count: selected.length }));
+    if (operation === "sql") return new Response(JSON.stringify([{ n: selected.length }]));
     const response = new Response(JSON.stringify(selected));
     return response;
   }) as typeof fetch);

@@ -81,13 +81,14 @@ test("emptyCheckpoint: the watermark is scannedAt, pulled back to a still-needed
   expect(stray.watermark).toBe("2026-10-02T00:00:00.000Z");
 });
 
-interface PruneResult { code: number | undefined; plan: any; output: string; errors: string; deletes: string[][]; paths: string[] }
+interface PruneResult { code: number | undefined; plan: any; output: string; errors: string; deletes: string[][]; paths: string[]; tables: string[] }
 
 async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLite[]; extra?: string[]; failDeleteCall?: number; human?: boolean }): Promise<PruneResult> {
   const originalFetch = globalThis.fetch;
   const originalExit = process.exit;
   const originalWrite = process.stdout.write;
   const deletes: string[][] = [];
+  const tables: string[] = [];
   const originalError = console.error;
   const originalLog = console.log;
   let output = "";
@@ -98,6 +99,7 @@ async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLit
     globalThis.fetch = (async (_url: any, init: any) => {
       const body = JSON.parse(init.body);
       const { operation, table, hash_values } = body;
+      tables.push(typeof table === "string" ? table : "");
       if (operation === "delete") {
         expect(table).toBe("MemoryDeletionHistory");
         if (args.failDeleteCall === deletes.length) return new Response("boom", { status: 500 });
@@ -125,7 +127,7 @@ async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLit
     console.error = originalError;
     console.log = originalLog;
   }
-  return { code, output, errors, plan: args.human || !output ? null : JSON.parse(output), deletes, paths: args.checkpoints };
+  return { code, output, errors, plan: args.human || !output ? null : JSON.parse(output), deletes, paths: args.checkpoints, tables };
 }
 
 function writeCheckpointFile(watermark: string, ids: Record<string, string> = {}, instanceTokens: Record<string, string | null> = {}): string {
@@ -201,6 +203,15 @@ test("prune-history: no checkpoint or an unreadable watermark prunes nothing and
   expect(refused3.deletes).toEqual([]);
 });
 
+test("prune-history reads the checkpoints and the history it may prune — no Memory rows", async () => {
+  const cp = writeCheckpointFile("2026-10-02T00:00:00.000Z");
+  const deletions = [del("a", "m", "t", "2026-09-01T00:00:00.000Z")];
+  const r = await prune({ checkpoints: [cp], deletions, extra: ["--apply"] });
+  expect(r.code).toBe(0);
+  expect(r.tables.length).toBeGreaterThan(0);
+  expect(r.tables).not.toContain("Memory");
+});
+
 test("check: a known watermark reads deletion history by condition; an unknown one reads the whole table", async () => {
   const originalFetch = globalThis.fetch;
   const originalExit = process.exit;
@@ -214,6 +225,7 @@ test("check: a known watermark reads deletion history by condition; an unknown o
         ? `${body.operation}:${body.table}:${body.conditions?.[0]?.search_attribute}`
         : `${body.operation}:${body.table}`);
       if (body.operation === "describe_table") return new Response(JSON.stringify({ record_count: 0 }));
+      if (body.operation === "sql") return new Response(JSON.stringify([{ n: 0 }]));
       if (body.operation === "delete") return new Response(JSON.stringify({ deleted_hashes: body.hash_values ?? [] }));
       return new Response(JSON.stringify([]));
     }) as typeof fetch;

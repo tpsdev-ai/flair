@@ -10,7 +10,7 @@
  * way the other extracted command groups are.
  */
 import { Command } from "commander";
-import { readExactTableCount } from "../lib/ops-table-count.js";
+import { readExactCountSince, readExactTableCount } from "../lib/ops-table-count.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { resolveHome } from "../lib/home.js";
 import {
@@ -86,15 +86,15 @@ function opsUrl(opsPort: number | string): string {
   return typeof opsPort === "number" ? `http://127.0.0.1:${opsPort}/` : `${String(opsPort).replace(/\/$/, "")}/`;
 }
 
+const DELETION_HISTORY_ATTRIBUTES = ["id", "memoryId", "memoryInstanceToken", "durability", "at"];
+
 /**
- * Read Memory ids, durability, instanceToken and deletion records through
- * the operations API. Throws on any read failure — the caller reports UNKNOWN.
+ * The operations-API reads the integrity commands share. `search` reads a whole
+ * table (bracketed by its exact count); `searchDeletionsSince` reads only history
+ * at or after `since`, bracketed by the exact count of that range so a short
+ * result is a read error and never a shorter history that would read as a loss.
  */
-async function readCorpus(
-  opsPort: number | string,
-  auth: string,
-  deletionSince: string | null,
-): Promise<{ rows: MemoryRowLite[]; deletions: DeletionRecordLite[] }> {
+function integrityReader(opsPort: number | string, auth: string) {
   const opsPost = async (body: Record<string, unknown>, context: string): Promise<unknown> => {
     const res = await fetch(opsUrl(opsPort), {
       method: "POST",
@@ -139,32 +139,44 @@ async function readCorpus(
     }
     return rows;
   };
-  // The watermark-bounded read: only history at or after `deletionSince`. No
-  // table-wide exact-count bracket applies (the total count is not this query's
-  // count); the read is validated per row instead. The bracketed full read is
-  // still used whenever the watermark is unknown.
+  // The watermark-bounded read: only history at or after `deletionSince`, bracketed
+  // by that range's exact count (the table count is not this query's count, so
+  // `describe_table` cannot bracket it — the count comes from the SQL count of the
+  // same range). The bracketed full read is still used whenever the watermark is
+  // unknown.
   const searchDeletionsSince = async (since: string): Promise<any[]> => {
+    const expected = await readExactCountSince(opsPost, "MemoryDeletionHistory", "at", since);
     const body = await opsPost({
       operation: "search_by_conditions",
       database: "flair",
       table: "MemoryDeletionHistory",
       operator: "and",
       conditions: [{ search_attribute: "at", search_type: "greater_than_equal", search_value: since }],
-      get_attributes: ["id", "memoryId", "memoryInstanceToken", "durability", "at"],
+      get_attributes: DELETION_HISTORY_ATTRIBUTES,
     }, "MemoryDeletionHistory search");
-    return project("MemoryDeletionHistory", body);
+    const rows = project("MemoryDeletionHistory", body);
+    if (rows.length !== expected) {
+      throw new Error(`MemoryDeletionHistory: the bounded read reports ${expected} rows, integrity read ${rows.length}; retry integrity check when writes are paused`);
+    }
+    const after = await readExactCountSince(opsPost, "MemoryDeletionHistory", "at", since);
+    if (after !== expected) {
+      throw new Error(`MemoryDeletionHistory: the bounded read count changed from ${expected} to ${after}; integrity read ${rows.length}; retry integrity check when writes are paused`);
+    }
+    return rows;
   };
+  return { search, searchDeletionsSince };
+}
 
-  const memoryRows = await search("Memory", ["id", "durability", "instanceToken"]);
-  const deletionRows = deletionSince === null
-    ? await search("MemoryDeletionHistory", ["id", "memoryId", "memoryInstanceToken", "durability", "at"])
-    : await searchDeletionsSince(deletionSince);
-
+function toMemoryRows(memoryRows: any[]): MemoryRowLite[] {
   const rows: MemoryRowLite[] = [];
   for (const r of memoryRows) {
     if (!r || typeof r.id !== "string" || r.id.length === 0) throw new Error("operations API Memory search returned an invalid id");
     rows.push({ id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard", instanceToken: typeof r.instanceToken === "string" ? r.instanceToken : null });
   }
+  return rows;
+}
+
+function toDeletions(deletionRows: any[]): DeletionRecordLite[] {
   const deletions: DeletionRecordLite[] = [];
   for (const d of deletionRows) {
     if (!d || typeof d.id !== "string" || !d.id || typeof d.memoryId !== "string" || !d.memoryId) {
@@ -178,7 +190,39 @@ async function readCorpus(
       at: typeof d.at === "string" ? d.at : "",
     });
   }
-  return { rows, deletions };
+  return deletions;
+}
+
+/**
+ * Read Memory ids, durability, instanceToken and deletion records through
+ * the operations API. Throws on any read failure — the caller reports UNKNOWN.
+ */
+async function readCorpus(
+  opsPort: number | string,
+  auth: string,
+  deletionSince: string | null,
+): Promise<{ rows: MemoryRowLite[]; deletions: DeletionRecordLite[] }> {
+  const { search, searchDeletionsSince } = integrityReader(opsPort, auth);
+  const memoryRows = await search("Memory", ["id", "durability", "instanceToken"]);
+  const deletionRows = deletionSince === null
+    ? await search("MemoryDeletionHistory", DELETION_HISTORY_ATTRIBUTES)
+    : await searchDeletionsSince(deletionSince);
+  return { rows: toMemoryRows(memoryRows), deletions: toDeletions(deletionRows) };
+}
+
+/**
+ * Read only the deletion-history rows retention may prune — no Memory rows.
+ */
+async function readDeletions(
+  opsPort: number | string,
+  auth: string,
+  deletionSince: string | null,
+): Promise<DeletionRecordLite[]> {
+  const { search, searchDeletionsSince } = integrityReader(opsPort, auth);
+  const deletionRows = deletionSince === null
+    ? await search("MemoryDeletionHistory", DELETION_HISTORY_ATTRIBUTES)
+    : await searchDeletionsSince(deletionSince);
+  return toDeletions(deletionRows);
 }
 
 function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
@@ -283,7 +327,8 @@ async function planPruneHistory(opts: {
     return { status: "refused", reason: "a checkpoint watermark is missing or unreadable", planned: 0, pruned: 0, more: false, checkpoints };
   }
   const cutoff = new Date(Math.min(Date.parse(watermarkCutoff), Date.now() - DELETION_HISTORY_MARGIN_MS)).toISOString();
-  const { deletions } = await readCorpus(opsPort, auth, null);
+  // Retention reads only the history it may prune — never the Memory corpus.
+  const deletions = await readDeletions(opsPort, auth, null);
   const eligible = historyRowsToPrune(deletions, cutoff, deletions.length);
   const planned = eligible.slice(0, cap);
   if (!apply) {
