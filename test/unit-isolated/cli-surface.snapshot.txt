@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=138 options=619
+# commands=139 options=626
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -871,7 +871,7 @@ flair integrity
   description: Detect missing checkpointed durable Memory IDs or changed or missing previously nonempty tokens
   usage: [options] [command]
   options: (none)
-  subcommands: check
+  subcommands: check, prune-history
 
 flair integrity check
   description: Report missing checkpointed durable IDs or changed or missing previously nonempty tokens; rows created and lost entirely between scans are not observed
@@ -886,6 +886,33 @@ flair integrity check
     --checkpoint <path>
       description: Checkpoint file path (default: ~/.flair/integrity-checkpoint.json)
       attr: checkpoint
+    --ops-port <port>
+      description: Harper operations API port
+      attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env)
+      attr: adminPass
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+
+flair integrity prune-history
+  description: Prune MemoryDeletionHistory rows older than the oldest live checkpoint watermark minus a margin; dry-run unless --apply
+  usage: [options]
+  options:
+    --checkpoint <path...>
+      description: Checkpoint file whose watermark bounds the prune; repeat for several (default: ~/.flair/integrity-checkpoint.json)
+      attr: checkpoint
+      variadic: true
+    --apply
+      description: Delete the eligible rows; without it nothing is deleted
+      attr: apply
+    --max <n>
+      description: Hard cap on rows pruned in one run (default: 500)
+      attr: max
+    --json
+      description: Print the plan as JSON
+      attr: json
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
@@ -3664,16 +3691,19 @@ Detect missing checkpointed durable Memory IDs or changed or missing previously
 nonempty tokens
 
 Options:
-  -h, --help       display help for command
+  -h, --help               display help for command
 
 Global Options:
-  -v, --version    output the version number
+  -v, --version            output the version number
 
 Commands:
-  check [options]  Report missing checkpointed durable IDs or changed or missing
-                   previously nonempty tokens; rows created and lost entirely
-                   between scans are not observed
-  help [command]   display help for command
+  check [options]          Report missing checkpointed durable IDs or changed or
+                           missing previously nonempty tokens; rows created and
+                           lost entirely between scans are not observed
+  prune-history [options]  Prune MemoryDeletionHistory rows older than the
+                           oldest live checkpoint watermark minus a margin;
+                           dry-run unless --apply
+  help [command]           display help for command
 
 ----- flair integrity check -----
 Usage: flair integrity check [options]
@@ -3696,6 +3726,29 @@ Options:
 
 Global Options:
   -v, --version        output the version number
+
+----- flair integrity prune-history -----
+Usage: flair integrity prune-history [options]
+
+Prune MemoryDeletionHistory rows older than the oldest live checkpoint watermark
+minus a margin; dry-run unless --apply
+
+Options:
+  --checkpoint <path...>  Checkpoint file whose watermark bounds the prune;
+                          repeat for several (default:
+                          ~/.flair/integrity-checkpoint.json)
+  --apply                 Delete the eligible rows; without it nothing is
+                          deleted
+  --max <n>               Hard cap on rows pruned in one run (default: 500)
+  --json                  Print the plan as JSON
+  --ops-port <port>       Harper operations API port
+  --admin-pass <pass>     Admin password (or set FLAIR_ADMIN_PASS env)
+  --admin-user <name>     Admin username for Basic auth (env: FLAIR_ADMIN_USER;
+                          default: admin)
+  -h, --help              display help for command
+
+Global Options:
+  -v, --version           output the version number
 
 ----- flair federation -----
 Usage: flair federation [options] [command]

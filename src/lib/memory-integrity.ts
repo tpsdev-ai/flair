@@ -38,11 +38,99 @@ export interface IntegrityCheckpoint {
   version: 2;
   /** ISO timestamp of the successful scan this checkpoint records. */
   scannedAt: string;
+  /**
+   * Bounds the next scan's deletion-history read: rows at or after
+   * `watermark - DELETION_HISTORY_MARGIN_MS` are read, older rows are not.
+   * Never later than `scannedAt`, and never later than the `at` of any
+   * history row this checkpoint still needs (so the oldest live watermark
+   * also bounds retention safely). Absent on a checkpoint written before this
+   * field existed, which reads as `unknown` — the scan falls back to a full
+   * read, never "nothing new".
+   */
+  watermark?: string;
   byDurability: Record<Tier, number>;
   /** id -> durability at the checkpoint. */
   ids: Record<string, string>;
   instanceTokens: Record<string, string | null>;
   historyIds: string[];
+}
+
+/**
+ * Margin (ms) applied to a checkpoint watermark on both sides of the
+ * deletion-history read and of retention.
+ *
+ * A row's `at` is stamped by `recordMemoryDeletion` when the delete records
+ * its history, inside the delete's transaction and therefore BEFORE it
+ * commits; the watcher only sees it once the commit is visible, up to a
+ * transaction later than `at`. The watcher's own clock (its `scannedAt`) is
+ * also a different clock from the instance's. The margin must exceed both the
+ * longest such delay and the largest clock difference between the two hosts.
+ * Five minutes is comfortably above both for an operator-run scan, and the
+ * cost of a too-large margin is only re-reading a few minutes of history.
+ */
+export const DELETION_HISTORY_MARGIN_MS = 5 * 60_000;
+
+/**
+ * The time from which the next scan must read deletion history, or null when
+ * the watermark is absent or unparseable (the caller must then read the whole
+ * table — never treat an unknown watermark as "nothing new").
+ */
+export function deletionReadSince(
+  checkpoint: IntegrityCheckpoint | null | undefined,
+  marginMs = DELETION_HISTORY_MARGIN_MS,
+): string | null {
+  const watermark = checkpoint?.watermark;
+  if (typeof watermark !== "string" || watermark.length === 0) return null;
+  const ms = Date.parse(watermark);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms - marginMs).toISOString();
+}
+
+/**
+ * The instant before which deletion history may be pruned: the OLDEST live
+ * checkpoint watermark, minus the margin. Returns null when there are no
+ * watermarks or any of them is absent or unparseable — the caller then prunes
+ * nothing and names the reason.
+ *
+ * A checkpoint's watermark is never later than the `at` of a history row it
+ * still needs (see `emptyCheckpoint`), so no row an older checkpoint needs is
+ * older than the oldest watermark — which is why the oldest, not the newest,
+ * watermark is the bound.
+ */
+export function retentionCutoff(
+  watermarks: readonly (string | null | undefined)[],
+  marginMs = DELETION_HISTORY_MARGIN_MS,
+): string | null {
+  if (watermarks.length === 0) return null;
+  let oldest: number | null = null;
+  for (const watermark of watermarks) {
+    if (typeof watermark !== "string" || watermark.length === 0) return null;
+    const ms = Date.parse(watermark);
+    if (!Number.isFinite(ms)) return null;
+    if (oldest === null || ms < oldest) oldest = ms;
+  }
+  return new Date((oldest as number) - marginMs).toISOString();
+}
+
+/**
+ * The history rows retention may prune: rows strictly older than the cutoff,
+ * oldest first, at most `cap`. A row whose `at` is missing or unparseable is
+ * never selected — an unreadable age is not proof of age.
+ */
+export function historyRowsToPrune(
+  rows: readonly DeletionRecordLite[],
+  cutoffIso: string,
+  cap: number,
+): DeletionRecordLite[] {
+  const cutoff = Date.parse(cutoffIso);
+  if (!Number.isFinite(cutoff)) return [];
+  return rows
+    .filter((row) => {
+      const ms = typeof row.at === "string" ? Date.parse(row.at) : NaN;
+      return Number.isFinite(ms) && ms < cutoff;
+    })
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
+    .slice(0, Math.max(0, cap));
 }
 
 export interface MemoryRowLite {
@@ -124,7 +212,19 @@ export function emptyCheckpoint(scannedAt: string, rows: readonly MemoryRowLite[
     .filter(d => seen.has(d.id) && isDurableTier(ids[d.memoryId]) &&
       !!instanceTokens[d.memoryId] && instanceTokens[d.memoryId] === d.memoryInstanceToken)
     .map(d => d.id);
-  return { version: 2, scannedAt, byDurability: tallyByDurability(rows), ids, instanceTokens, historyIds };
+  // The watermark is `scannedAt`, pulled back to the `at` of any retained
+  // history row this checkpoint still needs (a durable id whose nonempty token
+  // matches and that is not already absorbed). Those rows must be re-read by the
+  // next scan, and must survive retention, so the watermark may not pass them.
+  const absorbed = new Set(historyIds);
+  let watermark = scannedAt;
+  for (const d of deletions) {
+    if (absorbed.has(d.id) || !isDurableTier(ids[d.memoryId])) continue;
+    const token = instanceTokens[d.memoryId];
+    if (!token || token !== d.memoryInstanceToken) continue;
+    if (typeof d.at === "string" && d.at.length > 0 && d.at < watermark) watermark = d.at;
+  }
+  return { version: 2, scannedAt, watermark, byDurability: tallyByDurability(rows), ids, instanceTokens, historyIds };
 }
 
 export function deletionRecordsToPrune(checkpoint: IntegrityCheckpoint, deletions: readonly DeletionRecordLite[]): string[] {
@@ -254,6 +354,7 @@ export function readCheckpoint(path: string): CheckpointRead {
   try {
     const parsed = JSON.parse(raw) as IntegrityCheckpoint;
     if (parsed?.version !== 2 || typeof parsed.scannedAt !== "string" ||
+        (parsed.watermark !== undefined && (typeof parsed.watermark !== "string" || parsed.watermark.length === 0)) ||
         typeof parsed.ids !== "object" || parsed.ids === null || Array.isArray(parsed.ids) ||
         !Object.entries(parsed.ids).every(([id, tier]) => id.length > 0 && (ALL_TIERS as readonly unknown[]).includes(tier)) ||
         typeof parsed.instanceTokens !== "object" || parsed.instanceTokens === null || Array.isArray(parsed.instanceTokens) ||
