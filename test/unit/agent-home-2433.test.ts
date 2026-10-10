@@ -24,6 +24,7 @@ import {
   resolveTargetInstanceId,
 } from "../../src/lib/agent-home.js";
 import { describeAgentHomeFinding } from "../../src/doctor-client.js";
+import { INSTANCE_ROW_PRUNE_REMEDY } from "../../src/lib/instance-identity-row.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -99,15 +100,17 @@ describe("isHomeLessAgentRow / isSyncOriginatedAgentRow / agentRowId", () => {
 
 describe("describeAgentHomeFinding — what doctor prints", () => {
   test("no home-less row → no finding", () => {
-    expect(describeAgentHomeFinding([{ id: "a", originatorInstanceId: "inst" }], "inst")).toBeNull();
+    expect(describeAgentHomeFinding([{ id: "a", originatorInstanceId: "inst" }], { kind: "one", id: "inst" })).toBeNull();
   });
 
-  test("a home-less row is a finding naming the remedy and the stamps/lists split", () => {
+  test("an identity and a home-less row is an advisory, not counted, naming the remedy and the stamps/lists split", () => {
     const finding = describeAgentHomeFinding(
       [{ id: "a" }, { id: "b", _syncedFrom: "peer" }],
-      "inst-local",
+      { kind: "one", id: "inst-local" },
     );
     expect(finding).not.toBeNull();
+    expect(finding!.severity).toBe("advisory");
+    expect(finding!.isIssue).toBe(false);
     expect(finding!.homeLessIds).toEqual(["a", "b"]);
     expect(finding!.stampableIds).toEqual(["a"]);
     expect(finding!.syncIds).toEqual(["b"]);
@@ -116,11 +119,28 @@ describe("describeAgentHomeFinding — what doctor prints", () => {
     expect(finding!.message).toContain("federation");
   });
 
-  test("with no canonical instance id, the message says so and nothing is stampable", () => {
-    const finding = describeAgentHomeFinding([{ id: "a" }], null);
+  test("a fresh instance (no Instance row) is info and not counted", () => {
+    const finding = describeAgentHomeFinding([{ id: "a" }], { kind: "none" });
     expect(finding).not.toBeNull();
-    expect(finding!.stampableIds).toEqual(["a"]);
-    expect(finding!.message).toContain("no single canonical id");
+    expect(finding!.severity).toBe("info");
+    expect(finding!.isIssue).toBe(false);
+    expect(finding!.message).toContain("no Instance row");
+    expect(finding!.message).toContain("local-origin");
+  });
+
+  test("several Instance rows is info, not counted, and names the prune remedy", () => {
+    const finding = describeAgentHomeFinding([{ id: "a" }], { kind: "multiple", count: 2 });
+    expect(finding).not.toBeNull();
+    expect(finding!.severity).toBe("info");
+    expect(finding!.isIssue).toBe(false);
+    expect(finding!.message).toContain("2 Instance rows");
+    expect(finding!.fixHint).toContain(INSTANCE_ROW_PRUNE_REMEDY);
+  });
+
+  test("an unreadable Instance table is info and not counted", () => {
+    const finding = describeAgentHomeFinding([{ id: "a" }], { kind: "unreadable" });
+    expect(finding!.severity).toBe("info");
+    expect(finding!.isIssue).toBe(false);
   });
 });
 

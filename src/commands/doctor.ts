@@ -17,7 +17,7 @@ import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
-import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceId } from "../lib/agent-home.js";
+import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
@@ -2062,14 +2062,14 @@ program
         issues++;
         console.log(`  ${render.icons.warn} Could not read the stored Agent roster, so the home-instance check did not run.`);
       } else {
-        const localInstanceId = await resolveTargetInstanceId(homeEndpoint);
-        const homeFinding = describeAgentHomeFinding(homeRows, localInstanceId);
+        const homeIdentity = await resolveTargetInstanceIdentity(homeEndpoint);
+        const homeFinding = describeAgentHomeFinding(homeRows, homeIdentity);
         if (!homeFinding) {
           console.log(`  ${render.icons.ok} Every stored agent row names a home instance.`);
         } else {
-          issues++;
-          console.log(`  ${render.icons.warn} ${homeFinding.message}`);
-          console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
+          console.log(`  ${homeFinding.severity === "info" ? render.icons.info : render.icons.warn} ${homeFinding.message}`);
+          if (homeFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
+          if (homeFinding.isIssue) issues++;
         }
       }
     }

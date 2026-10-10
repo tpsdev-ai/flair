@@ -5,6 +5,9 @@
   Agent resource stamps on a REST create. A request-supplied home is ignored, and a
   stored home cannot be changed by a later write.
 
-  `flair doctor` reports Agent rows with no home and names the remedy `flair agent
+  `flair doctor` lists Agent rows with no home. On an instance with one Instance row it
+  prints an advisory (not counted as an issue) naming the remedy `flair agent
   stamp-home`, which stamps the local id only on rows it can show were created on this
-  instance and lists — never stamps — a row that arrived through federation.
+  instance and lists — never stamps — a row that arrived through federation. On an
+  instance with no Instance row, or with several, it prints an info line (not counted):
+  homes stay unset, the local-origin state, until the instance has one identity.

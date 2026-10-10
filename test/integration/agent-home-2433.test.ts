@@ -251,6 +251,16 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect(r.stdout, "the home-less row was not reported").toContain(id);
     expect(r.stdout).toContain("Agent homes");
     expect(r.stdout).toContain(AGENT_HOME_STAMP_REMEDY);
+    expect(r.stdout, "the seeded identity was not used").toContain(`can be stamped with this instance's id (${LOCAL_ID})`);
+
+    // An advisory: removing the only home-less rows leaves the issue count unchanged.
+    const before = r.stdout.match(/(\d+) issues? found/)?.[1] ?? "0";
+    const stamped = await runAgentHomeStamp({
+      opsUrl: harper.opsURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 10_000, apply: true,
+    });
+    expect(stamped.ok).toBe(true);
+    const after = (await runDoctor()).stdout.match(/(\d+) issues? found/)?.[1] ?? "0";
+    expect(after, "the home-less row counted toward doctor's issue total").toBe(before);
   }, 60_000);
 });
 

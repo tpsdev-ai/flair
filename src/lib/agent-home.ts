@@ -58,6 +58,19 @@ export function agentHomeEndpoint(
  * localInstanceId() returns in the same situations.
  */
 export async function resolveTargetInstanceId(endpoint: OpsEndpoint): Promise<string | null> {
+  const identity = await resolveTargetInstanceIdentity(endpoint);
+  return identity.kind === "one" ? identity.id : null;
+}
+
+/** What the target's Instance table says about its identity: one id, no row, several rows, or unread. */
+export type TargetInstanceIdentity =
+  | { kind: "one"; id: string }
+  | { kind: "none" }
+  | { kind: "multiple"; count: number }
+  | { kind: "unreadable" };
+
+/** The decision behind `resolveTargetInstanceId`, with the reason a null id is null. */
+export async function resolveTargetInstanceIdentity(endpoint: OpsEndpoint): Promise<TargetInstanceIdentity> {
   let rows: InstanceIdentityRow[];
   try {
     rows = await readInstanceRows(endpoint);
@@ -69,10 +82,12 @@ export async function resolveTargetInstanceId(endpoint: OpsEndpoint): Promise<st
       opsUrl: endpoint.opsUrl,
       err,
     });
-    return null;
+    return { kind: "unreadable" };
   }
   const decision = decideInstanceAnswer(rows);
-  return decision.kind === "answer" ? decision.row.id : null;
+  if (decision.kind === "answer") return { kind: "one", id: decision.row.id };
+  if (decision.kind === "refuse-multiple") return { kind: "multiple", count: decision.rows.length };
+  return { kind: "none" };
 }
 
 /**

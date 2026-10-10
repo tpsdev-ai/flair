@@ -26,7 +26,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
 import { AGENT_ID_RULE, isValidAgentId } from "./lib/agent-id-rule.js";
-import { AGENT_HOME_STAMP_REMEDY, planAgentHomeStamps } from "./lib/agent-home.js";
+import { AGENT_HOME_STAMP_REMEDY, planAgentHomeStamps, type TargetInstanceIdentity } from "./lib/agent-home.js";
+import { INSTANCE_ROW_PRUNE_REMEDY } from "./lib/instance-identity-row.js";
 import type { SeedOwnerRead } from "./keystore.js";
 import {
   ALL_CLIENTS,
@@ -2872,8 +2873,16 @@ export interface AgentHomeFinding {
   stampableIds: string[];
   /** The home-less rows that arrived through a federation merge — listed, never stamped. */
   syncIds: string[];
+  /**
+   * `info`: the instance has no single canonical id, so a null home is the local-origin
+   * state. `advisory`: an id exists and the rows can be stamped. Neither counts as a
+   * doctor issue.
+   */
+  severity: "info" | "advisory";
+  /** Whether doctor counts this toward its issue total / exit code. */
+  isIssue: boolean;
   message: string;
-  fixHint: string;
+  fixHint: string | null;
 }
 
 /**
@@ -2891,22 +2900,47 @@ export interface AgentHomeFinding {
  */
 export function describeAgentHomeFinding(
   rows: Array<Record<string, unknown>>,
-  localInstanceId: string | null,
+  identity: TargetInstanceIdentity,
 ): AgentHomeFinding | null {
-  const plan = planAgentHomeStamps(rows, localInstanceId);
+  const plan = planAgentHomeStamps(rows, identity.kind === "one" ? identity.id : null);
   if (plan.homeLess.length === 0) return null;
-  const message =
-    `${plan.homeLess.length} stored agent row(s) have no home instance (originatorInstanceId): ` +
-    plan.homeLess.join(", ") +
-    (localInstanceId === null
-      ? "; this instance has no single canonical id to stamp"
-      : `; ${plan.stampable.length} can be stamped with this instance's id (${localInstanceId})` +
-        (plan.sync.length > 0 ? `, ${plan.sync.length} arrived through federation and are listed only` : ""));
-  return {
+  const base = {
     homeLessIds: plan.homeLess,
     stampableIds: plan.stampable,
     syncIds: plan.sync,
-    message,
-    fixHint: AGENT_HOME_STAMP_REMEDY,
+  };
+  const listed = `${plan.homeLess.length} stored agent row(s) have no home instance (originatorInstanceId): ${plan.homeLess.join(", ")}`;
+  if (identity.kind === "one") {
+    return {
+      ...base,
+      severity: "advisory",
+      isIssue: false,
+      message:
+        `${listed}; ${plan.stampable.length} can be stamped with this instance's id (${identity.id})` +
+        (plan.sync.length > 0 ? `, ${plan.sync.length} arrived through federation and are listed only` : ""),
+      fixHint: AGENT_HOME_STAMP_REMEDY,
+    };
+  }
+  if (identity.kind === "multiple") {
+    return {
+      ...base,
+      severity: "info",
+      isIssue: false,
+      message:
+        `${listed}; this instance has ${identity.count} Instance rows, so no single canonical id; ` +
+        "homes stay unset (the local-origin state) until it has one",
+      fixHint: `keep one Instance row and delete the rest with: ${INSTANCE_ROW_PRUNE_REMEDY}`,
+    };
+  }
+  return {
+    ...base,
+    severity: "info",
+    isIssue: false,
+    message:
+      `${listed}; ` +
+      (identity.kind === "none"
+        ? "this instance has no Instance row yet, so homes stay unset (the local-origin state) until it has an identity"
+        : "the Instance row could not be read, so no id was resolved"),
+    fixHint: null,
   };
 }
