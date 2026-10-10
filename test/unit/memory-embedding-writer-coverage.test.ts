@@ -53,12 +53,16 @@ const add = (file: string, sites: string[], policy: Policy, reason: string) => {
 add("Federation", ["writer:table.put#1"], "LATCH",
   "Federation sync-in LWW merge (applyMergedRecordToTable) — a remote-win copies the REMOTE embeddingModel; must trip the latch via noteWriteStamp.");
 
-// ── GATED: Memory.ts's own post()/put() write path (calls noteWriteStamp) ──
+// ── GATED: Memory.ts's own post()/put()/patch() write path (calls noteWriteStamp) ──
 // The writes go through the base TABLE (`databases.flair.Memory`) with the
 // shared request context so a direct/internal caller is atomic (A1'' 0a).
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
+// flair#2425 — an ordinary PATCH merges the body (including a caller-supplied
+// embedding/embeddingModel) into the row; it now calls noteWriteStamp too.
+add("Memory", ["writer:super.patch#1"], "GATED",
+  "Memory.patch() ordinary write — a partial merge that can store a caller-supplied embedding stamp; calls noteWriteStamp (flair#2425).");
 // ── LOCAL: replaces a stored stamp with the current local model ID ──
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "LOCAL",
   "Memory.patch() re-embed: puts the re-read row with a locally computed vector, getModelId() and updatedAt; noteWriteStamp.");
@@ -91,13 +95,9 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "EC
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "Dedup repair (flair#2358): read-modify-write re-writes the stored row's own stamp — only its expiresAt changes.");
 
-// ── UNLATCHED: writes a stamp without tripping the latch ──
+// ── NON_EMBED: writes no stamp, or a partial update/patch/delete ──
 // The feed refuses a body embedding or embeddingModel (flair#2354), so its
 // ingest is NON_EMBED and its skill successor ECHO.
-add("Memory", ["writer:super.patch#1"], "UNLATCHED",
-  "Memory.patch(): an ordinary PATCH stores a body's embedding and embeddingModel without noteWriteStamp; when redaction (flair#2407) discards them, it stores a locally computed vector and getModelId(), or null for both when the engine returns no vector.");
-
-// ── NON_EMBED: writes no stamp, or a partial update/patch/delete ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Admin-only starter memories — the record carries no embedding/embeddingModel.");
 add("MemoryFeed", ["writer:writeBackCommittedRow#1"], "NON_EMBED",

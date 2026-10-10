@@ -1943,7 +1943,14 @@ export class Memory extends (databases as any).flair.Memory {
       content.embedding = computed ? vec : null;
       content.embeddingModel = computed ? getModelId() : null;
     }
-    return withRedactedValues(await super.patch(content, query), redactedValues, content?.id ?? (this as any).getId?.());
+    const patched = await super.patch(content, query);
+    // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an
+    // embedding stamp must consult the latch the same way post()/put() do, so a
+    // body-supplied foreign stamp closes the gate instead of the row carrying a
+    // model stamp the latch never recorded. A PATCH body with no embedding
+    // fields is unchanged: noteWriteStamp(undefined) is a no-op.
+    noteWriteStamp(content?.embeddingModel as string | null | undefined);
+    return withRedactedValues(patched, redactedValues, content?.id ?? (this as any).getId?.());
   }
 
   async put(content: any, query?: any) {
