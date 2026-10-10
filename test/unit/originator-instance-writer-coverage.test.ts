@@ -47,11 +47,12 @@ const RAW_WRITE_RE = new RegExp(
 /**
  * The synced table a write-back call's first argument names, resolved only
  * when unambiguous: a direct `<expr>.flair.<Table>` member, or an identifier
- * whose ONLY binding in the file is a `const` initialised with exactly such a
- * member. Anything else (a conditional, a logical or call expression, a
- * parameter, a `let`/`var`, more than one binding) resolves to "?", and such a
- * site needs its own reviewed policy entry, so an unreviewed one fails the
- * gate (flair#2354).
+ * the type checker resolves to a single declaration that is a `const`
+ * initialised with exactly such a member. Anything else (a conditional, a
+ * logical or call expression, an import, a parameter, a `let`/`var`, a
+ * destructured binding, a symbol with more than one declaration) resolves to
+ * "?", and such a site needs its own reviewed policy entry, so an unreviewed
+ * one fails the gate (flair#2354).
  */
 function writeBackTable(call: ts.CallExpression): string {
   const unwrap = (node: ts.Expression): ts.Expression => {
