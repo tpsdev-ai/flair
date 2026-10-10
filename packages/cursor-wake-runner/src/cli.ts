@@ -12,6 +12,7 @@ import { FlairClient } from "@tpsdev-ai/flair-client";
 import { createCatchupPort } from "./catchup.js";
 import { HELP, loadConfig, parseArgs } from "./config.js";
 import { createCursorAgentClient, dryRunCursorClient } from "./cursor-api.js";
+import { createMemoryReceiptStore } from "./receipt-store.js";
 import { runWakeCycle, type WakeResult } from "./run.js";
 
 function printResult(result: WakeResult): void {
@@ -20,11 +21,16 @@ function printResult(result: WakeResult): void {
   ];
   if (result.acked) lines.push(`acked: ${result.acked}`);
   if (result.blocked) lines.push(`blocked: ${result.blocked}`);
+  if (result.receiptFailed) lines.push(`receipt failed: ${result.receiptFailed}`);
+  for (const refused of result.receiptRefused) {
+    lines.push(`receipt refused: ${refused.eventId} (HTTP ${refused.status}${refused.code ? ` ${refused.code}` : ""}; acked without it)`);
+  }
   for (const item of result.items) {
     const cursor = item.cursorAgentId ? ` ${item.cursorAgentId}` : "";
     const url = item.url ? ` ${item.url}` : "";
+    const receipt = item.receipt ? ` receipt=${item.receipt}` : "";
     const reason = item.reason ? ` (${item.reason})` : "";
-    lines.push(`  - [${item.action}] ${item.kind} ${item.eventId}${cursor}${url}${reason}`);
+    lines.push(`  - [${item.action}] ${item.kind} ${item.eventId}${cursor}${url}${receipt}${reason}`);
   }
   console.log(lines.join("\n"));
 }
@@ -60,11 +66,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       agentId: config.agentId,
       catchup,
       cursor,
+      receipts: createMemoryReceiptStore(flair),
+      log: (line) => console.error(line),
       dryRun: config.dryRun,
       pageLimit: config.pageLimit,
     });
     printResult(result);
-    return result.blocked ? 2 : 0;
+    return result.blocked || result.receiptFailed ? 2 : 0;
   };
 
   if (config.intervalSec === null) return runOnce();

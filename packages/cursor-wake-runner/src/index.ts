@@ -33,7 +33,28 @@ export {
   type LaunchOutcome,
   type LaunchResult,
 } from "./cursor-api.js";
-export { runWakeCycle, type WakeDeps, type WakeItem, type WakeResult } from "./run.js";
+export {
+  runWakeCycle,
+  type WakeDeps,
+  type WakeItem,
+  type WakeReceiptRefusal,
+  type WakeResult,
+} from "./run.js";
+export {
+  buildLaunchReceipt,
+  cursorLaunchHostSource,
+  isAcceptableHostSourceId,
+  isAcceptableHostSourceUrl,
+  launchReceiptId,
+  permanentReceiptRefusal,
+  RECEIPT_NAMESPACE,
+  RECEIPT_PERMANENT_REFUSAL_STATUSES,
+  type CursorLaunchSource,
+  type LaunchReceipt,
+  type ReceiptRefusal,
+  type ReceiptStore,
+} from "./receipt.js";
+export { createMemoryReceiptStore } from "./receipt-store.js";
 export {
   HELP,
   loadConfig,
