@@ -3,9 +3,9 @@
 // The doctor stop-deadline test (launchd-adopt-stop-deadline-2205) replaces the
 // whole reader with a fake that enforces the deadline itself, so nothing checks
 // that the REAL reader bounds the timeout it hands to each `ps` invocation by
-// the caller's remaining deadline. This file calls the real reader with only
-// the `ps` spawn seam stubbed, so the timeout it sees at the process boundary is
-// the one the reader computed.
+// the caller's remaining deadline. This file calls the real reader with the `ps`
+// spawn seam stubbed and the clock held, so the timeout it sees at the process
+// boundary is the one the reader computed.
 //
 // Module mocks are process-global (as in process-start-time-clock-rate), so this
 // file runs in the isolated lane.
@@ -50,7 +50,7 @@ function targetPid(): number {
   return process.pid + 1000;
 }
 
-test("every ps timeout is bounded by the caller's remaining deadline, including after time has passed", () => {
+test("each ps timeout is bounded by the caller's remaining deadline, including after time has passed", () => {
   const deadline = T0 + 60_000;
   psDurationMs = 59_000; // the first read consumes most of the shared deadline
   const value = readProcessStartTimeMs(targetPid(), deadline);
