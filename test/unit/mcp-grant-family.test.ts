@@ -134,7 +134,7 @@ describe("grantMcpClient — happy path", () => {
 
     // Ops calls: search_by_value (dup check), the Instance read, then insert.
     expect(calls.map((c) => c.operation)).toEqual(["search_by_value", "sql", "insert"]);
-    expect(calls[2].records[0]).toMatchObject({ id: "ci-runner", publicKey: expect.any(String), runtime: "headless" });
+    expect(calls[2].records[0]).toMatchObject({ id: "ci-runner", publicKey: expect.any(String), runtime: "headless", originatorInstanceId: "inst-local-2433" });
   });
 
   test("rejects an invalid name before any I/O", async () => {

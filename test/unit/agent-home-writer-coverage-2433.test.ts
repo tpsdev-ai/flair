@@ -8,8 +8,9 @@
  *
  * This test enumerates the CLI's ops-API Agent creation literal in src/ — a write
  * `operation` of insert/upsert on table "Agent" — and requires each file to reach
- * the ONE shared home rule from src/lib/agent-home.ts. A new ops-API Agent
- * creation path that stamps nothing has no such reference and fails the lane.
+ * the ONE shared home rule from src/lib/agent-home.ts. A file that creates Agent
+ * rows must reach the stamping rule; record-level stamping is pinned by the
+ * per-creator tests.
  *
  * The `update` idiom is deliberately NOT enumerated: an update on an Agent row is
  * not a creation, and the CLI's updates (principal status, key rotation) name

@@ -477,6 +477,7 @@ describe("provisionIdpIdentityMapping", () => {
     expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "sql", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
     const agentRecord = calls.find((c) => c.body.operation === "insert")!.body.records[0];
     expect(agentRecord.publicKey).toBe("idp:github:octocat");
+    expect(agentRecord.originatorInstanceId).toBe("inst-local-2433");
     await expect(importEd25519Key(agentRecord.publicKey)).rejects.toThrow();
     const credRecord = calls.find((c) => c.body.operation === "upsert")!.body.records[0];
     expect(credRecord.kind).toBe("idp");
@@ -732,6 +733,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     const creds = credentialTable();
     const received: { host: string; operation: string }[] = [];
     let principalPresent = false;
+    const insertedHomes: unknown[] = [];
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -743,6 +745,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
         if (body.operation === "insert") {
           const error = agentInsertSchemaError(body.records ?? []);
           if (error) return error;
+          insertedHomes.push(body.records?.[0]?.originatorInstanceId);
           principalPresent = true;
           return Response.json({ message: "inserted" });
         }
@@ -768,6 +771,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
         "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "sql", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions",
       ]);
       expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
+      expect(insertedHomes).toEqual(["inst-local-2433"]);
       expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
     } finally {
       server.stop(true);
