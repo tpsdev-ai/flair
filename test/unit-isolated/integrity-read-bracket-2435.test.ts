@@ -4,7 +4,7 @@
  *
  * On a known watermark `flair integrity check` reads history by condition; the
  * read is bracketed by the exact count of that range (a SQL count), so a result
- * shorter than the count says is a named read error — UNKNOWN, never an alert.
+ * that differs from the count is a named read error — UNKNOWN, never an alert.
  * The live path on a real ephemeral Harper is in
  * test/integration/integrity-retention-2229.test.ts.
  */
@@ -29,14 +29,16 @@ interface Run { code: number | undefined; verdict: any; calls: string[] }
 /**
  * Run `flair integrity check` against a fake operations API. The SQL count of
  * the bounded range says `windowCount` rows; the conditional search returns
- * `windowRows`. A mismatch is the short read this fix must catch.
+ * `windowRows`. A mismatch must be caught.
  */
 async function runCheckFake(opts: {
   checkpoint: string;
   memoryRows?: any[];
   windowCount: number;
   windowRows?: any[];
+  windowCountAfter?: number;
 }): Promise<Run> {
+  let sqlCalls = 0;
   const originalFetch = globalThis.fetch;
   const originalExit = process.exit;
   const originalWrite = process.stdout.write;
@@ -49,7 +51,10 @@ async function runCheckFake(opts: {
       const body = JSON.parse(init.body);
       calls.push(`${body.operation}:${typeof body.table === "string" ? body.table : ""}`);
       if (body.operation === "describe_table") return new Response(JSON.stringify({ record_count: (opts.memoryRows ?? []).length }));
-      if (body.operation === "sql") return new Response(JSON.stringify([{ n: opts.windowCount }]));
+      if (body.operation === "sql") {
+        sqlCalls += 1;
+        return new Response(JSON.stringify([{ n: sqlCalls > 1 ? (opts.windowCountAfter ?? opts.windowCount) : opts.windowCount }]));
+      }
       if (body.operation === "search_by_conditions") return new Response(JSON.stringify(opts.windowRows ?? []));
       if (body.operation === "search_by_value") return new Response(JSON.stringify(body.table === "Memory" ? (opts.memoryRows ?? []) : []));
       if (body.operation === "delete") return new Response(JSON.stringify({ deleted_hashes: body.hash_values ?? [] }));
@@ -80,12 +85,12 @@ function checkpointWithMissingDurable(): string {
   return path;
 }
 
-test("check: a bounded read shorter than its count is a named read error, not an alert", async () => {
+test("check: a bounded read with fewer rows than its count is a named read error, not an alert", async () => {
   const r = await runCheckFake({
     checkpoint: checkpointWithMissingDurable(),
     memoryRows: [],          // m1 is gone from the corpus
     windowCount: 1,          // the operations API says the window holds one row
-    windowRows: [],          // but the search returns none: a short read
+    windowRows: [],          // but the search returns none
   });
   expect(r.calls).toContain("search_by_conditions:MemoryDeletionHistory");
   expect(r.code).toBe(3);
@@ -93,7 +98,20 @@ test("check: a bounded read shorter than its count is a named read error, not an
   expect(r.verdict?.reason).toContain("bounded read reports 1 rows, integrity read 0");
 });
 
-test("check: a bounded read no longer than its count reads as it always did", async () => {
+test("check: a bounded range count that changes during the read is a named read error", async () => {
+  const r = await runCheckFake({
+    checkpoint: checkpointWithMissingDurable(),
+    memoryRows: [],
+    windowCount: 1,
+    windowCountAfter: 2,
+    windowRows: [{ id: "h1", memoryId: "m1", memoryInstanceToken: "t1", durability: "permanent", at: "2026-09-20T00:00:00.000Z" }],
+  });
+  expect(r.code).toBe(3);
+  expect(r.verdict?.status).toBe("unknown");
+  expect(r.verdict?.reason).toContain("count changed from 1 to 2");
+});
+
+test("check: a bounded read that matches its count reads as it always did", async () => {
   const r = await runCheckFake({
     checkpoint: checkpointWithMissingDurable(),
     memoryRows: [],

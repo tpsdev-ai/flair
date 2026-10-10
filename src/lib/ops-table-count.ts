@@ -19,7 +19,7 @@ export async function readExactTableCount(
  * counts a whole table, not a range). The bounded deletion-history read is
  * bracketed against this the way a whole-table read is bracketed against
  * `readExactTableCount`: a result the count does not match is a read error, never
- * a shorter history that would read as an unexplained loss.
+ * a history that would read as an unexplained loss.
  */
 export async function readExactCountSince(
   opsPost: (body: Record<string, unknown>, context: string) => Promise<unknown>,

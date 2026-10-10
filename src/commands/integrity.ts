@@ -91,8 +91,8 @@ const DELETION_HISTORY_ATTRIBUTES = ["id", "memoryId", "memoryInstanceToken", "d
 /**
  * The operations-API reads the integrity commands share. `search` reads a whole
  * table (bracketed by its exact count); `searchDeletionsSince` reads only history
- * at or after `since`, bracketed by the exact count of that range so a short
- * result is a read error and never a shorter history that would read as a loss.
+ * at or after `since`, bracketed by the exact count of that range so a result
+ * that differs from it is a read error, never a history that would read as a loss.
  */
 function integrityReader(opsPort: number | string, auth: string) {
   const opsPost = async (body: Record<string, unknown>, context: string): Promise<unknown> => {
