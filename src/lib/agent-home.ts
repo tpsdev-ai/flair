@@ -302,6 +302,33 @@ export interface AgentHomeStampResult {
   plan: AgentHomePlan;
   /** The ids whose home was stamped and read back (empty on a dry run). */
   stamped: string[];
+  /** The planned ids left unwritten because the row, re-read just before its write, carried sync provenance. */
+  skipped: string[];
+}
+
+/** One Agent row in full (null when absent, "unreadable" when the read failed). */
+async function readAgentRowForStamp(args: {
+  opsUrl: string;
+  authHeader: string;
+  id: string;
+  fetchImpl: typeof fetch;
+  timeoutMs: number;
+}): Promise<Record<string, unknown> | null | "unreadable"> {
+  try {
+    const res = await args.fetchImpl(args.opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: args.authHeader },
+      body: JSON.stringify({ operation: "search_by_id", database: "flair", table: "Agent", ids: [args.id], get_attributes: ["*"] }),
+      signal: AbortSignal.timeout(args.timeoutMs),
+    });
+    if (!res.ok) return "unreadable";
+    const data = await res.json();
+    const rows = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : null;
+    if (rows === null) return "unreadable";
+    return rows.length > 0 && rows[0] && typeof rows[0] === "object" ? (rows[0] as Record<string, unknown>) : null;
+  } catch {
+    return "unreadable";
+  }
 }
 
 /**
@@ -327,17 +354,26 @@ export async function runAgentHomeStamp(args: {
     fetchImpl: args.fetchImpl,
     timeoutMs: args.timeoutMs,
   });
-  if (rows === null) return { ok: false, reason: "roster-unreadable", plan: empty, stamped: [] };
+  if (rows === null) return { ok: false, reason: "roster-unreadable", plan: empty, stamped: [], skipped: [] };
   const plan = planAgentHomeStamps(rows, args.localInstanceId);
-  if (!args.apply) return { ok: true, plan, stamped: [] };
-  if (args.localInstanceId === null) return { ok: false, reason: "no-canonical-id", plan, stamped: [] };
+  if (!args.apply) return { ok: true, plan, stamped: [], skipped: [] };
+  if (args.localInstanceId === null) return { ok: false, reason: "no-canonical-id", plan, stamped: [], skipped: [] };
   const fetchImpl = args.fetchImpl ?? fetch;
   const timeoutMs = args.timeoutMs ?? 10_000;
   const stamped: string[] = [];
+  const skipped: string[] = [];
   for (const id of plan.stampable) {
     // The shared agent-ID rule owns an id outside it — the doctor's Agent-ID
     // check reports such a row. A home stamp is not the place to rewrite it.
     if (!isValidAgentId(id)) continue;
+    const current = await readAgentRowForStamp({ opsUrl: args.opsUrl, authHeader: args.authHeader, id, fetchImpl, timeoutMs });
+    if (current === "unreadable") {
+      throw new Error(`Could not re-read agent '${id}' before stamping it; no change was made to it.`);
+    }
+    if (current === null || isSyncOriginatedAgentRow(current)) {
+      skipped.push(id);
+      continue;
+    }
     const res = await fetchImpl(args.opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: args.authHeader },
@@ -360,5 +396,5 @@ export async function runAgentHomeStamp(args: {
     }
     stamped.push(id);
   }
-  return { ok: true, plan, stamped };
+  return { ok: true, plan, stamped, skipped };
 }

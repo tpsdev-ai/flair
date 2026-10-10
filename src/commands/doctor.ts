@@ -2057,7 +2057,9 @@ program
       const homeRows = homeAuth
         ? await readAgentHomeRows({ opsUrl: homeOpsUrl, authHeader: homeAuth, timeoutMs: 5000 })
         : null;
-      if (homeRows === null) {
+      if (!homeAuth) {
+        console.log(`  ${render.icons.info} Agent homes check skipped (no admin credential).`);
+      } else if (homeRows === null) {
         issues++;
         console.log(`  ${render.icons.warn} Could not read the stored Agent roster, so the home-instance check did not run.`);
       } else {

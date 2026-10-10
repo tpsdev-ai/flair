@@ -22,6 +22,7 @@ import {
   readAgentHomeRows,
   readStoredAgentHome,
   resolveTargetInstanceId,
+  runAgentHomeStamp,
 } from "../../src/lib/agent-home.js";
 import { describeAgentHomeFinding } from "../../src/doctor-client.js";
 import { INSTANCE_ROW_PRUNE_REMEDY } from "../../src/lib/instance-identity-row.js";
@@ -71,6 +72,55 @@ describe("planAgentHomeStamps — the remedy's split", () => {
     const plan = planAgentHomeStamps([{ name: "no-id" }, { id: "" }], "inst-local");
     expect(plan.homeLess).toEqual([]);
     expect(plan.stampable).toEqual([]);
+  });
+});
+
+describe("runAgentHomeStamp — sync provenance is checked at write time", () => {
+  function stampFake(rows: Record<string, Record<string, unknown>>, onRoster: () => void) {
+    const writes: string[] = [];
+    const fetchImpl = (async (_url: any, opts: any) => {
+      const body = JSON.parse(String(opts.body));
+      if (body.operation === "search_by_value") {
+        const out = Object.values(rows).map((r) => ({ ...r }));
+        onRoster();
+        return jsonResponse(out);
+      }
+      if (body.operation === "search_by_id") return jsonResponse(rows[body.ids[0]] ? [{ ...rows[body.ids[0]] }] : []);
+      if (body.operation === "update") {
+        for (const rec of body.records) {
+          writes.push(rec.id);
+          rows[rec.id] = { ...rows[rec.id], ...rec };
+        }
+        return jsonResponse({ message: "updated" });
+      }
+      throw new Error(`unexpected operation ${body.operation}`);
+    }) as unknown as typeof fetch;
+    return { fetchImpl, writes };
+  }
+  const base = { opsUrl: "http://127.0.0.1:1/", authHeader: "Basic x", localInstanceId: "inst-local", apply: true };
+
+  test("a row that gains sync provenance between the plan and its write is listed, not stamped", async () => {
+    const rows: Record<string, Record<string, unknown>> = { "late-sync": { id: "late-sync" }, "still-local": { id: "still-local" } };
+    const { fetchImpl, writes } = stampFake(rows, () => { rows["late-sync"]._syncedFrom = "peer-1"; });
+    const result = await runAgentHomeStamp({ ...base, fetchImpl });
+    expect(result.plan.stampable).toEqual(["late-sync", "still-local"]);
+    expect(writes).toEqual(["still-local"]);
+    expect(result.stamped).toEqual(["still-local"]);
+    expect(result.skipped).toEqual(["late-sync"]);
+    expect(rows["late-sync"].originatorInstanceId ?? null).toBeNull();
+  });
+
+  test("a row whose provenance cannot be re-read is not written", async () => {
+    const writes: string[] = [];
+    const fetchImpl = (async (_url: any, opts: any) => {
+      const body = JSON.parse(String(opts.body));
+      if (body.operation === "search_by_value") return jsonResponse([{ id: "a" }]);
+      if (body.operation === "search_by_id") return jsonResponse({ error: "down" }, 500);
+      writes.push(body.operation);
+      return jsonResponse({});
+    }) as unknown as typeof fetch;
+    await expect(runAgentHomeStamp({ ...base, fetchImpl })).rejects.toThrow("re-read agent 'a'");
+    expect(writes).toEqual([]);
   });
 });
 

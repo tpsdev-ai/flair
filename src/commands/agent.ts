@@ -884,6 +884,7 @@ export function register(program: Command): void {
         );
         return;
       }
+      for (const id of result.skipped) console.log(`     list only (sync-originated): ${id}`);
       console.log(`${render.icons.ok} Stamped the home instance on ${result.stamped.length} row(s).`);
     });
 }

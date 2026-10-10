@@ -8,7 +8,11 @@
   `flair doctor` lists Agent rows with no home. On an instance with one Instance row it
   prints an advisory (not counted as an issue) naming the remedy `flair agent
   stamp-home`, which stamps the local id on home-less rows that carry no federation-sync
-  provenance and lists — never stamps — a row that arrived through federation. On an
+  provenance and lists — never stamps — a row that arrived through federation, checking each
+  row's provenance again immediately before its write. On an
   instance with no Instance row, or with several, it prints an info line (not counted):
   homes stay unset, the local-origin state, until the instance has one identity.
-  `flair doctor` now counts an unreadable agent roster as an issue.
+  `flair doctor` now counts an unreadable agent roster as an issue, and reports the Agent
+  homes check as skipped, not counted, when no admin credential is available. The Agent
+  resource keeps the stored federation bookkeeping fields (`_syncedFrom`,
+  `_originatorInstanceId`) on update and drops them from a create.

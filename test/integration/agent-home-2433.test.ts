@@ -218,6 +218,46 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect((await rowIn("Agent", id))?.originatorInstanceId, "PATCH changed the stored home").toBe(LOCAL_ID);
   }, 30_000);
 
+  test("a resource write cannot supply, change or clear the federation bookkeeping of an existing row", async () => {
+    const id = `agent-bookkeeping-${sfx}`;
+    // Agent schema required fields (schemas/agent.graphql): name, publicKey, createdAt (id is the key).
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-bk-2433", _syncedFrom: PEER_ID, _originatorInstanceId: PEER_ID, createdAt: new Date().toISOString() }],
+    });
+    const stays = async (label: string) => {
+      const row = await rowIn("Agent", id);
+      expect(row._syncedFrom, `${label} changed _syncedFrom`).toBe(PEER_ID);
+      expect(row._originatorInstanceId, `${label} changed _originatorInstanceId`).toBe(PEER_ID);
+    };
+
+    const patchSet = await send("PATCH", `/Agent/${id}`, { _syncedFrom: "forged", _originatorInstanceId: "forged", displayName: id });
+    expect(patchSet.status, patchSet.raw).toBeLessThan(300);
+    await stays("a PATCH that supplied them");
+    const patchClear = await send("PATCH", `/Agent/${id}`, { _syncedFrom: null, _originatorInstanceId: null, displayName: id });
+    expect(patchClear.status, patchClear.raw).toBeLessThan(300);
+    await stays("a PATCH that cleared them");
+
+    const full = { id, name: id, role: "agent", status: "active", publicKey: "pk-bk-2433", createdAt: new Date().toISOString() };
+    await send("PUT", `/Agent/${id}`, { ...full, _syncedFrom: "forged", _originatorInstanceId: "forged" });
+    await stays("a PUT that supplied them");
+    await send("PUT", `/Agent/${id}`, full);
+    await stays("a PUT that omitted them");
+  }, 30_000);
+
+  test("a resource create cannot set the federation bookkeeping", async () => {
+    const id = `agent-bookkeeping-create-${sfx}`;
+    const r = await send("POST", "/Agent/", {
+      id, name: id, role: "agent", status: "active", publicKey: "pk-bkc-2433",
+      _syncedFrom: "forged", _originatorInstanceId: "forged", createdAt: new Date().toISOString(),
+    });
+    expect(r.status, r.raw).toBeLessThan(300);
+    const row = await rowIn("Agent", id);
+    expect(row._syncedFrom ?? null).toBeNull();
+    expect(row._originatorInstanceId ?? null).toBeNull();
+  }, 30_000);
+
   test("the remedy stamps a home-less row with no federation-sync provenance and lists a sync-originated one", async () => {
     // A home-less row written through the ops API with no home and no
     // federation provenance.

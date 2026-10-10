@@ -148,16 +148,17 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(unreadable.stdout).not.toContain("No stored agent id is outside");
     expect(issueCount(unreadable.stdout), "the unrun check left the summary clean").toBe(baseCount + 2);
 
-    // 4. No admin credential at all is also a counted issue, not a pass.
+    // 4. No admin credential at all: the Agent-ID check is a counted issue, not
+    //    a pass; the Agent homes check is reported skipped and not counted.
     const noCred = await runDoctor("");
     expect(noCred.stdout).toContain("no admin credentials");
-    expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 2);
+    expect(noCred.stdout).toContain("Agent homes check skipped (no admin credential)");
+    expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 1);
   }, 120_000);
 
   test("an unsafe or empty admin-pass file: doctor completes and counts the unrun check with the resolver's reason", async () => {
     // The reference: no admin credential at all, which the test above proves
-    // is a counted issue (for both the Agent-ID and the Agent homes checks)
-    // over the clean baseline.
+    // is one counted issue (the Agent-ID check) over the clean baseline.
     const noCred = await runDoctor("");
     expect(noCred.stdout).toContain("no admin credentials");
     const unrunCount = issueCount(noCred.stdout);

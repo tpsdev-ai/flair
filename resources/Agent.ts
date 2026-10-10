@@ -2,7 +2,7 @@ import { databases } from "harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
 import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js";
-import { applyOriginatorInstanceId, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
+import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { AGENT_ID_ERROR, invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
 
 /**
@@ -106,6 +106,7 @@ export class Agent extends (databases as any).flair.Agent {
     // contract (create/update rule; the federation merge path is the raw
     // table writer and never consults a body).
     await stampOriginatorOnCreate(content);
+    dropClientFederationBookkeeping(content);
 
     return super.post(content, context);
   }
@@ -219,6 +220,7 @@ export class Agent extends (databases as any).flair.Agent {
     const resolvedOriginRow = await resolveStoredRow(this, "Agent", content, () => super.get());
     if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
     await applyOriginatorInstanceId(content, resolvedOriginRow.row);
+    applyFederationBookkeeping(content, resolvedOriginRow.row);
 
     const result = await super.put(content);
     invalidateAdminCache();
@@ -273,6 +275,7 @@ export class Agent extends (databases as any).flair.Agent {
       const resolvedOriginRow = await resolveStoredRow(this, "Agent", content, () => super.get());
       if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
       await applyOriginatorInstanceId(content, resolvedOriginRow.row);
+      applyFederationBookkeeping(content, resolvedOriginRow.row);
       content.updatedAt = new Date().toISOString();
     }
 
