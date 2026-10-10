@@ -510,7 +510,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 
 `flair integrity check` reports missing checkpointed durable Memory IDs or replacements with changed or missing previously nonempty tokens without matching new deletion history. A row created and lost entirely between scans is not observed. The scan reads deletion history at or after the checkpoint's watermark minus a margin; an absent or unknown watermark reads the whole table.
 
-`flair integrity prune-history` prunes deletion history older than the oldest named checkpoint watermark minus a margin. It is a dry run unless `--apply` is given, prunes at most `--max` rows in a run, and refuses — naming the reason — when a checkpoint is missing or a watermark is unreadable.
+`flair integrity prune-history` prunes deletion history older than the oldest named checkpoint watermark minus a margin. It is a dry run unless `--apply` is given, prunes at most `--max` rows in a run, and refuses — naming the reason — when a checkpoint is missing or a watermark is unreadable. Pruning against only some of the checkpoints that read an instance can remove history an unnamed checkpoint still needs, which causes false alerts there.
 
 `InstructionVersion` rows are appended by Flair's in-process write path. The administrator operations API (`upsert` / `delete` under admin auth) can also write version rows, and that path is not audited by this table — a documented, deferred exception.
 

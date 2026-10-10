@@ -43,7 +43,7 @@ export interface IntegrityCheckpoint {
    * `watermark - DELETION_HISTORY_MARGIN_MS` are read, older rows are not.
    * Never later than `scannedAt`, and never later than the `at` of any
    * history row this checkpoint still needs (so the oldest live watermark
-   * also bounds retention safely). Absent on a checkpoint written before this
+   * also bounds retention, while the delete-commit delay plus host clock skew stays under the 5-minute margin). Absent on a checkpoint written before this
    * field existed, which reads as `unknown` — the scan falls back to a full
    * read, never "nothing new".
    */
@@ -65,7 +65,7 @@ export interface IntegrityCheckpoint {
  * transaction later than `at`. The watcher's own clock (its `scannedAt`) is
  * also a different clock from the instance's. The margin must exceed both the
  * longest such delay and the largest clock difference between the two hosts.
- * Five minutes is comfortably above both for an operator-run scan, and the
+ * Five minutes is assumed to be above both for an operator-run scan, and the
  * cost of a too-large margin is only re-reading a few minutes of history.
  */
 export const DELETION_HISTORY_MARGIN_MS = 5 * 60_000;

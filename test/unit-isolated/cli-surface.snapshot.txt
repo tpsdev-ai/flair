@@ -897,7 +897,7 @@ flair integrity check
       attr: adminUser
 
 flair integrity prune-history
-  description: Prune MemoryDeletionHistory rows older than the oldest live checkpoint watermark minus a margin; dry-run unless --apply
+  description: Prune MemoryDeletionHistory rows older than the oldest named checkpoint watermark minus a margin; dry-run unless --apply
   usage: [options]
   options:
     --checkpoint <path...>
@@ -3701,7 +3701,7 @@ Commands:
                            missing previously nonempty tokens; rows created and
                            lost entirely between scans are not observed
   prune-history [options]  Prune MemoryDeletionHistory rows older than the
-                           oldest live checkpoint watermark minus a margin;
+                           oldest named checkpoint watermark minus a margin;
                            dry-run unless --apply
   help [command]           display help for command
 
@@ -3730,8 +3730,8 @@ Global Options:
 ----- flair integrity prune-history -----
 Usage: flair integrity prune-history [options]
 
-Prune MemoryDeletionHistory rows older than the oldest live checkpoint watermark
-minus a margin; dry-run unless --apply
+Prune MemoryDeletionHistory rows older than the oldest named checkpoint
+watermark minus a margin; dry-run unless --apply
 
 Options:
   --checkpoint <path...>  Checkpoint file whose watermark bounds the prune;

@@ -81,14 +81,17 @@ test("emptyCheckpoint: the watermark is scannedAt, pulled back to a still-needed
   expect(stray.watermark).toBe("2026-10-02T00:00:00.000Z");
 });
 
-interface PruneResult { code: number | undefined; plan: any; deletes: string[][]; paths: string[] }
+interface PruneResult { code: number | undefined; plan: any; output: string; errors: string; deletes: string[][]; paths: string[] }
 
-async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLite[]; extra?: string[] }): Promise<PruneResult> {
+async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLite[]; extra?: string[]; failDeleteCall?: number; human?: boolean }): Promise<PruneResult> {
   const originalFetch = globalThis.fetch;
   const originalExit = process.exit;
   const originalWrite = process.stdout.write;
   const deletes: string[][] = [];
+  const originalError = console.error;
+  const originalLog = console.log;
   let output = "";
+  let errors = "";
   let code: number | undefined;
   try {
     bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
@@ -97,6 +100,7 @@ async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLit
       const { operation, table, hash_values } = body;
       if (operation === "delete") {
         expect(table).toBe("MemoryDeletionHistory");
+        if (args.failDeleteCall === deletes.length) return new Response("boom", { status: 500 });
         deletes.push(hash_values);
         return new Response(JSON.stringify({ deleted_hashes: hash_values }));
       }
@@ -108,16 +112,20 @@ async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLit
     }) as typeof fetch;
     process.exit = ((value: number) => { code = value; throw new Error(`exit:${value}`); }) as typeof process.exit;
     process.stdout.write = ((value: any) => { output += String(value); return true; }) as typeof process.stdout.write;
+    console.error = ((...a: unknown[]) => { errors += a.join(" "); }) as typeof console.error;
+    console.log = ((...a: unknown[]) => { output += `${a.join(" ")}\n`; }) as typeof console.log;
     const program = new Command();
     register(program);
-    const argv = ["integrity", "prune-history", "--json", "--checkpoint", ...args.checkpoints, "--admin-pass", "secret", ...(args.extra ?? [])];
+    const argv = ["integrity", "prune-history", ...(args.human ? [] : ["--json"]), "--checkpoint", ...args.checkpoints, "--admin-pass", "secret", ...(args.extra ?? [])];
     await expect(program.parseAsync(argv, { from: "user" })).rejects.toThrow("exit:");
   } finally {
     globalThis.fetch = originalFetch;
     process.exit = originalExit;
     process.stdout.write = originalWrite;
+    console.error = originalError;
+    console.log = originalLog;
   }
-  return { code, plan: JSON.parse(output), deletes, paths: args.checkpoints };
+  return { code, output, errors, plan: args.human || !output ? null : JSON.parse(output), deletes, paths: args.checkpoints };
 }
 
 function writeCheckpointFile(watermark: string, ids: Record<string, string> = {}, instanceTokens: Record<string, string | null> = {}): string {
@@ -233,6 +241,48 @@ test("check: a known watermark reads deletion history by condition; an unknown o
     globalThis.fetch = originalFetch;
     process.exit = originalExit;
     process.stdout.write = originalWrite;
+  }
+});
+
+const manyDeletions = (n: number): DeletionRecordLite[] =>
+  Array.from({ length: n }, (_, i) => del(`h${String(i).padStart(4, "0")}`, "m", "t", new Date(Date.parse("2026-01-01T00:00:00.000Z") + i * 1000).toISOString()));
+
+test("prune-history: a failure after batch 1 reports the 256 confirmed rows as FAILED, exit 3", async () => {
+  const cp = writeCheckpointFile("2026-10-02T00:00:00.000Z");
+  const deletions = manyDeletions(300);
+  const json = await prune({ checkpoints: [cp], deletions, extra: ["--apply", "--max", "300"], failDeleteCall: 1 });
+  expect(json.code).toBe(3);
+  expect(json.plan.status).toBe("failed");
+  expect(json.plan.pruned).toBe(256);
+  expect(json.plan.reason).toContain("500");
+  expect(json.deletes).toHaveLength(1);
+  expect(json.deletes[0]).toHaveLength(256);
+
+  const human = await prune({ checkpoints: [cp], deletions, extra: ["--apply", "--max", "300"], failDeleteCall: 1, human: true });
+  expect(human.code).toBe(3);
+  expect(human.output).toContain("FAILED — 256 rows pruned before the failure");
+  expect(human.output).not.toContain("nothing pruned");
+});
+
+test("prune-history: a watermark in the future prunes nothing newer than now minus the margin", async () => {
+  const cp = writeCheckpointFile(new Date(Date.now() + 86_400_000).toISOString());
+  const now = Date.now();
+  const deletions = [
+    del("old", "m", "t", new Date(now - DELETION_HISTORY_MARGIN_MS - 60_000).toISOString()),
+    del("recent", "m", "t", new Date(now - 60_000).toISOString()),
+  ];
+  const r = await prune({ checkpoints: [cp], deletions, extra: ["--apply"] });
+  expect(r.plan.ids).toEqual(["old"]);
+  expect(r.deletes).toEqual([["old"]]);
+  expect(Date.parse(r.plan.cutoff)).toBeLessThanOrEqual(Date.now() - DELETION_HISTORY_MARGIN_MS);
+});
+
+test("prune-history: --max must be digits only", async () => {
+  const cp = writeCheckpointFile("2026-10-02T00:00:00.000Z");
+  for (const bad of ["5x", "-1", "1.5"]) {
+    const r = await prune({ checkpoints: [cp], deletions: [], extra: ["--max", bad] });
+    expect(r.code).toBe(1);
+    expect(r.errors).toContain("--max must be a non-negative integer");
   }
 });
 

@@ -15,6 +15,7 @@ import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { resolveHome } from "../lib/home.js";
 import {
   compareScan,
+  DELETION_HISTORY_MARGIN_MS,
   deletionReadSince,
   deletionRecordsToPrune,
   emptyCheckpoint,
@@ -47,24 +48,38 @@ async function pruneDeletionHistory(opsPort: number | string, auth: string, chec
   await deleteHistoryIds(opsPort, auth, deletionRecordsToPrune(checkpoint, deletions));
 }
 
+/** A batch failed after `confirmed` rows were already confirmed deleted. */
+class HistoryDeleteError extends Error {
+  constructor(message: string, readonly confirmed: number) {
+    super(message);
+  }
+}
+
 /** Delete history rows by id in confirmed batches of at most 256. A batch that
- *  the operations API does not confirm deleted throws — the caller reports the
- *  failure and never claims a prune. */
-async function deleteHistoryIds(opsPort: number | string, auth: string, ids: readonly string[]): Promise<void> {
+ *  the operations API does not confirm deleted throws a HistoryDeleteError
+ *  carrying the count confirmed before it. */
+async function deleteHistoryIds(opsPort: number | string, auth: string, ids: readonly string[]): Promise<number> {
+  let confirmed = 0;
   for (let offset = 0; offset < ids.length; offset += 256) {
     const batch = ids.slice(offset, offset + 256);
-    const res = await fetch(opsUrl(opsPort), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: auth },
-      body: JSON.stringify({ operation: "delete", database: "flair", table: "MemoryDeletionHistory", hash_values: batch }),
-      signal: AbortSignal.timeout(OPS_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`operations API deletion history retention failed (${res.status})`);
-    const body = await res.json();
-    if (!batch.every(id => writeConfirmed(body, "deleted_hashes", id))) {
-      throw new Error("operations API deletion history retention was not confirmed");
+    try {
+      const res = await fetch(opsUrl(opsPort), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify({ operation: "delete", database: "flair", table: "MemoryDeletionHistory", hash_values: batch }),
+        signal: AbortSignal.timeout(OPS_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`operations API deletion history retention failed (${res.status})`);
+      const body = await res.json();
+      if (!batch.every(id => writeConfirmed(body, "deleted_hashes", id))) {
+        throw new Error("operations API deletion history retention was not confirmed");
+      }
+    } catch (err) {
+      throw new HistoryDeleteError(err instanceof Error ? err.message : String(err), confirmed);
     }
+    confirmed += batch.length;
   }
+  return confirmed;
 }
 
 function opsUrl(opsPort: number | string): string {
@@ -204,7 +219,7 @@ function renderHuman(v: IntegrityVerdict, checkpointPath: string): string {
 }
 
 interface PrunePlan {
-  status: "refused" | "planned" | "pruned";
+  status: "refused" | "planned" | "pruned" | "failed";
   reason?: string;
   cutoff?: string;
   planned: number;
@@ -218,6 +233,13 @@ function renderPrunePlan(plan: PrunePlan): string {
   if (plan.status === "refused") {
     return [
       "Deletion-history retention: REFUSED — nothing pruned.",
+      `  reason: ${plan.reason}`,
+      `  checkpoints: ${plan.checkpoints.join(", ")}`,
+    ].join("\n");
+  }
+  if (plan.status === "failed") {
+    return [
+      `Deletion-history retention: FAILED — ${plan.pruned} rows pruned before the failure.`,
       `  reason: ${plan.reason}`,
       `  checkpoints: ${plan.checkpoints.join(", ")}`,
     ].join("\n");
@@ -236,8 +258,9 @@ function renderPrunePlan(plan: PrunePlan): string {
 /**
  * The retention plan: read every named checkpoint; refuse (prune nothing) when
  * one is missing or unreadable or a watermark cannot be parsed; otherwise prune
- * history older than the OLDEST watermark minus the margin, at most `cap` rows,
- * and only when `apply`. Never deletes without a plan that says what it pruned.
+ * history older than the OLDEST watermark minus the margin (never later than
+ * now minus the margin), at most `cap` rows, and only when `apply`. A delete
+ * failure returns "failed" with the count confirmed before it.
  */
 async function planPruneHistory(opts: {
   opsPort: number | string;
@@ -254,21 +277,25 @@ async function planPruneHistory(opts: {
     if (read.kind === "unreadable") return { status: "refused", reason: `${path}: checkpoint unreadable: ${read.reason}`, planned: 0, pruned: 0, more: false, checkpoints };
     watermarks.push(read.checkpoint.watermark ?? "");
   }
-  const cutoff = retentionCutoff(watermarks);
-  if (cutoff === null) {
+  const watermarkCutoff = retentionCutoff(watermarks);
+  if (watermarkCutoff === null) {
     return { status: "refused", reason: "a checkpoint watermark is missing or unreadable", planned: 0, pruned: 0, more: false, checkpoints };
   }
+  const cutoff = new Date(Math.min(Date.parse(watermarkCutoff), Date.now() - DELETION_HISTORY_MARGIN_MS)).toISOString();
   const { deletions } = await readCorpus(opsPort, auth, null);
   const eligible = historyRowsToPrune(deletions, cutoff, deletions.length);
   const planned = eligible.slice(0, cap);
   if (!apply) {
     return { status: "planned", cutoff, planned: planned.length, pruned: 0, more: eligible.length > planned.length, checkpoints, ids: planned.map(row => row.id) };
   }
-  await deleteHistoryIds(opsPort, auth, planned.map(row => row.id));
-  return {
-    status: "pruned", cutoff, planned: planned.length, pruned: planned.length,
-    more: eligible.length > planned.length, checkpoints, ids: planned.map(row => row.id),
-  };
+  const more = eligible.length > planned.length;
+  try {
+    const pruned = await deleteHistoryIds(opsPort, auth, planned.map(row => row.id));
+    return { status: "pruned", cutoff, planned: planned.length, pruned, more, checkpoints, ids: planned.map(row => row.id) };
+  } catch (err) {
+    if (!(err instanceof HistoryDeleteError)) throw err;
+    return { status: "failed", reason: err.message, cutoff, planned: planned.length, pruned: err.confirmed, more, checkpoints, ids: planned.slice(0, err.confirmed).map(row => row.id) };
+  }
 }
 
 export function register(program: Command): void {
@@ -350,7 +377,7 @@ export function register(program: Command): void {
   // is unreadable.
   integrity
     .command("prune-history")
-    .description("Prune MemoryDeletionHistory rows older than the oldest live checkpoint watermark minus a margin; dry-run unless --apply")
+    .description("Prune MemoryDeletionHistory rows older than the oldest named checkpoint watermark minus a margin; dry-run unless --apply")
     .option("--checkpoint <path...>", "Checkpoint file whose watermark bounds the prune; repeat for several (default: ~/.flair/integrity-checkpoint.json)")
     .option("--apply", "Delete the eligible rows; without it nothing is deleted")
     .option("--max <n>", "Hard cap on rows pruned in one run (default: 500)")
@@ -365,8 +392,9 @@ export function register(program: Command): void {
       const checkpoints: string[] = Array.isArray(opts.checkpoint) && opts.checkpoint.length > 0
         ? opts.checkpoint.map((path: unknown) => String(path))
         : [integrityCheckpointPath(resolveHome())];
-      const cap = Number.parseInt(String(opts.max ?? "500"), 10);
-      if (!Number.isSafeInteger(cap) || cap < 0) {
+      const maxText = String(opts.max ?? "500");
+      const cap = /^\d+$/.test(maxText) ? Number.parseInt(maxText, 10) : Number.NaN;
+      if (!Number.isSafeInteger(cap)) {
         console.error("Error: --max must be a non-negative integer");
         process.exit(1);
       }
@@ -383,6 +411,6 @@ export function register(program: Command): void {
       }
       if (opts.json) process.stdout.write(`${JSON.stringify(plan)}\n`);
       else console.log(renderPrunePlan(plan));
-      process.exit(plan.status === "refused" ? 3 : 0);
+      process.exit(plan.status === "refused" || plan.status === "failed" ? 3 : 0);
     });
 }
