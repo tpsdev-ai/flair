@@ -80,7 +80,7 @@ interface RawMemoryWriter {
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
   { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
   { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(row, c)", kind: "echo" },
-  { file: "resources/Federation.ts", via: "alias-source", needle: "put(mergedData)", kind: "federation-merge" },
+  { file: "resources/Federation.ts", via: "write-back", needle: "mergedData", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
   { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
@@ -88,7 +88,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
   { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivedRow, c", kind: "echo" },
-  { file: "resources/usage-recording.ts", via: "direct-put", needle: "put(usageRow)", kind: "echo" },
+  { file: "resources/usage-recording.ts", via: "write-back", needle: 'label: "usage-recording"', kind: "echo" },
   { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
   { file: "resources/auth-middleware.ts", via: "write-back", needle: 'label: "backfillEmbedding"', kind: "single-field" },
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
@@ -231,7 +231,7 @@ describe("raw flair.Memory handle coverage", () => {
   test("the enumerator finds writers — a silent zero would make this gate vacuous", () => {
     expect(writers.length).toBeGreaterThan(5);
     expect(writers.some((w) => w.file === "resources/MemoryFeed.ts" && w.via === "write-back")).toBe(true);
-    expect(writers.some((w) => w.file === "resources/Federation.ts" && w.via === "alias-source" && w.excerpt.includes("mergedData"))).toBe(true);
+    expect(writers.some((w) => w.file === "resources/Federation.ts" && w.via === "write-back" && w.excerpt.includes("mergedData"))).toBe(true);
   });
 
   test("every raw Memory writer is classified; unclassified goes red", () => {

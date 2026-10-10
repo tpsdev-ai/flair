@@ -16,8 +16,8 @@
  *
  * `recordUsageContribution()` is the one (agentId, memoryId) ledger write —
  * see its doc below for the read-scope gate it applies, the ledger-then-count
- * ordering, the individually-wrapped `withDetachedTxn` discipline, and the
- * accepted best-effort race on the final read-modify-write.
+ * ordering, and the owned read-modify-write that confirms the stored row before
+ * the count bump.
  *
  * `recordCitations()` is the NEW batch helper citation-on-write uses: the
  * same agent-required / cap / dedup / per-id failure-isolation shape as
@@ -56,6 +56,8 @@
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withDetachedTxn } from "./table-helpers.js";
+import { writeBackCommittedRow } from "./write-back.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import type { ReadScope, ScopableRecord } from "./memory-read-scope.js";
 import type { AgentAuthVerdict } from "./agent-auth.js";
@@ -88,27 +90,21 @@ export type CanReadMemory = (record: ScopableRecord | null | undefined) => boole
  * not yet bumped: a later retry just re-checks and no-ops) rather than the
  * reverse (count bumped, no ledger row → a retry would double-count).
  *
- * Every discrete Harper call is wrapped INDIVIDUALLY in its own
- * withDetachedTxn — never one wrap around a multi-step helper. A request
- * that reads/writes MULTIPLE tables (or the same table twice) in sequence
- * can otherwise inherit a closed transaction from a prior call's drained
- * chain (table-helpers.ts's withDetachedTxn doc); resources/Memory.ts's
- * closeSupersededRecord documents exactly why a single wrap around a
- * multi-await async function does NOT protect a later call inside it —
- * this mirrors that function's literal shape (get wrapped, then a
- * SEPARATE put wrapped) rather than delegating to the generic
- * patchRecord() helper, which would combine both into one un-safe wrap.
+ * The MemoryUsage ledger reads and its row create keep the withDetachedTxn
+ * discipline — one wrap per discrete Harper call (table-helpers.ts's
+ * withDetachedTxn doc): a request that reads/writes MULTIPLE tables in
+ * sequence can otherwise inherit a closed transaction from a prior call's
+ * drained chain. The count bump does not wrap its own calls: it runs through
+ * the shared write-back helper (writeBackCommittedRow, below), which opens a
+ * transaction this call OWNS and reads, builds and writes the row inside it.
  *
- * The final get-then-put for the increment is a best-effort (non-atomic)
- * read-modify-write — a concurrent contribution from a DIFFERENT agent
- * landing between this call's read and write could lose one increment.
- * Search hit-tracking is no longer this class of race (flair#1528;
- * resources/hit-tracking.ts coalesces MemoryHitStat increments).
- * Re-fetching immediately before the write (rather than reusing the
- * earlier existence-check read) narrows, without eliminating, that
- * window. Not solved here: bounded, low-severity (an undercount, never an
- * inflation), and orthogonal to the anti-gaming properties the cap/floor
- * and dedup ledger actually defend.
+ * The count bump is the shared write-back helper (write-back.ts): the row is
+ * read inside a transaction this call OWNS, the bump is built from THAT read,
+ * and the committed row is re-read before commit. A row deleted or purged
+ * between the read and the write is not bumped and NOT re-created (the plan
+ * skips an absent row); a same-id replace is refused, never overwritten; a row
+ * that keeps changing is a bounded retry. The earlier read only decides the
+ * read-scope gate above; it never authorizes the count write on its own.
  *
  * Called by recordUsageBatch() (POST /RecordUsage, explicit usage feedback)
  * and by recordCitations() below (citation-on-write) — identical ledger
@@ -156,14 +152,40 @@ export async function recordUsageContribution(
   // ownership check, and bypassing that check directly would risk letting
   // this write path smuggle OTHER field changes through instead of just the
   // count (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT").
-  const fresh = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(memoryId)).catch(() => null);
-  // Deleted, or moved out of the agent's read scope, between the check above
-  // and now — the count is not bumped (the ledger row written above stays).
-  // The count is only ever bumped on a row in the agent's read scope.
-  if (!fresh || !canRead(fresh)) return;
-  const usageRow = { ...fresh, usageCount: (fresh.usageCount ?? 0) + 1 };
-  stripUndeclaredMemoryAttributes(usageRow);
-  await withDetachedTxn(ctx, () => (databases as any).flair.Memory.put(usageRow));
+  // Targeted usageCount-ONLY bump: a full-row read-modify-write through the
+  // shared helper, against the RAW Memory table, NEVER Memory.put() (the
+  // resource class): that would 403 this cross-agent write via its ownership
+  // check, and bypassing that check directly would risk letting this write
+  // path smuggle OTHER field changes through instead of just the count
+  // (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT"). The helper
+  // confirms, inside its own transaction, that the stored row is still the one
+  // this contribution was checked against (flair#2441): a row deleted or purged
+  // after the read is not re-created (the plan skips an absent row), a same-id
+  // replace is refused, and a row in a scope that no longer reads is skipped.
+  await writeBackCommittedRow(
+    (databases as any).flair.Memory,
+    memoryId,
+    (row: any) => {
+      // Deleted, or moved out of the agent's read scope, between the check
+      // above and this read — the count is not bumped (the ledger row written
+      // above stays). The count is only ever bumped on a row in the agent's
+      // read scope.
+      if (!row || !canRead(row)) return { skip: true };
+      const usageRow = { ...row, usageCount: (row.usageCount ?? 0) + 1 };
+      stripUndeclaredMemoryAttributes(usageRow);
+      return { write: usageRow };
+    },
+    {
+      ctx,
+      label: "usage-recording",
+      // The row the contribution was checked against is the basis: the helper
+      // refuses when the stored row is no longer it (a delete, a purge, or a
+      // same-id replace with a new token).
+      expectedRow: memory,
+      pausePre: () => txnPausePoint("usage-count-pre"),
+      pausePoint: () => txnPausePoint("usage-count"),
+    },
+  );
 }
 
 /**

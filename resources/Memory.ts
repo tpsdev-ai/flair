@@ -27,6 +27,7 @@ import {
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
+import { sameStoredRow, storedRowChangedRefusal } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
@@ -2311,7 +2312,25 @@ export class Memory extends (databases as any).flair.Memory {
     // test/unit/memory-host-source.test.ts (r20-atomic, which drives POST);
     // request-context PUT rollback is pinned by
     // test/integration/host-source-atomicity-1940.test.ts (t2).
+    // flair#2441: hold the row still before this write's transaction opens, so
+    // a delete, a purge or a same-id replace can commit and be seen by the
+    // confirmation inside.
+    const beforePut = txnPausePoint("memory-put-pre");
+    if (beforePut) await beforePut;
     const putResult = await withSharedWriteTransaction(ctx, async (c) => {
+      // flair#2441: this put is over the row read as `preExisting` (which
+      // `stampInstanceToken` copied its incarnation token from). Confirm, in
+      // this write's own transaction, that the COMMITTED row is still that one:
+      // a delete or a purge since the read (the row is gone) and a same-id
+      // replace (a new token) are refused with a named 409 and nothing is written
+      // — an update write-back never re-creates the row it read. The read is an
+      // explicit fresh context, never contextless (see resources/write-back.ts).
+      const confirmPause = txnPausePoint("memory-put");
+      if (confirmPause) await confirmPause;
+      if (preExisting) {
+        const confirmed = await (databases as any).flair.Memory.get(preExisting.id, {});
+        if (!confirmed || !sameStoredRow(confirmed, preExisting)) return storedRowChangedRefusal("Memory");
+      }
       const r: any = await (databases as any).flair.Memory.put(content, c);
       if (pointer.row) {
         pointer.row.memoryId = r?.id ?? content.id ?? "";

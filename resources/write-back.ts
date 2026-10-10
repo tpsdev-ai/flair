@@ -41,6 +41,39 @@ export interface WriteBackOptions {
  *  with the row read inside its transaction, besides `matchFields`. */
 export const WRITE_BACK_IDENTITY_FIELDS = ["id", "agentId", "instanceToken", "contentHash", "createdAt"] as const;
 
+/**
+ * Is `row` still the stored row `basis` describes? Compares the fields in
+ * {@link WRITE_BACK_IDENTITY_FIELDS} — the row's id and agent, and the
+ * server-stamped incarnation token, content hash and creation time. A `basis`
+ * of `null` requires `row` to still be absent (a write-back never re-creates a
+ * row a delete or a purge removed).
+ *
+ * This is the identity check the write-back helper applies, exposed so a
+ * writer that cannot hand its write to the helper (one that joins a
+ * request-owned transaction, e.g. Memory.put) confirms the SAME facts before
+ * it writes.
+ */
+export function sameStoredRow(row: any, basis: any): boolean {
+  return row == null ? basis == null : basis != null &&
+    String(row.id) === String(basis.id) && row.agentId === basis.agentId &&
+    row.instanceToken === basis.instanceToken && row.contentHash === basis.contentHash && row.createdAt === basis.createdAt;
+}
+
+/**
+ * The named 409 for a write refused because the row it read is no longer the
+ * stored one: the row is gone (a delete or a purge committed) or its
+ * incarnation token changed (a same-id replace committed). Nothing was written.
+ */
+export function storedRowChangedRefusal(tableName: string): Response {
+  return new Response(
+    JSON.stringify({
+      error: "stored_row_changed",
+      message: `${tableName} row changed since it was read; not written`,
+    }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  );
+}
+
 /** Only the identity fields of `row`: an `expectedRow` for a caller that
  *  selects many rows before writing each back, so it need not hold them whole. */
 export function writeBackIdentity(row: Record<string, any>): Record<string, unknown> {
@@ -79,9 +112,8 @@ export async function writeBackCommittedRow(
   const attempts = opts.attempts ?? WRITE_BACK_ATTEMPTS;
   const selected = "expectedRow" in opts ? opts.expectedRow : await table.get(id, {});
   const basis = selected == null ? selected : { ...selected };
-  const sameTarget = (row: any) => row == null ? basis == null : basis != null &&
-    String(row.id) === String(basis.id) && row.agentId === basis.agentId &&
-    row.instanceToken === basis.instanceToken && row.contentHash === basis.contentHash && row.createdAt === basis.createdAt &&
+  const sameTarget = (row: any) => row == null ? basis == null :
+    basis != null && sameStoredRow(row, basis) &&
     (opts.matchFields ?? []).every((field) => isDeepStrictEqual(row[field], basis[field]));
   if (opts.pausePre) {
     const pre = opts.pausePre();

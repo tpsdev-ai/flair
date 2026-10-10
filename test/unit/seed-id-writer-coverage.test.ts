@@ -48,8 +48,8 @@ add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:wri
   "GUARDED: FeedMemories.post calls the decision on the body id before the write-back through the shared helper (flair#2354).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "GUARDED: the dedup expiry repair (flair#2358) calls the decision on the id it writes before the raw put.");
-add("Federation", ["writer:table.put#1"],
-  "GUARDED: the merge skips a reserved id (seed_id_not_federated) before the put.");
+add("Federation", ["writer:writeBackCommittedRow#1"],
+  "GUARDED: the merge skips a reserved id (seed_id_not_federated) before the write-back through the shared helper.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
   "GUARDED: the transactional skill writer (flair#2139 S2) is reached only after Memory.post/put/delete or FeedMemories ran the reserved-id decision on the write's ids; the successor upsert and predecessor close ride the same transaction.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
@@ -64,8 +64,8 @@ add("MemoryPurge", ["writer:memory.delete#1"],
 // ── BOOKKEEPING (deliberately open; see the distinctions above) ──
 add("Memory", ["writer:patchRecord#1"],
   "BOOKKEEPING: lastReflected on each derivedFrom source of a new row.");
-add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
-  "BOOKKEEPING: usageCount + 1 on a row the caller can read; the rest of the row is the stored row.");
+add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+  "BOOKKEEPING: usageCount + 1 on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354).");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
@@ -206,7 +206,7 @@ test("the listed entry paths run the decision, and its denial stops the path bef
   const federation = readFileSync("resources/Federation.ts", "utf8");
   const skip = skipContinueEnd(federation, "seed_id_not_federated");
   expect(skip, "the seed skip does not stop the record").toBeGreaterThan(-1);
-  expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
+  expect(federation.indexOf("await writeBackCommittedRow(", skip)).toBeGreaterThan(skip);
 });
 
 test("the listed entry paths run the .content-suffix id decision on the ids it writes, and its denial stops the path before it writes", () => {
@@ -239,7 +239,7 @@ test("the listed entry paths run the .content-suffix id decision on the ids it w
   expect(guard, "the federation merge does not test endsWithContentSelectorSuffix(mergedData.id) before skipping, or the skip does not stop the record").not.toBeNull();
   const skip = skipContinueEnd(federation, "content_suffix_id_not_federated");
   expect(skip).toBe(guard!.index + guard![0].length);
-  expect(federation.indexOf("await table.put(mergedData);", skip), "the merge does not write the row the predicate checked after the skip").toBeGreaterThan(skip);
+  expect(federation.indexOf("await writeBackCommittedRow(", skip), "the merge does not write the row the predicate checked after the skip").toBeGreaterThan(skip);
 });
 
 test("a new direct, aliased or computed Memory writer fails classification", () => {

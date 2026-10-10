@@ -14,7 +14,7 @@ add("instruction-version-record", ["alias-source:(databases as any).flair?.Soul#
 add("instruction-version-record", ["writer:table.create#1", "writer:table.create#2", 'writer:createHash("sha256").update#1', 'writer:createHash("sha256").update#2'], "Version appends and hashes included by conservative sink enumeration.");
 add("AgentSeed", ["writer:(databases as any).flair.Soul.put#1"], "Provisioning: source authorization and whole-template content validation precede mutations.");
 add("AgentSeed", ["writer:(databases as any).flair.Agent.put#1", "writer:(databases as any).flair.Memory.put#1"], "Other tables in the provisioning module, included by conservative sink enumeration.");
-add("Federation", ["alias-source:(databases as any).flair.Soul#1", "writer:table.put#1"], "Explicit replication path: authenticated pinned instance keys and federation classification; preserve originating provenance.");
+add("Federation", ["alias-source:(databases as any).flair.Soul#1", "writer:writeBackCommittedRow#1"], "Explicit replication path: authenticated pinned instance keys and federation classification; preserve originating provenance.");
 add("Federation", ["writer:(databases as any).flair.Instance.put#1", "writer:(databases as any).flair.Peer.put#1", "writer:(databases as any).flair.Peer.put#2", "writer:(databases as any).flair.Peer.put#3", "writer:(databases as any).flair.PairingToken.put#1", "writer:(databases as any).flair.SyncLog.put#1"], "Other tables in the federation module, included by conservative sink enumeration.");
 
 test("every raw Soul capability and mutation sink has an explicit policy", () => {

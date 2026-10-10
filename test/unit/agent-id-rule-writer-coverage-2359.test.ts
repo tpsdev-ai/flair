@@ -99,7 +99,7 @@ test("each resource Agent write path runs the guard before it writes", () => {
   const federation = readFileSync("resources/Federation.ts", "utf8");
   const skip = federation.indexOf("recordSkip(AGENT_ID_ERROR)");
   expect(skip).toBeGreaterThan(-1);
-  expect(federation.indexOf("await table.put(", skip)).toBeGreaterThan(skip);
+  expect(federation.indexOf("await writeBackCommittedRow(", skip)).toBeGreaterThan(skip);
 });
 
 test("seedAgentViaOpsApi refuses an out-of-rule id before any HTTP call", async () => {

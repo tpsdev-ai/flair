@@ -29,6 +29,8 @@ import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declar
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { verifyFederationRequestBody } from "./replay-store.js";
+import { writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import {
   classifyRecord,
   reconstructRecordVerifyBody,
@@ -200,12 +202,11 @@ export function mergeRecord(local: Record<string, any> | null, remote: SyncRecor
  *
  * `noteWriteStamp` no-ops for a current/bare stamp (a self-originated or
  * same-space sync) and for a non-Memory table (no `embeddingModel`), so only a
- * genuinely foreign Memory sync trips it. Kept as a note-ONLY helper — the raw
- * `table.put(mergedData)` stays INLINE at the call site so the raw-writer
- * coverage gates (authority-field-guard.test.ts / memory-embedding-writer-
- * coverage.test.ts) still enumerate the Memory writer — while the trip decision
- * itself is unit-testable without standing up the full signed sync-in path (see
- * test/unit-isolated/embedding-space-guard-federation.test.ts).
+ * genuinely foreign Memory sync trips it. Kept as a note-ONLY helper — the
+ * merge's row write runs through the shared write-back helper (write-back.ts,
+ * flair#2441), whose call sites the raw-writer coverage gates enumerate — while
+ * the trip decision itself is unit-testable without standing up the full signed
+ * sync-in path (see test/unit-isolated/embedding-space-guard-federation.test.ts).
  */
 export function noteFederationMergedMemory(
   recordTable: string,
@@ -959,7 +960,36 @@ export class FederationSync extends Resource {
               : randomUUID();
         }
 
-        await table.put(mergedData);
+        // flair#2441: the merge is a full-row write-back of the row it read
+        // (`local`), through the shared helper: the row is re-read inside a
+        // transaction this call OWNS, the merge is confirmed to still be over
+        // that row, and the COMMITTED row is re-read before commit. A row
+        // deleted or purged since the read is not re-created (it stays gone),
+        // and a same-id replace is refused, never overwritten by the stale
+        // merge.
+        try {
+          await writeBackCommittedRow(
+            table,
+            record.id,
+            () => ({ write: mergedData }),
+            {
+              label: "FederationSync",
+              expectedRow: local,
+              attempts: 1,
+              pausePre: () => txnPausePoint("federation-merge-pre"),
+              pausePoint: () => txnPausePoint("federation-merge"),
+            },
+          );
+        } catch (err) {
+          // The target row was superseded (deleted, purged, or replaced with a
+          // new token) between the merge's read and its write: nothing was
+          // written, and the record is skipped by name.
+          if (err instanceof WriteBackConflictError) {
+            recordSkip("merge_target_changed");
+            continue;
+          }
+          throw err;
+        }
         // embedding-space-guard slice 1: a federation-merged Memory can carry a
         // FOREIGN embeddingModel (LWW remote-win) — trip the guard's latch so
         // recall/dedup degrade instead of cosining a foreign vector. See

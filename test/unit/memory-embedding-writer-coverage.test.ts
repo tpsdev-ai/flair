@@ -50,7 +50,7 @@ const add = (file: string, sites: string[], policy: Policy, reason: string) => {
 };
 
 // ── LATCH: raw put that can land an externally-sourced foreign stamp ──
-add("Federation", ["writer:table.put#1"], "LATCH",
+add("Federation", ["writer:writeBackCommittedRow#1"], "LATCH",
   "Federation sync-in LWW merge (applyMergedRecordToTable) — a remote-win copies the REMOTE embeddingModel; must trip the latch via noteWriteStamp.");
 
 // ── GATED: Memory.ts's own post()/put()/patch() write path (calls noteWriteStamp) ──
@@ -75,8 +75,8 @@ add("MemoryArchive", ["writer:Memory.put#1"], "DELEGATED", "Existing row through
 // ── ECHO: preserves an EXISTING row's stamp ──
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "closeSupersededRecord: read-modify-write validTo close, re-writes the existing stamp.");
-add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
-  "usageCount bump: get-then-put re-writes the existing row's own stamp.");
+add("usage-recording", ["writer:writeBackCommittedRow#1"], "ECHO",
+  "usageCount bump through the shared write-back helper (flair#2441): re-writes the existing row's own stamp.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Admin reindex re-PUT of an existing local row through the shared write-back helper (flair#2354): echoes the stored embedding and embeddingModel; no re-embed.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",

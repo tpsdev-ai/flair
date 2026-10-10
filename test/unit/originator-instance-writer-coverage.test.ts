@@ -22,8 +22,9 @@
  *
  * The literal idiom cannot see a writer that resolves the table handle through a
  * variable first (the federation merge builds `{ Memory: databases.flair.Memory,
- * ... }` and calls `table.put(...)`); those are listed as explicit DYNAMIC
- * exceptions below and each is asserted to still exist. Harper's administrator
+ * ... }` and hands `table` to the shared write-back helper); such a site is
+ * enumerated by the helper scan and resolves to the `?` table key instead (see
+ * writeBackTable). Harper's administrator
  * ops API (`:9925`) is outside the repo and cannot be enumerated here.
  *
  * Verified by a mutation: appending an unstamped `(databases as any).flair.Soul.put(...)`
@@ -88,15 +89,18 @@ function writeBackTable(call: ts.CallExpression): string {
   return directTable(binding.initializer) ?? "?";
 }
 
-type Disposition = "stamped-create" | "update-only" | "resource-internal";
+type Disposition = "stamped-create" | "update-only" | "resource-internal" | "federation-merge";
 
 /**
  * The reviewed policy: key `file|table|verb` -> { count, disposition, note }.
  * A raw writer that CREATES a synced-table row is `stamped-create`; one that
  * only re-writes an EXISTING row is `update-only`; a resource's own raw
  * persistence (the row already carries the value decided above it) is
- * `resource-internal`. Every entry is asserted to be present with its count.
- * A key whose sites differ lists one entry per disposition; their counts sum.
+ * `resource-internal`; a federated merge (flair#2441) is `federation-merge` — it
+ * writes a verified peer's row and preserves the originator's own signed value,
+ * so it is NOT a local stamped create. Every entry is asserted to be present
+ * with its count. A key whose sites differ lists one entry per disposition;
+ * their counts sum.
  */
 type PolicyEntry = { count: number; disposition: Disposition; note: string };
 const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
@@ -123,7 +127,8 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/Memory.ts|Memory|put": { count: 3, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord + re-embed" },
   "resources/Memory.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "Memory.delete raw table delete" },
   "resources/MemoryMaintenance.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "reap/delete of existing rows" },
-  "resources/usage-recording.ts|Memory|put": { count: 1, disposition: "update-only", note: "usage counters on an EXISTING row" },
+  "resources/usage-recording.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "usage counters on an EXISTING row, through the shared write-back helper (flair#2441)" },
+  "resources/Federation.ts|?|write-back": { count: 1, disposition: "federation-merge", note: "FederationSync.post merge: re-writes the row it read through the shared write-back helper; a verified peer's own originatorInstanceId is preserved, never locally stamped (flair#2441)" },
 };
 
 /**
@@ -131,13 +136,7 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
  * the literal idiom above cannot see them. Each is an explicit exception to the
  * stamping rule (reviewed), and is asserted to still exist.
  */
-const DYNAMIC_RAW_WRITE_EXCEPTIONS: Array<{ file: string; marker: string; note: string }> = [
-  {
-    file: "resources/Federation.ts",
-    marker: "table.put(mergedData)",
-    note: "FederationSync.post merge — applies a verified, non-revoked peer's rows via a resolved table handle",
-  },
-];
+const DYNAMIC_RAW_WRITE_EXCEPTIONS: Array<{ file: string; marker: string; note: string }> = [];
 
 /** Directory scan (recursive), skipping test files. */
 function resourceSources(root = "resources"): string[] {
