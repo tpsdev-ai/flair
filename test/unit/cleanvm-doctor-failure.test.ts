@@ -68,8 +68,8 @@ function run(doctorOutput: string) {
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-describe("clean-VM gate: the doctor failure names the check that failed (#2438)", () => {
-  test("a non-embeddings failure names that check, not embeddings", () => {
+describe("clean-VM gate: the doctor failure lists the failing doctor lines (#2438)", () => {
+  test("a non-embeddings failure lists that line and does not mention embeddings", () => {
     const r = run(NON_EMBEDDINGS_FAIL);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain("no home instance");
@@ -78,7 +78,7 @@ describe("clean-VM gate: the doctor failure names the check that failed (#2438)"
     expect(r.stdout).toContain("1 issue");
   });
 
-  test("an embeddings failure names embeddings", () => {
+  test("a Semantic search DEGRADED failure names the #538 showstopper", () => {
     const r = run(EMBEDDINGS_FAIL);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toMatch(/Semantic search DEGRADED/);
@@ -129,7 +129,7 @@ describe("clean-VM gate: the doctor failure names the check that failed (#2438)"
     expect(r.stdout).not.toContain("FLAIR_PUBLIC_URL");
   });
 
-  test("a non-zero exit with no finding line does not name embeddings", () => {
+  test("a non-zero exit with no finding line does not mention embeddings", () => {
     const r = run("  something unexpected happened\n");
     expect(r.stdout).not.toMatch(/embeddings/i);
     expect(r.stdout).toContain("something unexpected happened");

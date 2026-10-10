@@ -109,13 +109,7 @@ echo "[3/3] flair doctor --agent $AGENT_ID --port $PORT (hard semantic gate)"
 DOCTOR_OUTPUT=$(flair doctor --agent "$AGENT_ID" --port "$PORT" 2>&1) || {
   echo "$DOCTOR_OUTPUT"
   echo ""
-  # Print the finding doctor actually counted. The embeddings showstopper is
-  # named when the embeddings check is the one that failed; a different failing
-  # check is reported by its own ✗ (or counted ⚠) line (flair#2438: on #2436 the
-  # embeddings check passed and the counted issue was an agent-homes warning, yet
-  # this message blamed embeddings). The parser reads doctor's own lines and,
-  # when it cannot attribute the failure to a check, lists them rather than
-  # asserting a cause.
+  # The #538 showstopper is named only when doctor prints `Semantic search DEGRADED`; every other failing line, including other embeddings failures, is listed as doctor printed it.
   node --input-type=module - "$DOCTOR_OUTPUT" <<'DOCTORFAIL'
 const raw = process.argv[2] ?? "";
 
@@ -177,9 +171,6 @@ if (shown.length > 0) {
   for (const line of seen.length > 0 ? seen : lines.filter((l) => l.trim() !== "")) out.push(line);
 }
 
-// The embeddings check is the failing one when an embeddings ✗ (a red
-// "Semantic search DEGRADED") is among the findings; a different failing check
-// leaves this unnamed.
 if (hard.some((f) => f.lines.some((l) => /Semantic search DEGRADED/.test(l)))) {
   out.push("      The embeddings check itself failed on a realistic non-root sudo-install:");
   out.push("      semantic search is DEGRADED and recall-by-meaning is not working. The #538");
