@@ -11,7 +11,7 @@
  * seeds or writes real rows against a real Harper and asserts on what a READ
  * returns.
  *
- *   n1a  a write body's own instanceToken never becomes the stored token;
+ *   n1a  a PUT body's own instanceToken never becomes the stored token;
  *   n1b  a pointer whose stored token does not match its Memory row is not
  *        returned (and one that matches IS — the control);
  *   n2   an author-only pointer on another agent's memory is withheld from a
@@ -20,9 +20,15 @@
  *        returns no record and no pointer;
  *   n4   after a same-id replace the OLD pointer row is not returned for the new
  *        row, and a re-bound pointer is (the control);
- *   n5   a PATCH keeps the stored token, so the pointer stays attached.
+ *   n5   a PATCH keeps the stored token, so the pointer stays attached;
+ *   n6   a POST's own instanceToken never becomes the stored token, and a POST
+ *        over an existing id with a forged token is refused (409);
+ *   n7   a pointer whose authorId differs from the memory's agentId is not
+ *        returned (a matching authorId is);
+ *   n8   a pointer on an archived memory is not returned (unarchived, it is).
  *
- * Memory rows a supported write can produce are written through POST /Memory.
+ * Memory rows a supported write can produce are written through POST /Memory
+ * for creation and PUT/PATCH for the update cases.
  * Where a test needs a state no supported write can produce (a pointer row whose
  * token does not match, a Memory row removed while its pointer row stays), the ops
  * API places or alters it. No product code is changed.
@@ -58,6 +64,8 @@ const author = mkAgent("hpneg-author");
 const reader = mkAgent("hpneg-reader");
 const other = mkAgent("hpneg-other");
 const POINTER = { v: 1, host: "openclaw", kind: "run", id: "run-neg1aaaa" };
+const POINTER_N3 = { v: 1, host: "openclaw", kind: "run", id: "run-n3-deleted" };
+const POINTER_N3_LIVE = { v: 1, host: "openclaw", kind: "run", id: "run-n3-live" };
 
 function adminOp(op: Record<string, any>): Promise<Response> {
   return fetch(harper.opsURL, {
@@ -148,6 +156,20 @@ async function readMemoryAs(a: TestAgent, id: string): Promise<{ status: number;
     body = text;
   }
   return { status: res.status, body };
+}
+
+/** The rows of a gated collection read (GET /Memory?agentId=...) as `a`. */
+async function listMemoryAs(a: TestAgent, agentId: string): Promise<{ status: number; rows: any[]; text: string }> {
+  const res = await reqAs(a, "GET", `/Memory?agentId=${encodeURIComponent(agentId)}`);
+  const text = await res.text();
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = [];
+  }
+  const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : [];
+  return { status: res.status, rows, text };
 }
 
 beforeAll(async () => {
@@ -252,12 +274,24 @@ describe("flair#1940 A1-iv — host pointer negative cases (real Harper)", () =>
       agentId: author.id,
       content: "n3 body",
       visibility: "shared",
-      hostSource: POINTER,
+      hostSource: POINTER_N3,
       hostSourceScope: "record",
     });
     expect(create.ok, `create returned ${create.status}`).toBe(true);
+    // Control: a live sibling with its own pointer, so the list below is a read
+    // that can return a row and a pointer.
+    const liveId = "hpneg-n3-live";
+    const live = await reqAs(author, "POST", "/Memory", {
+      id: liveId,
+      agentId: author.id,
+      content: "n3 live body",
+      visibility: "shared",
+      hostSource: POINTER_N3_LIVE,
+      hostSourceScope: "record",
+    });
+    expect(live.ok, `live create returned ${live.status}`).toBe(true);
     const attached = await readMemoryAs(author, id);
-    expect(attached.body.hostSource).toEqual(POINTER);
+    expect(attached.body.hostSource).toEqual(POINTER_N3);
 
     // Remove ONLY the Memory row, leaving the pointer row: the design's
     // cleanup-hygiene case (cleanup may lag, so the read join refuses a pointer
@@ -267,6 +301,15 @@ describe("flair#1940 A1-iv — host pointer negative cases (real Harper)", () =>
 
     const afterDelete = await readMemoryAs(author, id);
     expect(afterDelete.status).toBe(404);
+    const errText = typeof afterDelete.body === "string" ? afterDelete.body : JSON.stringify(afterDelete.body ?? "");
+    expect(errText).not.toContain("hostSource");
+    expect(errText).not.toContain(POINTER_N3.id);
+
+    const list = await listMemoryAs(author, author.id);
+    expect(list.status).toBe(200);
+    expect(list.rows.find((r) => r.id === liveId)?.hostSource).toEqual(POINTER_N3_LIVE);
+    expect(list.rows.find((r) => r.id === id)).toBeUndefined();
+    expect(list.text).not.toContain(POINTER_N3.id);
   }, 60_000);
 
   it("n4: after a same-id replace the old pointer is not returned for the new row", async () => {
@@ -336,5 +379,110 @@ describe("flair#1940 A1-iv — host pointer negative cases (real Harper)", () =>
     const read = await readMemoryAs(author, id);
     expect(read.status).toBe(200);
     expect(read.body.hostSource).toEqual(POINTER);
+  }, 60_000);
+
+  it("n6: a POST's own instanceToken is not stored, and a POST over an existing id is refused", async () => {
+    const id = "hpneg-n6";
+    const forgedToken = "forged-instance-token-n6";
+    const create = await reqAs(author, "POST", "/Memory", {
+      id,
+      agentId: author.id,
+      content: "n6 body",
+      visibility: "shared",
+      hostSource: POINTER,
+      hostSourceScope: "record",
+      instanceToken: forgedToken,
+    });
+    expect(create.ok, `create returned ${create.status}`).toBe(true);
+    const stored = await readRow("Memory", id);
+    expect(typeof stored.instanceToken).toBe("string");
+    expect(stored.instanceToken).not.toBe(forgedToken);
+    const ptr = await readPointerRow(id);
+    expect(ptr.memoryInstanceToken).toBe(stored.instanceToken);
+    expect((await readMemoryAs(author, id)).body.hostSource).toEqual(POINTER);
+
+    // A pointer bound to the client's value is not returned.
+    await updateRow("MemoryHostSource", { memoryId: id, memoryInstanceToken: forgedToken });
+    const forgedBound = await readMemoryAs(author, id);
+    expect(forgedBound.status).toBe(200);
+    expect(forgedBound.body.hostSource).toBeUndefined();
+    await updateRow("MemoryHostSource", { memoryId: id, memoryInstanceToken: stored.instanceToken });
+
+    // POST over the existing id with a forged token: refused, stored token unchanged.
+    const over = await reqAs(author, "POST", "/Memory", {
+      id,
+      agentId: author.id,
+      content: "n6 overwrite",
+      visibility: "shared",
+      instanceToken: forgedToken,
+    });
+    expect(over.status).toBe(409);
+    const after = await readRow("Memory", id);
+    expect(after.instanceToken).toBe(stored.instanceToken);
+    expect(after.content).toBe("n6 body");
+    expect((await readMemoryAs(author, id)).body.hostSource).toEqual(POINTER);
+  }, 60_000);
+
+  it("n7: a pointer whose authorId differs from the memory's agentId is not returned", async () => {
+    const id = "hpneg-n7";
+    await insertRow("Memory", {
+      id,
+      agentId: author.id,
+      content: "n7 body",
+      contentHash: "h",
+      visibility: "shared",
+      archived: false,
+      instanceToken: "inst-n7",
+      createdAt: new Date().toISOString(),
+    });
+    await insertRow("MemoryHostSource", {
+      memoryId: id,
+      hostSource: JSON.stringify(POINTER),
+      scopeAtWrite: "shared",
+      authorId: other.id,
+      memoryInstanceToken: "inst-n7",
+      receivedAt: new Date().toISOString(),
+    });
+
+    const mismatch = await readMemoryAs(reader, id);
+    expect(mismatch.status).toBe(200);
+    expect(mismatch.body.hostSource).toBeUndefined();
+
+    await updateRow("MemoryHostSource", { memoryId: id, authorId: author.id });
+    const matched = await readMemoryAs(reader, id);
+    expect(matched.status).toBe(200);
+    expect(matched.body.hostSource).toEqual(POINTER);
+  }, 60_000);
+
+  it("n8: a pointer on an archived memory is not returned", async () => {
+    const id = "hpneg-n8";
+    await insertRow("Memory", {
+      id,
+      agentId: author.id,
+      content: "n8 body",
+      contentHash: "h",
+      visibility: "shared",
+      archived: false,
+      instanceToken: "inst-n8",
+      createdAt: new Date().toISOString(),
+    });
+    await insertRow("MemoryHostSource", {
+      memoryId: id,
+      hostSource: JSON.stringify(POINTER),
+      scopeAtWrite: "shared",
+      authorId: author.id,
+      memoryInstanceToken: "inst-n8",
+      receivedAt: new Date().toISOString(),
+    });
+
+    const live = await readMemoryAs(author, id);
+    expect(live.status).toBe(200);
+    expect(live.body.hostSource).toEqual(POINTER);
+
+    await updateRow("Memory", { id, archived: true });
+    const archived = await readMemoryAs(author, id);
+    expect(archived.status).toBe(200);
+    expect(archived.body.archived).toBe(true);
+    expect(archived.body.hostSource).toBeUndefined();
   }, 60_000);
 });
