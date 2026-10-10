@@ -1,1 +1,0 @@
-- Successful Soul PUT/PATCH identity changes close the old history window; occupied destinations return `409 soul_subject_occupied`. IDs written by the new encoder distinguish colon-bearing pairs; a collision with a legacy version ID is refused with a rollback rather than merged.

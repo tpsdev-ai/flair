@@ -5,4 +5,4 @@
  * attribute edge cases in a published dist/ build. test/version-sync.test.ts
  * asserts this stays equal to package.json's "version" field.
  */
-export const TOOL_VERSION = "0.59.0";
+export const TOOL_VERSION = "0.60.0";

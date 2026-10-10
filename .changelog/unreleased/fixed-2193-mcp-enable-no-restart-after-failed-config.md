@@ -1,1 +1,0 @@
-- **`flair mcp enable` stops before the restart when its local configuration update fails, exits non-zero, and says to fix the reported cause and re-run.** Previously the standalone flow continued past the failed update and could reach the restart. (flair#2193)

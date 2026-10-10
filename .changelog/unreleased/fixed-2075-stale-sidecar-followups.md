@@ -1,1 +1,0 @@
-- **Launchd stop verifies the recorded process exited before attempting stale-sidecar cleanup (#2075).** Unreadable PID, unload failure or unconfirmed exit fails the stop without cleanup. The restart test uses a short scratch path; command tests cover NOT_RUNNING cleanup.

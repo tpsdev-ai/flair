@@ -1,1 +1,0 @@
-- The shipped `config.yaml` leaves `mcp.signingKeyPem` unpinned. `flair mcp enable` does not generate a signing-key file or stage `FLAIR_MCP_SIGNING_KEY_PEM`. An install that wants a fixed key adds the `signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}` line and stages the variable.

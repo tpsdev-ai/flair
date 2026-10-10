@@ -1,1 +1,0 @@
-- **The bridge docs say plugin `import` options are a null-prototype record (flair#2293).** Since #2257 the options passed to a code plugin's `import` have no prototype, so inherited methods such as `hasOwnProperty` are absent; the docs now recommend `Object.hasOwn(opts, key)`.

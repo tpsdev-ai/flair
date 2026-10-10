@@ -1,3 +1,4 @@
+import { AGENT_ID_ERROR, invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
 import { randomUUID } from "node:crypto";
 /**
  * POST /AgentSeed
@@ -65,9 +66,13 @@ export class AgentSeed extends Resource {
     if (denied) return denied;
 
     const { agentId, displayName, role = "agent", soulTemplate, starterMemories } = data || {};
-    if (!agentId) return new Response(JSON.stringify({ error: "agentId required" }), { status: 400 });
-    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(agentId)) {
-      return new Response(JSON.stringify({ error: "invalid agentId" }), { status: 400 });
+    // flair#2359 — the ONE shared agent-ID rule, which refuses an absent id
+    // (`undefined`/`null`/empty) exactly as it refuses a malformed one.
+    if (!isValidAgentId(agentId)) {
+      return new Response(
+        JSON.stringify({ error: AGENT_ID_ERROR, message: invalidAgentIdMessage(agentId) }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
     }
 
     const now = new Date().toISOString();

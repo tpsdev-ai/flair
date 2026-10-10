@@ -1,3 +1,0 @@
-- **`flair bridge import` now declares `--user`, `--base-url` and `--api-key-file`.** The mem0 bridge's old hint named flags the command did not accept. Mem0 now accepts a user id and an HTTP(S) base URL, and reads the API key from `MEM0_API_KEY` or a `--api-key-file` whose group/world permissions are clear. The key is never an argv value. YAML imports refuse `--api-key-file`.
-
-  > **Heads-up:** set `MEM0_API_KEY` or pass `--api-key-file <path>` (no group/world permissions; `chmod 600` recommended). An explicitly empty or invalid `--base-url` is refused before a request, and API failures do not print response bodies or pagination URLs.

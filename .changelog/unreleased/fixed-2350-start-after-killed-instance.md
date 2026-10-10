@@ -1,1 +1,0 @@
-- **`flair start` can recover an UNKNOWN state with an exited recorded owner (Refs #2350).** Recovery requires the data-directory guard to pass, owner records readable without following symlinks, confirmed PID exit, and a refused TCP connection; start rechecks the selected PID before spawning. UNKNOWN refusals suggest `flair doctor` for diagnosis.

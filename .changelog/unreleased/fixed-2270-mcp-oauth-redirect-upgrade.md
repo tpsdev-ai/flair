@@ -1,1 +1,0 @@
-- **Local upgrade can stage a missing GitHub OAuth redirect from configured MCP issuer and credentials.** Local `flair init` also stages it. The boot guard disables a credentialed GitHub provider when its redirect is missing. Doctor reads authenticated target readiness. Fabric `--target` migration is outside this change.

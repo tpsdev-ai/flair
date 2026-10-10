@@ -72,6 +72,7 @@ import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpec
 import { harperPortValue } from "./lib/harper-port-value.js";
 import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import { encodeRecordId } from "./lib/record-id-path.js";
+import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -3505,6 +3506,12 @@ export async function seedAgentViaOpsApi(
    */
   occupiedListener?: OperationsPortAttribution,
 ): Promise<void> {
+  // flair#2359 — the ONE agent-ID rule, before the operations-API insert. This
+  // is the write path for `flair agent add`, `flair import` and `flair init`,
+  // so a caller-supplied id is refused here by name before any HTTP call.
+  if (!isValidAgentId(agentId)) {
+    throw new Error(invalidAgentIdMessage(agentId));
+  }
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
@@ -5425,8 +5432,7 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
   // A stale or foreign pid holding the port is NOT healed. False-green is
   // worse than no self-heal.
   //
-  // The write uses the same O_NOFOLLOW / 0600 / atomic-rename posture as every
-  // other sidecar write. We skip self-heal when the dataDir is unsafe
+  // The write uses mode 0600 and atomic rename. We skip self-heal when the dataDir is unsafe
   // (symlink / world-writable) — the check has already happened above.
   let portOwner: PortOwnerResult = { kind: "unavailable" };
   let instanceMatch: InstanceMatch = { kind: "unavailable" };
@@ -5478,12 +5484,11 @@ export async function gatherDaemonEvidence(port: number, dataDir: string): Promi
 }
 
 /**
- * Write the identity sidecar atomically (temp + rename) at spawn time or
- * during self-heal (flair#1454 decision 3). `pid` is the spawned process's
- * pid — the same number Harper writes to `hdb.pid`, since Harper runs
- * in-process. `startTimeMs` defaults to `Date.now()` for a fresh spawn.
+ * Write the identity sidecar atomically (temp + rename) for direct starts,
+ * confirmed managed starts, or self-heal (flair#1454 decision 3).
+ * `startTimeMs` defaults to `Date.now()` for a fresh direct spawn.
  *
- * Self-heal callers pass the live process's actual start time (from
+ * Managed start and self-heal callers pass the live process's actual start time (from
  * readProcessStartTimeMs) so the sidecar records an accurate epoch, not a
  * wall-clock approximation. Note: in the self-heal path the ±2s start-time
  * check in verifyIdentity is NOT what prevents recycled-pid adoption —
@@ -5612,6 +5617,7 @@ bindServiceCli({
   observeLaunchdManagement,
   probeHealth,
   readyOpsSocketPosture,
+  recordManagedStartSidecar,
   resolveHarperBin,
   resolveHttpBindHost,
   resolveHttpPort,
@@ -6239,6 +6245,108 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
     plistExists: existsSync,
     list: realLaunchctlLister,
   });
+}
+
+/**
+ * Record the identity sidecar for the instance a launchd-managed start brought
+ * up during a CLI-managed start (flair#2411). The direct start path writes one
+ * immediately after spawn. A launchd KeepAlive relaunch does not write one.
+ *
+ * The sidecar is written after launchd reports the same pid before and after a
+ * Flair-shaped health response and matching serving-pid and hdb.pid reads.
+ * The writer uses an atomic temp+rename and mode 0600; pidfile and sidecar
+ * reads use O_NOFOLLOW.
+ *
+ * A throwing waitForHealth call rethrows its original error so the caller's
+ * existing fallback still runs; a failed Flair fingerprint and the other
+ * unconfirmed cases return `recorded: false`.
+ */
+export async function recordManagedStartSidecar(
+  dataDir: string,
+  port: number,
+  label: string,
+  deps: {
+    adminUser?: string;
+    adminPass?: string;
+    timeoutMs?: number;
+    list?: LaunchctlLister;
+    waitForHealth?: (port: number, adminUser: string, adminPass: string, timeoutMs: number) => Promise<void>;
+    probeHealth?: (port: number) => Promise<HealthResult>;
+    servingPid?: (dataDir: string, port: number) => number | null;
+    readStartTime?: (pid: number) => number | null;
+    write?: (dataDir: string, pid: number, port: number, startTimeMs: number) => void;
+    warn?: (line: string) => void;
+  } = {},
+): Promise<{ recorded: true; pid: number; detail: string } | { recorded: false; detail: string }> {
+  const warn = deps.warn ?? ((line: string) => console.error(line));
+  const timeoutMs = deps.timeoutMs ?? STARTUP_TIMEOUT_MS;
+  try {
+    await (deps.waitForHealth ?? waitForHealth)(
+      port,
+      deps.adminUser ?? DEFAULT_ADMIN_USER,
+      deps.adminPass ?? process.env.HDB_ADMIN_PASSWORD ?? "",
+      timeoutMs,
+    );
+  } catch (err: any) {
+    warn(`⚠️  the instance for launchd job ${label} did not answer health within ${timeoutMs}ms, so its identity sidecar was not written (${err?.message ?? err})`);
+    throw err;
+  }
+  const job = readLaunchctlJobState(label, deps.list ?? realLaunchctlLister);
+  if (!job.registered) {
+    const detail = `could not read launchd job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  if (job.pid === null) {
+    const detail = `launchd did not report a running pid for job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const health = await (deps.probeHealth ?? probeHealth)(port);
+  if (health.kind !== "ok") {
+    const detail = `the instance for launchd job ${label} did not return Flair health (${health.kind}), so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const serving = (deps.servingPid ?? ((_dataDir, httpPort) => {
+    const listeners = resolveListenerPids(httpPort);
+    return listeners?.length === 1 ? listeners[0] : null;
+  }))(dataDir, port);
+  if (serving === null) {
+    const detail = `launchd job ${label} runs as process ${job.pid}, but the process serving this instance could not be identified, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  if (serving !== job.pid) {
+    const detail = `the process answering on port ${port} is ${serving}, not launchd's process ${job.pid} for job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const again = readLaunchctlJobState(label, deps.list ?? realLaunchctlLister);
+  if (!again.registered) {
+    const detail = `could not re-read launchd job ${label}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  if (again.pid !== job.pid) {
+    const detail = `launchd job ${label} changed pid during health confirmation, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const pidfile = readPidfile(dataDir);
+  if (pidfile.kind !== "present" || pidfile.pid !== job.pid) {
+    const detail = `hdb.pid does not confirm launchd job ${label}'s process ${job.pid}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  const startTimeMs = (deps.readStartTime ?? readProcessStartTimeMs)(job.pid);
+  if (startTimeMs === null) {
+    const detail = `could not read the start time of launchd job ${label}'s process ${job.pid}, so its identity sidecar was not written`;
+    warn(`⚠️  ${detail}`);
+    return { recorded: false, detail };
+  }
+  (deps.write ?? writeDaemonSidecar)(dataDir, job.pid, port, startTimeMs);
+  return { recorded: true, pid: job.pid, detail: `launchd job ${label} is running as process ${job.pid}` };
 }
 
 // `preserveHttpPortValue` / `preserveSecurePort` / `bindHostOf` live in
@@ -8166,7 +8274,9 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
             throw new LaunchdValidationRefusal(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
           }
           ensureLaunchdServiceLoaded(dataDir, realLaunchctlCommand);
-          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+          await recordManagedStartSidecar(dataDir, port, launchdLabel(dataDir), {
+            adminPass: process.env.HDB_ADMIN_PASSWORD ?? "",
+          });
           readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade
           stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
           return;

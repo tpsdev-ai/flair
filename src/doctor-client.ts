@@ -25,6 +25,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
+import { AGENT_ID_RULE, isValidAgentId } from "./lib/agent-id-rule.js";
 import type { SeedOwnerRead } from "./keystore.js";
 import {
   ALL_CLIENTS,
@@ -1857,9 +1858,16 @@ interface ProbeSpawn {
   spawnError: string | null;
 }
 
+// The pin must never sit at SIGTERM's default disposition: cleanup sends SIGKILL
+// only while the pin answers signal 0, so a pin killed by the probe's own
+// SIGTERM skips that SIGKILL. Ignoring the signals here, before the fork, lets
+// the pin inherit them across fork and exec instead of racing to run its own
+// `trap`; the command's shell gets the defaults back via `trap -` before its exec.
 const PROBE_WRAPPER =
-  `( ( trap '' HUP INT QUIT TERM; PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
-  `printf '%s' "$!" >"$1" ); exec /bin/sh -c "$3"`;
+  `trap '' HUP INT QUIT TERM; ` +
+  `( ( PATH="$PATH:/bin:/usr/bin"; exec sleep "$2" ) </dev/null >/dev/null 2>&1 & ` +
+  `printf '%s' "$!" >"$1" ); ` +
+  `trap - HUP INT QUIT TERM; exec /bin/sh -c "$3"`;
 
 function spawnProbeBounded(
   command: string,
@@ -2820,4 +2828,34 @@ export function resolveFixAgentId(args: {
   const candidate = optsAgent || envAgentId || anyKnownAgentId || inferSoleAgentId(keyAgentIds);
   if (candidate && isNodeKeyId(candidate, keysDir)) return undefined;
   return candidate;
+}
+
+/** A stored agent id outside the shared rule, as reported by `flair doctor`. */
+export interface AgentIdRuleFinding {
+  invalidIds: string[];
+  message: string;
+  fixHint: string;
+}
+
+/**
+ * Report a stored Agent id that is outside the shared agent-ID rule
+ * (flair#2359). `rows` is the Agent roster read from the instance. Returns null
+ * when the roster's ids conform. PURE — it reports; nothing is rewritten.
+ */
+export function describeAgentIdRuleFinding(rows: Array<{ id?: unknown }>): AgentIdRuleFinding | null {
+  const invalidIds = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row == null || !isValidAgentId(row.id))
+    .map((row) => String(row?.id))
+    .sort();
+  if (invalidIds.length === 0) return null;
+  return {
+    invalidIds,
+    message:
+      `${invalidIds.length} stored agent id(s) are outside the agent-ID rule (${AGENT_ID_RULE}): ` +
+      invalidIds.join(", "),
+    fixHint:
+      "after any needed data migration and registration with `flair agent add <new-id>`, " +
+      "remove the old row with `flair agent remove <id>`, or remove it alone if stale; " +
+      "`flair agent remove` also deletes the agent's Memory and Soul data",
+  };
 }

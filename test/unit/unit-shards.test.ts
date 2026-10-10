@@ -1,42 +1,47 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import {
   ROOT, SHARDS, assignShards, coverageReport, listUnitFiles, shardFiles, verifyShards,
 } from "../../scripts/ci/unit-shards.mjs";
 import { unitPlan } from "../../scripts/test-unit.ts";
-import { checkGate, gateMutations, parseWorkflows, type Gate } from "../helpers/workflow-gate";
+import { testFilesUnder } from "../../scripts/ci/check-cli-spawn-budgets.mjs";
+import { checkCoverageGate, gateCases, parseWorkflows, respacedGate, type Gate } from "../helpers/workflow-gate";
 
 const ALL = listUnitFiles();
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
+const SUFFIXES = [".test", "_test", ".spec", "_spec"];
+const EXTENSIONS = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
+const DIRS = ["test", "test/unit", "test/unit/nested"];
+const FIXTURE_FILES = DIRS.flatMap(dir => SUFFIXES.flatMap(suffix =>
+  EXTENSIONS.map(extension => `${dir}/sample${suffix}.${extension}`)));
+
 function fixtureRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "flair-shard-fixture-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "flair-shard-fixture-")));
   fixtures.push(root);
   mkdirSync(join(root, "scripts/ci"), { recursive: true });
   mkdirSync(join(root, "test/unit/nested"), { recursive: true });
-  for (const extension of ["js", "jsx", "ts", "tsx"]) {
-    for (const dir of ["test", "test/unit", "test/unit/nested"]) {
-      writeFileSync(join(root, dir, `sample.test.${extension}`), "");
-    }
-  }
-  writeFileSync(join(root, "test/unit/ignored.spec.ts"), "");
+  for (const file of FIXTURE_FILES) writeFileSync(join(root, file), "");
+  writeFileSync(join(root, "test/unit/not-a-test.ts"), "");
   cpSync(join(ROOT, "scripts/ci/test-files.mjs"), join(root, "scripts/ci/test-files.mjs"));
   cpSync(join(ROOT, "scripts/ci/unit-shards.mjs"), join(root, "scripts/ci/unit-shards.mjs"));
   return root;
 }
+
+// An independent enumeration (shell find) filtered by Bun's documented test
+// filename patterns, checked against the module's own discovery (flair#2288).
+const BUN_TEST_NAME = /(?:\.test|_test|\.spec|_spec)\.(?:[cm]?[jt]s|[jt]sx)$/i;
 
 function findFiles(): string[] {
   const r = spawnSync("bash", ["-c", "{ find test/unit -type f; find test -maxdepth 1 -type f; } | LC_ALL=C sort"], {
     cwd: ROOT, encoding: "utf8", timeout: 15_000,
   });
   if (r.status !== 0) throw new Error(`find failed: ${r.stderr}`);
-  return r.stdout.split("\n").filter(file =>
-    [".test.js", ".test.jsx", ".test.ts", ".test.tsx"].some(suffix => file.endsWith(suffix)),
-  ).sort();
+  return r.stdout.split("\n").filter(file => BUN_TEST_NAME.test(file)).sort();
 }
 
 describe("unit-shards — discovery", () => {
@@ -45,12 +50,11 @@ describe("unit-shards — discovery", () => {
     expect(ALL.length).toBeGreaterThan(0);
   });
 
-  test("includes all runner extensions at both root boundaries", () => {
+  test("includes every runner suffix and extension at both root boundaries", () => {
     const root = fixtureRoot();
-    const expected = ["js", "jsx", "ts", "tsx"].flatMap(extension =>
-      ["test", "test/unit", "test/unit/nested"].map(dir => `${dir}/sample.test.${extension}`),
-    ).sort();
+    const expected = [...FIXTURE_FILES].sort();
     expect(listUnitFiles(root)).toEqual(expected);
+    expect(testFilesUnder(root).map(file => relative(root, file))).toEqual(expected);
     const result = spawnSync("node", [join(root, "scripts/ci/unit-shards.mjs"), "--verify", "--of", "1"], {
       encoding: "utf8", timeout: 20_000,
     });
@@ -68,8 +72,8 @@ describe("unit-shards — discovery", () => {
         } else if (defect === "missing") {
           rmSync(join(root, dir), { recursive: true });
         } else {
-          for (const extension of ["js", "jsx", "ts", "tsx"]) {
-            rmSync(join(root, dir, `sample.test.${extension}`));
+          for (const file of FIXTURE_FILES.filter(file => file.startsWith(`${dir}/sample`))) {
+            rmSync(join(root, file));
           }
         }
         expect(() => listUnitFiles(root)).toThrow();
@@ -220,26 +224,25 @@ describe("unit-shards — CLI", () => {
 
 });
 
-// The coverage gate has to actually gate: a substring match over the workflow
-// file passes on a step that is disabled or moved out of the required job
-// (flair#2289).
 const WORKFLOW_DIR = join(ROOT, ".github", "workflows");
 const UNIT_GATE: Gate = {
-  requiredCheck: "Unit Tests",
   step: "Verify root unit shard coverage",
-  script: "scripts/ci/unit-shards.mjs",
-  flag: "--verify",
+  command: "node scripts/ci/unit-shards.mjs --verify",
 };
 
-describe("the root-unit shard coverage gate is an enabled step of the required unit job", () => {
-  test("the committed workflow satisfies the gate's required shape", () => {
-    expect(() => checkGate(parseWorkflows(WORKFLOW_DIR), UNIT_GATE)).not.toThrow();
+describe("root-unit shard coverage gate workflow shape", () => {
+  test("the committed workflows satisfy the checker", () => {
+    expect(() => checkCoverageGate(parseWorkflows(WORKFLOW_DIR), UNIT_GATE)).not.toThrow();
   });
 
-  test("a renamed, disabled, continued, relocated or under-argumented gate is refused", () => {
-    const workflows = parseWorkflows(WORKFLOW_DIR);
-    for (const [label, build] of gateMutations(workflows, UNIT_GATE)) {
-      expect(() => checkGate(build(), UNIT_GATE), label).toThrow();
-    }
+  test("the canonical command accepts normalised whitespace", () => {
+    expect(() => checkCoverageGate(respacedGate(WORKFLOW_DIR, UNIT_GATE), UNIT_GATE)).not.toThrow();
   });
+
+  for (const [label, build, error] of gateCases(WORKFLOW_DIR, UNIT_GATE)) {
+    test(`refuses ${label}`, () => {
+      const mutated = build();
+      expect(() => checkCoverageGate(mutated, UNIT_GATE)).toThrow(error);
+    });
+  }
 });

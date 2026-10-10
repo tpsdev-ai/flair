@@ -196,12 +196,14 @@ for (const config of HARPERS) {
       test("(d) an administrator still creates and updates rows through PATCH (Basic and an admin agent)", async () => {
         for (const [label, auth] of [["Basic", "basic"], ["admin agent", ADMIN]] as const) {
           const id = `${p}-admin-${randomUUID()}`;
-          const created = await patch(`/Memory/${id}`, { agentId: A.id, content: `${p} ${label} create` }, auth);
+          // Lower case: Memory writes redact `Basic <text>` as a credential (flair#2407).
+          const text = label.toLowerCase();
+          const created = await patch(`/Memory/${id}`, { agentId: A.id, content: `${p} ${text} create` }, auth);
           expect(created.status, `${label} create: ${created.text}`).toBeLessThan(300);
-          expect((await rowIn("Memory", id))?.content, `${label} create`).toBe(`${p} ${label} create`);
-          const updated = await patch(`/Memory/${id}`, { content: `${p} ${label} update` }, auth);
+          expect((await rowIn("Memory", id))?.content, `${label} create`).toBe(`${p} ${text} create`);
+          const updated = await patch(`/Memory/${id}`, { content: `${p} ${text} update` }, auth);
           expect(updated.status, `${label} update: ${updated.text}`).toBeLessThan(300);
-          expect((await rowIn("Memory", id))?.content, `${label} update`).toBe(`${p} ${label} update`);
+          expect((await rowIn("Memory", id))?.content, `${label} update`).toBe(`${p} ${text} update`);
         }
       }, 60_000);
     }
