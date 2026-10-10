@@ -187,12 +187,11 @@ export function captureHostSource(runId: string): { host: "openclaw"; kind: "run
 
 /**
  * The host session identifier for a capture callback, or null when the host
- * carries none. OpenClaw exposes `sessionKey` on the hook context and
- * `sessionId` on the llm_input/llm_output events (and on the context); the
- * value is passed through verbatim as Flair's `sessionId`, never synthesised.
+ * carries none. The event's `sessionId` wins over the context's; `sessionKey`
+ * (a slot reused across sessions) is never used.
  */
 export function sessionIdForCapture(event: any, ctx: any): string | null {
-  const raw = ctx?.sessionKey ?? event?.sessionId ?? ctx?.sessionId;
+  const raw = event?.sessionId ?? ctx?.sessionId;
   return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
 

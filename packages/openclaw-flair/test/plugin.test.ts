@@ -1128,12 +1128,49 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     }
   });
 
-  test("session id decision: the host session key, else the host session id, else none", async () => {
+  test("session id decision: the event session id, else the context session id, else none", async () => {
     const { sessionIdForCapture } = await loadModule();
-    expect(sessionIdForCapture({ sessionId: "e" }, { sessionKey: "k" })).toBe("k");
+    expect(sessionIdForCapture({ sessionId: "e" }, { sessionId: "c" })).toBe("e");
     expect(sessionIdForCapture({ sessionId: "e" }, {})).toBe("e");
     expect(sessionIdForCapture({}, { sessionId: "c" })).toBe("c");
+    expect(sessionIdForCapture({}, { sessionKey: "k" })).toBeNull();
     expect(sessionIdForCapture({}, {})).toBeNull();
+  });
+
+  test("a hook context with both sessionKey and sessionId: the write carries the sessionId", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", assistantTexts: ["remember this: both session fields are on the context"] },
+      { agentId: "A", sessionKey: "agent:A:slot", sessionId: "sess-ctx" } as any,
+    );
+    const body = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url))[0].body as any;
+    expect(body.sessionId).toBe("sess-ctx");
+  });
+
+  test("a hook context with only sessionKey: the write has no sessionId field", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", assistantTexts: ["remember this: only the session key is present"] },
+      { agentId: "A", sessionKey: "agent:A:slot" } as any,
+    );
+    const body = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url))[0].body as any;
+    expect("sessionId" in body).toBe(false);
   });
 
   test("D15: the capture write carries hostSource {openclaw, run, <runId>} and the session id", async () => {
