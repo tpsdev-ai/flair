@@ -552,8 +552,11 @@ export class BootstrapMemories extends Resource {
     // `"withheld"` (A3), and everything else is unchanged. An admin/operator
     // bootstrap stays unfiltered and takes no join — the same exception the
     // named read surfaces take. ONE batched pointer query per row set, never
-    // one per row. The join's binding fields (`agentId`, `instanceToken`,
-    // `visibility`, `archived`) are in the projected rows the caller passes in.
+    // one per row. The retrieved rows (DEFAULT_SELECT) carry every binding field
+    // (`agentId`, `instanceToken`, `visibility`, `archived`). The own-record
+    // sections (OWN_SELECT) carry `agentId` and `instanceToken` only: their query
+    // already excludes archived rows, and the reader is the author, so the author
+    // outcome never reads `visibility`.
     const hostSourceReader: string | undefined =
       authenticatedAgent && !callerIsAdmin ? authenticatedAgent : undefined;
     const pointerRenders = async (rows: readonly any[]): Promise<Map<string, any>> => {
