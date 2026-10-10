@@ -180,9 +180,13 @@ const HOST_SOURCE_ID_RE = /^[A-Za-z0-9._:/@#-]{1,256}$/;
  * The host-source pointer an OpenClaw capture claims, or null when `runId` is
  * outside the server's id grammar. The `id` is the host's run id VERBATIM —
  * never derived from captured text — so a citation of it names the host run.
+ *
+ * The check runs on the NFC form, as the server's does: the server normalises
+ * before its grammar test (U+212A KELVIN SIGN becomes ASCII "K"), so a raw-form
+ * check would omit a source the server accepts. The server stores the NFC form.
  */
 export function captureHostSource(runId: string): { host: "openclaw"; kind: "run"; id: string } | null {
-  return HOST_SOURCE_ID_RE.test(runId) ? { host: "openclaw", kind: "run", id: runId } : null;
+  return HOST_SOURCE_ID_RE.test(runId.normalize("NFC")) ? { host: "openclaw", kind: "run", id: runId } : null;
 }
 
 /**

@@ -167,7 +167,8 @@ order — live beside the code in `index.ts` and in the tests named above.
 
 A capture whose run id is within the server's `hostSource` id grammar carries it
 as the memory's **`hostSource`** (`{ host: "openclaw", kind: "run", id: <run id> }`,
-the run id verbatim, never derived from captured text), plus the host's session
+the host's run id as sent, never derived from captured text; Flair stores its
+NFC-normalised form), plus the host's session
 id when the hook carries one. A run id outside that grammar is omitted with one
 log line — the capture still lands. `hostSource` is the writer's claim, not
 verified host authorship. Covered by

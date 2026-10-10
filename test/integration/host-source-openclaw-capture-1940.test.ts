@@ -11,7 +11,9 @@
  *       for its author, and with the host session id;
  *   t2  a run id OUTSIDE the server's id grammar captures WITHOUT a source (the
  *       write still lands) and logs one line;
- *   t3  a NON-capture write (the memory_store tool) carries no source.
+ *   t3  a NON-capture write (the memory_store tool) carries no source;
+ *   t4  a run id the server NFC-normalises into its grammar (U+212A KELVIN
+ *       SIGN -> "K") keeps its source, stored in the server's NFC form.
  *
  * The host is a minimal stand-in for the OpenClaw plugin API: it exposes the
  * hooks and tools the plugin registers and nothing else. Only the plugin's
@@ -194,5 +196,24 @@ describe("flair#1940 — OpenClaw capture keeps the host run id as a host source
     const row = await findCaptured(c, marker);
     expect(row, `manual write ${marker} must have landed`).toBeTruthy(); // assertion: the manual write landed
     expect(row?.hostSource).toBeUndefined(); // assertion: a non-capture write carries no source
+  }, 120_000);
+
+  test("t4: a run id the server normalises into its grammar (U+212A KELVIN SIGN) keeps its source, stored in NFC form", async () => {
+    const api = hostForCapture();
+    const c = reader();
+    const suffix = randomUUID();
+    const runId = `run-\u212A-${suffix}`; // NFC maps U+212A to ASCII "K"
+    const marker = `openclaw-nfc-id-${randomUUID()}`;
+
+    await api._fire(
+      "llm_output",
+      { runId, assistantTexts: [`remember this: the capture target is ${marker}`] },
+      { agentId: AGENT },
+    );
+
+    const row = await findCaptured(c, marker);
+    expect(row, `capture ${marker} must have landed`).toBeTruthy(); // assertion: the capture landed
+    expect(row?.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: `run-K-${suffix}` }); // assertion: the server kept the source, NFC form
+    expect(api._warnText()).not.toContain("omitted its host source"); // assertion: the plugin did not omit it
   }, 120_000);
 });
