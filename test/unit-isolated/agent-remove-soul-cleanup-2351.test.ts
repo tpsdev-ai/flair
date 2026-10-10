@@ -100,6 +100,7 @@ beforeEach(() => {
     shouldShowInlineSecretWarning: () => false,
     resolveEffectiveOpsUrl: () => undefined,
     seedAgentViaOpsApi: async () => {},
+    seedAgentWithLocalHome: async () => {},
     agentRecordIsAdmin: () => false,
   } satisfies AgentCli);
 });

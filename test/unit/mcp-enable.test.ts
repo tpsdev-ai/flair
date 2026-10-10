@@ -431,6 +431,11 @@ function mockOpsFetch(opts: {
     if (body.operation === "restart") {
       return new Response(JSON.stringify({ message: "restarting" }), { status: 200 });
     }
+    if (body.operation === "sql") {
+      // flair#2433 — the create path resolves the instance's own id from the
+      // Instance table before it inserts the Agent row.
+      return new Response(JSON.stringify([{ id: "inst-local-2433" }]), { status: 200 });
+    }
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
   return { fetchImpl, calls, creds };
@@ -469,9 +474,10 @@ describe("provisionIdpIdentityMapping", () => {
     expect(result.credentialSuperseded).toBe(false);
     expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "sql", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
     const agentRecord = calls.find((c) => c.body.operation === "insert")!.body.records[0];
     expect(agentRecord.publicKey).toBe("idp:github:octocat");
+    expect(agentRecord.originatorInstanceId).toBe("inst-local-2433");
     await expect(importEd25519Key(agentRecord.publicKey)).rejects.toThrow();
     const credRecord = calls.find((c) => c.body.operation === "upsert")!.body.records[0];
     expect(credRecord.kind).toBe("idp");
@@ -727,6 +733,7 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
     const creds = credentialTable();
     const received: { host: string; operation: string }[] = [];
     let principalPresent = false;
+    const insertedHomes: unknown[] = [];
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -734,9 +741,11 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
         const body: any = await req.json().catch(() => ({}));
         received.push({ host: req.headers.get("host") ?? "", operation: body.operation });
         if (body.operation === "search_by_value") return Response.json(principalPresent ? [{ id: body.search_value }] : []);
+        if (body.operation === "sql") return Response.json([{ id: "inst-local-2433" }]);
         if (body.operation === "insert") {
           const error = agentInsertSchemaError(body.records ?? []);
           if (error) return error;
+          insertedHomes.push(body.records?.[0]?.originatorInstanceId);
           principalPresent = true;
           return Response.json({ message: "inserted" });
         }
@@ -757,11 +766,12 @@ describe("provisionIdpIdentityMapping — ops target (flair#2102)", () => {
 
       const result = await provisionIdpIdentityMapping({ opsPortOrUrl: origin, ...MAPPING }, { fetchImpl });
 
-      expect(attempted).toEqual(Array(9).fill(`${origin}/`));
+      expect(attempted).toEqual(Array(10).fill(`${origin}/`));
       expect(received.map((r) => r.operation)).toEqual([
-        "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions",
+        "search_by_value", "search_by_conditions", "search_by_value", "search_by_conditions", "sql", "insert", "search_by_value", "search_by_conditions", "upsert", "search_by_conditions",
       ]);
       expect(received.every((r) => r.host === `127.0.0.1:${server.port}`)).toBe(true);
+      expect(insertedHomes).toEqual(["inst-local-2433"]);
       expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
     } finally {
       server.stop(true);

@@ -128,6 +128,12 @@ beforeEach(async () => {
         }
         return json(res, 200, { ok: true });
       }
+      if (body.operation === "sql") {
+        // flair#2433 — the create path resolves the instance's own id from the
+        // Instance table before it inserts the Agent row.
+        ops.push("sql");
+        return json(res, 200, [{ id: "inst-local-2126" }]);
+      }
       ops.push(body.operation ?? "unknown");
       return json(res, 200, { ok: true });
     });
@@ -215,7 +221,7 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     const result = await agentAdd(id);
 
     expect(result.code).toBe(0);
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(ops).toEqual(["search_by_value", "sql", "insert", "search_by_value"]);
     const stored = table.get(id);
     expect(stored).toBeDefined();
     expect(result.stdout).toContain("registered");
@@ -231,7 +237,7 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     const result = await agentAdd(id);
 
     expect(result.code).toBe(1);
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(ops).toEqual(["search_by_value", "sql", "insert", "search_by_value"]);
     expect(table.has(id)).toBe(false);
     expect(result.stderr).toContain(`Agent '${id}'`);
     expect(result.stderr).toContain(`no Agent row for '${id}'`);
@@ -245,7 +251,7 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     const result = await agentAdd(id);
 
     expect(result.code).toBe(1);
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(ops).toEqual(["search_by_value", "sql", "insert", "search_by_value"]);
     expect(table.get(id)?.publicKey).toBe("stored-public-key-not-the-one-written");
     expect(result.stderr).toContain("stored-public-key-not-the-one-written");
     expect(result.stderr).toContain(`flair agent rotate-key ${id}`);
@@ -262,7 +268,7 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     const result = await agentAdd(id);
 
     expect(result.code).toBe(1);
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(ops).toEqual(["search_by_value", "sql", "insert", "search_by_value"]);
     expect(result.stderr).toContain(`Agent '${id}'`);
     expect(result.stderr).not.toContain(`no Agent row for '${id}'`);
     expect(result.stderr).toContain("usable public key");
@@ -276,7 +282,7 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     const result = await agentAdd(id);
 
     expect(result.code).toBe(1);
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(ops).toEqual(["search_by_value", "sql", "insert", "search_by_value"]);
     expect(result.stderr).toContain("name");
     expect(result.stderr).not.toContain("no Agent row");
     expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
@@ -289,7 +295,7 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     const result = await agentAdd(id);
 
     expect(result.code).toBe(1);
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_value"]);
+    expect(ops).toEqual(["search_by_value", "sql", "insert", "search_by_value"]);
     expect(result.stderr).toContain("name");
     expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
   });

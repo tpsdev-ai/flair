@@ -78,6 +78,7 @@ export type InitCli = {
   resolveTarget: (...args: any[]) => any;
   runSoulWizard: (...args: any[]) => any;
   seedAgentViaOpsApi: (...args: any[]) => any;
+  seedAgentWithLocalHome: (...args: any[]) => any;
   seedFederationInstanceViaOpsApi: (...args: any[]) => any;
   readOccupiedListener: (port: number) => OccupiedHarperListener;
   resolveInstanceServingPid: (dataDir: string, port: number, deps: { findListeningPids: (port: number) => number[] }) => number | null;
@@ -243,6 +244,10 @@ function reconcileFederationInstanceViaOpsApi(...args: any[]): any {
 
 function seedAgentViaOpsApi(...args: any[]): any {
   return cli.seedAgentViaOpsApi(...args);
+}
+
+function seedAgentWithLocalHome(...args: any[]): any {
+  return cli.seedAgentWithLocalHome(...args);
 }
 
 function seedFederationInstanceViaOpsApi(...args: any[]): any {
@@ -452,6 +457,39 @@ program
       let privPath: string | undefined;
       let instanceId: string | undefined;
 
+      // Reconcile the federation Instance identity row if --remote (hub role).
+      // flair#1883: this used to INSERT a row with a fresh random id on every
+      // run, so a hub that had already answered a `GET /FederationInstance`
+      // (which find-or-creates a `spoke` row) ended up with TWO rows and no
+      // canonical identity. Reconciling keeps the row peers already know.
+      // It runs before the agent seed so the agent's home is the hub's id.
+      const reconcileHubInstance = async (publicKey: string): Promise<void> => {
+        instanceId = randomUUID();
+        console.log(`Reconciling federation Instance (role=${role}) via ops API...`);
+        let reconciled: { action: string; id: string };
+        try {
+          reconciled = await reconcileFederationInstanceViaOpsApi(
+            opsUrl,
+            { instanceId, publicKey },
+            adminUser,
+            flairAdminPass,
+          );
+        } catch (err: any) {
+          // A refusal (two rows) or an unreachable ops API — both are this
+          // command failing, and both already name what to do.
+          console.error(`Error: ${err?.message ?? err}`);
+          process.exit(1);
+        }
+        instanceId = reconciled.id;
+        if (reconciled.action === "created") {
+          console.log(`Federation Instance created: ${reconciled.id} (role=${role}) ✓`);
+        } else if (reconciled.action === "updated") {
+          console.log(`Federation Instance reconciled: ${reconciled.id} is now role=${role} (id and key kept) ✓`);
+        } else {
+          console.log(`Federation Instance already role=${role}: ${reconciled.id} — no change ✓`);
+        }
+      };
+
       if (agentId || role) {
         const keysDir: string = opts.keysDir ?? defaultKeysDir();
         mkdirSync(keysDir, { recursive: true });
@@ -476,15 +514,18 @@ program
             console.log(`Keypair written: ${privPath} ✓`);
           }
 
+          if (role) await reconcileHubInstance(pubKeyB64url!);
+
           // Seed agent via remote ops API
           console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
-          await seedAgentViaOpsApi(opsUrl, agentId, pubKeyB64url, adminUser, flairAdminPass);
+          await seedAgentWithLocalHome(opsUrl, agentId, pubKeyB64url, adminUser, flairAdminPass);
           console.log(`Agent '${agentId}' registered on remote instance ✓`);
         } else {
           // No agentId -- generate throwaway keypair for FederationInstance row
           console.log("Generating federation instance keypair...");
           const kp = nacl.sign.keyPair();
           pubKeyB64url = b64url(kp.publicKey);
+          if (role) await reconcileHubInstance(pubKeyB64url!);
         }
       } else {
         console.log("No --agent-id provided -- skipping agent registration");
@@ -493,42 +534,6 @@ program
       // flair#2141 S2 — seed the org-wide using-flair skill on the remote
       // instance, as the operator. Idempotent; a refusal fails this run.
       await seedUsingFlairSkillViaRest(baseUrl, adminUser, flairAdminPass);
-
-      // Reconcile the federation Instance identity row if --remote (hub role).
-      // flair#1883: this used to INSERT a row with a fresh random id on every
-      // run, so a hub that had already answered a `GET /FederationInstance`
-      // (which find-or-creates a `spoke` row) ended up with TWO rows and no
-      // canonical identity. Reconciling keeps the row peers already know.
-      if (role) {
-        if (!pubKeyB64url) {
-          const kp = nacl.sign.keyPair();
-          pubKeyB64url = b64url(kp.publicKey);
-        }
-        instanceId = randomUUID();
-        console.log(`Reconciling federation Instance (role=${role}) via ops API...`);
-        let reconciled: { action: string; id: string };
-        try {
-          reconciled = await reconcileFederationInstanceViaOpsApi(
-            opsUrl,
-            { instanceId, publicKey: pubKeyB64url },
-            adminUser,
-            flairAdminPass,
-          );
-        } catch (err: any) {
-          // A refusal (two rows) or an unreachable ops API — both are this
-          // command failing, and both already name what to do.
-          console.error(`Error: ${err?.message ?? err}`);
-          process.exit(1);
-        }
-        instanceId = reconciled.id;
-        if (reconciled.action === "created") {
-          console.log(`Federation Instance created: ${reconciled.id} (role=${role}) ✓`);
-        } else if (reconciled.action === "updated") {
-          console.log(`Federation Instance reconciled: ${reconciled.id} is now role=${role} (id and key kept) ✓`);
-        } else {
-          console.log(`Federation Instance already role=${role}: ${reconciled.id} — no change ✓`);
-        }
-      }
 
       // Verify connectivity
       if (didProvision) {
@@ -1362,7 +1367,7 @@ program
         console.log(`Seeding agent '${agentId}' via operations API...`);
         const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
         await attributeBeforeCredential(opsPort, opsBindHost);
-        await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
+        await seedAgentWithLocalHome(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
         console.log(`Agent '${agentId}' registered ✓`);
 
         // Verify Ed25519 auth

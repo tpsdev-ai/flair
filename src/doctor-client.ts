@@ -26,6 +26,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { withHome } from "./lib/home.js";
 import { AGENT_ID_RULE, isValidAgentId } from "./lib/agent-id-rule.js";
+import { AGENT_HOME_STAMP_REMEDY, planAgentHomeStamps, type TargetInstanceIdentity } from "./lib/agent-home.js";
+import { INSTANCE_ROW_PRUNE_REMEDY } from "./lib/instance-identity-row.js";
 import type { SeedOwnerRead } from "./keystore.js";
 import {
   ALL_CLIENTS,
@@ -2857,5 +2859,86 @@ export function describeAgentIdRuleFinding(rows: Array<{ id?: unknown }>): Agent
       "after any needed data migration and registration with `flair agent add <new-id>`, " +
       "remove the old row with `flair agent remove <id>`, or remove it alone if stale; " +
       "`flair agent remove` also deletes the agent's Memory and Soul data",
+  };
+}
+
+/** A stored Agent row with no home instance, as reported by `flair doctor` (flair#2433). */
+export interface AgentHomeFinding {
+  /** Every Agent row whose `originatorInstanceId` is null/absent, sorted. */
+  homeLessIds: string[];
+  /**
+   * The home-less rows that carry no federation-sync provenance; the remedy may stamp them.
+   */
+  stampableIds: string[];
+  /** The home-less rows that arrived through a federation merge — listed, never stamped. */
+  syncIds: string[];
+  /**
+   * `info`: the instance has no single canonical id, so a null home is the local-origin
+   * state. `advisory`: an id exists and the rows can be stamped. Neither counts as a
+   * doctor issue.
+   */
+  severity: "info" | "advisory";
+  /** Whether doctor counts this toward its issue total / exit code. */
+  isIssue: boolean;
+  message: string;
+  fixHint: string | null;
+}
+
+/**
+ * Report every stored Agent row with no home (flair#2433). `rows` is the Agent
+ * roster read from the instance (each row's full record).
+ *
+ * The split is the remedy's contract: a row that carries sync provenance
+ * (`_syncedFrom`/`_originatorInstanceId`, resources/Federation.ts's receiver
+ * stamps) arrived through federation and is LISTED ONLY — stamping it would
+ * forge its origin. `flair agent stamp-home --apply` stamps the local id on a
+ * home-less row that carries no federation-sync provenance.
+ *
+ * PURE — it reports; nothing is rewritten.
+ */
+export function describeAgentHomeFinding(
+  rows: Array<Record<string, unknown>>,
+  identity: TargetInstanceIdentity,
+): AgentHomeFinding | null {
+  const plan = planAgentHomeStamps(rows, identity.kind === "one" ? identity.id : null);
+  if (plan.homeLess.length === 0) return null;
+  const base = {
+    homeLessIds: plan.homeLess,
+    stampableIds: plan.stampable,
+    syncIds: plan.sync,
+  };
+  const listed = `${plan.homeLess.length} stored agent row(s) have no home instance (originatorInstanceId): ${plan.homeLess.join(", ")}`;
+  if (identity.kind === "one") {
+    return {
+      ...base,
+      severity: "advisory",
+      isIssue: false,
+      message:
+        `${listed}; ${plan.stampable.length} can be stamped with this instance's id (${identity.id})` +
+        (plan.sync.length > 0 ? `, ${plan.sync.length} arrived through federation and are listed only` : ""),
+      fixHint: AGENT_HOME_STAMP_REMEDY,
+    };
+  }
+  if (identity.kind === "multiple") {
+    return {
+      ...base,
+      severity: "info",
+      isIssue: false,
+      message:
+        `${listed}; this instance has ${identity.count} Instance rows, so no single canonical id; ` +
+        "homes stay unset (the local-origin state) until it has one",
+      fixHint: `keep one Instance row and delete the rest with: ${INSTANCE_ROW_PRUNE_REMEDY}`,
+    };
+  }
+  return {
+    ...base,
+    severity: "info",
+    isIssue: false,
+    message:
+      `${listed}; ` +
+      (identity.kind === "none"
+        ? "this instance has no Instance row yet, so homes stay unset (the local-origin state) until it has an identity"
+        : "the Instance row could not be read, so no id was resolved"),
+    fixHint: null,
   };
 }

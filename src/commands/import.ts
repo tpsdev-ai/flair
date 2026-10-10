@@ -20,6 +20,7 @@ export type ImportCli = {
   resolveHttpPort: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   seedAgentViaOpsApi: (...args: any[]) => any;
+  seedAgentWithLocalHome: (...args: any[]) => any;
 };
 
 let cli: ImportCli;
@@ -51,6 +52,10 @@ function resolveOpsPort(...args: any[]): any {
 
 function seedAgentViaOpsApi(...args: any[]): any {
   return cli.seedAgentViaOpsApi(...args);
+}
+
+function seedAgentWithLocalHome(...args: any[]): any {
+  return cli.seedAgentWithLocalHome(...args);
 }
 
 export function register(program: Command): void {
@@ -124,7 +129,7 @@ program
     const pubKeyB64url = b64url(pubKey);
 
     // Register agent via ops API (remote when --url/--ops-target points off-box)
-    await seedAgentViaOpsApi(seedOpsTarget, agentId, pubKeyB64url, resolveAdminUser(opts.adminUser), adminPass);
+    await seedAgentWithLocalHome(seedOpsTarget, agentId, pubKeyB64url, resolveAdminUser(opts.adminUser), adminPass);
     console.log(
       typeof seedOpsTarget === "string"
         ? `  Agent registered (ops: ${seedOpsTarget})`

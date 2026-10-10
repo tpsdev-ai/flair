@@ -126,11 +126,13 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
 
     // 2. A stored id whose createdAt sorts BELOW "1970-01-01" — the old
     //    `createdAt > "1970-01-01"` filtered search would exclude it entirely.
+    //    It carries a home so only the Agent-ID section moves: this case is
+    //    about the id rule, not the home rule.
     const seeded = "outside.filter.bad"; // a dot is not in the rule
     await ops({
       operation: "insert",
       table: "Agent",
-      records: [{ id: seeded, name: seeded, role: "agent", status: "active", publicKey: "seeded-public-key", createdAt: "1969-12-31T00:00:00.000Z" }],
+      records: [{ id: seeded, name: seeded, role: "agent", status: "active", publicKey: "seeded-public-key", createdAt: "1969-12-31T00:00:00.000Z", originatorInstanceId: "inst-fixture-2359" }],
     });
 
     const reported = await runDoctor(ADMIN_PASS);
@@ -138,21 +140,25 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(reported.stdout).toContain("outside the agent-ID rule");
     expect(issueCount(reported.stdout), "the reported invalid id did not move the summary").toBe(baseCount + 1);
 
-    // 3. A roster read that fails (wrong admin credential) is a counted issue.
+    // 3. A roster read that fails (wrong admin credential) is a counted issue —
+    //    for the Agent-ID section AND the Agent homes section (both read the
+    //    same roster, so both are unrun).
     const unreadable = await runDoctor("wrong-admin-pass-not-a-secret");
     expect(unreadable.stdout).toContain("Could not read the stored Agent roster");
     expect(unreadable.stdout).not.toContain("No stored agent id is outside");
-    expect(issueCount(unreadable.stdout), "the unrun check left the summary clean").toBe(baseCount + 1);
+    expect(issueCount(unreadable.stdout), "the unrun check left the summary clean").toBe(baseCount + 2);
 
-    // 4. No admin credential at all is also a counted issue, not a pass.
+    // 4. No admin credential at all: the Agent-ID check is a counted issue, not
+    //    a pass; the Agent homes check is reported skipped and not counted.
     const noCred = await runDoctor("");
     expect(noCred.stdout).toContain("no admin credentials");
+    expect(noCred.stdout).toContain("Agent homes check skipped (no admin credential)");
     expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 1);
   }, 120_000);
 
   test("an unsafe or empty admin-pass file: doctor completes and counts the unrun check with the resolver's reason", async () => {
     // The reference: no admin credential at all, which the test above proves
-    // is one counted issue over the clean baseline.
+    // is one counted issue (the Agent-ID check) over the clean baseline.
     const noCred = await runDoctor("");
     expect(noCred.stdout).toContain("no admin credentials");
     const unrunCount = issueCount(noCred.stdout);
