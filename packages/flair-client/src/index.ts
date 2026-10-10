@@ -18,6 +18,7 @@ export type {
   MemoryType,
   Durability,
   Visibility,
+  HostSource,
   SoulEntry,
   SearchResult,
   BootstrapResult,
