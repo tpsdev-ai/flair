@@ -168,6 +168,34 @@ export function captureText(content: unknown): string {
   return parts.join("");
 }
 
+/**
+ * The server's host-source id grammar (`resources/host-source.ts`,
+ * `HOST_SOURCE_ID_RE`, flair#1940 A2). Mirrored here so the capture path can
+ * decide BEFORE the write: the server refuses a pointer whose id fails it, and
+ * a refused write is a failed capture.
+ */
+const HOST_SOURCE_ID_RE = /^[A-Za-z0-9._:/@#-]{1,256}$/;
+
+/**
+ * The host-source pointer an OpenClaw capture claims, or null when `runId` is
+ * outside the server's id grammar. The `id` is the host's run id VERBATIM —
+ * never derived from captured text — so a citation of it names the host run.
+ */
+export function captureHostSource(runId: string): { host: "openclaw"; kind: "run"; id: string } | null {
+  return HOST_SOURCE_ID_RE.test(runId) ? { host: "openclaw", kind: "run", id: runId } : null;
+}
+
+/**
+ * The host session identifier for a capture callback, or null when the host
+ * carries none. OpenClaw exposes `sessionKey` on the hook context and
+ * `sessionId` on the llm_input/llm_output events (and on the context); the
+ * value is passed through verbatim as Flair's `sessionId`, never synthesised.
+ */
+export function sessionIdForCapture(event: any, ctx: any): string | null {
+  const raw = ctx?.sessionKey ?? event?.sessionId ?? ctx?.sessionId;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+
 interface CaptureState {
   count: number;
   hashes: Set<string>;
@@ -954,7 +982,7 @@ export default {
       runs.set(key, aborted);
     }
 
-    async function tryAutoCapture(client: FlairClient, agentId: string, runId: string | null, text: string): Promise<boolean> {
+    async function tryAutoCapture(client: FlairClient, agentId: string, runId: string | null, sessionId: string | null, text: string): Promise<boolean> {
       const state = captureGate(agentId, runId);
       if (!state) return false;
       const decision = evaluateAutoCapture(text, state, autoCaptureMaxPerSession);
@@ -967,6 +995,18 @@ export default {
       // The scan is synchronous, so the reservation stays synchronous too.
       const entities = captureProbe.detectEntities(text);
       const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
+      // flair#1940: the capture claims its host run id as the memory's source.
+      // The id is the run id VERBATIM. If it is outside the server's id grammar,
+      // the write OMITS the source (one log line) rather than let the server
+      // refuse the whole write: capture must never fail for the shape of a run
+      // id. A run id the host supplies is a host value, so it is not echoed raw.
+      const hostSource = runId ? captureHostSource(runId) : null;
+      if (runId && !hostSource) {
+        logOnce(
+          `bad-run-id:${hashContent(runId)}`,
+          `openclaw-flair: capture for agent ${agentId} omitted its host source: the host run id is not valid under the host-source id grammar`,
+        );
+      }
       // D10: take the cap slot and claim the excerpt SYNCHRONOUSLY, before any
       // await, so a concurrent callback (or the agent_end rescan) that sees the
       // same excerpt dedups against the reservation instead of writing twice.
@@ -978,6 +1018,8 @@ export default {
           type: "session",
           tags: ["auto-captured"],
           subject,
+          ...(hostSource ? { hostSource } : {}),
+          ...(sessionId ? { sessionId } : {}),
           // Item 5: the run's signal reaches the fetch, so an abort cancels an
           // in-flight capture rather than letting it finish.
           signal: state.controller.signal,
@@ -1261,7 +1303,7 @@ export default {
               if (msg.role !== "user" && msg.role !== "assistant") continue;
               const text = captureText(msg.content);
               if (!text) continue;
-              if (await tryAutoCapture(client, agentId, runId, text)) stored++;
+              if (await tryAutoCapture(client, agentId, runId, sessionIdForCapture(event, ctx), text)) stored++;
             }
             if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
           } catch (err: any) {
@@ -1281,7 +1323,7 @@ export default {
           if (!text) return;
           try {
             const client = clientFor(agentId);
-            const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), text);
+            const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), sessionIdForCapture(event, ctx), text);
             if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_input)");
           } catch (err: any) {
             refuseKey(agentId, "live auto-capture (llm_input)", err);
@@ -1300,7 +1342,7 @@ export default {
           if (!text) return;
           try {
             const client = clientFor(agentId);
-            const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), text);
+            const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), sessionIdForCapture(event, ctx), text);
             if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_output)");
           } catch (err: any) {
             refuseKey(agentId, "live auto-capture (llm_output)", err);

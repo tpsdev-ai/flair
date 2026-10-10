@@ -149,7 +149,7 @@ function createMockApi(opts: {
 
 // ── network stub ─────────────────────────────────────────────────────────────
 
-interface Call { url: string; method: string; authorization: string | null; signal: AbortSignal | null }
+interface Call { url: string; method: string; authorization: string | null; signal: AbortSignal | null; body: unknown }
 
 function installFetchStub(
   handler?: (call: Call) => { status?: number; body?: unknown },
@@ -158,11 +158,16 @@ function installFetchStub(
   const calls: Call[] = [];
   globalThis.fetch = (async (url: string, init: any = {}) => {
     const headers = (init.headers ?? {}) as Record<string, string>;
+    let parsedBody: unknown = null;
+    if (typeof init.body === "string") {
+      try { parsedBody = JSON.parse(init.body); } catch { parsedBody = init.body; }
+    }
     const call: Call = {
       url: String(url),
       method: init.method ?? "GET",
       authorization: headers["Authorization"] ?? null,
       signal: (init.signal as AbortSignal | undefined) ?? null,
+      body: parsedBody,
     };
     calls.push(call);
     const out = handler ? handler(call) : {};
@@ -1112,6 +1117,77 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     for (const leak of ["LEAK-IMAGE", "LEAK-THINK", "LEAK-TOOL", "LEAK-RESULT"]) {
       expect(text).not.toContain(leak);
     }
+  });
+
+  test("hostSource decision: a grammar-valid run id becomes the pointer; an invalid one is null", async () => {
+    const { captureHostSource } = await loadModule();
+    expect(captureHostSource("1a2b3c4d-0000-4000-8000-000000000000")).toEqual({ host: "openclaw", kind: "run", id: "1a2b3c4d-0000-4000-8000-000000000000" });
+    expect(captureHostSource("run-1a2b3c4d")).toEqual({ host: "openclaw", kind: "run", id: "run-1a2b3c4d" });
+    for (const bad of ["", "bad run id", "a".repeat(257), "run\u0007"]) {
+      expect(captureHostSource(bad)).toBeNull();
+    }
+  });
+
+  test("session id decision: the host session key, else the host session id, else none", async () => {
+    const { sessionIdForCapture } = await loadModule();
+    expect(sessionIdForCapture({ sessionId: "e" }, { sessionKey: "k" })).toBe("k");
+    expect(sessionIdForCapture({ sessionId: "e" }, {})).toBe("e");
+    expect(sessionIdForCapture({}, { sessionId: "c" })).toBe("c");
+    expect(sessionIdForCapture({}, {})).toBeNull();
+  });
+
+  test("D15: the capture write carries hostSource {openclaw, run, <runId>} and the session id", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "run-1a2b3c4d", sessionId: "sess-9", assistantTexts: ["remember this: the capture body carries its source"] },
+      { agentId: "A" },
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one capture write
+    const body = memPuts[0].body as any;
+    expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-1a2b3c4d" }); // assertion: the run id is the source
+    expect(body.sessionId).toBe("sess-9"); // assertion: the host session id is carried
+  });
+
+  test("D15: a run id outside the id grammar captures with no source, and one log line", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    await api._fire(
+      "llm_output",
+      { runId: "bad run id", assistantTexts: ["remember this: the capture target is the bad run id case"] },
+      { agentId: "A" },
+    );
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: the capture still lands
+    expect((memPuts[0].body as any).hostSource).toBeUndefined(); // assertion: no source was attached
+    expect(api._warnText()).toContain("omitted its host source"); // assertion: one line names why
+  });
+
+  test("D15: the memory_store tool's write carries no source", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    await store.execute("1", { text: "remember this: a manual write carries no source" });
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1); // assertion: one manual write
+    expect((memPuts[0].body as any).hostSource).toBeUndefined(); // assertion: no source on a non-capture write
   });
 
   test("D5: a block-shaped agent_end message is captured (mixed blocks contribute nothing)", async () => {
