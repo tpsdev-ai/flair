@@ -6,6 +6,29 @@ import { join } from "node:path";
 import yaml from "js-yaml";
 import { tempDir } from "../helpers/temp-dir.ts";
 
+/**
+ * The environment the fixture's git commands run under, with git's automatic
+ * background maintenance turned OFF (flair#2426).
+ *
+ * `git fetch` finishes by spawning `git maintenance run --auto`, which detaches
+ * on a git that honours `gc.autoDetach` (the default) and keeps writing into the
+ * repository after `git fetch` returns. These repositories live under a
+ * `tempDir()` that `bun test` sweeps as soon as the test ends, so a writer still
+ * running mid-sweep leaves the directory behind for the unit lane's temp-dir
+ * leak guard. `maintenance.auto=false` keeps git from spawning that command;
+ * `gc.auto=0` disables the gc task behind it.
+ */
+function noAutomaticMaintenance(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "maintenance.auto",
+    GIT_CONFIG_VALUE_0: "false",
+    GIT_CONFIG_KEY_1: "gc.auto",
+    GIT_CONFIG_VALUE_1: "0",
+  };
+}
+
 interface Step {
   name?: string;
   id?: string;
@@ -91,7 +114,7 @@ describe("adk-flair publishing", () => {
       mkdirSync(origin);
       mkdirSync(checkout);
       function git(args: string[], dir: string, input?: string) {
-        const result = spawnSync("git", args, { cwd: dir, input, encoding: "utf8" });
+        const result = spawnSync("git", args, { cwd: dir, input, encoding: "utf8", env: noAutomaticMaintenance() });
         if (result.status !== 0) throw new Error(result.stderr);
         return result.stdout.trim();
       }
@@ -109,7 +132,7 @@ describe("adk-flair publishing", () => {
       const rejected = commit(checkout, "rejected");
       const sha = mode === "rejected" ? rejected : accepted;
       const result = spawnSync("bash", ["-c", ancestry.run!], {
-        cwd: checkout, encoding: "utf8", env: { ...process.env, GITHUB_SHA: sha },
+        cwd: checkout, encoding: "utf8", env: { ...noAutomaticMaintenance(), GITHUB_SHA: sha },
       });
       const text = result.stdout + result.stderr;
       if (mode === "fetch failure") expect(result.status, text).not.toBe(0);
