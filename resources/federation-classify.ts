@@ -71,10 +71,13 @@ export type SkipReason =
   | "invalid_expiry"
   // Emitted by FederationSync.post before the row is written, for a record of
   // ANY synced table whose merge could not be applied because the row it read
-  // is no longer the stored one — a delete, a purge or a same-id replace with a
-  // new incarnation token committed between the read and the write, or any
-  // change committed to the row after the merge staged its write. Nothing was
-  // written (flair#2441, flair#2450).
+  // is no longer the stored one — a delete or a purge committed between the read
+  // and the write, or a same-id replace committed in that window, or any change
+  // committed to the row after the merge staged its write. For Soul, Agent,
+  // Relationship and Message the check is whole-row; for Memory (and the
+  // _reindex re-PUT) it is the identity check (incarnation token, content hash,
+  // creation time, owner) — a replace that changed none of those is not seen.
+  // Nothing was written (flair#2441, flair#2450).
   | "merge_target_changed";
 
 /**

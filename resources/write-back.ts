@@ -27,6 +27,19 @@ export interface WriteBackOptions {
   expectedRow?: any;
   matches?: (row: any) => boolean;
   matchFields?: string[];
+  /**
+   * Require the row read inside the transaction to equal `expectedRow` (the row
+   * the caller read) as a WHOLE row, not only in the fields
+   * {@link sameStoredRow} compares. A caller whose table carries no
+   * instanceToken or contentHash (Soul/Agent/Relationship/Message) needs this:
+   * for such a table sameStoredRow reduces to id/agentId/createdAt, so a same-id
+   * REPLACE that keeps those fields and changes a data value passes the identity
+   * check and the stale write-back would overwrite the competitor (flair#2450).
+   * The comparison spreads `row` first: a Harper row read has a different
+   * prototype from the plain `{ ...selected }` basis, so a bare
+   * isDeepStrictEqual(row, basis) could differ on prototype alone.
+   */
+  wholeRow?: boolean;
   /** Test-only pause BEFORE this call's owned transaction opens — the
    *  interleaving where the other writer's transaction opens first. The call
    *  site names its point: `() => txnPausePoint("<name>")` (flair#2382). */
@@ -148,9 +161,13 @@ export async function writeBackCommittedRow(
   const attempts = opts.attempts ?? WRITE_BACK_ATTEMPTS;
   const selected = "expectedRow" in opts ? opts.expectedRow : await table.get(id, {});
   const basis = selected == null ? selected : { ...selected };
-  const sameTarget = (row: any) => row == null ? basis == null :
-    basis != null && sameStoredRow(row, basis) &&
-    (opts.matchFields ?? []).every((field) => isDeepStrictEqual(row[field], basis[field]));
+  const sameTarget = (row: any) => {
+    if (row == null) return basis == null;
+    if (basis == null) return false;
+    return sameStoredRow(row, basis) &&
+      (!opts.wholeRow || isDeepStrictEqual({ ...row }, basis)) &&
+      (opts.matchFields ?? []).every((field) => isDeepStrictEqual(row[field], basis[field]));
+  };
   if (opts.pausePre) {
     const pre = opts.pausePre();
     if (pre) await pre;

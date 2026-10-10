@@ -936,6 +936,16 @@ export class FederationSync extends Resource {
         // helper hands it (the in-transaction re-read), never the pre-helper
         // read: the Agent status guard (flair#2108) and the Message
         // consumed-state reconcile (flair#1521 §12 P0-3) both key on it.
+        //
+        // flair#2450 (`wholeRow`): Soul, Agent, Relationship and Message carry
+        // no instanceToken and no contentHash, so the helper's sameStoredRow
+        // check reduces to id/agentId/createdAt for them. A same-id REPLACE that
+        // keeps those fields and changes a data value would pass that identity
+        // check and let the stale merge (built from `local`) overwrite the
+        // competitor. So for every table WITHOUT an incarnation token the helper
+        // additionally compares the WHOLE stored row against `local`. Memory
+        // carries the server-stamped token (and a content hash); its identity
+        // check is sameStoredRow's, covering a replace that changed either.
         let outcome: any;
         try {
           outcome = await writeBackCommittedRow(
@@ -976,6 +986,10 @@ export class FederationSync extends Resource {
               label: "FederationSync",
               expectedRow: local,
               attempts: 1,
+              // Every table but Memory carries no instanceToken: compare the
+              // whole stored row, not just sameStoredRow's identity fields
+              // (flair#2450 — see above).
+              wholeRow: record.table !== "Memory",
               pausePre: () => txnPausePoint("federation-merge-pre"),
               pausePoint: () => txnPausePoint("federation-merge"),
             },
