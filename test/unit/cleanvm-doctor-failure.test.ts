@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { summarizeDoctorRun } from "../../src/commands/doctor";
 
 const REPO = join(import.meta.dir, "../..");
 const GATE_PATH = join(REPO, "docker", "test-clean-vm.sh");
@@ -85,7 +86,7 @@ describe("clean-VM gate: the doctor failure names the check that failed (#2438)"
     expect(r.stdout).toContain("#538");
   });
 
-  test("a ✗ finding carries its Fix line", () => {
+  test("a ✗ finding carries its Common cause line", () => {
     const r = run(EMBEDDINGS_FAIL);
     expect(r.stdout).toContain("Common cause:");
   });
@@ -102,6 +103,17 @@ describe("clean-VM gate: the doctor failure names the check that failed (#2438)"
     const r = run(two);
     expect(r.stdout).toContain("2 issues");
     expect(r.stdout).not.toMatch(/embeddings/i);
+  });
+
+  test("doctor's own summary line is read as the count", () => {
+    const log = [
+      "  ✗ Ops socket permissions: world-accessible",
+      "  ✗ Instance identity: bad",
+      "  ✗ Harper unreachable",
+      summarizeDoctorRun(3, 0, false).line,
+    ].join("\n");
+    const r = run(log);
+    expect(r.stdout).toContain("doctor reported 3 issues");
   });
 
   test("when the ✗ findings explain the count, an advisory ⚠ is not listed", () => {
