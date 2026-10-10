@@ -77,8 +77,8 @@ string `"withheld"`) and `sessionId`; `get()` and `list()` also carry
 author-only unless the write opts it into the record's own read scope with
 `hostSourceScope: "record"`.
 
-A `hostSource` is the **writer's claim**, made by a write signed with the
-writer's Flair identity; it is **not** verified host authorship. A `hostSource`
+A `hostSource` is the writer's unverified claim about an external source, stored
+with the writer's authenticated agent id; Flair does not verify it. A `hostSource`
 written with admin Basic auth (not an agent's Ed25519 signature) is stored with
 no author and is never shown to any reader.
 

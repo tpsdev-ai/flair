@@ -5,5 +5,6 @@
   byte-identical to before. `memory.search()`, `get()` and `list()` results
   carry the joined `hostSource` (or the server's `"withheld"` marker) and
   `sessionId`; `get()` and `list()` also carry `provenance`, and `search()`
-  also carries the record's `author`. A `hostSource` is the writer's claim,
-  not verified host authorship.
+  also carries the record's `author`. A `hostSource` is the writer's unverified claim
+  about an external source, stored with the writer's authenticated agent id;
+  Flair does not verify it.

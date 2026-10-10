@@ -70,6 +70,11 @@ function mockOpsFetch(opts: {
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
       return new Response(JSON.stringify({ message: "inserted" }), { status: 200 });
     }
+    if (body.operation === "sql") {
+      // flair#2433 — the create path resolves the instance's own id from the
+      // Instance table before it inserts the Agent row.
+      return new Response(JSON.stringify([{ id: "inst-local-2433" }]), { status: 200 });
+    }
     if (body.operation === "delete") {
       if (opts.networkErrorOnDelete) throw new TypeError("fetch failed: connection refused");
       if (opts.failDelete) return new Response("delete failed", { status: 500 });
@@ -127,9 +132,9 @@ describe("grantMcpClient — happy path", () => {
     });
     expect(JSON.stringify(config)).toContain(entry.keyFile);
 
-    // Ops calls: search_by_value (dup check) then insert.
-    expect(calls.map((c) => c.operation)).toEqual(["search_by_value", "insert"]);
-    expect(calls[1].records[0]).toMatchObject({ id: "ci-runner", publicKey: expect.any(String), runtime: "headless" });
+    // Ops calls: search_by_value (dup check), the Instance read, then insert.
+    expect(calls.map((c) => c.operation)).toEqual(["search_by_value", "sql", "insert"]);
+    expect(calls[2].records[0]).toMatchObject({ id: "ci-runner", publicKey: expect.any(String), runtime: "headless", originatorInstanceId: "inst-local-2433" });
   });
 
   test("rejects an invalid name before any I/O", async () => {

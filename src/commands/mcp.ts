@@ -52,6 +52,7 @@ import {
 } from "../lib/mcp-enable.js";
 import { resolveHome } from "../lib/home.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
+import { agentHomeEndpoint, resolveTargetInstanceId } from "../lib/agent-home.js";
 
 export type McpCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -314,6 +315,9 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   writeFileSync(pubPath, Buffer.from(kp.publicKey));
 
   const nowIso = now();
+  // flair#2433 — the new Agent row's home is THIS instance's federation id,
+  // resolved through the one shared rule; a create stamps it.
+  const home = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass, fetchImpl));
   const insertRes = await fetchImpl(opsUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -332,6 +336,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
         defaultTrustTier: "unverified",
         runtime: "headless",
         publicKey: pubKeyB64url,
+        originatorInstanceId: home,
         createdAt: nowIso,
         updatedAt: nowIso,
       }],

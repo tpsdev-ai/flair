@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=139 options=626
+# commands=140 options=632
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -108,7 +108,7 @@ flair agent
   description: Manage Flair agents
   usage: [options] [command]
   options: (none)
-  subcommands: add, list, show, rotate-key, remove
+  subcommands: add, list, show, rotate-key, remove, stamp-home
 
 flair agent add
   description: Register a new agent. Refuses an id whose Agent record already exists
@@ -226,6 +226,29 @@ flair agent remove
     --force
       description: Skip interactive confirmation (required when stdin is not a TTY)
       attr: force
+
+flair agent stamp-home
+  description: Back-fill the home instance (originatorInstanceId) on home-less Agent rows with no federation-sync provenance
+  usage: [options]
+  options:
+    --port <port>
+      description: Harper HTTP port
+      attr: port
+    --ops-port <port>
+      description: Harper operations API port
+      attr: opsPort
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from a file (chmod 600 enforced)
+      attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+    --apply
+      description: Write the home; without it the command is a dry run and writes nothing
+      attr: apply
 
 flair keys
   description: Manage Ed25519 key files in the key directory
@@ -2909,6 +2932,9 @@ Commands:
   show [options] <id>        Show agent details
   rotate-key [options] <id>  Rotate an agent's Ed25519 keypair
   remove [options] <id>      Remove an agent and all its data from Flair
+  stamp-home [options]       Back-fill the home instance (originatorInstanceId)
+                             on home-less Agent rows with no federation-sync
+                             provenance
   help [command]             display help for command
 
 ----- flair agent add -----
@@ -3007,6 +3033,27 @@ Options:
 
 Global Options:
   -v, --version        output the version number
+
+----- flair agent stamp-home -----
+Usage: flair agent stamp-home [options]
+
+Back-fill the home instance (originatorInstanceId) on home-less Agent rows with
+no federation-sync provenance
+
+Options:
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
+  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from a file (chmod 600
+                            enforced)
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --apply                   Write the home; without it the command is a dry run
+                            and writes nothing
+  -h, --help                display help for command
+
+Global Options:
+  -v, --version             output the version number
 
 ----- flair keys -----
 Usage: flair keys [options] [command]

@@ -84,7 +84,7 @@ beforeEach(() => {
   bindAgent({ api, resolveOpsPort, resolveHttpPort,
     b64url: () => "", privKeyPath: () => "", pubKeyPath: () => "",
     shouldShowInlineSecretWarning: () => false, resolveEffectiveOpsUrl: () => undefined,
-    seedAgentViaOpsApi: async () => {}, agentRecordIsAdmin: () => false,
+    seedAgentViaOpsApi: async () => {}, seedAgentWithLocalHome: async () => {}, agentRecordIsAdmin: () => false,
   } satisfies AgentCli);
 });
 afterEach(() => {

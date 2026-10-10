@@ -291,6 +291,17 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
     }
     body.visibility = args.visibility;
   }
+  // flair#1940 slice 2b — the host-source envelope. Forwarded ONLY when the
+  // caller actually supplied it, so a store without a pointer delegates a
+  // byte-identical body. This wrapper adds NO second schema: `Memory.post()`
+  // validates the pointer with the SAME server-side validator the REST write
+  // uses (`resources/host-source.ts`'s validateHostSource, A2) and returns its
+  // 400 on an invalid pointer — reject, never coerce. `sessionId` is a declared,
+  // client-writable Memory attribute (schemas/memory.graphql); both are omitted
+  // from the body unless supplied.
+  if (args?.hostSource !== undefined && args?.hostSource !== null) body.hostSource = args.hostSource;
+  if (args?.hostSourceScope !== undefined && args?.hostSourceScope !== null) body.hostSourceScope = args.hostSourceScope;
+  if (args?.sessionId !== undefined && args?.sessionId !== null) body.sessionId = args.sessionId;
   // flair#1188 — memory_store's response goes through the same buildWriteResponse
   // echo as memory_update; strip the server-regenerated embedding so no write
   // tool ever inlines the vector. No-op when the response carries none.
@@ -1213,7 +1224,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_search: {
         impl: memorySearch,
     contract: {
-      summary: "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding.",
+      summary: "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding. A hit whose record has a bound host-source pointer carries `hostSource`: the pointer object for a reader allowed to see it, or the literal \"withheld\" for one who may read the record but not the pointer. hostSource is the writer's unverified claim about an external source, stored with the writer's authenticated agent id; Flair does not verify it.",
       requiredFields: ["results"],
       fieldTypes: { results: "array" },
       invariants: {

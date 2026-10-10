@@ -34,6 +34,12 @@ import {
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
+import {
+  agentHomeEndpoint,
+  resolveTargetInstanceId,
+  runAgentHomeStamp,
+  stampLeftoverLines,
+} from "../lib/agent-home.js";
 import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
 
 export type AgentCli = {
@@ -51,6 +57,13 @@ export type AgentCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
   resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
   seedAgentViaOpsApi: (
+    opsPortOrUrl: number | string,
+    agentId: string,
+    pubKeyB64url: string,
+    adminUser: string,
+    adminPass?: string,
+  ) => Promise<void>;
+  seedAgentWithLocalHome: (
     opsPortOrUrl: number | string,
     agentId: string,
     pubKeyB64url: string,
@@ -84,13 +97,14 @@ const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | numbe
   cli.resolveOpsPort(opts);
 const resolveEffectiveOpsUrl = (opts: { target?: string; opsTarget?: string }): string | undefined =>
   cli.resolveEffectiveOpsUrl(opts);
-const seedAgentViaOpsApi = (
+const seedAgentWithLocalHome = (
   opsPortOrUrl: number | string,
   agentId: string,
   pubKeyB64url: string,
   adminUser: string,
   adminPass?: string,
-): Promise<void> => cli.seedAgentViaOpsApi(opsPortOrUrl, agentId, pubKeyB64url, adminUser, adminPass);
+): Promise<void> =>
+  cli.seedAgentWithLocalHome(opsPortOrUrl, agentId, pubKeyB64url, adminUser, adminPass);
 const agentRecordIsAdmin = (record: any): boolean => cli.agentRecordIsAdmin(record);
 
 const INLINE_ADMIN_PASS_WARNING =
@@ -377,7 +391,7 @@ export function register(program: Command): void {
         console.log(`Keypair written: ${privPath}`);
       }
 
-      await seedAgentViaOpsApi(seedOpsTarget, id, pubKeyB64url, adminUser, adminPass);
+      await seedAgentWithLocalHome(seedOpsTarget, id, pubKeyB64url, adminUser, adminPass);
       const stored = await readStoredAgent(seedOpsTarget, id, adminUser, adminPass);
       if (!stored || stored.publicKey !== pubKeyB64url) {
         console.error(agentKeyNotStoredMessage(id, stored));
@@ -791,5 +805,87 @@ export function register(program: Command): void {
       }
 
       console.log(`\n✅ Agent '${id}' removed successfully`);
+    });
+
+  agent
+    .command("stamp-home")
+    .description("Back-fill the home instance (originatorInstanceId) on home-less Agent rows with no federation-sync provenance")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+    .option("--admin-pass-file <path>", "Read the admin password from a file (chmod 600 enforced)")
+    .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
+    .option("--apply", "Write the home; without it the command is a dry run and writes nothing")
+    .action(async (opts) => {
+      const opsPort = resolveOpsPort(opts);
+      const adminUser = resolveAdminUser(opts.adminUser);
+      let explicitPass: string | undefined;
+      try {
+        explicitPass =
+          resolveAdminPassFromSources({
+            adminPassFile: opts.adminPassFile,
+            adminPass: opts.adminPass,
+            envPass: undefined,
+          }) || undefined;
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+      let adminPass: string | undefined;
+      try {
+        adminPass = resolveLocalAdminPass(explicitPass);
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+      if (!adminPass) {
+        console.error(
+          "Error: --admin-pass or FLAIR_ADMIN_PASS required (or ensure ~/.flair/admin-pass exists, created by `flair init`)",
+        );
+        process.exit(1);
+      }
+      const opsUrl = `http://127.0.0.1:${opsPort}/`;
+      const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+
+      const localInstanceId = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass));
+      const result = await runAgentHomeStamp({
+        opsUrl,
+        authHeader: auth,
+        localInstanceId,
+        apply: Boolean(opts.apply),
+      });
+      if (result.reason === "roster-unreadable") {
+        console.error("Error: could not read the stored Agent roster; nothing was changed.");
+        process.exit(1);
+      }
+      const plan = result.plan;
+      if (plan.homeLess.length === 0) {
+        console.log(`${render.icons.ok} Every stored agent row names a home instance.`);
+        return;
+      }
+      console.log(
+        `${plan.homeLess.length} agent row(s) have no home instance` +
+          (localInstanceId ? ` (this instance is ${localInstanceId})` : ""),
+      );
+      for (const id of plan.homeLess) {
+        const inSync = plan.sync.includes(id);
+        console.log(`     ${inSync ? "list only (sync-originated):" : "stamp:"} ${id}`);
+      }
+      if (result.reason === "no-canonical-id") {
+        console.error(
+          "Error: this instance has no single canonical Instance row, so there is no id to stamp; nothing was written.",
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (!opts.apply) {
+        console.log(
+          `Dry run — nothing written. Re-run with --apply to stamp ${plan.stampable.length} row(s); ` +
+            `${plan.sync.length} sync-originated row(s) are never stamped.`,
+        );
+        return;
+      }
+      for (const line of stampLeftoverLines(result)) console.log(line);
+      console.log(`${render.icons.ok} Stamped the home instance on ${result.stamped.length} row(s).`);
     });
 }

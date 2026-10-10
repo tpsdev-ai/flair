@@ -34,10 +34,10 @@
  * never with Memory provenance.
  *
  * The decision is made HERE, on the server, in the read projection — no client
- * or MCP layer can un-redact. `Memory.get()`, `Memory.search()` and
- * `SemanticSearch` render pointers through the pointer helper. Other Memory
- * projections, bootstrap included, do not render pointers in this slice (see the
- * handler-level tests in test/unit/memory-host-source.test.ts).
+ * or MCP layer can un-redact. `Memory.get()`, `Memory.search()`,
+ * `SemanticSearch` and bootstrap render pointers through the pointer helper;
+ * bootstrap renders a visible pointer as a prose citation (A6; see
+ * resources/MemoryBootstrap.ts).
  */
 import { parseHostSource } from "./host-source.js";
 import { isPrivateVisibility } from "./memory-visibility.js";
@@ -127,8 +127,9 @@ export function pointerOutcomeFor(
 /** The pointer-input keys the named non-admin read paths remove from their
  *  output (A1' item 1). A supported write strips them before persist; a RAW
  *  writer can leave one on the row, so the named non-admin reads (Memory.get,
- *  Memory.search, SemanticSearch) strip them. Other Memory projections do not
- *  render pointers in this slice and do not run this strip. */
+ *  Memory.search, SemanticSearch) strip them. Bootstrap projects through the
+ *  pointer helper too, so its inline fields are dropped as well, except where
+ *  its `?? m` fallback uses the row as read. */
 const INLINE_POINTER_FIELDS = ["hostSource", "hostSourceScope", "hostSourceVisibility"] as const;
 
 /** Return `record` with every inline pointer-input field removed. Returns the
