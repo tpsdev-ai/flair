@@ -145,8 +145,8 @@ for (let i = 0; i < lines.length; i++) {
 // N comes from doctor's own summary line.
 let count = null;
 for (const line of lines) {
-  const m = line.match(/(\d+)\s+issues?\s+found/);
-  if (m) count = Number(m[1]);
+  const trimmed = line.trimStart();
+  if (isSummary(trimmed)) count = Number(trimmed.match(/\d+/)[0]);
 }
 const hard = findings.filter((f) => f.hard);
 

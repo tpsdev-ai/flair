@@ -116,6 +116,17 @@ describe("clean-VM gate: the doctor failure lists the failing doctor lines (#243
     expect(r.stdout).toContain("doctor reported 3 issues");
   });
 
+  test("a finding line containing 'issues found' does not change the count", () => {
+    const log = [
+      "  ✗ Ops socket permissions: world-accessible",
+      "     Fix: flair init (7 issues found in the socket scan)",
+      "  ✗ 1 issue found — see fixes above",
+      "     7 issues found by a later tool",
+    ].join("\n");
+    const r = run(log);
+    expect(r.stdout).toContain("doctor reported 1 issue:");
+  });
+
   test("when the ✗ findings explain the count, an advisory ⚠ is not listed", () => {
     const mixed = [
       "  ⚠ FLAIR_PUBLIC_URL is not set — local-only, unusable for any remote client",
