@@ -1,2 +1,0 @@
-- **The listed test fixtures publish content-read signals through a shared helper using a temp file and rename (#2397).**
-  `test/unit-isolated/restart-refuses-after-timeout-2365.test.ts`, `test/unit-isolated/start-unknown-owner-2350.test.ts`, `test/unit-isolated/harper-stop-pid-recovery-2207.test.ts`, `test/unit/stale-sidecar-launchd-2075.test.ts`, `test/unit/port-not-identity.test.ts`, `test/unit/snapshot-datadir-instance-targeting.test.ts`, `test/unit/launchd-management-reporting.test.ts`, `test/unit/harper-config-port.test.ts`, `test/unit/stale-sidecar-2055.test.ts`.

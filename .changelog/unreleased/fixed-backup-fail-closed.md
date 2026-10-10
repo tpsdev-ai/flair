@@ -1,1 +1,0 @@
-- **`flair backup` rejects failed or non-array reads, missing, blank, non-string or duplicate IDs, and mismatched Memory or Soul ownership before publishing an archive.** Closes #2214.

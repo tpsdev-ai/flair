@@ -22,7 +22,8 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectDeps,
-  collectNonExactOverrides,
+  collectNonExactDeps,
+  collectUnsupportedDeps,
   collectUnsupportedOverrides,
 } from "../../scripts/lib/check-dep-ages-collect.mjs";
 
@@ -60,6 +61,14 @@ describe("collectDeps", () => {
 
   /* dependencies */
   describe("dependencies", () => {
+    it("does not collect a digit-leading range like 1.x as an exact pin", () => {
+      // The same classifier the override grammar uses reads `1.x` as a range,
+      // so it is never fetched as the exact version `1.x`.
+      expect(collectDeps(pkgsDeps({"some-pkg":"1.x"},"packages/foo/package.json"), keepCurrent).size).toBe(0);
+    });
+    it("does not collect a range like ^1 as an exact pin", () => {
+      expect(collectDeps(pkgsDeps({"some-pkg":"^1"},"packages/foo/package.json"), keepCurrent).size).toBe(0);
+    });
     it("collects an exact dependencies pin", () => {
       const result = collectDeps(pkgsDeps({"some-pkg":"1.2.3"},"packages/foo/package.json"), keepCurrent);
       expect(result.size).toBe(1);
@@ -165,34 +174,49 @@ describe("collectDeps", () => {
   });
 });
 
-/* ── Override specifiers the gate cannot age-check ────────────────────── */
+/* ── Specifiers the gate cannot age-check because they are ranges ────── */
 
-describe("collectNonExactOverrides", () => {
+describe("collectNonExactDeps", () => {
   const pkgsOverrides = (overrides: Record<string,string>, p: string) => [
     { pkg: { overrides }, path: p },
   ];
 
   it("reports a non-exact override range with its manifest", () => {
-    const gaps = collectNonExactOverrides(pkgsOverrides({"some-pin":"^1.2.3"},"package.json"));
+    const gaps = collectNonExactDeps(pkgsOverrides({"some-pin":"^1.2.3"},"package.json"));
     expect(gaps).toEqual([{ name: "some-pin", spec: "^1.2.3", declaredIn: "package.json" }]);
   });
 
   it("does not report an exact override pin", () => {
-    expect(collectNonExactOverrides(pkgsOverrides({"some-pin":"1.2.3"},"package.json"))).toEqual([]);
+    expect(collectNonExactDeps(pkgsOverrides({"some-pin":"1.2.3"},"package.json"))).toEqual([]);
   });
 
   it("does not report an exempt workspace: specifier", () => {
-    expect(collectNonExactOverrides(pkgsOverrides({"some-pin":"workspace:*"},"package.json"))).toEqual([]);
+    expect(collectNonExactDeps(pkgsOverrides({"some-pin":"workspace:*"},"package.json"))).toEqual([]);
   });
 
   it("reports digit-leading and nested ranges", () => {
-    const gaps = collectNonExactOverrides([
+    const gaps = collectNonExactDeps([
       { pkg: { overrides: { "some-pin": "1.0.0 || 2.0.0", "parent-dep": { "nested-pin": "1 - 2" } } }, path: "package.json" },
     ]);
     expect(gaps).toEqual([
       { name: "some-pin", spec: "1.0.0 || 2.0.0", declaredIn: "package.json" },
       { name: "nested-pin", spec: "1 - 2", declaredIn: "package.json" },
     ]);
+  });
+
+  it("reports a dependencies range and an optionalDependencies range", () => {
+    expect(collectNonExactDeps([
+      { pkg: { dependencies: { "some-dep": "^1.2.3" }, optionalDependencies: { "some-opt": "1.x" } }, path: "packages/foo/package.json" },
+    ])).toEqual([
+      { name: "some-dep", spec: "^1.2.3", declaredIn: "packages/foo/package.json" },
+      { name: "some-opt", spec: "1.x", declaredIn: "packages/foo/package.json" },
+    ]);
+  });
+
+  it("lists a range declared in both dependencies and overrides of one manifest once", () => {
+    expect(collectNonExactDeps([
+      { pkg: { dependencies: { "some-pin": "^1.2.3" }, overrides: { "some-pin": "^1.2.3" } }, path: "package.json" },
+    ])).toEqual([{ name: "some-pin", spec: "^1.2.3", declaredIn: "package.json" }]);
   });
 });
 
@@ -261,6 +285,14 @@ function writeOverrideFixtureRepo(root: string, overrides: Record<string, unknow
     version: "0.0.0",
     overrides,
   }));
+  if (!existsSync(join(root, "package.json"))) setupFailure(`fixture package.json not written under ${root}`);
+  return root;
+}
+
+/** Write a repo root with the given manifest object and an empty packages/ dir. */
+function writeManifestRepo(root: string, manifest: Record<string, unknown>): string {
+  mkdirSync(join(root, "packages"), { recursive: true });
+  writeFileSync(join(root, "package.json"), JSON.stringify(manifest));
   if (!existsSync(join(root, "package.json"))) setupFailure(`fixture package.json not written under ${root}`);
   return root;
 }
@@ -416,6 +448,22 @@ describe("CLI — a pin through overrides and the dated exemption", () => {
     }
   }, 30_000);
 
+  it("names the exemption applied on the exit-0 success line", async () => {
+    const root = writeOverrideFixtureRepo(join(scratch, "override-exempt-named"), { [FIXTURE_DEP]: FIXTURE_VERSION });
+    writeAllowlist(root, [exemption("2026-01-01", "2099-01-01")]);
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain(`1 exemption(s) applied: ${FIXTURE_DEP}@${FIXTURE_VERSION}.`);
+      expect(exitCode).toBe(0);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
   it("exits 2 on an expired exemption, before fetching", async () => {
     const root = writeOverrideFixtureRepo(join(scratch, "override-expired"), { [FIXTURE_DEP]: FIXTURE_VERSION });
     writeAllowlist(root, [exemption("2020-01-01", "2020-01-02")]);
@@ -438,11 +486,152 @@ describe("CLI — a pin through overrides and the dated exemption", () => {
       // Nothing is age-checked, so the dead registry is never queried.
       FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
     });
-    expect(output).toContain("Not age-checked (override ranges)");
+    expect(output).toContain("Not age-checked (ranges)");
     expect(output).toContain(`${FIXTURE_DEP} "^1.0.0"`);
     expect(output).toContain("No external pinned production deps to check.");
     expect(exitCode).toBe(0);
   }, 30_000);
+});
+
+describe("CLI — a dependency range is classified, not fetched as an exact version", () => {
+  it("reports a digit-leading range like 1.x and never fetches it", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-range"), {
+      name: "dep-ages-range-fixture",
+      version: "0.0.0",
+      dependencies: { [FIXTURE_DEP]: "1.x" },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain("Not age-checked (ranges):");
+      expect(output).toContain(`${FIXTURE_DEP} "1.x"`);
+      expect(output).toContain("No external pinned production deps to check.");
+      expect(registry.requests).toEqual([]); // never fetched as the exact version "1.x"
+      expect(exitCode).toBe(0);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+});
+
+describe("CLI — a refused dependency form fails the gate before any fetch", () => {
+  const refusedForms: Array<[string, string]> = [
+    ["build metadata", "1.0.0+build"],
+    ["a v prefix", "v1.0.0"],
+    ["an = prefix", "=1.0.0"],
+    ["a dist-tag", "latest"],
+  ];
+  for (const field of ["dependencies", "optionalDependencies"]) {
+    for (const [label, spec] of refusedForms) {
+      it(`exits 2 naming the package, spec and manifest for ${label} in ${field}`, async () => {
+        const root = writeManifestRepo(join(scratch, `dep-refused-${field}-${label.replace(/\W+/g, "-")}`), {
+          name: "dep-ages-refused-fixture",
+          version: "0.0.0",
+          [field]: { [FIXTURE_DEP]: spec },
+        });
+        const registry = freshRegistry();
+        try {
+          const { exitCode, output } = await runGate(CLI_SCRIPT, {
+            FLAIR_CHECK_DEP_AGES_ROOT: root,
+            FLAIR_NPM_REGISTRY: registry.url,
+          });
+          expect(exitCode).toBe(2);
+          expect(output).toContain(`package.json ${field} ${FIXTURE_DEP} "${spec}"`);
+          expect(registry.requests).toEqual([]);
+        } finally {
+          registry.stop();
+        }
+      }, 30_000);
+    }
+  }
+
+  it("checks an npm: alias with an exact target by the target, as overrides do", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-alias-exact"), {
+      name: "dep-ages-alias-fixture",
+      version: "0.0.0",
+      dependencies: { "some-alias": `npm:${FIXTURE_DEP}@${FIXTURE_VERSION}` },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(registry.requests).toEqual([`/${FIXTURE_DEP}`]);
+      expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
+      expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("prints an npm: alias with a range target as not age-checked", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-alias-range"), {
+      name: "dep-ages-alias-fixture",
+      version: "0.0.0",
+      dependencies: { "some-alias": `npm:${FIXTURE_DEP}@^1.0.0` },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain(`some-alias "npm:${FIXTURE_DEP}@^1.0.0"`);
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(0);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("exits 2 for an npm: alias whose target is a refused form", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-alias-refused"), {
+      name: "dep-ages-alias-fixture",
+      version: "0.0.0",
+      dependencies: { "some-alias": `npm:${FIXTURE_DEP}@latest` },
+    });
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(exitCode).toBe(2);
+      expect(output).toContain(`some-alias "npm:${FIXTURE_DEP}@latest"`);
+      expect(registry.requests).toEqual([]);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("keeps a workspace: entry exempt", async () => {
+    const root = writeManifestRepo(join(scratch, "dep-workspace-protocol"), {
+      name: "dep-ages-ws-fixture",
+      version: "0.0.0",
+      dependencies: { "some-internal": "workspace:*" },
+    });
+    const { exitCode, output } = await runGate(CLI_SCRIPT, { FLAIR_CHECK_DEP_AGES_ROOT: root });
+    expect(exitCode).toBe(0);
+    expect(output).toContain("No external pinned production deps to check.");
+  });
+});
+
+describe("collectUnsupportedDeps", () => {
+  it("names the manifest, field, package, spec and reason", () => {
+    expect(collectUnsupportedDeps([
+      { pkg: { dependencies: { "some-pin": "latest", ok: "1.0.0" } }, path: "packages/foo/package.json" },
+    ])).toEqual([{
+      declaredIn: "packages/foo/package.json",
+      field: "dependencies",
+      name: "some-pin",
+      spec: "latest",
+      reason: '"latest" is not an exact version, a semver range or an npm: alias of one',
+    }]);
+  });
 });
 
 describe("CLI — override forms", () => {

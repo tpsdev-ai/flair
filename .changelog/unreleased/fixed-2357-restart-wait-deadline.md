@@ -1,1 +1,0 @@
-- **Direct-process restarts probe through the stop deadline and refuse replacement after an unconfirmed stop.**

@@ -1,1 +1,0 @@
-- **`flair doctor --fix` reports a direct Harper process not observed to exit during launchd adoption (Closes #2205).** Exit, health and final listener checks share one stop deadline.
