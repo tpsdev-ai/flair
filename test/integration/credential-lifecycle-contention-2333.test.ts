@@ -229,10 +229,10 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2333 slice 2 — a credential lifecycle write does not undo a committed revoke (real Harper)", () => {
+describe("flair#2333 slice 2 — a later credential lifecycle write does not undo a committed revoke (real Harper)", () => {
   // ── OAuth refresh vs revoke ────────────────────────────────────────────────
 
-  it("CONTROL (H4): a rotation with no competing revoke still exchanges", async () => {
+  it("CONTROL: an uncontended rotation still exchanges", async () => {
     const raw = await seedRefreshToken("flair_cl_2333_ctl", "agent-2333-ctl");
     const res = await postJson("/OAuthToken", { grant_type: "refresh_token", refresh_token: raw, client_id: "flair_cl_2333_ctl" });
     const text = await res.text();
@@ -242,7 +242,7 @@ describe("flair#2333 slice 2 — a credential lifecycle write does not undo a co
     expect(typeof body.refresh_token).toBe("string");
   }, 60_000);
 
-  it("(H4 pause): a revoke that commits between the read and the claim refuses the rotation", async () => {
+  it("a revoked refresh token cannot be rotated", async () => {
     const raw = await seedRefreshToken("flair_cl_2333_rev", "agent-2333-rev");
     const { response, competed, released } = await withPaused(
       "oauth-refresh-pre-claim",
@@ -260,7 +260,7 @@ describe("flair#2333 slice 2 — a credential lifecycle write does not undo a co
 
   // ── XAA credential touch vs revoke / delete ────────────────────────────────
 
-  it("CONTROL (H5): a touch with no competing revoke still records lastUsedAt", async () => {
+  it("CONTROL: an uncontended credential touch still records lastUsedAt", async () => {
     const subject = `user-ctl-${randomUUID()}`;
     const principalId = `agent-2333-ctl-${randomUUID().slice(0, 8)}`;
     const credentialId = `cred_idp_ctl_${randomUUID().slice(0, 8)}`;
@@ -276,7 +276,7 @@ describe("flair#2333 slice 2 — a credential lifecycle write does not undo a co
     expect(typeof row.lastUsedAt, "the control touch recorded lastUsedAt").toBe("string");
   }, 60_000);
 
-  it("(H5 pause): a revoke that commits between the read and the write leaves the credential revoked", async () => {
+  it("a revoked credential stays revoked", async () => {
     const subject = `user-rev-${randomUUID()}`;
     const principalId = `agent-2333-rev-${randomUUID().slice(0, 8)}`;
     const credentialId = `cred_idp_rev_${randomUUID().slice(0, 8)}`;
@@ -299,7 +299,7 @@ describe("flair#2333 slice 2 — a credential lifecycle write does not undo a co
     expect(row.status, "the committed revoke was undone by the touch").toBe("revoked");
   }, 60_000);
 
-  it("(H5 pause): a delete that commits between the read and the write leaves the credential deleted", async () => {
+  it("a deleted credential stays deleted", async () => {
     const subject = `user-del-${randomUUID()}`;
     const principalId = `agent-2333-del-${randomUUID().slice(0, 8)}`;
     const credentialId = `cred_idp_del_${randomUUID().slice(0, 8)}`;
