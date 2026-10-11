@@ -8,5 +8,5 @@
   requests that interleave on the same key cannot both act on state the other is
   about to change: one message id keeps one owner, a `(from, threadId)` sequence
   stays strictly increasing, the per-sender cap holds, one `(agent, memory)` pair
-  contributes one usage count, and one IdP subject resolves to one principal. A
-  request that cannot take the lock is refused rather than applied.
+  contributes one usage count, and one IdP subject resolves to one principal. When
+  the lock cannot be taken, nothing is written.
