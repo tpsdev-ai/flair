@@ -111,8 +111,10 @@ add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"], "S
 for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#1"],
   ["Memory", "alias-source:(databases as any).flair.Memory#2"],
-  // flair#2441: Memory.put's committed-row re-check (confirmCommittedRow takes only `get`).
   ["Memory", "alias-source:(databases as any).flair.Memory#3"],
+  // flair#2465/#2441: the two committed-row re-checks (confirmCommittedRow takes only `get`) —
+  // the re-embed's and Memory.put's.
+  ["Memory", "alias-source:(databases as any).flair.Memory#4"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],
   ["Federation", "alias-source:(databases as any).flair.Memory#1"],
   ["MemoryReflect", "alias-source:(databases as any).flair.Memory#1"],

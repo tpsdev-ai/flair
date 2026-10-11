@@ -57,7 +57,7 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"],
   "Skill predecessor close: preserves stored content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.update#1"],
-  "Re-embed request (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector; content and tags stay as stored.");
+  "Re-embed request (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector; it does not carry the re-read row's other fields.");
 add("Memory", ["writer:super.put#1"],
   "Admin-only _reindex re-PUT (reindex_admin_only gate) — preserves existing content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
@@ -67,8 +67,8 @@ add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
-add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3"],
-  "Read-only table alias (get/search; #3 is Memory.put's committed-row re-check, confirmCommittedRow, which takes only `get`, flair#2441) — no write through this handle.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4"],
+  "Read-only table aliases (the class heritage and two committed-row re-checks; #2 is the re-embed's confirmCommittedRow (flair#2465) and #4 is Memory.put's (flair#2441), which takes only `get`) — no write through these handles.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
@@ -105,7 +105,7 @@ add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
 add("promotion-stamp", ["writer:table.put#1"],
   "Promotion status stamp in the manual promotion's own write transaction — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.update#1"],
-  "Content-suffix migration embeds skillEmbedText(row) and stages an incremental update of only embedding/embeddingModel/updatedAt (flair#2465) — never a full-row put; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
+  "Content-suffix migration embeds skillEmbedText(row) and stages an incremental update of only embedding/embeddingModel/updatedAt (flair#2465) — never a full-row put; a row gone or replaced at the committed-row confirm, staged before it, aborts. A change committed after that confirm and before the commit is not seen (no compare-and-set; PR residual-gap note).");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
 add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],

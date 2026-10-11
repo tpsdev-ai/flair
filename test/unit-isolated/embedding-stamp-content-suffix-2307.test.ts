@@ -4,9 +4,11 @@
  *
  * That row is re-embedded through the raw table handle (the loopback
  * `PUT /Memory/:id` cannot address it), from the text Memory's write paths
- * embed for it (a skill row's `trigger`, else `content`). A change visible at
- * the committed re-read aborts; later changes follow Harper's timestamp order
- * (see the PR residual-gap note).
+ * embed for it (a skill row's `trigger`, else `content`). The re-embed stages an
+ * incremental `update` of only the embedding fields, then confirms the committed
+ * row is still the one it read; a row gone or replaced at that confirm aborts,
+ * and a change committed after the confirm and before the commit is not seen
+ * (Harper has no compare-and-set; see the PR residual-gap note).
  *
  * Runs in its own process (test/unit-isolated): it mocks
  * resources/embeddings-provider.ts, which other unit files import for real.
@@ -172,7 +174,7 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     ["edited", () => store.set(LEGACY_ID, { ...store.get(LEGACY_ID)!, content: "edited after the read" })],
     ["deleted", () => store.delete(LEGACY_ID)],
   ] as const) {
-    it(`a row ${name} before the committed re-read aborts the stamp`, async () => {
+    it(`a row ${name} after its write is staged aborts the stamp`, async () => {
       afterStage = () => {
         afterStage = null;
         change(); // a competing write commits while this transaction's write is staged
@@ -188,6 +190,19 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
       }
     });
   }
+
+  it("a row re-created under the same id by another owner after staging is not patched", async () => {
+    afterStage = () => {
+      afterStage = null;
+      // Delete + same-id re-create: a fresh incarnation the migration never read.
+      store.set(LEGACY_ID, { id: LEGACY_ID, agentId: "b", content: "replacement", ...STALE });
+    };
+    const result = await migration().run(10);
+    expect(result.processed).toBe(0);
+    expect(puts).toEqual([]); // assertion: the staged update was discarded, not patched onto the replacement
+    // The replacement keeps exactly what re-created it — no embedding fields patched on.
+    expect(store.get(LEGACY_ID)).toMatchObject({ agentId: "b", content: "replacement", ...STALE });
+  });
 
   it("a row deleted while its embedding was computed is not recreated", async () => {
     embedImpl = async () => {

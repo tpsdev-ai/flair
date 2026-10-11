@@ -139,6 +139,7 @@
  */
 import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
+import { confirmCommittedRow } from "../write-back.js";
 import { getEmbedding, getModelId } from "../embeddings-provider.js";
 import { withOwnedTransaction } from "../request-transaction.js";
 import { txnPausePoint } from "../txn-pause-point.js";
@@ -249,9 +250,6 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
   inTransaction: (fn) => withOwnedTransaction(undefined, fn),
 };
 
-/** Aborts the re-embed's owned transaction: the row changed after the transaction read it. */
-class RowChangedBeforeCommit extends Error {}
-
 /**
  * Re-embed a legacy row whose id ends in the `.content` property suffix. The
  * loopback `PATCH /Memory/:id` the regen path uses cannot address such an id
@@ -263,11 +261,13 @@ class RowChangedBeforeCommit extends Error {}
  * (`skillEmbedText`: a skill row's `trigger` when present, else `content`); a
  * row with no such text is not embedded.
  *
- * Writes a usable vector in an owned transaction, staging only changes to
- * `embedding`, `embeddingModel` and `updatedAt` — an INCREMENTAL update, the
- * same field-only write Memory's own re-embed branch uses (flair#2465), never
- * a full-row put. A full-row put would carry this transaction's re-read row and
- * could revert a field an owner edit committed meanwhile.
+ * Writes a usable vector in an owned transaction. It STAGES an incremental
+ * `update` of only `embedding`, `embeddingModel` and `updatedAt` — the same
+ * field-only write Memory's own re-embed branch uses (flair#2465), never a
+ * full-row put — and the write touches no other field of the committed row.
+ * Then it CONFIRMS the committed row (an explicit fresh context) is still the
+ * row this transaction read and embedded; a row gone or replaced since that
+ * read aborts the owned transaction.
  *
  * Harper 5.2.8 has no compare-and-set on a table write: a transaction does not
  * fail when a row it read is changed by another write before it commits;
@@ -277,7 +277,12 @@ class RowChangedBeforeCommit extends Error {}
  * not this transaction's snapshot or its staged write); if it is no longer the
  * row read inside the transaction, the transaction is aborted and the staged
  * write discarded. A change committed after that re-read and before the commit
- * is not seen by it; Harper orders the two writes by timestamp.
+ * is not seen by it; Harper orders the two writes by timestamp. The re-read
+ * compares the WHOLE committed row with the row read (the supersede-close
+ * pattern), which is stronger than the identity list alone: a content-only
+ * change with no stored incarnation token (a legacy row has none) still fails
+ * it, so this migration never stamps a vector for text the row no longer
+ * carries.
  *
  * Returns true iff it wrote. Otherwise this migration does not stamp the row;
  * a row that still exists with a stale stamp stays pending for the next batch
@@ -298,20 +303,24 @@ async function regenContentSuffixRow(
     return await deps.inTransaction(async (txn) => {
       const fresh = await table.get(id, txn);
       if (!fresh || !isDeepStrictEqual(fresh, existing)) return false;
-      // Test-only: inert unless the fault-injection env opt-in is set and armed.
-      const pause = txnPausePoint("embedding-stamp-content-suffix");
-      if (pause) await pause;
       // flair#2465: an incremental update of ONLY the embedding fields, not a
       // full-row put. A full-row put carries this transaction's re-read row and
-      // can revert a field an owner edit committed meanwhile; writing only
-      // embedding/embeddingModel/updatedAt leaves every other field as stored.
+      // can revert a field an owner edit committed meanwhile; this write touches
+      // only embedding/embeddingModel/updatedAt.
       await table.update(id, { embedding, embeddingModel: current, updatedAt: new Date().toISOString() }, txn);
-      const committed = await table.get(id, {});
-      if (!isDeepStrictEqual(committed, fresh)) throw new RowChangedBeforeCommit();
+      // Test-only: inert unless the fault-injection env opt-in is set and armed.
+      // After the write is STAGED and before the transaction commits.
+      const pause = txnPausePoint("embedding-stamp-content-suffix");
+      if (pause) await pause;
+      // Stage first, then confirm the COMMITTED row is still the row this
+      // transaction read and embedded; gone or replaced aborts (the staged write
+      // is discarded). Harper has no compare-and-set: a change committed after
+      // this re-read and before the commit is not seen.
+      await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, fresh));
       return true;
     });
   } catch {
-    // Includes RowChangedBeforeCommit: the transaction was aborted, nothing written.
+    // Includes CommittedRowChanged: the transaction was aborted, nothing written.
     return false;
   }
 }

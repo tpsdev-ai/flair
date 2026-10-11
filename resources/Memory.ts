@@ -1146,6 +1146,14 @@ function isUsableEmbeddingVector(value: unknown): value is number[] {
 /** Attempts of a re-embed before it gives up on a row whose text keeps changing. */
 const REEMBED_WRITE_ATTEMPTS = 3;
 
+/** What one re-embed attempt's owned transaction decides. */
+type ReembedOutcome =
+  | { kind: "not_found" }
+  | { kind: "forbidden" }
+  | { kind: "no_text" }
+  | { kind: "recompute"; text: string }
+  | { kind: "written"; model: string; updatedAt: string };
+
 /**
  * flair#2390: write the re-embed of Memory row `id`.
  *
@@ -1161,9 +1169,18 @@ const REEMBED_WRITE_ATTEMPTS = 3;
  * recomputes from the stored text rather than stamping a vector for text the row
  * no longer carries (at most REEMBED_WRITE_ATTEMPTS times). If the text keeps
  * changing across the REEMBED_WRITE_ATTEMPTS attempts, it returns
- * reembed_row_changed (409) and writes nothing. A row that vanished, a row with
- * no text, or a caller no longer authorized for the row is refused the same way
- * the first read refused it.
+ * reembed_row_changed (409) and writes nothing. A row absent at the attempt's
+ * own re-read, a row with no text, or a caller no longer authorized for the row
+ * is refused the same way the first read refused it.
+ *
+ * flair#2465: the attempt STAGES the field-only incremental update, then
+ * confirms the COMMITTED row (an explicit fresh context) is still the row this
+ * transaction read and re-authorized — the same identity (id, agentId,
+ * instanceToken, contentHash, createdAt). A row gone or replaced since that read
+ * aborts the owned transaction (the staged write is discarded) and the caller
+ * answers stored_row_changed (409), the named refusal Memory.put uses for the
+ * same condition. Harper has no compare-and-set on a table write, so a change
+ * committed after that confirm and before the commit is not seen by it.
  */
 async function reembedStoredRow(
   id: string,
@@ -1175,41 +1192,44 @@ async function reembedStoredRow(
   let textToEmbed = skillEmbedText(preRead);
   let embedding = vector;
   for (let attempt = 1; attempt <= REEMBED_WRITE_ATTEMPTS; attempt++) {
-    const outcome = await withOwnedTransaction(ctx, async (owned) => {
-      const stored = await (databases as any).flair.Memory.get(id, owned);
-      if (!stored) return { kind: "not_found" as const };
-      if (auth.kind === "agent" && !auth.isAdmin &&
-          isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
-        return { kind: "forbidden" as const };
-      }
-      const storedText = skillEmbedText(stored);
-      if (typeof storedText !== "string" || storedText.length === 0) return { kind: "no_text" as const };
-      if (storedText !== textToEmbed) return { kind: "recompute" as const, text: storedText };
-      const model = getModelId();
-      const updatedAt = new Date().toISOString();
-      // Test-only: inert unless the fault-injection env opt-in is set and armed.
-      const pause = txnPausePoint("memory-reembed-write");
-      if (pause) await pause;
-      // flair#2465: a re-embed must never CREATE a row. Re-read the COMMITTED
-      // row here, in an explicit fresh context (never contextless — that would
-      // join this transaction and see its snapshot/staged write), and if the
-      // row is gone skip with not_found and write nothing. A delete committed
-      // after this transaction's read (its snapshot) but before this write is
-      // seen by this re-read; without it the incremental update below could be
-      // applied against an absent record, and Harper's audit-off commit path
-      // builds a record from the patch fields — a PARTIAL row carrying only id
-      // and the embedding fields (harper resources/Table.ts's no-audit branch).
-      const committed = await (databases as any).flair.Memory.get(id, {});
-      if (!committed) return { kind: "not_found" as const };
-      // flair#2465: an incremental update, NOT a full-row put. Harper orders a
-      // transaction by its first read, so this write can land after an edit the
-      // owner committed while the vector was computed; a full-row put would
-      // carry the row this transaction read and revert that edit. Writing only
-      // the embedding fields leaves the stored text (and every other field) as
-      // the owner left it.
-      await (databases as any).flair.Memory.update(id, { embedding, embeddingModel: model, updatedAt }, owned);
-      return { kind: "written" as const, model, updatedAt };
-    });
+    let outcome: ReembedOutcome;
+    try {
+      outcome = await withOwnedTransaction<ReembedOutcome>(ctx, async (owned) => {
+        const stored = await (databases as any).flair.Memory.get(id, owned);
+        if (!stored) return { kind: "not_found" as const };
+        if (auth.kind === "agent" && !auth.isAdmin &&
+            isForbiddenOwnerMutation(stored, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+          return { kind: "forbidden" as const };
+        }
+        const storedText = skillEmbedText(stored);
+        if (typeof storedText !== "string" || storedText.length === 0) return { kind: "no_text" as const };
+        if (storedText !== textToEmbed) return { kind: "recompute" as const, text: storedText };
+        const model = getModelId();
+        const updatedAt = new Date().toISOString();
+        // flair#2465: an incremental update, NOT a full-row put. Harper orders a
+        // transaction by its first read, so this write can land after an edit the
+        // owner committed while the vector was computed; a full-row put would
+        // carry the row this transaction read and revert that edit.
+        await (databases as any).flair.Memory.update(id, { embedding, embeddingModel: model, updatedAt }, owned);
+        // Test-only: inert unless the fault-injection env opt-in is set and armed.
+        const stagedPause = txnPausePoint("memory-reembed-staged");
+        if (stagedPause) await stagedPause;
+        // flair#2465: STAGE first, THEN confirm the COMMITTED row (an explicit
+        // fresh context — never contextless, which joins this transaction and
+        // sees its snapshot or its staged write) is still the row this transaction
+        // read and re-authorized: the same identity (id, agentId, instanceToken,
+        // contentHash, createdAt). A row gone or replaced since that read aborts
+        // this owned transaction — the staged write is discarded and the caller
+        // answers stored_row_changed (409). Harper has no compare-and-set: a
+        // change committed after this confirm and before the commit is not seen.
+        await confirmCommittedRow((databases as any).flair.Memory, id, (committed) => sameStoredRow(committed, stored));
+        return { kind: "written" as const, model, updatedAt };
+      });
+    } catch (err) {
+      // The owned transaction was aborted by the throw; nothing was written.
+      if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
+      throw err;
+    }
     if (outcome.kind === "not_found") return NOT_FOUND();
     if (outcome.kind === "forbidden") return FORBIDDEN("forbidden: cannot write memory owned by another agent");
     if (outcome.kind === "no_text") {
@@ -1895,10 +1915,11 @@ export class Memory extends (databases as any).flair.Memory {
     // and updatedAt.
     // flair#2390: the vector is computed OUTSIDE the write. The write itself
     // re-reads the committed row inside its own transaction (reembedStoredRow),
-    // re-checks the owner and the text, and writes ONLY embedding/embeddingModel/
-    // updatedAt (flair#2465) — a row gone at that committed re-read aborts the
-    // write — so an edit committed while the vector was computed is kept, and
-    // the vector written is the one for the text of the re-read row.
+    // re-checks the owner and the text, stages ONLY embedding/embeddingModel/
+    // updatedAt (flair#2465), then confirms the committed row is still the one it
+    // read (flair#2465) — a row gone or replaced aborts the write with the named
+    // 409 stored_row_changed — so an edit committed while the vector was computed
+    // is kept, and the vector written is the one for the text of the re-read row.
     if (reembedRequest) {
       if (!existingForSkill) return NOT_FOUND();
       const auth = await resolveAgentAuth((this as any).getContext?.());

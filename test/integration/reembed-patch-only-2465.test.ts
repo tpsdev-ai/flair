@@ -1,6 +1,7 @@
 /**
- * reembed-patch-only-2465.test.ts — a background re-embed does not lose a
- * concurrent edit to the same Memory row (flair#2465), real Harper.
+ * reembed-patch-only-2465.test.ts — a background re-embed writes only the
+ * embedding fields, and confirms the committed row after staging (flair#2465),
+ * real Harper.
  *
  * Harper orders a transaction by its FIRST READ, not its write. The re-embed
  * (`Memory.patch()`'s re-embed branch, driven here by a genuine HTTP PATCH whose
@@ -18,14 +19,17 @@
  * FIRST), the re-embed runs to completion while it is held, then the PUT is
  * released: the edit's write is ordered after the re-embed's.
  *
- * `memory-reembed-write` holds the re-embed's own owned transaction, after its
- * re-read and before its write. The third case commits a DELETE of the row
- * there: the re-embed must not resurrect the row from its patch fields (Harper's
- * audit-off commit path builds a record from an absent record's patch fields).
- * It re-reads the COMMITTED row before writing and skips with not_found, so no
- * row — and never a partial one carrying only id + the embedding fields — exists
- * after. Dropping that committed re-read makes this case fail (the re-embed
- * answers 2xx for a row it did not write).
+ * `memory-reembed-staged` holds the re-embed's own owned transaction AFTER it
+ * has STAGED its field-only update and BEFORE it confirms the committed row (and
+ * commits). Cases commit a competitor there:
+ *   - (a) a DELETE: the committed row is gone at the confirm, so the re-embed
+ *     aborts (nothing is written) and answers the named 409 stored_row_changed;
+ *     no row — and never a partial one — exists afterwards;
+ *   - (b) a DELETE + same-id RE-CREATE by another owner: the committed row is a
+ *     different incarnation, so the re-embed aborts and the replacement row is
+ *     left exactly as re-created (its embedding fields are not patched onto it).
+ * Dropping the post-staging confirm fails both (the staged write lands on the
+ * absent/replacement row and the re-embed answers 2xx instead of 409).
  *
  * Throwaway HOME + data dir, ephemeral ports.
  */
@@ -39,17 +43,20 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const PUT_POINT = "memory-put";
-// The re-embed's own in-transaction pause (resources/Memory.ts, reembedStoredRow).
-const REEMBED_WRITE_POINT = "memory-reembed-write";
+// The re-embed's own in-transaction pause, AFTER its write is staged and BEFORE
+// its committed-row confirm (resources/Memory.ts, reembedStoredRow).
+const REEMBED_STAGED_POINT = "memory-reembed-staged";
 const CURRENT_MODEL_ID = getModelId();
 const STALE_MODEL = "some-ancient-model-v0";
 const STALE_EMBEDDING = [0.01, 0.02, 0.03];
 const ORIGINAL = "the original text about a quiet walk through the produce market";
 const EDITED = "an edit about quantum computing research grants and their deadlines";
+const REPLACEMENT = "a replacement row another owner re-created under the same id";
 
 interface TestAgent { id: string; publicKey: Uint8Array; secretKey: Uint8Array; }
 const newAgent = (id: string): TestAgent => ({ id, ...nacl.sign.keyPair() });
 const owner = newAgent("rpo-owner");
+const other = newAgent("rpo-other");
 
 let harper: HarperInstance;
 let pauseDir: string;
@@ -118,11 +125,50 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   return false;
 }
 
-async function seedRow(id: string, agentId: string, extra: Record<string, unknown> = {}): Promise<void> {
+async function seedRow(id: string, agentId: string, content: string, extra: Record<string, unknown> = {}): Promise<void> {
   await opsCall({
     operation: "insert", database: "flair", table: "Memory",
-    records: [{ id, agentId, content: ORIGINAL, embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(), ...extra }],
+    records: [{ id, agentId, content, embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(), ...extra }],
   });
+}
+/** The server's own embedding of `text`, via an ordinary admin PUT of a probe row. */
+async function serverEmbedding(text: string): Promise<number[]> {
+  const id = `rpo-probe-${randomUUID()}`;
+  const res = await fetch(`${harper.httpURL}/Memory/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: authHeader },
+    body: JSON.stringify({ id, agentId: "probe-agent", content: text }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  expect(res.status, await res.clone().text()).toBe(200);
+  const row = await readRow(id);
+  expect(Array.isArray(row?.embedding)).toBe(true);
+  return row.embedding;
+}
+function cosine(a: number[], b: number[]): number {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return dot / Math.sqrt(na * nb);
+}
+
+/**
+ * Arm the re-embed's staged pause, start the PATCH, and once it is paused (its
+ * write staged), run `compete`, then release it. Returns the PATCH's response
+ * and how the pause ended.
+ */
+async function withPausedStaged(id: string, compete: () => Promise<unknown>): Promise<{ response: Response; released: string; paused: boolean }> {
+  for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${REEMBED_STAGED_POINT}`), { force: true });
+  writeFileSync(join(pauseDir, `arm.${REEMBED_STAGED_POINT}`), "");
+  const pending = reembedAs(owner, id);
+  const paused = await waitFor(join(pauseDir, `paused.${REEMBED_STAGED_POINT}`), 20_000);
+  try {
+    if (paused) await compete();
+  } finally {
+    writeFileSync(join(pauseDir, `go.${REEMBED_STAGED_POINT}`), "");
+  }
+  const response = await pending;
+  const released = paused ? readFileSync(join(pauseDir, `released.${REEMBED_STAGED_POINT}`), "utf8") : "never paused";
+  return { response, released, paused };
 }
 
 beforeAll(async () => {
@@ -158,7 +204,9 @@ beforeAll(async () => {
   const now = new Date().toISOString();
   await opsCall({
     operation: "upsert", database: "flair", table: "Agent",
-    records: [{ id: owner.id, name: owner.id, role: "agent", publicKey: Buffer.from(owner.publicKey).toString("base64"), createdAt: now }],
+    records: [owner, other].map((a) => ({
+      id: a.id, name: a.id, role: "agent", publicKey: Buffer.from(a.publicKey).toString("base64"), createdAt: now,
+    })),
   });
 }, 180_000);
 
@@ -171,7 +219,7 @@ afterAll(async () => {
 describe("flair#2465 — a re-embed keeps a concurrent owner edit (real Harper)", () => {
   it("an owner PUT that starts before the re-embed and commits after it keeps its edit", async () => {
     const id = "rpo-case-1";
-    await seedRow(id, owner.id);
+    await seedRow(id, owner.id, ORIGINAL);
 
     for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${PUT_POINT}`), { force: true });
     writeFileSync(join(pauseDir, `arm.${PUT_POINT}`), "");
@@ -197,45 +245,76 @@ describe("flair#2465 — a re-embed keeps a concurrent owner edit (real Harper)"
 
     const row = await readRow(id);
     expect(row.content, "the re-embed reverted the owner's committed edit").toBe(EDITED);
-    expect(row.embeddingModel).toBe(CURRENT_MODEL_ID); // the re-embed landed
+    // "the re-embed landed": its write is the vector it computed (for the text it
+    // read), distinguishable from the vector the owner PUT computed for EDITED.
+    // (The owner PUT also stamps the current model, so embeddingModel alone would
+    // not prove the re-embed's write landed.)
+    const ownVector = await serverEmbedding(ORIGINAL);
+    const editVector = await serverEmbedding(EDITED);
+    expect(cosine(row.embedding, ownVector), "the re-embed's write did not land").toBeGreaterThan(0.999);
+    expect(cosine(row.embedding, ownVector)).toBeGreaterThan(cosine(row.embedding, editVector));
   }, 120_000);
 
   it("CONTROL: with no competitor the re-embed stamps the current model and leaves the text", async () => {
     const id = "rpo-case-2";
-    await seedRow(id, owner.id);
+    await seedRow(id, owner.id, ORIGINAL);
     const res = await reembedAs(owner, id);
     expect(res.status, await res.clone().text()).toBeLessThan(300);
     const row = await readRow(id);
     expect(row.content).toBe(ORIGINAL);
     expect(row.embeddingModel).toBe(CURRENT_MODEL_ID);
   }, 120_000);
+});
 
-  it("a delete committed while the re-embed is paused leaves no row — never a partial one", async () => {
-    const id = "rpo-case-3";
-    await seedRow(id, owner.id);
-
-    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${REEMBED_WRITE_POINT}`), { force: true });
-    writeFileSync(join(pauseDir, `arm.${REEMBED_WRITE_POINT}`), "");
-    const pendingReembed = reembedAs(owner, id);
-    const paused = await waitFor(join(pauseDir, `paused.${REEMBED_WRITE_POINT}`), 20_000);
-    let deleteStatus = -1;
-    try {
-      if (paused) {
-        // The row is deleted (committed) while the re-embed's owned transaction is held.
-        deleteStatus = await deleteRow(id);
-      }
-    } finally {
-      writeFileSync(join(pauseDir, `go.${REEMBED_WRITE_POINT}`), "");
-    }
-    const res = await pendingReembed;
-    const released = paused ? readFileSync(join(pauseDir, `released.${REEMBED_WRITE_POINT}`), "utf8") : "never paused";
-
-    expect(released, "the pause ended by timeout, not by this test").toBe("go");
-    expect(deleteStatus, "the committed delete did not succeed").toBe(200);
-    // The re-embed's write must not resurrect the row from its patch fields.
+describe("flair#2465 — the re-embed confirms the committed row after staging (real Harper)", () => {
+  it("CONTROL: held at the staged write with no competitor, the re-embed lands", async () => {
+    const id = "rpo-staged-ok";
+    await seedRow(id, owner.id, ORIGINAL);
+    const { response, released, paused } = await withPausedStaged(id, async () => {});
+    expect(paused, "the re-embed was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    expect(response.status, await response.clone().text()).toBeLessThan(300);
     const row = await readRow(id);
-    expect(row, "the re-embed created a row (partial record) after a committed delete").toBeNull();
-    // A gone row is a named refusal, never a silent 2xx.
-    expect(res.status, await res.clone().text()).toBe(404);
+    expect(row.content).toBe(ORIGINAL);
+    expect(row.embeddingModel).toBe(CURRENT_MODEL_ID);
+  }, 120_000);
+
+  it("(a) a delete committed after staging aborts the re-embed and leaves no row", async () => {
+    const id = "rpo-staged-delete";
+    await seedRow(id, owner.id, ORIGINAL);
+    const { response, released, paused } = await withPausedStaged(id, async () => {
+      expect(await deleteRow(id), "the committed delete did not succeed").toBe(200);
+    });
+    expect(paused, "the re-embed was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    // The re-embed's staged write must not resurrect the row from its patch fields.
+    expect(await readRow(id), "the re-embed created a row after a committed delete").toBeNull();
+    // A gone row is the named 409 refusal, never a silent 2xx.
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+  }, 120_000);
+
+  it("(b) a same-id RE-CREATE by another owner after staging aborts the re-embed and is not overwritten", async () => {
+    const id = "rpo-staged-recreate";
+    await seedRow(id, owner.id, ORIGINAL);
+    const { response, released, paused } = await withPausedStaged(id, async () => {
+      expect(await deleteRow(id), "the committed delete did not succeed").toBe(200);
+      // Another owner re-creates the same id: a fresh incarnation the re-embed
+      // never read or authorized.
+      await seedRow(id, other.id, REPLACEMENT);
+    });
+    expect(paused, "the re-embed was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    const row = await readRow(id);
+    expect(row?.agentId, "the replacement row was replaced by the stale re-embed").toBe(other.id);
+    expect(row?.content, "the replacement row's content was overwritten").toBe(REPLACEMENT);
+    // The re-embed's staged field-only update must not be patched onto the
+    // replacement: it keeps the (stale) stamp the re-create gave it.
+    expect(row?.embeddingModel, "the stale re-embed's embedding fields were patched onto the replacement").toBe(STALE_MODEL);
+    expect(row?.embedding).toEqual(STALE_EMBEDDING);
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
   }, 120_000);
 });
