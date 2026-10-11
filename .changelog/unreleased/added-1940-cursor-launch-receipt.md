@@ -5,8 +5,9 @@
   OrgEvent id, content naming only the dispatch id and the launched Cursor agent
   id, and — when the Cursor agent id passes the server's host-source grammar —
   `hostSource` `{ host: "cursor", kind: "launch", id, url? }` claiming where the
-  launch lives (an id the grammar refuses stores no pointer: the receipt still
-  lands, unsourced, and gets no bootstrap citation). The `id`
+  launch lives. The receipt is "sourced" only when that pointer was STORED: an id
+  the grammar refuses stores no pointer (an unsourced receipt, no bootstrap
+  citation), and a read or write failure can prevent the receipt entirely. The `id`
   is the Cursor agent id: on create, the id Cursor returned (the requested id
   when the response carries none); on a 409 replay, the requested id, which
   Cursor reported as already in use. The `url` is set only on create, and only
@@ -17,10 +18,14 @@
   the dispatch text; the write is
   private and omits `hostSourceScope`, so the pointer stays author-only. Only a
   live run signed with the agent's own key writes the receipt, and that signing
-  requirement is enforced WHERE THE WRITE HAPPENS: the production receipt store
-  requires the key, and the client fails closed (no admin Basic fallback) when
-  none resolves at send time; a key the client already loaded is cached and still
-  signs, so removing the key file cannot cause a Basic fallback. The cycle runs
+  requirement is enforced at the START of the exported runner — `runWakeCycle`
+  refuses a live cycle whose client cannot sign, by name, before it reads the feed
+  or launches Cursor — and again WHERE THE WRITE HAPPENS: the production receipt
+  store requires the key, and the client fails closed (no admin Basic fallback)
+  when none resolves at send time; a key the client already loaded is cached and
+  still signs, so removing the key file cannot cause a Basic fallback. Admin Basic
+  credentials are accepted only for the read-only `--dry-run` mode, which writes
+  nothing. The cycle runs
   on ONE signed client: the runner builds the catchup reader and the receipt
   store from it, so on a live cycle the receipt is signed as exactly the runner's
   agent and a receipt signed as another agent is unrepresentable (no separate
@@ -48,4 +53,5 @@
   is reported as `receiptFailed`; none is a crash. A `hostSource` value the
   server's grammar would refuse (checked on its NFC form, as the server checks
   it) is omitted with one line through the supplied `log` callback — the receipt
-  still lands if the remaining write succeeds.
+  is stored unsourced if the remaining write succeeds, though a read or write
+  failure can still prevent it.

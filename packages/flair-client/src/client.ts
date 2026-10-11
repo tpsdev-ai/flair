@@ -241,6 +241,22 @@ export class FlairClient {
   }
 
   /**
+   * flair#1944 round 9 — whether a request from this client would be SIGNED with
+   * the agent's own Ed25519 identity rather than fall back to admin Basic.
+   * Mirrors `resolveKey`'s precedence WITHOUT loading the key file: an in-memory
+   * key, or a key file that resolves NOW (the same `inspectKeyLookup` the CLI's
+   * startup check uses). Synchronous, so a caller (the cursor wake-runner) can
+   * refuse a live cycle BEFORE it makes any request — the feed read, the Cursor
+   * launch, or the receipt write. `false` when `authMode` is "basic" (that mode
+   * never signs), regardless of a configured key path.
+   */
+  hasSigningKey(): boolean {
+    if (this.authMode === "basic") return false;
+    if (this.privateKey || this.rawPrivateKey) return true;
+    return inspectKeyLookup(this.agentId, this.keyPath).resolvedPath !== null;
+  }
+
+  /**
    * flair#1987 — the FINAL request URL: `path` joined onto the base URL's OWN
    * path with exactly one slash between them (whether or not the base ends in
    * "/"). Parsed with `new URL` so the path sent is the path the base names.

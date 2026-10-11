@@ -31,6 +31,8 @@ import {
   type CatchupPort,
   type CursorAgentClient,
   type CursorLaunchConfig,
+  type CursorLaunchSource,
+  type FlairRequestClient,
   type LaunchInput,
   type LaunchResult,
   type ReceiptStore,
@@ -141,10 +143,10 @@ describe("catchup port — owner-scope by construction", () => {
     const calls: Array<{ method: string; path: string; body?: unknown }> = [];
     const port = createCatchupPort({
       agentId: CREW,
-      request: async (method, path, body) => {
+      request: (async (method: string, path: string, body?: unknown) => {
         calls.push({ method, path, body });
         return { events: [] };
-      },
+      }) as unknown as FlairRequestClient["request"],
     });
     // The port function signature has no participantId — TypeScript enforces
     // this; at runtime a spoofed third arg is ignored.
@@ -158,7 +160,9 @@ describe("catchup port — owner-scope by construction", () => {
   });
 
   test("refuses to bind without an identity", () => {
-    expect(() => createCatchupPort({ agentId: "", request: async () => ({}) })).toThrow("FLAIR_AGENT_ID");
+    expect(() =>
+      createCatchupPort({ agentId: "", request: (async () => ({})) as unknown as FlairRequestClient["request"] }),
+    ).toThrow("FLAIR_AGENT_ID");
   });
 });
 
@@ -203,7 +207,7 @@ describe("Cursor create body + 409", () => {
       (async () =>
         new Response(JSON.stringify({ agent: { id: input.cursorAgentId, url: "https://cursor.com/agents/x" } }), {
           status: 201,
-        })) as typeof fetch,
+        })) as unknown as typeof fetch,
     );
     expect(await created.create(input)).toEqual({
       outcome: "created",
@@ -213,19 +217,19 @@ describe("Cursor create body + 409", () => {
 
     const reused = createCursorAgentClient(
       { apiBase: "https://api.cursor.com", apiKey: "k" },
-      (async () => new Response(JSON.stringify({ error: "agent_id_conflict" }), { status: 409 })) as typeof fetch,
+      (async () => new Response(JSON.stringify({ error: "agent_id_conflict" }), { status: 409 })) as unknown as typeof fetch,
     );
     expect(await reused.create(input)).toEqual({ outcome: "already", cursorAgentId: input.cursorAgentId });
 
     const boom = createCursorAgentClient(
       { apiBase: "https://api.cursor.com", apiKey: "k" },
-      (async () => new Response("nope", { status: 500 })) as typeof fetch,
+      (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch,
     );
     await expect(boom.create(input)).rejects.toThrow("500");
 
     const empty409 = createCursorAgentClient(
       { apiBase: "https://api.cursor.com", apiKey: "k" },
-      (async () => new Response("", { status: 409 })) as typeof fetch,
+      (async () => new Response("", { status: 409 })) as unknown as typeof fetch,
     );
     await expect(empty409.create(input)).rejects.toThrow("409");
   });
@@ -270,7 +274,7 @@ function recordingCursor(handler: (input: LaunchInput) => Promise<LaunchResult> 
  * another's ids.
  */
 function acceptingReceiptStore(agentId = CREW): ReceiptStore {
-  const written = new Map<string, { author: string; content: string; hostSource?: { host: string; kind: string; id: string } }>();
+  const written = new Map<string, { author: string; content: string; hostSource?: CursorLaunchSource }>();
   return {
     agentId,
     read: async (id) => written.get(id) ?? null,

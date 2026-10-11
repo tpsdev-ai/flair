@@ -1,6 +1,7 @@
 /**
- * The sourced launch receipt a wake handoff ATTEMPTS to record (flair#1944,
- * slice 2 of flair#1940).
+ * The launch receipt a wake handoff ATTEMPTS to record (flair#1944, slice 2 of
+ * flair#1940): "sourced" only when a pointer was STORED, and only if the write
+ * succeeds.
  *
  * After a dispatch is handed to a Cursor Cloud Agent ("created" or "already"),
  * the runner attempts one receipt as its own agent: a STABLE id derived from the
@@ -15,8 +16,11 @@
  * A live receipt run requires the agent's own Ed25519 signing key (flair#1944
  * round 4): under admin Basic credentials the server would stamp the written
  * pointer with the Basic username while the row's `agentId` is
- * `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. Basic
- * credentials are accepted only for the read-only modes (`--dry-run`).
+ * `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. Round 9
+ * enforces this at the START of the exported runner: a LIVE `runWakeCycle` whose
+ * client cannot resolve an Ed25519 key is refused by name BEFORE the first read,
+ * launch or write. Basic credentials are accepted only for the read-only modes
+ * (`--dry-run`), which write nothing.
  *
  * Scope: the write is PRIVATE and omits `hostSourceScope`, so the server's read
  * projection keeps the pointer AUTHOR-ONLY. An ordinary non-author cannot read
@@ -38,8 +42,9 @@
  * requested id when the response carries none); on a 409 replay, the requested
  * id, which Cursor reported as already in use. The url is set only on create,
  * and only as Cursor returned it. A value the server's host-source grammar would
- * refuse is omitted — never rewritten — so the receipt still lands IF THE
- * REMAINING WRITE SUCCEEDS; the server checks and stores each value's NFC form,
+ * refuse is omitted — never rewritten — so the receipt is stored UNSOURCED if the
+ * remaining WRITE succeeds; a READ or WRITE failure can still prevent the
+ * receipt entirely. The server checks and stores each value's NFC form,
  * and so does this mirror's check. The grammar is mirrored from
  * resources/host-source.ts (packages never import server code);
  * test/host-source-parity.test.ts runs this mirror and the server's

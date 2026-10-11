@@ -1,0 +1,15 @@
+{
+  "//": "flair#1944 round 9 — type-checks packages/cursor-wake-runner's TEST directory. The package tsconfig.json includes only `src`, and the root tsconfig.test.check.json includes only the ROOT `test/**`, so nothing type-checked these tests: a `@ts-expect-error` guard (e.g. on `WakeDeps` carrying no `__test` seam) could rot silently — restore the typed field and the unused directive would go unnoticed. This config checks `src` + `test` together (noEmit; the test files import `.ts` specifiers, hence allowImportingTsExtensions). Wired into CI by the typecheck-strict job.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "noEmit": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node", "bun-types"]
+  },
+  "include": ["src", "test"]
+}

@@ -14,6 +14,7 @@ import {
   type CatchupPort,
   type CursorAgentClient,
   type CursorLaunchConfig,
+  type CursorLaunchSource,
   type LaunchInput,
   type LaunchResult,
   type ReceiptStore,
@@ -42,7 +43,7 @@ function dispatchEvent(overrides: Record<string, unknown> = {}): Record<string, 
 
 interface Stored {
   content: string;
-  hostSource?: { host: string; kind: string; id: string; url?: string };
+  hostSource?: CursorLaunchSource;
 }
 
 /** A receipt store that records every call into the shared `order` log. Every
