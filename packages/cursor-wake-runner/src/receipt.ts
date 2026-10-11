@@ -3,10 +3,13 @@
  * slice 2 of flair#1940).
  *
  * After a dispatch is handed to a Cursor Cloud Agent ("created" or "already"),
- * the runner attempts a sourced receipt as its own agent: a STABLE id derived
- * from the OrgEvent id, deterministic content naming only the dispatch id and
- * the launched Cursor agent id, and a `hostSource` `{ host: "cursor", kind:
- * "launch", id: <cursorAgentId>, url?: <url> }` claiming where the launch lives.
+ * the runner attempts one receipt as its own agent: a STABLE id derived from the
+ * OrgEvent id, deterministic content naming only the dispatch id and the launched
+ * Cursor agent id, and — when the Cursor agent id passes the server's host-source
+ * grammar — a `hostSource` `{ host: "cursor", kind: "launch", id: <cursorAgentId>,
+ * url?: <url> }` claiming where the launch lives. A receipt whose Cursor id the
+ * grammar refuses is stored WITHOUT a pointer: it is not "sourced", and it gets no
+ * bootstrap citation (see Scope below).
  * A receipt the runner treats as a non-retryable refusal is acked without one.
  *
  * A live receipt run requires the agent's own Ed25519 signing key (flair#1944
@@ -21,14 +24,15 @@
  * pointer; an admin CAN read the row, but an admin/operator bootstrap takes no
  * pointer join for it. `withheld` applies only to a non-author who can read the
  * row after its visibility changes (for instance it is later shared): they read
- * the record but not the pointer, and see `hostSource: "withheld"`. When the
- * memory is selected for bootstrap, bootstrap PROSE cites a pointer the reader
- * may see (flair#2446): this memory's author sees the short
- * `[via cursor/launch <id8> (unverified)]` citation (host/kind and the first 8 id
- * characters, display-only — the full url never appears there), and a reader who
- * may read the memory but not the pointer sees `[via withheld]`; an admin
- * bootstrap takes no pointer join. A `hostSource` is the writer's claim, not
- * verified host authorship.
+ * the record but not the pointer, and see `hostSource: "withheld"`. When a
+ * pointer was stored AND the memory is selected for bootstrap, bootstrap PROSE
+ * cites that pointer to a reader who may see it (flair#2446): this memory's author
+ * sees the short `[via cursor/launch <id8> (unverified)]` citation (host/kind and
+ * the first 8 id characters, display-only — the full url never appears there), and
+ * a reader who may read the memory but not the pointer sees `[via withheld]`; an
+ * admin bootstrap takes no pointer join. A memory with no pointer — a receipt whose
+ * Cursor id the grammar refused stores none — gets no citation at all. A
+ * `hostSource` is the writer's claim, not verified host authorship.
  *
  * The id is the Cursor agent id: on create, the id Cursor returned (the
  * requested id when the response carries none); on a 409 replay, the requested

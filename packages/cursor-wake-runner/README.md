@@ -27,7 +27,7 @@ FLAIR_AGENT_ID=anvil CURSOR_API_KEY=… \
 FLAIR_AGENT_ID=anvil bun packages/cursor-wake-runner/src/cli.ts --once --dry-run
 ```
 
-A live run requires the Ed25519 key for `FLAIR_AGENT_ID`: the key is the signing identity and its feed is drained. Admin Basic credentials (`FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD`) with no key are accepted only for a read-only run (`--dry-run`) — a live receipt run needs the agent's signing key, because under Basic the server would stamp the written pointer with the Basic username while the row's `agentId` is `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. The requirement is enforced where the write happens, not only at startup: the production receipt store requires the signing key, and the client fails closed — no admin Basic fallback — when no key resolves at send time. Removing the key file cannot cause a Basic fallback: a key the client has already loaded is cached and still signs (the file is not re-read); only when no key resolves at send time does the client refuse. The cycle runs on ONE signed client: `runWakeCycle` builds the catchup reader, the receipt store and (from `--dry-run`) the Cursor client from that one client, so the runner identity IS the signing identity and a receipt signed as another agent is unrepresentable — there is no separate agent id and no store to supply. The client refuses to send admin Basic credentials over plain HTTP to a non-loopback host. There is no `--participant` flag.
+A live run requires the Ed25519 key for `FLAIR_AGENT_ID`: the key is the signing identity and its feed is drained. Admin Basic credentials (`FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD`) with no key are accepted only for a read-only run (`--dry-run`) — a live receipt run needs the agent's signing key, because under Basic the server would stamp the written pointer with the Basic username while the row's `agentId` is `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. The requirement is enforced where the write happens, not only at startup: the production receipt store requires the signing key, and the client fails closed — no admin Basic fallback — when no key resolves at send time. Removing the key file cannot cause a Basic fallback: a key the client has already loaded is cached and still signs (the file is not re-read); only when no key resolves at send time does the client refuse. The cycle runs on ONE signed client: `runWakeCycle` builds the catchup reader and the receipt store from that one client, so on a LIVE cycle the runner signs with the client's own Ed25519 identity and a receipt is signed as exactly the agent whose feed was drained — there is no separate agent id and no store to supply. The Cursor client, by contrast, is selected from `--dry-run` and the Cursor config, NOT built from the Flair client: a live cycle uses the real Cursor client built from the config, a dry-run cycle uses the dry-run client and writes nothing. The client refuses to send admin Basic credentials over plain HTTP to a non-loopback host. There is no `--participant` flag.
 
 | Variable | Required | Notes |
 |---|---|---|
@@ -67,12 +67,15 @@ admin CAN read the row, but an admin bootstrap takes no pointer join. `withheld`
 applies only to a non-author who can read the row after its visibility changes
 (for instance it is later shared): they read the record but not the pointer, and
 see `hostSource: "withheld"`. Only a live run signed with the agent's own key
-writes the receipt. When the memory is selected for bootstrap, bootstrap prose
-CITES the pointer (flair#2446) to a reader who may see it: this memory's author
+writes the receipt. When a pointer was stored AND the memory is selected for
+bootstrap, bootstrap prose CITES that pointer (flair#2446) to a reader who may see
+it: this memory's author
 sees the short `[via cursor/launch <id8> (unverified)]` citation — host/kind and
 the first 8 id characters, display-only; the full url never appears there — and
 a reader who may read the memory but not the pointer sees `[via withheld]`; an
-admin bootstrap takes no pointer join. A `hostSource` is the writer's claim, not
+admin bootstrap takes no pointer join. A memory with no pointer — a receipt whose
+Cursor id the grammar refused stores none — gets no citation. A `hostSource` is the
+writer's claim, not
 verified host
 authorship. A `hostSource` value the server's grammar would refuse (checked on
 its NFC form, as the server checks it; the server stores that form) is omitted

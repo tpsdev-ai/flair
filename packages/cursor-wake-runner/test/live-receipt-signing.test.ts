@@ -38,13 +38,15 @@ import { FlairClient, inspectKeyLookup } from "@tpsdev-ai/flair-client";
 import {
   createMemoryReceiptStore,
   launchReceiptId,
-  runWakeCycle,
   type CatchupPage,
   type CatchupPort,
   type CursorAgentClient,
   type CursorLaunchConfig,
   type LaunchResult,
 } from "../src/index.ts";
+// flair#1944 round 8 — the internal core that takes the test seams is NOT on the
+// package's public entry (`src/index.ts`); tests reach it from its own module.
+import { runWakeCycleCore } from "../src/run.ts";
 
 const CURSOR_CONFIG: CursorLaunchConfig = { apiBase: "https://api.cursor.com", apiKey: "k" };
 
@@ -132,11 +134,10 @@ describe("flair#1944 round 5 — a live receipt write is refused unless it signs
     });
     const { port, acks } = catchupWith([{ events: [dispatchEvent(agentId)], hasMore: false }]);
 
-    const result = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
-    });
+    const result = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
+    );
 
     expect(result.items[0].receipt, "an unsigned live write must not be recorded").toBe("failed");
     expect(result.receiptFailed, "the refusal names the signing key").toContain("live receipts need the agent's signing key");
@@ -161,11 +162,10 @@ describe("flair#1944 round 5 — a live receipt write is refused unless it signs
     const client = new FlairClient({ agentId: agent.id, url: base, keyPath });
     const { port, acks } = catchupWith([{ events: [dispatchEvent(agent.id)], hasMore: false }]);
 
-    const result = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
-    });
+    const result = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
+    );
 
     expect(result.items[0].receipt, "a vanished key must fail closed, not fall back").toBe("failed");
     expect(result.receiptFailed, "the refusal names the signing key").toContain("live receipts need the agent's signing key");
@@ -196,11 +196,10 @@ describe("flair#1944 round 7 — one client, one identity: a mismatched signer i
       adminPassword: "secret",
     });
     const { port } = catchupWith([{ events: [dispatchEvent(agentId)], hasMore: false }]);
-    const result = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
-    });
+    const result = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
+    );
     // The store is the client's: the idempotency READ went to THAT client's
     // memory (the stub), and there is no separate store argument to point at
     // another agent.

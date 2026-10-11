@@ -71,8 +71,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const runOnce = async (): Promise<number> => {
     const result = await runWakeCycle({
-      // ONE client: the runner identity IS this client's signing identity, and
-      // `runWakeCycle` builds the catchup reader and the receipt store from it.
+      // ONE client: on a live cycle the runner identity IS this client's signing
+      // identity, and `runWakeCycle` builds the catchup reader and the receipt
+      // store from it. The Cursor client is selected from `dryRun` + the Cursor
+      // config, not built from this client (a dry-run cycle writes nothing).
       client: flair,
       // The runner builds its Cursor client from this for a live cycle; a
       // dry-run cycle uses the dry-run client and touches no network.

@@ -5,15 +5,29 @@
  *
  * ONE signed client, ONE runner identity (flair#1944 round 7). The cycle takes a
  * single Flair client and BUILDS the catchup feed reader and the receipt store
- * from that same client; the runner identity IS the client's signing identity.
- * There is no separate `agentId` label to trust and no caller-supplied store, so
- * a receipt can never be signed as a different agent than the feed it drains —
- * the "store labelled A writing as B" combination is unrepresentable rather than
- * guarded. The Cursor client is likewise chosen by the runner from `dryRun`
- * (live -> the real client built from the config; dry-run -> `dryRunCursorClient`),
- * and a `dry-run` outcome observed in a LIVE cycle is refused, by name, before
- * anything is acked (defence in depth against a dry-run client reaching a live
- * cycle).
+ * from that same client; on a LIVE cycle the runner's signing identity IS the
+ * client's own Ed25519 identity, so a receipt is signed as exactly the agent whose
+ * feed was drained. (A dry-run cycle may be driven by admin Basic credentials and
+ * writes nothing.) There is no separate `agentId` label to trust and no
+ * caller-supplied store, so a receipt can never be signed as a different agent
+ * than the feed it drains — the "store labelled A writing as B" combination is
+ * unrepresentable rather than guarded. The Cursor client is chosen by the runner
+ * from `dryRun` AND the Cursor config — NOT built from the Flair client (a live
+ * cycle -> the real client from the config; a dry-run cycle -> `dryRunCursorClient`).
+ * A construction fault in
+ * EITHER direction is refused, by name, BEFORE anything is recorded or acked:
+ * a `dry-run` outcome observed in a LIVE cycle (a dry-run client reached a live
+ * cycle), and symmetrically a live outcome (`created`/`already`) observed in a
+ * DRY-RUN cycle — so a dry-run cycle can never write a receipt.
+ *
+ * flair#1944 round 8: the EXPORTED `runWakeCycle` takes NO test seam. It builds
+ * every part from production inputs — the catchup reader and the receipt store
+ * from the runner's own client, the Cursor client from `dryRun` + the Cursor
+ * config — and hands them to the internal `runWakeCycleCore`. The two seams a
+ * test may drive (a canned catchup port and a Cursor client) live only on that
+ * core, which the package's public entry (`src/index.ts`) does NOT export, so the
+ * shipped path has no override a caller can reach; a test feeds canned events
+ * through a fake Flair client and drives a fake Cursor endpoint through the core.
  *
  * Ack happens AFTER handoff and AFTER a receipt — a successful write, or an
  * existing row VERIFIED as this runner's own receipt — and only through the last
@@ -88,33 +102,46 @@ export interface WakeDeps {
   client: FlairClient;
   /**
    * Cursor Cloud Agents launch config. The runner builds its Cursor client from
-   * this for a LIVE cycle; a dry-run cycle uses `dryRunCursorClient` instead and
-   * never touches the network.
+   * THIS and the mode, never from the Flair client: a LIVE cycle builds
+   * `createCursorAgentClient(config)` from these fields; a dry-run cycle uses
+   * `dryRunCursorClient` instead and never touches the network.
    */
   cursor: CursorLaunchConfig;
   /** One line for a receipt that omits a value the server's grammar would refuse, and one for a receipt the server refused. */
   log?: (line: string) => void;
-  /** When true, classify only — no Cursor create, no receipt, no watermark ack. */
+  /** When true, classify only — the dry-run Cursor client creates nothing, records no receipt and acks no watermark. */
   dryRun?: boolean;
   pageLimit?: number;
-  /**
-   * TEST-ONLY seam — the shipped CLI never sets it. `runWakeCycle` builds the
-   * feed reader, the receipt store and the Cursor client from `client`/`cursor`
-   * alone; a test uses this to supply a canned catchup feed and/or a fake Cursor
-   * client without a network. It can NEVER supply a receipt store or an agent
-   * id: the runner identity and the signer are always the client's, so a
-   * mismatched signer is unrepresentable here.
-   */
-  __test?: {
-    catchup?: CatchupPort;
-    cursor?: CursorAgentClient;
-  };
 }
 
-/** flair#1944 round 7 — a `dry-run` launch outcome seen in a LIVE cycle. Thrown,
- *  not swallowed into `blocked`: it is a construction fault (a dry-run client
- *  reached a live cycle), refused by name before anything is recorded or acked. */
-class DryRunInLiveCycleError extends Error {}
+/**
+ * The interchangeable parts a wake cycle drives. fla#1944 round 8: the seams a
+ * TEST may substitute live HERE, on the internal `runWakeCycleCore`, never on the
+ * exported `runWakeCycle` — which builds production parts only. A test feeds
+ * canned events through a fake Flair client (whose `request` serves the catchup
+ * feed) and drives a fake Cursor endpoint. The receipt store and the agent id are
+ * NOT part of these parts: the core still builds the store from `deps.client`, so
+ * the runner identity and the signer are always the client's and a mismatched
+ * signer is unrepresentable through this core too.
+ */
+export interface WakeCycleParts {
+  catchup: CatchupPort;
+  cursor: CursorAgentClient;
+}
+
+/** flair#1944 round 7/8 — a construction fault: the parts a cycle was built with
+ *  do not match its mode. Thrown, not swallowed into `blocked`: it is refused by
+ *  name before anything is recorded or acked (never a launch failure). */
+class CycleConstructionError extends Error {}
+
+/** A `dry-run` launch outcome seen in a LIVE cycle (a dry-run client reached a
+ *  live cycle). */
+class DryRunInLiveCycleError extends CycleConstructionError {}
+
+/** flair#1944 round 8 — a live outcome (`created`/`already`) seen in a DRY-RUN
+ *  cycle: a write-capable Cursor client reached a cycle that must classify only.
+ *  Refused, by name, BEFORE `recordLaunch`, so a dry-run cycle writes no receipt. */
+class LiveOutcomeInDryRunError extends CycleConstructionError {}
 
 function emptyResult(): WakeResult {
   return {
@@ -222,15 +249,35 @@ async function recordLaunchReceipt(
 }
 
 export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
+  // flair#1944 round 8 — PRODUCTION PARTS ONLY. The exported entry builds every
+  // part from the inputs it is given and nothing else: the catchup reader from
+  // the runner's own client, the receipt store from that same client (inside the
+  // core), and the Cursor client from `dryRun` + the Cursor config. There is no
+  // override a caller can reach; a test drives the seams through
+  // `runWakeCycleCore`, which `src/index.ts` does not export.
+  const cursor = deps.dryRun ? dryRunCursorClient() : createCursorAgentClient(deps.cursor);
+  return runWakeCycleCore(deps, { catchup: createCatchupPort(deps.client), cursor });
+}
+
+/**
+ * TEST-ONLY entry point — NOT part of the package's public entry (`src/index.ts`
+ * exports `runWakeCycle`, not this). It runs the cycle on the two parts handed to
+ * it, so a test can drive a canned feed through a fake Flair client and a fake
+ * Cursor endpoint without a network. It can NEVER supply a receipt store or an
+ * agent id: the store is still `createMemoryReceiptStore(deps.client)` and the
+ * runner identity is still `deps.client.agentId`, so the "store labelled A writing
+ * as B" combination is unrepresentable here either.
+ */
+export async function runWakeCycleCore(deps: WakeDeps, parts: WakeCycleParts): Promise<WakeResult> {
   // flair#1944 round 7 — ONE client, ONE identity. The runner identity is the
-  // client's signing identity; the catchup feed reader and the receipt store are
-  // built from that same client, so a receipt can never be signed as a different
-  // agent than the feed drained, and there is no store to supply.
+  // client's signing identity; the receipt store is built from that same client,
+  // so a receipt can never be signed as a different agent than the feed drained,
+  // and there is no store to supply.
   const client = deps.client;
   const agentId = client.agentId;
-  const catchup = deps.__test?.catchup ?? createCatchupPort(client);
+  const catchup = parts.catchup;
   const store = createMemoryReceiptStore(client);
-  const cursor = deps.__test?.cursor ?? (deps.dryRun ? dryRunCursorClient() : createCursorAgentClient(deps.cursor));
+  const cursor = parts.cursor;
 
   const result = emptyResult();
   let after: string | undefined;
@@ -277,13 +324,24 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
           crewAgentId: agentId,
         });
         // flair#1944 round 7 — defence in depth: the runner picks the Cursor
-        // client from `dryRun`, so a live cycle can only see `dry-run` through a
-        // test seam. Refuse it, by name, BEFORE anything is recorded or acked —
-        // a live handoff must be a real launch, not a dry-run classification.
+        // client from `dryRun`, so a live cycle can only see `dry-run` through the
+        // internal core's seam. Refuse it, by name, BEFORE anything is recorded or
+        // acked — a live handoff must be a real launch, not a dry-run classification.
         if (!deps.dryRun && launch.outcome === "dry-run") {
           throw new DryRunInLiveCycleError(
             `runWakeCycle: the Cursor client reported a \`dry-run\` outcome for ${dispatch.id} in a live cycle; ` +
               "a live cycle must launch for real (the dry-run client is only for --dry-run)",
+          );
+        }
+        // flair#1944 round 8 — defence in depth, the other direction. The runner
+        // picks the Cursor client from `dryRun`, so a dry-run cycle can only see a
+        // live outcome through the internal core's seam. Refuse it, by name, BEFORE
+        // `recordLaunch`: a dry-run cycle classifies only, records no receipt and
+        // acks nothing — so no receipt write can happen in dry-run.
+        if (deps.dryRun && (launch.outcome === "created" || launch.outcome === "already")) {
+          throw new LiveOutcomeInDryRunError(
+            `runWakeCycle: the Cursor client reported a \`${launch.outcome}\` outcome for ${dispatch.id} in a dry-run cycle; ` +
+              "a dry-run cycle classifies only, records no receipt and acks nothing",
           );
         }
         recordLaunch(result, dispatch, launch);
@@ -323,7 +381,7 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
         if (dispatch.position) lastAckable = dispatch.position;
       } catch (err) {
         // A construction fault is not a launch failure: re-raise it untouched.
-        if (err instanceof DryRunInLiveCycleError) throw err;
+        if (err instanceof CycleConstructionError) throw err;
         const message = err instanceof Error ? err.message : String(err);
         result.blocked = `launch failed for ${dispatch.id}: ${message}`;
         result.items.push({

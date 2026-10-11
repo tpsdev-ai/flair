@@ -4,11 +4,11 @@ import type { FlairClient } from "@tpsdev-ai/flair-client";
 import {
   buildLaunchReceipt,
   cursorLaunchHostSource,
+  dryRunCursorClient,
   isAcceptableHostSourceUrl,
   isStoredReceipt,
   launchReceiptId,
   permanentReceiptRefusal,
-  runWakeCycle,
   wakeAgentId,
   type CatchupPage,
   type CatchupPort,
@@ -18,7 +18,11 @@ import {
   type LaunchResult,
   type ReceiptStore,
   type WakeDeps,
+  type WakeResult,
 } from "../src/index.ts";
+// flair#1944 round 8 — the internal core that takes the test seams is NOT on the
+// package's public entry (`src/index.ts`); tests reach it from its own module.
+import { runWakeCycleCore } from "../src/run.ts";
 
 // Neutral fixture names only (no real fleet hosts or agents).
 const CREW = "agent-a";
@@ -93,9 +97,10 @@ const CURSOR_CONFIG: CursorLaunchConfig = { apiBase: "https://api.cursor.com", a
 /**
  * Wrap a `ReceiptStore` into a fake `FlairClient` whose `memory` delegates to it,
  * so a cycle — which now BUILDS the receipt store from the client it runs —
- * drives exactly this store. `request` is never reached: the catchup feed comes
- * through the `__test` seam. The client's `agentId` is the store's, so the runner
- * identity and the signer are the same by construction (flair#1944 round 7).
+ * drives exactly this store. `request` is never reached: the catchup feed is
+ * supplied as a canned port to the internal core (`runWakeCycleCore`). The
+ * client's `agentId` is the store's, so the runner identity and the signer are
+ * the same by construction (flair#1944 round 7).
  */
 function clientFromStore(store: ReceiptStore): FlairClient {
   return {
@@ -126,14 +131,19 @@ function clientFromStore(store: ReceiptStore): FlairClient {
   } as unknown as FlairClient;
 }
 
-/** A cycle's deps for a fake store + fake feed (+ optional fake Cursor client). */
-function ctx(
+/**
+ * Drive the INTERNAL core (test-only; `src/index.ts` does not export it) on a
+ * fake store + canned feed (+ optional fake Cursor client). The exported
+ * `runWakeCycle` builds production parts only — the seams live here.
+ */
+function runCycle(
   store: ReceiptStore,
   port: CatchupPort,
   cursor?: CursorAgentClient,
   extra: Partial<WakeDeps> = {},
-): WakeDeps {
-  return { client: clientFromStore(store), cursor: CURSOR_CONFIG, __test: { catchup: port, cursor }, ...extra };
+): Promise<WakeResult> {
+  const deps: WakeDeps = { client: clientFromStore(store), cursor: CURSOR_CONFIG, ...extra };
+  return runWakeCycleCore(deps, { catchup: port, cursor: cursor ?? dryRunCursorClient() });
 }
 
 function catchupWith(order: string[], pages: CatchupPage[]): { port: CatchupPort; acks: string[] } {
@@ -222,7 +232,7 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
       cursorAgentId: "bc-1",
       url: "https://cursor.example/agents/bc-1",
     });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.receiptFailed).toBeNull();
     expect(result.acked).toBe("p1");
     const id = launchReceiptId("evt-1");
@@ -250,8 +260,8 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
       url: "https://cursor.example/agents/bc-1",
     });
     const already = cursorReturning({ outcome: "already", cursorAgentId: "bc-1" });
-    await runWakeCycle(ctx(store, first.port, created.client));
-    const replay = await runWakeCycle(ctx(store, second.port, already.client));
+    await runCycle(store, first.port, created.client);
+    const replay = await runCycle(store, second.port, already.client);
     expect(records.size).toBe(1);
     expect(records.get(launchReceiptId("evt-1"))?.hostSource?.url).toBe("https://cursor.example/agents/bc-1");
     expect(replay.items[0].receipt).toBe("unchanged");
@@ -270,7 +280,7 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
       cursorAgentId: "bc-1",
       url: "https://cursor.example/agents/bc-1",
     });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.items[0].receipt).toBe("written");
     const stored = records.get(launchReceiptId("evt-1"))?.hostSource;
     expect(stored, "the receipt carries the source but not the replay's url").toEqual({ host: "cursor", kind: "launch", id: "bc-1" });
@@ -284,7 +294,7 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
     const { store } = fakeStore(order, { failWrite: true });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.receiptFailed).toContain("evt-1");
     expect(result.items[0].receipt).toBe("failed");
     expect(result.acked).toBeNull();
@@ -297,7 +307,7 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
     const { store, records } = fakeStore(order, { failRead: true });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.receiptFailed).toContain("evt-1");
     expect(records.size).toBe(0);
     expect(acks).toEqual([]);
@@ -312,7 +322,7 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
         throw new Error("cursor down");
       },
     };
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.blocked).toContain("evt-1");
     expect(result.receiptFailed).toBeNull();
   });
@@ -323,7 +333,7 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     // No fake Cursor client: a dry-run cycle builds the dry-run client itself
     // and never touches the network.
-    const result = await runWakeCycle(ctx(store, port, undefined, { dryRun: true }));
+    const result = await runCycle(store, port, undefined, { dryRun: true });
     expect(result.items[0].action).toBe("dry-run");
     expect(result.items[0].receipt).toBeUndefined();
     expect(records.size).toBe(0);
@@ -395,7 +405,7 @@ describe("runWakeCycle — a row at the receipt id not verified as this receipt 
     });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client, calls } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.items[0].receipt).toBe("mismatched");
     expect(result.receiptMismatched).toContain(id);
     expect(result.receiptMismatched).toContain("agent-b");
@@ -414,7 +424,7 @@ describe("runWakeCycle — a row at the receipt id not verified as this receipt 
     });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client } = cursorReturning({ outcome: "already", cursorAgentId: "bc-1" });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.items[0].receipt).toBe("mismatched");
     expect(result.receiptMismatched).toContain("content");
     expect(result.acked).toBeNull();
@@ -430,7 +440,7 @@ describe("runWakeCycle — a row at the receipt id not verified as this receipt 
     });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client } = cursorReturning({ outcome: "already", cursorAgentId: "bc-1" });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.items[0].receipt).toBe("mismatched");
     expect(result.receiptMismatched).toContain("host source");
     expect(result.acked).toBeNull();
@@ -445,7 +455,7 @@ describe("runWakeCycle — a row at the receipt id not verified as this receipt 
     });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client } = cursorReturning({ outcome: "already", cursorAgentId: "bc-1" });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.items[0].receipt).toBe("unchanged");
     expect(result.receiptMismatched).toBeNull();
     expect(result.acked).toBe("p1");
@@ -503,7 +513,7 @@ describe("runWakeCycle — a receipt the runner treats as a non-retryable refusa
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
     const lines: string[] = [];
-    const result = await runWakeCycle(ctx(store, port, client, { log: (line) => lines.push(line) }));
+    const result = await runCycle(store, port, client, { log: (line) => lines.push(line) });
     expect(result.receiptFailed).toBeNull();
     expect(result.receiptRefused).toEqual([{ eventId: "evt-1", status: 400, code: "invalid_host_source" }]);
     expect(result.items[0].receipt).toBe("refused");
@@ -527,7 +537,7 @@ describe("runWakeCycle — a receipt the runner treats as a non-retryable refusa
     });
     const { port, acks } = catchupWith(order, [{ events: [first, second], hasMore: false }]);
     const { client, calls } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(calls.map((c) => c.dispatch.id)).toEqual(["evt-1", "evt-2"]);
     expect(result.items.map((i) => i.receipt)).toEqual(["refused", "written"]);
     expect(result.receiptRefused).toEqual([{ eventId: "evt-1", status: 422, code: "reembed_no_text" }]);
@@ -551,7 +561,7 @@ describe("runWakeCycle — a receipt the runner treats as a non-retryable refusa
       const { store } = fakeStore(order, { writeError });
       const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
       const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
-      const result = await runWakeCycle(ctx(store, port, client));
+      const result = await runCycle(store, port, client);
       expect(result.receiptFailed, String(writeError)).toContain("evt-1");
       expect(result.receiptRefused).toEqual([]);
       expect(result.items[0].receipt).toBe("failed");
@@ -564,7 +574,7 @@ describe("runWakeCycle — a receipt the runner treats as a non-retryable refusa
     const { store, records } = fakeStore(order, { readError: serverError(400, ECHOING_400) });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
-    const result = await runWakeCycle(ctx(store, port, client));
+    const result = await runCycle(store, port, client);
     expect(result.receiptFailed).toContain("evt-1");
     expect(result.receiptRefused).toEqual([]);
     expect(order.some((entry) => entry.startsWith("write:"))).toBe(false);
@@ -581,10 +591,37 @@ describe("runWakeCycle — a `dry-run` outcome in a live cycle is refused (flair
     const { store, records } = fakeStore(order);
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
     const { client } = cursorReturning({ outcome: "dry-run", cursorAgentId: "bc-1" });
-    await expect(runWakeCycle(ctx(store, port, client))).rejects.toThrow(/dry-run.*live cycle/);
+    await expect(runCycle(store, port, client)).rejects.toThrow(/dry-run.*live cycle/);
     expect(acks).toEqual([]);
     expect(order.some((entry) => entry.startsWith("ack:"))).toBe(false);
     expect(order.some((entry) => entry.startsWith("write:"))).toBe(false);
     expect(records.size).toBe(0);
+  });
+});
+
+describe("runWakeCycle — a LIVE outcome in a dry-run cycle is refused (flair#1944 round 8)", () => {
+  test("dryRun with a write-capable client and a `created` result: refused by name BEFORE recordLaunch, no memory written", async () => {
+    // The runner picks the Cursor client from `dryRun`, so a dry-run cycle can only
+    // observe a live outcome through the internal core's seam — defence in depth in
+    // the other direction. A `created`/`already` outcome must be refused, by name,
+    // BEFORE `recordLaunch`, so the dry-run cycle writes no receipt and acks nothing.
+    const order: string[] = [];
+    const { store, records } = fakeStore(order);
+    const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1", url: "https://cursor.example/agents/bc-1" });
+    await expect(runCycle(store, port, client, { dryRun: true })).rejects.toThrow(/dry-run cycle/);
+    expect(records.size, "a dry-run cycle writes no receipt").toBe(0);
+    expect(order.some((entry) => entry.startsWith("write:")), "no write was ever attempted").toBe(false);
+    expect(acks, "a dry-run cycle acks nothing").toEqual([]);
+  });
+
+  test("an `already` result in a dry-run cycle is refused by name too; no memory written", async () => {
+    const order: string[] = [];
+    const { store, records } = fakeStore(order);
+    const { port } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client } = cursorReturning({ outcome: "already", cursorAgentId: "bc-1" });
+    await expect(runCycle(store, port, client, { dryRun: true })).rejects.toThrow(/already.*dry-run cycle/);
+    expect(records.size).toBe(0);
+    expect(order.some((entry) => entry.startsWith("write:"))).toBe(false);
   });
 });

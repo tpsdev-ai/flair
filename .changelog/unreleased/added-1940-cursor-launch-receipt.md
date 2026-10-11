@@ -3,7 +3,10 @@
   After a dispatch is handed to a Cursor Cloud Agent ("created" or "already"),
   the runner attempts one memory as its own agent: a stable id derived from the
   OrgEvent id, content naming only the dispatch id and the launched Cursor agent
-  id, and `hostSource` `{ host: "cursor", kind: "launch", id, url? }`. The `id`
+  id, and — when the Cursor agent id passes the server's host-source grammar —
+  `hostSource` `{ host: "cursor", kind: "launch", id, url? }` claiming where the
+  launch lives (an id the grammar refuses stores no pointer: the receipt still
+  lands, unsourced, and gets no bootstrap citation). The `id`
   is the Cursor agent id: on create, the id Cursor returned (the requested id
   when the response carries none); on a 409 replay, the requested id, which
   Cursor reported as already in use. The `url` is set only on create, and only
@@ -19,10 +22,12 @@
   none resolves at send time; a key the client already loaded is cached and still
   signs, so removing the key file cannot cause a Basic fallback. The cycle runs
   on ONE signed client: the runner builds the catchup reader and the receipt
-  store from it, so the store signs as exactly the runner's agent and a receipt
-  signed as another agent is unrepresentable (no separate agent id, no store to
-  supply). When the memory is
-  selected for bootstrap, bootstrap prose cites the pointer to the author as
+  store from it, so on a live cycle the receipt is signed as exactly the runner's
+  agent and a receipt signed as another agent is unrepresentable (no separate
+  agent id, no store to supply); the Cursor client, by contrast, is selected from
+  `--dry-run` and the Cursor config, not built from the Flair client (a dry-run
+  cycle writes nothing). When a pointer was stored AND the memory is
+  selected for bootstrap, bootstrap prose cites that pointer to the author as
   `[via cursor/launch <id8> (unverified)]`, and shows `[via withheld]` only to a
   non-author who can read the record after its visibility changes — an ordinary
   non-author cannot read this private row at all, and an admin can read it but

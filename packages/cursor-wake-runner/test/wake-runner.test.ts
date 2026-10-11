@@ -10,6 +10,7 @@ import {
   createCatchupPort,
   createCursorAgentClient,
   DISPATCH_KINDS,
+  dryRunCursorClient,
   extractPointer,
   firstHttpUrl,
   HELP,
@@ -34,7 +35,11 @@ import {
   type LaunchResult,
   type ReceiptStore,
   type WakeDeps,
+  type WakeResult,
 } from "../src/index.ts";
+// flair#1944 round 8 — the internal core that takes the test seams is NOT on the
+// package's public entry (`src/index.ts`); tests reach it from its own module.
+import { runWakeCycleCore } from "../src/run.ts";
 
 const CREW = "anvil";
 const OTHER = "ember";
@@ -286,9 +291,10 @@ const CURSOR_CONFIG: CursorLaunchConfig = { apiBase: "https://api.cursor.com", a
 /**
  * Wrap a `ReceiptStore` into a fake `FlairClient` whose `memory` delegates to
  * it, so a cycle — which now BUILDS the receipt store from the client it runs —
- * drives exactly this store. `request` is unused: the feed comes through the
- * `__test` seam. The client signs as the store's agent, so the runner identity
- * and the signer are the same by construction (flair#1944 round 7).
+ * drives exactly this store. `request` is unused: the feed is a canned port
+ * handed to the internal core (`runWakeCycleCore`). The client signs as the
+ * store's agent, so the runner identity and the signer are the same by
+ * construction (flair#1944 round 7).
  */
 function clientFromStore(store: ReceiptStore): FlairClient {
   return {
@@ -362,14 +368,19 @@ function singleClient(
   return { client, acks, records };
 }
 
-/** A cycle's deps for a canned feed + fake Cursor client, on the ONE client. */
-function ctx(
+/**
+ * Drive the INTERNAL core (test-only; `src/index.ts` does not export it) on a
+ * canned catchup port + a fake Cursor client, over the ONE fake Flair client.
+ * The exported `runWakeCycle` builds production parts only — the seams live here.
+ */
+function runCycle(
   port: CatchupPort,
   cursor?: CursorAgentClient,
   extra: Partial<WakeDeps> = {},
   store: ReceiptStore = acceptingReceiptStore(),
-): WakeDeps {
-  return { client: clientFromStore(store), cursor: CURSOR_CONFIG, __test: { catchup: port, cursor }, ...extra };
+): Promise<WakeResult> {
+  const deps: WakeDeps = { client: clientFromStore(store), cursor: CURSOR_CONFIG, ...extra };
+  return runWakeCycleCore(deps, { catchup: port, cursor: cursor ?? dryRunCursorClient() });
 }
 
 describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
@@ -381,7 +392,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       cursorAgentId: input.cursorAgentId,
       url: "https://cursor.com/agents/" + input.cursorAgentId,
     }));
-    const result = await runWakeCycle(ctx(port, client));
+    const result = await runCycle(port, client);
     expect(result.launched).toBe(1);
     expect(result.acked).toBe("p1");
     expect(acks).toEqual(["p1"]);
@@ -402,8 +413,8 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     };
     const a = recordingCursor(handler);
     const b = recordingCursor(handler);
-    const one = await runWakeCycle(ctx(first.port, a.client));
-    const two = await runWakeCycle(ctx(second.port, b.client));
+    const one = await runCycle(first.port, a.client);
+    const two = await runCycle(second.port, b.client);
     expect(one.launched).toBe(1);
     expect(two.launched).toBe(0);
     expect(two.reused).toBe(1);
@@ -416,7 +427,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     const { client, calls } = recordingCursor(() => {
       throw new Error("should not launch");
     });
-    const result = await runWakeCycle(ctx(port, client));
+    const result = await runCycle(port, client);
     expect(result.drained).toBe(0);
     expect(result.launched).toBe(0);
     expect(result.acked).toBeNull();
@@ -436,7 +447,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     const { client, calls } = recordingCursor(() => {
       throw new Error("should not launch");
     });
-    const result = await runWakeCycle(ctx(port, client));
+    const result = await runCycle(port, client);
     expect(result.skipped).toBe(2);
     expect(result.launched).toBe(0);
     expect(result.acked).toBe("p2");
@@ -458,7 +469,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       if (input.dispatch.id === "fail") throw new Error("cursor down");
       return { outcome: "created", cursorAgentId: input.cursorAgentId };
     });
-    const result = await runWakeCycle(ctx(port, client));
+    const result = await runCycle(port, client);
     expect(result.launched).toBe(1);
     expect(result.blocked).toContain("fail");
     expect(result.acked).toBe("p1");
@@ -473,7 +484,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       },
     ]);
     const { client, calls } = recordingCursor(() => ({ outcome: "created", cursorAgentId: "nope" }));
-    const result = await runWakeCycle(ctx(port, client));
+    const result = await runCycle(port, client);
     expect(result.blocked).toMatch(/missing an id/);
     expect(result.launched).toBe(0);
     expect(result.acked).toBeNull();
@@ -484,22 +495,25 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
   test("dry-run classifies and does not ack or create", async () => {
     const { port, acks } = memoryCatchup([{ events: [dispatchEvent()], hasMore: false }]);
     // No injected Cursor client: the runner builds the dry-run client itself.
-    const result = await runWakeCycle(ctx(port, undefined, { dryRun: true }));
+    const result = await runCycle(port, undefined, { dryRun: true });
     expect(result.items[0]?.action).toBe("dry-run");
     expect(result.acked).toBeNull();
     expect(acks).toEqual([]);
   });
 
   test("the cycle builds the feed reader AND the receipt store from the ONE client (flair#1944 round 7)", async () => {
-    // No catchup seam and no store: the client's own `request` serves the feed
-    // and the receipt is written through the client's own `memory`, as the
-    // client's agent. On the old API (separate agentId/catchup/receipts) this
-    // cycle cannot run at all; a store that signs as another agent is
-    // unrepresentable.
+    // No store and no agent label: the client's OWN `request` serves the feed (the
+    // catchup port is derived from it) and the receipt is written through the
+    // client's own `memory`, as the client's agent. A store that signs as another
+    // agent is unrepresentable. Only the fake Cursor endpoint is injected, through
+    // the internal core — the exported `runWakeCycle` builds production parts.
     const event = dispatchEvent();
     const { client, acks, records } = singleClient(CREW, [{ events: [event], hasMore: false }]);
     const { client: cursorClient } = recordingCursor(() => ({ outcome: "created", cursorAgentId: "bc-x" }));
-    const result = await runWakeCycle({ client, cursor: CURSOR_CONFIG, __test: { cursor: cursorClient } });
+    const result = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: createCatchupPort(client), cursor: cursorClient },
+    );
     expect(result.acked).toBe("p1");
     expect(acks).toEqual(["p1"]);
     expect(records.get(launchReceiptId(String(event.id)))?.author, "the receipt is signed as the client's own agent").toBe(CREW);
@@ -514,11 +528,58 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       outcome: "created",
       cursorAgentId: input.cursorAgentId,
     }));
-    const result = await runWakeCycle(ctx(port, client));
+    const result = await runCycle(port, client);
     expect(result.launched).toBe(2);
     expect(result.acked).toBe("p2");
     expect(calls).toHaveLength(2);
     expect(new Set(calls.map((c) => c.cursorAgentId)).size).toBe(2);
+  });
+});
+
+describe("runWakeCycle — the EXPORTED function takes NO test seam (flair#1944 round 8)", () => {
+  test("WakeDeps carries no `__test` override — a caller cannot inject parts", () => {
+    // @ts-expect-error — WakeDeps has no `__test`; the seam is not on the public API.
+    const withSeam: WakeDeps = { client: {} as FlairClient, cursor: CURSOR_CONFIG, __test: {} };
+    expect("__test" in withSeam, "only a runtime leftover here, never a typed field").toBe(true);
+  });
+
+  test("a stray `__test` override is IGNORED: the client's own feed is drained and a dry-run writes nothing", async () => {
+    // A fake FlairClient that serves its OWN catchup feed through `request` and
+    // records any memory write. The exported `runWakeCycle` must ignore the stray
+    // override entirely: on 9c231e6a the injected empty feed drains nothing and the
+    // injected `created` cursor writes a receipt through the client's memory even
+    // in a dry-run cycle; here neither may happen.
+    const wrote: string[] = [];
+    const client = {
+      agentId: CREW,
+      async request(method: string, path: string) {
+        if (path.startsWith("/OrgEventCatchup/")) {
+          if (method === "GET") return { events: [dispatchEvent()], hasMore: false };
+          return {};
+        }
+        throw new Error(`unexpected ${method} ${path}`);
+      },
+      memory: {
+        async get() {
+          return null;
+        },
+        async write(_content: string, opts: { id?: string } = {}) {
+          wrote.push(String(opts.id));
+          return { id: opts.id };
+        },
+      },
+    } as unknown as FlairClient;
+    const stray = {
+      __test: {
+        catchup: { drain: async () => ({ events: [], hasMore: false }), ack: async () => {} },
+        cursor: { create: async (input: LaunchInput) => ({ outcome: "created", cursorAgentId: input.cursorAgentId }) },
+      },
+    } as unknown as Partial<WakeDeps>;
+    const result = await runWakeCycle({ client, cursor: CURSOR_CONFIG, dryRun: true, ...stray });
+    expect(result.drained, "the client's own feed was drained, not the stray port").toBe(1);
+    expect(result.items[0]?.action, "the production dry-run client classified, not the stray `created` cursor").toBe("dry-run");
+    expect(result.receiptFailed).toBeNull();
+    expect(wrote, "a dry-run cycle writes no receipt even alongside a `created` cursor").toEqual([]);
   });
 });
 

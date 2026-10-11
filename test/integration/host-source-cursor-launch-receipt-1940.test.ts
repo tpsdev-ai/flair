@@ -4,11 +4,12 @@
  *
  * Real-Harper coverage that the Cursor wake runner ATTEMPTS A SOURCED LAUNCH
  * RECEIPT through the production memory path on a successful handoff (a
- * classified refusal is acked without one). Each cycle runs through
- * `runWakeCycle` on ONE real Flair client — the runner builds the catchup reader
- * and the receipt store from that client (flair#1944 round 7), and a fake Cursor
- * client and canned catchup feed are supplied through the `__test` seam (no
- * network). The receipt reads back with its stable id, deterministic content and
+ * classified refusal is acked without one). Each cycle runs through the
+ * internal `runWakeCycleCore` (flair#1944 round 8 — the EXPORTED `runWakeCycle`
+ * takes no test seam; the core it delegates to does) on ONE real Flair client —
+ * the runner builds the receipt store from that client (flair#1944 round 7) —
+ * with a fake Cursor endpoint and a canned catchup feed (no network). The receipt
+ * reads back with its stable id, deterministic content and
  * the `hostSource` the server validated and stored; a replay leaves the url-bearing
  * receipt unchanged and writes no second one; a url the server's grammar would
  * refuse (http, empty userinfo) is omitted with one log line and the receipt
@@ -41,7 +42,6 @@ import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifec
 import { FlairClient } from "../../packages/flair-client/src/client";
 import {
   launchReceiptId,
-  runWakeCycle,
   wakeAgentId,
   type CatchupPage,
   type CatchupPort,
@@ -49,6 +49,9 @@ import {
   type CursorLaunchConfig,
   type LaunchResult,
 } from "../../packages/cursor-wake-runner/src/index.ts";
+// flair#1944 round 8 — the internal core that takes the test seams is NOT on the
+// package's public entry (`src/index.ts`); tests reach it from its own module.
+import { runWakeCycleCore } from "../../packages/cursor-wake-runner/src/run.ts";
 
 const CURSOR_CONFIG: CursorLaunchConfig = { apiBase: "https://api.cursor.com", apiKey: "k" };
 
@@ -150,11 +153,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const url = "https://cursor.example/agents/bc-0f1e2d3c-4b5a-8978-8675-4433221100aa";
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
-    const result = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
-    });
+    const result = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
+    );
 
     expect(result.receiptFailed, "a created launch that stored its receipt must not report a receipt failure").toBeNull();
     expect(result.acked).toBe("p1");
@@ -177,19 +179,17 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const url = "https://cursor.example/agents/bc-11112222-3333-8444-9555-666677778888";
 
     const first = catchupWith([{ events: [event], hasMore: false }]);
-    const created = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: first.port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
-    });
+    const created = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: first.port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
+    );
     expect(created.receiptFailed).toBeNull();
 
     const second = catchupWith([{ events: [event], hasMore: false }]);
-    const replay = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: second.port, cursor: cursorReturning({ outcome: "already", cursorAgentId }) },
-    });
+    const replay = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: second.port, cursor: cursorReturning({ outcome: "already", cursorAgentId }) },
+    );
     expect(replay.items[0]?.receipt).toBe("unchanged");
     expect(second.acks).toEqual(["p1"]);
 
@@ -212,11 +212,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const event = dispatchEvent(unknown.id);
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
-    const result = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
-    });
+    const result = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
+    );
 
     expect(result.receiptFailed, "a refused receipt read must be a named outcome").toContain(String(event.id));
     expect(result.receiptRefused, "an unknown identity is not a permanent refusal of the receipt").toEqual([]);
@@ -237,12 +236,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
       const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
       const lines: string[] = [];
 
-      const result = await runWakeCycle({
-        client,
-        cursor: CURSOR_CONFIG,
-        __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
-        log: (line) => lines.push(line),
-      });
+      const result = await runWakeCycleCore(
+        { client, cursor: CURSOR_CONFIG, log: (line) => lines.push(line) },
+        { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
+      );
 
       expect(result.receiptFailed, "omitting the url must not cost the receipt").toBeNull();
       expect(result.receiptRefused).toEqual([]);
@@ -269,11 +266,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     await otherClient.memory.write("an unrelated memory written by another agent", { id, visibility: "shared" });
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
-    const result = await runWakeCycle({
-      client: runnerClient,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-abcdef01-2345-8678-89ab-cdef01234567" }) },
-    });
+    const result = await runWakeCycleCore(
+      { client: runnerClient, cursor: CURSOR_CONFIG },
+      { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-abcdef01-2345-8678-89ab-cdef01234567" }) },
+    );
 
     expect(result.items[0]?.receipt, "a foreign row is not this runner's receipt").toBe("mismatched");
     expect(result.receiptMismatched, "the failure names the id").toContain(id);
@@ -296,11 +292,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     await client.memory.write("a stale receipt naming a different launch", { id });
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
-    const result = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "already", cursorAgentId: wakeAgentId(String(event.id)) }) },
-    });
+    const result = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: port, cursor: cursorReturning({ outcome: "already", cursorAgentId: wakeAgentId(String(event.id)) }) },
+    );
 
     expect(result.items[0]?.receipt).toBe("mismatched");
     expect(result.receiptMismatched).toContain(id);
@@ -326,11 +321,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     expect((written as { visibility?: string }).visibility, "the row a plain write stamps is private").toBe("private");
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
-    const result = await runWakeCycle({
-      client: runnerClient,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-22223333-4444-8555-9666-777788889999" }) },
-    });
+    const result = await runWakeCycleCore(
+      { client: runnerClient, cursor: CURSOR_CONFIG },
+      { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-22223333-4444-8555-9666-777788889999" }) },
+    );
 
     expect(result.items[0]?.receipt, "the server refused the write; the receipt is not recorded").toBe("failed");
     expect(result.receiptFailed, "the failure names the receipt id").toContain(id);
@@ -355,11 +349,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     expect(normalizedId, "the id actually changes under NFC").not.toBe(rawId);
 
     const first = catchupWith([{ events: [event], hasMore: false }]);
-    const created = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: first.port, cursor: cursorReturning({ outcome: "created", cursorAgentId: rawId }) },
-    });
+    const created = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: first.port, cursor: cursorReturning({ outcome: "created", cursorAgentId: rawId }) },
+    );
     expect(created.receiptFailed).toBeNull();
     expect(created.acked).toBe("p1");
     const id = launchReceiptId(String(event.id));
@@ -367,11 +360,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     expect(got?.hostSource, "the server stored the normalised id").toEqual({ v: 1, host: "cursor", kind: "launch", id: normalizedId });
 
     const second = catchupWith([{ events: [event], hasMore: false }]);
-    const replay = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: second.port, cursor: cursorReturning({ outcome: "already", cursorAgentId: rawId }) },
-    });
+    const replay = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG },
+      { catchup: second.port, cursor: cursorReturning({ outcome: "already", cursorAgentId: rawId }) },
+    );
     expect(replay.items[0]?.receipt, "the raw id verifies against the normalised stored id").toBe("unchanged");
     expect(replay.receiptMismatched).toBeNull();
     expect(second.acks).toEqual(["p1"]);
@@ -384,12 +376,10 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const event = dispatchEvent(agent.id);
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
-    const result = await runWakeCycle({
-      client,
-      cursor: CURSOR_CONFIG,
-      __test: { catchup: port, cursor: cursorReturning({ outcome: "dry-run", cursorAgentId: "bc-00000000-0000-8000-8000-000000000000" }) },
-      dryRun: true,
-    });
+    const result = await runWakeCycleCore(
+      { client, cursor: CURSOR_CONFIG, dryRun: true },
+      { catchup: port, cursor: cursorReturning({ outcome: "dry-run", cursorAgentId: "bc-00000000-0000-8000-8000-000000000000" }) },
+    );
 
     expect(result.items[0]?.action).toBe("dry-run");
     expect(result.items[0]?.receipt).toBeUndefined();

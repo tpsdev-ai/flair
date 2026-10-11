@@ -26,7 +26,8 @@
  * the client and uses the client's OWN `agentId` as its signing identity. There
  * is no second agent label to supply or disagree with, so a store that signs as
  * a different agent than the runner is unrepresentable: whoever builds the
- * runner from a client gets a store bound to that same client.
+ * runner from a client gets a store bound to that same client. This signing
+ * identity is what a LIVE run writes with; a dry-run run writes no receipt at all.
  */
 
 import { MissingSigningKeyError } from "@tpsdev-ai/flair-client";
