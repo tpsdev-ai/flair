@@ -106,7 +106,9 @@ async function waitForCycleDone(timeoutMs: number): Promise<boolean> {
   while (Date.now() < deadline) {
     const detail = await healthDetail();
     const phase = detail?.migrations?.cyclePhase;
-    if (phase === "done" || phase === "idle") return true;
+    // "idle" means the boot trigger never loaded (migration-boot.ts), so it is
+    // not completion; a cycle that ended with an error does not count either.
+    if (phase === "done") return !detail?.migrations?.lastCycleError;
     await new Promise((r) => setTimeout(r, 250));
   }
   return false;
