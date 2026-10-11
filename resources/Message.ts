@@ -29,11 +29,12 @@ import {
   type RelayDeps,
 } from "./relay-ops.js";
 
-function relayDeps(): RelayDeps {
+function relayDeps(ctx?: any): RelayDeps {
   return {
     messages: (databases as any).flair.Message,
     agents: (databases as any).flair.Agent,
     resolveOrg: localInstanceId,
+    ctx,
   };
 }
 
@@ -84,8 +85,9 @@ export class Message extends (databases as any).flair.Message {
   }
 
   async post(content: any) {
-    const auth = await resolveAgentAuth(ctxOf(this));
-    return relaySend(relayDeps(), auth, content ?? {});
+    const ctx = ctxOf(this);
+    const auth = await resolveAgentAuth(ctx);
+    return relaySend(relayDeps(ctx), auth, content ?? {});
   }
 
   /** Scope a non-admin agent's collection read to the messages it is a party

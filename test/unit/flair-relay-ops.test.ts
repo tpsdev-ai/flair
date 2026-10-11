@@ -9,7 +9,7 @@
  * `from`; the no-existence-oracle response; and the same-id retry answered only
  * for the original sender.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { sealMessage, type MessageEnvelope } from "../../resources/relay-lib.js";
 import {
@@ -21,6 +21,14 @@ import {
   type RelayDeps,
 } from "../../resources/relay-ops.js";
 import type { AgentAuthVerdict } from "../../resources/agent-auth.js";
+import { ensureGlobalHarperTransaction } from "../helpers/fake-replay-store";
+
+// The send's check-and-write runs in a fresh OWNED transaction
+// (withOwnedTransaction, resources/request-transaction.ts), which needs Harper's
+// global `transaction()`. In a real Harper process that global exists; here we
+// install the shared fake (a passthrough), as the write-back unit tests do.
+const restoreHarperTransaction = ensureGlobalHarperTransaction();
+afterAll(() => restoreHarperTransaction());
 
 const ORG = "flair-test-instance";
 

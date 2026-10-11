@@ -24,6 +24,15 @@
  * resources/txn-pause-point.ts, armed through
  * FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR set for this file's
  * Harper only.
+ *
+ * A first request's write must also COMMIT before its key lock releases: Harper
+ * commits a REST request's REQUEST transaction only after the handler returns
+ * (server/REST.ts ~284), so a write that joined that transaction is invisible
+ * when the lock frees. Each path runs its check and write in a FRESH OWNED
+ * transaction (withOwnedTransaction, resources/request-transaction.ts); the
+ * "… commit" case per group pauses after the lock releases and before the first
+ * request's own commit, then has a second request take the just-freed lock and
+ * re-read. See the "The write commits before the lock releases" section below.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -276,7 +285,7 @@ beforeAll(async () => {
   await ensureFlairAgentRole(harper.opsURL, harper.admin.username, harper.admin.password);
   await ensureFlairAgentUser(harper.opsURL, harper.admin.username, harper.admin.password);
 
-  for (const id of ["agent-a", "agent-b", "agent-c", "agent-d", "agent-e", "agent-f"]) mkAgent(id);
+  for (const id of ["agent-a", "agent-b", "agent-c", "agent-d", "agent-e", "agent-f", "agent-g", "agent-h"]) mkAgent(id);
   for (const a of Object.values(byId)) await registerAgent(a);
 
   // Sign the orgScope the server will resolve (relaySend enforces it inside the
@@ -431,19 +440,95 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
 
   // ── N1: an ordinary Agent update must not wipe the stored public key ───────
 
-  it("N1: an ordinary Agent update keeps the stored public key", async () => {
+  it("N1: an ordinary Agent PATCH that succeeds keeps the stored public key", async () => {
     const agent = byId["agent-f"];
-    const before = await searchById("Agent", agent.id, ["id", "publicKey"]);
+    const before = await searchById("Agent", agent.id, ["id", "publicKey", "name"]);
     expect(before[0]?.publicKey).toBe(agent.publicKey);
     const path = `/Agent/${agent.id}`;
+    // PATCH is the verb a de-elevated agent actually uses to edit its own card:
+    // it merges, and resources/Agent.ts deletes the immutable publicKey from the
+    // body. A PUT of a whole record is NOT the path an agent takes (it is refused
+    // before the resource — a full Agent record needs fields the agent does not
+    // send), so asserting on a refused PUT would prove nothing. Drive the update
+    // that SUCCEEDS and assert the rename persisted AND the key survived it.
     const res = await fetch(`${harper.httpURL}${path}`, {
-      method: "PUT",
-      headers: { Authorization: ed25519Header(agent, "PUT", path), "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "renamed", runtime: "local" }),
+      method: "PATCH",
+      headers: { Authorization: ed25519Header(agent, "PATCH", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "renamed" }),
       signal: AbortSignal.timeout(60_000),
     });
-    const after = await searchById("Agent", agent.id, ["id", "publicKey"]);
-    console.log(`N1 Agent PUT status: ${res.status}`);
-    expect(after[0]?.publicKey, `PUT returned ${res.status}`).toBe(agent.publicKey);
+    expect(res.status, `PATCH returned ${res.status}: ${(await res.text()).slice(0, 200)}`).toBeLessThan(300);
+    const after = await searchById("Agent", agent.id, ["id", "publicKey", "name"]);
+    expect(after[0]?.name, "the rename was persisted").toBe("renamed");
+    expect(after[0]?.publicKey, "the stored public key survived the update").toBe(agent.publicKey);
   }, 60_000);
+
+  // ── The write commits before the lock releases (flair#2333) ────────────────
+  //
+  // Each check-and-write path holds its per-key lock across the read and the
+  // write. Harper commits a REST request's REQUEST transaction only after the
+  // handler returns (server/REST.ts ~284), so a write that JOINED that
+  // transaction is still invisible the moment the lock frees: a second request
+  // that takes the just-freed lock re-reads stale state and acts again. Each
+  // path's check and write now runs in a FRESH OWNED transaction
+  // (withOwnedTransaction, resources/request-transaction.ts) that COMMITS before
+  // the lock releases. Every case below pauses AFTER the first request released
+  // its lock (and, with the fix, after its owned transaction committed) but
+  // BEFORE the first request's own transaction commits, then lets a second
+  // request take the just-freed lock and read. Without the owned transaction the
+  // second request sees the deferred write; with it, the committed one.
+
+  it("H6 commit: a send that takes the locks right after another releases them sees the committed row (relay-send-lock-released)", async () => {
+    const sharedId = `h6-commit-${randomUUID().slice(0, 8)}`;
+    // agent-g / agent-h are used by this case ALONE: the per-(from, to) inbox
+    // cap is counted over all stored messages, so reusing a pair an earlier
+    // case already wrote to would refuse a send on the cap before the lock ever
+    // mattered.
+    const { response, competed, released, paused } = await withPaused(
+      "relay-send-lock-released",
+      () => sendAs("agent-g", "agent-h", 0, { id: sharedId, threadId: "h6commit:g:h", body: "from-g" }).then((r) => new Response(JSON.stringify(r.body), { status: r.status })),
+      () => sendAs("agent-h", "agent-g", 0, { id: sharedId, threadId: "h6commit:h:g", body: "from-h" }),
+    );
+    expect(paused, "the send was not paused after releasing its locks").toBe(true);
+    expect(released, "the send was not released by this test").toBe("go");
+    const a = { status: response.status };
+    const b = competed as { status: number; body: any };
+    const acceptedCount = [a, b].filter(accepted).length;
+    expect(acceptedCount, `exactly one sender may claim the id (a=${a.status}, b=${b.status}, b=${JSON.stringify(b.body).slice(0, 160)})`).toBe(1);
+    const stored = await searchByValue("Message", "id", sharedId);
+    expect(stored.length, "the id names exactly one stored message").toBe(1);
+  }, 90_000);
+
+  it("H7 commit: a contribution that takes the lock right after another releases it sees the committed ledger row (usage-ledger-lock-released)", async () => {
+    const memId = `h7-commit-mem-${randomUUID().slice(0, 8)}`;
+    await putMemory(byId["agent-a"], memId, { agentId: "agent-a", content: "commit-before-release memory, long enough for the dedup gate.", durability: "standard", visibility: "shared" });
+    const { response, competed, released, paused } = await withPaused(
+      "usage-ledger-lock-released",
+      () => recordUsage(byId["agent-a"], [memId]),
+      () => recordUsage(byId["agent-a"], [memId]).then((r) => r.status),
+    );
+    expect(paused, "the contribution was not paused after releasing the lock").toBe(true);
+    expect(released, "the contribution was not released by this test").toBe("go");
+    expect(response.status, `RecordUsage returned ${response.status}`).toBe(200);
+    void competed;
+    expect(await memoryUsageCount(memId), "the ledger dedups one (agent, memory) contribution").toBe(1);
+  }, 90_000);
+
+  it("H8 commit: a grant that takes the subject lock right after another releases it sees the committed principal (xaa-principal-lock-released)", async () => {
+    const subject = `h8-commit-${randomUUID()}`;
+    const assertionA = await jwtBearerAssertion(subject);
+    const assertionB = await jwtBearerAssertion(subject);
+    const { response, competed, released, paused } = await withPaused(
+      "xaa-principal-lock-released",
+      () => grantJwtBearer(assertionA),
+      () => grantJwtBearer(assertionB).then((r) => r.status),
+    );
+    expect(paused, "the grant was not paused after releasing the subject lock").toBe(true);
+    expect(released, "the grant was not released by this test").toBe("go");
+    void response;
+    void competed;
+    const creds = await searchByValue("Credential", "idpSubject", subject, ["id", "principalId"]);
+    const principals = new Set(creds.map((c) => c.principalId));
+    expect(principals.size, `one subject must resolve to one principal (got ${creds.length} credential(s))`).toBe(1);
+  }, 90_000);
 });

@@ -57,6 +57,7 @@ import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withKeyLock } from "./key-lock.js";
 import { withDetachedTxn } from "./table-helpers.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { resolveReadScope } from "./memory-read-scope.js";
@@ -140,6 +141,17 @@ export async function recordUsageContribution(
   // Not recorded when the lock stayed held or the store has none — the same
   // silent no-op as every other failure here (no ledger row, no count change).
   if (outcome.kind !== "done") return;
+
+  // Test-only: inert unless the fault-injection env opt-in is set and armed
+  // (resources/txn-pause-point.ts). Pauses AFTER the ledger's per-key lock
+  // released (and, with the owned transaction inside, after the ledger's write
+  // committed) but BEFORE this request's own transaction commits — Harper
+  // commits a request transaction only after the handler returns. A second
+  // contribution that takes the just-freed lock must see the committed ledger
+  // row; one whose own write joined the request transaction would not
+  // (flair#2333).
+  const committed = txnPausePoint("usage-ledger-lock-released");
+  if (committed) await committed;
 }
 
 /** The per-(agentId, memoryId) lock namespace and wait (resources/key-lock.ts). */
@@ -163,38 +175,50 @@ async function recordUsageContributionLocked(
 ): Promise<void> {
   const ledgerId = `${agentId}:${memoryId}`;
 
-  // Bypasses resources/MemoryUsage.ts's own auth wrapper by design — this
-  // IS the trusted internal caller that resource's module doc describes
-  // (same "raw table object" pattern resources/Memory.ts uses for
-  // MemoryGrant).
-  const existingContribution = await withDetachedTxn(ctx, () =>
-    (databases as any).flair.MemoryUsage.get(ledgerId),
-  ).catch(() => null);
-  if (existingContribution) return; // already counted by this agent — silent no-op
+  // The ledger check and the ledger create are ONE OWNED transaction that
+  // COMMITS before the (agentId, memoryId) lock releases (withOwnedTransaction,
+  // resources/request-transaction.ts). Harper commits a request's own
+  // transaction only after the handler returns, so a ledger row written into
+  // the REQUEST transaction would still be invisible when the lock frees: a
+  // second contribution that took the just-freed lock would re-read no row and
+  // bump again. The check reads the ledger IN this owned transaction (committed
+  // state, never the request's snapshot), and the create commits with it. The
+  // read-scope gate and the usageCount bump below are unchanged; the bump is
+  // its own owned transaction (writeBackCommittedRow).
+  const prepared = await withOwnedTransaction(ctx, async (owned) => {
+    // Bypasses resources/MemoryUsage.ts's own auth wrapper by design — this
+    // IS the trusted internal caller that resource's module doc describes
+    // (same "raw table object" pattern resources/Memory.ts uses for
+    // MemoryGrant).
+    const existingContribution = await (databases as any).flair.MemoryUsage.get(ledgerId, owned).catch(() => null);
+    if (existingContribution) return null; // already counted by this agent — silent no-op
 
-  // Test-only: arms between the ledger check above and the ledger create below,
-  // the interleaving where a concurrent contribution commits its row and bump
-  // first. Only a call that found no row reaches here, so it is the call that
-  // creates the row and performs the bump (see the fix's lock).
-  const pause = txnPausePoint("usage-contribution-claim");
-  if (pause) await pause;
+    // Test-only: arms between the ledger check above and the ledger create below,
+    // the interleaving where a concurrent contribution commits its row and bump
+    // first. Only a call that found no row reaches here, so it is the call that
+    // creates the row and performs the bump (see the fix's lock).
+    const pause = txnPausePoint("usage-contribution-claim");
+    if (pause) await pause;
 
-  // Absent, unreadable, or a failed read: ONE silent no-op branch (no
-  // enumeration). A read failure is never evidence the memory is readable.
-  const memory = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(memoryId)).catch(() => null);
-  if (!memory || !canRead(memory)) return;
+    // Absent, unreadable, or a failed read: ONE silent no-op branch (no
+    // enumeration). A read failure is never evidence the memory is readable.
+    const memory = await (databases as any).flair.Memory.get(memoryId, owned).catch(() => null);
+    if (!memory || !canRead(memory)) return null;
 
-  const ledgerRecord: Record<string, unknown> = { id: ledgerId, agentId, memoryId, createdAt: now };
-  if (attribution) ledgerRecord.attribution = attribution;
-  // .put(), not .post(): Harper's raw TableResource has no default post()
-  // implementation for a static-style (non-`isCollection`-instantiated)
-  // call — confirmed live ("The MemoryUsage does not have a post method
-  // implemented", statusCode 405) — the SAME class of gotcha
-  // resources/Memory.ts documents for HTTP POST, but here it bites even
-  // this in-process call. Irrelevant anyway: ledgerId is already a
-  // deterministic composite key, so this is a create-with-explicit-id —
-  // exactly what PUT (upsert) is for, not an auto-generated-id insert.
-  await withDetachedTxn(ctx, () => (databases as any).flair.MemoryUsage.put(ledgerRecord));
+    const ledgerRecord: Record<string, unknown> = { id: ledgerId, agentId, memoryId, createdAt: now };
+    if (attribution) ledgerRecord.attribution = attribution;
+    // .put(), not .post(): Harper's raw TableResource has no default post()
+    // implementation for a static-style (non-`isCollection`-instantiated)
+    // call — confirmed live ("The MemoryUsage does not have a post method
+    // implemented", statusCode 405) — the SAME class of gotcha
+    // resources/Memory.ts documents for HTTP POST, but here it bites even
+    // this in-process call. Irrelevant anyway: ledgerId is already a
+    // deterministic composite key, so this is a create-with-explicit-id —
+    // exactly what PUT (upsert) is for, not an auto-generated-id insert.
+    await (databases as any).flair.MemoryUsage.put(ledgerRecord, owned);
+    return memory;
+  });
+  if (!prepared) return;
 
   // Targeted usageCount-ONLY bump: read-full-record, merge just this one
   // field, write — against the RAW Memory table, NEVER Memory.put() (the
@@ -231,7 +255,7 @@ async function recordUsageContributionLocked(
       // The row the contribution was checked against is the basis: the helper
       // refuses when the stored row is no longer it (a delete, a purge, or a
       // same-id replace with a new token).
-      expectedRow: memory,
+      expectedRow: prepared,
       pausePre: () => txnPausePoint("usage-count-pre"),
       pausePoint: () => txnPausePoint("usage-count"),
     },

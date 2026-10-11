@@ -172,6 +172,8 @@ interface AssertionOpts {
   aud?: string;
   iss?: string;
   key?: CryptoKey;
+  /** The `sub` claim — the IdP subject the principal lock is keyed by. */
+  sub?: string;
   claims?: Record<string, unknown>;
 }
 
@@ -182,7 +184,7 @@ async function assertion(opts: AssertionOpts = {}): Promise<string> {
   const jwt = new SignJWT(payload)
     .setProtectedHeader({ alg: "ES256", kid })
     .setIssuer(opts.iss ?? ISSUER)
-    .setSubject(`user-${randomUUID()}`)
+    .setSubject(opts.sub ?? `user-${randomUUID()}`)
     .setAudience(opts.aud ?? xaa.jwtBearerBaseUrl())
     .setIssuedAt(now);
   if (opts.expInSec !== null) jwt.setExpirationTime(now + (opts.expInSec ?? 300));
@@ -255,6 +257,41 @@ describe("a UUID jti is accepted once", () => {
     table.rows.set(jti, { id: jti, expiresAt: new Date().toISOString(), createdAt: new Date().toISOString() } as any);
     expect(await grant(await assertion({ jti }))).toEqual(REPLAY);
     expect(tokenRows.size).toBe(0);
+  });
+});
+
+// ─── a lock miss does not consume the jti (flair#2333) ──────────────────────
+
+describe("the subject's principal lock miss does not consume the assertion's jti", () => {
+  const PRINCIPAL_BUSY = { status: 503, body: { error: "temporarily_unavailable", error_description: "principal_provision_in_progress" } };
+
+  it("a grant refused for the principal lock leaves the jti unclaimed, so the same assertion can be retried and succeeds once; a true replay is still refused", async () => {
+    const sub = `lock-${randomUUID()}`;
+    const jti = randomUUID();
+    const token = await assertion({ jti, sub });
+    const principalStore = harperMock.databases.flair.Credential.primaryStore;
+    const lockKey = [xaa.XAA_PRINCIPAL_LOCK_NAMESPACE, "idp-2073", sub];
+
+    // Another grant holds the subject's lock: this one is refused BEFORE it can
+    // claim the jti (the order the fix establishes).
+    expect(principalStore.tryLock(lockKey)).toBe(true);
+    expect(await grant(token)).toEqual(PRINCIPAL_BUSY);
+    expect(table.calls.tryLock, "the jti store is not touched on a principal-lock miss").toBe(0);
+    expect(table.rows.size).toBe(0);
+    expect(credentials.size).toBe(0);
+    expect(tokenRows.size).toBe(0);
+
+    // The lock frees. The SAME assertion is retried and succeeds once, because
+    // the refused attempt consumed nothing.
+    principalStore.unlock(lockKey);
+    const first = await grant(token);
+    expect(first.status).toBe(200);
+    expect([...table.rows.keys()]).toEqual([jti]);
+    expect(credentials.size).toBe(1);
+
+    // A true second presentation of the now-recorded jti is still refused.
+    expect(await grant(token)).toEqual(REPLAY);
+    expect(tokenRows.size).toBe(2);
   });
 });
 
