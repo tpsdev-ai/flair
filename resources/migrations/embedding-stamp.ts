@@ -272,9 +272,8 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * Harper has no compare-and-set: a change committed after confirmation and
  * before commit is not seen. The confirmation compares the WHOLE committed row
  * with the row read (the supersede-close pattern), which is stronger than the
- * identity list alone: a content-only change with no stored incarnation token
- * (a legacy row has none) still fails
- * it. The vector is computed for text unchanged through confirmation.
+ * identity list alone: a content-only change to a row that lacks a stored
+ * incarnation token (a legacy row may lack one) still fails it. The vector is computed for text unchanged through confirmation.
  *
  * Returns true when the update is staged, confirmation passes and the owned
  * transaction completes; otherwise false.
