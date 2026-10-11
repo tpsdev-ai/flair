@@ -28,8 +28,8 @@ export interface WriteBackOptions {
   matches?: (row: any) => boolean;
   matchFields?: string[];
   /**
-   * Require the row read inside the transaction to equal `expectedRow` (the row
-   * the caller read) as a WHOLE row, not only in the fields
+   * Before a planned write, require the in-transaction row to equal `expectedRow`
+   * (the row the caller read) as a WHOLE row, not only in the fields
    * {@link sameStoredRow} compares. A caller whose table carries no
    * instanceToken or contentHash (Soul/Agent/Relationship/Message) needs this:
    * for such a table sameStoredRow reduces to id/agentId/createdAt, so a same-id

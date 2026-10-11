@@ -9,10 +9,11 @@
   is gone (a delete or a purge): the re-PUT answers 409 `stored_row_changed`, the
   merge skips the record as `merge_target_changed`. `Soul`, `Agent`,
   `Relationship` and `Message` carry no incarnation token or content hash, so
-  for them the whole stored row is compared against the row the merge read; a
-  same-id replace that keeps the identity fields and changes only a data value
-  is refused too. The `Agent` status guard (flair#2108) and the `Message`
-  consumed-state reconcile (flair#1521) now key on that confirmed row. This
+  their planned writes compare the whole stored row against the row the merge
+  read. A same-id replace that keeps the identity fields and changes only a
+  data value is refused too. The `Agent` status guard (flair#2108) can skip as
+  `agent_status_not_federated` before this comparison. That guard and the `Message`
+  consumed-state reconcile (flair#1521) use the in-transaction row. This
   extends flair#2441's Memory-only merge confirmation to every synced table.
 
   A change committed **after** the final confirm read and before the
@@ -22,15 +23,10 @@
 
   A `merge_target_changed` skip is not re-offered once the spoke's cursor has
   advanced past the record's `updatedAt`. The sender's outbound cursor
-  (`peer.lastSyncAt`) is advanced to the pre-query timestamp — but only once, at
-  the end of the whole run, and only when every batch got a successful (2xx)
-  response with a valid JSON body and the field-only cursor update matched the
-  row. A later batch that fails (or a
-  cursor update that does not match) leaves the cursor where it was, so the next
-  `federation sync` re-offers every record from the old cursor, the refused one
-  included. When the cursor does advance past a refused record, the next poll's
-  `updatedAt > cursor` selection cannot pick it up again — because its stored
-  `updatedAt` is still what it was (the receiver never rewrites it on a refusal),
-  not because `updatedAt` is a structural guarantee: a row whose `updatedAt` is
-  bumped by a writer during the run carries `updatedAt > cursor` and is
-  re-offered next cycle.
+  (`peer.lastSyncAt`) is updated by `stampLocalContact`, called once after every
+  batch got a successful (2xx) response with valid JSON. The field-only update
+  advances the cursor to the pre-query timestamp only if it matches the row.
+  A later batch failure or an unmatched update leaves the old cursor, so the
+  next sync can re-offer the refused record with unchanged `updatedAt`. Once the
+  cursor passes that value, selection excludes it. A row with
+  `updatedAt > cursor` can be selected again.

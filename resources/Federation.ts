@@ -925,29 +925,23 @@ export class FederationSync extends Resource {
               : randomUUID();
         }
 
-        // flair#2441 / flair#2450: EVERY synced table's merge is a full-row
-        // write-back of the row it read (`local`), through the shared helper:
-        // the row is re-read inside a transaction this call OWNS, the merge is
-        // confirmed to still be over that row, and the COMMITTED row is re-read
-        // before commit (one attempt, no retry). For Memory the merge confirms
-        // identity (instanceToken, contentHash, createdAt, agentId) and that the
-        // row is present; for every other synced table (wholeRow) it confirms
-        // the whole stored row against the row it merged from. A mismatch skips
-        // the record by name (merge_target_changed). Only a change committed
-        // BEFORE the final confirm read is seen: there is no compare-and-set, so
-        // a change committed after it and before commit is not (write-back.ts).
-        // The plan reads the CONFIRMED row the
-        // helper hands it (the in-transaction re-read), never the pre-helper
-        // read: the Agent status guard (flair#2108) and the Message
-        // consumed-state reconcile (flair#1521 §12 P0-3) both key on it.
+        // flair#2441 / flair#2450: every synced table uses the write-back helper
+        // (one attempt, no retry). The plan reads the in-transaction row. The
+        // Agent status guard can skip as agent_status_not_federated before row
+        // comparison. For planned writes, Memory checks presence and identity
+        // (instanceToken, contentHash, createdAt, agentId); the other tables
+        // compare the whole row against `local`. A mismatch skips the record as
+        // merge_target_changed. The committed row is checked again before commit.
+        // A change committed after that final read is not seen: Harper has no
+        // compare-and-set (write-back.ts).
         //
         // flair#2450 (`wholeRow`): Soul, Agent, Relationship and Message carry
         // no instanceToken and no contentHash, so the helper's sameStoredRow
         // check reduces to id/agentId/createdAt for them. A same-id REPLACE that
         // keeps those fields and changes a data value would pass that identity
         // check and let the stale merge (built from `local`) overwrite the
-        // competitor. So for every table WITHOUT an incarnation token the helper
-        // additionally compares the WHOLE stored row against `local`. Memory
+        // competitor. Planned writes for these tables therefore compare the
+        // WHOLE stored row against `local`. Memory
         // carries the server-stamped token (and a content hash); its identity
         // check is sameStoredRow's, covering a replace that changed either.
         let outcome: any;
@@ -957,7 +951,7 @@ export class FederationSync extends Resource {
             record.id,
             (row) => {
               // flair#2108: an inbound Agent record whose `status` differs from
-              // the CONFIRMED local principal's stored value is skipped WHOLE,
+              // the in-transaction local principal's stored value is skipped WHOLE,
               // whether or not it would win the last-write-wins merge — the
               // federation path carries no verified administrator authority for
               // that principal (the batch is signed, and a record signature may
@@ -972,7 +966,7 @@ export class FederationSync extends Resource {
               // CONSUMED message, telling the sender "failed" about a message the
               // recipient actually consumed — the exact inversion Relay exists to
               // kill. `consumed` is absorbing: reconcileState pins it regardless
-              // of updatedAt, against the CONFIRMED row's state. P1-3: reconcile
+              // of updatedAt, against the in-transaction row's state. P1-3: reconcile
               // the SATELLITE lifecycle fields too, not just `state`, so a
               // consumed row keeps its own consumedAt and never carries a remote
               // failureReason.
@@ -990,8 +984,8 @@ export class FederationSync extends Resource {
               label: "FederationSync",
               expectedRow: local,
               attempts: 1,
-              // Every table but Memory carries no instanceToken: compare the
-              // whole stored row, not just sameStoredRow's identity fields
+              // Every table but Memory carries no instanceToken: planned writes
+              // compare the whole stored row, not just sameStoredRow's identity fields
               // (flair#2450 — see above).
               wholeRow: record.table !== "Memory",
               pausePre: () => txnPausePoint("federation-merge-pre"),

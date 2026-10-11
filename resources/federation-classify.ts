@@ -69,7 +69,8 @@ export type SkipReason =
   // missing or is not the envelope's id, so the record is not applied.
   | "id_mismatch"
   | "invalid_expiry"
-  // Emitted by FederationSync.post when a merge's row confirmation fails.
+  // Emitted by FederationSync.post when row confirmation fails for a planned
+  // merge write.
   // The initial check compares presence and identity fields for Memory, and
   // the whole row for Soul, Agent, Relationship and Message; the final check
   // compares the committed row with the in-transaction read. A change committed

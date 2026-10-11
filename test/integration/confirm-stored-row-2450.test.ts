@@ -11,8 +11,8 @@
  *
  * Each now confirms the COMMITTED row inside the write's transaction (item 1
  * before and after staging; item 2 through the shared write-back helper, one
- * attempt). For the merge of Soul, Agent, Relationship and Message the helper
- * now compares the WHOLE stored row against the row the merge read (its
+ * attempt). Planned merge writes to Soul, Agent, Relationship and Message
+ * compare the WHOLE stored row against the row the merge read (the helper's
  * `wholeRow` option), because those tables carry no instanceToken or
  * contentHash and sameStoredRow's identity check reduces to id/agentId/createdAt
  * for them; a same-id REPLACE that keeps those fields and changes only a data
@@ -26,9 +26,9 @@
  * a change committed AFTER the final confirm read — taken inside the same
  * transaction, before its commit — is not seen (resources/write-back.ts).
  *
- * Each writer's test-only pause point (resources/txn-pause-point.ts, armed
- * through FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR) holds it
- * between its read and its write while this test commits the competitor. A
+ * Test-only pause points (resources/txn-pause-point.ts, armed
+ * through FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR) hold each
+ * writer while this test commits the competitor. A
  * control case per writer shows the ordinary path is unchanged.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -433,25 +433,16 @@ for (const c of CASES) {
 // `hub.lastSyncAt` (the spoke's local Peer row for the hub), and the push
 // selects `updatedAt > since`.
 //
-// stampLocalContact() advances that cursor to `queriedAt` — the timestamp
-// captured BEFORE the table queries (the flair#146 no-miss comment) — and it
-// runs ONCE, at the end of the whole run, ONLY when every batch got a successful
-// (2xx) response with a valid JSON body
-// AND the field-only cursor update matched the row (persistLocalPeerLastSyncAt:
-// HTTP 200 alone is not success, a miss is a refusal, never an insert). It is
-// NOT run after each successful batch: a later batch that fails (or a cursor write that
-// does not match) leaves the stamp where it was, so the next poll re-selects
-// every record from the old cursor — a batch that failed after an earlier one
-// succeeded re-offers the earlier records too.
+// After every batch gets a successful (2xx) response with valid JSON,
+// stampLocalContact() runs once at the end. Its field-only update advances the
+// cursor to the pre-query `queriedAt` only if it matches the Peer row. A later
+// batch failure or an unmatched update leaves the old cursor for the next poll.
 //
 // `updatedAt` is a DATA value, not a structural guarantee: a merged row keeps
 // whatever updatedAt the remote sent (mergeRecord), and the receiver never
-// rewrites it on a refusal. So the reason a refused record is not re-offered is
-// that its stored `updatedAt` was already <= the advanced cursor — true for a
-// row that existed before the query (the case here), but a row whose updatedAt
-// is bumped by a writer DURING the run carries updatedAt > queriedAt and IS
-// re-offered next cycle. "Can never re-offer" would be false; "was not
-// re-offered while its updatedAt stayed put" is what holds.
+// rewrites it on a refusal. A refused record with unchanged updatedAt can be
+// re-offered if the cursor does not advance. Once the cursor passes that value,
+// selection excludes it; a row with updatedAt > queriedAt is re-offered.
 //
 // The hub's own `lastSyncCursor` (resources/Federation.ts) is written-only: set
 // on the hub's Peer row for the spoke and read by nothing.
@@ -466,8 +457,8 @@ for (const c of CASES) {
 // #2 (pushed 0) and its content stays un-merged, while bumping the row's own
 // updatedAt (sync #3) IS re-offered. The spoke-side advance is pinned on its own
 // — no second instance, no pause — by the batch-path unit test in
-// test/unit/federation-liveness-ping.test.ts ("the cursor advances after a
-// batch, after every batch succeeds").
+// test/unit/federation-liveness-ping.test.ts
+// ("flair#2450 — the spoke cursor advances after a batch, after every batch succeeds").
 describe("flair#2450 item 3 — a merge_target_changed skip is not re-offered once the cursor advances past it (real Harper)", () => {
   // The hub peer row id must be this instance's id: runFederationSyncOnce signs
   // the batch as its OWN instance, and FederationSync.post authenticates it via
