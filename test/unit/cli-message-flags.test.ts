@@ -792,7 +792,9 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       file: "src/lib/mcp-enable.ts",
       from: "Environment, then re-run with --confirm-secrets-applied.",
       to: "Environment, then re-run with --confirm-secrets-applied-now.",
-      expected: "--confirm-secrets-applied-now → 18 commands in reach",
+      // flair#2283: `flair doctor` and `flair deploy` now import this module for
+      // the shared discovery discriminator, widening the fallback reach.
+      expected: "--confirm-secrets-applied-now → 36 commands in reach",
     },
   ];
   for (const row of mutationRows) {

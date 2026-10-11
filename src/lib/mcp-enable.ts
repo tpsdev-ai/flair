@@ -2093,7 +2093,7 @@ export interface SelfVerifyResult {
 async function fetchOAuthMetadata(
   origin: string,
   deps: { fetchImpl?: typeof fetch; redirect?: RequestRedirect } = {},
-): Promise<{ ok: true; url: string; body: any } | { ok: false; detail: string; unreachable?: true }> {
+): Promise<{ ok: true; url: string; body: any } | { ok: false; detail: string; unreachable?: true; status?: number }> {
   const url = `${origin.replace(/\/+$/, "")}/.well-known/oauth-authorization-server`;
   const fetchImpl = deps.fetchImpl ?? fetch;
   let res: Response;
@@ -2106,15 +2106,15 @@ async function fetchOAuthMetadata(
     return { ok: false, unreachable: true, detail: `could not reach ${url}: ${err?.message ?? err}` };
   }
   if (deps.redirect === "manual" && (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400))) {
-    return { ok: false, detail: "--instance answered with a redirect; point --instance at the instance itself." };
+    return { ok: false, status: res.status, detail: "--instance answered with a redirect; point --instance at the instance itself." };
   }
   if (!res.ok) {
-    return { ok: false, detail: `${url} returned HTTP ${res.status} — is FLAIR_MCP_OAUTH actually set on the restarted instance?` };
+    return { ok: false, status: res.status, detail: `${url} returned HTTP ${res.status} — is FLAIR_MCP_OAUTH actually set on the restarted instance?` };
   }
   try {
     return { ok: true, url, body: await res.json() };
   } catch {
-    return { ok: false, detail: `${url} did not return JSON` };
+    return { ok: false, status: res.status, detail: `${url} did not return JSON` };
   }
 }
 
@@ -2125,6 +2125,19 @@ async function fetchOAuthMetadata(
  *  from the same function. */
 function mcpTokenEndpoint(issuer: string): string {
   return `${issuer.replace(/\/+$/, "")}/oauth/mcp/token`;
+}
+
+/** Which authorization server a discovery document's `token_endpoint` names.
+ *  flair's own OAuth 2.1 AS answers `<issuer>/OAuthToken`
+ *  (resources/oauth-discovery.ts); the `@harperfast/oauth` plugin answers
+ *  `<issuer>/oauth/mcp/token`. Anything else is neither. One implementation,
+ *  so the self-verify, the discriminator below and `flair doctor`/`flair
+ *  deploy` cannot drift. */
+export function mcpAuthServerOwner(issuer: string, tokenEndpoint: unknown): "plugin" | "flair-own" | "other" {
+  const normalized = issuer.replace(/\/+$/, "");
+  if (tokenEndpoint === `${normalized}/OAuthToken`) return "flair-own";
+  if (tokenEndpoint === mcpTokenEndpoint(normalized)) return "plugin";
+  return "other";
 }
 
 async function verifyTargetIssuer(
@@ -2149,6 +2162,171 @@ async function verifyTargetIssuer(
   return { ok: true, detail: `Issuer ${issuer} matched the target's own OAuth authorization-server metadata at ${target.url}` };
 }
 
+// ─── The discovery discriminator (flair#2283) ─────────────────────────────────
+//
+// Which authorization server answers an origin's RFC 8414 discovery document?
+// flair serves its OWN OAuth 2.1 AS at `<origin>/.well-known/oauth-authorization-
+// server` (resources/oauth-discovery.ts, token_endpoint `<origin>/OAuthToken`)
+// whenever FLAIR_MCP_OAUTH is off; with the flag on, flair's handler defers and
+// the `@harperfast/oauth` plugin answers (token_endpoint `<origin>/oauth/mcp/
+// token`). The document's `token_endpoint` therefore names which one answered,
+// and that is the whole discriminator. It lives here once: `flair mcp enable`'s
+// self-verify, `flair doctor` and `flair deploy`'s self-verify all read it.
+
+export type McpOAuthDiscoveryState = "plugin-live" | "plugin-absent" | "unreachable" | "unrecognized";
+
+export interface McpOAuthDiscovery {
+  state: McpOAuthDiscoveryState;
+  /** The origin the discovery document was read from (trailing slash stripped). */
+  origin: string;
+  /** The well-known URL read. */
+  url: string;
+  /** HTTP status when a response came back. Absent when the request itself failed. */
+  status?: number;
+  /** `issuer` named by the document, when one was read and it was a string. */
+  issuer?: string;
+  /** `token_endpoint` named by the document, when one was read and it was a string. */
+  tokenEndpoint?: string;
+  /** One sentence naming what was observed. */
+  detail: string;
+  /** The parsed document, when one was read. Carried so a caller that needs
+   *  more than the classification (self-verify's CIMD/shape checks) reuses the
+   *  SAME read rather than issuing a second request. Never rendered. */
+  body?: any;
+}
+
+/**
+ * Read `origin`'s discovery document and classify which authorization server
+ * answers there.
+ *
+ *   "plugin"    -> `plugin-live`     the `@harperfast/oauth` MCP AS answered
+ *   "flair-own" -> `plugin-absent`   flair's own AS answered; the plugin is not mounted
+ *   neither     -> `unrecognized`    a document answered but names a token endpoint that is neither
+ *   no document -> `unreachable`     the request failed, or the answer was non-2xx or non-JSON
+ *
+ * A failed read is never reported as a state of the surface: `unreachable`
+ * carries `status` only when a response actually came back.
+ */
+export async function discriminateMcpOAuthDiscovery(
+  origin: string,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<McpOAuthDiscovery> {
+  const normalized = origin.replace(/\/+$/, "");
+  const read = await fetchOAuthMetadata(normalized, deps);
+  if (read.ok === false) {
+    return {
+      state: "unreachable",
+      origin: normalized,
+      url: `${normalized}/.well-known/oauth-authorization-server`,
+      status: read.status,
+      detail: read.detail,
+    };
+  }
+  const body = read.body;
+  const tokenEndpoint = body?.token_endpoint;
+  const owner = mcpAuthServerOwner(normalized, tokenEndpoint);
+  const common = {
+    origin: normalized,
+    url: read.url,
+    status: 200,
+    issuer: typeof body?.issuer === "string" ? body.issuer : undefined,
+    tokenEndpoint: typeof tokenEndpoint === "string" ? tokenEndpoint : undefined,
+    body,
+  };
+  if (owner === "plugin") {
+    return {
+      ...common,
+      state: "plugin-live",
+      detail: `${read.url} names the MCP authorization server's token endpoint (token_endpoint=${JSON.stringify(tokenEndpoint)})`,
+    };
+  }
+  if (owner === "flair-own") {
+    return {
+      ...common,
+      state: "plugin-absent",
+      detail: `${read.url} names flair's own OAuth 2.1 authorization server (token_endpoint=${JSON.stringify(tokenEndpoint)})`,
+    };
+  }
+  return {
+    ...common,
+    state: "unrecognized",
+    detail: `${read.url} answered with an unrecognized token endpoint (token_endpoint=${JSON.stringify(tokenEndpoint)})`,
+  };
+}
+
+/** The one sentence `flair mcp enable`'s self-verify prints for a `plugin-absent`
+ *  observation (flair#756/#1000). Kept as one function so the wording cannot
+ *  drift from the check. */
+function mcpAbsentDetail(url: string, tokenEndpoint: unknown): string {
+  return (
+    `${url} answered with flair's OWN OAuth 2.1 authorization server, not the MCP one ` +
+    `(token_endpoint=${tokenEndpoint}) — the /mcp surface is NOT enabled on that instance. ` +
+    `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
+    `component declared in its config.yaml?`
+  );
+}
+
+export type McpOAuthDiscoverySeverity = "ok" | "info" | "warn" | "error";
+
+export interface McpOAuthDiscoveryReport {
+  severity: McpOAuthDiscoverySeverity;
+  /** Lines to print, in order. The first is the finding; later lines are the remedy. */
+  lines: string[];
+  /** True only for a positive confirmation of the live MCP authorization server. */
+  pass: boolean;
+}
+
+/**
+ * The operator-facing report for a discovery observation, shared by `flair
+ * doctor` and `flair deploy` so both word it identically.
+ *
+ * `mcpConfigured` is whether the instance is configured for MCP OAuth (the
+ * effective `FLAIR_MCP_OAUTH` the CLI can see — the component `.env` Harper's
+ * loadEnv reads, overlaid with the operator environment). Its only effect is on
+ * the `plugin-absent` case: a configured instance whose discovery names flair's
+ * own AS is a named failure with a remedy, while an unconfigured instance is a
+ * plain informational line. An `unreachable` or `unrecognized` observation is
+ * never a pass, and never an error — it says the surface could not be confirmed.
+ */
+export function reportMcpOAuthDiscovery(
+  observation: McpOAuthDiscovery,
+  mcpConfigured: boolean,
+): McpOAuthDiscoveryReport {
+  switch (observation.state) {
+    case "plugin-live":
+      return {
+        severity: "ok",
+        pass: true,
+        lines: [`MCP OAuth discovery: the MCP authorization server is live (${observation.url}).`],
+      };
+    case "plugin-absent":
+      if (!mcpConfigured) {
+        return {
+          severity: "info",
+          pass: false,
+          lines: [
+            `MCP OAuth discovery: MCP OAuth is not enabled on this instance (${observation.url} names flair's own authorization server).`,
+          ],
+        };
+      }
+      return {
+        severity: "error",
+        pass: false,
+        lines: [
+          `MCP OAuth discovery: FLAIR_MCP_OAUTH is set but the MCP authorization server is absent — ${observation.detail}.`,
+          `Fix: set FLAIR_MCP_OAUTH=true in the instance environment and confirm the '@harperfast/oauth' component is declared in its config.yaml, then restart (see \`flair mcp status\`).`,
+        ],
+      };
+    case "unreachable":
+    case "unrecognized":
+      return {
+        severity: "warn",
+        pass: false,
+        lines: [`MCP OAuth discovery: the MCP authorization server could not be confirmed — ${observation.detail}.`],
+      };
+  }
+}
+
 /**
  * Hit the OAuth metadata endpoint from the operator's machine against the
  * PUBLIC origin — the verification that matters is the one claude.ai's
@@ -2168,34 +2346,37 @@ export async function selfVerifyMcpMetadata(
   deps: { fetchImpl?: typeof fetch } = {},
 ): Promise<SelfVerifyResult> {
   const normalizedIssuer = issuer.replace(/\/+$/, "");
-  const metadata = await fetchOAuthMetadata(normalizedIssuer, deps);
-  if (metadata.ok === false) return metadata;
-  const { url, body } = metadata;
-  // ── The flair's-own-server check runs BEFORE the shape check (flair#1094) ──
+  // ── The discriminator runs BEFORE the shape check (flair#1094, flair#2283) ──
   //
-  // It used to run after, and that made the DEFAULT flag-off case misreport.
-  // flair's own document omits `registration_endpoint` unless DCR is enabled,
-  // which it is not by default — so the shape check fired first and returned
-  // "the metadata shape is unexpected", which is true, useless, and points at
-  // shapes when the cause is an unset environment variable.
-  //
-  // `token_endpoint` is present in that document either way, so testing the
+  // flair's own AS is identifiable by its token endpoint alone
+  // (`<issuer>/OAuthToken`), and that document omits `registration_endpoint`
+  // unless DCR is enabled — which it is not, by default. Testing the
   // discriminator first names the real cause in EVERY flag-off case rather than
   // only when DCR happens to be on. Found by writing the test that pins this
   // relationship, not by reading the code.
-  if (typeof body?.token_endpoint === "string" && body.token_endpoint === `${normalizedIssuer}/OAuthToken`) {
+  //
+  // This used to be an inline token_endpoint comparison here. flair#2283 lifted
+  // it into `discriminateMcpOAuthDiscovery` so `flair doctor` and `flair deploy`
+  // run the SAME function instead of re-deriving the comparison.
+  const observation = await discriminateMcpOAuthDiscovery(normalizedIssuer, deps);
+  if (observation.state === "unreachable") {
+    // A failed request read nothing, so the caller must not read it as a verdict
+    // (flair#2116). `status` is absent only when no response came back at all.
+    return observation.status === undefined
+      ? { ok: false, unreachable: true, detail: observation.detail }
+      : { ok: false, detail: observation.detail };
+  }
+  if (observation.state === "plugin-absent") {
     return {
       ok: false,
-      issuer: body?.issuer,
-      registrationEndpoint: body?.registration_endpoint,
-      tokenEndpoint: body.token_endpoint,
-      detail:
-        `${url} answered with flair's OWN OAuth 2.1 authorization server, not the MCP one ` +
-        `(token_endpoint=${body.token_endpoint}) — the /mcp surface is NOT enabled on that instance. ` +
-        `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
-        `component declared in its config.yaml?`,
+      issuer: observation.issuer,
+      registrationEndpoint: observation.body?.registration_endpoint,
+      tokenEndpoint: observation.tokenEndpoint,
+      detail: mcpAbsentDetail(observation.url, observation.tokenEndpoint),
     };
   }
+  const url = observation.url;
+  const body = observation.body;
   // ── registration_endpoint is OPTIONAL and must not be required (Kern, #1101) ─
   //
   // Requiring it made self-verify fail on a CORRECTLY enabled instance — the
@@ -2229,27 +2410,6 @@ export async function selfVerifyMcpMetadata(
     return {
       ok: false,
       detail: `${url} responded but the metadata shape is unexpected (issuer/token_endpoint) — got issuer=${JSON.stringify(body?.issuer)}`,
-    };
-  }
-
-  // flair#1000: this path is now served by flair ITSELF when FLAIR_MCP_OAUTH is
-  // off, so a 200 no longer proves the plugin answered. flair's own document
-  // (resources/oauth-discovery.ts) is identifiable by its token endpoint —
-  // `<issuer>/OAuthToken`, where the plugin's is `<issuer>/oauth/mcp/token`.
-  // Name the real cause here: before this existed the operator got a 404 whose
-  // message already asked the right question, and falling through to the CIMD
-  // branch would send them to a plugin knob that is not the problem.
-  if (body.token_endpoint === `${normalizedIssuer}/OAuthToken`) {
-    return {
-      ok: false,
-      issuer: body.issuer,
-      registrationEndpoint: body.registration_endpoint,
-      tokenEndpoint: body.token_endpoint,
-      detail:
-        `${url} answered with flair's OWN OAuth 2.1 authorization server, not the MCP one ` +
-        `(token_endpoint=${body.token_endpoint}) — the /mcp surface is NOT enabled on that instance. ` +
-        `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
-        `component declared in its config.yaml?`,
     };
   }
 
@@ -3102,6 +3262,137 @@ export async function disableMcp(params: DisableMcpParams, deps: DisableMcpDeps 
     return { ok: false, detail: `restart failed: ${err?.message ?? err}` };
   }
   return { ok: true, detail: `restart requested for ${params.instance}` };
+}
+
+// ─── flair mcp enable --refresh-flag (flair#2283) ──────────────────────────────
+
+export interface RefreshMcpFlagParams {
+  instance: string;
+  adminUser: string;
+  adminPass: string;
+  /** Public origin to self-verify; defaults to `instance`. */
+  issuer?: string;
+  fabric?: boolean;
+  dryRun?: boolean;
+  secretsStagingPath?: string;
+}
+
+export interface RefreshMcpFlagDeps {
+  fetchImpl?: typeof fetch;
+  /** waitForOpsApi bounds, injectable so tests run fast. */
+  waitForOpsApiTimeoutMs?: number;
+  waitForOpsApiPollMs?: number;
+}
+
+export interface RefreshMcpFlagResult {
+  ok: boolean;
+  dryRun: boolean;
+  refused?: { message: string };
+  steps: EnableStepResult[];
+  failedStep?: EnableStepName;
+  secretsPath?: string;
+}
+
+/**
+ * flair#2283 — the one-shot migration for an instance enabled before the
+ * shipped `config.yaml` referenced `FLAIR_MCP_OAUTH` (the pre-0.46.0 staging
+ * recorded by `buildSecretsBundle`; flair#1284 changed it to `true`). Such an
+ * instance holds `FLAIR_MCP_OAUTH=1`: flair's own reader accepts `1`, but the
+ * `@harperfast/oauth` component coerces only `true`/`false` and deletes it, so
+ * the MCP authorization server never mounts and every connector handshake fails
+ * with no cause named.
+ *
+ * This sets that ONE variable to `true` in the target's process environment —
+ * the same env-secrets primitive `flair mcp enable` uses — and restarts, WITHOUT
+ * the IdP-credential intake or the identity mapping (both are already in place
+ * from the original enable and are never touched here). It reads and writes no
+ * IdP secret value. The final step runs the SHARED discovery discriminator, so
+ * the migration is confirmed the same way `enable`, `doctor` and `deploy`
+ * confirm the surface.
+ */
+export async function refreshMcpOAuthFlag(
+  params: RefreshMcpFlagParams,
+  deps: RefreshMcpFlagDeps = {},
+): Promise<RefreshMcpFlagResult> {
+  const steps: EnableStepResult[] = [];
+  const dryRun = Boolean(params.dryRun);
+  let currentStep: EnableStepName = "target-shape-check";
+  const push = (ok: boolean, detail: string) => steps.push({ step: currentStep, ok, detail });
+
+  const targetRefusal = targetOriginRefusal(params.instance) ?? fabricLoopbackRefusal(params.instance, params.fabric);
+  if (targetRefusal) {
+    push(false, targetRefusal);
+    return { ok: false, dryRun, refused: { message: targetRefusal }, steps, failedStep: "target-shape-check" };
+  }
+  push(true, `${params.instance}: target shape accepted`);
+
+  const issuer = (params.issuer ?? params.instance).replace(/\/+$/, "");
+  const stagedPath = params.secretsStagingPath ?? defaultSecretsStagingPath(params.instance);
+
+  if (dryRun) {
+    currentStep = "secrets-provisioning";
+    push(true, `--dry-run: would set FLAIR_MCP_OAUTH=true in ${params.instance}'s process environment and restart; nothing was changed.`);
+    return { ok: true, dryRun: true, steps };
+  }
+
+  try {
+    // Stage the one-var bundle FIRST, so a target whose push does not complete
+    // still has the staged file.
+    currentStep = "secrets-provisioning";
+    writeSecretsStagingFile(stagedPath, { FLAIR_MCP_OAUTH: "true" });
+    const cap = await probeSecretsCapability(
+      resolveOpsUrl(params.instance),
+      basicAuthHeader(params.adminUser, params.adminPass),
+      { fetchImpl: deps.fetchImpl },
+    );
+    if (!cap.available || !cap.publicKeyPem) {
+      push(false, `cannot set FLAIR_MCP_OAUTH over the ops API: ${cap.reason}. The one-var bundle is staged at ${stagedPath} (0600); apply it to ${params.instance}'s process environment and restart.`);
+      return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsPath: stagedPath };
+    }
+    const pushed = await pushSecrets(
+      resolveOpsUrl(params.instance),
+      basicAuthHeader(params.adminUser, params.adminPass),
+      { FLAIR_MCP_OAUTH: "true" },
+      cap.publicKeyPem,
+      { fetchImpl: deps.fetchImpl },
+    );
+    if (!pushed.allOk) {
+      const failed = pushed.results.filter((r) => !r.ok).map((r) => `${r.name} (${r.detail})`).join("; ");
+      push(false, `FLAIR_MCP_OAUTH=true was not pushed: ${failed}. The one-var bundle is staged at ${stagedPath} (0600); apply it and restart.`);
+      return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsPath: stagedPath };
+    }
+    push(true, `FLAIR_MCP_OAUTH=true pushed to the target as an enc:v1 env-secret (tier ${PROCESS_ENV_TIER}); the value was sealed locally.`);
+
+    // Restart so the env-secrets decryptor materialises it into the process.
+    currentStep = "restart";
+    const pre = await captureBootDiscriminator(params.instance, params.adminUser, params.adminPass, { fetchImpl: deps.fetchImpl });
+    await triggerRemoteRestart(params.instance, params.adminUser, params.adminPass, { fetchImpl: deps.fetchImpl });
+    push(true, `restart triggered against ${params.instance}`);
+
+    currentStep = "verify-restart";
+    const post = await waitForOpsApi(
+      resolveOpsUrl(params.instance),
+      basicAuthHeader(params.adminUser, params.adminPass),
+      pre.pid,
+      { fetchImpl: deps.fetchImpl, timeoutMs: deps.waitForOpsApiTimeoutMs, pollMs: deps.waitForOpsApiPollMs },
+    );
+    push(true, `process restarted: pid changed ${pre.pid} -> ${post.pid}`);
+
+    // Self-verify with the SAME discriminator `enable`, `doctor` and `deploy` run.
+    currentStep = "self-verify";
+    const observation = await discriminateMcpOAuthDiscovery(issuer, { fetchImpl: deps.fetchImpl });
+    const report = reportMcpOAuthDiscovery(observation, true);
+    if (report.severity !== "ok") {
+      push(false, report.lines.join(" "));
+      return { ok: false, dryRun, steps, failedStep: "self-verify", secretsPath: stagedPath };
+    }
+    push(true, report.lines[0]);
+
+    return { ok: true, dryRun: false, steps, secretsPath: stagedPath };
+  } catch (err: any) {
+    push(false, `unexpected error: ${err?.message ?? err}`);
+    return { ok: false, dryRun, steps, failedStep: currentStep, secretsPath: stagedPath };
+  }
 }
 
 // ─── flair mcp status ─────────────────────────────────────────────────────────

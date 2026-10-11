@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=140 options=632
+# commands=140 options=633
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -515,6 +515,9 @@ flair mcp enable
     --dry-run
       description: Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run
       attr: dryRun
+    --refresh-flag
+      description: One-shot migration (flair#2283): set FLAIR_MCP_OAUTH=true in the target's process environment and restart, without re-running the IdP credentials or the identity mapping. Use it to correct an instance enabled before this release that still holds FLAIR_MCP_OAUTH=1 — the value the @harperfast/oauth component deletes, leaving its authorization server unmounted
+      attr: refreshFlag
     --json
       description: Print machine-readable JSON instead of a human summary
       attr: json
@@ -3343,6 +3346,7 @@ Options:
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
   --fabric                                           Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host
   --dry-run                                          Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run
+  --refresh-flag                                     One-shot migration (flair#2283): set FLAIR_MCP_OAUTH=true in the target's process environment and restart, without re-running the IdP credentials or the identity mapping. Use it to correct an instance enabled before this release that still holds FLAIR_MCP_OAUTH=1 — the value the @harperfast/oauth component deletes, leaving its authorization server unmounted
   --json                                             Print machine-readable JSON instead of a human summary
   -h, --help                                         display help for command
 

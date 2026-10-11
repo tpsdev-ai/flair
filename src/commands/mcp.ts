@@ -39,6 +39,7 @@ import {
 } from "../mcp-client-assertion.js";
 import {
   enableMcp,
+  refreshMcpOAuthFlag,
   disableMcp,
   mcpStatus,
   checkLocalOriginRefusal,
@@ -48,6 +49,7 @@ import {
   cimdAllowedHostsFromFlag,
   claudeAiExcludedNote,
   type EnableMcpResult,
+  type RefreshMcpFlagResult,
   type SecretsMechanism,
 } from "../lib/mcp-enable.js";
 import { resolveHome } from "../lib/home.js";
@@ -495,6 +497,19 @@ function printEnableSteps(result: EnableMcpResult): void {
   console.log("");
 }
 
+function printRefreshFlagSteps(result: RefreshMcpFlagResult): void {
+  console.log(`\n${render.wrap(render.c.bold, "flair mcp enable --refresh-flag")}${result.dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
+  for (const s of result.steps) {
+    console.log(`  ${s.ok ? render.icons.ok : render.icons.error} ${render.wrap(render.c.dim, s.step)}`);
+    console.log(`     ${s.detail}`);
+  }
+  console.log("");
+  if (result.ok && !result.dryRun) {
+    console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "FLAIR_MCP_OAUTH is now true on the target.")} Confirm with \`flair mcp status\`.`);
+    console.log("");
+  }
+}
+
 export function register(program: Command): void {
   const mcp = program.command("mcp").description("MCP client-credentials agent-auth (RFC 7523 private_key_jwt)");
 
@@ -830,6 +845,7 @@ export function register(program: Command): void {
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
     .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
     .option("--dry-run", "Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run")
+    .option("--refresh-flag", "One-shot migration (flair#2283): set FLAIR_MCP_OAUTH=true in the target's process environment and restart, without re-running the IdP credentials or the identity mapping. Use it to correct an instance enabled before this release that still holds FLAIR_MCP_OAUTH=1 — the value the @harperfast/oauth component deletes, leaving its authorization server unmounted")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
@@ -870,6 +886,32 @@ export function register(program: Command): void {
             "else's Harper. Pass the target's own admin password explicitly.",
         );
         process.exit(1);
+      }
+
+      // flair#2283 — the one-shot migration. It re-sets FLAIR_MCP_OAUTH in the
+      // target's environment and restarts, so it takes none of the IdP
+      // credentials or CIMD options and never prompts for them.
+      if (opts.refreshFlag) {
+        const refreshed = await refreshMcpOAuthFlag(
+          {
+            instance,
+            issuer: opts.issuer,
+            adminUser: resolveAdminUser(opts.adminUser),
+            adminPass,
+            fabric: Boolean(opts.fabric),
+            dryRun,
+            secretsStagingPath: opts.secretsPath,
+          },
+          {},
+        );
+        if (opts.json) {
+          console.log(render.asJSON(refreshed));
+          if (!refreshed.ok) process.exit(1);
+          return;
+        }
+        printRefreshFlagSteps(refreshed);
+        if (!refreshed.ok) process.exit(1);
+        return;
       }
 
       let idpClientId: string | undefined = opts.idpClientId;

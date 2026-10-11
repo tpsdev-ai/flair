@@ -171,6 +171,21 @@ registered identities.
 
 3. **Restart flair.** `/mcp` mounts, OAuth-guarded.
 
+4. **Upgrading an instance enabled before 0.46.0.** Releases before 0.46.0 staged
+   `FLAIR_MCP_OAUTH=1`; the component accepts only `true`/`false` and deletes `1`,
+   so its authorization server never mounts and the `/mcp` route answers with no
+   AS behind it. Correct the value in place, without re-running the whole enable
+   (the IdP credentials and the identity mapping are already in place and are not
+   touched):
+
+   ```bash
+   flair mcp enable --instance https://your-public-origin --refresh-flag
+   ```
+
+   It sets `FLAIR_MCP_OAUTH=true` in the target's process environment, restarts,
+   and confirms the MCP authorization server answers, using the same discovery
+   check as `flair doctor` and `flair deploy`.
+
 ## Sherlock's 4 requirements — how they are met
 
 1. **Token lifetime.** `mcp.accessTokenTtl: 900` (5–15 min) in the AS config +

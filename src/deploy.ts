@@ -23,6 +23,8 @@ import {
 } from "./replication-convergence.js";
 import { DEFAULT_STAMP_VERIFY_TIMEOUT_MS, verifyStampMigrationConverged } from "./stamp-migration-verify.js";
 import { FABRIC_NPM_INSTALL_COMMAND } from "./fabric-npm-install.js";
+import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery } from "./lib/mcp-enable.js";
+import { mcpOAuthEnabledFromComponentEnv } from "./lib/mcp-oauth-env.js";
 
 export interface DeployOptions {
   fabricOrg?: string;
@@ -1162,6 +1164,40 @@ export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void>
   onProgress?.(`served API verified non-404 for ${resources.length} resource(s)`);
 }
 
+/**
+ * flair#2283 — post-deploy verification that the target's OAuth discovery names
+ * the `@harperfast/oauth` MCP authorization server.
+ *
+ * Runs the SAME discriminator `flair mcp enable` runs (src/lib/mcp-enable.ts),
+ * imported rather than re-derived. A target whose shipped component `.env` sets
+ * `FLAIR_MCP_OAUTH` (so this deploy is configured for MCP OAuth) but whose
+ * discovery names flair's own AS is a named failure — the deploy must not report
+ * success on a surface a client cannot authorize against. An unreadable document,
+ * or one naming an unrecognized token endpoint, is reported as unverified, never
+ * as a pass.
+ *
+ * The deploy cannot read the TARGET's environment; `mcpOAuthConfigured` is the
+ * `.env` it shipped, so a target enabled only through Fabric's environment panel
+ * is reported, not failed.
+ */
+export async function verifyDeployedMcpDiscovery(o: {
+  url: string;
+  mcpOAuthConfigured: boolean;
+  onProgress?: (msg: string) => void;
+  fetchImpl?: typeof fetch;
+}): Promise<void> {
+  const discovery = await discriminateMcpOAuthDiscovery(o.url, { fetchImpl: o.fetchImpl });
+  const report = reportMcpOAuthDiscovery(discovery, o.mcpOAuthConfigured);
+  if (report.severity === "error") {
+    throw new Error(`deploy verification: ${report.lines.join(" ")}`);
+  }
+  if (report.severity === "warn") {
+    for (const line of report.lines) console.warn(`⚠ flair deploy: ${line}`);
+  } else {
+    for (const line of report.lines) o.onProgress?.(line);
+  }
+}
+
 export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   const errors = validateOptions(opts);
   if (errors.length) {
@@ -1218,6 +1254,13 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
 
   let replicationWarning: boolean;
   let convergedAfterReplicationError: boolean;
+  // flair#2283: whether this deploy is shipping an instance configured for MCP
+  // OAuth — the effective FLAIR_MCP_OAUTH in the component `.env` Harper's
+  // loadEnv reads, captured before the staged tree is cleaned up. The deploy
+  // cannot read the TARGET's environment, so the shipped `.env` is the one fact
+  // it can stand on; a target enabled only through Fabric's environment panel is
+  // therefore reported, not failed.
+  let mcpOAuthConfigured = false;
   try {
     ({ replicationWarning, convergedAfterReplicationError } = await runHarperDeploy(
       harperBin,
@@ -1229,6 +1272,10 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
       project,
     ));
   } finally {
+    try {
+      const envPath = join(staged.dir, COMPONENT_ENV_FILENAME);
+      mcpOAuthConfigured = mcpOAuthEnabledFromComponentEnv(existsSync(envPath) ? readFileSync(envPath, "utf8") : null);
+    } catch { mcpOAuthConfigured = false; }
     staged.cleanup();
   }
 
@@ -1280,6 +1327,11 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
         opts.onProgress?.(`issuer check did not run — ${issuerCheck.detail}`);
       }
     }
+
+    // flair#2283: the SAME discovery discriminator `flair mcp enable` runs — does
+    // the target's OAuth discovery name the @harperfast/oauth MCP authorization
+    // server? See verifyDeployedMcpDiscovery.
+    await verifyDeployedMcpDiscovery({ url, mcpOAuthConfigured, onProgress: opts.onProgress });
   }
 
   return {

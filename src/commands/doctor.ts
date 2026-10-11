@@ -9,7 +9,7 @@
 import { Command } from "commander";
 import { makeReadInstanceIds } from "./keys.js";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
-import { readTargetMcpRedirectFinding } from "../lib/mcp-oauth-env.js";
+import { readTargetMcpRedirectFinding, mcpOAuthEnabledFromComponentEnv } from "../lib/mcp-oauth-env.js";
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, describeAgentHomeFinding, describeAgentIdRuleFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
@@ -31,6 +31,7 @@ import {
   probeInstanceIdentity,
 } from "../lib/instance-identity-row.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery, type McpOAuthDiscoverySeverity } from "../lib/mcp-enable.js";
 import { mcpClientPinFindings, refreshOwnedPins, repinSessionStartHookGuarded, sessionStartHookPinFindings } from "../lib/owned-pins.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME } from "../version-check.js";
@@ -905,6 +906,27 @@ program
         if (mcpRedirectFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${mcpRedirectFinding.fixHint}`);
         if (mcpRedirectFinding.isIssue) issues++;
       }
+
+      // 3e. MCP OAuth discovery (flair#2283) — the SAME discriminator `flair mcp
+      // enable` runs (src/lib/mcp-enable.ts), imported rather than re-derived, so
+      // doctor reports which authorization server actually answers the instance's
+      // discovery document. A configured instance whose discovery names flair's
+      // own AS is a named failure; an unreadable document is reported as
+      // unverified, never as a pass. "Configured" is the effective FLAIR_MCP_OAUTH
+      // the component .env carries (Harper's loadEnv), overlaid with the operator
+      // environment.
+      const discovery = await discriminateMcpOAuthDiscovery(baseUrl);
+      const discoveryReport = reportMcpOAuthDiscovery(discovery, mcpOAuthEnabledFromComponentEnv(componentEnvText, process.env));
+      const discoveryIcons: Record<McpOAuthDiscoverySeverity, string> = {
+        ok: render.icons.ok,
+        info: render.icons.info,
+        warn: render.icons.warn,
+        error: render.icons.error,
+      };
+      discoveryReport.lines.forEach((line, index) => {
+        console.log(index === 0 ? `  ${discoveryIcons[discoveryReport.severity]} ${line}` : `     ${line}`);
+      });
+      if (discoveryReport.severity === "error") issues++;
     } else {
       console.log(`  ${render.icons.warn} MCP OAuth redirect: cannot verify target configuration`);
     }
