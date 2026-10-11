@@ -157,8 +157,9 @@ export interface MemoryTableLike {
   /** `context` carries the owned transaction of the content-suffix fallback below, or an
    *  empty context for its re-read of the committed row. */
   get(id: string, context?: unknown): Promise<Record<string, unknown> | null>;
-  /** The raw table write handle, used only for the content-suffix fallback below. */
-  put(row: Record<string, unknown>, context?: unknown): Promise<unknown>;
+  /** The raw table write handle, used only for the content-suffix fallback below: an
+   *  incremental update of the embedding fields (flair#2465), never a full-row put. */
+  update(id: string, row: Record<string, unknown>, context?: unknown): Promise<unknown>;
 }
 
 function defaultMemoryTable(): MemoryTableLike {
@@ -263,7 +264,10 @@ class RowChangedBeforeCommit extends Error {}
  * row with no such text is not embedded.
  *
  * Writes a usable vector in an owned transaction, staging only changes to
- * `embedding` and `embeddingModel`.
+ * `embedding`, `embeddingModel` and `updatedAt` — an INCREMENTAL update, the
+ * same field-only write Memory's own re-embed branch uses (flair#2465), never
+ * a full-row put. A full-row put would carry this transaction's re-read row and
+ * could revert a field an owner edit committed meanwhile.
  *
  * Harper 5.2.8 has no compare-and-set on a table write: a transaction does not
  * fail when a row it read is changed by another write before it commits;
@@ -297,7 +301,11 @@ async function regenContentSuffixRow(
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       const pause = txnPausePoint("embedding-stamp-content-suffix");
       if (pause) await pause;
-      await table.put({ ...fresh, embedding, embeddingModel: current }, txn);
+      // flair#2465: an incremental update of ONLY the embedding fields, not a
+      // full-row put. A full-row put carries this transaction's re-read row and
+      // can revert a field an owner edit committed meanwhile; writing only
+      // embedding/embeddingModel/updatedAt leaves every other field as stored.
+      await table.update(id, { embedding, embeddingModel: current, updatedAt: new Date().toISOString() }, txn);
       const committed = await table.get(id, {});
       if (!isDeepStrictEqual(committed, fresh)) throw new RowChangedBeforeCommit();
       return true;

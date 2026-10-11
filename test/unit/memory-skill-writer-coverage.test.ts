@@ -104,8 +104,8 @@ add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.put#1"],
   "Promotion status stamp in the manual promotion's own write transaction — non-skill.");
-add("migrations/embedding-stamp", ["writer:table.put#1"],
-  "Content-suffix migration embeds skillEmbedText(row), staging embedding/embeddingModel; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
+add("migrations/embedding-stamp", ["writer:table.update#1"],
+  "Content-suffix migration embeds skillEmbedText(row) and stages an incremental update of only embedding/embeddingModel/updatedAt (flair#2465) — never a full-row put; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
 add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],

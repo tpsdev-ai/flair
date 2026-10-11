@@ -1190,6 +1190,17 @@ async function reembedStoredRow(
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       const pause = txnPausePoint("memory-reembed-write");
       if (pause) await pause;
+      // flair#2465: a re-embed must never CREATE a row. Re-read the COMMITTED
+      // row here, in an explicit fresh context (never contextless — that would
+      // join this transaction and see its snapshot/staged write), and if the
+      // row is gone skip with not_found and write nothing. A delete committed
+      // after this transaction's read (its snapshot) but before this write is
+      // seen by this re-read; without it the incremental update below could be
+      // applied against an absent record, and Harper's audit-off commit path
+      // builds a record from the patch fields — a PARTIAL row carrying only id
+      // and the embedding fields (harper resources/Table.ts's no-audit branch).
+      const committed = await (databases as any).flair.Memory.get(id, {});
+      if (!committed) return { kind: "not_found" as const };
       // flair#2465: an incremental update, NOT a full-row put. Harper orders a
       // transaction by its first read, so this write can land after an edit the
       // owner committed while the vector was computed; a full-row put would
@@ -1881,12 +1892,13 @@ export class Memory extends (databases as any).flair.Memory {
     if (resolvedStored.denial) return resolvedStored.denial;
     const existingForSkill = resolvedStored.row;
     // flair#2296: re-embed intentionally changes only embedding, embeddingModel
-    // and updatedAt; the whole re-read row is submitted to put.
+    // and updatedAt.
     // flair#2390: the vector is computed OUTSIDE the write. The write itself
     // re-reads the committed row inside its own transaction (reembedStoredRow),
-    // builds the record from that row, and re-checks the owner and the text, so
-    // an edit committed while the vector was computed is kept, and the vector
-    // written is the one for the text of the re-read row.
+    // re-checks the owner and the text, and writes ONLY embedding/embeddingModel/
+    // updatedAt (flair#2465) — a row gone at that committed re-read aborts the
+    // write — so an edit committed while the vector was computed is kept, and
+    // the vector written is the one for the text of the re-read row.
     if (reembedRequest) {
       if (!existingForSkill) return NOT_FOUND();
       const auth = await resolveAgentAuth((this as any).getContext?.());

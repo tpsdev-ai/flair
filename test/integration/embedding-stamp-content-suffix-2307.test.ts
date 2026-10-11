@@ -159,6 +159,12 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
     expect(record.embeddingModel).toBe(CURRENT_MODEL_ID);
     expect(Array.isArray(record.embedding)).toBe(true);
     expect(record.content).toBe("embedding-stamp-content-suffix-marker"); // derived-only
+    // flair#2465: the content-suffix re-embed writes only the embedding fields —
+    // an incremental update, not the full-row put it used to stage — so it
+    // stamps `updatedAt` (which the old full-row put never wrote) and leaves
+    // `createdAt` as seeded.
+    expect(typeof record.updatedAt, "the content-suffix re-embed did not stamp updatedAt (full-row put?)").toBe("string");
+    expect(typeof record.createdAt).toBe("string");
 
     const detail = await healthDetail();
     const named = (detail?.warnings ?? []).some((w: any) => String(w?.message ?? "").includes(`migration '${EMBEDDING_STAMP_ID}' is outstanding`));

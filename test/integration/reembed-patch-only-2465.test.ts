@@ -18,6 +18,15 @@
  * FIRST), the re-embed runs to completion while it is held, then the PUT is
  * released: the edit's write is ordered after the re-embed's.
  *
+ * `memory-reembed-write` holds the re-embed's own owned transaction, after its
+ * re-read and before its write. The third case commits a DELETE of the row
+ * there: the re-embed must not resurrect the row from its patch fields (Harper's
+ * audit-off commit path builds a record from an absent record's patch fields).
+ * It re-reads the COMMITTED row before writing and skips with not_found, so no
+ * row — and never a partial one carrying only id + the embedding fields — exists
+ * after. Dropping that committed re-read makes this case fail (the re-embed
+ * answers 2xx for a row it did not write).
+ *
  * Throwaway HOME + data dir, ephemeral ports.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -30,6 +39,8 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const PUT_POINT = "memory-put";
+// The re-embed's own in-transaction pause (resources/Memory.ts, reembedStoredRow).
+const REEMBED_WRITE_POINT = "memory-reembed-write";
 const CURRENT_MODEL_ID = getModelId();
 const STALE_MODEL = "some-ancient-model-v0";
 const STALE_EMBEDDING = [0.01, 0.02, 0.03];
@@ -60,6 +71,16 @@ async function readRow(id: string): Promise<any> {
     operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"],
   });
   return Array.isArray(rows) ? rows[0] ?? null : rows;
+}
+/** A committed delete of `id` through the admin ops API (a competitor of the re-embed). */
+async function deleteRow(id: string): Promise<number> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: authHeader },
+    body: JSON.stringify({ operation: "delete", database: "flair", table: "Memory", ids: [id] }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  return res.status;
 }
 function ed25519Header(agent: TestAgent, method: string, path: string): string {
   const ts = Date.now().toString();
@@ -187,5 +208,34 @@ describe("flair#2465 — a re-embed keeps a concurrent owner edit (real Harper)"
     const row = await readRow(id);
     expect(row.content).toBe(ORIGINAL);
     expect(row.embeddingModel).toBe(CURRENT_MODEL_ID);
+  }, 120_000);
+
+  it("a delete committed while the re-embed is paused leaves no row — never a partial one", async () => {
+    const id = "rpo-case-3";
+    await seedRow(id, owner.id);
+
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${REEMBED_WRITE_POINT}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${REEMBED_WRITE_POINT}`), "");
+    const pendingReembed = reembedAs(owner, id);
+    const paused = await waitFor(join(pauseDir, `paused.${REEMBED_WRITE_POINT}`), 20_000);
+    let deleteStatus = -1;
+    try {
+      if (paused) {
+        // The row is deleted (committed) while the re-embed's owned transaction is held.
+        deleteStatus = await deleteRow(id);
+      }
+    } finally {
+      writeFileSync(join(pauseDir, `go.${REEMBED_WRITE_POINT}`), "");
+    }
+    const res = await pendingReembed;
+    const released = paused ? readFileSync(join(pauseDir, `released.${REEMBED_WRITE_POINT}`), "utf8") : "never paused";
+
+    expect(released, "the pause ended by timeout, not by this test").toBe("go");
+    expect(deleteStatus, "the committed delete did not succeed").toBe(200);
+    // The re-embed's write must not resurrect the row from its patch fields.
+    const row = await readRow(id);
+    expect(row, "the re-embed created a row (partial record) after a committed delete").toBeNull();
+    // A gone row is a named refusal, never a silent 2xx.
+    expect(res.status, await res.clone().text()).toBe(404);
   }, 120_000);
 });
