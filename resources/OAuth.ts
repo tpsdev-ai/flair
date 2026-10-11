@@ -10,6 +10,7 @@ import {
 } from "./replay-store.js";
 import { decideRegistration } from "./dcr-gate.js";
 import { buildAuthorizationServerMetadata } from "./oauth-discovery.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { esc } from "./admin-layout.js";
 
 /**
@@ -600,8 +601,17 @@ export class OAuthToken extends Resource {
       });
     }
 
+    // Test-only: valid names are inert unless fault injection is enabled and
+    // armed (resources/txn-pause-point.ts). Holds this rotation between the
+    // read above and the claim below — the interleaving where a revoke of the
+    // same token commits first.
+    const pause = txnPausePoint("oauth-refresh-pre-claim");
+    if (pause) await pause;
+
     // Claim to rotate once per instance under a per-key lock before the new
-    // pair is issued (resources/replay-store.ts).
+    // pair is issued (resources/replay-store.ts). A revoke of this refresh
+    // token takes this same claim (OAuthRevoke below), so a revoke that
+    // committed before this claim makes it a replay.
     const claim = await claimOAuthSingleUse("refresh", tokenHash, REFRESH_TOKEN_TTL_MS);
     if (claim === "unavailable") return storeUnavailable();
     if (claim === "replay") {
@@ -610,13 +620,24 @@ export class OAuthToken extends Resource {
       });
     }
 
+    // A revoke commits `revokedAt` without this rotation's claim, so it may
+    // have committed after the read above and before the claim. Re-read the
+    // COMMITTED row (explicit fresh context: never this request's snapshot)
+    // and refuse unless it is still this token, unrevoked.
+    const committed = await (databases as any).flair.OAuthToken.get(refreshRecord.id, {});
+    if (!committed || committed.tokenHash !== tokenHash || committed.revokedAt) {
+      return new Response(JSON.stringify({ error: "invalid_grant", error_description: "token revoked" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+
     // Rotate: revoke old refresh token, issue new pair
     await (databases as any).flair.OAuthToken.put({
-      ...refreshRecord,
+      ...committed,
       revokedAt: nowISO(),
     });
 
-    return this.issueTokenPair(refreshRecord.clientId, refreshRecord.principalId, refreshRecord.scope);
+    return this.issueTokenPair(committed.clientId, committed.principalId, committed.scope);
   }
 
   private async issueTokenPair(clientId: string, principalId: string, scope: string) {
@@ -680,6 +701,14 @@ export class OAuthRevoke extends Resource {
     for await (const t of (databases as any).flair.OAuthToken.search({
       conditions: [{ attribute: "tokenHash", comparator: "equals", value: tokenHash }],
     })) {
+      // A refresh token's rotation takes the single-use claim `r:<hash>`; a
+      // revoke records that same claim so a rotation presenting this token
+      // after the revoke is refused (OAuthToken above). An access token has no
+      // rotation to refuse.
+      if (t.tokenType === "refresh") {
+        const claim = await claimOAuthSingleUse("refresh", tokenHash, REFRESH_TOKEN_TTL_MS);
+        if (claim === "unavailable") return storeUnavailable();
+      }
       await (databases as any).flair.OAuthToken.put({
         ...t,
         revokedAt: nowISO(),

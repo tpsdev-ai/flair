@@ -60,6 +60,10 @@ function createTokenTable() {
   const rows = new Map<string, any>();
   return {
     rows,
+    async get(id: string) {
+      const row = rows.get(id);
+      return row ? { ...row } : null;
+    },
     async put(row: any) {
       rows.set(row.id, { ...row });
     },
