@@ -34,7 +34,7 @@ const add = (file: string, sites: string[], reason: string) => {
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
 add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
-add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#3"],
+add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#2"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer.");
@@ -56,8 +56,8 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Dedup expiry repair (flair#2358): re-writes the row read in its transaction with expiresAt set; content and tags stay as stored.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"],
   "Skill predecessor close: preserves stored content and tags.");
-add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
-  "Re-embed request: puts the re-read row with new embedding, embeddingModel and updatedAt; preserves stored content and tags.");
+add("Memory", ["writer:(databases as any).flair.Memory.update#1"],
+  "Re-embed request (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector; content and tags stay as stored.");
 add("Memory", ["writer:super.put#1"],
   "Admin-only _reindex re-PUT (reindex_admin_only gate) — preserves existing content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],

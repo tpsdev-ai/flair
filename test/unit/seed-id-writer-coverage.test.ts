@@ -37,7 +37,7 @@ add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
 add("Memory", [
   "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
   "writer:(databases as any).flair.Memory.put#2",
-  "writer:(databases as any).flair.Memory.put#3",
+  "writer:(databases as any).flair.Memory.update#1",
   "writer:super.put#1",
   "writer:super.patch#1",
   "writer:(databases as any).flair.Memory.delete#1",

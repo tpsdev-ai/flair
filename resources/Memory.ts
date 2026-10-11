@@ -1187,7 +1187,16 @@ async function reembedStoredRow(
       if (storedText !== textToEmbed) return { kind: "recompute" as const, text: storedText };
       const model = getModelId();
       const updatedAt = new Date().toISOString();
-      await (databases as any).flair.Memory.put({ ...stored, embedding, embeddingModel: model, updatedAt }, owned);
+      // Test-only: inert unless the fault-injection env opt-in is set and armed.
+      const pause = txnPausePoint("memory-reembed-write");
+      if (pause) await pause;
+      // flair#2465: an incremental update, NOT a full-row put. Harper orders a
+      // transaction by its first read, so this write can land after an edit the
+      // owner committed while the vector was computed; a full-row put would
+      // carry the row this transaction read and revert that edit. Writing only
+      // the embedding fields leaves the stored text (and every other field) as
+      // the owner left it.
+      await (databases as any).flair.Memory.update(id, { embedding, embeddingModel: model, updatedAt }, owned);
       return { kind: "written" as const, model, updatedAt };
     });
     if (outcome.kind === "not_found") return NOT_FOUND();
