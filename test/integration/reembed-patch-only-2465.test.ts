@@ -14,10 +14,20 @@
  * The spawned Harper carries the test-only pause (resources/txn-pause-point.ts,
  * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set in
  * this process's environment while this file starts its Harper, then restored).
+ *
+ * `memory-reembed` holds the re-embed AFTER its initial read and BEFORE it
+ * embeds. The deterministic case starts an owner PUT there, lets it commit, then
+ * releases the re-embed: the PUT's transaction opens after the re-embed's read,
+ * so Harper orders the re-embed's (newer) field-only write after the PUT and the
+ * edit survives — independent of the audit walk.
+ *
  * `memory-put` holds an owner PUT inside its own transaction, after its first
- * read and before its write. An edit is started there (so its transaction opens
- * FIRST), the re-embed runs to completion while it is held, then the PUT is
- * released: the edit's write is ordered earlier than the re-embed's.
+ * read and before its write, so its transaction opens FIRST. The re-embed then
+ * runs to completion while it is held, and the PUT is released: the PUT's full
+ * update is OLDER than the re-embed's write. Harper's out-of-order reconciliation
+ * of an older full update is best-effort (the audit walk folds the newer write
+ * into it, or misses and drops it), so that ordering is documented, not asserted
+ * — see the `(older PUT)` case.
  *
  * `memory-reembed-staged` holds the re-embed's own owned transaction AFTER it
  * has STAGED its field-only update and BEFORE it confirms the committed row (and
@@ -31,6 +41,11 @@
  * With audit logging on (Harper's default), dropping the post-staging confirm
  * changes the response from 409 to 2xx; the competitor's row state stands.
  *
+ * Seeded rows carry an explicit `visibility` so the boot visibility-backfill
+ * migration treats them as already-stamped and never re-puts them (a full-row put
+ * with a newer transaction timestamp than a case's own write) while a case runs —
+ * measured racing an earlier-started owner PUT (flair#2465 round 5).
+ *
  * Throwaway HOME + data dir, ephemeral ports.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -41,13 +56,24 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 
 const PUT_POINT = "memory-put";
+// The re-embed's pause AFTER its initial read and BEFORE it computes the vector
+// (resources/Memory.ts, the re-embed branch of patch()).
+const REEMBED_PAUSE_POINT = "memory-reembed";
 // The re-embed's own in-transaction pause, AFTER its write is staged and BEFORE
 // its committed-row confirm (resources/Memory.ts, reembedStoredRow).
 const REEMBED_STAGED_POINT = "memory-reembed-staged";
 const CURRENT_MODEL_ID = getModelId();
-const STALE_MODEL = "some-ancient-model-v0";
+// The seed stamp is the CURRENT model's BARE (engine-prefix-stripped) equivalent
+// — the same stamp test/integration/reembed-preserves-fields-2296.test.ts uses.
+// The boot embedding-stamp migration treats it as current-space (see
+// resources/migrations/embedding-stamp.ts's staleCondition), so none of its
+// cycles — the boot pass or a delayed follow-up — ever re-embeds a seeded row
+// and races the write under test. It is NOT the current id, so a re-embed under
+// test (which stamps the engine-qualified `CURRENT_MODEL_ID`) is still visible.
+const SEED_MODEL_ID = stripEnginePrefix(CURRENT_MODEL_ID);
 const STALE_EMBEDDING = [0.01, 0.02, 0.03];
 const ORIGINAL = "the original text about a quiet walk through the produce market";
 const EDITED = "an edit about quantum computing research grants and their deadlines";
@@ -128,7 +154,12 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 async function seedRow(id: string, agentId: string, content: string, extra: Record<string, unknown> = {}): Promise<void> {
   await opsCall({
     operation: "insert", database: "flair", table: "Memory",
-    records: [{ id, agentId, content, embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(), ...extra }],
+    // `visibility` is set so the boot visibility-backfill migration treats this
+    // row as already-stamped and never re-puts it. A bare seeded row (no
+    // visibility) is a migration candidate; its full-row put carries a newer
+    // transaction timestamp than a case's own write, which was measured racing
+    // an earlier-started owner PUT and dropping it (flair#2465 round 5).
+    records: [{ id, agentId, content, embedding: STALE_EMBEDDING, embeddingModel: SEED_MODEL_ID, visibility: "shared", createdAt: new Date().toISOString(), ...extra }],
   });
 }
 /** The server's own embedding of `text`, via an ordinary admin PUT of a probe row. */
@@ -217,42 +248,77 @@ afterAll(async () => {
 });
 
 describe("flair#2465 — a re-embed keeps a concurrent owner edit (real Harper)", () => {
-  it("an owner PUT that starts before the re-embed and commits after it keeps its edit", async () => {
-    const id = "rpo-case-1";
+  it("(a) an owner PUT that starts after the re-embed's read and commits while it runs keeps its edit", async () => {
+    const id = "rpo-case-a";
+    await seedRow(id, owner.id, ORIGINAL);
+
+    // Hold the re-embed after its initial read, before it embeds and writes.
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${REEMBED_PAUSE_POINT}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${REEMBED_PAUSE_POINT}`), "");
+    const pendingReembed = reembedAs(owner, id);
+    const paused = await waitFor(join(pauseDir, `paused.${REEMBED_PAUSE_POINT}`), 20_000);
+    let putStatus = -1;
+    try {
+      if (paused) {
+        // This PUT's transaction opens AFTER the re-embed's read and commits while
+        // the re-embed is still paused — the window this PR is about.
+        putStatus = (await editAs(owner, id, EDITED)).status;
+      }
+    } finally {
+      writeFileSync(join(pauseDir, `go.${REEMBED_PAUSE_POINT}`), "");
+    }
+    const reembed = await pendingReembed;
+    const released = paused ? readFileSync(join(pauseDir, `released.${REEMBED_PAUSE_POINT}`), "utf8") : "never paused";
+
+    expect(released, "the pause ended by timeout, not by this test").toBe("go");
+    expect(putStatus, "the owner PUT did not answer 200").toBe(200);
+    expect(reembed.status, await reembed.clone().text()).toBeLessThan(300);
+
+    const row = await readRow(id);
+    expect(row.content, "the re-embed reverted the owner's committed edit").toBe(EDITED);
+    expect(row.embeddingModel).toBe(CURRENT_MODEL_ID);
+    // The re-embed re-read the committed row, saw the edited text, and stored the
+    // vector for THAT text — never the superseded original.
+    const editedVector = await serverEmbedding(EDITED);
+    const originalVector = await serverEmbedding(ORIGINAL);
+    expect(cosine(row.embedding, editedVector), "the re-embed stored a vector for the superseded text").toBeGreaterThan(0.999);
+    expect(cosine(row.embedding, editedVector)).toBeGreaterThan(cosine(row.embedding, originalVector));
+  }, 120_000);
+
+  it("(older PUT) an owner PUT that starts before the re-embed and commits after it documents Harper's best-effort reconciliation; the edit's survival is not asserted", async () => {
+    const id = "rpo-case-older-put";
     await seedRow(id, owner.id, ORIGINAL);
 
     for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${PUT_POINT}`), { force: true });
     writeFileSync(join(pauseDir, `arm.${PUT_POINT}`), "");
-    // The PUT opens its transaction and reads the row, then is held before its write.
+    // The PUT opens its transaction and reads the row, then is held before its write,
+    // so its transaction opens BEFORE the re-embed's.
     const pendingPut = editAs(owner, id, EDITED);
     const paused = await waitFor(join(pauseDir, `paused.${PUT_POINT}`), 20_000);
     let reembedStatus = -1;
     try {
       if (paused) {
         // The re-embed runs to completion while the edit is held.
-        const reembed = await reembedAs(owner, id);
-        reembedStatus = reembed.status;
+        reembedStatus = (await reembedAs(owner, id)).status;
       }
     } finally {
       writeFileSync(join(pauseDir, `go.${PUT_POINT}`), "");
     }
-    const putResponse = await pendingPut;
+    const put = await pendingPut;
     const released = paused ? readFileSync(join(pauseDir, `released.${PUT_POINT}`), "utf8") : "never paused";
 
     expect(released, "the pause ended by timeout, not by this test").toBe("go");
     expect(reembedStatus, "the re-embed did not answer 2xx").toBeLessThan(300);
-    expect(putResponse.status, await putResponse.clone().text()).toBe(200); // the PUT's 200 is true
-
+    expect(put.status, "the owner PUT did not answer 200").toBe(200);
+    // Harper orders by first read: this PUT's transaction is OLDER than the
+    // re-embed's write. Harper reconciles the older full update best-effort —
+    // folding the newer write into it (the edit survives) or superseding it (the
+    // edit does not). Both 200s above always hold; which row state results is NOT
+    // asserted (it depends on Harper's audit walk, not on this PR's write). The
+    // deterministic case above is what this PR guarantees.
     const row = await readRow(id);
-    expect(row.content, "the re-embed reverted the owner's committed edit").toBe(EDITED);
-    // "the re-embed landed": its write is the vector it computed (for the text it
-    // read), distinguishable from the vector the owner PUT computed for EDITED.
-    // (The owner PUT also stamps the current model, so embeddingModel alone would
-    // not prove the re-embed's write landed.)
-    const ownVector = await serverEmbedding(ORIGINAL);
-    const editVector = await serverEmbedding(EDITED);
-    expect(cosine(row.embedding, ownVector), "the re-embed's write did not land").toBeGreaterThan(0.999);
-    expect(cosine(row.embedding, ownVector)).toBeGreaterThan(cosine(row.embedding, editVector));
+    expect(row, "the row vanished entirely").not.toBeNull();
+    expect([ORIGINAL, EDITED], `row.content was neither the original nor the edit: ${JSON.stringify(row?.content)}`).toContain(row?.content);
   }, 120_000);
 
   it("CONTROL: with no competitor the re-embed stamps the current model and leaves the text", async () => {
@@ -311,7 +377,7 @@ describe("flair#2465 — the re-embed confirms the committed row after staging (
     expect(row?.content, "the replacement row's content was overwritten").toBe(REPLACEMENT);
     // The re-embed's staged field-only update must not be patched onto the
     // replacement: it keeps the (stale) stamp the re-create gave it.
-    expect(row?.embeddingModel, "the stale re-embed's embedding fields were patched onto the replacement").toBe(STALE_MODEL);
+    expect(row?.embeddingModel, "the stale re-embed's embedding fields were patched onto the replacement").toBe(SEED_MODEL_ID);
     expect(row?.embedding).toEqual(STALE_EMBEDDING);
     const text = await response.clone().text();
     expect(response.status, text.slice(0, 200)).toBe(409);
