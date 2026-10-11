@@ -912,11 +912,14 @@ program
       // enable` runs (src/lib/mcp-enable.ts), imported rather than re-derived. It
       // compares the instance's discovery-document strings against the issuer(s)
       // the CLI knows independently of the document — the shipped/ambient
-      // FLAIR_PUBLIC_URL and FLAIR_MCP_ISSUER, plus the probed origin — so a
-      // document advertising flair's own token endpoint is a named failure when
-      // local configuration implies MCP OAuth is enabled. An unreadable or
-      // unrecognized document is unverified. The component `.env` and operator
-      // environment supply the local inference.
+      // FLAIR_PUBLIC_URL and FLAIR_MCP_ISSUER, plus the probed origin. A positive
+      // classification requires the document's OWN `issuer` to EQUAL one of those
+      // caller-known candidates and its `token_endpoint` to be that issuer's.
+      // Only then does a document advertising flair's own `<issuer>/OAuthToken`
+      // become a named failure when local configuration implies MCP OAuth is
+      // enabled; a document whose issuer is not a candidate is unrecognized, not a
+      // failure. An unreadable or unrecognized document is unverified. The
+      // component `.env` and operator environment supply the local inference.
       const discovery = await discriminateMcpOAuthDiscovery(baseUrl, {
         expectedIssuers: [componentMcpIssuer, componentEnvValue, process.env.FLAIR_MCP_ISSUER, process.env.FLAIR_PUBLIC_URL].filter(
           (issuer): issuer is string => typeof issuer === "string" && issuer.trim() !== "",

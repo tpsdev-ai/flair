@@ -2,12 +2,14 @@
  * deploy-discovery-2283.test.ts — flair#2283.
  *
  * `flair deploy`'s self-verify must run the SAME discovery discriminator
- * `flair mcp enable` runs (src/lib/mcp-enable.ts). It compares the target's
- * discovery-document strings against the origin the deploy shipped to — an issuer
- * the deploy knows independently of the document — plus the probed address, so a
- * deploy whose shipped `.env` implies MCP OAuth is enabled fails when the
- * document advertises flair's own token endpoint and deploy verification is
- * enabled. A document naming an unknown token endpoint, or one that is not JSON, is reported as a warning, never
+ * `flair mcp enable` runs (src/lib/mcp-enable.ts). A positive classification
+ * requires the target document's own `issuer` to EQUAL a caller-known candidate —
+ * the configured `FLAIR_PUBLIC_URL` / `FLAIR_MCP_ISSUER` read from the shipped
+ * component `.env`, plus the origin the deploy shipped to — and its `token_endpoint`
+ * to be that issuer's. So a deploy whose shipped `.env` implies MCP OAuth is
+ * enabled fails when the document advertises flair's own token endpoint for an
+ * issuer the deploy knows, and deploy verification is enabled. A document naming an
+ * unknown token endpoint, or one that is not JSON, is reported as a warning, never
  * as a failure and never as a pass.
  *
  * Part A drives `verifyDeployedMcpDiscovery` — the deploy self-verify's check —
@@ -28,6 +30,16 @@ import {
 } from "../../src/deploy.ts";
 
 type Shape = "plugin-live" | "plugin-absent" | "unrecognized" | "non-json";
+
+/** Capture `console.warn` during a test so a warning's TEXT can be asserted. */
+function captureWarn(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    lines.push(args.map((a) => String(a)).join(" "));
+  };
+  return { lines, restore: () => { console.warn = original; } };
+}
 
 function documentFor(o: string, s: Shape): Response {
   const json = (body: unknown, status = 200) =>
@@ -86,12 +98,29 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
 
   test("a document naming an unrecognized token endpoint warns rather than throwing", async () => {
     shape = "unrecognized";
-    await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).resolves.toBeUndefined();
+    const warnings = captureWarn();
+    try {
+      await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).resolves.toBeUndefined();
+      // The warning is EMITTED, not merely non-fatal: suppressing it must fail this.
+      expect(warnings.lines.join("\n")).toContain(
+        "MCP OAuth discovery: the MCP authorization server could not be confirmed",
+      );
+    } finally {
+      warnings.restore();
+    }
   });
 
   test("a non-JSON document warns rather than throwing", async () => {
     shape = "non-json";
-    await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).resolves.toBeUndefined();
+    const warnings = captureWarn();
+    try {
+      await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).resolves.toBeUndefined();
+      expect(warnings.lines.join("\n")).toContain(
+        "MCP OAuth discovery: the MCP authorization server could not be confirmed",
+      );
+    } finally {
+      warnings.restore();
+    }
   });
 
   // ─── Part B: the whole deploy() path, so the CALL is under test ─────────────
@@ -126,11 +155,14 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
     return dir;
   }
 
-  /** A target that answers every post-deploy probe, with `shape` at the well-known. */
-  function routedTarget(routeShape: Shape) {
+  /** A target that answers every post-deploy probe, with `shape` at the well-known.
+   *  `docIssuer` overrides the issuer the well-known document advertises, so a
+   *  document whose issuer differs from the probed origin (a vanity public URL) can
+   *  be exercised. */
+  function routedTarget(routeShape: Shape, docIssuer?: string) {
     return (async (input: any) => {
       const url = new URL(typeof input === "string" ? input : input.url);
-      if (url.pathname === "/.well-known/oauth-authorization-server") return documentFor(url.origin, routeShape);
+      if (url.pathname === "/.well-known/oauth-authorization-server") return documentFor(docIssuer ?? url.origin, routeShape);
       if (url.pathname === "/OAuthMetadata") {
         return new Response(JSON.stringify({ issuer: TARGET }), { status: 200, headers: { "content-type": "application/json" } });
       }
@@ -153,6 +185,35 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
       const pkgRoot = synthPkgRoot("FLAIR_MCP_OAUTH=true\n");
       const origFetch = globalThis.fetch;
       globalThis.fetch = routedTarget("plugin-absent");
+      try {
+        await expect(
+          deploy({
+            target: TARGET,
+            fabricUser: "admin",
+            fabricPassword: "pw",
+            packageRoot: pkgRoot,
+            verifyTimeoutMs: 40_000,
+          } as any),
+        ).rejects.toThrow(/document advertises flair's own token endpoint/);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    },
+    120_000,
+  );
+
+  // flair#2283 round 5: staging preserves an operator's FLAIR_PUBLIC_URL when it
+  // differs from the deploy target (component-env.ts planComponentEnv). The deploy
+  // must pass that shipped value — and FLAIR_MCP_ISSUER — as caller-known issuers,
+  // as doctor does; binding to the target URL alone left a vanity issuer advertising
+  // flair's own /OAuthToken "unrecognized" (a warning) instead of the named failure.
+  test(
+    "deploy() fails for a shipped vanity FLAIR_PUBLIC_URL whose document advertises flair's own token endpoint",
+    async () => {
+      const VANITY = "https://vanity.acme.example.com";
+      const pkgRoot = synthPkgRoot(`FLAIR_MCP_OAUTH=true\nFLAIR_PUBLIC_URL=${VANITY}\n`);
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = routedTarget("plugin-absent", VANITY);
       try {
         await expect(
           deploy({

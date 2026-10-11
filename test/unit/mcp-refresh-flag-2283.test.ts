@@ -17,7 +17,7 @@
  * server that answers each document shape on the wire.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants } from "node:crypto";
@@ -182,18 +182,34 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
   test("a target that cannot take a pushed secret leaves the staged file and names it", async () => {
     shape = "plugin-live";
     const { impl } = opsFetch({ disablePush: true });
+    const stagedPath = base().secretsStagingPath;
+    rmSync(stagedPath, { force: true });
     const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("secrets-provisioning");
-    expect(result.steps.find((s) => s.step === "secrets-provisioning")?.detail).toContain(base().secretsStagingPath);
+    expect(result.steps.find((s) => s.step === "secrets-provisioning")?.detail).toContain(stagedPath);
+    // The fallback file is not merely NAMED in the message: it is really on disk,
+    // unreadable-by-others (0600), and carries exactly the one value the reader
+    // accepts. Naming a path that was never written would still satisfy the old
+    // assertion; this one reads the file back and checks its permission bits.
+    expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
+    expect(statSync(stagedPath).mode & 0o777).toBe(0o600);
   });
 
   test("--dry-run makes no remote call", async () => {
-    const { impl, sent } = opsFetch();
-    const result = await refreshMcpOAuthFlag({ ...base(), dryRun: true }, { fetchImpl: impl, ...FAST });
+    const { impl } = opsFetch();
+    // Count EVERY fetch — ops calls AND discovery reads — not just the ops bodies
+    // the stub records. A dry run that still probed discovery would leave `sent`
+    // empty yet issue a request; this counts the request itself.
+    let fetches = 0;
+    const counting = (async (input: any, init: any) => {
+      fetches++;
+      return impl(input, init);
+    }) as unknown as typeof fetch;
+    const result = await refreshMcpOAuthFlag({ ...base(), dryRun: true }, { fetchImpl: counting, ...FAST });
     expect(result.ok).toBe(true);
     expect(result.dryRun).toBe(true);
-    expect(sent).toEqual([]);
+    expect(fetches).toBe(0);
   });
 
   // flair#2283 round 2: after the target binding, the PUBLIC document must name

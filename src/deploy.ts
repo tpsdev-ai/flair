@@ -6,10 +6,12 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import {
   COMPONENT_ENV_FILENAME,
+  MCP_ISSUER_KEY,
   PUBLIC_URL_KEY,
   isLoopbackUrl,
   planComponentEnv,
   publicUrlRemedy,
+  readEnvValue,
   type ComponentEnvPlan,
 } from "./component-env.js";
 import {
@@ -1166,28 +1168,40 @@ export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void>
 
 /**
  * flair#2283 — post-deploy verification that the target's OAuth discovery
- * advertises the MCP token endpoint of the origin the deploy shipped to.
+ * advertises the MCP token endpoint of an issuer the deploy knows.
  *
  * Runs the SAME discriminator `flair mcp enable` runs (src/lib/mcp-enable.ts),
- * imported rather than re-derived: it compares the discovery document's strings
- * against the origin the deploy shipped to (an issuer this deploy knows
- * independently of the document) plus the probed address. A target whose shipped
- * component `.env` implies MCP OAuth is enabled but whose document advertises
- * flair's own token endpoint is a named failure when deploy verification is
- * enabled. An unreadable, non-JSON, or unrecognized document is
+ * imported rather than re-derived. The discriminator binds a positive
+ * classification to a CALLER-KNOWN issuer: the document's own `issuer` must
+ * EQUAL one of the candidates this deploy knows independently of the document —
+ * the configured `FLAIR_PUBLIC_URL` / `FLAIR_MCP_ISSUER` read from the shipped
+ * component `.env`, plus the origin shipped to — and its `token_endpoint` must be
+ * that issuer's endpoint. A document advertising flair's own `<issuer>/OAuthToken`
+ * is a named failure when the shipped component `.env` implies MCP OAuth is enabled
+ * and the document's issuer is one of those candidates. An unreadable, non-JSON, or
+ * unrecognized document — including one whose issuer is not a candidate — is
  * reported as unverified, never as a pass.
  *
- * The deploy cannot read the TARGET's environment; `mcpOAuthConfigured` is the
- * `.env` it shipped, so a target enabled only through Fabric's environment panel
+ * The deploy cannot read the TARGET's environment; `mcpOAuthConfigured` and the
+ * `FLAIR_PUBLIC_URL` / `FLAIR_MCP_ISSUER` candidates are read from the `.env` it
+ * shipped. A target whose flag or issuer lives only in Fabric's environment panel
  * is reported, not failed.
  */
 export async function verifyDeployedMcpDiscovery(o: {
   url: string;
   mcpOAuthConfigured: boolean;
+  /** Issuers the deploy knows INDEPENDENTLY of the target's document: the
+   *  configured `FLAIR_PUBLIC_URL` / `FLAIR_MCP_ISSUER` read from the shipped
+   *  component `.env`. The origin shipped to is always added. A document whose
+   *  `issuer` is none of these is `unrecognized`, never a failure. */
+  knownIssuers?: string[];
   onProgress?: (msg: string) => void;
   fetchImpl?: typeof fetch;
 }): Promise<void> {
-  const discovery = await discriminateMcpOAuthDiscovery(o.url, { fetchImpl: o.fetchImpl, expectedIssuers: [o.url] });
+  const discovery = await discriminateMcpOAuthDiscovery(o.url, {
+    fetchImpl: o.fetchImpl,
+    expectedIssuers: [o.url, ...(o.knownIssuers ?? [])],
+  });
   const report = reportMcpOAuthDiscovery(discovery, o.mcpOAuthConfigured);
   if (report.severity === "error") {
     throw new Error(`deploy verification: ${report.lines.join(" ")}`);
@@ -1255,9 +1269,14 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
 
   let replicationWarning: boolean;
   let convergedAfterReplicationError: boolean;
-  // flair#2283: infer MCP OAuth enablement from the shipped component `.env`
-  // before cleaning up the staged tree. This does not read target environment.
+  // flair#2283: infer MCP OAuth enablement AND read the caller-known issuers from
+  // the shipped component `.env` before cleaning up the staged tree. This does not
+  // read target environment. Staging keeps an operator's FLAIR_PUBLIC_URL when it
+  // differs from the deploy target (component-env.ts planComponentEnv), so the
+  // shipped value — not the target URL alone — is the caller-known issuer the
+  // discovery check binds against.
   let mcpOAuthConfigured = false;
+  let deployedKnownIssuers: string[] = [];
   try {
     ({ replicationWarning, convergedAfterReplicationError } = await runHarperDeploy(
       harperBin,
@@ -1271,8 +1290,15 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   } finally {
     try {
       const envPath = join(staged.dir, COMPONENT_ENV_FILENAME);
-      mcpOAuthConfigured = mcpOAuthEnabledFromComponentEnv(existsSync(envPath) ? readFileSync(envPath, "utf8") : null);
-    } catch { mcpOAuthConfigured = false; }
+      const shippedEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : null;
+      mcpOAuthConfigured = mcpOAuthEnabledFromComponentEnv(shippedEnvText);
+      deployedKnownIssuers = [readEnvValue(shippedEnvText, PUBLIC_URL_KEY), readEnvValue(shippedEnvText, MCP_ISSUER_KEY)].filter(
+        (issuer): issuer is string => typeof issuer === "string" && issuer.trim() !== "",
+      );
+    } catch {
+      mcpOAuthConfigured = false;
+      deployedKnownIssuers = [];
+    }
     staged.cleanup();
   }
 
@@ -1328,7 +1354,12 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     // flair#2283: the SAME discovery discriminator `flair mcp enable` runs — does
     // the target's OAuth discovery advertise the expected MCP token endpoint?
     // See verifyDeployedMcpDiscovery.
-    await verifyDeployedMcpDiscovery({ url, mcpOAuthConfigured, onProgress: opts.onProgress });
+    await verifyDeployedMcpDiscovery({
+      url,
+      mcpOAuthConfigured,
+      knownIssuers: deployedKnownIssuers,
+      onProgress: opts.onProgress,
+    });
   }
 
   return {

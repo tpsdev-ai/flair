@@ -2331,10 +2331,12 @@ export interface McpOAuthDiscoveryReport {
  * doctor` and `flair deploy` so both word it identically.
  *
  * `mcpConfigured` is the locally inferred `FLAIR_MCP_OAUTH` the caller can see.
- * For a document advertising flair's own token endpoint, true yields a named
- * failure with a remedy; false yields an informational line. An `unreachable` or
- * `unrecognized` observation is never a pass, and never an error — it says the
- * surface could not be confirmed.
+ * A `plugin-absent` observation is a document whose `issuer` equals a caller-known
+ * candidate (a configured public URL / MCP issuer, or the verified origin) while
+ * advertising flair's own `<issuer>/OAuthToken`; true yields a named failure with a
+ * remedy, false yields an informational line. An `unreachable` or `unrecognized`
+ * observation — including a document whose issuer is no candidate — is never a pass,
+ * and never an error: it says the surface could not be confirmed.
  */
 export function reportMcpOAuthDiscovery(
   observation: McpOAuthDiscovery,

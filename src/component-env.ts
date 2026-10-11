@@ -136,8 +136,9 @@ export function envKeyNames(text: string | null | undefined): string[] {
 }
 
 /**
- * The value assigned to `key`, or null. The single value this module reads is
- * `FLAIR_PUBLIC_URL`, which is not a secret; nothing here reads any other value.
+ * The value assigned to `key`, or null. This module reads no secret value: the
+ * only keys it reads are `FLAIR_PUBLIC_URL` (not a secret) and `FLAIR_MCP_ISSUER`
+ * (a public issuer origin), both operator-facing configuration.
  */
 export function readEnvValue(text: string | null | undefined, key: string): string | null {
   if (!text) return null;
