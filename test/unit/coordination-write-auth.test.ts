@@ -224,8 +224,8 @@ describe("OrgEvent.post() — agent-self attribution (no forging)", () => {
 });
 
 // ─── OrgEvent.post() id ownership + uniqueness (flair#2333 N2/H9) ───────────────
-describe("OrgEvent.post() — a non-admin caller's POST naming an event stored and owned by another agent is refused (N2)", () => {
-  it("refuses a POST whose id already names another agent's event, leaving it unchanged", async () => {
+describe("OrgEvent.post() — refuses a non-admin POST for a row observed at the guard's lookup as owned by another agent (N2)", () => {
+  it("refuses a POST for a row observed at the guard's lookup as owned by another agent", async () => {
     orgEventStore.set("owned-1", { id: "owned-1", authorId: "agent-a", kind: "status", summary: "original" });
     const oe = makeOrgEvent(agentCtx("agent-b"));
     const res = await oe.post({ id: "owned-1", kind: "coord.claim", summary: "overwrite attempt" });
@@ -235,7 +235,7 @@ describe("OrgEvent.post() — a non-admin caller's POST naming an event stored a
     expect(orgEventStore.get("owned-1").authorId).toBe("agent-a");
   });
 
-  it("refuses the overwrite even when the body claims the owner's authorId", async () => {
+  it("refuses a POST claiming the observed owner's authorId", async () => {
     orgEventStore.set("owned-2", { id: "owned-2", authorId: "agent-a", kind: "status", summary: "original" });
     const oe = makeOrgEvent(agentCtx("agent-b"));
     const res = await oe.post({ id: "owned-2", authorId: "agent-a", kind: "coord.claim", summary: "forged" });
@@ -261,10 +261,10 @@ describe("OrgEvent.post() — a non-admin caller's POST naming an event stored a
   });
 });
 
-describe("OrgEvent.post() — two events posted in the same millisecond are both stored (H9)", () => {
+describe("OrgEvent.post() — avoids deterministic same-millisecond collisions (random UUID, H9)", () => {
   afterEach(() => { setSystemTime(); });
 
-  it("the default id does not collide when the wall clock does not advance", async () => {
+  it("avoids deterministic same-millisecond collisions (random UUID)", async () => {
     setSystemTime(new Date("2026-10-11T00:00:00.000Z"));
     const oe = makeOrgEvent(agentCtx("agent-alpha"));
     await oe.post({ kind: "status", summary: "first" });

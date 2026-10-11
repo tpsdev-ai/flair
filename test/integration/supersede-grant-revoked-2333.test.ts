@@ -164,8 +164,8 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2333 H10 — a grant revoked before the close commits stops the close (real Harper)", () => {
-  it("a revoked write grant leaves the owner's memory open", async () => {
+describe("flair#2333 H10 — a grant revocation committed before the grant re-check stops the close (real Harper)", () => {
+  it("a grant revocation committed during the pre-stage pause leaves the owner's memory open", async () => {
     const { response, competed, released } = await withPausedClose(
       () => authSend(harper, grantee, "PUT", "/Memory/h10-revoked-successor", {
         id: "h10-revoked-successor", agentId: grantee.id, supersedes: "h10-revoked-target",
@@ -193,7 +193,7 @@ describe("flair#2333 H10 — a grant revoked before the close commits stops the 
     expect(target?.validTo, "the close did not land under an intact grant").toBeTruthy();
   }, 60_000);
 
-  it("a grant revoked while the close's write is staged leaves the owner's memory open", async () => {
+  it("a grant revocation committed before the staged re-check leaves the owner's memory open", async () => {
     await grantWrite(harper, owner.id, grantee.id);
     const { response, competed, released } = await withPausedClose(
       () => authSend(harper, grantee, "PUT", "/Memory/h10-staged-successor", {

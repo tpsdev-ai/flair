@@ -1,16 +1,8 @@
 /**
- * orgevent-post-id-ownership-2333.test.ts — flair#2333 slice 4 (N2), real Harper.
+ * orgevent-post-id-ownership-2333.test.ts — flair#2333 slice 4, real Harper.
  *
- * OrgEvent.post() is reachable over REST: since Harper 5.2 a bare
- * `POST /OrgEvent` is routed to the resource's post() override (see the
- * "sanity" case in workspace-orgevent-cli-e2e.test.ts). post() mints an id when
- * the body carries none, but a caller-supplied id was written straight through
- * to the underlying table write with no ownership guard, so agent B could POST
- * with agent A's existing event id and overwrite A's event.
- *
- * These cases drive a spawned Harper over real HTTP. An event owned by agent A
- * exists; agent B POSTs with that id. Safe outcome: the write is refused and A's
- * stored event is unchanged. A control case shows a fresh id still writes.
+ * Checks ownership refusal for a row observed at the guard's lookup, creation,
+ * and random UUID ids with a frozen child clock over real HTTP.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -92,26 +84,14 @@ const other = mkAgent("oep-other");
 const OWNED_ID = "oep-owner-event";
 
 beforeAll(async () => {
-  // This file's Harper runs on a FROZEN clock (test/helpers/harper-freeze-clock.cjs,
-  // opt-in via FLAIR_TEST_FROZEN_NOW on the child's env), so two no-id POSTs land
-  // in the same millisecond deterministically — see the H9 case. The test process
-  // keeps the real clock, so its request timestamps stay inside agent-auth's 30 s
-  // window. The env is restored right after spawn so no other test inherits it.
+  // Freeze only this instance's child clock for the same-millisecond case.
   const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
-  const saved = {
-    frozen: process.env.FLAIR_TEST_FROZEN_NOW,
-    nodeOptions: process.env.NODE_OPTIONS,
-  };
-  process.env.FLAIR_TEST_FROZEN_NOW = String(Date.now());
-  process.env.NODE_OPTIONS = `${saved.nodeOptions ?? ""} --require=${clockPreload}`.trim();
-  try {
-    harper = await startHarper();
-  } finally {
-    if (saved.frozen === undefined) delete process.env.FLAIR_TEST_FROZEN_NOW;
-    else process.env.FLAIR_TEST_FROZEN_NOW = saved.frozen;
-    if (saved.nodeOptions === undefined) delete process.env.NODE_OPTIONS;
-    else process.env.NODE_OPTIONS = saved.nodeOptions;
-  }
+  harper = await startHarper({
+    env: {
+      FLAIR_TEST_FROZEN_NOW: String(Date.now()),
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
+    },
+  });
   assertOwnInstance(harper);
   await seedAgent(harper, owner);
   await seedAgent(harper, other);
@@ -126,8 +106,8 @@ beforeAll(async () => {
 
 afterAll(async () => { if (harper) await stopHarper(harper); });
 
-describe("flair#2333 N2 — a non-admin agent's POST naming another agent's OrgEvent is refused", () => {
-  it("a POST naming another agent's existing event id is refused and leaves the event unchanged", async () => {
+describe("flair#2333 N2 — a non-admin POST is refused for an OrgEvent observed at the guard's lookup as owned by another agent", () => {
+  it("refuses a POST for a row observed at the guard's lookup as owned by another agent", async () => {
     const res = await authSend(harper, other, "POST", "/OrgEvent", {
       id: OWNED_ID, kind: "coord.claim", summary: "overwrite attempt by another agent",
     });
@@ -138,7 +118,7 @@ describe("flair#2333 N2 — a non-admin agent's POST naming another agent's OrgE
     expect(row?.kind).toBe("status");
   }, 30_000);
 
-  it("a POST naming another agent's id AND that agent's authorId is refused too", async () => {
+  it("refuses a POST claiming the observed owner's authorId", async () => {
     const res = await authSend(harper, other, "POST", "/OrgEvent", {
       id: OWNED_ID, authorId: owner.id, kind: "coord.claim", summary: "forged-author overwrite attempt",
     });
@@ -166,13 +146,8 @@ describe("flair#2333 N2 — a non-admin agent's POST naming another agent's OrgE
   }, 30_000);
 });
 
-describe("flair#2333 H9 — two events posted in the same millisecond are both stored (real Harper)", () => {
-  // This file's Harper runs on a frozen clock (see beforeAll), so both posts are
-  // stamped with the SAME millisecond deterministically — no reliance on a burst
-  // landing two requests in one ms. (The POST body is empty, so the rows are
-  // recovered by author.) Under the old millisecond-only id those two shared one
-  // id, so the second replaced the first and only one row survived.
-  it("two no-id posts in the same millisecond are stored under two distinct, readable ids", async () => {
+describe("flair#2333 H9 — avoids deterministic same-millisecond collisions (random UUID, real Harper)", () => {
+  it("avoids deterministic same-millisecond collisions (random UUID)", async () => {
     const summaries = [`h9-same-ms-a-${randomUUID()}`, `h9-same-ms-b-${randomUUID()}`];
     for (const summary of summaries) {
       const res = await authSend(harper, other, "POST", "/OrgEvent", { kind: "status", summary });

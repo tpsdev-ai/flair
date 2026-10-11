@@ -692,7 +692,7 @@ class CloseTargetChanged extends Error {}
 /**
  * Aborts the close's owned transaction: a cross-agent close authorized by a
  * "write" grant found that grant revoked on committed state before it committed
- * (flair#2333 H10). Not retried — a revoked grant cannot come back by retrying.
+ * (flair#2333 H10). This close attempt does not retry.
  */
 class GrantedCloseRevoked extends Error {}
 
@@ -761,8 +761,8 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
         // flair#2333 (H10): a cross-agent close stands on the grant checked at
         // authorization time. Re-read it on committed state HERE — after the write
         // is staged, as the last read before this transaction commits — so a grant
-        // revoked and committed before this point aborts the close (a revoked grant
-        // cannot come back by retrying, so the loop rethrows it immediately).
+        // revoked and committed before this point aborts the close; this close
+        // attempt does not retry.
         if (granteeId !== undefined && !(await hasWriteGrant(granteeId, expectedOwner as string, {}))) {
           throw new GrantedCloseRevoked();
         }

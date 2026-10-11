@@ -795,6 +795,8 @@ export interface StartHarperOptions {
    */
   installDir?: string;
   homeDir?: string;
+  /** Environment overrides for this instance's child processes. */
+  env?: Record<string, string>;
   /**
    * When false, skip the #1450 orphan-exit preload so a SIGKILL of this
    * parent leaves Harper alive (the #1372 reap-on-start known-answer).
@@ -863,7 +865,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   // Deny-list: strip CI secrets from the inherited env so Harper's child
   // process (and any log dump on failure) doesn't leak them onto a public
   // CI runner (Sherlock review on #467).
-  const parentEnv = { ...process.env as Record<string, string> };
+  const parentEnv = { ...process.env as Record<string, string>, ...opts.env };
   delete parentEnv.GITHUB_TOKEN;
   delete parentEnv.NPM_TOKEN;
 
