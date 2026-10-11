@@ -157,12 +157,9 @@ export async function validateIdJag(
     }
   }
 
-  // Replay prevention (jti): a jti claim, when present, must be a nonempty
-  // string, and its `exp` must be inside ID_JAG_MAX_VALIDITY_MS, so the
-  // assertion's validity is bounded first. The record itself (one row per jti,
-  // kept ID_JAG_REPLAY_RETENTION_S) is claimed under the SUBJECT lock in
-  // resolveOrCreatePrincipal, after it has taken that lock and before the grant
-  // has any effect — see the ordering note there.
+  // A present jti must be a nonempty string with exp no further ahead than
+  // ID_JAG_MAX_VALIDITY_MS plus CLOCK_SKEW_MS. resolveOrCreatePrincipal claims
+  // it under the subject lock before provisioning and token issuance.
   if (payload.jti !== undefined) {
     if (typeof payload.jti !== "string" || payload.jti === "") throw new Error("jti claim must be a nonempty string");
     if (typeof payload.exp !== "number" || payload.exp * 1000 > Date.now() + ID_JAG_MAX_VALIDITY_MS + CLOCK_SKEW_MS) {
@@ -176,11 +173,8 @@ export async function validateIdJag(
 /**
  * Resolve or JIT-create a Principal from validated ID-JAG claims.
  *
- * The credential lookup and the JIT create it may fall back to are one
- * check-and-write: two grants for one new subject must not both find no
- * principal and both provision. They run under the subject's per-key lock
- * (resources/key-lock.ts); a grant that cannot take the lock is refused (503)
- * rather than provision a second principal for the subject.
+ * Within one Harper process, the subject's per-key lock serializes the
+ * credential lookup and any JIT create. A lock miss refuses the grant (503).
  */
 async function resolveOrCreatePrincipal(
   payload: any,
@@ -222,13 +216,9 @@ async function resolveOrCreatePrincipalLocked(
   idpConfig: any,
   ctx?: any,
 ): Promise<string> {
-  // Replay prevention ORDER (flair#2333): the assertion's jti is claimed HERE,
-  // after the SUBJECT lock above is held and before the grant has any effect.
-  // Claiming it BEFORE that lock (as the earlier code did) consumed the
-  // assertion even when the lock could not be taken (a 503 lock miss), so a
-  // retry of the SAME assertion was refused as a replay. A lock miss now leaves
-  // the jti unclaimed: the assertion can be retried and succeeds once; a genuine
-  // second presentation of a recorded jti is still refused.
+  // Claim jti after taking the subject lock, before provisioning and token
+  // issuance (flair#2333). A lock miss leaves it unclaimed; a retry can succeed
+  // if the assertion remains valid and the later grant steps succeed.
   if (payload.jti !== undefined) {
     const claim = await claimIdJagJti(payload.jti, ID_JAG_LONGEST_ACCEPTANCE_MS);
     if (claim === "replay") throw new Error("token replay detected");
@@ -239,14 +229,8 @@ async function resolveOrCreatePrincipalLocked(
   const email = payload.email ?? payload.preferred_username;
   const displayName = payload.name ?? email ?? idpSubject;
 
-  // The credential lookup and the JIT principal + credential create it may fall
-  // back to are ONE OWNED transaction that COMMITS before the SUBJECT lock
-  // releases (withOwnedTransaction, resources/request-transaction.ts). Harper
-  // commits a request's own transaction only after the handler returns, so a
-  // provisioning that joined the request transaction would still be invisible
-  // when the lock frees: a second grant for the same subject that took the
-  // just-freed lock would re-read no credential and provision a second
-  // principal. The lookup reads IN this owned transaction (committed state).
+  // Within one Harper process, the credential lookup and any JIT create run
+  // in an owned transaction that commits before the subject lock releases.
   return withOwnedTransaction(ctx, async (owned) => {
     // Look for existing credential with this IdP subject
     for await (const cred of (databases as any).flair.Credential.search({
@@ -269,8 +253,7 @@ async function resolveOrCreatePrincipalLocked(
       throw new Error(`no principal for IdP subject ${idpSubject} and JIT provisioning is disabled`);
     }
 
-    // Test-only: arms between the lookup above (which found no principal) and the
-    // create below, the interleaving where a concurrent grant provisions first.
+    // Test-only: pause after the lookup finds no credential, before JIT create.
     const pause = txnPausePoint("xaa-principal-provision");
     if (pause) await pause;
 
@@ -352,21 +335,12 @@ export async function handleJwtBearerGrant(data: any, ctx?: any): Promise<Respon
     // Resolve or create principal
     const principalId = await resolveOrCreatePrincipal(payload, idpConfig, ctx);
 
-    // Test-only: inert unless the fault-injection env opt-in is set and armed
-    // (resources/txn-pause-point.ts). Pauses AFTER the subject lock released
-    // (and the principal's provisioning committed) but BEFORE this request's
-    // own transaction commits — Harper commits a request transaction only after
-    // the handler returns. A grant that takes the just-freed lock here must see
-    // the committed credential; one whose provisioning joined the request
-    // transaction would not (flair#2333).
+    // Test-only: pause after the subject lock releases and the owned transaction
+    // commits, before this request's transaction commits (flair#2333).
     const released = txnPausePoint("xaa-principal-lock-released");
     if (released) await released;
 
-    // The token rows below are issued AFTER the subject lock released: they are
-    // not part of the decision write the lock serializes (the "one subject → one
-    // principal" lookup+JIT create above), so a failure here leaves a
-    // provisioned principal with no token pair rather than a second principal
-    // (flair#2333).
+    // Token writes follow the subject lock's release and can fail independently.
     // Determine scopes — intersection of ID-JAG scopes and IdP allowed scopes
     const requestedScopes = (payload.scope ?? "memory:read").split(" ");
     const allowedScopes = idpConfig.allowedScopes?.length

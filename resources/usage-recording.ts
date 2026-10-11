@@ -112,13 +112,8 @@ export class UsageLedgerReadError extends Error {
  * that contribution aborts (named UsageLedgerReadError, no ledger write, no
  * count change) rather than upsert over the stored row and bump again.
  *
- * The MemoryUsage ledger reads and its row create keep the withDetachedTxn
- * discipline — one wrap per discrete Harper call (table-helpers.ts's
- * withDetachedTxn doc): a request that reads/writes MULTIPLE tables in
- * sequence can otherwise inherit a closed transaction from a prior call's
- * drained chain. The count bump does not wrap its own calls: it runs through
- * the shared write-back helper (writeBackCommittedRow, below), which opens a
- * transaction this call OWNS and reads, builds and writes the row inside it.
+ * The ledger read and any create share an owned transaction. The count bump
+ * uses a separate owned transaction through writeBackCommittedRow.
  *
  * The count bump is the shared write-back helper (write-back.ts): the row is
  * read inside a transaction this call OWNS, the bump is built from THAT read,
@@ -145,11 +140,8 @@ export async function recordUsageContribution(
   now: string,
   canRead: CanReadMemory,
 ): Promise<void> {
-  // The check-and-write below reads the ledger, then writes it, then bumps the
-  // count. Two contributions for the same (agentId, memoryId) that run
-  // concurrently must not both see no ledger row and both bump. Hold the
-  // ledger's per-key lock (resources/key-lock.ts) across the whole contribution:
-  // the second call re-reads the ledger the first committed and no-ops.
+  // Within one Harper process, the per-(agentId, memoryId) lock serializes
+  // contributions across the ledger check, any create and any count bump.
   const store = (databases as any)?.flair?.MemoryUsage?.primaryStore;
   const outcome = await withKeyLock(
     store,
@@ -158,19 +150,13 @@ export async function recordUsageContribution(
     USAGE_LOCK_ATTEMPTS,
     USAGE_LOCK_WAIT_MS,
   );
-  // The lock stayed held (or the store has none): THIS contribution is skipped —
-  // no ledger row, no count change — and the caller still gets its recorded
-  // response. Other ids in the same batch may already have been credited.
+  // The lock could not be acquired (or the store has none): this contribution
+  // writes no ledger row and makes no count change; the caller still gets its
+  // recorded response. Other ids in the same batch may already have been credited.
   if (outcome.kind !== "done") return;
 
-  // Test-only: inert unless the fault-injection env opt-in is set and armed
-  // (resources/txn-pause-point.ts). Pauses AFTER the ledger's per-key lock
-  // released (and, with the owned transaction inside, after the ledger's write
-  // committed) but BEFORE this request's own transaction commits — Harper
-  // commits a request transaction only after the handler returns. A second
-  // contribution that takes the just-freed lock must see the committed ledger
-  // row; one whose own write joined the request transaction would not
-  // (flair#2333).
+  // Test-only: pause after the ledger lock releases and the owned transaction
+  // commits, before this request's transaction commits (flair#2333).
   const committed = txnPausePoint("usage-ledger-lock-released");
   if (committed) await committed;
 }
@@ -196,16 +182,9 @@ async function recordUsageContributionLocked(
 ): Promise<void> {
   const ledgerId = `${agentId}:${memoryId}`;
 
-  // The ledger check and the ledger create are ONE OWNED transaction that
-  // COMMITS before the (agentId, memoryId) lock releases (withOwnedTransaction,
-  // resources/request-transaction.ts). Harper commits a request's own
-  // transaction only after the handler returns, so a ledger row written into
-  // the REQUEST transaction would still be invisible when the lock frees: a
-  // second contribution that took the just-freed lock would re-read no row and
-  // bump again. The check reads the ledger IN this owned transaction (committed
-  // state, never the request's snapshot), and the create commits with it. The
-  // read-scope gate and the usageCount bump below are unchanged; the bump is
-  // its own owned transaction (writeBackCommittedRow).
+  // Within one Harper process, the ledger check and any create share an owned
+  // transaction that commits before the contribution lock releases. The count
+  // bump uses a separate owned transaction.
   const prepared = await withOwnedTransaction(ctx, async (owned) => {
     // Bypasses resources/MemoryUsage.ts's own auth wrapper by design — this
     // IS the trusted internal caller that resource's module doc describes
@@ -221,10 +200,8 @@ async function recordUsageContributionLocked(
     }
     if (existingContribution) return null; // already counted by this agent — silent no-op
 
-    // Test-only: arms between the ledger check above and the ledger create below,
-    // the interleaving where a concurrent contribution commits its row and bump
-    // first. Only a call that found no row reaches here, so it is the call that
-    // creates the row and performs the bump (see the fix's lock).
+    // Test-only: pause after finding no ledger row. Creation and the count bump
+    // still require their read-scope gates and successful writes.
     const pause = txnPausePoint("usage-contribution-claim");
     if (pause) await pause;
 

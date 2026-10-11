@@ -1,40 +1,15 @@
 /**
  * decision-races-2333.test.ts — real Harper (flair#2333 slice 3).
  *
- * A read that decides a SEPARATE later action must still hold when that action
- * runs. Three such check-and-write paths, each driven against real Harper with
- * the shared transaction pause points:
+ * Within one Harper process, per-key locks serialize relay sends, usage
+ * contributions and XAA JIT provisioning; their decision writes use owned
+ * transactions that commit before the locks release.
  *
- *   H6 relay send (resources/relay-ops.ts). A send reads the store (is this id
- *      free; the thread's last seq; the inbox count) and then writes. Two sends
- *      that interleave between the read and the write must not both pass an id,
- *      a seq or a cap on state the other is about to change.
- *   H7 usage ledger (resources/usage-recording.ts). RecordUsage reads the
- *      (agentId, memoryId) ledger, writes it, then bumps Memory.usageCount. Two
- *      contributions for one agent and memory must not both see no row and both
- *      bump.
- *   H8 XAA JIT provisioning (resources/XAA.ts). A jwt-bearer grant looks up the
- *      IdP subject, and provisions a principal when none exists. Two grants for
- *      one new subject must not both provision.
- *
- * Each RACE case holds the first request between its read and its write (the
- * pause points below), runs the competing request to completion, then releases
- * it: the stored state must be the safe one. The "… commit" cases below instead
- * pause AFTER the first request released its lock — not between its read and its
- * write — see that section. A CONTROL case per group runs the same path with no
- * competitor (the ordinary path is unchanged). The pause points are
- * resources/txn-pause-point.ts, armed through
- * FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR set for this file's
- * Harper only.
- *
- * A first request's write must also COMMIT before its key lock releases: Harper
- * commits a REST request's REQUEST transaction only after the handler returns
- * (server/REST.ts ~284), so a write that joined that transaction is invisible
- * when the lock frees. Each path runs its check and write in a FRESH OWNED
- * transaction (withOwnedTransaction, resources/request-transaction.ts); the
- * "… commit" case per group pauses after the lock releases and before the first
- * request's own commit, then has a second request take the just-freed lock and
- * re-read. See the "The write commits before the lock releases" section below.
+ * RACE cases pause between the decision read and write; commit cases pause
+ * after lock release and before the request transaction commits. CONTROL
+ * cases run without a competitor. The shared transaction pause points are
+ * armed through FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR for
+ * this file's Harper only.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -339,7 +314,7 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2333 slice 3 — a read that decides a later write holds when the write runs (real Harper)", () => {
+describe("flair#2333 slice 3 — decision writes serialize within one Harper process (real Harper)", () => {
   // ── H6 relay send ──────────────────────────────────────────────────────────
 
   it("CONTROL: an uncontended send is delivered", async () => {
@@ -348,7 +323,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect((await messagesInThread("control:a:f")).length).toBe(1);
   }, 60_000);
 
-  it("H6 seq: two concurrent sends in one thread do not both take the same seq", async () => {
+  it("H6 seq: within one Harper process, two concurrent sends in one thread do not both take the same seq", async () => {
     const thread = "seq:a:b";
     const { response, competed, released } = await withPaused(
       "relay-send-write",
@@ -363,7 +338,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(seqs, "the (from, threadId) sequence must stay strictly increasing").toEqual([...new Set(seqs)]);
   }, 60_000);
 
-  it("H6 cap: two concurrent sends from one sender do not both pass the per-sender cap", async () => {
+  it("H6 cap: within one Harper process, two concurrent sends from one sender do not both pass the per-sender cap", async () => {
     const { competed, released } = await withPaused(
       "relay-send-write",
       () => sendAs("agent-a", "agent-c", 0, { id: `cap-1-${randomUUID().slice(0, 8)}`, threadId: "cap:a:c:1" }).then((r) => new Response(JSON.stringify(r.body), { status: r.status })),
@@ -375,7 +350,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(rows.length, "the per-sender cap (1) must hold").toBeLessThanOrEqual(1);
   }, 60_000);
 
-  it("H6 id: two senders reusing one message id — exactly one is accepted and the id keeps one owner", async () => {
+  it("H6 id: within one Harper process, two senders reusing one message id — exactly one is accepted and the id keeps one owner", async () => {
     const sharedId = `shared-${randomUUID().slice(0, 8)}`;
     const { response, competed, released } = await withPaused(
       "relay-send-write",
@@ -401,7 +376,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(await memoryUsageCount(memId)).toBe(1);
   }, 60_000);
 
-  it("H7: two concurrent RecordUsage calls for one (agent, memory) bump the count once", async () => {
+  it("H7: within one Harper process, two concurrent RecordUsage calls for one (agent, memory) bump the count once", async () => {
     const memId = `race-mem-${randomUUID().slice(0, 8)}`;
     await putMemory(byId["agent-a"], memId, { agentId: "agent-a", content: "contended memory, long enough for the dedup gate.", durability: "standard", visibility: "shared" });
     const { response, competed, released } = await withPaused(
@@ -425,7 +400,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(creds.length).toBe(1);
   }, 60_000);
 
-  it("H8: two concurrent grants for one new subject provision exactly one principal", async () => {
+  it("H8: within one Harper process, two concurrent grants for one new subject provision exactly one principal", async () => {
     const subject = `race-${randomUUID()}`;
     const assertionA = await jwtBearerAssertion(subject);
     const assertionB = await jwtBearerAssertion(subject);
@@ -442,7 +417,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(principals.size, `one subject must resolve to one principal (got ${creds.length} credential(s))`).toBe(1);
   }, 60_000);
 
-  it("H8 jti: a grant refused for the subject lock leaves the assertion's jti unclaimed; the same assertion then succeeds once and a second use is refused as a replay", async () => {
+  it("H8 jti: within one Harper process, a subject-lock refusal leaves jti unclaimed; a successful retry records it and a later replay is refused", async () => {
     const subject = `jti-${randomUUID()}`;
     const assertionA = await jwtBearerAssertion(subject, randomUUID()); // holds the subject lock
     const jtiB = randomUUID();
@@ -460,8 +435,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(competed, "a grant that cannot take the subject lock is refused").toBe(503);
     expect((await searchByValue("IdJagReplay", "id", jtiB)).length, "a lock miss records no replay row for the refused assertion's jti").toBe(0);
 
-    // The lock is free now. The SAME refused assertion is retried and succeeds
-    // once, recording its jti only on this successful use.
+    // Retry the refused assertion after the subject lock releases.
     const retry = await grantJwtBearer(assertionB);
     expect(retry.status, `retry returned ${retry.status}: ${(await retry.text()).slice(0, 200)}`).toBe(200);
     expect((await searchByValue("IdJagReplay", "id", jtiB)).length, "the successful retry records the jti").toBe(1);
@@ -499,21 +473,10 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
 
   // ── The write commits before the lock releases (flair#2333) ────────────────
   //
-  // Each check-and-write path holds its per-key lock across the read and the
-  // write. Harper commits a REST request's REQUEST transaction only after the
-  // handler returns (server/REST.ts ~284), so a write that JOINED that
-  // transaction is still invisible the moment the lock frees: a second request
-  // that takes the just-freed lock re-reads stale state and acts again. Each
-  // path's check and write now runs in a FRESH OWNED transaction
-  // (withOwnedTransaction, resources/request-transaction.ts) that COMMITS before
-  // the lock releases. Every case below pauses AFTER the first request released
-  // its lock (and, with the fix, after its owned transaction committed) but
-  // BEFORE the first request's own transaction commits, then lets a second
-  // request take the just-freed lock and read. Without the owned transaction the
-  // second request does NOT see the deferred write and re-reads stale state; with
-  // it, it sees the committed one.
+  // Within one Harper process, these cases check that a request taking a
+  // just-released lock reads the preceding owned transaction's committed write.
 
-  it("H6 commit: a send that takes the locks right after another releases them sees the committed row (relay-send-lock-released)", async () => {
+  it("H6 commit: within one Harper process, a send that takes the locks right after another releases them sees the committed row (relay-send-lock-released)", async () => {
     const sharedId = `h6-commit-${randomUUID().slice(0, 8)}`;
     // agent-g / agent-h are used by this case ALONE: the per-(from, to) inbox
     // cap is counted over all stored messages, so reusing a pair an earlier
@@ -534,7 +497,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(stored.length, "the id names exactly one stored message").toBe(1);
   }, 90_000);
 
-  it("H7 commit: a contribution that takes the lock right after another releases it sees the committed ledger row (usage-ledger-lock-released)", async () => {
+  it("H7 commit: within one Harper process, a contribution that takes the lock right after another releases it sees the committed ledger row (usage-ledger-lock-released)", async () => {
     const memId = `h7-commit-mem-${randomUUID().slice(0, 8)}`;
     await putMemory(byId["agent-a"], memId, { agentId: "agent-a", content: "commit-before-release memory, long enough for the dedup gate.", durability: "standard", visibility: "shared" });
     const { response, competed, released, paused } = await withPaused(
@@ -549,7 +512,7 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(await memoryUsageCount(memId), "the ledger dedups one (agent, memory) contribution").toBe(1);
   }, 90_000);
 
-  it("H8 commit: a grant that takes the subject lock right after another releases it sees the committed principal (xaa-principal-lock-released)", async () => {
+  it("H8 commit: within one Harper process, a grant that takes the subject lock right after another releases it sees the committed principal (xaa-principal-lock-released)", async () => {
     const subject = `h8-commit-${randomUUID()}`;
     const assertionA = await jwtBearerAssertion(subject);
     const assertionB = await jwtBearerAssertion(subject);

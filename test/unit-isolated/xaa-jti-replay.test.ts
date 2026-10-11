@@ -1,15 +1,15 @@
 /**
  * xaa-jti-replay.test.ts — the XAA ID-JAG `jti` single-use record (flair#2073).
  *
- * validateIdJag (resources/XAA.ts) records an assertion's `jti` through
- * claimIdJagJti (resources/replay-store.ts), the same lock-then-insert as the
- * agent-auth and federation nonces (recordOnce), in flair.IdJagReplay. These
- * tests drive the jwt-bearer grant (handleJwtBearerGrant) with real signed
+ * resolveOrCreatePrincipal (resources/XAA.ts) claims a validated assertion's
+ * `jti` under the subject lock through claimIdJagJti (resources/replay-store.ts)
+ * before provisioning and token issuance. Tests drive the jwt-bearer grant
+ * (handleJwtBearerGrant) with real signed
  * assertions, a real JWKS served on an ephemeral loopback port, and an
  * in-memory table with the store's contract (test/helpers/fake-replay-store.ts),
  * and pin:
  *   - an assertion with a UUID `jti` is accepted once, and N simultaneous
- *     presentations of one give one acceptance and one token pair;
+ *     presentations within one Harper process give one acceptance and one token pair;
  *   - a `jti` claim that is present but not a nonempty string is refused with
  *     400 before the store is touched;
  *   - the lock key is in its own namespace; recordOnce attempts unlock in
@@ -66,10 +66,7 @@ const harperMock: any = {
         put: async (r: any) => {
           credentials.set(r.id, { ...r });
         },
-        // The credential table's per-key lock (resources/key-lock.ts): an
-        // in-memory stand-in for Harper's non-blocking primary-store
-        // tryLock/unlock, so resolveOrCreatePrincipal's serialized
-        // check-and-write runs here.
+        // Fake per-key lock for serialization within one Harper process.
         primaryStore: (() => {
           const held = new Set<string>();
           return {
@@ -265,7 +262,7 @@ describe("a UUID jti is accepted once", () => {
 describe("the subject's principal lock miss does not consume the assertion's jti", () => {
   const PRINCIPAL_BUSY = { status: 503, body: { error: "temporarily_unavailable", error_description: "principal_provision_in_progress" } };
 
-  it("a grant refused for the principal lock leaves the jti unclaimed, so the same assertion can be retried and succeeds once; a true replay is still refused", async () => {
+  it("within one Harper process, a principal-lock refusal leaves jti unclaimed; a successful retry records it and a later replay is refused", async () => {
     const sub = `lock-${randomUUID()}`;
     const jti = randomUUID();
     const token = await assertion({ jti, sub });
@@ -281,8 +278,7 @@ describe("the subject's principal lock miss does not consume the assertion's jti
     expect(credentials.size).toBe(0);
     expect(tokenRows.size).toBe(0);
 
-    // The lock frees. The SAME assertion is retried and succeeds once, because
-    // the refused attempt consumed nothing.
+    // Retry the refused assertion after releasing the subject lock.
     principalStore.unlock(lockKey);
     const first = await grant(token);
     expect(first.status).toBe(200);

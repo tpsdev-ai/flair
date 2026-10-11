@@ -1,7 +1,7 @@
 /**
  * key-lock.ts — run a function while holding one key of a Harper table's
- * primary-store lock (`tryLock` / `unlock`). The guarantee is per Harper
- * process: the lock is per key and shared by the threads of one Harper process
+ * primary-store lock (`tryLock` / `unlock`). Within one Harper process,
+ * the lock is per key and shared by its threads
  * (resources/replay-store.ts uses the same primitive). No Harper imports.
  */
 

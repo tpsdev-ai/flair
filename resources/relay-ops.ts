@@ -73,11 +73,10 @@ const CONFLICT = (error: string): Response => json(409, { error, reason: "seq_co
 /** Over-cap: a synchronous 4xx that names the reason — backpressure that fails loud. */
 const INBOX_FULL = (scope: "recipient" | "sender"): Response =>
   json(429, { error: "inbox full", reason: "inbox_full", scope });
-/** The message-id lock stayed held for the whole wait: another send that must be
- *  serialized with this one is in progress. Refused, not remembered. */
+/** The message-id or sender lock could not be acquired: the send is refused. */
 const SEND_BUSY = (): Response => json(409, { error: "send in progress", reason: "send_contended" });
-/** The Message store has no per-key lock, so the check-and-write cannot be
- *  serialized against a concurrent send: refused (fail closed). */
+/** Without a per-key lock, serialization within one Harper process is
+ *  unavailable: the send is refused. */
 const SEND_LOCK_UNAVAILABLE = (): Response =>
   json(503, { error: "send lock unavailable", message: "the Message store has no per-key lock; the send was refused" });
 
@@ -86,8 +85,7 @@ const SEND_LOCK_UNAVAILABLE = (): Response =>
 /** First element of every relay-send lock key (resources/key-lock.ts), so a send
  *  lock never collides with another lock on the database. */
 const SEND_LOCK_NAMESPACE = "flair-relay-send";
-/** The wait for another send that must be serialized follows the configured
- *  retry schedule (SEND_LOCK_ATTEMPTS attempts, SEND_LOCK_WAIT_MS apart). */
+/** Per-lock retry schedule: SEND_LOCK_ATTEMPTS attempts, SEND_LOCK_WAIT_MS apart. */
 const SEND_LOCK_ATTEMPTS = 200;
 const SEND_LOCK_WAIT_MS = 10;
 
@@ -207,16 +205,9 @@ export async function relaySend(
   // Store the server-recomputed canonical hash (verified equal above).
   content.contentHash = computeContentHash(content);
 
-  // The id-ownership check, the content dedup, the per-thread seq check and the
-  // per-sender cap check each READ the table and then the send WRITES to it. Two
-  // sends from one sender that run concurrently must not both pass a check on
-  // state the other is about to change — both see an id free, a thread's last
-  // seq, or that sender still below its cap. Hold the message id's per-key lock
-  // and the SENDER's per-key lock (resources/key-lock.ts) across the check and
-  // the write: the id covers the id-ownership check, the sender covers the
-  // per-thread seq and the per-sender sub-cap. The lock serializes the PER-SENDER
-  // cap only — the recipient-wide cap spans senders, who take different sender
-  // locks, and is not serialized by this one.
+  // Within one Harper process, the message-id lock serializes id ownership;
+  // the sender lock serializes content dedup, thread sequence and per-sender
+  // cap checks with the write. The recipient-wide cap is not serialized.
   const store = (deps.messages as any)?.primaryStore;
   const outer = await withKeyLock(
     store,
@@ -236,13 +227,8 @@ export async function relaySend(
   if (outcome.kind === "busy") return SEND_BUSY();
   if (outcome.kind === "unavailable") return SEND_LOCK_UNAVAILABLE();
 
-  // Test-only: inert unless the fault-injection env opt-in is set and armed
-  // (resources/txn-pause-point.ts). Pauses AFTER the send locks released (and,
-  // with the owned transaction inside, after the stored row committed) but
-  // BEFORE this request's own transaction commits — Harper commits a request
-  // transaction only after the handler returns. A send that takes the
-  // just-freed locks here must see the committed row; one whose write joined the
-  // request transaction would not (flair#2333).
+  // Test-only: pause after the send locks release and the owned transaction
+  // commits, before this request's transaction commits (flair#2333).
   const committed = txnPausePoint("relay-send-lock-released");
   if (committed) await committed;
   return outcome.value;
@@ -330,8 +316,7 @@ async function storeAndDeliver(
     state: "delivered",
     deliveredAt: now,
   };
-  // Test-only: arms between the checks above and the store below, the
-  // interleaving where a concurrent send commits its own row first.
+  // Test-only: pause between the checks above and the store below.
   const pause = txnPausePoint("relay-send-write");
   if (pause) await pause;
   await deps.messages.put(row, ctx);

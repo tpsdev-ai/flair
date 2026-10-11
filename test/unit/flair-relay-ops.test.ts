@@ -39,10 +39,7 @@ function messagesTable() {
   const held = new Set<string>();
   return {
     store,
-    // The Message table's primary-store lock (resources/key-lock.ts). The send
-    // path serializes its check-and-write on the message id and the sender; a
-    // plain in-memory store stands in for Harper's per-key tryLock (no Harper,
-    // no contention in these single-threaded tests).
+    // Fake per-key lock for serialization within one Harper process.
     primaryStore: {
       tryLock: (key: unknown) => {
         const k = JSON.stringify(key);
