@@ -27,6 +27,44 @@
  * not this rule's business — no-forge attribution on creation is each resource's
  * own job. The decision itself is the pure `isForbiddenOwnerFieldChange`
  * (record-owner-guard.ts), so it is unit-tested without a Harper instance.
+ *
+ * ─── Scope: this guard is a fail-closed BACKSTOP, not the first line ─────────
+ *
+ * On the HTTP path, the stored row is normally read by Harper BEFORE this guard
+ * runs. Harper's REST layer resolves a `/<Table>/<id>` request through
+ * `Table.getResource` → `resource._loadRecord` (harper 5.3.1,
+ * dist/resources/Table.js ~1631/1640), which loads the row and binds it to the
+ * instance's `#record`. A no-argument `super.get()` (the thunk every caller here
+ * passes) then returns that cached record and performs NO fresh read. So an
+ * unreadable row is refused One Layer Up, at the load: measured on real Harper
+ * 5.3.1 (test/integration/owner-guard-2468-real-harper-load.test.ts), a forced
+ * failure of `_loadRecord` on an existing owner-guarded row answers the client
+ * Harper's own 500 (an RFC 9457 problem detail) for every owner-guarded PUT and
+ * PATCH — the resource method never runs and this guard's named refusal never
+ * appears.
+ *
+ * This guard's own read is therefore the read that fails only off the HTTP
+ * dispatch path: an in-process call, or a resource that reads the row itself
+ * (Memory, Integration, Relationship and friends call `resolveStoredRow` for
+ * the create/update decision, and Soul reaches that resolver FIRST — see
+ * below). It exists so that a failed read can never be mistaken for "no stored
+ * row" and read as permission to write. That is defence in depth behind
+ * Harper's load, and the unit tests below exercise exactly the seam real Harper
+ * cannot reach over HTTP.
+ *
+ * ─── Two callers do not read through this guard's thunk ─────────────────────
+ *
+ * `Soul` resolves the stored row through `resolveStoredRow`
+ * (resources/originator-instance.ts) before it calls this guard, and passes the
+ * ALREADY-RESOLVED row (`() => existing`), not a fresh read. A failure there is
+ * refused even earlier with the resolver's own named `stored_row_lookup_failed`
+ * (500) — this guard never sees it. Callers that read the row themselves
+ * (Memory, Integration, Relationship, OrgSkillAssignment via
+ * `resolveStoredRow`) likewise hit that resolver's refusal before this guard's.
+ *
+ * Admin and internal callers bypass this guard entirely (it returns null before
+ * reading anything), so an unreadable row does not refuse them HERE — they pass
+ * through and any refusal is Harper's own load or the resolver's.
  */
 import { resolveAgentAuth } from "./agent-auth.js";
 import { isForbiddenOwnerFieldChange } from "./record-owner-guard.js";
@@ -44,8 +82,17 @@ export const OWNER_CHECK_UNAVAILABLE_ERROR = "owner_check_unavailable";
  * is no way to tell a re-pointed owner field from a legitimate one, so the write
  * is refused.
  *
- * A client error from the read answers 400; anything else 503, since a retry can
- * succeed. The write does not happen.
+ * A client error from the read answers 400 (the caller's request was bad and a
+ * retry with the same input will fail the same way); anything else 503, since a
+ * retry can succeed. The write does not happen.
+ *
+ * On the HTTP path this refusal is a backstop: Harper's `_loadRecord` already
+ * loads the row before the resource runs, so a genuinely unreadable row is
+ * refused one layer up with Harper's own error (see the file header). This
+ * answers the reads Harper's load does not perform — in-process calls, or a
+ * resource whose own read is the one that fails. Admin and internal callers
+ * return from `guardOwnerFieldImmutable` before the read, so they never reach
+ * here.
  */
 export function ownerCheckUnavailable(err: unknown): Response {
   console.error(

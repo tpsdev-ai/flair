@@ -1,12 +1,28 @@
 // owner-field-guard-read-failure-callers.test.ts
 //
 // Every resource that delegates a write to the shared owner-field guard
-// (resources/owner-field-guard.ts) must propagate the refusal the guard returns
-// when the STORED-ROW READ FAILS. This file drives each caller's REAL resource
-// class (the actual resources/<Table>.ts class, instantiated) with the one
-// boundary it does not own — Harper's base table — replaced by a table whose
+// (resources/owner-field-guard.ts) must PROPAGATE the refusal the guard returns
+// when the STORED-ROW READ FAILS — it must not swallow it and fall through to
+// the write. "Propagate" is not one literal shape: most callers return the
+// guard's Response unchanged (`if (denial) return denial`), while Integration
+// wraps it in its write-outcome denial object (`{ kind: "denial", denial }`, via
+// runIntegrationWrite) and returns that. This file drives each caller's REAL
+// resource class (the actual resources/<Table>.ts class, instantiated) with the
+// one boundary it does not own — Harper's base table — replaced by a table whose
 // read rejects. A failed read must be refused and the write must not reach the
 // table.
+//
+// Soul is the exception, named where it appears below: its own owner guard is
+// reached only after `resolveStoredRow` has ALREADY read the row, so a failed
+// read is refused even earlier, by that resolver, with `stored_row_lookup_failed`
+// (500) — not by this guard's `owner_check_unavailable`.
+//
+// This exercises the guard's own read and each caller's propagation of it. On
+// the HTTP path a real Harper loads the row before the resource runs and a
+// no-arg `super.get()` returns the cached record, so a genuinely unreadable row
+// is refused one layer up with Harper's own 500; that is measured in
+// test/integration/owner-guard-2468-real-harper-load.test.ts. This file is the
+// backstop's coverage.
 //
 // Lives in test/unit-isolated/ because it mocks "harper" process-wide.
 import { mock, describe, test, expect, beforeEach } from "bun:test";

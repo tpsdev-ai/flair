@@ -3,8 +3,21 @@
 // The shared owner-field guard (resources/owner-field-guard.ts) reads the stored
 // record through a `getExisting` thunk. A read that RESOLVED to null/undefined is
 // "no stored record" (a create, which the rule leaves alone). A read that THREW
-// or rejected is a FAILURE: the guard must refuse with a named 503, never read
-// the failure as "no stored record" and let the write through.
+// or rejected is a FAILURE: the guard must refuse with a named refusal, never
+// read the failure as "no stored record" and let the write through.
+//
+// The refusal STATUS is chosen by the error: a client-status error (`statusCode`
+// in 400..499, e.g. a 404 from a bad id) answers 400 — a retry with the same
+// input fails the same way; anything else answers 503, since a retry can
+// succeed. Both are refusals (`owner_check_unavailable`) and the write does not
+// happen.
+//
+// This exercises the guard's OWN read. On the HTTP path a real Harper loads the
+// row before the resource runs and a no-arg `super.get()` returns the cached
+// record, so this seam is reachable only off that path (in-process calls, or a
+// resource that reads the row itself). The real-Harper behaviour — an unreadable
+// row is refused one layer up with Harper's own 500 — is measured in
+// test/integration/owner-guard-2468-real-harper-load.test.ts.
 //
 // Lives in test/unit-isolated/ because importing the guard pulls in the auth
 // helper, which imports "harper"; this file mocks that module so the real
