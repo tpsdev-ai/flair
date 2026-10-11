@@ -12,9 +12,14 @@
  *     file asserts those operations really happened.
  *   - When the build has NO secrets custody — the OSS harness answers
  *     `{"error":"secrets custody is not initialized on this node"}` — the code must
- *     NOT pretend. It leaves the 0600 staged file for manual application and returns
- *     non-zero. This file asserts the staged file's bytes, its 0600 mode, and the
- *     failed step.
+ *     NOT pretend. It leaves the 0600 staged file for manual application and fails:
+ *     the FUNCTION returns `{ ok: false }`, which the `flair mcp enable` CLI turns
+ *     into a non-zero exit. This file asserts the staged file's bytes, its 0600 mode,
+ *     and the failed step.
+ *
+ *   CI boots the OSS harness, which answers with no secrets custody, so CI exercises
+ *   only the refusal branch. The push-success branch is asserted here from the same
+ *   recorded evidence, but CI does not run it — this file does not claim it did.
  *
  * `resolveOpsUrl` sends a loopback served origin's ops calls to HOSTED_OPS_PORT
  * (9925); a routing fetch rewrites that origin to the harness's REAL ops port, so the
@@ -116,7 +121,7 @@ function routingFetch(harper: HarperInstance, record: OpsExchange[]): typeof fet
 
 describe("flair#2283 — refreshMcpOAuthFlag against the real Harper harness", () => {
   test(
-    "the target's real capability decides the branch: push+marker+restart, or the staged 0600 file and non-zero",
+    "the target's real capability decides the branch: push+marker+restart+discovery, or the staged 0600 file and { ok: false }",
     async () => {
       for (const k of MCP_ENV_KEYS) delete process.env[k];
       // The migration's starting state: the legacy value the component deletes.
@@ -150,16 +155,24 @@ describe("flair#2283 — refreshMcpOAuthFlag against the real Harper harness", (
       const provisionDetail = result.steps.find((s) => s.step === "secrets-provisioning")?.detail ?? "";
 
       if (/BEGIN PUBLIC KEY/.test(capCall!.body)) {
-        // ── Supported branch: the push, the marker read-back, and the restart ─
+        // ── Supported branch: the push, the marker read-back, the restart, the
+        //    discovery checks — and NO fallback file, because the push landed ────
         expect(capCall!.status).toBeGreaterThanOrEqual(200);
         expect(capCall!.status).toBeLessThan(300);
+        expect(result.ok).toBe(true);
         expect(result.steps.find((s) => s.step === "secrets-provisioning")?.ok).toBe(true);
         expect(provisionDetail).toContain("pushed");
+        // refresh ITSELF recorded the set_secret push and the marker read-back.
+        expect(opsCalls.some((c) => c.operation === "set_secret")).toBe(true);
+        expect(opsCalls.some((c) => c.operation === "search_by_value")).toBe(true);
         expect(result.steps.some((s) => s.step === "restart" && s.ok)).toBe(true);
         // The restart was VERIFIED by PID change, not merely requested.
         const verify = result.steps.find((s) => s.step === "verify-restart");
         expect(verify?.ok).toBe(true);
         expect(verify?.detail).toMatch(/pid changed \d+ -> \d+/);
+        // Both discovery checks ran and passed.
+        expect(result.steps.find((s) => s.step === "issuer-target-binding")?.ok).toBe(true);
+        expect(result.steps.find((s) => s.step === "self-verify")?.ok).toBe(true);
         // The marker really materialised: read the row back from the REAL store.
         const row = await fetch(harper.opsURL, {
           method: "POST",
@@ -174,10 +187,12 @@ describe("flair#2283 — refreshMcpOAuthFlag against the real Harper harness", (
           }),
         }).then((r) => r.json() as Promise<any[]>);
         expect(row?.[0]?.processEnv).toBe(true);
-        // The staged file is left either way — it is the record of what was pushed.
-        expect(existsSync(stagedPath)).toBe(true);
+        // flair#2283 round 9: the push LANDED, so refresh wrote no fallback file and
+        // names none. A staged file here would mean it fell back despite the push.
+        expect(existsSync(stagedPath)).toBe(false);
+        expect(result.secretsPath).toBeUndefined();
       } else {
-        // ── Unsupported branch: fail closed, leave the 0600 file, exit non-zero ─
+        // ── Unsupported branch: fail closed, leave the 0600 file, return { ok: false }
         // Harper refused the capability probe with ITS OWN words; refresh must carry
         // that refusal, not invent one.
         expect(capCall!.status).toBe(400);
@@ -191,6 +206,8 @@ describe("flair#2283 — refreshMcpOAuthFlag against the real Harper harness", (
         expect(existsSync(stagedPath)).toBe(true);
         expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
         expect(statSync(stagedPath).mode & 0o777).toBe(0o600);
+        // The refusal wrote the fallback, so the result NAMES the file it staged.
+        expect(result.secretsPath).toBe(stagedPath);
         // And it never claimed to have restarted: the fallback stops before the
         // restart, so no restart step is recorded.
         expect(result.steps.some((s) => s.step === "restart")).toBe(false);

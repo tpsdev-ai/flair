@@ -10,33 +10,39 @@
  * and the PUBLIC document read at the verified issuer name that issuer with the MCP
  * token endpoint — the shared discriminator, bound to an issuer the caller knows —
  * and when the target cannot take the secret it leaves a 0600 file to apply by hand
- * and exits non-zero. It does not run the IdP-credential intake
- * nor apply CIMD changes.
+ * and returns `{ ok: false }` (the `flair mcp enable` CLI turns that into a non-zero
+ * exit). It does not run the IdP-credential intake nor apply CIMD changes.
  *
  * These drive `refreshMcpOAuthFlag` with an injected fetch. Ops calls always go to
  * a stub (a real RSA public key, so the value is sealed through the real
  * `pushSecrets` path; `disablePush` makes the capability probe fail). The discovery
  * read is served per case in one of three ways:
  *
- *   - the local HTTP `Bun.serve` above, selected by `shape` — the happy path (a
+ *   - the local HTTP `Bun.serve` below, selected by `shape` — the happy path (a
  *     `plugin-live` document) and the target-binding refusal (`plugin-absent`);
  *   - a SYNTHETIC `Response` built inside the stub — the mismatched-`--issuer` case
  *     (`otherIssuer`) and the public-document-names-a-`STRANGER` case (`discovery`);
  *   - not at all — the push-failure fallback stops at `secrets-provisioning`, and
  *     `--dry-run` issues no request.
  *
- * The REAL-Harper harness covers the SAME `--refresh-flag` command end to end for
- * both branches the TARGET selects — the push+marker+restart+self-verify path when
- * the build has secrets custody, and the staged-0600-file-and-non-zero path when it
- * does not — in test/integration-heavy/mcp-refresh-real-harper-2283.test.ts. It is
- * not the "full" refresh path: it does not run IdP intake or apply CIMD changes
- * here either, and discovery reads on the push-success branch stay at the served
- * origin.
+ * The REAL-Harper harness drives the SAME `refreshMcpOAuthFlag` FUNCTION — not the
+ * `flair mcp enable` command, and not an end-to-end CLI run — for both branches the
+ * TARGET selects: the push+marker+restart+self-verify path when the build has
+ * secrets custody, and the staged-0600-file-and-`{ ok: false }` path when it does
+ * not, in test/integration-heavy/mcp-refresh-real-harper-2283.test.ts. It is not the
+ * "full" refresh path: it does not run IdP intake or apply CIMD changes here
+ * either, and discovery reads on the push-success branch stay at the served origin.
  *
  * flair#2283 round 8 adds the two staging-file cases: refresh's own DEFAULT filename
  * is distinct from `mcp enable`'s, so a refresh fallback never truncates a staged IdP
  * credentials bundle; and an EXPLICIT `--secrets-path` that already holds a file is
  * refused by name rather than truncated.
+ *
+ * flair#2283 round 9 pins `result.secretsPath`: it is returned ONLY when a fallback
+ * file was actually written. A successful push and every later refusal (target
+ * binding, self-verify, an ineffective restart, an unexpected error) leave no file
+ * and therefore no `secretsPath`; only the two fallback branches — a failed
+ * capability probe and a failed push — carry the path they really staged.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -93,12 +99,16 @@ afterAll(() => {
  *  - `discovery(url)` answers the discovery path first when it returns a Response.
  *  - `restartWithoutEffect` acknowledges a restart but never changes the PID, so
  *    the restart verification must fail.
+ *  - `failPush` makes the capability probe succeed but the `set_secret` push fail,
+ *    so refresh takes its fallback AFTER the push rather than at the probe.
+ *  - `throwOn` throws the named ops operation, so refresh hits its unexpected-error
+ *    catch after the push.
  *
  *  The ops fake advances the Harper PID ONLY when a `restart` was actually
  *  requested: a run that never restarts (or restarts ineffectively) sees an
  *  unchanged PID, so the verification cannot pass on a no-op. */
 function opsFetch(
-  opts: { disablePush?: boolean; otherIssuer?: string; discovery?: (url: URL) => Response | undefined; restartWithoutEffect?: boolean } = {},
+  opts: { disablePush?: boolean; failPush?: boolean; otherIssuer?: string; throwOn?: string; discovery?: (url: URL) => Response | undefined; restartWithoutEffect?: boolean } = {},
 ) {
   const sent: any[] = [];
   let restarts = 0;
@@ -117,10 +127,16 @@ function opsFetch(
     const body = JSON.parse(init.body);
     sent.push(body);
     const op = body.operation;
+    if (opts.throwOn && op === opts.throwOn) throw new Error(`fixture: ${op} exploded`);
     if (op === "get_secrets_public_key") {
       return opts.disablePush
         ? Response.json({ error: "Operation 'get_secrets_public_key' not found" }, { status: 400 })
         : Response.json({ public_key: PUB });
+    }
+    if (op === "set_secret") {
+      return opts.failPush
+        ? Response.json({ error: "set_secret refused by fixture" }, { status: 400 })
+        : Response.json({ ok: true });
     }
     if (op === "search_by_value") return Response.json([{ name: body.search_value, processEnv: true }]);
     if (op === "restart") {
@@ -175,7 +191,9 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     // It restarted and self-verified.
     expect(sent.some((b) => b.operation === "restart")).toBe(true);
     expect(result.steps.find((s) => s.step === "self-verify")?.ok).toBe(true);
-    expect(result.secretsPath).toBe(base().secretsStagingPath);
+    // flair#2283 round 9: a push that LANDED writes no fallback file, so the
+    // result must not name one — `secretsPath` is a claim about disk state.
+    expect(result.secretsPath).toBeUndefined();
   });
 
   test("refuses success when the target document advertises flair's own token endpoint", async () => {
@@ -188,6 +206,8 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.steps.find((s) => s.step === "issuer-target-binding")?.detail).toContain(
       "not the MCP authorization server's token endpoint",
     );
+    // No fallback file was written, so no secretsPath (flair#2283 round 9).
+    expect(result.secretsPath).toBeUndefined();
   });
 
   // flair#2283 blocker 2: --refresh-flag must BIND the verification to the target,
@@ -205,6 +225,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.refused?.message ?? "").toContain(INSTANCE);
     expect(result.refused?.message ?? "").toContain(OTHER);
     expect(result.steps.find((s) => s.step === "self-verify")?.ok).not.toBe(true);
+    expect(result.secretsPath).toBeUndefined();
   });
 
   test("a target that cannot take a pushed secret leaves the staged file and names it", async () => {
@@ -222,6 +243,28 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     // assertion; this one reads the file back and checks its permission bits.
     expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
     expect(statSync(stagedPath).mode & 0o777).toBe(0o600);
+    // The file really exists, so the result NAMES it (flair#2283 round 9).
+    expect(result.secretsPath).toBe(stagedPath);
+  });
+
+  // flair#2283 round 9: the OTHER fallback branch. The capability probe SUCCEEDS
+  // (so this is not the probe-refusal path) but the `set_secret` push fails, so the
+  // fallback file is written AFTER the push — and the result carries that path.
+  test("a push that fails after a good probe writes the staged file and returns its path", async () => {
+    shape = "plugin-live";
+    const { impl, sent } = opsFetch({ failPush: true });
+    const stagedPath = base().secretsStagingPath;
+    rmSync(stagedPath, { force: true });
+    const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("secrets-provisioning");
+    // The probe succeeded and the push was attempted — this is the push-failure
+    // fallback, not the probe-failure one.
+    expect(sent.some((b) => b.operation === "get_secrets_public_key")).toBe(true);
+    expect(sent.some((b) => b.operation === "set_secret")).toBe(true);
+    expect(result.steps.find((s) => s.step === "secrets-provisioning")?.detail).toContain(stagedPath);
+    expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
+    expect(result.secretsPath).toBe(stagedPath);
   });
 
   test("--dry-run makes no remote call", async () => {
@@ -238,6 +281,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.ok).toBe(true);
     expect(result.dryRun).toBe(true);
     expect(fetches).toBe(0);
+    expect(result.secretsPath).toBeUndefined();
   });
 
   // flair#2283 round 2: after the target binding, the PUBLIC document must name
@@ -268,6 +312,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.steps.find((s) => s.step === "issuer-target-binding")?.ok).toBe(true);
     expect(result.steps.find((s) => s.step === "self-verify")?.ok).not.toBe(true);
     expect(result.steps.find((s) => s.step === "self-verify")?.detail).toContain(STRANGER);
+    expect(result.secretsPath).toBeUndefined();
   });
 
   // flair#2283 item 2: the ops fake advances the PID only on a real restart, so an
@@ -279,6 +324,20 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("verify-restart");
     expect(result.steps.find((s) => s.step === "verify-restart")?.ok).not.toBe(true);
+    // The push landed, so the failure is later than the fallback: no file, no path.
+    expect(result.secretsPath).toBeUndefined();
+  });
+
+  // flair#2283 round 9: an unexpected error after a landed push (the restart's
+  // `system_information` call throws) surfaces through refresh's catch. No fallback
+  // file was written, so the result carries no secretsPath.
+  test("an unexpected ops error after the push returns no secretsPath", async () => {
+    shape = "plugin-live";
+    const { impl } = opsFetch({ throwOn: "system_information" });
+    const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("restart");
+    expect(result.secretsPath).toBeUndefined();
   });
 
   // flair#2283 round 8: `--refresh-flag` and ordinary `mcp enable` must NOT share a
@@ -345,5 +404,6 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     // have both emptied it and issued the ops probe).
     expect(readFileSync(explicit, "utf8")).toBe(existing);
     expect(sent).toEqual([]);
+    expect(result.secretsPath).toBeUndefined();
   });
 });

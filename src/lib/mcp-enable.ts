@@ -3364,8 +3364,10 @@ export interface RefreshMcpFlagResult {
  * This ATTEMPTS an encrypted `FLAIR_MCP_OAUTH=true` push, and only when the target
  * can take the secret does it check the secret row's processEnv marker and verify a
  * restart by PID change; when the target cannot, it leaves a 0600 file to apply by
- * hand and returns non-zero. That fallback file is written only AFTER the probe says
- * the push is not going to happen, and to this command's OWN default filename
+ * hand and returns `{ ok: false }` — the failure signal the `flair mcp enable` CLI
+ * turns into a non-zero exit. That fallback file is written only after a failed
+ * capability probe or a failed push, never before probing and never on a push that
+ * landed, and to this command's OWN default filename
  * (`defaultRefreshSecretsStagingPath`, never the `mcp enable` one); an EXPLICIT
  * `secretsStagingPath` that already holds a file is refused by name, not truncated
  * (flair#2283). It does
@@ -3385,6 +3387,11 @@ export async function refreshMcpOAuthFlag(
   const dryRun = Boolean(params.dryRun);
   let currentStep: EnableStepName = "target-shape-check";
   const push = (ok: boolean, detail: string) => steps.push({ step: currentStep, ok, detail });
+  // Set ONLY when the fallback file is really written. `secretsPath` on the
+  // result is a claim about disk state, so it is absent on every path that wrote
+  // nothing — a successful push, a later verification refusal, an error — and
+  // never merely the name of a path this call happened to compute (flair#2283).
+  let stagedFallbackPath: string | undefined;
 
   const targetRefusal = targetOriginRefusal(params.instance) ?? fabricLoopbackRefusal(params.instance, params.fabric);
   if (targetRefusal) {
@@ -3414,8 +3421,9 @@ export async function refreshMcpOAuthFlag(
       return { ok: false, dryRun, steps, refused: { message }, failedStep: "secrets-provisioning" };
     }
     // Probe FIRST: the staged one-var file is a FALLBACK, written only when the
-    // target cannot take the secret over the ops API — never an unconditional
-    // truncating write ahead of the probe (flair#2283).
+    // target cannot take the secret — after the capability probe fails or the push
+    // fails — never an unconditional truncating write ahead of the probe
+    // (flair#2283).
     const cap = await probeSecretsCapability(
       resolveOpsUrl(params.instance),
       basicAuthHeader(params.adminUser, params.adminPass),
@@ -3423,8 +3431,9 @@ export async function refreshMcpOAuthFlag(
     );
     if (!cap.available || !cap.publicKeyPem) {
       writeSecretsStagingFile(stagedPath, { FLAIR_MCP_OAUTH: "true" });
+      stagedFallbackPath = stagedPath;
       push(false, `cannot set FLAIR_MCP_OAUTH over the ops API: ${cap.reason}. The one-var bundle is staged at ${stagedPath} (0600); apply it to ${params.instance}'s process environment and restart.`);
-      return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsPath: stagedPath };
+      return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsPath: stagedFallbackPath };
     }
     const pushed = await pushSecrets(
       resolveOpsUrl(params.instance),
@@ -3436,8 +3445,9 @@ export async function refreshMcpOAuthFlag(
     if (!pushed.allOk) {
       const failed = pushed.results.filter((r) => !r.ok).map((r) => `${r.name} (${r.detail})`).join("; ");
       writeSecretsStagingFile(stagedPath, { FLAIR_MCP_OAUTH: "true" });
+      stagedFallbackPath = stagedPath;
       push(false, `FLAIR_MCP_OAUTH=true was not pushed: ${failed}. The one-var bundle is staged at ${stagedPath} (0600); apply it and restart.`);
-      return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsPath: stagedPath };
+      return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsPath: stagedFallbackPath };
     }
     push(true, `FLAIR_MCP_OAUTH=true pushed to the target as an enc:v1 env-secret (tier ${PROCESS_ENV_TIER}); the value was sealed locally.`);
 
@@ -3464,7 +3474,7 @@ export async function refreshMcpOAuthFlag(
     const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
     if (!binding.ok) {
       push(false, binding.detail);
-      return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "issuer-target-binding", secretsPath: stagedPath };
+      return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "issuer-target-binding" };
     }
     push(true, binding.detail);
 
@@ -3476,14 +3486,14 @@ export async function refreshMcpOAuthFlag(
     const observation = await discriminateMcpOAuthDiscovery(issuer, { fetchImpl: deps.fetchImpl, expectedIssuers: [issuer] });
     if (observation.state !== "plugin-live") {
       push(false, `refused: the public document at ${issuer} did not confirm the MCP authorization server for the verified issuer ${issuer} — ${observation.detail}`);
-      return { ok: false, dryRun, steps, failedStep: "self-verify", secretsPath: stagedPath };
+      return { ok: false, dryRun, steps, failedStep: "self-verify" };
     }
     push(true, observation.detail);
 
-    return { ok: true, dryRun: false, steps, secretsPath: stagedPath };
+    return { ok: true, dryRun: false, steps };
   } catch (err: any) {
     push(false, `unexpected error: ${err?.message ?? err}`);
-    return { ok: false, dryRun, steps, failedStep: currentStep, secretsPath: stagedPath };
+    return { ok: false, dryRun, steps, failedStep: currentStep, secretsPath: stagedFallbackPath };
   }
 }
 

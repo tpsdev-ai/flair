@@ -191,7 +191,7 @@ registered identities.
    the public document read at that issuer must match the same normalized issuer and its token
    endpoint. When the target cannot take the secret (an older Harper, or no secrets
    custody on the node), it writes its own 0600 one-var file — a path distinct from
-   `mcp enable`'s, written only after the probe says the push will not happen, so it
+   `mcp enable`'s, written only after a failed capability probe or a failed push, so it
    never truncates a bundle a previous `mcp enable` staged — leaves it for manual
    application and exits
    non-zero.

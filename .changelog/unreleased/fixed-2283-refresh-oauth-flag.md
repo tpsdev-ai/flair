@@ -9,7 +9,7 @@
   the public document read at that issuer must match the same normalized issuer and its token
   endpoint. When the target cannot take the secret (an older Harper, or no secrets
   custody on the node) it writes its OWN 0600 one-var file — a path distinct from
-  `mcp enable`'s, and written only after the probe says the push will not happen, so
+  `mcp enable`'s, and written only after a failed capability probe or a failed push, so
   it never truncates a previously staged IdP credentials bundle — leaves it for
   manual application and exits
   non-zero. An explicit `--secrets-path` that already holds a file is refused by
