@@ -78,8 +78,9 @@ describe("planAgentHomeStamps — the remedy's split", () => {
 
 describe("runAgentHomeStamp — sync provenance is checked at write time", () => {
   function stampFake(rows: Record<string, Record<string, unknown>>, onRoster: () => void) {
-    const writes: string[] = [];
+    const writes: Array<{ id: string; body: Record<string, unknown> }> = [];
     const fetchImpl = (async (_url: any, opts: any) => {
+      const url = String(_url);
       const body = JSON.parse(String(opts.body));
       if (body.operation === "search_by_value") {
         const out = Object.values(rows).map((r) => ({ ...r }));
@@ -87,35 +88,62 @@ describe("runAgentHomeStamp — sync provenance is checked at write time", () =>
         return jsonResponse(out);
       }
       if (body.operation === "search_by_id") return jsonResponse(rows[body.ids[0]] ? [{ ...rows[body.ids[0]] }] : []);
-      if (body.operation === "update") {
-        for (const rec of body.records) {
-          writes.push(rec.id);
-          rows[rec.id] = { ...rows[rec.id], ...rec };
-        }
-        return jsonResponse({ message: "updated" });
+      if (opts.method === "PATCH" && url.includes("/Agent/")) {
+        const id = decodeURIComponent(url.split("/Agent/")[1]);
+        writes.push({ id, body });
+        const cur = rows[id];
+        // The resource's guard: absent -> 404; not home-less or provenance -> no write.
+        if (!cur) return new Response("", { status: 404 });
+        if (isHomeLessAgentRow(cur) && !isSyncOriginatedAgentRow(cur)) cur.originatorInstanceId = "inst-local";
+        return new Response("", { status: 200 });
       }
-      throw new Error(`unexpected operation ${body.operation}`);
+      throw new Error(`unexpected request ${opts.method ?? "POST"} ${body.operation ?? url}`);
     }) as unknown as typeof fetch;
     return { fetchImpl, writes };
   }
-  const base = { opsUrl: "http://127.0.0.1:1/", authHeader: "Basic x", localInstanceId: "inst-local", apply: true };
+  const base = {
+    opsUrl: "http://127.0.0.1:1/",
+    httpUrl: "http://127.0.0.1:2",
+    authHeader: "Basic x",
+    localInstanceId: "inst-local",
+    apply: true,
+  };
 
   test("a row that gains sync provenance between the plan and its write is listed, not stamped", async () => {
     const rows: Record<string, Record<string, unknown>> = { "late-sync": { id: "late-sync" }, "still-local": { id: "still-local" } };
     const { fetchImpl, writes } = stampFake(rows, () => { rows["late-sync"]._syncedFrom = "peer-1"; });
     const result = await runAgentHomeStamp({ ...base, fetchImpl });
     expect(result.plan.stampable).toEqual(["late-sync", "still-local"]);
-    expect(writes).toEqual(["still-local"]);
+    expect(writes.map((w) => w.id)).toEqual(["still-local"]);
     expect(result.stamped).toEqual(["still-local"]);
     expect(result.skipped).toEqual(["late-sync"]);
     expect(rows["late-sync"].originatorInstanceId ?? null).toBeNull();
+  });
+
+  test("a row that gains a home between the plan and its write is listed, never overwritten", async () => {
+    const rows: Record<string, Record<string, unknown>> = { "late-home": { id: "late-home" }, "still-local": { id: "still-local" } };
+    const { fetchImpl, writes } = stampFake(rows, () => { rows["late-home"].originatorInstanceId = "peer-1"; });
+    const result = await runAgentHomeStamp({ ...base, fetchImpl });
+    expect(writes.map((w) => w.id)).toEqual(["still-local"]);
+    expect(result.stamped).toEqual(["still-local"]);
+    expect(result.skipped).toEqual(["late-home"]);
+    expect(rows["late-home"].originatorInstanceId).toBe("peer-1");
+  });
+
+  test("the write is a guarded PATCH to the Agent resource", async () => {
+    const rows: Record<string, Record<string, unknown>> = { "still-local": { id: "still-local" } };
+    const { fetchImpl, writes } = stampFake(rows, () => {});
+    await runAgentHomeStamp({ ...base, fetchImpl });
+    expect(writes).toHaveLength(1);
+    expect(Object.keys(writes[0].body).sort()).toEqual(["flairStampHome", "id", "originatorInstanceId"]);
+    expect(writes[0].body.flairStampHome).toBe(true);
   });
 
   test("a row that vanishes between the plan and its write is vanished, not skipped", async () => {
     const rows: Record<string, Record<string, unknown>> = { gone: { id: "gone" }, "still-local": { id: "still-local" } };
     const { fetchImpl, writes } = stampFake(rows, () => { delete rows.gone; });
     const result = await runAgentHomeStamp({ ...base, fetchImpl });
-    expect(writes).toEqual(["still-local"]);
+    expect(writes.map((w) => w.id)).toEqual(["still-local"]);
     expect(result.vanished).toEqual(["gone"]);
     expect(result.skipped).toEqual([]);
     const lines = stampLeftoverLines(result);
@@ -129,11 +157,45 @@ describe("runAgentHomeStamp — sync provenance is checked at write time", () =>
       const body = JSON.parse(String(opts.body));
       if (body.operation === "search_by_value") return jsonResponse([{ id: "a" }]);
       if (body.operation === "search_by_id") return jsonResponse({ error: "down" }, 500);
-      writes.push(body.operation);
+      writes.push(opts.method ?? body.operation);
       return jsonResponse({});
     }) as unknown as typeof fetch;
     await expect(runAgentHomeStamp({ ...base, fetchImpl })).rejects.toThrow("re-read agent 'a'");
     expect(writes).toEqual([]);
+  });
+
+  test("a stamp the resource refuses (row gone) is reported vanished", async () => {
+    // The row is present at the CLI's re-read but gone when the resource runs
+    // (a 404): a stamp never creates, so it is vanished, not stamped.
+    let patched = false;
+    const fetchImpl = (async (_url: any, opts: any) => {
+      const body = JSON.parse(String(opts.body));
+      if (body.operation === "search_by_value") return jsonResponse([{ id: "a" }]);
+      if (body.operation === "search_by_id") return jsonResponse(patched ? [] : [{ id: "a" }]);
+      if (opts.method === "PATCH") { patched = true; return new Response("", { status: 404 }); }
+      throw new Error(`unexpected ${opts.method}`);
+    }) as unknown as typeof fetch;
+    const result = await runAgentHomeStamp({ ...base, fetchImpl });
+    expect(result.vanished).toEqual(["a"]);
+    expect(result.stamped).toEqual([]);
+  });
+
+  test("a merge that lands after the stamp is reported skipped, not stamped", async () => {
+    // The PATCH writes, then a federation merge overwrites the row before the
+    // CLI's read-back: the row is peer-homed with provenance, so it is skipped.
+    let patched = false;
+    const fetchImpl = (async (_url: any, opts: any) => {
+      const body = JSON.parse(String(opts.body));
+      if (body.operation === "search_by_value") return jsonResponse([{ id: "a" }]);
+      if (body.operation === "search_by_id") {
+        return jsonResponse(patched ? [{ id: "a", originatorInstanceId: "peer-1", _syncedFrom: "peer-1" }] : [{ id: "a" }]);
+      }
+      if (opts.method === "PATCH") { patched = true; return new Response("", { status: 200 }); }
+      throw new Error(`unexpected ${opts.method}`);
+    }) as unknown as typeof fetch;
+    const result = await runAgentHomeStamp({ ...base, fetchImpl });
+    expect(result.stamped).toEqual([]);
+    expect(result.skipped).toEqual(["a"]);
   });
 });
 

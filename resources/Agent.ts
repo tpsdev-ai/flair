@@ -3,7 +3,9 @@ import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCa
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
 import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
+import { localInstanceId } from "./instance-identity.js";
 import { AGENT_ID_ERROR, invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
+import { AGENT_HOME_STAMP_FIELD, isHomeLessAgentRow, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
 
 /**
  * The id this write lands on: the URL-bound target (`getId()`) when there is
@@ -276,6 +278,30 @@ export class Agent extends (databases as any).flair.Agent {
       if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
       await applyOriginatorInstanceId(content, resolvedOriginRow.row);
       applyFederationBookkeeping(content, resolvedOriginRow.row);
+      // flair#2472 — the guarded home stamp, the write `flair agent stamp-home
+      // --apply` sends. Read inside THIS request's transaction: a stamp is
+      // applied only when the row, at write time, is still home-less and carries
+      // no federation-sync provenance; the value stamped is this instance's own
+      // id, never the body's. A row that already has a home, or carries
+      // provenance, keeps its stored home. A stamp NEVER creates: an absent row
+      // is refused, so a row deleted since the caller's read is not re-created.
+      // Gated to an administrator or a trusted internal caller; the field is a
+      // control field, dropped before the write.
+      if (content[AGENT_HOME_STAMP_FIELD] === true) {
+        delete content[AGENT_HOME_STAMP_FIELD];
+        const admission = admitPrincipalWrite(await resolveAgentAuth((this as any).getContext?.()));
+        if (admission === "admin" || admission === "internal") {
+          if (resolvedOriginRow.row == null) {
+            return new Response(
+              JSON.stringify({ error: "agent_home_stamp_no_row", message: "no stored agent row to stamp" }),
+              { status: 404, headers: { "content-type": "application/json" } },
+            );
+          }
+          if (isHomeLessAgentRow(resolvedOriginRow.row) && !isSyncOriginatedAgentRow(resolvedOriginRow.row)) {
+            content.originatorInstanceId = await localInstanceId();
+          }
+        }
+      }
       content.updatedAt = new Date().toISOString();
     }
 

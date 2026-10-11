@@ -845,11 +845,13 @@ export function register(program: Command): void {
         process.exit(1);
       }
       const opsUrl = `http://127.0.0.1:${opsPort}/`;
+      const httpUrl = `http://127.0.0.1:${resolveHttpPort(opts)}/`;
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
       const localInstanceId = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass));
       const result = await runAgentHomeStamp({
         opsUrl,
+        httpUrl,
         authHeader: auth,
         localInstanceId,
         apply: Boolean(opts.apply),

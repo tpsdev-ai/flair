@@ -1,9 +1,12 @@
 /**
- * principal-add-home-2433.test.ts — flair#2433.
+ * principal-add-home-2433.test.ts — flair#2433, flair#2473.
  *
- * `flair principal add` upserts the Agent row through the operations API. The
- * upsert body carries the local instance's home on a create (no stored row) and
- * omits it over a found row.
+ * `flair principal add` writes the Agent row through the operations API. The
+ * write is CREATE-ONLY: an `insert` carries the local instance's home on a
+ * create (no stored row), and a row that already exists keeps its stored home —
+ * the create is skipped and the row is written back WITHOUT the home field, or
+ * a differing non-null stored home is refused. A stored `originatorInstanceId`
+ * is never changed, whatever appears between the read and the write.
  *
  * Isolated because it drives the process-global commander `program` and stands
  * up an HTTP server in place of the operations API.
@@ -18,13 +21,15 @@ import { program } from "../../src/cli.js";
 let tmpHome: string;
 let keysDir: string;
 let server: Server;
-let upserts: any[];
+let inserts: any[];
+let updates: any[];
 let storedRows: Array<Record<string, unknown>>;
 
 beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), "flair-2433-principal-"));
   keysDir = join(tmpHome, "keys");
-  upserts = [];
+  inserts = [];
+  updates = [];
   storedRows = [];
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = [];
@@ -34,7 +39,19 @@ beforeEach(async () => {
       let answer: unknown = { ok: true };
       if (body.operation === "sql") answer = [{ id: "inst-local-2433" }];
       else if (body.operation === "search_by_id") answer = storedRows;
-      else if (body.operation === "upsert") upserts.push(body);
+      else if (body.operation === "insert") {
+        inserts.push(body);
+        const record = body.records[0];
+        const existing = storedRows.some((r) => r.id === record.id);
+        if (existing) answer = { inserted_hashes: [], skipped_hashes: [record.id] };
+        else {
+          storedRows.push(record);
+          answer = { inserted_hashes: [record.id], skipped_hashes: [] };
+        }
+      } else if (body.operation === "update") {
+        updates.push(body);
+        answer = { update_hashes: [body.records[0].id], skipped_hashes: [] };
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(answer));
     });
@@ -81,19 +98,29 @@ function opsPort(): number {
   return address.port;
 }
 
-describe("flair#2433 — principal add upsert body", () => {
-  test("a create (no stored row) carries the local home", async () => {
+describe("flair#2433/#2473 — principal add is create-only", () => {
+  test("a create (no stored row) inserts the local home", async () => {
     expect(await principalAdd("fresh-id", opsPort())).toBe(0);
-    expect(upserts).toHaveLength(1);
-    expect(upserts[0].records[0].id).toBe("fresh-id");
-    expect(upserts[0].records[0].originatorInstanceId).toBe("inst-local-2433");
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].records[0].id).toBe("fresh-id");
+    expect(inserts[0].records[0].originatorInstanceId).toBe("inst-local-2433");
+    expect(updates).toHaveLength(0);
   });
 
-  test("an upsert over a found row omits the home", async () => {
+  test("an existing row is written back without the home field", async () => {
     storedRows = [{ id: "known-id", originatorInstanceId: null }];
     expect(await principalAdd("known-id", opsPort())).toBe(0);
-    expect(upserts).toHaveLength(1);
-    expect(upserts[0].records[0].id).toBe("known-id");
-    expect("originatorInstanceId" in upserts[0].records[0]).toBe(false);
+    expect(inserts).toHaveLength(1);
+    expect("originatorInstanceId" in inserts[0].records[0]).toBe(false);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].records[0].id).toBe("known-id");
+    expect("originatorInstanceId" in updates[0].records[0]).toBe(false);
+  });
+
+  test("a differing non-null stored home is refused with the named error", async () => {
+    storedRows = [{ id: "known-id", originatorInstanceId: "peer-inst" }];
+    expect(await principalAdd("known-id", opsPort())).toBe(1);
+    expect(inserts).toHaveLength(0);
+    expect(updates).toHaveLength(0);
   });
 });

@@ -328,13 +328,17 @@ export function register(program: Command): void {
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
       // flair#2433 — a NEW row's home is THIS instance's federation id,
-      // resolved through the one shared rule. An upsert over an existing row
-      // never writes a home: read it first and refuse a change with a named
-      // error (the home is immutable after create). A failed read is
-      // UNREADABLE, not "no home", and is refused the same way.
-      const homeEndpoint = agentHomeEndpoint(opsPort, adminUser, adminPass);
-      const home = await resolveTargetInstanceId(homeEndpoint);
-      const existingHome = await readStoredAgentHome({ opsUrl: `http://127.0.0.1:${opsPort}/`, authHeader: auth, id });
+      // resolved through the one shared rule. The write is CREATE-ONLY
+      // (flair#2473): an `insert` carries the home, and a row that already
+      // exists at the write keeps its stored home — the create is skipped and
+      // the row is written back WITHOUT the home field, or a differing non-null
+      // stored home is refused with the named error. A stored
+      // originatorInstanceId is never changed, whatever commits between the
+      // read and the write. A failed read is UNREADABLE, not "no home", and is
+      // refused the same way.
+      const opsUrl = `http://127.0.0.1:${opsPort}/`;
+      const home = await resolveTargetInstanceId(agentHomeEndpoint(opsPort, adminUser, adminPass));
+      const existingHome = await readStoredAgentHome({ opsUrl, authHeader: auth, id });
       const homePlan = planAgentHomeWrite(existingHome, home, id);
       if (homePlan.refuse) {
         console.error(`Error: ${homePlan.message}`);
@@ -360,19 +364,43 @@ export function register(program: Command): void {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      // Only a create stamps a home; over a found row the stored value stands.
-      const homeWrite = homePlan as Extract<typeof homePlan, { refuse: false }>;
-      if (homeWrite.stamp) record.originatorInstanceId = homeWrite.home;
 
-      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      // 1) Create-only. The home rides ONLY on this insert: a row that already
+      //    exists at the write is skipped, never overwritten.
+      const createRecord = { ...record };
+      const homePlanOk = homePlan as Extract<typeof homePlan, { refuse: false }>;
+      if (homePlanOk.stamp) createRecord.originatorInstanceId = homePlanOk.home;
+      const createRes = await fetch(opsUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: auth },
-        body: JSON.stringify({ operation: "upsert", database: "flair", table: "Agent", records: [record] }),
+        body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [createRecord] }),
       });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        console.error(`Error: ${res.status} ${text}`);
+      if (!createRes.ok) {
+        const text = await createRes.text().catch(() => "");
+        console.error(`Error: ${createRes.status} ${text}`);
         process.exit(1);
+      }
+      const createBody = (await createRes.json().catch(() => null)) as
+        | { inserted_hashes?: unknown[]; skipped_hashes?: unknown[] }
+        | null;
+      const created = Array.isArray(createBody?.inserted_hashes) && createBody.inserted_hashes.includes(id);
+      if (!created) {
+        // The row already exists (it appeared between the read above and this
+        // write, or was found). Its stored home STANDS: write back WITHOUT the
+        // home field, so a home this command did not create is never changed. A
+        // differing non-null stored home was already refused above from the
+        // pre-read; a row that appeared since carried its home in from its own
+        // creation, which this update cannot change because it omits the field.
+        const updateRes = await fetch(opsUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({ operation: "update", database: "flair", table: "Agent", records: [record] }),
+        });
+        if (!updateRes.ok) {
+          const text = await updateRes.text().catch(() => "");
+          console.error(`Error: ${updateRes.status} ${text}`);
+          process.exit(1);
+        }
       }
 
       console.log(`✅ Principal '${id}' created`);

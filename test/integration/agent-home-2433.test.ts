@@ -294,7 +294,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect(syncRow.originatorInstanceId ?? null).toBeNull();
     expect(syncRow._syncedFrom, "the receiver did not stamp sync provenance").toBe(PEER_ID);
 
-    const args = { opsUrl: harper.opsURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 10_000 };
+    const args = { opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 10_000 };
 
     // Dry run writes nothing.
     const dry = await runAgentHomeStamp({ ...args, apply: false });
@@ -312,6 +312,54 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect((await rowIn("Agent", localId)).originatorInstanceId).toBe(LOCAL_ID);
     expect((await rowIn("Agent", syncId)).originatorInstanceId ?? null, "the sync-originated row was stamped").toBeNull();
     expect((await rowIn("Agent", syncId))._syncedFrom).toBe(PEER_ID);
+  }, 60_000);
+
+  test("a row that gains a home between the CLI's re-read and its write is not stamped", async () => {
+    // The stamp's decision is made INSIDE the Agent resource's request
+    // transaction. Here another writer commits a home in the gap between the
+    // CLI's re-read and the resource's write: the resource re-reads, sees a
+    // stored home, and leaves it — the CLI cannot stamp over it.
+    const id = `race-home-${sfx}`;
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-race-h-2433", createdAt: new Date().toISOString() }],
+    });
+    const injecting = (async (url: any, opts: any) => {
+      if (opts?.method === "PATCH" && String(url).includes("/Agent/")) {
+        await ops({ operation: "update", table: "Agent", records: [{ id, originatorInstanceId: PEER_ID }] });
+      }
+      return fetch(url, opts);
+    }) as typeof fetch;
+    const result = await runAgentHomeStamp({
+      opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID,
+      timeoutMs: 10_000, apply: true, fetchImpl: injecting,
+    });
+    expect(result.stamped).not.toContain(id);
+    expect((await rowIn("Agent", id)).originatorInstanceId, "the gained home was overwritten").toBe(PEER_ID);
+  }, 60_000);
+
+  test("a merged row that lands between the CLI's re-read and its write is listed, never stamped", async () => {
+    const id = `race-sync-${sfx}`;
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-race-s-2433", createdAt: new Date().toISOString() }],
+    });
+    const injecting = (async (url: any, opts: any) => {
+      if (opts?.method === "PATCH" && String(url).includes("/Agent/")) {
+        await ops({ operation: "update", table: "Agent", records: [{ id, _syncedFrom: PEER_ID, _originatorInstanceId: PEER_ID }] });
+      }
+      return fetch(url, opts);
+    }) as typeof fetch;
+    const result = await runAgentHomeStamp({
+      opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID,
+      timeoutMs: 10_000, apply: true, fetchImpl: injecting,
+    });
+    expect(result.stamped).not.toContain(id);
+    const row = await rowIn("Agent", id);
+    expect(row.originatorInstanceId ?? null, "the merged row was stamped").toBeNull();
+    expect(row._syncedFrom).toBe(PEER_ID);
   }, 60_000);
 
   test("flair doctor reports the home-less row it can see, with the named remedy", async () => {
@@ -333,7 +381,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     // An advisory: removing the only home-less rows leaves the issue count unchanged.
     const before = r.stdout.match(/(\d+) issues? found/)?.[1] ?? "0";
     const stamped = await runAgentHomeStamp({
-      opsUrl: harper.opsURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 10_000, apply: true,
+      opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 10_000, apply: true,
     });
     expect(stamped.ok).toBe(true);
     const after = (await runDoctor()).stdout.match(/(\d+) issues? found/)?.[1] ?? "0";

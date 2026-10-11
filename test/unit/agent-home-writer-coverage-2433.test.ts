@@ -77,3 +77,32 @@ test("the Agent resource and its raw creators stamp through the one delegate", (
     expect(readFileSync(file, "utf8"), `${file} stamps via the shared helper`).toContain("stampOriginatorOnCreate(");
   }
 });
+
+/**
+ * flair#2474 — the writer-coverage test above sees only the file that carries
+ * the ops-API create literal (cli.ts). A creation path that creates its Agent
+ * row by CALLING the shared seed is invisible to it: it could switch to the
+ * home-less `seedAgentViaOpsApi` and no test would notice (a real-Harper audit
+ * did exactly that to `flair init` and `flair import`). This pins the routing:
+ * every seed-based creation path reaches the STAMPING seed
+ * (`seedAgentWithLocalHome`), never the home-less one directly. The rows those
+ * paths create are asserted by test/unit-isolated/agent-home-creation-paths-2474
+ * (agent add, import), the remote-init isolated test, and
+ * test/integration/agent-home-2433 (the seed itself).
+ */
+test("every seed-based CLI Agent creation path reaches the home-stamping seed", () => {
+  const paths = ["src/commands/agent.ts", "src/commands/init.ts", "src/commands/import.ts"];
+  for (const file of paths) {
+    const src = readFileSync(file, "utf8");
+    expect(src, `${file} seeds through the home-stamping seed`).toContain("seedAgentWithLocalHome(");
+    // The home-less seed may remain only as a passthrough: its own definition
+    // (`function seedAgentViaOpsApi(`) and its call (`cli.seedAgentViaOpsApi(`).
+    // Any other call site is a creation path that would write a row with no
+    // home — the flair#2474 regression. Read the RAW source (not through
+    // stripComments) so that a mis-stripped block cannot hide the call.
+    const rest = src
+      .replace(/function\s+seedAgentViaOpsApi\(/g, "\u0000")
+      .replace(/cli\.seedAgentViaOpsApi\(/g, "\u0000");
+    expect(rest.includes("seedAgentViaOpsApi("), `${file} calls the home-less seed directly`).toBe(false);
+  }
+});
