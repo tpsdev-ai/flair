@@ -4,6 +4,6 @@
   id: <run id> }` — the host's run id as sent (Flair stores its NFC form), never derived from
   captured text —
   along with the host's session id when the hook carries one. A run id outside
-  the grammar is omitted with one log line; the capture still lands. `hostSource`
+  the grammar is omitted with a rate-limited warning; the capture still lands. `hostSource`
   is the writer's claim, not verified host authorship. Writes outside the
   capture path are unchanged.

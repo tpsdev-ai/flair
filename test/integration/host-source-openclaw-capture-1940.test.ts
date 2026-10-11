@@ -10,15 +10,14 @@
  *   t1  a captured memory reads back with hostSource {openclaw, run, <run id>}
  *       for its author, and with the host session id;
  *   t2  a run id OUTSIDE the server's id grammar captures WITHOUT a source (the
- *       write still lands) and logs one line;
+ *       write still lands) with a rate-limited warning;
  *   t3  a NON-capture write (the memory_store tool) carries no source;
  *   t4  a run id the server NFC-normalises into its grammar (U+212A KELVIN
  *       SIGN -> "K") keeps its source, stored in the server's NFC form.
  *
  * The host is a minimal stand-in for the OpenClaw plugin API: it exposes the
- * hooks and tools the plugin registers and nothing else. Only the plugin's
- * capture path is exercised; the Flair component on the other side is the real
- * built one.
+ * hooks and tools the plugin registers and nothing else.
+ * The capture path and a non-capture memory_store write are exercised.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -31,7 +30,7 @@ import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifec
 import { FlairClient } from "../../packages/flair-client/src/client";
 import plugin from "../../packages/openclaw-flair/index.ts";
 
-/** A name unique to this run, so re-runs never collide on the Agent row. */
+/** A randomized name for the test agent. */
 const AGENT = `agent-a-${randomUUID().slice(0, 8)}`;
 const HOST_VERSION = "2026.9.6"; // in the plugin's tested host set
 
@@ -166,7 +165,7 @@ describe("flair#1940 — OpenClaw capture keeps the host run id as a host source
     expect(row?.sessionId).toBe(sessionId); // assertion: the host session id is carried
   }, 120_000);
 
-  test("t2: a run id outside the id grammar captures without a source, and logs one line", async () => {
+  test("t2: a run id outside the id grammar captures without a source", async () => {
     const api = hostForCapture();
     const c = reader();
     const runId = "run id with spaces and \u0007control"; // outside ^[A-Za-z0-9._:/@#-]{1,256}$
@@ -179,9 +178,9 @@ describe("flair#1940 — OpenClaw capture keeps the host run id as a host source
     );
 
     const row = await findCaptured(c, marker);
-    expect(row, `capture ${marker} must still land`).toBeTruthy(); // assertion: capture never fails on a run id
+    expect(row, `capture ${marker} must still land`).toBeTruthy(); // this malformed run id did not prevent capture.
     expect(row?.hostSource).toBeUndefined(); // assertion: no source was attached
-    expect(api._warnText()).toContain("omitted its host source"); // assertion: one line names why
+    expect(api._warnText()).toContain("omitted its host source");
   }, 120_000);
 
   test("t3: a non-capture write carries no source", async () => {

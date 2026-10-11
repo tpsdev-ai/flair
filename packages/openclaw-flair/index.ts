@@ -1000,9 +1000,8 @@ export default {
       const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
       // flair#1940: the capture claims its host run id as the memory's source.
       // The id is the run id VERBATIM. If it is outside the server's id grammar,
-      // the write OMITS the source (one log line) rather than let the server
-      // refuse the whole write: capture must never fail for the shape of a run
-      // id. A run id the host supplies is a host value, so it is not echoed raw.
+      // the source is omitted with a rate-limited warning.
+      // A run id the host supplies is a host value, so it is not echoed raw.
       const hostSource = runId ? captureHostSource(runId) : null;
       if (runId && !hostSource) {
         logOnce(

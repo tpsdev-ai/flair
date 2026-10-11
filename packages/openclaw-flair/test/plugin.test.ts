@@ -22,9 +22,10 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readdirSync, readFileSync } from "node:fs";
 import * as realFs from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
 import { loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
@@ -1100,6 +1101,61 @@ describe("evaluateAutoCapture", () => {
 // ── slice 2 — capture done right (D5 / D11 / D14) ─────────────────────────────
 
 describe("slice 2 — capture normalisation, ids and outcomes", () => {
+  for (const [hook, method] of [
+    ["agent_end", "runAgentEnd"],
+    ["llm_input", "runLlmInput"],
+    ["llm_output", "runLlmOutput"],
+  ]) {
+    for (const session of ["event", "context", "key-only"]) {
+      test(`real OpenClaw hook runner: ${hook}, ${session} identifiers`, async () => {
+        const dist = dirname(fileURLToPath(import.meta.resolve("openclaw")));
+        const entry = readdirSync(dist).find((name) =>
+          /^hooks-.*\.mjs$/.test(name) &&
+          readFileSync(join(dist, name), "utf8").includes("export { createHookRunner };"),
+        );
+        expect(entry).toBeDefined();
+        const { createHookRunner } = await import(pathToFileURL(join(dist, entry!)).href);
+        writeKey("A");
+        const calls = installFetchStub();
+        const api = createMockApi({
+          pluginConfig: { autoCapture: true },
+          config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+        });
+        (await loadPlugin()).register(api as any);
+        const typedHooks = [...api._hooks].flatMap(([hookName, handlers]) =>
+          handlers.map((handler) => ({ hookName, handler, pluginId: api.id })),
+        );
+        const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+        const runId = `run-${hook}-${session}`;
+        const text = `remember this: capture from ${hook} with ${session} identifiers`;
+        const event = {
+          ...(session === "event" ? { runId, sessionId: "event-session" } : {}),
+          success: true,
+          messages: [{ role: "user", content: text }],
+          provider: "p", model: "m", prompt: text, assistantTexts: [text],
+        };
+        const ctx = {
+          agentId: "A",
+          runId: session === "event" ? "context-other-run" : runId,
+          ...(session !== "key-only" ? { sessionId: "context-session" } : {}),
+          sessionKey: "agent:A:slot",
+        };
+        try {
+          expect(runner.hasHooks(hook)).toBe(true);
+          await runner[method](event, ctx);
+          const writes = calls.filter((call) => call.method === "PUT" && /\/Memory\//.test(call.url));
+          expect(writes).toHaveLength(1);
+          const body = writes[0].body as Record<string, unknown>;
+          expect(body.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: runId });
+          if (session === "key-only") expect("sessionId" in body).toBe(false);
+          else expect(body.sessionId).toBe(session === "event" ? "event-session" : "context-session");
+        } finally {
+          await runner.runGatewayStop({}, {});
+        }
+      });
+    }
+  }
+
   test("D5: a string and an equivalent text-block array normalise to the same capture text", async () => {
     const { captureText } = await loadModule();
     expect(captureText("hello world")).toBe("hello world");
@@ -1198,7 +1254,7 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     expect(body.sessionId).toBe("sess-9"); // assertion: the host session id is carried
   });
 
-  test("D15: a run id outside the id grammar captures with no source, and one log line", async () => {
+  test("D15: a run id outside the id grammar captures with no source", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
@@ -1215,7 +1271,7 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
     expect(memPuts.length).toBe(1); // assertion: the capture still lands
     expect((memPuts[0].body as any).hostSource).toBeUndefined(); // assertion: no source was attached
-    expect(api._warnText()).toContain("omitted its host source"); // assertion: one line names why
+    expect(api._warnText()).toContain("omitted its host source");
   });
 
   test("D15: the memory_store tool's write carries no source", async () => {
