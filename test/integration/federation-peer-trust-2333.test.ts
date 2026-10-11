@@ -402,3 +402,77 @@ describe("flair#2333 — a peer revoked during a re-pair is not brought back (re
     expect((await readPeer(peer))?.status).toBe("paired");
   }, 60_000);
 });
+
+// ─── The token lock releases only AFTER the consume commits (flair#2333) ──────
+//
+// Harper wraps POST /FederationPair in a REQUEST transaction that commits only
+// after the handler returns (harper server/REST.ts ~284), so a token consume that
+// JOINED that request transaction is still invisible when the token's per-key
+// lock releases. A second pairing that takes the just-freed lock then reads the
+// token UNCONSUMED and pairs a second peer. The fix runs the consume (re-read of
+// the token) and the Peer write in a FRESH OWNED transaction (withOwnedTransaction,
+// resources/request-transaction.ts) that commits BEFORE the lock releases. These
+// two cases FAIL on b0fed5fa, where both paths write in the request transaction.
+
+describe("flair#2333 — the token lock releases only after the consume commits: first-pair path (real Harper)", () => {
+  it("a pairing that takes the lock right after the first releases it is refused; one peer (federation-pair-claim-done)", async () => {
+    const token = `pt-h1c-${sfx}`;
+    const a = nacl.sign.keyPair();
+    const b = nacl.sign.keyPair();
+    const peerA = `h1c-peer-a-${sfx}`;
+    const peerB = `h1c-peer-b-${sfx}`;
+    await seedToken(token);
+    // The pause sits AFTER the first pairing released the token lock (and, with
+    // the fix, after its owned transaction committed the consume) but BEFORE this
+    // request's own transaction commits (Harper commits it when the handler
+    // returns). The competitor is free to grab the lock here.
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-claim-done",
+      () => pairRequest(pairBody(peerA, b64url(a.publicKey), a.secretKey, token)),
+      () => pairRequest(pairBody(peerB, b64url(b.publicKey), b.secretKey, token)),
+    );
+    expect(paused, "the first pairing was not paused after releasing the token lock").toBe(true);
+    expect(released, "the first pairing was not released by this test").toBe("go");
+    const aBody = await response.json() as any;
+    const bBody = await (competed as Response).json() as any;
+    console.log("H1c pair bodies:", JSON.stringify({ a: aBody, b: bBody }));
+    expect(aBody?.paired, `the first pairing paired its peer: ${JSON.stringify(aBody)}`).toBe(true);
+    expect((competed as Response).status, `the second pairing is refused: ${JSON.stringify(bBody)}`).toBe(401);
+    expect(bBody?.error).toBe("invalid_or_expired_pairing_token");
+    const rows = [await readPeer(peerA), await readPeer(peerB)].filter(Boolean);
+    expect(rows.length, "exactly one peer row is written").toBe(1);
+    expect((await readToken(token))?.consumedBy, "the token records the one peer that consumed it").toBe(peerA);
+  }, 90_000);
+});
+
+describe("flair#2333 — the token lock releases only after the consume commits: re-pair path (real Harper)", () => {
+  it("a new-peer pairing that takes the lock as the re-pair releases it is refused (federation-pair-repair-pre)", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `h1d-peer-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub); // peer exists → the re-pair path
+    const token = `pt-h1d-${sfx}`;
+    await seedToken(token);
+    const k2 = nacl.sign.keyPair();
+    const peer2 = `h1d-peer-new-${sfx}`;
+    // The existing re-pair pause sits after the token lock released and before
+    // this request's own commit; the competitor pairs a NEW peer with the token
+    // the re-pair just claimed. On b0fed5fa the re-pair's consume is uncommitted
+    // here, so the new peer is written; with the fix it is refused.
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-repair-pre",
+      () => pairRequest(pairBody(peer, pub, k.secretKey, token)),
+      () => pairRequest(pairBody(peer2, b64url(k2.publicKey), k2.secretKey, token)),
+    );
+    expect(paused, "the re-pair was not paused after releasing the token lock").toBe(true);
+    expect(released, "the re-pair was not released by this test").toBe("go");
+    const repairBody = await response.json() as any;
+    const newBody = await (competed as Response).json() as any;
+    console.log("H1d pair bodies:", JSON.stringify({ repair: repairBody, newPeer: newBody }));
+    expect(repairBody?.paired, `the re-pair paired: ${JSON.stringify(repairBody)}`).toBe(true);
+    expect((competed as Response).status, `the new-peer pairing is refused: ${JSON.stringify(newBody)}`).toBe(401);
+    expect(newBody?.error).toBe("invalid_or_expired_pairing_token");
+    expect(await readPeer(peer2), "the token spent on the re-pair pairs no new peer").toBeNull();
+    expect((await readToken(token))?.consumedBy, "the token records the re-paired peer").toBe(peer);
+  }, 90_000);
+});

@@ -31,6 +31,7 @@ import { initFederationCleanup } from "./federation-cleanup.js";
 import { verifyFederationRequestBody } from "./replay-store.js";
 import { writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
 import { withKeyLock } from "./key-lock.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
   classifyRecord,
@@ -578,10 +579,16 @@ export class FederationPair extends Resource {
       // NO token still proceeds — the protocol requires none (docs/federation.md,
       // "Pairing tokens"). The supplied token is not the request's credential;
       // the request still has to prove key ownership above (`verifyResult`).
+      //
+      // As on the first-pair path, the consume runs in a FRESH OWNED transaction
+      // committed BEFORE the lock releases (withOwnedTransaction). Harper commits
+      // the request's own transaction only after this handler returns, so a
+      // consume that joined it would still be invisible when the lock frees and a
+      // pairing taking the lock right after would read the token unconsumed.
       if (pairingToken) {
         const ctx = (this as any).getContext?.() ?? {};
         const refusal = await withPairingTokenClaim(pairingToken, () =>
-          consumePairingToken(pairingToken, instanceId, ctx),
+          withOwnedTransaction(ctx, (owned) => consumePairingToken(pairingToken, instanceId, owned)),
         );
         if (refusal) return refusal;
       }
@@ -615,25 +622,44 @@ export class FederationPair extends Resource {
       // is not shared across the nodes of a Fabric instance (see the PR body).
       // The first pairing consumes the token and records the peer; a pairing
       // that presents the same, now-consumed token is refused.
+      //
+      // The consume AND the Peer write run in a FRESH OWNED transaction that is
+      // COMMITTED before the lock releases (withOwnedTransaction). Harper wraps
+      // POST /FederationPair in a REQUEST transaction that commits only after the
+      // handler returns, so writes that joined it would still be invisible when
+      // the lock frees: a pairing that takes the lock right after release could
+      // re-read the token unconsumed and pair a second peer. Detaching the request
+      // transaction re-reads the token from committed state and commits the
+      // consume and the Peer write while the lock is held.
       const ctx = (this as any).getContext?.() ?? {};
-      const refusal = await withPairingTokenClaim(pairingToken, async () => {
-        const claim = await consumePairingToken(pairingToken, instanceId, ctx);
-        if (claim.kind !== "consumed") return claim;
-        const at = new Date().toISOString();
-        await (databases as any).flair.Peer.put({
-          id: instanceId,
-          publicKey,
-          role: role ?? "spoke",
-          endpoint: endpoint ?? null,
-          status: "paired",
-          relayOnly: false,
-          pairedAt: at,
-          createdAt: at,
-          updatedAt: at,
-        });
-        return claim;
-      });
+      const refusal = await withPairingTokenClaim(pairingToken, () =>
+        withOwnedTransaction(ctx, async (owned) => {
+          const claim = await consumePairingToken(pairingToken, instanceId, owned);
+          if (claim.kind !== "consumed") return claim;
+          const at = new Date().toISOString();
+          await (databases as any).flair.Peer.put({
+            id: instanceId,
+            publicKey,
+            role: role ?? "spoke",
+            endpoint: endpoint ?? null,
+            status: "paired",
+            relayOnly: false,
+            pairedAt: at,
+            createdAt: at,
+            updatedAt: at,
+          }, owned);
+          return claim;
+        }),
+      );
       if (refusal) return refusal;
+
+      // Test-only: inert unless the fault-injection env opt-in is set and armed.
+      // Pause AFTER the token lock released (and the consume is committed) but
+      // BEFORE this request's own transaction commits (Harper commits it when the
+      // handler returns). A pairing that takes the now-free lock here must read
+      // the token consumed; a request-transaction write would not (flair#2333).
+      const claimed = txnPausePoint("federation-pair-claim-done");
+      if (claimed) await claimed;
 
       // Drop the bootstrap user that was created alongside this pairing token.
       // Failure here is non-fatal: the cleanup sweep (PR-5) will catch stragglers.
@@ -753,10 +779,13 @@ async function consumePairingToken(
   consumerInstanceId: string,
   ctx: any,
 ): Promise<PairingTokenClaim> {
-  // Fetch the token record for consumption
+  // Fetch the token record for consumption IN the caller's transaction — the
+  // fresh OWNED one the claim runs in (withOwnedTransaction), never the request's
+  // earlier read snapshot. Harper's transaction() set `ctx.transaction`, so the
+  // read sees committed state and the write below commits with it.
   let tokenRecord: any = null;
   try {
-    tokenRecord = await (databases as any).flair.PairingToken.get(pairingToken);
+    tokenRecord = await (databases as any).flair.PairingToken.get(pairingToken, ctx);
   } catch { /* table may not exist */ }
 
   const pause = txnPausePoint("federation-pair-token");
@@ -788,7 +817,7 @@ async function consumePairingToken(
     ...tokenRecord,
     consumedBy: consumerInstanceId,
     consumedAt: new Date().toISOString(),
-  });
+  }, ctx);
   return { kind: "consumed" };
 }
 
