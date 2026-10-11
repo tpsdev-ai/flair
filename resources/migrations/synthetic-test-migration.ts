@@ -106,7 +106,7 @@ export function createSyntheticTestMigration(
             if (!existing || existing.agentId !== RESERVED_TEST_AGENT_ID) return { skip: true } as const;
             if (existing.source === SYNTHETIC_TARGET_MARKER) return { skip: true } as const; // already stamped — idempotent skip
 
-            // ONLY the field this migration owns: an incremental update, never a
+            // Only `source`: an incremental update, never a
             // full-row put of the row read above (flair#2470).
             return { update: { source: SYNTHETIC_TARGET_MARKER } };
           },

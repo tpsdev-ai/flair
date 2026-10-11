@@ -2,8 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 import { withOwnedTransaction } from "./request-transaction.js";
 
 /** The narrow surface the helper needs of a Harper table: a primary-key read
- *  that accepts a context, and a full-record write that accepts one. A plan that
- *  writes only the fields it owns needs the table's incremental `update` too. */
+ *  that accepts a context, and a full-record write that accepts one. An `update`
+ *  plan needs the table's incremental `update` too. */
 export interface WriteBackTable {
   get(id: string, ctx?: any): Promise<any>;
   put(row: any, ctx?: any): Promise<any>;
@@ -17,9 +17,7 @@ export type WriteBackPause = () => Promise<void> | undefined;
  *
  * `write` is a full-record replacement (Harper `put`): it carries every field of
  * the row, so a stale field it read can revert a concurrent edit. `update` is
- * an incremental write of only the fields named (Harper `update`): a writer that
- * owns a subset of a Memory row returns its own fields here, so the fields it
- * does not own are never carried into its write. */
+ * an incremental write of only the fields named (Harper `update`). */
 export type WriteBackPlan =
   | { write: Record<string, unknown> }
   | { update: Record<string, unknown> }

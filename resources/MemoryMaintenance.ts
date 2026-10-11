@@ -177,13 +177,13 @@ export class MemoryMaintenance extends Resource {
                 const confirmed = await (databases as any).flair.Memory.get(record.id, {});
                 if (!isDeepStrictEqual(confirmed, stored)) return;
                 // flair#2470: the archive flip is written as an INCREMENTAL update of
-                // exactly the fields this maintenance owns — `archived` and
+                // exactly `archived` and
                 // `archivedAt` — never a full-row put of the row read above. A
                 // full-row write would carry every field the read saw and could
                 // revert an owner PUT that started earlier and commits after this
                 // one (Harper orders the two by transaction timestamp) while that
-                // PUT still answered 200. The merged row is still built only for
-                // the lexical-index note below.
+                // PUT still answered 200. The merged row marks a non-skipped
+                // operation and supplies the lexical-index note below.
                 const archivePatch = { archived: true, archivedAt: now.toISOString() };
                 archivedRow = { ...stored, ...archivePatch };
                 stripUndeclaredMemoryAttributes(archivedRow);

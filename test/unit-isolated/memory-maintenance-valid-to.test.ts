@@ -149,7 +149,7 @@ test("archives validTo-expired rows across durability tiers, preserving their da
   for (const original of originals) {
     const archived = { ...original, archived: true, archivedAt: NOW.toISOString() };
     expect(rows.get(original.id)).toEqual(archived);
-    // flair#2470: the archive patches only the fields it owns.
+    // flair#2470: the archive patches only `archived` and `archivedAt`.
     expect(update).toHaveBeenCalledWith(original.id, { archived: true, archivedAt: NOW.toISOString() }, expect.any(Object));
     expect(noteMemoryUpsert).toHaveBeenCalledWith(archived);
   }
@@ -257,7 +257,7 @@ test("failed archival is counted as an error, retains the row and allows subsequ
 });
 
 
-test("validTo archival patches only `archived`/`archivedAt`, leaves every stored field, preserves provenance and commits before notifying the index", async () => {
+test("validTo archival patches only `archived`/`archivedAt`, preserves other stored fields and commits before notifying the index", async () => {
   const provenance = JSON.stringify({ v: 1, verified: { agentId: AGENT }, claimed: { model: "fixture" } });
   const original = seed("expired-with-pointer", {
     validTo: PAST, provenance, instanceToken: "stored-token", visibility: "private",
@@ -267,7 +267,7 @@ test("validTo archival patches only `archived`/`archivedAt`, leaves every stored
   const result = await maintain();
   expect(result.archived).toBe(1);
   expect(result.orphans).toBe(0);
-  // The archive is an incremental update of exactly the fields it owns: every
+  // The archive incrementally updates `archived` and `archivedAt`: every
   // other stored field — including a legacy `hostSource`/`hostSourceScope` and
   // an undeclared attribute — stands exactly as stored (flair#2470); only the
   // pointer row it cascades is removed.

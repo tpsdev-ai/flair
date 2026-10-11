@@ -1,7 +1,6 @@
 /**
- * memory-background-writer-races-2470.test.ts — a background writer that owns
- * only some fields of a Memory row must not supersede an earlier-started owner
- * PUT that still answers 200 (flair#2470), real Harper.
+ * memory-background-writer-races-2470.test.ts — usage-count and archive patches
+ * preserve the content edit in an earlier-started owner PUT (flair#2470), real Harper.
  *
  * Harper orders a transaction by its FIRST READ. The converted writers below
  * (the usage-count bump and the maintenance archive) used to write back the
@@ -9,7 +8,7 @@
  * therefore committed as an OLDER full update — was dropped by Harper's
  * out-of-order reconciliation while the PUT still answered 200 (measured during
  * flair#2469 round 5, with audit logging on). Each now writes an INCREMENTAL
- * update of only the fields it owns, which Harper folds around the older PUT
+ * update of only its named patch fields, which Harper folds around the older PUT
  * instead of superseding it.
  *
  * DETERMINISTIC ORDERING via the existing pause-point helpers
@@ -231,7 +230,7 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2470 — a background field-only writer keeps an earlier-started owner PUT (real Harper)", () => {
+describe("flair#2470 — usage-count and archive patches preserve an earlier-started owner content edit (real Harper)", () => {
   it("the usage-count bump's newer incremental write folds around the older owner PUT; the edit survives and the count lands", async () => {
     // Hold the usage-count bump before its own transaction opens.
     for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.usage-count-pre`), { force: true });

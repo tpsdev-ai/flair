@@ -186,7 +186,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
         if (record.embedding?.length > 100) return { skip: true };
         const embedding = await getEmbedding(record.content, "document");
         if (!embedding) return { skip: true };
-        // ONLY the field this backfill owns: an incremental update, never a
+        // Only `embedding`: an incremental update, never a
         // full-row put of the row read above (flair#2470).
         return { update: { embedding } };
       },

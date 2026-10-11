@@ -169,7 +169,7 @@ export async function recordUsageContribution(
       // above stays). The count is only ever bumped on a row in the agent's
       // read scope.
       if (!row || !canRead(row)) return { skip: true };
-      // ONLY the field this contribution owns: an incremental update, never a
+      // Only `usageCount`: an incremental update, never a
       // full-row put of the row read above (flair#2470).
       return { update: { usageCount: (row.usageCount ?? 0) + 1 } };
     },

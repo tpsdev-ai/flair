@@ -331,9 +331,9 @@ export class FeedMemories extends Resource {
           // `verified.timestamp` came from a client `createdAt` must not keep
           // presenting that value after a new write (flair#1960 r2). The feed
           // body's own `createdAt` is recorded only as the CLAIM
-          // `provenance.claimed.createdAt`, never as a verified timestamp. Only
-          // the values this re-authoring derives from the stored row (the
-          // incarnation token, an omitted visibility, the originator-instance and
+          // `provenance.claimed.createdAt`, never as a verified timestamp. The
+          // values this re-authoring derives from the stored row (the incarnation
+          // token, an omitted visibility, a carried expiry, the originator-instance and
           // federation bookkeeping) are carried across; it never writes back a
           // stale echo of the content it read, and it is a foreground client
           // write, so the field-only rule for background stamps (flair#2470) does
@@ -634,7 +634,7 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
         delete row.expiresAt;
         const error = stampEphemeralExpiry(row);
         if (error) throw new Error(`flair: deduplicated ephemeral row ${id} could not be repaired (${error})`);
-        // ONLY the field this repair owns: an incremental update, never a
+        // Only `expiresAt`: an incremental update, never a
         // full-row put of the row read above (flair#2470).
         await (databases as any).flair.Memory.update(id, { expiresAt: row.expiresAt }, c);
         return { kind: "written" as const, row };
