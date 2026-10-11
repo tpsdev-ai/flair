@@ -45,6 +45,7 @@ export {
   cursorLaunchHostSource,
   isAcceptableHostSourceId,
   isAcceptableHostSourceUrl,
+  isStoredReceipt,
   launchReceiptId,
   permanentReceiptRefusal,
   RECEIPT_NAMESPACE,
@@ -53,6 +54,7 @@ export {
   type LaunchReceipt,
   type ReceiptRefusal,
   type ReceiptStore,
+  type StoredReceipt,
 } from "./receipt.js";
 export { createMemoryReceiptStore } from "./receipt-store.js";
 export {

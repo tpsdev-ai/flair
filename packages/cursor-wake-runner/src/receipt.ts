@@ -10,10 +10,13 @@
  *
  * Scope: the write is PRIVATE and omits `hostSourceScope`, so the server's read
  * projection keeps the pointer AUTHOR-ONLY — a non-author who can read this
- * memory sees `hostSource: "withheld"` — and this branch's bootstrap does not
- * render host-source pointers at all. The id and url therefore do not reach
- * other agents' bootstrap; a `hostSource` is the writer's claim, not verified
- * host authorship.
+ * memory sees `hostSource: "withheld"`. Bootstrap PROSE cites a pointer the
+ * reader may see (flair#2446): this memory's author sees the short
+ * `[via cursor/launch <id8> (unverified)]` citation (host/kind and the first 8
+ * id characters, display-only — the full url never appears there), and a reader
+ * who may read the memory but not the pointer sees `[via withheld]`; an admin
+ * bootstrap takes no pointer join. A `hostSource` is the writer's claim, not
+ * verified host authorship.
  *
  * The id is the Cursor agent id: on create, the id Cursor returned (the
  * requested id when the response carries none); on a 409 replay, the requested
@@ -61,14 +64,27 @@ export interface LaunchReceipt {
   hostSource?: CursorLaunchSource;
 }
 
+/** The identity a stored receipt row is read back as — the fields the
+ *  existing-receipt check compares before it calls a row this runner's receipt. */
+export interface StoredReceipt {
+  /** The stored row's author (the server's `Memory.agentId`). */
+  author: string;
+  /** The stored row's content. */
+  content: string;
+  /** The stored row's joined host-source pointer, or `"withheld"` when the
+   *  reader may read the record but not its pointer. Absent when the row carries
+   *  no pointer. */
+  hostSource?: CursorLaunchSource | "withheld";
+}
+
 /**
- * Read/decide the launch receipt store. `has` answers whether a receipt with
- * this id already exists (a `get` that returns null on 404 and THROWS on any
- * other failure — an unknown read must never license a write); `write` puts
- * the record.
+ * Read/decide the launch receipt store. `read` returns the stored row's
+ * identity (see {@link StoredReceipt}) — or null when NO row exists at the id (a
+ * `get` that returns null on 404 and THROWS on any other failure — an unknown
+ * read must never license a write); `write` puts the record.
  */
 export interface ReceiptStore {
-  has: (id: string) => Promise<boolean>;
+  read: (id: string) => Promise<StoredReceipt | null>;
   write: (receipt: LaunchReceipt) => Promise<void>;
 }
 
@@ -156,22 +172,61 @@ export function buildLaunchReceipt(
 }
 
 /**
- * HTTP statuses the runner treats as a NON-RETRYABLE receipt-write refusal
+ * Whether a row already stored at a receipt id IS this runner's receipt — the
+ * ONE identity check the existing-receipt path makes before it calls the row
+ * "unchanged" and acks. All of these must hold:
+ *   - the row's author is the runner's OWN agent (`stored.author === agentId`);
+ *   - the row's content EQUALS the deterministic receipt content; and
+ *   - the row's host-source IDENTITY (`host`/`kind`/`id`) matches the receipt's —
+ *     a `"withheld"` pointer, or a different id, is a DIFFERENT record.
+ * The url is NOT part of the identity: a create stores the url Cursor returned,
+ * a replay (409) carries none, and the stored one stands.
+ *
+ * A row that fails any of these is a foreign record occupying the id (a
+ * collision, or another agent's memory). It is NOT this runner's receipt, so the
+ * caller must fail WITHOUT acking and WITHOUT overwriting it.
+ */
+export function isStoredReceipt(
+  stored: StoredReceipt | null | undefined,
+  agentId: string,
+  receipt: LaunchReceipt,
+): boolean {
+  if (!stored) return false;
+  if (stored.author !== agentId) return false;
+  if (stored.content !== receipt.content) return false;
+  return sameSourceIdentity(receipt.hostSource, stored.hostSource);
+}
+
+/** The host-source IDENTITY (`host`/`kind`/`id`) of two pointers matches: a
+ *  `"withheld"` pointer never matches, and absence matches only absence. */
+function sameSourceIdentity(
+  expected: CursorLaunchSource | undefined,
+  stored: CursorLaunchSource | "withheld" | undefined,
+): boolean {
+  if (stored === "withheld") return false;
+  if (expected === undefined) return stored === undefined;
+  if (stored === undefined) return false;
+  return expected.host === stored.host && expected.kind === stored.kind && expected.id === stored.id;
+}
+
+/**
+ * HTTP statuses the runner treats as NON-RETRYABLE for a receipt write
  * (flair#1944): a malformed or invalid request (400), a conflict (409), a body
- * too large (413), an unprocessable request (422). This is the runner's POLICY,
- * not proof the server would refuse every replay: the runner does not retry
- * these because a replay reaches the same write (Cursor 409 -> "already" -> no
- * receipt yet -> write) and holding the watermark for one would block every
- * later dispatch for this agent forever. Every other failure — a network error,
- * a timeout, 401/403, 408, 429, any 5xx, any other status — is treated as
- * transient or a configuration fault and retried next cycle.
+ * too large (413), an unprocessable request (422). The runner treats these
+ * statuses as non-retryable: it does not retry them because a replay reaches
+ * the same write (Cursor 409 -> "already" -> no receipt yet -> write) and
+ * holding the watermark for one would block every later dispatch for this
+ * agent. Every other failure — a network error, a timeout, 401/403, 408, 429,
+ * any 5xx, any other status — is treated as transient or a configuration fault
+ * and retried next cycle.
  */
 export const RECEIPT_PERMANENT_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 409, 413, 422]);
 
-/** A receipt write the server permanently refused: its status and error code only. */
+/** A receipt write the runner treats as a non-retryable refusal: its status and
+ *  error code only. */
 export interface ReceiptRefusal {
   status: number;
-  /** The server's named error code (`{"error": "<code>"}`), or null when the body carries none. */
+  /** The server's named error code (`{"error": "<code>"}`), when present; null when the body carries none. */
   code: string | null;
 }
 
@@ -196,9 +251,9 @@ function errorCodeFrom(body: unknown): string | null {
  * Classify a receipt WRITE failure. Returns the refusal when the error carries
  * an HTTP `status` (flair-client's FlairError exposes `status` and the response
  * `body`) in {@link RECEIPT_PERMANENT_REFUSAL_STATUSES}; otherwise null, and the
- * caller keeps the watermark back and retries. Only the status and a named
- * error code are returned — never the server's message, which can echo the
- * submitted values.
+ * caller keeps the watermark back and retries. Only the status and the named
+ * error code, when present, are returned — never the server's message, which can
+ * echo the submitted values.
  */
 export function permanentReceiptRefusal(err: unknown): ReceiptRefusal | null {
   if (!err || typeof err !== "object") return null;

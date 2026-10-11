@@ -261,12 +261,18 @@ function recordingCursor(handler: (input: LaunchInput) => Promise<LaunchResult> 
  * receipt just needs to land. A fresh store per cycle, so no case inherits
  * another's ids.
  */
-function acceptingReceiptStore(): ReceiptStore {
-  const written = new Set<string>();
+function acceptingReceiptStore(agentId = CREW): ReceiptStore {
+  const written = new Map<string, { author: string; content: string; hostSource?: { host: string; kind: string; id: string } }>();
   return {
-    has: async (id) => written.has(id),
+    read: async (id) => written.get(id) ?? null,
     write: async (receipt) => {
-      written.add(receipt.id);
+      written.set(receipt.id, {
+        author: agentId,
+        content: receipt.content,
+        ...(receipt.hostSource
+          ? { hostSource: { host: receipt.hostSource.host, kind: receipt.hostSource.kind, id: receipt.hostSource.id } }
+          : {}),
+      });
     },
   };
 }

@@ -10,11 +10,18 @@
  * deterministic content and the `hostSource` the server validated and stored;
  * a replay leaves the url-bearing receipt unchanged and writes no second one;
  * a url the server's grammar would refuse (http, empty userinfo) is omitted
- * with one log line and the receipt still lands; a receipt the server
- * PERMANENTLY refuses (a real 400) is acked and reported as `receiptRefused`
+ * with one log line and the receipt still lands; a receipt the runner treats as a
+ * non-retryable refusal (a real 400) is acked and reported as `receiptRefused`
  * without holding later dispatches; a refusal from an identity the server does
  * not know (a real 401) is `receiptFailed` and does NOT advance the watermark;
- * a dry-run records nothing.
+ * a row already at the receipt id that is NOT this runner's own receipt (another
+ * agent's memory, or the runner's own row with different content) is a named
+ * `receiptMismatched`, left untouched, and NOT acked; a dry-run records nothing.
+ *
+ * MUTATION (flair#1944 round 3): make the existing-receipt path existence-only
+ * (`read` returns a bare boolean, or ignores the row's identity). The two
+ * "not this runner's receipt" cases below then return `"unchanged"` and ACK —
+ * this file fails.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
@@ -28,6 +35,7 @@ import {
   createMemoryReceiptStore,
   launchReceiptId,
   runWakeCycle,
+  wakeAgentId,
   type CatchupPage,
   type CatchupPort,
   type CursorAgentClient,
@@ -197,7 +205,7 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const refused = await clientFor(mkAgent(`agent-z-${randomUUID()}`), false);
     let seen: unknown;
     const store: ReceiptStore = {
-      has: createMemoryReceiptStore(reader).has,
+      read: createMemoryReceiptStore(reader).read,
       write: async (receipt) => {
         try {
           await createMemoryReceiptStore(refused).write(receipt);
@@ -261,7 +269,7 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     }, 120_000);
   }
 
-  test("a receipt the server permanently refuses (HTTP 400) is acked as receiptRefused, and later dispatches still launch and record", async () => {
+  test("a receipt the runner treats as a non-retryable refusal (HTTP 400) is acked as receiptRefused, and later dispatches still launch and record", async () => {
     const agent = mkAgent(`agent-f-${randomUUID()}`);
     const client = await clientFor(agent);
     const production = createMemoryReceiptStore(client);
@@ -274,7 +282,7 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     // every replay would be refused the same way. The 400 is the server's own.
     let seen: unknown;
     const store: ReceiptStore = {
-      has: production.has,
+      read: production.read,
       write: async (receipt) => {
         if (receipt.id !== refusedId) return production.write(receipt);
         try {
@@ -318,6 +326,61 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     expect(await client.memory.get(refusedId), "the refused receipt was not stored").toBeNull();
     const next = await client.memory.get(launchReceiptId(String(nextEvent.id)));
     expect(next?.hostSource).toEqual({ v: 1, host: "cursor", kind: "launch", id: cursorAgentId });
+  }, 120_000);
+
+  test("a row at the receipt id that is ANOTHER agent's memory is not this runner's receipt: named mismatch, no ack, row untouched", async () => {
+    const runner = mkAgent(`agent-m-${randomUUID()}`);
+    const other = mkAgent(`agent-n-${randomUUID()}`);
+    const runnerClient = await clientFor(runner);
+    const otherClient = await clientFor(other);
+    const event = dispatchEvent(runner.id);
+    const id = launchReceiptId(String(event.id));
+    // Another agent's SHARED memory already occupies the receipt id (a shared
+    // row is readable by the runner, so a bare existence check would see it).
+    await otherClient.memory.write("an unrelated memory written by another agent", { id, visibility: "shared" });
+    const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
+
+    const result = await runWakeCycle({
+      agentId: runner.id,
+      catchup: port,
+      cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-abcdef01-2345-8678-89ab-cdef01234567" }),
+      receipts: createMemoryReceiptStore(runnerClient),
+    });
+
+    expect(result.items[0]?.receipt, "a foreign row is not this runner's receipt").toBe("mismatched");
+    expect(result.receiptMismatched, "the failure names the id").toContain(id);
+    expect(result.receiptFailed).toBeNull();
+    expect(result.acked, "a foreign row must not ack the event").toBeNull();
+    expect(acks).toEqual([]);
+    const got = await otherClient.memory.get(id);
+    expect(got?.content, "the foreign row is left untouched").toBe("an unrelated memory written by another agent");
+    expect(got?.agentId).toBe(other.id);
+    expect(await runnerClient.memory.list(), "the runner wrote no receipt of its own").toHaveLength(0);
+  }, 120_000);
+
+  test("the runner's OWN row at the receipt id with different content: named mismatch, no ack, row untouched", async () => {
+    const agent = mkAgent(`agent-o-${randomUUID()}`);
+    const client = await clientFor(agent);
+    const event = dispatchEvent(agent.id);
+    const id = launchReceiptId(String(event.id));
+    // The runner's own agent already stored SOMETHING at the id, but it is not
+    // the deterministic receipt for this event.
+    await client.memory.write("a stale receipt naming a different launch", { id });
+    const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
+
+    const result = await runWakeCycle({
+      agentId: agent.id,
+      catchup: port,
+      cursor: cursorReturning({ outcome: "already", cursorAgentId: wakeAgentId(String(event.id)) }),
+      receipts: createMemoryReceiptStore(client),
+    });
+
+    expect(result.items[0]?.receipt).toBe("mismatched");
+    expect(result.receiptMismatched).toContain(id);
+    expect(result.acked, "a different-content row must not ack the event").toBeNull();
+    expect(acks).toEqual([]);
+    const got = await client.memory.get(id);
+    expect(got?.content, "the row is left untouched").toBe("a stale receipt naming a different launch");
   }, 120_000);
 
   test("a dry-run records no receipt and acks nothing", async () => {

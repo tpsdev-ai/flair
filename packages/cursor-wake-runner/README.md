@@ -44,44 +44,58 @@ With an Ed25519 key, `FLAIR_AGENT_ID` is the signing identity and the feed reque
 ## Launch receipt
 
 After a dispatch is handed to a Cursor Cloud Agent ("created" or "already"),
-the runner records ONE memory as its own agent — unless the server permanently
-refuses the write, in which case the event is acked without it (see **Refused**
-below): a stable id derived from the OrgEvent id, content naming only the
-dispatch id and the Cursor agent id, and a `hostSource` `{ host: "cursor", kind:
-"launch", id, url? }`. The `id` is the Cursor agent id: on create, the id Cursor
-returned (the requested id when the response carries none); on a 409 replay, the
-requested id, which Cursor reported as already in use. The `url` is set only on
-create, and only as Cursor returned it. The write is private and omits
-`hostSourceScope`, so the server's read projection keeps the pointer author-only
-(a non-author reading the memory sees `hostSource: "withheld"`), and this
-branch's bootstrap does not render host-source pointers — the id and url do not
-reach other agents' bootstrap. A `hostSource` is the writer's claim, not
-verified host authorship. A `hostSource` value the server's grammar would refuse
-(checked on its NFC form, as the server checks it; the server stores that form)
-is omitted with one log line, and the receipt still lands if the remaining write
-succeeds.
+the runner ATTEMPTS one memory as its own agent: a stable id derived from the
+OrgEvent id, content naming only the dispatch id and the Cursor agent id, and a
+`hostSource` `{ host: "cursor", kind: "launch", id, url? }`. The ack follows a
+successful write, OR an existing row at that id VERIFIED as this runner's own
+receipt (same author, same deterministic content, same host-source identity); a
+row that fails that check is a different record, reported as `receiptMismatched`
+and left untouched (see **Not ours** below), and a receipt the runner treats as
+a non-retryable refusal is acked without one (see **Refused** below). The `id` is
+the Cursor agent id: on create, the id Cursor returned (the requested id when the
+response carries none); on a 409 replay, the requested id, which Cursor reported
+as already in use. The `url` is set only on create, and only as Cursor returned
+it. The write is private and omits `hostSourceScope`, so the server's read
+projection keeps the pointer author-only (a non-author reading the memory sees
+`hostSource: "withheld"`). Bootstrap prose CITES a pointer the reader may see
+(flair#2446): this memory's author sees the short
+`[via cursor/launch <id8> (unverified)]` citation — host/kind and the first 8 id
+characters, display-only; the full url never appears there — and a reader who
+may read the memory but not the pointer sees `[via withheld]`; an admin bootstrap
+takes no pointer join. A `hostSource` is the writer's claim, not verified host
+authorship. A `hostSource` value the server's grammar would refuse (checked on
+its NFC form, as the server checks it; the server stores that form) is omitted
+with one line through the supplied `log` callback (the shipped CLI passes one),
+and the receipt still lands if the remaining write succeeds.
 
-A receipt already present under that id is left unchanged, so a replay that
-reuses the agent (409) retries the receipt without rewriting the stored one.
-The write precedes the watermark ack — except for a receipt the server
-permanently refuses, which is acked without (see **Refused**) — and a failed
-write is classified:
+A receipt already present under that id is left unchanged only when it VERIFIES
+as this runner's own receipt (same author, content and host-source identity), so
+a replay that reuses the agent (409) retries the receipt without rewriting the
+stored one. The ack follows a successful write or a verified existing receipt —
+except for a receipt the runner treats as a non-retryable refusal, which is acked
+without one (see **Refused**) — and a failed write is classified:
 
 - **Refused** — the runner treats a write Flair answered with 400, 409, 413 or
-  422 as a non-retryable refusal; that is the runner's policy, not proof the
-  server would refuse every replay. The event is acked anyway (the launch is
+  422 as a non-retryable refusal. The event is acked anyway (the launch is
   real; the receipt is provenance, not control) and the cycle result's
-  `receiptRefused` names the event, the HTTP status and the server's error code
-  — never the content — with one log line; the exit status is unaffected.
-  Retrying would refuse every replay the same way and hold every later dispatch
-  for this agent.
+  `receiptRefused` names the event, the HTTP status and the server's error code,
+  when present — never the content — with one line through the supplied `log`
+  callback; the exit status is unaffected. Replaying would meet the same refusal
+  and hold every later dispatch for this agent.
+- **Not ours** — a row already at the receipt id that is NOT this runner's
+  receipt: another agent's memory, or this agent's own row with different
+  content, or a different host-source identity. The row is left untouched, the
+  event is NOT acked, `receiptMismatched` names the id and the reason, and a
+  one-shot run (`--once`) exits 2.
 - **Failed** — anything else: a network error or timeout, 401, 403, 408, 429,
-  a 5xx, or a failed existence read. The event is not acked, `receiptFailed`
+  a 5xx, or a failed read. The event is not acked, `receiptFailed`
   is set, the next cycle retries the receipt, and a one-shot run (`--once`)
   exits 2 (a poller under `--interval` keeps polling).
 
 Covered by `test/integration/host-source-cursor-launch-receipt-1940.test.ts`
-(the runner cycle against a real Harper) and
+(the runner cycle against a real Harper — it also pins that an unrelated memory at
+the receipt id, and the runner's own row with different content, are a named
+`receiptMismatched`, left untouched and not acked) and
 `test/integration/cursor-wake-cli-launch-receipt-1940.test.ts` (the shipped CLI
 through the real Flair client and a local Cursor fixture — drop the store and
 it fails). `test/host-source-parity.test.ts` runs the runner's copy of the

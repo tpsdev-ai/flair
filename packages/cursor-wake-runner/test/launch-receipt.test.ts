@@ -4,6 +4,7 @@ import {
   buildLaunchReceipt,
   cursorLaunchHostSource,
   isAcceptableHostSourceUrl,
+  isStoredReceipt,
   launchReceiptId,
   permanentReceiptRefusal,
   runWakeCycle,
@@ -37,7 +38,9 @@ interface Stored {
   hostSource?: { host: string; kind: string; id: string; url?: string };
 }
 
-/** A receipt store that records every call into the shared `order` log. */
+/** A receipt store that records every call into the shared `order` log. Every
+ *  row is authored by `opts.author` (default CREW) unless `opts.authors` names a
+ *  different one for an id — so a case can seed a row owned by ANOTHER agent. */
 function fakeStore(
   order: string[],
   opts: {
@@ -47,15 +50,27 @@ function fakeStore(
     writeError?: unknown;
     writeErrorFor?: string[];
     readError?: unknown;
+    /** The author of every row not named in `authors`. */
+    author?: string;
+    /** Per-id authors (a row owned by another agent). */
+    authors?: Map<string, string>;
+    /** Pre-seed rows already at an id. */
+    seed?: Map<string, Stored>;
   } = {},
 ): { store: ReceiptStore; records: Map<string, Stored> } {
-  const records = new Map<string, Stored>();
+  const records = opts.seed ?? new Map<string, Stored>();
   const store: ReceiptStore = {
-    has: async (id) => {
-      order.push(`has:${id}`);
+    read: async (id) => {
+      order.push(`read:${id}`);
       if (opts.readError !== undefined) throw opts.readError;
       if (opts.failRead) throw new Error("store read unavailable");
-      return records.has(id);
+      const row = records.get(id);
+      if (row === undefined) return null;
+      return {
+        author: opts.authors?.get(id) ?? opts.author ?? CREW,
+        content: row.content,
+        ...(row.hostSource ? { hostSource: row.hostSource } : {}),
+      };
     },
     write: async (receipt) => {
       order.push(`write:${receipt.id}`);
@@ -170,6 +185,9 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
   });
 
   test("a replay that reuses the agent writes no second receipt and leaves the url-bearing one unchanged", async () => {
+    // Also the "this runner's own MATCHING receipt -> unchanged + ack" case: the
+    // stored row VERIFIES (author, content, host-source identity) and its url is
+    // not part of the identity.
     const order: string[] = [];
     const { store, records } = fakeStore(order);
     const first = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
@@ -201,7 +219,7 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
     expect(order.some((entry) => entry.startsWith("ack:"))).toBe(false);
   });
 
-  test("an unreadable store (failed has) does not license a write and does not ack", async () => {
+  test("an unreadable store (failed read) does not license a write and does not ack", async () => {
     const order: string[] = [];
     const { store, records } = fakeStore(order, { failRead: true });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
@@ -240,6 +258,108 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
   });
 });
 
+describe("isStoredReceipt — a row is this runner's receipt only if it VERIFIES (flair#1944 round 3)", () => {
+  const receipt = buildLaunchReceipt("evt-1", { cursorAgentId: "bc-1", url: "https://cursor.example/agents/bc-1" }).receipt;
+
+  test("matches on the same author, content and host-source identity; the url is not identity", () => {
+    expect(
+      isStoredReceipt({ author: CREW, content: receipt.content, hostSource: receipt.hostSource }, CREW, receipt),
+    ).toBe(true);
+    // A replay carries no url; the stored url stands, and identity still matches.
+    expect(
+      isStoredReceipt(
+        { author: CREW, content: receipt.content, hostSource: { host: "cursor", kind: "launch", id: "bc-1" } },
+        CREW,
+        receipt,
+      ),
+    ).toBe(true);
+  });
+
+  test("a different author, content, source id, a withheld pointer, or no row does NOT match", () => {
+    expect(isStoredReceipt(null, CREW, receipt)).toBe(false);
+    expect(isStoredReceipt({ author: "agent-b", content: receipt.content, hostSource: receipt.hostSource }, CREW, receipt)).toBe(false);
+    expect(isStoredReceipt({ author: CREW, content: "different", hostSource: receipt.hostSource }, CREW, receipt)).toBe(false);
+    expect(
+      isStoredReceipt(
+        { author: CREW, content: receipt.content, hostSource: { host: "cursor", kind: "launch", id: "bc-OTHER" } },
+        CREW,
+        receipt,
+      ),
+    ).toBe(false);
+    expect(isStoredReceipt({ author: CREW, content: receipt.content, hostSource: "withheld" }, CREW, receipt)).toBe(false);
+    expect(isStoredReceipt({ author: CREW, content: receipt.content }, CREW, receipt)).toBe(false);
+  });
+});
+
+describe("runWakeCycle — a row at the receipt id that is NOT this runner's receipt (flair#1944 round 3)", () => {
+  const id = launchReceiptId("evt-1");
+
+  test("another agent's memory at the id: no ack, a named mismatch, row untouched", async () => {
+    const order: string[] = [];
+    const { store, records } = fakeStore(order, {
+      seed: new Map([[id, { content: "an unrelated memory" }]]),
+      author: "agent-b",
+    });
+    const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client, calls } = cursorReturning({ outcome: "created", cursorAgentId: "bc-1" });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: store });
+    expect(result.items[0].receipt).toBe("mismatched");
+    expect(result.receiptMismatched).toContain(id);
+    expect(result.receiptMismatched).toContain("agent-b");
+    expect(result.receiptFailed).toBeNull();
+    expect(result.acked).toBeNull();
+    expect(acks).toEqual([]);
+    expect(records.get(id)?.content, "the foreign row is left untouched").toBe("an unrelated memory");
+    expect(records.size).toBe(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("this runner's own row at the id with different content: no ack, row untouched", async () => {
+    const order: string[] = [];
+    const { store, records } = fakeStore(order, {
+      seed: new Map([[id, { content: "a stale receipt naming a different launch" }]]),
+    });
+    const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client } = cursorReturning({ outcome: "already", cursorAgentId: "bc-1" });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: store });
+    expect(result.items[0].receipt).toBe("mismatched");
+    expect(result.receiptMismatched).toContain("content");
+    expect(result.acked).toBeNull();
+    expect(acks).toEqual([]);
+    expect(records.get(id)?.content, "the row is left untouched").toBe("a stale receipt naming a different launch");
+  });
+
+  test("this runner's own row with a different host-source id: no ack", async () => {
+    const expected = buildLaunchReceipt("evt-1", { cursorAgentId: "bc-1" }).receipt;
+    const order: string[] = [];
+    const { store } = fakeStore(order, {
+      seed: new Map([[id, { content: expected.content, hostSource: { host: "cursor", kind: "launch", id: "bc-OTHER" } }]]),
+    });
+    const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client } = cursorReturning({ outcome: "already", cursorAgentId: "bc-1" });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: store });
+    expect(result.items[0].receipt).toBe("mismatched");
+    expect(result.receiptMismatched).toContain("host source");
+    expect(result.acked).toBeNull();
+    expect(acks).toEqual([]);
+  });
+
+  test("this runner's own MATCHING receipt: unchanged + ack", async () => {
+    const expected = buildLaunchReceipt("evt-1", { cursorAgentId: "bc-1" }).receipt;
+    const order: string[] = [];
+    const { store } = fakeStore(order, {
+      seed: new Map([[id, { content: expected.content, hostSource: expected.hostSource }]]),
+    });
+    const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client } = cursorReturning({ outcome: "already", cursorAgentId: "bc-1" });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: store });
+    expect(result.items[0].receipt).toBe("unchanged");
+    expect(result.receiptMismatched).toBeNull();
+    expect(result.acked).toBe("p1");
+    expect(acks).toEqual(["p1"]);
+  });
+});
+
 /** The error flair-client throws for a non-2xx response: status + (at most 500 chars of) body. */
 function serverError(status: number, body: string): FlairError {
   return new FlairError("PUT", "/Memory/x", status, body.slice(0, 500));
@@ -251,8 +371,8 @@ const ECHOING_400 = JSON.stringify({
   message: 'hostSource.id "ECHOED-SUBMITTED-VALUE" does not match the id grammar',
 });
 
-describe("permanentReceiptRefusal — which receipt write failures are permanent (flair#1944)", () => {
-  test("400, 409, 413 and 422 are permanent, with the status and the named error code", () => {
+describe("permanentReceiptRefusal — which receipt write failures are non-retryable (flair#1944)", () => {
+  test("400, 409, 413 and 422 are non-retryable, with the status and the named error code", () => {
     for (const status of [400, 409, 413, 422]) {
       expect(permanentReceiptRefusal(serverError(status, ECHOING_400))).toEqual({ status, code: "invalid_host_source" });
     }
@@ -283,7 +403,7 @@ describe("permanentReceiptRefusal — which receipt write failures are permanent
   });
 });
 
-describe("runWakeCycle — a receipt the server permanently refuses (flair#1944)", () => {
+describe("runWakeCycle — a receipt the runner treats as a non-retryable refusal (flair#1944)", () => {
   test("a 400 is acked, reported as receiptRefused with status + code only, and logged once", async () => {
     const order: string[] = [];
     const { store, records } = fakeStore(order, { writeError: serverError(400, ECHOING_400) });

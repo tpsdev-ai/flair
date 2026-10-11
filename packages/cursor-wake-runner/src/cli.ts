@@ -22,6 +22,7 @@ function printResult(result: WakeResult): void {
   if (result.acked) lines.push(`acked: ${result.acked}`);
   if (result.blocked) lines.push(`blocked: ${result.blocked}`);
   if (result.receiptFailed) lines.push(`receipt failed: ${result.receiptFailed}`);
+  if (result.receiptMismatched) lines.push(`receipt id conflict: ${result.receiptMismatched}`);
   for (const refused of result.receiptRefused) {
     lines.push(`receipt refused: ${refused.eventId} (HTTP ${refused.status}${refused.code ? ` ${refused.code}` : ""}; acked without it)`);
   }
@@ -72,7 +73,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       pageLimit: config.pageLimit,
     });
     printResult(result);
-    return result.blocked || result.receiptFailed ? 2 : 0;
+    return result.blocked || result.receiptFailed || result.receiptMismatched ? 2 : 0;
   };
 
   if (config.intervalSec === null) return runOnce();
