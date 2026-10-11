@@ -18,13 +18,10 @@
  *
  * The mock is typed against the installed `openclaw` peer's API; its simulated
  * behavior does not establish runtime parity with supported hosts. That requires
- * real-host drills. The nine real-runner cases (see `supportedRunnerHost`) take
- * those drills one step further: they deliver capture callbacks through the hook
- * runner of a pinned, SUPPORTED release (`openclaw-supported`, an npm-alias dev
- * dependency), and read the fixture's `runtime.version` from that same installed
- * package — so the host that registers the plugin and the host that runs it are
- * the same supported release, not the `openclaw` peer the lockfile happens to
- * resolve (flair#1940).
+ * real-host drills. In the real-runner cases (see `supportedRunnerHost`),
+ * the registration fixture reports the installed runner package's version,
+ * while callback delivery uses that package's real runner; registration itself
+ * is the mock (createMockApi).
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
@@ -1104,18 +1101,11 @@ describe("evaluateAutoCapture", () => {
   });
 });
 
-// ── the supported host the real-runner cases drive ───────────────────────────
+// ── the pinned runner package ───────────────────────────────────────────────
 //
-// The nine cases below deliver capture callbacks through OpenClaw's own hook
-// runner, so the runner must come from a release the plugin's
-// TESTED_HOST_VERSIONS names. The `openclaw` peer the lockfile resolves is not
-// guaranteed to be one (flair#1940: it resolved 2026.9.5, which the plugin does
-// not support). They therefore import the pinned dev dependency
-// `openclaw-supported` (an npm alias) and read the version from that installed
-// package's own package.json — the fixture's `runtime.version` and the runner
-// are then the SAME release. The membership assertion below fails first and
-// loudly if the alias drifts off the tested set, naming the cause instead of
-// letting the nine fail on "no hooks".
+// The registration fixture reports the installed runner package's version,
+// while callback delivery uses that package's real runner; registration itself
+// is the mock (createMockApi).
 function supportedRunnerHost(): { dist: string; version: string } {
   const dist = dirname(fileURLToPath(import.meta.resolve("openclaw-supported")));
   const pkg = JSON.parse(readFileSync(join(dist, "..", "package.json"), "utf8")) as { version: string };
@@ -1136,9 +1126,7 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
   test("the real-runner host is a supported OpenClaw release, read from the installed package", async () => {
     const { dist, version } = supportedRunnerHost();
     const { TESTED_HOST_VERSIONS } = await loadModule();
-    // Both the fixture's runtime.version and the runner come from this release.
-    // If it is not in the tested set the plugin registers nothing; assert it here
-    // so that drift is the failure, not the nine cases' "hasHooks" expectation.
+    // The fixture's reported version must be in the tested set.
     expect(TESTED_HOST_VERSIONS).toContain(version);
     expect(runnerEntry(dist)).toBeDefined();
   });
