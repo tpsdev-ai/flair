@@ -76,6 +76,23 @@ export const MAX_USAGE_IDS_PER_CALL = 20;
 export type CanReadMemory = (record: ScopableRecord | null | undefined) => boolean;
 
 /**
+ * The named refusal of a contribution whose ledger READ failed. The read is the
+ * decision "does this (agent, memory) pair already have a row?" — an error is
+ * NOT evidence there is none. Treating it as "no row" would upsert over whatever
+ * row is stored and bump the count a second time, so this contribution is
+ * aborted instead (no ledger write, no count change) and the batch logs the
+ * failure; the other ids in the batch are unaffected.
+ */
+export class UsageLedgerReadError extends Error {
+  readonly ledgerId: string;
+  constructor(ledgerId: string, cause: unknown) {
+    super(`usage ledger row read failed for ${ledgerId}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "UsageLedgerReadError";
+    this.ledgerId = ledgerId;
+  }
+}
+
+/**
  * One (agentId, memoryId) contribution — the shared ledger-write core.
  *
  * READ-SCOPE GATE: `canRead` is the contributing agent's read-scope predicate
@@ -90,7 +107,10 @@ export type CanReadMemory = (record: ScopableRecord | null | undefined) => boole
  * Ledger-row-create FIRST, THEN the Memory.usageCount bump — so a crash
  * between the two leaves the SAFE failure state (ledger row exists, count
  * not yet bumped: a later retry just re-checks and no-ops) rather than the
- * reverse (count bumped, no ledger row → a retry would double-count).
+ * reverse (count bumped, no ledger row → a retry would double-count). The
+ * ledger READ that decides all this FAILS CLOSED: an error is not "no row", so
+ * that contribution aborts (named UsageLedgerReadError, no ledger write, no
+ * count change) rather than upsert over the stored row and bump again.
  *
  * The MemoryUsage ledger reads and its row create keep the withDetachedTxn
  * discipline — one wrap per discrete Harper call (table-helpers.ts's
@@ -138,8 +158,9 @@ export async function recordUsageContribution(
     USAGE_LOCK_ATTEMPTS,
     USAGE_LOCK_WAIT_MS,
   );
-  // Not recorded when the lock stayed held or the store has none — the same
-  // silent no-op as every other failure here (no ledger row, no count change).
+  // The lock stayed held (or the store has none): THIS contribution is skipped —
+  // no ledger row, no count change — and the caller still gets its recorded
+  // response. Other ids in the same batch may already have been credited.
   if (outcome.kind !== "done") return;
 
   // Test-only: inert unless the fault-injection env opt-in is set and armed
@@ -189,8 +210,15 @@ async function recordUsageContributionLocked(
     // Bypasses resources/MemoryUsage.ts's own auth wrapper by design — this
     // IS the trusted internal caller that resource's module doc describes
     // (same "raw table object" pattern resources/Memory.ts uses for
-    // MemoryGrant).
-    const existingContribution = await (databases as any).flair.MemoryUsage.get(ledgerId, owned).catch(() => null);
+    // MemoryGrant). The read DECIDES whether a row is already there, so a
+    // failed read is not "no row": abort this contribution (fail closed,
+    // named) rather than upsert over the stored row and bump the count again.
+    let existingContribution: any;
+    try {
+      existingContribution = await (databases as any).flair.MemoryUsage.get(ledgerId, owned);
+    } catch (err) {
+      throw new UsageLedgerReadError(ledgerId, err);
+    }
     if (existingContribution) return null; // already counted by this agent — silent no-op
 
     // Test-only: arms between the ledger check above and the ledger create below,
@@ -374,6 +402,11 @@ export async function recordCitations(
         // replace, or a change found on every attempt); the count bump was
         // refused and nothing was written.
         console.error("recordCitations: not credited, stored_row_changed (no-op)", { memoryId: id, reason: "stored_row_changed", err });
+      } else if (err instanceof UsageLedgerReadError) {
+        // flair#2333: the ledger read that decides whether this pair already
+        // has a row failed — not "no row". This contribution is aborted (no
+        // ledger write, no count bump); the other ids stand.
+        console.error("recordCitations: not credited, ledger read failed (no-op)", { memoryId: id, ledgerId: err.ledgerId, reason: "ledger_read_failed", err });
       } else {
         console.error("recordCitations: failed to credit (no-op)", { memoryId: id, err });
       }
@@ -432,6 +465,10 @@ export async function recordUsageBatch(
         // replace, or a change found on every attempt); the count bump was
         // refused and nothing was written.
         console.error("RecordUsage.post: not recorded, stored_row_changed (treated as no-op)", { memoryId, reason: "stored_row_changed", err });
+      } else if (err instanceof UsageLedgerReadError) {
+        // flair#2333: the ledger read failed — not "no row". This contribution
+        // is aborted (no ledger write, no count bump); the other ids stand.
+        console.error("RecordUsage.post: not recorded, ledger read failed (treated as no-op)", { memoryId, ledgerId: err.ledgerId, reason: "ledger_read_failed", err });
       } else {
         console.error("RecordUsage.post: failed to record usage (treated as no-op)", { memoryId, err });
       }

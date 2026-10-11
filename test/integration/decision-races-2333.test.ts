@@ -17,10 +17,12 @@
  *      IdP subject, and provisions a principal when none exists. Two grants for
  *      one new subject must not both provision.
  *
- * Each case holds the first request between its read and its write (the pause
- * points below), runs the competing request to completion, then releases it: the
- * stored state must be the safe one. A CONTROL case per group runs the same path
- * with no competitor (the ordinary path is unchanged). The pause points are
+ * Each RACE case holds the first request between its read and its write (the
+ * pause points below), runs the competing request to completion, then releases
+ * it: the stored state must be the safe one. The "… commit" cases below instead
+ * pause AFTER the first request released its lock — not between its read and its
+ * write — see that section. A CONTROL case per group runs the same path with no
+ * competitor (the ordinary path is unchanged). The pause points are
  * resources/txn-pause-point.ts, armed through
  * FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR set for this file's
  * Harper only.
@@ -197,9 +199,11 @@ let jwksServer: Server;
 let signingKey: any;
 let kid: string;
 
-async function jwtBearerAssertion(subject: string): Promise<string> {
+async function jwtBearerAssertion(subject: string, jti?: string): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ scope: "memory:read" })
+  const payload: Record<string, unknown> = { scope: "memory:read" };
+  if (jti !== undefined) payload.jti = jti;
+  return new SignJWT(payload)
     .setProtectedHeader({ alg: "ES256", kid })
     .setIssuer(IDP_ISSUER)
     .setSubject(subject)
@@ -438,6 +442,36 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
     expect(principals.size, `one subject must resolve to one principal (got ${creds.length} credential(s))`).toBe(1);
   }, 60_000);
 
+  it("H8 jti: a grant refused for the subject lock leaves the assertion's jti unclaimed; the same assertion then succeeds once and a second use is refused as a replay", async () => {
+    const subject = `jti-${randomUUID()}`;
+    const assertionA = await jwtBearerAssertion(subject, randomUUID()); // holds the subject lock
+    const jtiB = randomUUID();
+    const assertionB = await jwtBearerAssertion(subject, jtiB); // the presentation refused for the lock
+    const { competed, released, paused } = await withPaused(
+      "xaa-principal-provision",
+      () => grantJwtBearer(assertionA),
+      () => grantJwtBearer(assertionB).then((r) => r.status),
+    );
+    expect(paused, "the grant was not paused while holding the subject lock").toBe(true);
+    expect(released, "the grant was not released by this test").toBe("go");
+    // The competing grant cannot take the subject lock: refused (503). Because
+    // the jti is claimed only AFTER the lock is held, the refused presentation
+    // records NO replay row for its jti — the assertion is not consumed.
+    expect(competed, "a grant that cannot take the subject lock is refused").toBe(503);
+    expect((await searchByValue("IdJagReplay", "id", jtiB)).length, "a lock miss records no replay row for the refused assertion's jti").toBe(0);
+
+    // The lock is free now. The SAME refused assertion is retried and succeeds
+    // once, recording its jti only on this successful use.
+    const retry = await grantJwtBearer(assertionB);
+    expect(retry.status, `retry returned ${retry.status}: ${(await retry.text()).slice(0, 200)}`).toBe(200);
+    expect((await searchByValue("IdJagReplay", "id", jtiB)).length, "the successful retry records the jti").toBe(1);
+
+    // A genuine second presentation of the now-recorded assertion is still a replay.
+    const replay = await grantJwtBearer(assertionB);
+    expect(replay.status, "a true replay is refused").toBe(400);
+    expect((await replay.json()).error_description).toBe("token replay detected");
+  }, 90_000);
+
   // ── N1: an ordinary Agent update must not wipe the stored public key ───────
 
   it("N1: an ordinary Agent PATCH that succeeds keeps the stored public key", async () => {
@@ -476,7 +510,8 @@ describe("flair#2333 slice 3 — a read that decides a later write holds when th
   // its lock (and, with the fix, after its owned transaction committed) but
   // BEFORE the first request's own transaction commits, then lets a second
   // request take the just-freed lock and read. Without the owned transaction the
-  // second request sees the deferred write; with it, the committed one.
+  // second request does NOT see the deferred write and re-reads stale state; with
+  // it, it sees the committed one.
 
   it("H6 commit: a send that takes the locks right after another releases them sees the committed row (relay-send-lock-released)", async () => {
     const sharedId = `h6-commit-${randomUUID().slice(0, 8)}`;

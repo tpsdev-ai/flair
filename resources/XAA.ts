@@ -362,6 +362,11 @@ export async function handleJwtBearerGrant(data: any, ctx?: any): Promise<Respon
     const released = txnPausePoint("xaa-principal-lock-released");
     if (released) await released;
 
+    // The token rows below are issued AFTER the subject lock released: they are
+    // not part of the decision write the lock serializes (the "one subject → one
+    // principal" lookup+JIT create above), so a failure here leaves a
+    // provisioned principal with no token pair rather than a second principal
+    // (flair#2333).
     // Determine scopes — intersection of ID-JAG scopes and IdP allowed scopes
     const requestedScopes = (payload.scope ?? "memory:read").split(" ");
     const allowedScopes = idpConfig.allowedScopes?.length

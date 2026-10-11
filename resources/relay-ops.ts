@@ -86,8 +86,8 @@ const SEND_LOCK_UNAVAILABLE = (): Response =>
 /** First element of every relay-send lock key (resources/key-lock.ts), so a send
  *  lock never collides with another lock on the database. */
 const SEND_LOCK_NAMESPACE = "flair-relay-send";
-/** The wait for another send that must be serialized: at most
- *  SEND_LOCK_ATTEMPTS × SEND_LOCK_WAIT_MS. */
+/** The wait for another send that must be serialized follows the configured
+ *  retry schedule (SEND_LOCK_ATTEMPTS attempts, SEND_LOCK_WAIT_MS apart). */
 const SEND_LOCK_ATTEMPTS = 200;
 const SEND_LOCK_WAIT_MS = 10;
 
@@ -208,12 +208,15 @@ export async function relaySend(
   content.contentHash = computeContentHash(content);
 
   // The id-ownership check, the content dedup, the per-thread seq check and the
-  // cap check each READ the table and then the send WRITES to it. Two sends that
-  // run concurrently must not both pass a check on state the other is about to
-  // change — both see an id free, a thread's last seq, or an inbox below its cap.
-  // Hold the message id's per-key lock and the sender's per-key lock
-  // (resources/key-lock.ts) across the check and the write: the id covers the
-  // id-ownership check, the sender the per-thread seq and the per-sender sub-cap.
+  // per-sender cap check each READ the table and then the send WRITES to it. Two
+  // sends from one sender that run concurrently must not both pass a check on
+  // state the other is about to change — both see an id free, a thread's last
+  // seq, or that sender still below its cap. Hold the message id's per-key lock
+  // and the SENDER's per-key lock (resources/key-lock.ts) across the check and
+  // the write: the id covers the id-ownership check, the sender covers the
+  // per-thread seq and the per-sender sub-cap. The lock serializes the PER-SENDER
+  // cap only — the recipient-wide cap spans senders, who take different sender
+  // locks, and is not serialized by this one.
   const store = (deps.messages as any)?.primaryStore;
   const outer = await withKeyLock(
     store,
