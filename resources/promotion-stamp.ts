@@ -39,8 +39,6 @@ export async function stampMemoryPromotion(
 ): Promise<void> {
   const table = (databases as any).flair.Memory;
   const stampPatch = { promotionStatus: "approved", promotedBy: reviewerId, promotedAt: decidedAt };
-  // The full row the incremental stamp produces, for the BM25 note; ONLY
-  // `stampPatch` is written (flair#2470).
   const stamp = (stored: any) => {
     if (!stored) throw new Error(`Promotion memory ${id} was not written`);
     const row = { ...stored, ...stampPatch };
@@ -48,8 +46,10 @@ export async function stampMemoryPromotion(
     return row;
   };
   if (isJoinableTransaction(stagedContext)) {
+    // The manual promotion's stamp shares the promotion's own open transaction,
+    // so it is atomic with the row that write produced and races no other writer.
     const row = stamp(await table.get(id, stagedContext));
-    await table.update(id, stampPatch, stagedContext);
+    await table.put(row, stagedContext);
     noteMemoryUpsert(row);
     return;
   }

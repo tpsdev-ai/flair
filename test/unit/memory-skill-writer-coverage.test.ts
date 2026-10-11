@@ -102,8 +102,8 @@ add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "write
   "usageCount increment through the shared write-back helper (flair#2441) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
-add("promotion-stamp", ["writer:table.update#1"],
-  "Promotion status stamp in the manual promotion's own write transaction — incremental, non-skill (flair#2470).");
+add("promotion-stamp", ["writer:table.put#1"],
+  "Promotion status stamp in the manual promotion's own write transaction — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.put#1"],
   "Content-suffix migration embeds skillEmbedText(row), staging embedding/embeddingModel; a change visible at the committed re-read aborts. Later changes follow Harper's timestamp order (PR residual-gap note).");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
