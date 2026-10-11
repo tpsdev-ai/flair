@@ -8,9 +8,9 @@
  * redelivery a 409, not a second launch.
  */
 
-import { FlairClient } from "@tpsdev-ai/flair-client";
+import { FlairClient, inspectKeyLookup } from "@tpsdev-ai/flair-client";
 import { createCatchupPort } from "./catchup.js";
-import { HELP, loadConfig, parseArgs } from "./config.js";
+import { HELP, loadConfig, parseArgs, type WakeConfig } from "./config.js";
 import { createCursorAgentClient, dryRunCursorClient } from "./cursor-api.js";
 import { createMemoryReceiptStore } from "./receipt-store.js";
 import { runWakeCycle, type WakeResult } from "./run.js";
@@ -36,6 +36,27 @@ function printResult(result: WakeResult): void {
   console.log(lines.join("\n"));
 }
 
+/**
+ * flair#1944 round 4 — a LIVE receipt run needs the runner's OWN signed agent
+ * identity: the Ed25519 key for `FLAIR_AGENT_ID`. Under admin Basic credentials
+ * the server stamps a written pointer with the Basic username while the row's
+ * `agentId` is `FLAIR_AGENT_ID`, so the receipt cannot be verified on replay
+ * (the identity check compares the row's author to the runner's agent id).
+ * Refuse a live cycle with no signing key BEFORE anything is read or acked;
+ * Basic credentials stay allowed for the read-only modes (`--dry-run`).
+ */
+export function assertLiveSigningKey(config: WakeConfig): void {
+  if (config.dryRun) return;
+  const lookup = inspectKeyLookup(config.agentId, config.keyPath);
+  if (lookup.resolvedPath === null) {
+    throw new Error(
+      `cursor-wake: live receipts need the agent's signing key — no Ed25519 key was found for FLAIR_AGENT_ID=${config.agentId} ` +
+        "(checked FLAIR_KEY_PATH and ~/.flair/keys/<id>.key); set FLAIR_KEY_PATH to the agent's .key file " +
+        "(admin Basic credentials are only for --dry-run)",
+    );
+  }
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const flags = parseArgs(argv);
   if (flags.help) {
@@ -43,6 +64,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 0;
   }
   const config = loadConfig(flags);
+  assertLiveSigningKey(config);
   const flair = new FlairClient({
     agentId: config.agentId,
     url: config.flairUrl,

@@ -1,7 +1,8 @@
 /**
  * Env / argv config for the wake-runner. There is no participant or
  * foreign-feed field. With Ed25519, `FLAIR_AGENT_ID` identifies the signer
- * and its feed; with admin Basic credentials and no key, it selects the feed.
+ * and its feed. Admin Basic credentials are accepted only for a read-only run
+ * (`--dry-run`): a live receipt run requires the agent's own signing key.
  */
 
 const CURSOR_ENV_TYPES = ["cloud", "pool", "machine"] as const;
@@ -108,7 +109,7 @@ command also works; do not point an automation at "start a crew agent" directly
 — that path has no idempotent agentId and can double-launch.
 
 Identity:
-  FLAIR_AGENT_ID     required. A signed runner drains its own feed; with admin Basic credentials and no key, selects the feed by ID (no --participant flag).
+  FLAIR_AGENT_ID     required. A live run drains its own feed and requires the Ed25519 key for this id; admin Basic credentials are accepted only with --dry-run (no --participant flag).
   FLAIR_URL          Flair HTTP origin (default http://localhost:19926)
   FLAIR_KEY_PATH     Ed25519 key (default ~/.flair/keys/<id>.key)
 

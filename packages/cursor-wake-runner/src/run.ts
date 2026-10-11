@@ -233,13 +233,12 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
         // flair#1944: after a handoff (never on dry-run), ATTEMPT one sourced
         // launch receipt BEFORE the ack — the ack follows a successful write OR
         // an existing row VERIFIED as this runner's receipt. A transient or
-        // configuration failure does not ack, so the next cycle replays (Cursor
-        // 409 -> "already") and retries the receipt. A refusal the runner treats
-        // as non-retryable would recur on every replay and hold this agent's
-        // feed, so it is reported and the event acked: the launch is real, the
-        // receipt is provenance. A row at the id that is a DIFFERENT record does
-        // not ack either — it is reported and left untouched. All are named
-        // outcomes, not a thrown crash.
+        // configuration failure does not ack, so the next cycle retries the
+        // receipt. A refusal the runner treats as non-retryable is reported and
+        // the event acked: the launch is real, the receipt is provenance. A row
+        // at the id that is NOT this runner's receipt does not ack either — it is
+        // reported and left untouched. All are named outcomes, not a thrown
+        // crash.
         if (launch.outcome === "created" || launch.outcome === "already") {
           const receipt = await recordLaunchReceipt(deps, dispatch, launch);
           result.items[result.items.length - 1].receipt = receipt.status;

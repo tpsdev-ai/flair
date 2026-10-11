@@ -27,7 +27,7 @@ FLAIR_AGENT_ID=anvil CURSOR_API_KEY=… \
 FLAIR_AGENT_ID=anvil bun packages/cursor-wake-runner/src/cli.ts --once --dry-run
 ```
 
-With an Ed25519 key, `FLAIR_AGENT_ID` is the signing identity and the feed requested by the runner. With admin Basic credentials and no key, the admin credential authenticates the request and `FLAIR_AGENT_ID` selects the feed. The client refuses to send admin Basic credentials over plain HTTP to a non-loopback host. There is no `--participant` flag.
+A live run requires the Ed25519 key for `FLAIR_AGENT_ID`: the key is the signing identity and its feed is drained. Admin Basic credentials (`FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD`) with no key are accepted only for a read-only run (`--dry-run`) — a live receipt run needs the agent's signing key, because under Basic the server would stamp the written pointer with the Basic username while the row's `agentId` is `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. The client refuses to send admin Basic credentials over plain HTTP to a non-loopback host. There is no `--participant` flag.
 
 | Variable | Required | Notes |
 |---|---|---|
@@ -49,20 +49,23 @@ OrgEvent id, content naming only the dispatch id and the Cursor agent id, and a
 `hostSource` `{ host: "cursor", kind: "launch", id, url? }`. The ack follows a
 successful write, OR an existing row at that id VERIFIED as this runner's own
 receipt (same author, same deterministic content, same host-source identity); a
-row that fails that check is a different record, reported as `receiptMismatched`
-and left untouched (see **Not ours** below), and a receipt the runner treats as
-a non-retryable refusal is acked without one (see **Refused** below). The `id` is
+row that fails that check is not verified as this runner's receipt, reported as
+`receiptMismatched` and left untouched (see **Not ours** below), and a receipt
+the runner treats as a non-retryable refusal is acked without one (see
+**Refused** below). The `id` is
 the Cursor agent id: on create, the id Cursor returned (the requested id when the
 response carries none); on a 409 replay, the requested id, which Cursor reported
 as already in use. The `url` is set only on create, and only as Cursor returned
 it. The write is private and omits `hostSourceScope`, so the server's read
 projection keeps the pointer author-only (a non-author reading the memory sees
-`hostSource: "withheld"`). Bootstrap prose CITES a pointer the reader may see
-(flair#2446): this memory's author sees the short
-`[via cursor/launch <id8> (unverified)]` citation — host/kind and the first 8 id
-characters, display-only; the full url never appears there — and a reader who
-may read the memory but not the pointer sees `[via withheld]`; an admin bootstrap
-takes no pointer join. A `hostSource` is the writer's claim, not verified host
+`hostSource: "withheld"`); only a live run signed with the agent's own key
+writes the receipt. When the memory is selected for bootstrap, bootstrap prose
+CITES the pointer (flair#2446) to a reader who may see it: this memory's author
+sees the short `[via cursor/launch <id8> (unverified)]` citation — host/kind and
+the first 8 id characters, display-only; the full url never appears there — and
+a reader who may read the memory but not the pointer sees `[via withheld]`; an
+admin bootstrap takes no pointer join. A `hostSource` is the writer's claim, not
+verified host
 authorship. A `hostSource` value the server's grammar would refuse (checked on
 its NFC form, as the server checks it; the server stores that form) is omitted
 with one line through the supplied `log` callback (the shipped CLI passes one),
@@ -80,13 +83,14 @@ without one (see **Refused**) — and a failed write is classified:
   real; the receipt is provenance, not control) and the cycle result's
   `receiptRefused` names the event, the HTTP status and the server's error code,
   when present — never the content — with one line through the supplied `log`
-  callback; the exit status is unaffected. Replaying would meet the same refusal
-  and hold every later dispatch for this agent.
-- **Not ours** — a row already at the receipt id that is NOT this runner's
-  receipt: another agent's memory, or this agent's own row with different
-  content, or a different host-source identity. The row is left untouched, the
-  event is NOT acked, `receiptMismatched` names the id and the reason, and a
-  one-shot run (`--once`) exits 2.
+  callback; the exit status is unaffected.
+- **Not ours** — a row already at the receipt id that is not verified as this
+  runner's receipt: another agent's shared memory, or this agent's own row with
+  different content, or a different host-source identity. The row is left
+  untouched, the event is NOT acked, `receiptMismatched` names the id and the
+  reason, and a one-shot run (`--once`) exits 2. A foreign PRIVATE row is not
+  readable by the runner, so it reads as absent: the runner attempts the write
+  and the server refuses that write instead.
 - **Failed** — anything else: a network error or timeout, 401, 403, 408, 429,
   a 5xx, or a failed read. The event is not acked, `receiptFailed`
   is set, the next cycle retries the receipt, and a one-shot run (`--once`)

@@ -8,16 +8,20 @@
   when the response carries none); on a 409 replay, the requested id, which
   Cursor reported as already in use. The `url` is set only on create, and only
   as Cursor returned it. Neither is derived from the dispatch text; the write is
-  private and omits `hostSourceScope`, so the pointer stays author-only
-  (bootstrap prose cites it to the author as
+  private and omits `hostSourceScope`, so the pointer stays author-only. Only a
+  live run signed with the agent's own key writes the receipt. When the memory is
+  selected for bootstrap, bootstrap prose cites the pointer to the author as
   `[via cursor/launch <id8> (unverified)]`, and shows `[via withheld]` to another
-  reader who may read the record — flair#2446). A receipt already present under
+  reader who may read the record — flair#2446. A receipt already present under
   that id is left unchanged only when it VERIFIES as this runner's own receipt
   (same author, content and host-source identity), so a replay that reuses the
   agent (Cursor 409) retries the receipt without rewriting the one already
-  stored; a row that fails that check is reported as `receiptMismatched`, left
-  untouched, and not acked. The ack follows a successful write or a verified
-  existing receipt — except for a receipt the runner treats as a non-retryable
+  stored; a row that fails that check is not verified as this runner's receipt:
+  it is reported as `receiptMismatched`, left untouched, and not acked (a
+  foreign PRIVATE row reads as absent to the runner, so the runner attempts the
+  write and the server refuses it instead). The ack follows a successful write
+  or a verified existing receipt — except for a receipt the runner treats as a
+  non-retryable
   refusal (400, 409, 413 or 422): the event is acked without its receipt and
   reported as `receiptRefused` with the status and the error code, when present.
   Any other failed write leaves the event unacknowledged for the next cycle and

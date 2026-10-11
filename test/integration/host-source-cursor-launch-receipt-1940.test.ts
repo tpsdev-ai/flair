@@ -2,9 +2,10 @@
  * host-source-cursor-launch-receipt-1940.test.ts — flair#1944, slice 2 of
  * flair#1940.
  *
- * Real-Harper coverage that the Cursor wake runner RECORDS A SOURCED LAUNCH
- * RECEIPT through the production memory path on a successful handoff. The
- * cycles run through `runWakeCycle` with a fake Cursor client (no network) and
+ * Real-Harper coverage that the Cursor wake runner ATTEMPTS A SOURCED LAUNCH
+ * RECEIPT through the production memory path on a successful handoff (a
+ * classified refusal is acked without one). The cycles run through
+ * `runWakeCycle` with a fake Cursor client (no network) and
  * a fake catchup feed, but the receipt store is the REAL production client
  * writing to a REAL Harper: the receipt reads back with its stable id,
  * deterministic content and the `hostSource` the server validated and stored;

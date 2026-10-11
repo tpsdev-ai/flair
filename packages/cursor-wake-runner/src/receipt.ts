@@ -1,22 +1,29 @@
 /**
- * The launch receipt a successful wake handoff records (flair#1944, slice 2 of
- * flair#1940).
+ * The sourced launch receipt a wake handoff ATTEMPTS to record (flair#1944,
+ * slice 2 of flair#1940).
  *
  * After a dispatch is handed to a Cursor Cloud Agent ("created" or "already"),
- * the runner writes ONE memory as its own agent: a STABLE id derived from the
- * OrgEvent id, deterministic content naming only the dispatch id and the
- * launched Cursor agent id, and a `hostSource` `{ host: "cursor", kind:
+ * the runner attempts a sourced receipt as its own agent: a STABLE id derived
+ * from the OrgEvent id, deterministic content naming only the dispatch id and
+ * the launched Cursor agent id, and a `hostSource` `{ host: "cursor", kind:
  * "launch", id: <cursorAgentId>, url?: <url> }` claiming where the launch lives.
+ * A receipt the runner treats as a non-retryable refusal is acked without one.
+ *
+ * A live receipt run requires the agent's own Ed25519 signing key (flair#1944
+ * round 4): under admin Basic credentials the server would stamp the written
+ * pointer with the Basic username while the row's `agentId` is
+ * `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. Basic
+ * credentials are accepted only for the read-only modes (`--dry-run`).
  *
  * Scope: the write is PRIVATE and omits `hostSourceScope`, so the server's read
  * projection keeps the pointer AUTHOR-ONLY — a non-author who can read this
- * memory sees `hostSource: "withheld"`. Bootstrap PROSE cites a pointer the
- * reader may see (flair#2446): this memory's author sees the short
- * `[via cursor/launch <id8> (unverified)]` citation (host/kind and the first 8
- * id characters, display-only — the full url never appears there), and a reader
- * who may read the memory but not the pointer sees `[via withheld]`; an admin
- * bootstrap takes no pointer join. A `hostSource` is the writer's claim, not
- * verified host authorship.
+ * memory sees `hostSource: "withheld"`. When the memory is selected for
+ * bootstrap, bootstrap PROSE cites a pointer the reader may see (flair#2446):
+ * this memory's author sees the short `[via cursor/launch <id8> (unverified)]`
+ * citation (host/kind and the first 8 id characters, display-only — the full url
+ * never appears there), and a reader who may read the memory but not the pointer
+ * sees `[via withheld]`; an admin bootstrap takes no pointer join. A `hostSource`
+ * is the writer's claim, not verified host authorship.
  *
  * The id is the Cursor agent id: on create, the id Cursor returned (the
  * requested id when the response carries none); on a 409 replay, the requested
@@ -178,13 +185,15 @@ export function buildLaunchReceipt(
  *   - the row's author is the runner's OWN agent (`stored.author === agentId`);
  *   - the row's content EQUALS the deterministic receipt content; and
  *   - the row's host-source IDENTITY (`host`/`kind`/`id`) matches the receipt's —
- *     a `"withheld"` pointer, or a different id, is a DIFFERENT record.
+ *     a `"withheld"` pointer, or a different id, is not a match.
  * The url is NOT part of the identity: a create stores the url Cursor returned,
  * a replay (409) carries none, and the stored one stands.
  *
- * A row that fails any of these is a foreign record occupying the id (a
- * collision, or another agent's memory). It is NOT this runner's receipt, so the
- * caller must fail WITHOUT acking and WITHOUT overwriting it.
+ * A row that fails any of these is NOT VERIFIED as this runner's receipt (a
+ * collision, or another agent's shared memory). The caller must fail WITHOUT
+ * acking and WITHOUT overwriting it. A foreign PRIVATE row is not readable by
+ * the runner, so it reads as ABSENT: the runner attempts the write, and the
+ * server refuses that write instead.
  */
 export function isStoredReceipt(
   stored: StoredReceipt | null | undefined,
@@ -213,12 +222,9 @@ function sameSourceIdentity(
  * HTTP statuses the runner treats as NON-RETRYABLE for a receipt write
  * (flair#1944): a malformed or invalid request (400), a conflict (409), a body
  * too large (413), an unprocessable request (422). The runner treats these
- * statuses as non-retryable: it does not retry them because a replay reaches
- * the same write (Cursor 409 -> "already" -> no receipt yet -> write) and
- * holding the watermark for one would block every later dispatch for this
- * agent. Every other failure — a network error, a timeout, 401/403, 408, 429,
- * any 5xx, any other status — is treated as transient or a configuration fault
- * and retried next cycle.
+ * statuses as non-retryable. Every other failure — a network error, a timeout,
+ * 401/403, 408, 429, any 5xx, any other status — is treated as transient or a
+ * configuration fault and retried next cycle.
  */
 export const RECEIPT_PERMANENT_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 409, 413, 422]);
 
