@@ -53,6 +53,13 @@ const databasesMock = {
         tokens.set(String(row.id), { ...row });
         return row;
       },
+      // The per-token lock (resources/key-lock.ts) the pairing claim runs
+      // under (flair#2333); a real Harper table exposes it as `primaryStore`.
+      primaryStore: {
+        tryLock: () => true,
+        unlock: () => {},
+        resetReadTxn: () => {},
+      },
     },
     // Signed federation bodies record their nonce here (flair#2061).
     ReplayNonce: createFakeReplayNonceTable(),

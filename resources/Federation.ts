@@ -30,6 +30,7 @@ import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { verifyFederationRequestBody } from "./replay-store.js";
 import { writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
+import { withKeyLock } from "./key-lock.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
   classifyRecord,
@@ -566,7 +567,14 @@ export class FederationPair extends Resource {
           error: "public key mismatch — peer already paired with different key",
         }), { status: 409, headers: { "content-type": "application/json" } });
       }
-      // Update endpoint and status
+      // A revoked peer does not re-pair (flair#2333): a revoke is a local
+      // decision, and a re-pair does not restore it.
+      if (existing.status === "revoked") return peerRevokedRefusal();
+      // Update endpoint and status. The interleaving where a revoke commits
+      // between this read and the write below is driven by the pause point here
+      // (the guard test); the write below is unchanged.
+      const repairPause = txnPausePoint("federation-pair-repair-pre");
+      if (repairPause) await repairPause;
       await (databases as any).flair.Peer.put({
         ...existing,
         endpoint: endpoint ?? existing.endpoint,
@@ -584,54 +592,39 @@ export class FederationPair extends Resource {
         }), { status: 401, headers: { "content-type": "application/json" } });
       }
 
-      // Fetch the token record for consumption
-      let tokenRecord: any = null;
-      try {
-        tokenRecord = await (databases as any).flair.PairingToken.get(pairingToken);
-      } catch { /* table may not exist */ }
-
-      if (!tokenRecord || tokenRecord.consumedBy) {
-        return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), {
-          status: 401, headers: { "content-type": "application/json" },
-        });
-      }
-      if (tokenRecord.expiresAt && new Date(tokenRecord.expiresAt) < new Date()) {
-        return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), {
-          status: 401, headers: { "content-type": "application/json" },
-        });
-      }
-
-      // PR-4: bind authenticated bootstrap user to specific pairing token
+      // Consume the token under its per-key lock (flair#2333): the claim is
+      // check-then-consume, so two pairings of the same token must not both see
+      // it unconsumed. One writer per token: the second pairing is refused.
       const ctx = (this as any).getContext?.() ?? {};
-      const authedUser = ctx.request?.tpsAgent;
-      const isAdmin = ctx.request?.tpsAgentIsAdmin === true;
-      if (!isAdmin && authedUser) {
-        const expectedBootstrap = `pair-bootstrap-${pairingToken.slice(0, 8)}`;
-        if (authedUser !== expectedBootstrap) {
-          return new Response(JSON.stringify({
-            error: "bootstrap_user_token_mismatch",
-          }), { status: 401, headers: { "content-type": "application/json" } });
-        }
+      const claim = await withKeyLock(
+        (databases as any).flair.PairingToken?.primaryStore,
+        [PAIRING_TOKEN_LOCK_NAMESPACE, pairingToken],
+        () => claimPairingToken(pairingToken, { instanceId, publicKey, role, endpoint }, ctx),
+        PAIR_LOCK_ATTEMPTS,
+        PAIR_LOCK_WAIT_MS,
+      );
+      if (claim.kind === "busy") {
+        return new Response(JSON.stringify({
+          error: "pairing_in_progress",
+          message: "another pairing of this token is still in progress; retry",
+        }), { status: 409, headers: { "content-type": "application/json" } });
       }
-
-      // Consume the token
-      await (databases as any).flair.PairingToken.put({
-        ...tokenRecord,
-        consumedBy: instanceId,
-        consumedAt: new Date().toISOString(),
-      });
-
-      await (databases as any).flair.Peer.put({
-        id: instanceId,
-        publicKey,
-        role: role ?? "spoke",
-        endpoint: endpoint ?? null,
-        status: "paired",
-        relayOnly: false,
-        pairedAt: new Date().toISOString(),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
+      if (claim.kind === "unavailable") {
+        return new Response(JSON.stringify({
+          error: "pairing_lock_unavailable",
+          message: "this instance's PairingToken store has no per-key lock, so the pairing was refused",
+        }), { status: 503, headers: { "content-type": "application/json" } });
+      }
+      if (claim.value.kind === "refused") {
+        return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), {
+          status: 401, headers: { "content-type": "application/json" },
+        });
+      }
+      if (claim.value.kind === "bootstrap_mismatch") {
+        return new Response(JSON.stringify({
+          error: "bootstrap_user_token_mismatch",
+        }), { status: 401, headers: { "content-type": "application/json" } });
+      }
 
       // Drop the bootstrap user that was created alongside this pairing token.
       // Failure here is non-fatal: the cleanup sweep (PR-5) will catch stragglers.
@@ -664,6 +657,85 @@ export class FederationPair extends Resource {
 }
 
 // ─── Sync endpoint ───────────────────────────────────────────────────────────
+
+/** One pairing's one-time token claim: the check-then-consume itself (FederationPair.post runs it under the token's lock). */
+type PairingTokenClaim =
+  | { kind: "paired" }
+  | { kind: "refused" }
+  | { kind: "bootstrap_mismatch" };
+
+/** The per-token lock namespace (resources/key-lock.ts); a token's lock key is its own. */
+const PAIRING_TOKEN_LOCK_NAMESPACE = "flair-pairing-token";
+/** The wait for another pairing of the same token: at most `PAIR_LOCK_ATTEMPTS × PAIR_LOCK_WAIT_MS`. */
+const PAIR_LOCK_ATTEMPTS = 200;
+const PAIR_LOCK_WAIT_MS = 10;
+
+/** 403 for a re-pair of a revoked peer: a revoke is a local decision, and a re-pair does not restore it. */
+function peerRevokedRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "peer_revoked",
+    message: "this Peer row is revoked; it stays revoked",
+  }), { status: 403, headers: { "content-type": "application/json" } });
+}
+
+/**
+ * The check-then-consume of one pairing token, run while holding that token's
+ * per-key lock (FederationPair.post), so at most one pairing consumes it. The
+ * token is re-read on entry: a pairing that consumed it first makes this one
+ * refuse.
+ */
+async function claimPairingToken(
+  pairingToken: string,
+  peer: { instanceId: string; publicKey: string; role?: string | null; endpoint?: string | null },
+  ctx: any,
+): Promise<PairingTokenClaim> {
+  // Fetch the token record for consumption
+  let tokenRecord: any = null;
+  try {
+    tokenRecord = await (databases as any).flair.PairingToken.get(pairingToken);
+  } catch { /* table may not exist */ }
+
+  const pause = txnPausePoint("federation-pair-token");
+  if (pause) await pause;
+
+  if (!tokenRecord || tokenRecord.consumedBy) {
+    return { kind: "refused" };
+  }
+  if (tokenRecord.expiresAt && new Date(tokenRecord.expiresAt) < new Date()) {
+    return { kind: "refused" };
+  }
+
+  // PR-4: bind authenticated bootstrap user to specific pairing token
+  const authedUser = ctx?.request?.tpsAgent;
+  const isAdmin = ctx?.request?.tpsAgentIsAdmin === true;
+  if (!isAdmin && authedUser) {
+    const expectedBootstrap = `pair-bootstrap-${pairingToken.slice(0, 8)}`;
+    if (authedUser !== expectedBootstrap) {
+      return { kind: "bootstrap_mismatch" };
+    }
+  }
+
+  const at = new Date().toISOString();
+  // Consume the token
+  await (databases as any).flair.PairingToken.put({
+    ...tokenRecord,
+    consumedBy: peer.instanceId,
+    consumedAt: at,
+  });
+
+  await (databases as any).flair.Peer.put({
+    id: peer.instanceId,
+    publicKey: peer.publicKey,
+    role: peer.role ?? "spoke",
+    endpoint: peer.endpoint ?? null,
+    status: "paired",
+    relayOnly: false,
+    pairedAt: at,
+    createdAt: at,
+    updatedAt: at,
+  });
+  return { kind: "paired" };
+}
 
 /**
  * POST /FederationSync — push sync records from a peer.
