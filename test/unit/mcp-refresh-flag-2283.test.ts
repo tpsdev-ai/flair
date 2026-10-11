@@ -3,9 +3,9 @@
  *
  * `flair mcp enable --refresh-flag` is the one-shot migration for an instance
  * that still holds the old staged value (`FLAIR_MCP_OAUTH=1`) — a value the
- * `@harperfast/oauth` component deletes, leaving its authorization server
- * unmounted. The flag sets that ONE variable to `true` in the target's process
- * environment (the env-secrets primitive), restarts, and verifies both the
+ * `@harperfast/oauth` component deletes, leaving its MCP authorization server
+ * disabled. The flag pushes an encrypted `FLAIR_MCP_OAUTH=true` update, checks
+ * the secret row's processEnv marker, verifies a restart by PID change, and checks the
  * target's own discovery document and the PUBLIC document read at the verified
  * issuer name that issuer with the MCP token endpoint — the shared discriminator,
  * bound to an issuer the caller knows. It does not run the IdP-credential intake
@@ -150,7 +150,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.secretsPath).toBe(base().secretsStagingPath);
   });
 
-  test("refuses a success claim when the target still serves flair's own AS", async () => {
+  test("refuses success when the target document advertises flair's own token endpoint", async () => {
     shape = "plugin-absent";
     const { impl } = opsFetch();
     const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });

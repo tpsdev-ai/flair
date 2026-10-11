@@ -5,9 +5,9 @@
  * `flair mcp enable` runs (src/lib/mcp-enable.ts). It compares the target's
  * discovery-document strings against the origin the deploy shipped to — an issuer
  * the deploy knows independently of the document — plus the probed address, so a
- * deploy that ships an instance configured for MCP OAuth cannot report success
- * while the document names flair's own authorization server. A document naming an
- * unknown token endpoint, or one that is not JSON, is reported as a warning, never
+ * deploy whose shipped `.env` implies MCP OAuth is enabled fails when the
+ * document advertises flair's own token endpoint and deploy verification is
+ * enabled. A document naming an unknown token endpoint, or one that is not JSON, is reported as a warning, never
  * as a failure and never as a pass.
  *
  * Part A drives `verifyDeployedMcpDiscovery` — the deploy self-verify's check —
@@ -72,14 +72,14 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
     await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).resolves.toBeUndefined();
   });
 
-  test("a configured target whose document names flair's own AS fails, naming the remedy", async () => {
+  test("local configuration implying MCP OAuth is enabled makes flair's own advertised endpoint a failure", async () => {
     shape = "plugin-absent";
     await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).rejects.toThrow(
-      /MCP authorization server is absent/,
+      /document advertises flair's own token endpoint/,
     );
   });
 
-  test("the same document on an unconfigured target is not a failure", async () => {
+  test("the same document with no local inference of enablement is not a failure", async () => {
     shape = "plugin-absent";
     await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: false })).resolves.toBeUndefined();
   });
@@ -148,7 +148,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
   }
 
   test(
-    "deploy() refuses success when the shipped .env enables MCP OAuth but the target serves flair's own AS",
+    "deploy() with verification enabled fails when shipped .env implies MCP OAuth and discovery advertises flair's own endpoint",
     async () => {
       const pkgRoot = synthPkgRoot("FLAIR_MCP_OAUTH=true\n");
       const origFetch = globalThis.fetch;
@@ -162,7 +162,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
             packageRoot: pkgRoot,
             verifyTimeoutMs: 40_000,
           } as any),
-        ).rejects.toThrow(/MCP authorization server is absent/);
+        ).rejects.toThrow(/document advertises flair's own token endpoint/);
       } finally {
         globalThis.fetch = origFetch;
       }

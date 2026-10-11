@@ -1172,10 +1172,9 @@ export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void>
  * imported rather than re-derived: it compares the discovery document's strings
  * against the origin the deploy shipped to (an issuer this deploy knows
  * independently of the document) plus the probed address. A target whose shipped
- * component `.env` sets `FLAIR_MCP_OAUTH` (so this deploy is configured for MCP
- * OAuth) but whose document names flair's own authorization server is a named
- * failure — the deploy must not report success on a surface a client cannot
- * authorize against. An unreadable, non-JSON, or unrecognized document is
+ * component `.env` implies MCP OAuth is enabled but whose document advertises
+ * flair's own token endpoint is a named failure when deploy verification is
+ * enabled. An unreadable, non-JSON, or unrecognized document is
  * reported as unverified, never as a pass.
  *
  * The deploy cannot read the TARGET's environment; `mcpOAuthConfigured` is the
@@ -1256,12 +1255,8 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
 
   let replicationWarning: boolean;
   let convergedAfterReplicationError: boolean;
-  // flair#2283: whether this deploy is shipping an instance configured for MCP
-  // OAuth — the shipped FLAIR_MCP_OAUTH in the component `.env` Harper's
-  // loadEnv reads, captured before the staged tree is cleaned up. The deploy
-  // cannot read the TARGET's environment, so the shipped `.env` is the one fact
-  // it can stand on; a target enabled only through Fabric's environment panel is
-  // therefore reported, not failed.
+  // flair#2283: infer MCP OAuth enablement from the shipped component `.env`
+  // before cleaning up the staged tree. This does not read target environment.
   let mcpOAuthConfigured = false;
   try {
     ({ replicationWarning, convergedAfterReplicationError } = await runHarperDeploy(
@@ -1331,8 +1326,8 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     }
 
     // flair#2283: the SAME discovery discriminator `flair mcp enable` runs — does
-    // the target's OAuth discovery name the @harperfast/oauth MCP authorization
-    // server? See verifyDeployedMcpDiscovery.
+    // the target's OAuth discovery advertise the expected MCP token endpoint?
+    // See verifyDeployedMcpDiscovery.
     await verifyDeployedMcpDiscovery({ url, mcpOAuthConfigured, onProgress: opts.onProgress });
   }
 

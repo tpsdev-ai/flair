@@ -505,7 +505,7 @@ function printRefreshFlagSteps(result: RefreshMcpFlagResult): void {
   }
   console.log("");
   if (result.ok && !result.dryRun) {
-    console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "FLAIR_MCP_OAUTH reads back true in the target's process environment.")} Confirm with \`flair mcp status\`.`);
+    console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "Encrypted FLAIR_MCP_OAUTH=true update accepted; secret processEnv marker, restart and discovery metadata checks passed.")} Confirm with \`flair mcp status\`.`);
     console.log("");
   }
 }
@@ -845,7 +845,7 @@ export function register(program: Command): void {
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
     .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
     .option("--dry-run", "Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run")
-    .option("--refresh-flag", "One-shot migration (flair#2283): set FLAIR_MCP_OAUTH=true in the target's process environment and restart, without re-running the IdP credentials or the identity mapping. Use it to correct an instance enabled before this release that still holds FLAIR_MCP_OAUTH=1 — the value the @harperfast/oauth component deletes, leaving its authorization server unmounted")
+    .option("--refresh-flag", "One-shot migration (flair#2283): push an encrypted FLAIR_MCP_OAUTH=true update, check the secret row's processEnv marker, restart and check discovery metadata. Does not re-run IdP intake or apply identity mapping or CIMD changes. Use it to correct FLAIR_MCP_OAUTH=1, which the @harperfast/oauth component deletes")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
@@ -888,9 +888,8 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      // flair#2283 — the one-shot migration. It re-sets FLAIR_MCP_OAUTH in the
-      // target's environment and restarts, so it takes none of the IdP
-      // credentials or CIMD options and never prompts for them.
+      // flair#2283 — push the encrypted flag update and restart.
+      // Does not run IdP intake or apply CIMD changes.
       if (opts.refreshFlag) {
         const refreshed = await refreshMcpOAuthFlag(
           {

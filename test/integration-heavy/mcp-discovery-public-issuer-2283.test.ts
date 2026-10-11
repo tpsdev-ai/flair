@@ -67,7 +67,7 @@ afterAll(async () => {
   tempDirs = [];
 });
 
-function makeWorkDir(prefix: string): string {
+function makeWorkDir(prefix: string, withCli = false): string {
   const workDir = mkdtempSync(join(tmpdir(), prefix));
   tempDirs.push(workDir);
   symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
@@ -76,11 +76,15 @@ function makeWorkDir(prefix: string): string {
   // config.yaml loads schemas/*.graphql from the app dir; copied (not linked):
   // Harper's schema glob does not follow a symlinked directory.
   cpSync(join(REPO_ROOT, "schemas"), join(workDir, "schemas"), { recursive: true });
+  if (withCli) {
+    cpSync(join(REPO_ROOT, "src"), join(workDir, "src"), { recursive: true });
+    copyFileSync(join(REPO_ROOT, "package.json"), join(workDir, "package.json"));
+  }
   return workDir;
 }
 
 /** Run the real `flair doctor` against a booted Harper's HTTP port. */
-function runDoctor(httpURL: string, extraEnv: Record<string, string>): { status: number | null; stdout: string } {
+function runDoctor(httpURL: string, extraEnv: Record<string, string>, cliEntry = CLI_ENTRY): { status: number | null; stdout: string } {
   const home = mkdtempSync(join(tmpdir(), "flair-2283-doctor-public-"));
   tempDirs.push(home);
   // A minimal PATH (a bare `sh`), as test/helpers/offline-doctor.ts does.
@@ -97,7 +101,7 @@ function runDoctor(httpURL: string, extraEnv: Record<string, string>): { status:
     ...extraEnv,
   };
   const startedAt = Date.now();
-  const result = spawnSync(process.execPath, [CLI_ENTRY, "doctor", "--port", port], {
+  const result = spawnSync(process.execPath, [cliEntry, "doctor", "--port", port], {
     cwd: home,
     env,
     encoding: "utf8",
@@ -147,7 +151,7 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
       // origin is supplied to doctor's environment as the caller-known issuer.
       clearMcpEnv();
       const doctor = runDoctor(harper.httpURL, { FLAIR_MCP_OAUTH: "true", FLAIR_PUBLIC_URL: FLAIR_PUBLIC });
-      expect(doctor.stdout).toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+      expect(doctor.stdout).toContain("local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
       expect(doctor.stdout).not.toContain("could not be confirmed");
       expect(doctor.status).not.toBe(0);
     },
@@ -178,25 +182,23 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
       clearMcpEnv();
       const doctor = runDoctor(harper.httpURL, { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: PLUGIN_ISSUER });
       expect(doctor.stdout).toContain("the metadata advertises the expected token endpoint");
-      expect(doctor.stdout).not.toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+      expect(doctor.stdout).not.toContain("local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
     },
     180_000,
   );
 
-  // Item 3: the flag and the public issuers supplied through the component `.env`
-  // file — the file Harper's `loadEnv` reads (shipped config.yaml declares
-  // `loadEnv.files: .env`) — rather than this test's process environment. This
-  // proves the real instance reads them from the component directory and serves the
-  // plugin's document with that public issuer.
+  // Copy src rather than symlink it: flairPackageDir() must resolve to the
+  // component tree containing this .env, not the repository running the test.
   test(
-    "the flag and public issuers supplied through the component .env file (not process.env)",
+    "doctor from the component tree classifies MCP metadata using its .env and a clean child environment",
     async () => {
       clearMcpEnv();
-      const workDir = makeWorkDir("flair-2283-env-");
+      const workDir = makeWorkDir("flair-2283-env-", true);
       writeFileSync(
         join(workDir, ".env"),
         [
           "FLAIR_MCP_OAUTH=true",
+          `FLAIR_PUBLIC_URL=${FLAIR_PUBLIC}`,
           `FLAIR_MCP_ISSUER=${PLUGIN_ISSUER}`,
           "OAUTH_GITHUB_CLIENT_ID=public-issuer-2283-client",
           "OAUTH_GITHUB_CLIENT_SECRET=public-issuer-2283-secret",
@@ -213,6 +215,42 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
 
       const observation = await discriminateMcpOAuthDiscovery(harper.httpURL, { expectedIssuers: [PLUGIN_ISSUER] });
       expect(observation.state).toBe("plugin-live");
+
+      const doctor = runDoctor(harper.httpURL, {}, join(workDir, "src", "cli.ts"));
+      expect(doctor.stdout).toContain("MCP OAuth discovery: the metadata advertises the expected token endpoint");
+      expect(doctor.stdout).not.toContain("MCP OAuth discovery: local configuration implies");
+      expect(doctor.stdout).not.toContain("MCP OAuth discovery: the MCP authorization server could not be confirmed");
+    },
+    180_000,
+  );
+
+  test(
+    "doctor infers the legacy flag from the component .env and reports flair's own advertised endpoint",
+    async () => {
+      clearMcpEnv();
+      const workDir = makeWorkDir("flair-2283-env-legacy-", true);
+      writeFileSync(
+        join(workDir, ".env"),
+        [
+          "FLAIR_MCP_OAUTH=1",
+          `FLAIR_PUBLIC_URL=${FLAIR_PUBLIC}`,
+          `FLAIR_MCP_ISSUER=${PLUGIN_ISSUER}`,
+          "",
+        ].join("\n"),
+      );
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      instances.push(harper);
+
+      const doc = await wellKnown(harper.httpURL);
+      expect(doc.issuer).toBe(FLAIR_PUBLIC);
+      expect(doc.token_endpoint).toBe(`${FLAIR_PUBLIC}/OAuthToken`);
+
+      const doctor = runDoctor(harper.httpURL, {}, join(workDir, "src", "cli.ts"));
+      expect(doctor.stdout).toContain("MCP OAuth discovery: local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
+      expect(doctor.stdout).toContain(`token_endpoint="${FLAIR_PUBLIC}/OAuthToken"`);
+      expect(doctor.stdout).not.toContain("MCP OAuth discovery: the metadata advertises the expected token endpoint");
+      expect(doctor.stdout).not.toContain("MCP OAuth discovery: the MCP authorization server could not be confirmed");
+      expect(doctor.status).not.toBe(0);
     },
     180_000,
   );

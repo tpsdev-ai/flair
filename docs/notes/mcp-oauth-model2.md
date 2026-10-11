@@ -172,21 +172,20 @@ registered identities.
 3. **Restart flair.** `/mcp` mounts, OAuth-guarded.
 
 4. **Upgrading an instance that still holds the old staged value.** Releases
-   before 0.46.0 staged `FLAIR_MCP_OAUTH=1`; the component accepts only `true`/`false`
-   and deletes `1`, so its authorization server never mounts and the `/mcp` route
-   answers with no AS behind it. Correct the value in place, without re-running the
-   whole enable (the IdP credentials and the identity mapping are already in place
-   and are not touched):
+   using `FLAIR_MCP_OAUTH=1` leave the component's MCP AS disabled: it accepts only
+   `true`/`false` and deletes `1`. Correct the value without re-running IdP intake
+   or changing the identity mapping:
 
    ```bash
    flair mcp enable --instance https://your-public-origin --refresh-flag
    ```
 
-   It sets `FLAIR_MCP_OAUTH=true` in the target's process environment, restarts,
-   and verifies the target's and the public document's issuer: the target's own
-   discovery document must advertise that issuer with the MCP token endpoint, and
-   the public document read at that issuer must name the SAME issuer and its token
-   endpoint. FLAIR_MCP_OAUTH reads back `true` only as far as that read-back shows.
+   It pushes an encrypted `FLAIR_MCP_OAUTH=true` update, checks the secret row's
+   `processEnv` marker, verifies a restart by PID change, and checks discovery
+   metadata: the target's own discovery document must advertise that issuer with
+   the MCP token endpoint, and
+   the public document read at that issuer must match the same normalized issuer and its token
+   endpoint.
 
 ## Sherlock's 4 requirements — how they are met
 

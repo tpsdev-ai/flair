@@ -55,8 +55,7 @@ export function issuerFromEnv(env: Record<string, string | undefined>): string |
  *
  * `envText` is the `.env` content or null when there is none; `overlay` is the
  * environment to prefer (the operator's `process.env` for `flair doctor`). This
- * decides only whether a report calls a state a failure — never a write — so an
- * unreadable file is the not-configured direction, never a fabricated one.
+ * decides only report severity. With no readable file, the overlay decides.
  */
 export function mcpOAuthEnabledFromComponentEnv(
   envText: string | null,

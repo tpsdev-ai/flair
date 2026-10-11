@@ -2308,8 +2308,7 @@ export async function discriminateMcpOAuthDiscovery(
  *  drift from the check. */
 function mcpAbsentDetail(url: string, tokenEndpoint: unknown): string {
   return (
-    `${url} answered with flair's OWN OAuth 2.1 authorization server, not the MCP one ` +
-    `(token_endpoint=${tokenEndpoint}) — the /mcp surface is NOT enabled on that instance. ` +
+    `${url} advertises flair's own token endpoint (token_endpoint=${tokenEndpoint}). ` +
     `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
     `component declared in its config.yaml?`
   );
@@ -2331,12 +2330,9 @@ export interface McpOAuthDiscoveryReport {
  * The operator-facing report for a discovery observation, shared by `flair
  * doctor` and `flair deploy` so both word it identically.
  *
- * `mcpConfigured` is whether the instance is configured for MCP OAuth (the
- * locally inferred `FLAIR_MCP_OAUTH` the CLI can see — the shipped component
- * `.env` Harper's loadEnv reads, overlaid with the operator environment). Its
- * only effect is on the `plugin-absent` case: a configured instance whose
- * discovery names flair's own AS is a named failure with a remedy, while an
- * unconfigured instance is a plain informational line. An `unreachable` or
+ * `mcpConfigured` is the locally inferred `FLAIR_MCP_OAUTH` the caller can see.
+ * For a document advertising flair's own token endpoint, true yields a named
+ * failure with a remedy; false yields an informational line. An `unreachable` or
  * `unrecognized` observation is never a pass, and never an error — it says the
  * surface could not be confirmed.
  */
@@ -2357,7 +2353,7 @@ export function reportMcpOAuthDiscovery(
           severity: "info",
           pass: false,
           lines: [
-            `MCP OAuth discovery: MCP OAuth is not enabled on this instance (${observation.url} names flair's own authorization server).`,
+            `MCP OAuth discovery: local configuration does not imply MCP OAuth is enabled; ${observation.url} advertises flair's own token endpoint.`,
           ],
         };
       }
@@ -2365,7 +2361,7 @@ export function reportMcpOAuthDiscovery(
         severity: "error",
         pass: false,
         lines: [
-          `MCP OAuth discovery: FLAIR_MCP_OAUTH is set but the MCP authorization server is absent — ${observation.detail}.`,
+          `MCP OAuth discovery: local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint — ${observation.detail}.`,
           `Fix: set FLAIR_MCP_OAUTH=true in the instance environment and confirm the '@harperfast/oauth' component is declared in its config.yaml, then restart (see \`flair mcp status\`).`,
         ],
       };
@@ -2400,12 +2396,8 @@ export async function selfVerifyMcpMetadata(
   const normalizedIssuer = issuer.replace(/\/+$/, "");
   // ── The discriminator runs BEFORE the shape check (flair#1094, flair#2283) ──
   //
-  // flair's own AS is identifiable by its token endpoint alone
-  // (`<issuer>/OAuthToken`), and that document omits `registration_endpoint`
-  // unless DCR is enabled — which it is not, by default. Testing the
-  // discriminator first names the real cause in EVERY flag-off case rather than
-  // only when DCR happens to be on. Found by writing the test that pins this
-  // relationship, not by reading the code.
+  // A document bound to a caller-known issuer advertising `<issuer>/OAuthToken`
+  // is named before checking registration_endpoint, even when DCR is off.
   //
   // This used to be an inline token_endpoint comparison here. flair#2283 lifted
   // it into `discriminateMcpOAuthDiscovery` so `flair doctor` and `flair deploy`
@@ -3350,16 +3342,15 @@ export interface RefreshMcpFlagResult {
  * staged value (`FLAIR_MCP_OAUTH=1`, recorded by `buildSecretsBundle` before
  * flair#1284 changed the staged value to `true`). Flair's own reader accepts
  * `1`, but the `@harperfast/oauth` component coerces only `true`/`false` and
- * deletes it, so the MCP authorization server never mounts and every connector
- * handshake fails with no cause named.
+ * deletes that value, leaving the component's MCP AS disabled.
  *
- * This sets that ONE variable to `true` in the target's process environment —
- * the same env-secrets primitive `flair mcp enable` uses — and restarts. It does
+ * This pushes an encrypted `FLAIR_MCP_OAUTH=true` update, checks the secret row's
+ * processEnv marker, and verifies a restart by PID change. It does
  * NOT run the IdP-credential intake nor apply CIMD changes, and it reads and
  * writes no IdP secret value. It then verifies two documents by name: the
  * target's own discovery document must advertise the issuer being verified with
  * the MCP token endpoint, and the PUBLIC document read at that issuer must
- * advertise the SAME issuer and its token endpoint — the shared discriminator
+ * match the same normalized issuer and its token endpoint — the shared discriminator
  * `enable`, `doctor` and `deploy` run, bound to an issuer this caller knows
  * (flair#2283).
  */
@@ -3384,7 +3375,7 @@ export async function refreshMcpOAuthFlag(
 
   if (dryRun) {
     currentStep = "secrets-provisioning";
-    push(true, `--dry-run: would set FLAIR_MCP_OAUTH=true in ${params.instance}'s process environment and restart; nothing was changed.`);
+    push(true, `--dry-run: would push an encrypted FLAIR_MCP_OAUTH=true update to ${params.instance}, check the secret row's processEnv marker, restart and check discovery metadata; nothing was changed.`);
     return { ok: true, dryRun: true, steps };
   }
 
@@ -3416,7 +3407,7 @@ export async function refreshMcpOAuthFlag(
     }
     push(true, `FLAIR_MCP_OAUTH=true pushed to the target as an enc:v1 env-secret (tier ${PROCESS_ENV_TIER}); the value was sealed locally.`);
 
-    // Restart so the env-secrets decryptor materialises it into the process.
+    // Restart for the env-secrets decryptor to load the updated secret.
     currentStep = "restart";
     const pre = await captureBootDiscriminator(params.instance, params.adminUser, params.adminPass, { fetchImpl: deps.fetchImpl });
     await triggerRemoteRestart(params.instance, params.adminUser, params.adminPass, { fetchImpl: deps.fetchImpl });

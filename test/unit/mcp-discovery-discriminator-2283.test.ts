@@ -3,10 +3,9 @@
  *
  * The discovery discriminator compares an RFC 8414 document's STRINGS against an
  * issuer the CALLER knows independently of the document — the configured
- * FLAIR_PUBLIC_URL / FLAIR_MCP_ISSUER, or the origin the caller verifies. flair
- * serves its own OAuth 2.1 AS (`<issuer>/OAuthToken`) when the MCP flag is off;
- * the `@harperfast/oauth` plugin answers (`<issuer>/oauth/mcp/token`) when it is
- * on. A positive result requires the document's OWN `issuer` to equal a
+ * FLAIR_PUBLIC_URL / FLAIR_MCP_ISSUER, or the origin the caller verifies.
+ * Flair's document advertises `<issuer>/OAuthToken`; the plugin's MCP document
+ * advertises `<issuer>/oauth/mcp/token`. A positive result requires `issuer` to equal a
  * caller-known candidate; the document's own `issuer` is never a candidate on its
  * own. `flair mcp enable` runs the check inside `selfVerifyMcpMetadata`; `flair
  * doctor` and `flair deploy` import `discriminateMcpOAuthDiscovery` so all three
@@ -35,7 +34,7 @@ let origin: string;
 let shape: Shape;
 
 /** When set, the document advertises THIS issuer instead of the probed origin —
- *  the shape a configured instance serving flair's own AS presents while doctor
+ *  the shape of a document advertising flair's own token endpoint while doctor
  *  probes it over loopback (FLAIR_PUBLIC_URL ≠ the probed address). */
 let advertisedIssuer: string | null = null;
 /** When true, the document omits `issuer` entirely — the fallback shape. */
@@ -128,7 +127,7 @@ describe("discriminateMcpOAuthDiscovery (real HTTP)", () => {
 
   // flair#2283 blocker 1: Flair can advertise FLAIR_PUBLIC_URL as its issuer while
   // doctor probes loopback. Comparing the token endpoint against the PROBED
-  // address turned a configured instance serving flair's own AS into
+  // address turned a document advertising flair's own token endpoint into
   // "unrecognized" (and, symmetrically, let an unrelated endpoint read "live").
   // These drive the document's OWN issuer, distinct from the probed address.
   test("plugin-absent when the document advertises a public issuer the caller knows, distinct from the probed address", async () => {
@@ -222,21 +221,21 @@ describe("reportMcpOAuthDiscovery", () => {
     return discriminateMcpOAuthDiscovery(origin);
   }
 
-  test("plugin live is a pass", async () => {
+  test("metadata advertising the expected MCP token endpoint is a pass", async () => {
     const report = reportMcpOAuthDiscovery(await observe("plugin-live"), false);
     expect(report.severity).toBe("ok");
     expect(report.pass).toBe(true);
   });
 
-  test("plugin absent while MCP OAuth is configured is a named failure with a remedy", async () => {
+  test("flair's own advertised endpoint with locally inferred MCP OAuth is a named failure with a remedy", async () => {
     const report = reportMcpOAuthDiscovery(await observe("plugin-absent"), true);
     expect(report.severity).toBe("error");
     expect(report.pass).toBe(false);
-    expect(report.lines[0]).toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+    expect(report.lines[0]).toContain("local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
     expect(report.lines[1]).toContain("FLAIR_MCP_OAUTH=true");
   });
 
-  test("plugin absent while MCP OAuth is NOT configured is informational, not a failure", async () => {
+  test("flair's own advertised endpoint without locally inferred MCP OAuth is informational", async () => {
     const report = reportMcpOAuthDiscovery(await observe("plugin-absent"), false);
     expect(report.severity).toBe("info");
     expect(report.pass).toBe(false);
@@ -308,11 +307,11 @@ describe("flair doctor runs the discriminator through the real command", () => {
   }
 
   test(
-    "a configured instance whose discovery names flair's own AS is a named failure",
+    "doctor reports a named failure for flair's own advertised endpoint with locally inferred MCP OAuth",
     async () => {
       shape = "plugin-absent";
       const result = await runDoctor({ FLAIR_MCP_OAUTH: "true" });
-      expect(result.stdout).toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+      expect(result.stdout).toContain("local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
       expect(result.status).not.toBe(0);
     },
     60_000,
@@ -324,19 +323,19 @@ describe("flair doctor runs the discriminator through the real command", () => {
       shape = "plugin-live";
       const result = await runDoctor({ FLAIR_MCP_OAUTH: "true" });
       expect(result.stdout).toContain("the metadata advertises the expected token endpoint");
-      expect(result.stdout).not.toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+      expect(result.stdout).not.toContain("local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
     },
     60_000,
   );
 
   test(
-    "a configured instance whose document advertises a public issuer (distinct from the probed address) is a named failure",
+    "doctor reports a named failure for a known public issuer's own endpoint with locally inferred MCP OAuth",
     async () => {
       shape = "plugin-absent";
       advertisedIssuer = "https://public.flair.example.com";
       try {
         const result = await runDoctor({ FLAIR_MCP_OAUTH: "true", FLAIR_PUBLIC_URL: "https://public.flair.example.com" });
-        expect(result.stdout).toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+        expect(result.stdout).toContain("local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
         expect(result.status).not.toBe(0);
       } finally {
         advertisedIssuer = null;

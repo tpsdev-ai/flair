@@ -913,11 +913,10 @@ program
       // compares the instance's discovery-document strings against the issuer(s)
       // the CLI knows independently of the document — the shipped/ambient
       // FLAIR_PUBLIC_URL and FLAIR_MCP_ISSUER, plus the probed origin — so a
-      // configured instance whose document is flair's own AS is a named failure
-      // and an unreadable or unrecognized document is reported as unverified,
-      // never as a pass. "Configured" is the locally inferred FLAIR_MCP_OAUTH the
-      // instance ships (Harper's loadEnv reads the component `.env`), overlaid
-      // with the operator environment.
+      // document advertising flair's own token endpoint is a named failure when
+      // local configuration implies MCP OAuth is enabled. An unreadable or
+      // unrecognized document is unverified. The component `.env` and operator
+      // environment supply the local inference.
       const discovery = await discriminateMcpOAuthDiscovery(baseUrl, {
         expectedIssuers: [componentMcpIssuer, componentEnvValue, process.env.FLAIR_MCP_ISSUER, process.env.FLAIR_PUBLIC_URL].filter(
           (issuer): issuer is string => typeof issuer === "string" && issuer.trim() !== "",
