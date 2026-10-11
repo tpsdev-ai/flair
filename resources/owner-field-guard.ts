@@ -31,6 +31,38 @@
 import { resolveAgentAuth } from "./agent-auth.js";
 import { isForbiddenOwnerFieldChange } from "./record-owner-guard.js";
 
+/** The named refusal for a write whose stored record could not be READ. */
+export const OWNER_CHECK_UNAVAILABLE_ERROR = "owner_check_unavailable";
+
+/**
+ * The refusal a write gets when the stored row could not be READ.
+ *
+ * A read ERROR is not the same as "no stored row" (a `null`/`undefined`
+ * result). The owner-field rule reads a `null` record as a create and lets the
+ * write through, so collapsing a failed read into `null` would make a
+ * stored-row read failure permission to write. Without the stored record there
+ * is no way to tell a re-pointed owner field from a legitimate one, so the write
+ * is refused.
+ *
+ * A client error from the read answers 400; anything else 503, since a retry can
+ * succeed. The write does not happen.
+ */
+export function ownerCheckUnavailable(err: unknown): Response {
+  console.error(
+    "owner-field-guard: the stored record could not be read, so the write was refused",
+    { err },
+  );
+  const code = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+  const status = typeof code === "number" && code >= 400 && code < 500 ? 400 : 503;
+  return new Response(
+    JSON.stringify({
+      error: OWNER_CHECK_UNAVAILABLE_ERROR,
+      message: "the stored record could not be read; the write was refused",
+    }),
+    { status, headers: { "content-type": "application/json" } },
+  );
+}
+
 /**
  * Enforce owner-field immutability for one write.
  *
@@ -39,7 +71,8 @@ import { isForbiddenOwnerFieldChange } from "./record-owner-guard.js";
  *                    so the raw base-table read is used rather than any get() override
  * @param content     the write content (the caller's claim)
  * @param ownerField  the column naming the owning principal for this table
- * @returns a 403 Response to send, or null to proceed
+ * @returns a Response to send (401 unauthenticated, 403 owner-field change,
+ *          400/503 stored-row read failure), or null to proceed
  */
 export async function guardOwnerFieldImmutable(
   self: any,
@@ -64,9 +97,15 @@ export async function guardOwnerFieldImmutable(
     );
   }
 
-  const existing = (await Promise.resolve(getExisting()).catch(() => null)) as
-    | Record<string, unknown>
-    | null;
+  // A read that RESOLVED to null/undefined is "no stored row" (a create, which
+  // this rule leaves to each resource). A read that THREW or rejected is a
+  // FAILURE, and the guard refuses it rather than reading it as "no stored row".
+  let existing: Record<string, unknown> | null;
+  try {
+    existing = ((await Promise.resolve(getExisting())) ?? null) as Record<string, unknown> | null;
+  } catch (err) {
+    return ownerCheckUnavailable(err);
+  }
 
   if (isForbiddenOwnerFieldChange(existing, content, ownerField, auth.agentId)) {
     return new Response(
