@@ -15,9 +15,8 @@ export type WriteBackPause = () => Promise<void> | undefined;
 
 /** What the `plan` callback decides for the row it was handed.
  *
- * `write` is a full-record replacement (Harper `put`): it carries every field of
- * the row, so a stale field it read can revert a concurrent edit. `update` is
- * an incremental write of only the fields named (Harper `update`). */
+ * A `write` plan must supply a complete row for Harper `put`.
+ * `update` writes only the named fields through Harper `update`. */
 export type WriteBackPlan =
   | { write: Record<string, unknown> }
   | { update: Record<string, unknown> }

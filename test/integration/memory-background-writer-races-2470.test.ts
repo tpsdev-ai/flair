@@ -30,7 +30,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -111,6 +111,17 @@ async function waitForCycleDone(timeoutMs: number): Promise<boolean> {
   }
   return false;
 }
+async function assertReleased(point: string): Promise<void> {
+  const path = join(pauseDir, `released.${point}`);
+  const deadline = Date.now() + 30_000;
+  let released = "";
+  while (Date.now() < deadline) {
+    if (existsSync(path)) released = readFileSync(path, "utf8");
+    if (released) break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  expect(released, "the pause ended by timeout, not by this test").toBe("go");
+}
 /** Wait until the usage-count bump on `id` has committed. */
 async function waitForUsageCount(id: string, expected: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -165,7 +176,7 @@ beforeAll(async () => {
   const first = await startHarper({ homeDir: home });
   authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
   harper = first;
-  await waitForCycleDone(30_000);
+  expect(await waitForCycleDone(30_000), "the first boot migration cycle did not finish before seeding").toBe(true);
   await opsCall({
     operation: "upsert", database: "flair", table: "Agent",
     records: [{
@@ -249,11 +260,12 @@ describe("flair#2470 — usage-count and archive patches preserve an earlier-sta
     // Let the count bump commit first, then release the PUT (its older full
     // update commits last — the out-of-order case).
     writeFileSync(join(pauseDir, "go.usage-count-pre"), "");
-    await waitFor(join(pauseDir, "released.usage-count-pre"), 30_000);
+    await assertReleased("usage-count-pre");
     const bumped = await waitForUsageCount(USAGE_ID, 1, 30_000);
     expect(bumped, "the usage-count bump did not commit").toBe(true);
     writeFileSync(join(pauseDir, `go.${PUT_POINT}`), "");
     const [usage, put] = await Promise.all([pendingUsage, pendingPut]);
+    await assertReleased(PUT_POINT);
 
     expect(usage.status, `the usage bump did not answer 2xx: ${await usage.clone().text()}`).toBeLessThan(300);
     expect(put.status, `the owner PUT did not answer 200: ${await put.clone().text()}`).toBe(200);
@@ -283,11 +295,12 @@ describe("flair#2470 — usage-count and archive patches preserve an earlier-sta
     // reconciliation is the case under test. A full-row archive write here would
     // revert the PUT's content.
     writeFileSync(join(pauseDir, "go.maintenance-archive-pre"), "");
-    await waitFor(join(pauseDir, "released.maintenance-archive-pre"), 30_000);
+    await assertReleased("maintenance-archive-pre");
     const archived = await waitForArchived(ARCHIVE_ID, 30_000);
     expect(archived, "the maintenance did not commit its archived flip").toBe(true);
     writeFileSync(join(pauseDir, `go.${PUT_POINT}`), "");
     const [put] = await Promise.all([pendingPut, pendingMaintenance]);
+    await assertReleased(PUT_POINT);
 
     expect(put.status, `the owner PUT did not answer 200: ${await put.clone().text()}`).toBe(200);
     const row = await readRow(ARCHIVE_ID);

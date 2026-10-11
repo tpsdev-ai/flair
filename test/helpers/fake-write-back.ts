@@ -14,7 +14,7 @@ export interface FakeWriteBackOptions {
 
 /** Apply a plan's write the way the real helper does: an `update` plan writes
  *  incrementally (a fake table without `update` refuses, like the real one),
- *  a `write` plan puts the full row. */
+ *  a `write` plan passes its row directly to `put`. */
 async function applyPlanWrite(
   table: { put(row: any): Promise<any>; update?(id: string, patch: Record<string, unknown>): Promise<any> },
   id: string,
