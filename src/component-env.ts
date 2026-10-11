@@ -138,18 +138,25 @@ export function envKeyNames(text: string | null | undefined): string[] {
 }
 
 /**
- * The value assigned to `key`, or null, with EXACTLY the semantics of Harper's
- * own `.env` loader: the LAST assignment to a key wins, because that is what
- * `dotenv.parse` — which Harper's `loadEnv` plugin runs over this file —
- * produces. flair#2283 round 7: doctor, deploy and `flair mcp enable` must decide
- * from the value Harper will actually load, so this delegates to the SAME parser
- * the unit suite pins against Harper's bundled `dotenv`
- * (`parseMcpComponentEnv`, src/lib/mcp-oauth-env-core.ts) instead of re-deriving a
- * scan whose first-wins rule could silently diverge from it.
+ * The value a `.env` FILE assigns to `key`, or null, parsed the way Harper's
+ * `loadEnv` plugin parses that file: the LAST assignment to a key wins, because
+ * that is what `dotenv.parse` produces. flair#2283 round 7: `flair doctor`
+ * (src/commands/doctor.ts) and `flair deploy` (src/deploy.ts, feeding
+ * `deployedKnownIssuers`) decide from this, and `planComponentEnv` reads an
+ * operator's `FLAIR_PUBLIC_URL` through it here — so it delegates to
+ * `parseMcpComponentEnv` (src/lib/mcp-oauth-env-core.ts) rather than a hand-rolled
+ * scan whose first-wins rule could silently diverge from the loader.
  *
- * This module reads no secret value: the only keys it reads are `FLAIR_PUBLIC_URL`
- * (not a secret) and `FLAIR_MCP_ISSUER` (a public issuer origin), both
- * operator-facing configuration.
+ * Scope, in two directions:
+ *   - FILE parsing only. Harper's `loadEnv` does NOT override a key already set in
+ *     the process environment, so a running instance's effective value can differ
+ *     from what this file says; a caller that needs the effective value must
+ *     overlay `process.env` itself (as `flair doctor`'s
+ *     `mcpOAuthEnabledFromComponentEnv` does).
+ *   - It returns whatever value the file assigns to the key NAMED, so it is only
+ *     as non-secret as its callers' keys. The keys the current callers request —
+ *     `FLAIR_PUBLIC_URL` and `FLAIR_MCP_ISSUER` — are operator-facing configuration,
+ *     not secrets.
  */
 export function readEnvValue(text: string | null | undefined, key: string): string | null {
   if (!text) return null;

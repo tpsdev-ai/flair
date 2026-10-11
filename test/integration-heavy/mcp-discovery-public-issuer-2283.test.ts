@@ -279,4 +279,47 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
     },
     180_000,
   );
+
+  // flair#2283 round 8: the component `.env` is parsed with Harper's dotenv
+  // semantics (LAST assignment wins), the same rule the running instance used to
+  // advertise its issuer. An operator who corrected FLAIR_PUBLIC_URL by appending a
+  // line must have doctor classify from the corrected value: here the served document
+  // advertises the LAST value's own token endpoint, so the named failure names it. A
+  // first-wins read would classify from the DECOY first line and call the document
+  // "could not be confirmed" (a warning) instead.
+  test(
+    "doctor acts on the LAST FLAIR_PUBLIC_URL in the component .env, not a decoy first assignment",
+    async () => {
+      clearMcpEnv();
+      const DECOY = "https://flair-2283-decoy.test";
+      // The running instance's flag is OFF (the process environment wins over the
+      // component .env for the EFFECTIVE value), so it serves flair's OWN AS document,
+      // whose issuer/endpoints come from the last FLAIR_PUBLIC_URL the .env assigns.
+      process.env.FLAIR_MCP_OAUTH = "false";
+      const workDir = makeWorkDir("flair-2283-env-last-wins-", true);
+      writeFileSync(
+        join(workDir, ".env"),
+        [
+          "FLAIR_MCP_OAUTH=1",
+          `FLAIR_PUBLIC_URL=${DECOY}`,
+          `FLAIR_PUBLIC_URL=${FLAIR_PUBLIC}`, // LAST wins — what Harper loads
+          "",
+        ].join("\n"),
+      );
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      instances.push(harper);
+
+      const doc = await wellKnown(harper.httpURL);
+      expect(doc.issuer).toBe(FLAIR_PUBLIC);
+      expect(doc.token_endpoint).toBe(`${FLAIR_PUBLIC}/OAuthToken`);
+
+      clearMcpEnv();
+      const doctor = runDoctor(harper.httpURL, {}, join(workDir, "src", "cli.ts"));
+      expect(doctor.stdout).toContain("MCP OAuth discovery: local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
+      expect(doctor.stdout).toContain(`token_endpoint="${FLAIR_PUBLIC}/OAuthToken"`);
+      expect(doctor.stdout).not.toContain("MCP OAuth discovery: the MCP authorization server could not be confirmed");
+      expect(doctor.status).not.toBe(0);
+    },
+    180_000,
+  );
 });

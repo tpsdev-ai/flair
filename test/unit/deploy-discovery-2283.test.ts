@@ -271,4 +271,35 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
     },
     120_000,
   );
+
+  // flair#2283 round 8: the shipped `.env` is parsed with Harper's dotenv semantics
+  // (LAST assignment wins). An operator who corrected FLAIR_PUBLIC_URL by appending a
+  // second line must have deploy ACT on the corrected value. Here the document
+  // advertises the LAST value's own token endpoint: a last-wins read binds ACTUAL as
+  // a caller-known issuer and refuses; a first-wins read would bind only the DECOY and
+  // call the document unrecognized (a warning), letting a broken deploy report success.
+  test(
+    "deploy() acts on the LAST shipped FLAIR_PUBLIC_URL, not a decoy first assignment",
+    async () => {
+      const DECOY = "https://decoy-2283.example.com";
+      const ACTUAL = "https://actual-2283.example.com";
+      const pkgRoot = synthPkgRoot(`FLAIR_MCP_OAUTH=true\nFLAIR_PUBLIC_URL=${DECOY}\nFLAIR_PUBLIC_URL=${ACTUAL}\n`);
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = routedTarget("plugin-absent", ACTUAL);
+      try {
+        await expect(
+          deploy({
+            target: TARGET,
+            fabricUser: "admin",
+            fabricPassword: "pw",
+            packageRoot: pkgRoot,
+            verifyTimeoutMs: 40_000,
+          } as any),
+        ).rejects.toThrow(/document advertises flair's own token endpoint/);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    },
+    120_000,
+  );
 });

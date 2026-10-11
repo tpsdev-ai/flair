@@ -32,13 +32,18 @@
  * not the "full" refresh path: it does not run IdP intake or apply CIMD changes
  * here either, and discovery reads on the push-success branch stay at the served
  * origin.
+ *
+ * flair#2283 round 8 adds the two staging-file cases: refresh's own DEFAULT filename
+ * is distinct from `mcp enable`'s, so a refresh fallback never truncates a staged IdP
+ * credentials bundle; and an EXPLICIT `--secrets-path` that already holds a file is
+ * refused by name rather than truncated.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants } from "node:crypto";
-import { refreshMcpOAuthFlag } from "../../src/lib/mcp-enable.ts";
+import { defaultRefreshSecretsStagingPath, defaultSecretsStagingPath, refreshMcpOAuthFlag } from "../../src/lib/mcp-enable.ts";
 import { ENV_ENCRYPTED_PREFIX } from "../../src/lib/secret-envelope.ts";
 
 const INSTANCE = "https://agent-a.harperfabric.com";
@@ -131,6 +136,12 @@ function opsFetch(
 let dir: string;
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "flair-2283-refresh-"));
+});
+// Each case starts with NO staging file at the explicit path: `refreshMcpOAuthFlag`
+// now REFUSES by name an explicit path that already holds a file (flair#2283 round 8),
+// so a leftover file from a prior case would be refused rather than overwritten.
+beforeEach(() => {
+  rmSync(join(dir, "refresh.env"), { force: true });
 });
 afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -268,5 +279,71 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("verify-restart");
     expect(result.steps.find((s) => s.step === "verify-restart")?.ok).not.toBe(true);
+  });
+
+  // flair#2283 round 8: `--refresh-flag` and ordinary `mcp enable` must NOT share a
+  // default staging file. They stage different bundles (enable: the full IdP
+  // credentials bundle; refresh: the single FLAIR_MCP_OAUTH var) and a refresh that
+  // wrote its one-var file to the enable path would erase a bundle a prior enable had
+  // staged. Here a full bundle sits at the enable path; a refresh that CANNOT push
+  // (so it definitely writes its fallback) must leave that bundle byte-identical and
+  // land its own file elsewhere.
+  test("refresh writes its own default file, never truncating a staged IdP bundle at the enable path", async () => {
+    shape = "plugin-live";
+    const home = mkdtempSync(join(tmpdir(), "flair-2283-refresh-home-"));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const enablePath = defaultSecretsStagingPath(INSTANCE);
+      const refreshPath = defaultRefreshSecretsStagingPath(INSTANCE);
+      expect(refreshPath).not.toBe(enablePath);
+      mkdirSync(join(home, ".flair"), { recursive: true });
+      const idpBundle =
+        "FLAIR_MCP_OAUTH=true\n" +
+        "OAUTH_GITHUB_CLIENT_ID=idp-client\n" +
+        "OAUTH_GITHUB_CLIENT_SECRET=idp-secret\n" +
+        "OAUTH_GITHUB_REDIRECT_URI=https://agent-a.harperfabric.com/oauth\n";
+      writeFileSync(enablePath, idpBundle, { mode: 0o600 });
+
+      // disablePush => the capability probe fails => refresh takes its fallback and
+      // WRITES its staged file. A shared default path would truncate the bundle above.
+      const { impl } = opsFetch({ disablePush: true });
+      const result = await refreshMcpOAuthFlag({ instance: INSTANCE, adminUser: "admin", adminPass: "pw" }, { fetchImpl: impl, ...FAST });
+      expect(result.ok).toBe(false);
+
+      expect(readFileSync(enablePath, "utf8")).toBe(idpBundle);
+      expect(readFileSync(refreshPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
+      expect(result.secretsPath).toBe(refreshPath);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevProfile;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // flair#2283 round 8: an EXPLICIT staging path is the operator's own file. A
+  // refresh must refuse a path that already holds a file BY NAME rather than
+  // truncate it (it may be a credentials bundle), and must not even probe the
+  // target before doing so.
+  test("an explicit --secrets-path that already holds a file is refused by name, not truncated", async () => {
+    const explicit = join(dir, "occupied.env");
+    const existing =
+      "OAUTH_GITHUB_CLIENT_ID=keep-me\n" + "OAUTH_GITHUB_CLIENT_SECRET=keep-me-too\n";
+    writeFileSync(explicit, existing, { mode: 0o600 });
+
+    const { impl, sent } = opsFetch();
+    const result = await refreshMcpOAuthFlag({ ...base(), secretsStagingPath: explicit }, { fetchImpl: impl, ...FAST });
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("secrets-provisioning");
+    expect(result.refused?.message ?? "").toContain(explicit);
+    // The file is untouched, and no request was made (a truncate-then-probe would
+    // have both emptied it and issued the ops probe).
+    expect(readFileSync(explicit, "utf8")).toBe(existing);
+    expect(sent).toEqual([]);
   });
 });

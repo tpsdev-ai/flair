@@ -1,6 +1,6 @@
 - **`flair mcp enable --refresh-flag` attempts an encrypted flag update and checks restart and discovery metadata.**
 
-  It stages the one-var bundle (0600) and ATTEMPTS an encrypted
+  It ATTEMPTS an encrypted
   `FLAIR_MCP_OAUTH=true` push: it probes the target's secrets capability, and only
   when the target can take the secret does it push the update, check the secret
   row's `processEnv` marker, verify a restart by PID change, and check metadata —
@@ -8,8 +8,13 @@
   token endpoint, and
   the public document read at that issuer must match the same normalized issuer and its token
   endpoint. When the target cannot take the secret (an older Harper, or no secrets
-  custody on the node), it leaves that 0600 file for manual application and exits
-  non-zero. It does not run the IdP-credential intake nor apply CIMD changes.
+  custody on the node) it writes its OWN 0600 one-var file — a path distinct from
+  `mcp enable`'s, and written only after the probe says the push will not happen, so
+  it never truncates a previously staged IdP credentials bundle — leaves it for
+  manual application and exits
+  non-zero. An explicit `--secrets-path` that already holds a file is refused by
+  name rather than truncated. It does not run the IdP-credential intake nor apply
+  CIMD changes.
 
   > **Heads-up:** an instance may still hold the old staged value
   > `FLAIR_MCP_OAUTH=1`; the `@harperfast/oauth` component deletes that value, so
