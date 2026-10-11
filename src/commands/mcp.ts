@@ -888,8 +888,9 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      // flair#2283 — push the encrypted flag update and restart.
-      // Does not run IdP intake or apply CIMD changes.
+      // flair#2283 — attempt the encrypted flag update push, then restart.
+      // When the target cannot take the secret, leave a 0600 file to apply by
+      // hand and exit non-zero. Does not run IdP intake or apply CIMD changes.
       if (opts.refreshFlag) {
         const refreshed = await refreshMcpOAuthFlag(
           {

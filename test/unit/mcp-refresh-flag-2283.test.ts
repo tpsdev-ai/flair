@@ -4,11 +4,13 @@
  * `flair mcp enable --refresh-flag` is the one-shot migration for an instance
  * that still holds the old staged value (`FLAIR_MCP_OAUTH=1`) — a value the
  * `@harperfast/oauth` component deletes, leaving its MCP authorization server
- * disabled. The flag pushes an encrypted `FLAIR_MCP_OAUTH=true` update, checks
- * the secret row's processEnv marker, verifies a restart by PID change, and checks the
- * target's own discovery document and the PUBLIC document read at the verified
- * issuer name that issuer with the MCP token endpoint — the shared discriminator,
- * bound to an issuer the caller knows. It does not run the IdP-credential intake
+ * disabled. The flag ATTEMPTS an encrypted `FLAIR_MCP_OAUTH=true` push; when the
+ * target can take the secret it then checks the secret row's processEnv marker,
+ * verifies a restart by PID change, and checks the target's own discovery document
+ * and the PUBLIC document read at the verified issuer name that issuer with the MCP
+ * token endpoint — the shared discriminator, bound to an issuer the caller knows —
+ * and when the target cannot take the secret it leaves a 0600 file to apply by hand
+ * and exits non-zero. It does not run the IdP-credential intake
  * nor apply CIMD changes.
  *
  * These drive `refreshMcpOAuthFlag` with an injected fetch. Ops calls always go to
@@ -23,8 +25,13 @@
  *   - not at all — the push-failure fallback stops at `secrets-provisioning`, and
  *     `--dry-run` issues no request.
  *
- * The full refresh path against the REAL Harper harness lives in
- * test/integration-heavy/mcp-refresh-real-harper-2283.test.ts.
+ * The REAL-Harper harness covers the SAME `--refresh-flag` command end to end for
+ * both branches the TARGET selects — the push+marker+restart+self-verify path when
+ * the build has secrets custody, and the staged-0600-file-and-non-zero path when it
+ * does not — in test/integration-heavy/mcp-refresh-real-harper-2283.test.ts. It is
+ * not the "full" refresh path: it does not run IdP intake or apply CIMD changes
+ * here either, and discovery reads on the push-success branch stay at the served
+ * origin.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";

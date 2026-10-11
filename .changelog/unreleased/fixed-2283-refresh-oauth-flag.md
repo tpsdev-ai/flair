@@ -13,7 +13,9 @@
 
   > **Heads-up:** an instance may still hold the old staged value
   > `FLAIR_MCP_OAUTH=1`; the `@harperfast/oauth` component deletes that value, so
-  > its MCP AS remains disabled. Correct it in place:
+  > its MCP AS remains disabled. Correct it in place with a command that ATTEMPTS
+  > the encrypted push — when the target cannot take the secret, it leaves a 0600
+  > file to apply by hand and exits non-zero:
   >
   > ```bash
   > flair mcp enable --instance <your-public-origin> --refresh-flag

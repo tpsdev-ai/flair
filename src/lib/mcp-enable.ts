@@ -3346,8 +3346,10 @@ export interface RefreshMcpFlagResult {
  * `1`, but the `@harperfast/oauth` component coerces only `true`/`false` and
  * deletes that value, leaving the component's MCP AS disabled.
  *
- * This pushes an encrypted `FLAIR_MCP_OAUTH=true` update, checks the secret row's
- * processEnv marker, and verifies a restart by PID change. It does
+ * This ATTEMPTS an encrypted `FLAIR_MCP_OAUTH=true` push, and only when the target
+ * can take the secret does it check the secret row's processEnv marker and verify a
+ * restart by PID change; when the target cannot, it leaves a 0600 file to apply by
+ * hand and returns non-zero. It does
  * NOT run the IdP-credential intake nor apply CIMD changes, and it reads and
  * writes no IdP secret value. It then verifies two documents by name: the
  * target's own discovery document must advertise the issuer being verified with

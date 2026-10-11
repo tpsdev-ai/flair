@@ -228,6 +228,24 @@ describe("stageDeployRoot — what harper actually uploads", () => {
     expect(readEnvValue(await packedEnvText(staged.dir), PUBLIC_URL_KEY)).toBe("https://cdn.example.com");
   });
 
+  test("a duplicated FLAIR_PUBLIC_URL is kept at its LAST value, as Harper's dotenv loads it", async () => {
+    // flair#2283 round 7. Staging calls planComponentEnv -> readEnvValue, so this is
+    // the deploy path deciding which value to keep. Harper's loader is LAST-wins;
+    // the old first-wins scan would keep the stale loopback line and ship it.
+    const root = makePackageRoot();
+    writeFileSync(
+      join(root, COMPONENT_ENV_FILENAME),
+      "FLAIR_PUBLIC_URL=http://127.0.0.1:9925\nFLAIR_PUBLIC_URL=https://cdn.example.com\n",
+    );
+
+    const staged = stageDeployRoot(root, "https://cluster.org.harperfabric.com");
+    cleanups.push(staged.cleanup);
+
+    expect(staged.plan.action).toBe("operator-value-kept");
+    expect(staged.plan.effectiveValue).toBe("https://cdn.example.com");
+    expect(readEnvValue(await packedEnvText(staged.dir), PUBLIC_URL_KEY)).toBe("https://cdn.example.com");
+  });
+
   test("a loopback target ships no generated .env, but is still filtered", async () => {
     const root = makePackageRoot();
     const staged = stageDeployRoot(root, resolveDeployPublicUrl("http://127.0.0.1:9925"));

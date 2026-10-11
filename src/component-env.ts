@@ -40,6 +40,8 @@
 // Hence: the file this module generates carries `FLAIR_PUBLIC_URL` and nothing
 // else, and `assertNoSecretKeys` is a runtime guard, not a comment.
 
+import { parseMcpComponentEnv } from "./lib/mcp-oauth-env-core.js";
+
 /** The file Harper's `loadEnv` plugin is pointed at by flair's config.yaml. */
 export const COMPONENT_ENV_FILENAME = ".env";
 
@@ -136,23 +138,23 @@ export function envKeyNames(text: string | null | undefined): string[] {
 }
 
 /**
- * The value assigned to `key`, or null. This module reads no secret value: the
- * only keys it reads are `FLAIR_PUBLIC_URL` (not a secret) and `FLAIR_MCP_ISSUER`
- * (a public issuer origin), both operator-facing configuration.
+ * The value assigned to `key`, or null, with EXACTLY the semantics of Harper's
+ * own `.env` loader: the LAST assignment to a key wins, because that is what
+ * `dotenv.parse` — which Harper's `loadEnv` plugin runs over this file —
+ * produces. flair#2283 round 7: doctor, deploy and `flair mcp enable` must decide
+ * from the value Harper will actually load, so this delegates to the SAME parser
+ * the unit suite pins against Harper's bundled `dotenv`
+ * (`parseMcpComponentEnv`, src/lib/mcp-oauth-env-core.ts) instead of re-deriving a
+ * scan whose first-wins rule could silently diverge from it.
+ *
+ * This module reads no secret value: the only keys it reads are `FLAIR_PUBLIC_URL`
+ * (not a secret) and `FLAIR_MCP_ISSUER` (a public issuer origin), both
+ * operator-facing configuration.
  */
 export function readEnvValue(text: string | null | undefined, key: string): string | null {
   if (!text) return null;
-  for (const line of text.split(/\r?\n/)) {
-    const m = ASSIGNMENT_RE.exec(line);
-    if (!m || m[1] !== key) continue;
-    let v = line.slice(line.indexOf("=") + 1).trim();
-    if ((v.startsWith('"') && v.endsWith('"') && v.length >= 2) ||
-        (v.startsWith("'") && v.endsWith("'") && v.length >= 2)) {
-      v = v.slice(1, -1);
-    }
-    return v;
-  }
-  return null;
+  const values = parseMcpComponentEnv(text);
+  return Object.prototype.hasOwnProperty.call(values, key) ? values[key]! : null;
 }
 
 /**

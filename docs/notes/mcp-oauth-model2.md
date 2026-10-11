@@ -174,7 +174,9 @@ registered identities.
 4. **Upgrading an instance that still holds the old staged value.** Releases
    using `FLAIR_MCP_OAUTH=1` leave the component's MCP AS disabled: it accepts only
    `true`/`false` and deletes `1`. Correct the value without re-running IdP intake
-   or changing the identity mapping:
+   or changing the identity mapping — the command ATTEMPTS the push, and when the
+   target cannot take the secret it leaves a 0600 file to apply by hand and exits
+   non-zero:
 
    ```bash
    flair mcp enable --instance https://your-public-origin --refresh-flag
