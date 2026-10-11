@@ -16,9 +16,15 @@
  * requests" is asserted directly, and the signer id is read off the
  * `Authorization` header of anything that IS sent.
  *
- * A lockfile install supplies the `openclaw` peer version resolved in bun.lock.
- * The mock is typed against that installed peer's API; its simulated behavior
- * does not establish runtime parity with supported hosts. That requires real-host drills.
+ * The mock is typed against the installed `openclaw` peer's API; its simulated
+ * behavior does not establish runtime parity with supported hosts. That requires
+ * real-host drills. The nine real-runner cases (see `supportedRunnerHost`) take
+ * those drills one step further: they deliver capture callbacks through the hook
+ * runner of a pinned, SUPPORTED release (`openclaw-supported`, an npm-alias dev
+ * dependency), and read the fixture's `runtime.version` from that same installed
+ * package — so the host that registers the plugin and the host that runs it are
+ * the same supported release, not the `openclaw` peer the lockfile happens to
+ * resolve (flair#1940).
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
@@ -1098,9 +1104,45 @@ describe("evaluateAutoCapture", () => {
   });
 });
 
+// ── the supported host the real-runner cases drive ───────────────────────────
+//
+// The nine cases below deliver capture callbacks through OpenClaw's own hook
+// runner, so the runner must come from a release the plugin's
+// TESTED_HOST_VERSIONS names. The `openclaw` peer the lockfile resolves is not
+// guaranteed to be one (flair#1940: it resolved 2026.9.5, which the plugin does
+// not support). They therefore import the pinned dev dependency
+// `openclaw-supported` (an npm alias) and read the version from that installed
+// package's own package.json — the fixture's `runtime.version` and the runner
+// are then the SAME release. The membership assertion below fails first and
+// loudly if the alias drifts off the tested set, naming the cause instead of
+// letting the nine fail on "no hooks".
+function supportedRunnerHost(): { dist: string; version: string } {
+  const dist = dirname(fileURLToPath(import.meta.resolve("openclaw-supported")));
+  const pkg = JSON.parse(readFileSync(join(dist, "..", "package.json"), "utf8")) as { version: string };
+  return { dist, version: pkg.version };
+}
+
+/** The hooks chunk in `dist` that exports `createHookRunner` (the real runner). */
+function runnerEntry(dist: string): string | undefined {
+  return readdirSync(dist).find(
+    (name) => /^hooks-.*\.mjs$/.test(name) &&
+      readFileSync(join(dist, name), "utf8").includes("export { createHookRunner };"),
+  );
+}
+
 // ── slice 2 — capture done right (D5 / D11 / D14) ─────────────────────────────
 
 describe("slice 2 — capture normalisation, ids and outcomes", () => {
+  test("the real-runner host is a supported OpenClaw release, read from the installed package", async () => {
+    const { dist, version } = supportedRunnerHost();
+    const { TESTED_HOST_VERSIONS } = await loadModule();
+    // Both the fixture's runtime.version and the runner come from this release.
+    // If it is not in the tested set the plugin registers nothing; assert it here
+    // so that drift is the failure, not the nine cases' "hasHooks" expectation.
+    expect(TESTED_HOST_VERSIONS).toContain(version);
+    expect(runnerEntry(dist)).toBeDefined();
+  });
+
   for (const [hook, method] of [
     ["agent_end", "runAgentEnd"],
     ["llm_input", "runLlmInput"],
@@ -1108,16 +1150,14 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
   ]) {
     for (const session of ["event", "context", "key-only"]) {
       test(`real OpenClaw hook runner: ${hook}, ${session} identifiers`, async () => {
-        const dist = dirname(fileURLToPath(import.meta.resolve("openclaw")));
-        const entry = readdirSync(dist).find((name) =>
-          /^hooks-.*\.mjs$/.test(name) &&
-          readFileSync(join(dist, name), "utf8").includes("export { createHookRunner };"),
-        );
+        const { dist, version: hostVersion } = supportedRunnerHost();
+        const entry = runnerEntry(dist);
         expect(entry).toBeDefined();
         const { createHookRunner } = await import(pathToFileURL(join(dist, entry!)).href);
         writeKey("A");
         const calls = installFetchStub();
         const api = createMockApi({
+          hostVersion,
           pluginConfig: { autoCapture: true },
           config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
         });
