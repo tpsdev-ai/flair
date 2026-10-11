@@ -11,6 +11,7 @@
  * distinguishes internal/agent/anonymous explicitly.
  */
 
+import { randomUUID } from "node:crypto";
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
@@ -56,7 +57,12 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // completeness only.
     stampAttribution(auth, content, RECORD_TYPES.OrgEvent.ownerField, RECORD_TYPES.OrgEvent.attribution.post, "forbidden: unreachable for stamp-default");
 
-    if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}`;
+    // flair#2333 (H9): the default id embedded the wall clock at millisecond
+    // resolution, so two events posted by one author in the same millisecond
+    // collided and one was lost. A random suffix makes the minted id unique; the
+    // catch-up order is `${createdAt}\t${id}` (agent-read-position-lib.ts), where
+    // the id is a same-instant tie-break.
+    if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}-${randomUUID()}`;
     content.createdAt = new Date().toISOString();
 
     // attention-plane vocabulary gate (flair#675): `entities`, if present,
@@ -64,6 +70,22 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // Field is additive/optional; absent entities is not an error.
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
+
+    // flair#2333 (N2): the middleware's record-owner-guard resolves only
+    // `/<Table>/<id>`, so a collection POST is not covered by it. Without this, a
+    // caller-supplied id that already names another agent's event was written
+    // straight through and overwrote it. authorId is stamped from the signature
+    // above, so the shared owner-field delegate (owner-field-guard.ts) compares
+    // the STORED row's authorId against the caller and refuses when they differ —
+    // the same rule put()/patch() apply. Creation (no stored row) and a re-post of
+    // the caller's own id are untouched; admin/internal callers pass through.
+    const ownerDenial = await guardOwnerFieldImmutable(
+      this,
+      () => (databases as any).flair.OrgEvent.get(content.id, {}),
+      content,
+      RECORD_TYPES.OrgEvent.ownerField,
+    );
+    if (ownerDenial) return ownerDenial;
 
     // Harper 5: table resources use put() for create/upsert (post() removed).
     return (databases as any).flair.OrgEvent.put(content);
