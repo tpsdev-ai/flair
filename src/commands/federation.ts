@@ -403,7 +403,7 @@ const signBodyFresh = signRequestBody;
 /**
  * Persist last-contact on the local Peer row after confirmed hub contact.
  *
- * Callers must invoke this only after a FederationSync 200 (sendBatch or the
+ * Callers must invoke this only after a successful FederationSync response (sendBatch or the
  * no-change liveness ping). lastSyncAt is the value HealthDetail counts as
  * `connected` (flair#1499 / flair#1146) AND the spoke's OUTBOUND sync cursor
  * (`federation sync` re-sends from it) — so a frozen value re-sends from the
@@ -882,7 +882,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     // lastSyncAt is contact, not "the driver ran" (flair#1146). Persist only
-    // after a FederationSync 200 — sendBatch already threw on non-ok, so
+    // after a successful FederationSync response — sendBatch already threw on non-ok or invalid JSON, so
     // totalBatches > 0 means the hub answered. The no-change path must ping
     // first; a failed ping leaves the stamp untouched → unknown.
     const stampLocalContact = async () => {

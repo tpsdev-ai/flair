@@ -5,7 +5,7 @@
   stored row inside the write's own transaction and write nothing when it is no
   longer the row they read. For the `_reindex` re-PUT and the `Memory` merge the
   stored row is confirmed against the row they read when its identity —
-  incarnation token, content hash, creation time or owner — changed, or the row
+  `instanceToken`, `contentHash`, `createdAt` or `agentId` — changed, or the row
   is gone (a delete or a purge): the re-PUT answers 409 `stored_row_changed`, the
   merge skips the record as `merge_target_changed`. `Soul`, `Agent`,
   `Relationship` and `Message` carry no incarnation token or content hash, so
@@ -20,11 +20,12 @@
   write, so the confirmation narrows the window, it does not close it
   (resources/write-back.ts).
 
-  A `merge_target_changed` skip is **dropped, not re-offered**: the receiver
-  keeps no per-record retry state. The sender's outbound cursor
+  A `merge_target_changed` skip is not re-offered once the spoke's cursor has
+  advanced past the record's `updatedAt`. The sender's outbound cursor
   (`peer.lastSyncAt`) is advanced to the pre-query timestamp — but only once, at
-  the end of the whole run, and only when every batch returned 200 and the
-  field-only cursor update matched the row. A later batch that fails (or a
+  the end of the whole run, and only when every batch got a successful (2xx)
+  response with a valid JSON body and the field-only cursor update matched the
+  row. A later batch that fails (or a
   cursor update that does not match) leaves the cursor where it was, so the next
   `federation sync` re-offers every record from the old cursor, the refused one
   included. When the cursor does advance past a refused record, the next poll's

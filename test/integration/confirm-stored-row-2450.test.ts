@@ -424,8 +424,8 @@ for (const c of CASES) {
 
 // ── item 3: is a merge_target_changed skip re-offered on the next sync? ─────
 //
-// ANSWER: DROPPED, not re-offered — by the sender's selection rule, not by any
-// receiver-side retry state. The receiver (hub) records the skip
+// A skip is not re-offered once the spoke's cursor advances past its updatedAt.
+// The receiver (hub) records the skip
 // (SyncLog.skippedReasons, and the response body's skipped/skippedReasons); it
 // keeps NO per-record retry state, and no hub value is ever read to drive a
 // re-send. The decision belongs to the SPOKE's outbound cursor, in
@@ -435,10 +435,11 @@ for (const c of CASES) {
 //
 // stampLocalContact() advances that cursor to `queriedAt` — the timestamp
 // captured BEFORE the table queries (the flair#146 no-miss comment) — and it
-// runs ONCE, at the end of the whole run, ONLY when every batch returned 200
+// runs ONCE, at the end of the whole run, ONLY when every batch got a successful
+// (2xx) response with a valid JSON body
 // AND the field-only cursor update matched the row (persistLocalPeerLastSyncAt:
 // HTTP 200 alone is not success, a miss is a refusal, never an insert). It is
-// NOT run "after any 200": a later batch that fails (or a cursor write that
+// NOT run after each successful batch: a later batch that fails (or a cursor write that
 // does not match) leaves the stamp where it was, so the next poll re-selects
 // every record from the old cursor — a batch that failed after an earlier one
 // succeeded re-offers the earlier records too.
@@ -466,8 +467,8 @@ for (const c of CASES) {
 // updatedAt (sync #3) IS re-offered. The spoke-side advance is pinned on its own
 // — no second instance, no pause — by the batch-path unit test in
 // test/unit/federation-liveness-ping.test.ts ("the cursor advances after a
-// batch, and only when every batch got 200").
-describe("flair#2450 item 3 — a merge_target_changed skip is dropped, not re-offered (real Harper)", () => {
+// batch, after every batch succeeds").
+describe("flair#2450 item 3 — a merge_target_changed skip is not re-offered once the cursor advances past it (real Harper)", () => {
   // The hub peer row id must be this instance's id: runFederationSyncOnce signs
   // the batch as its OWN instance, and FederationSync.post authenticates it via
   // Peer.get(instanceId). Pointing the spoke at its own instance is what lets one
@@ -525,7 +526,7 @@ describe("flair#2450 item 3 — a merge_target_changed skip is dropped, not re-o
     });
   }, 60_000);
 
-  it("a record the receiver refused is not re-offered while its updatedAt stays put", async () => {
+  it("a record the receiver refused is not re-offered after the cursor passes its unchanged updatedAt", async () => {
     const id = `csr3-drop-${Date.now()}`;
     const T1 = new Date().toISOString();
     await insertRow("Soul", { id, agentId: owner.id, key: "identity", value: "original", durability: "permanent", createdAt: T1, updatedAt: T1 });
@@ -564,7 +565,7 @@ describe("flair#2450 item 3 — a merge_target_changed skip is dropped, not re-o
     // not applied late.
     expect((await readRow("Soul", id)).value).toBe("original");
 
-    // Sync #3: the ONLY re-offer path — the sender's OWN row changes again. A new
+    // Sync #3: the sender's OWN row changes again. A new
     // updatedAt past the cursor makes the next poll select and merge it. (This is
     // the re-offer that a mid-run updatedAt bump produces too: see the header
     // note on updatedAt being a data value, not a structural guarantee.)

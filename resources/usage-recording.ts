@@ -165,7 +165,7 @@ export async function recordUsageContribution(
   // confirms, inside its own transaction, that the stored row is still the one
   // this contribution was checked against (flair#2441): a row deleted or purged
   // before the in-transaction read is skipped by the plan (absent row), a
-  // same-id replace seen there is refused, and a row in a scope that no longer reads is skipped.
+  // same-id replace that changes identity fields is refused, and a row in a scope that no longer reads is skipped.
   await writeBackCommittedRow(
     (databases as any).flair.Memory,
     memoryId,

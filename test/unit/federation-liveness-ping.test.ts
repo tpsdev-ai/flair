@@ -14,7 +14,7 @@ import nacl from "tweetnacl";
  * from dead.
  *
  * flair#1146: the spoke's own lastSyncAt must not advance unless that ping
- * (or a sendBatch) returned 200. A failed ping leaves the stamp untouched.
+ * (or a sendBatch) got a successful response. A failed ping leaves the stamp untouched.
  */
 
 const origFetch = globalThis.fetch;
@@ -217,11 +217,11 @@ describe("hub-side FederationSync with empty records", () => {
  * client re-reads as `since` — the advance cannot be attributed. These unit
  * cases isolate stampLocalContact: they mock the wire, push one Memory record,
  * and assert the field-only Peer cursor update happens exactly once, after the
- * batch POST, and only when the batch returned 200. Removing the post-batch
+ * batch POST, after every batch got a successful (2xx) response with valid JSON. Removing the post-batch
  * `await stampLocalContact()` fails the first case; letting a failed batch stamp
  * anyway fails the second.
  */
-describe("flair#2450 — the spoke cursor advances after a batch, and only when every batch got 200", () => {
+describe("flair#2450 — the spoke cursor advances after a batch, after every batch succeeds", () => {
   const origFetch = globalThis.fetch;
   let calls: Array<{ url: string; method?: string; body?: any }> = [];
   const INSTANCE = "spoke-batch-2450";
